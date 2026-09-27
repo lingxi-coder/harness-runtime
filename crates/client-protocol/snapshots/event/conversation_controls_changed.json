@@ -1,0 +1,88 @@
+{
+  "type": "conversation_controls_changed",
+  "controls": {
+    "qualified_model": "gemini/gemini-2.5-pro",
+    "permission": {
+      "requested": "auto",
+      "effective": "acceptEdits",
+      "options": [
+        {
+          "mode": "default",
+          "available": true
+        },
+        {
+          "mode": "acceptEdits",
+          "available": true
+        },
+        {
+          "mode": "plan",
+          "available": true
+        },
+        {
+          "mode": "auto",
+          "available": true
+        },
+        {
+          "mode": "dontAsk",
+          "available": true
+        },
+        {
+          "mode": "bypassPermissions",
+          "available": false,
+          "disabled_reason": {
+            "code": "not_yet_available",
+            "message": "Bypass permissions is not available on iOS"
+          }
+        }
+      ]
+    },
+    "reasoning": {
+      "requested": {
+        "type": "token_budget",
+        "tokens": 2048
+      },
+      "effective": {
+        "type": "token_budget",
+        "tokens": 2048
+      },
+      "spec": {
+        "options": [
+          {
+            "selection": {
+              "type": "automatic"
+            },
+            "persistable": true
+          },
+          {
+            "selection": {
+              "type": "disabled"
+            },
+            "persistable": true
+          },
+          {
+            "selection": {
+              "type": "enabled"
+            },
+            "persistable": false
+          },
+          {
+            "selection": {
+              "type": "token_budget",
+              "tokens": 2048
+            },
+            "persistable": true
+          }
+        ],
+        "budget_range": {
+          "min_tokens": 128,
+          "max_tokens": 8192
+        },
+        "provider_default": {
+          "type": "enabled"
+        },
+        "forced_reasoning": false,
+        "editable": true
+      }
+    }
+  }
+}

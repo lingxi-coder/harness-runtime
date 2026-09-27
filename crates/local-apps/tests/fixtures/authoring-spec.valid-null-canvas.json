@@ -1,0 +1,47 @@
+{
+  "product": {
+    "goal": "Track household chores",
+    "tasks": ["Add and complete a chore"],
+    "external_integrations": []
+  },
+  "targets": [
+    { "id": "primary", "os": "ios", "form_factor": "iphone" }
+  ],
+  "ui": {
+    "structure": ["Chore list", "Add chore form"],
+    "theme": { "mode": "system", "accent": "blue" },
+    "style": { "direction": "calm", "density": "comfortable" },
+    "references": []
+  },
+  "design": {
+    "presentations": [
+      { "target_id": "primary", "presentation": "Single-column list", "navigation": "Inline add" }
+    ],
+    "tokens": { "accent": "blue" },
+    "states": {
+      "loading": "Progress indicator",
+      "empty": "Empty chore list",
+      "error": "Retry message",
+      "success": "Saved confirmation",
+      "permission": "Permission explanation"
+    },
+    "inputs": {
+      "pointer_touch": ["Tap add"],
+      "keyboard_mouse": ["Press Enter"],
+      "back": "Return to list",
+      "reduced_motion": "Disable transitions"
+    },
+    "canvas": null
+  },
+  "acceptance_checks": [
+    {
+      "id": "primary-action",
+      "target_ids": ["primary"],
+      "required": true,
+      "preconditions": ["List is loaded"],
+      "steps": ["Add a chore"],
+      "expected": "The new chore appears",
+      "evidence": ["inspect", "ui_action", "capture"]
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+---
+source: crates/tui/src/render/markdown.rs
+expression: "render(\"- a\\n  - b\\n  - c\\n- d\", &theme())"
+---
+- spans:
+    - text: "- "
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: a
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+- spans:
+    - text: "  - "
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: b
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+- spans:
+    - text: "  - "
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: c
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+- spans:
+    - text: "- "
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: d
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text

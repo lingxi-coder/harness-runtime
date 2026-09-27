@@ -1,0 +1,4 @@
+interface:
+  display_name: "Babylon 3D Local App"
+  short_description: "Build Babylon-based local app scenes"
+  default_prompt: "Use $babylon-3d-local-app to implement this LingXi local app with the persisted Babylon 3D runtime profile, explicit engine lifecycle, and bridge-safe scene rules."

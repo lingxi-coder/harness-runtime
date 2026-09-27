@@ -1,0 +1,5 @@
+{
+  "type": "pause_turn",
+  "turn_id": 1,
+  "reason": "background_time_expired"
+}

@@ -1,0 +1,132 @@
+[package]
+name = "test-harness"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Bumps proptest case counts in property suites to 10K. Off by default so
+# `cargo test --workspace` stays fast; CI flips this on for the nightly job.
+# M1.23 ships the feature flag plumbing only — existing property tests do not
+# yet read it; the migration lands alongside the M2 property suite expansion.
+"10k-iterations" = []
+
+[dependencies]
+protocol = { path = "../protocol" }
+platform-api = { path = "../platform-api" }
+core = { path = "../core" }
+llm-runtime = { path = "../llm-runtime" }
+cost = { path = "../cost" }
+hooks = { path = "../hooks" }
+mcp = { path = "../mcp" }
+# `MockMcpTransport` implements `mcp::RawConnectionProvider`, handing out a
+# paired in-memory `jsonrpc::Connection` so `McpRegistry::connect` can build a
+# live `McpClient` in lifecycle tests.
+jsonrpc = { path = "../jsonrpc" }
+bytes = "1"
+compaction = { path = "../compaction" }
+coordinator = { path = "../coordinator" }
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+futures-core.workspace = true
+futures = "0.3"
+tokio = { workspace = true, features = ["net"] }
+tracing.workspace = true
+# Hyper-based in-process echo server used by the `contracts::http` suite.
+# The test-harness is dev-only (consumers depend on it via `dev-dependencies`)
+# so this does not bleed into production builds.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+http-body-util = "0.1"
+
+[dev-dependencies]
+proptest.workspace = true
+platform-posix-minimal = { path = "../platforms/posix-minimal" }
+# Used by parity_force_compact_50_messages: manual `/compact` hard-fails
+# without a wired side-query summarizer, so the parity driver wires a stub
+# `SideQueryClient` through `ForkedAgentRunner`. Dev-only.
+sidequery = { path = "../sidequery" }
+# Used by the M2-07 Phase B parity drivers to exercise production
+# `convert_settings_to_runtime_config` (sandbox config conversion fixture).
+sandbox = { path = "../sandbox" }
+# Used by the M2-07 Phase B LSP parity driver to confirm `LspRegistry`
+# `register_config` visibility stays `pub(crate)`.
+lsp = { path = "../lsp" }
+# Used by the M2-07 contract drivers that need a real on-disk root
+# (worktree, secure_storage). Dev-only — never reaches production builds.
+tempfile = "3.13"
+# Used by the M7-16 parity_tui_screens driver to build ResumeRow values
+# (ResumeRow.uuid is a uuid::Uuid). Dev-only.
+uuid = { version = "1.10", features = ["v4"] }
+# Used by the M3-01 parity driver to exercise
+# `Settings::load_with_telemetry` against a capture sink. Dev-only.
+telemetry = { path = "../telemetry" }
+# Used by the M3-02 Phase 11 parity drivers (memory_loading + memory_relevance)
+# to exercise `claude_md::hierarchy::walk` + `memdir::find::find_relevant`
+# against fixed reference fixtures. Dev-only.
+branding = { path = "../branding" }
+memory = { path = "../memory" }
+filetime = "0.2"
+# Used by the M3-04 Phase 10 parity driver (oauth_pkce_refresh) to exercise
+# `ClaudeAiOAuthConfig::default_with_port` + `OAuthError` Display strings +
+# `proactive_lead` formula against locked wire identifiers. Dev-only.
+# M8-P7-final: the `tools` monolith is dissolved; parity drivers now assert
+# fixture constants directly against the per-category tool crates + tool-api.
+# `test-support` enables `tool_api::test_support::shell_test_ctx`, used by the
+# Batch 3 `parity_mcp_invocation` driver to mint a `BuiltinToolContext`.
+tool-api = { path = "../tool-api", features = ["test-support"] }
+tool-file = { path = "../tools/file" }
+tool-shell = { path = "../tools/shell" }
+tool-task = { path = "../tools/task" }
+tool-web = { path = "../tools/web" }
+tool-plan = { path = "../tools/plan" }
+tool-meta = { path = "../tools/meta" }
+tool-cron = { path = "../tools/cron" }
+# Single-file scheduled-task persistence shape, asserted by parity_system_tools.
+cron = { path = "../cron" }
+tool-ui = { path = "../tools/ui" }
+tool-skill = { path = "../tools/skill" }
+tool-agent = { path = "../tools/agent" }
+tool-mcp = { path = "../tools/mcp" }
+tool-lsp = { path = "../tools/lsp" }
+tool-worktree = { path = "../tools/worktree" }
+# Used by the M4-05 parity driver (parity_agent_task_tools) to validate the
+# task-id regex against fresh-generated 9-char [bartwmd][0-9a-z]{8} ids.
+regex = "1"
+# Used by the M5-09 parity driver (parity_slash_commands) to exercise the
+# 99-name CommandRegistry + RegistrySlashDispatcher end-to-end against the
+# locked fixture. Dev-only.
+command-api = { path = "../command-api" }
+command-core = { path = "../commands/core" }
+# Used by the M5-10 parity driver (parity_init_template) to assert the
+# OLD_INIT_PROMPT sha256/length/lines lock against the fixture. Dev-only.
+sha2 = "0.10"
+# Used by the M5-14 parity driver (parity_orchestrator) to exercise the
+# ConversationOrchestrator turn loop + TurnOutcome + run_turn_with_cancel.
+orchestrator = { path = "../orchestrator" }
+# Production prompt-style resolution for Claude 2.1.220 body manifests.
+outputstyles = { path = "../outputstyles" }
+tokio-util = { workspace = true, features = ["rt"] }
+# Used by the M5-14 parity driver (parity_session_jsonl) to exercise the
+# orchestrator → JsonlWriter → JsonlReader round-trip byte-equivalence.
+session = { path = "../session" }
+# Used by the M6-05 parity driver (parity_tui_permission_dialogs) to drive
+# `events::keymap::handle_key` end-to-end against the locked fixture. Dev-only.
+permission = { path = "../permission" }
+crossterm = { workspace = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
+platform-posix = { path = "../platforms/posix" }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+platform-windows = { path = "../platforms/windows" }
+
+[[bin]]
+name = "mock_lsp_server"
+path = "src/bin/mock_lsp_server.rs"
+
+[lints]
+workspace = true

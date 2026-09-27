@@ -1,0 +1,73 @@
+{
+  "_source": "claude-code/src/memory/relevance.ts: rankByRelevance (lines 41-118); claude-code/src/memory/age.ts: ageWeight (lines 9-22)",
+  "_note": "Fixed-point u64 scoring (basis points). No f64 in the scoring path. Tier weights: session=10000, project=8000, team=7000, user=6000. Team boost = × 12000/10000 ONLY when entry tier is Team AND settings.team_memory.enabled is true. Tie-break: tier_order asc (Session<Project<Team<User), then path lex asc. Each scenario lists explicit (jaccard, age, tier, expected_score_bps^3) so any drift on any platform fails loudly with the exact mismatched factor.",
+  "scenarios": [
+    {
+      "name": "top_k_picks_high_jaccard_high_tier_first",
+      "prompt": "alpha beta",
+      "k": 2,
+      "team_boost_enabled": false,
+      "entries": [
+        { "path": "/m/user-fresh.md",    "tier": "User",    "body": "alpha beta",     "age_days": 0,   "size_bytes": 10 },
+        { "path": "/m/project-partial.md", "tier": "Project", "body": "beta gamma",  "age_days": 0,   "size_bytes": 10 },
+        { "path": "/m/session-noise.md", "tier": "Session", "body": "delta",          "age_days": 0,   "size_bytes": 5 }
+      ],
+      "expected_order": ["/m/user-fresh.md", "/m/project-partial.md"]
+    },
+    {
+      "name": "age_penalty_shifts_ordering",
+      "prompt": "alpha beta",
+      "k": 3,
+      "team_boost_enabled": false,
+      "entries": [
+        { "path": "/m/old-perfect.md",  "tier": "Project", "body": "alpha beta", "age_days": 300, "size_bytes": 10 },
+        { "path": "/m/fresh-half.md",   "tier": "Project", "body": "alpha",      "age_days": 0,   "size_bytes": 10 },
+        { "path": "/m/fresh-perfect.md","tier": "Project", "body": "alpha beta", "age_days": 0,   "size_bytes": 10 }
+      ],
+      "expected_order": ["/m/fresh-perfect.md", "/m/fresh-half.md", "/m/old-perfect.md"]
+    },
+    {
+      "name": "team_boost_promotes_team_entry_when_enabled",
+      "prompt": "alpha",
+      "k": 2,
+      "team_boost_enabled": true,
+      "entries": [
+        { "path": "/m/team.md", "tier": "Team", "body": "alpha", "age_days": 0, "size_bytes": 5 },
+        { "path": "/m/user.md", "tier": "User", "body": "alpha", "age_days": 0, "size_bytes": 5 }
+      ],
+      "expected_order": ["/m/team.md", "/m/user.md"]
+    },
+    {
+      "name": "team_boost_disabled_team_still_beats_user_on_tier_weight",
+      "prompt": "alpha",
+      "k": 2,
+      "team_boost_enabled": false,
+      "entries": [
+        { "path": "/m/team.md", "tier": "Team", "body": "alpha", "age_days": 0, "size_bytes": 5 },
+        { "path": "/m/user.md", "tier": "User", "body": "alpha", "age_days": 0, "size_bytes": 5 }
+      ],
+      "expected_order": ["/m/team.md", "/m/user.md"]
+    },
+    {
+      "name": "tie_break_by_path_ascending",
+      "prompt": "alpha",
+      "k": 2,
+      "team_boost_enabled": false,
+      "entries": [
+        { "path": "/m/z.md", "tier": "Project", "body": "alpha", "age_days": 0, "size_bytes": 5 },
+        { "path": "/m/a.md", "tier": "Project", "body": "alpha", "age_days": 0, "size_bytes": 5 }
+      ],
+      "expected_order": ["/m/a.md", "/m/z.md"]
+    },
+    {
+      "name": "empty_prompt_returns_empty_ranking",
+      "prompt": "",
+      "k": 5,
+      "team_boost_enabled": false,
+      "entries": [
+        { "path": "/m/a.md", "tier": "Project", "body": "alpha", "age_days": 0, "size_bytes": 5 }
+      ],
+      "expected_order": []
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "type": "configuration_operation",
+  "domain": "plugin",
+  "operation_id": 41,
+  "status": "succeeded",
+  "effect": "applied",
+  "message": "Saved plugin settings.",
+  "details_json": "{\"scope\":\"user\"}"
+}

@@ -1,0 +1,5 @@
+{
+  "type": "remove_mcp_server",
+  "scope": "user",
+  "name": "linear"
+}

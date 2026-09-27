@@ -1,0 +1,96 @@
+{
+  "phase": "8-ios",
+  "tasks": [
+    {
+      "id": "P8I.0",
+      "title": "Root-hosted Local App approval receipts and fail-closed token handling",
+      "gate": "§17.3 / §17.4a / §18 Phase 8 iOS: RootView owns the Local App create-confirm and MCP proposal sheets so page switches do not strand receipts, and stale/duplicate tokens are superseded or rejected fail-closed",
+      "owns": [
+        "clients/ios/Sources/App/RootView.swift",
+        "clients/ios/Sources/LocalApps/LocalAppApprovalSheets.swift",
+        "clients/ios/Sources/LocalApps/LocalAppsStore.swift",
+        "clients/ios/Tests/LocalAppsStoreTests.swift",
+        "clients/ios/Tests/LocalAppsWidgetTests.swift"
+      ],
+      "testPackages": ["ios-app"],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "move the Phase 8 Local App approval sheets out of RootView and stop rejecting superseded create-confirm tokens",
+        "mustNameInOutput": [
+          "create_confirmation_supersedes_same_app_and_rejects_old_token",
+          "root_view_hosts_phase8_approval_sheets_at_the_root_level"
+        ]
+      },
+      "addedTests": [
+        "create_confirmation_supersedes_same_app_and_rejects_old_token",
+        "resolving_create_confirmation_advances_queue",
+        "mcp_proposal_unchanged_payloads_fail_closed_without_presenting",
+        "root_view_hosts_phase8_approval_sheets_at_the_root_level"
+      ],
+      "notes": "The root presenter must coexist with the existing profile proposal sheet; receipt dismissal always resolves or rejects the engine token."
+    },
+    {
+      "id": "P8I.1",
+      "title": "Builtin Local App plugin settings and managed MCP inventory restrictions",
+      "gate": "§17.2 / §17.4 / §19.10 Client: Settings surfaces the LingXi Local App builtin plugin summary using plugin status/inventory DTOs, while managed Local App MCP servers remain visible but cannot edit transport or be removed",
+      "owns": [
+        "clients/ios/Sources/Settings/SettingsHost.swift",
+        "clients/ios/Sources/Settings/SettingsPages.swift",
+        "clients/ios/Sources/Settings/MCPPages.swift",
+        "clients/ios/Sources/LocalApps/LocalAppsModels.swift",
+        "clients/ios/Sources/LocalApps/LocalAppsProtocolAdapter.swift",
+        "clients/ios/Sources/LocalApps/LocalAppsPhase8BindingsCompat.swift",
+        "clients/ios/Generated/client_protocol.swift",
+        "clients/ios/Tests/LocalAppsStoreTests.swift",
+        "clients/ios/Tests/LocalAppsWidgetTests.swift"
+      ],
+      "testPackages": ["ios-app"],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "replace plugin status and managed inventory reads with hardcoded local-only state in the iOS settings surfaces",
+        "mustNameInOutput": [
+          "plugin_inventory_event_updates_builtin_plugin_metadata",
+          "managed_inventory_restrictions_stay_read_only"
+        ]
+      },
+      "addedTests": [
+        "plugin_inventory_event_updates_builtin_plugin_metadata",
+        "managed_inventory_reader_loads_published_catalog_from_disk",
+        "managed_inventory_restrictions_stay_read_only",
+        "mcp_pages_keeps_generic_editor_alongside_managed_local_app_restrictions"
+      ],
+      "notes": "The generic MCP list/editor must remain intact; this lane only adds managed Local App rows and read-only restrictions."
+    },
+    {
+      "id": "P8I.2",
+      "title": "Published verification badges and MCP proposal diff projection",
+      "gate": "§17.4 / §17.5 / §18 Phase 8 iOS: library/detail/settings show draft, published_unverified, published_verified plus verification badges with accessible text, and MCP proposal sheets project added/removed/changed tool surfaces including execution/visible meta/semantic flow/ceiling",
+      "owns": [
+        "clients/ios/Sources/LocalApps/LocalAppsLibraryView.swift",
+        "clients/ios/Sources/LocalApps/LocalAppDetailView.swift",
+        "clients/ios/Sources/LocalApps/LocalAppsModels.swift",
+        "clients/ios/Sources/LocalApps/LocalAppApprovalSheets.swift",
+        "clients/ios/Tests/LocalAppsStoreTests.swift",
+        "clients/ios/Tests/LocalAppsWidgetTests.swift"
+      ],
+      "testPackages": ["ios-app"],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "collapse published_unverified and published_verified back into one badge and stop projecting MCP proposal before/after fields",
+        "mustNameInOutput": [
+          "published_workflow_badges_stay_textual_and_actionable",
+          "mcp_proposal_shows_all_diff_kinds_rejects_explicitly_and_fails_closed_when_unchanged"
+        ]
+      },
+      "addedTests": [
+        "published_workflow_badges_stay_textual_and_actionable",
+        "mcp_proposal_shows_all_diff_kinds_rejects_explicitly_and_fails_closed_when_unchanged",
+        "approval_sheets_stay_scrollable_and_detented_for_large_text_and_keyboard"
+      ],
+      "notes": "Verification state must not rely on color alone; root-owned sheets stay item-driven and scrollable for Dynamic Type and iPad keyboards."
+    }
+  ]
+}

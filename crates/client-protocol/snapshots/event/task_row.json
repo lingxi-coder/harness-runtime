@@ -1,0 +1,11 @@
+{
+  "type": "task_row",
+  "task": {
+    "task_id": "b12345678",
+    "task_type": "bash",
+    "status": {
+      "type": "running"
+    },
+    "description": "run the test suite"
+  }
+}

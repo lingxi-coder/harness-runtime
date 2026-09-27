@@ -1,0 +1,17 @@
+{
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {},
+      "clientInfo": { "name": "parity-probe", "version": "1" }
+    }
+  },
+  "required_response": {
+    "protocolVersion": "2025-06-18",
+    "capabilities": { "tools": {} },
+    "serverInfo": { "name": "lingxi-code" }
+  }
+}

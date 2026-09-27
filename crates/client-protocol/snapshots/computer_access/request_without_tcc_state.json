@@ -1,0 +1,13 @@
+{
+  "request_id": 7,
+  "reason": "read the clipboard",
+  "apps": [
+    {
+      "label": "Notes"
+    }
+  ],
+  "tier": "read",
+  "clipboard_read": true,
+  "clipboard_write": false,
+  "system_key_combos": false
+}

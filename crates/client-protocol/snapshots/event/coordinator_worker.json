@@ -1,0 +1,9 @@
+{
+  "type": "coordinator_worker",
+  "worker": {
+    "agent_id": "agent:00000000-0000-0000-0000-000000000001",
+    "name": "alpha",
+    "agent_type": "explorer",
+    "status": "working"
+  }
+}

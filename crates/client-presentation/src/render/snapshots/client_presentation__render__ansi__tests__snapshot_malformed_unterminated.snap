@@ -1,0 +1,13 @@
+---
+source: crates/tui/src/render/ansi.rs
+expression: "parse_ansi(\"before\\x1b[38;5\")"
+---
+- spans:
+    - text: before
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text

@@ -1,0 +1,12 @@
+error: audit rejected: UngatedPayload: missing #[serde(deny_unknown_fields)] (spec §7 line 768)
+ --> tests/compile_fail/missing_deny_unknown.rs:4:5
+  |
+4 | /     telemetry_macros::_audit_source!(r#"
+5 | |         #[derive(serde::Serialize, serde::Deserialize)]
+6 | |         pub struct UngatedPayload {
+7 | |             pub model: Verified,
+8 | |         }
+9 | |     "#);
+  | |_______^
+  |
+  = note: this error originates in the macro `telemetry_macros::_audit_source` (in Nightly builds, run with -Z macro-backtrace for more info)

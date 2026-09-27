@@ -1,0 +1,70 @@
+{
+  "type": "provider_model_catalog",
+  "providers": [
+    {
+      "provider_id": "anthropic",
+      "provider_label": "Anthropic",
+      "models": [
+        {
+          "reference": "anthropic/claude-opus-4-8",
+          "provider_id": "anthropic",
+          "provider_label": "Anthropic",
+          "display_name": "Claude Opus 4.8",
+          "model_id": "claude-opus-4-8",
+          "description": "Large reasoning model",
+          "family": "claude",
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ],
+          "capabilities": {
+            "streaming": true,
+            "tools": true,
+            "vision": false,
+            "documents": false,
+            "reasoning": true,
+            "structured_output": false
+          },
+          "reasoning": {
+            "options": [
+              {
+                "selection": {
+                  "type": "automatic"
+                },
+                "persistable": true
+              },
+              {
+                "selection": {
+                  "type": "disabled"
+                },
+                "persistable": true
+              },
+              {
+                "selection": {
+                  "type": "enabled"
+                },
+                "persistable": true
+              },
+              {
+                "selection": {
+                  "type": "level",
+                  "id": "low"
+                },
+                "persistable": true
+              }
+            ],
+            "provider_default": {
+              "type": "automatic"
+            },
+            "forced_reasoning": false,
+            "editable": true
+          },
+          "supports_fast_mode": false,
+          "fusion_analyst_capable": false
+        }
+      ]
+    }
+  ]
+}

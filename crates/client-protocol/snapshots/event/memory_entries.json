@@ -1,0 +1,14 @@
+{
+  "type": "memory_entries",
+  "entries": [
+    {
+      "path": "/home/dev/project/LINGXI.md",
+      "tier": {
+        "type": "project"
+      },
+      "body": "# Project notes",
+      "age_days": 3,
+      "size_bytes": 256
+    }
+  ]
+}

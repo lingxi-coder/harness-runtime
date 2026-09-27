@@ -1,0 +1,5 @@
+{
+  "type": "resolve_app_dependency_change_confirmation",
+  "request_id": "dependency-00000001",
+  "approved": true
+}

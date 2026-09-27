@@ -1,0 +1,46 @@
+{
+  "_meta": {
+    "plan": "M5-14",
+    "spec_section": "§3 cross-cutting locks — hooks 4-arm executor matrix",
+    "_lingxi_version": "0.6.0",
+    "description": "Cross-cutting parity: HookExecutorImpl 4-arm dispatch matrix. Validates Builtin/Http/Command/Agent arms each produce the expected outcome under PreToolUse + PostToolUse events."
+  },
+  "arms": [
+    {
+      "name": "Builtin",
+      "executor_variant": "Builtin",
+      "expected_outcome_on_success": "Success",
+      "notes": "In-process handler registered via register_builtin(). Returns whatever HookResult the handler produces."
+    },
+    {
+      "name": "Http",
+      "executor_variant": "Http",
+      "expected_outcome_on_success": "Success",
+      "ssrf_guard": "loopback and RFC-1918 addresses blocked by default",
+      "notes": "HTTP POST to endpoint; SSRF guard validates host before dispatch."
+    },
+    {
+      "name": "Command",
+      "executor_variant": "Command",
+      "expected_outcome_with_runner": "Success",
+      "expected_outcome_without_runner": "Error",
+      "notes": "The Command arm is wired through ProcessRunner + Sandbox and sends the serialized hook envelope on stdin. An executor without those platform seams still returns the structured 'command executor not wired' error."
+    },
+    {
+      "name": "Agent",
+      "executor_variant": "Agent",
+      "expected_outcome_when_spawner_absent": "Error",
+      "notes": "Without a SubagentSpawner attached, returns HookOutcome::Error with stderr containing 'agent executor not wired'."
+    }
+  ],
+  "ssrf_guard_blocked_urls": [
+    "http://127.0.0.1:8080/hook",
+    "http://169.254.169.254/latest/meta-data/"
+  ],
+  "hook_telemetry_events": [
+    "tengu_orchestrator_hook_pre_started",
+    "tengu_orchestrator_hook_pre_completed",
+    "tengu_orchestrator_hook_post_started",
+    "tengu_orchestrator_hook_post_completed"
+  ]
+}

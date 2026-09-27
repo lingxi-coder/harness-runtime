@@ -1,0 +1,14 @@
+---
+source: crates/tui/src/render/ansi.rs
+expression: "parse_ansi(\"\\x1b[31ma\\x1b[2A\\x1b[2Jb\\x1b[0m\")"
+---
+- spans:
+    - text: ab
+      style:
+        fg:
+          Named: Red
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text

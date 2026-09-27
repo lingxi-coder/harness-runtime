@@ -1,0 +1,92 @@
+[
+  {
+    "rendered_message": "UserText",
+    "status": "live_fed",
+    "note": "SendPrompt user text echoed into the scrollback"
+  },
+  {
+    "rendered_message": "AssistantText",
+    "status": "live_fed",
+    "note": "OutputStream::emit_text -> ClientEvent::TextDelta"
+  },
+  {
+    "rendered_message": "AssistantToolUse",
+    "status": "live_fed",
+    "note": "OutputStream::emit_tool_call -> ClientEvent::ToolUseStarted"
+  },
+  {
+    "rendered_message": "UserToolResult",
+    "status": "live_fed",
+    "note": "OutputStream::emit_tool_result -> ClientEvent::ToolUseResult"
+  },
+  {
+    "rendered_message": "CompactBoundary",
+    "status": "live_fed",
+    "note": "OutputStream::emit_compaction_completed -> ClientEvent::CompactionCompleted"
+  },
+  {
+    "rendered_message": "ThinkingDelta",
+    "status": "live_fed",
+    "note": "OutputStream::emit_thinking -> ClientEvent::ThinkingDelta (§0.7 follow-up: event_router emits per ThinkingDelta SSE chunk)"
+  },
+  {
+    "rendered_message": "UsageUpdate",
+    "status": "live_fed",
+    "note": "OutputStream::emit_usage -> ClientEvent::UsageUpdate (§0.7 follow-up: event_router emits on MessageStart/MessageDelta usage)"
+  },
+  {
+    "rendered_message": "CoordinatorStatus",
+    "status": "live_fed",
+    "note": "OutputStream::emit_coordinator_status -> ClientEvent::CoordinatorStatus (§0.9 coordinator-activation: CoordinatorStatusSink pushes TeamRegistry::active_worker_count on worker status transitions)"
+  },
+  {
+    "rendered_message": "AssistantThinking",
+    "status": "reserved",
+    "note": "whole-block thinking synthesized form has no live source; the live stream uses ThinkingDelta (decision §0.7)"
+  },
+  {
+    "rendered_message": "RedactedThinking",
+    "status": "reserved",
+    "note": "carried only inside a synthesized MessageDto, not streamed live"
+  },
+  {
+    "rendered_message": "ExitPlanMode",
+    "status": "reserved",
+    "note": "PermissionGate::check never sources it in the foundation (decision §0.6)"
+  },
+  {
+    "rendered_message": "BypassPermissionsMode",
+    "status": "reserved",
+    "note": "PermissionGate::check never sources it in the foundation (decision §0.6)"
+  },
+  {
+    "rendered_message": "WorkerInfo",
+    "status": "reserved",
+    "note": "no wire worker identity in the foundation; always None on a live request"
+  },
+  {
+    "rendered_message": "SessionStarted",
+    "status": "reserved",
+    "note": "lifecycle event; lossy on replay (carries only session_id, decision §0.5)"
+  },
+  {
+    "rendered_message": "SessionEnded",
+    "status": "reserved",
+    "note": "lifecycle event; not part of the live message feed"
+  },
+  {
+    "rendered_message": "SessionResumed",
+    "status": "reserved",
+    "note": "lifecycle event (not part of the per-turn message feed); now carries the full restored transcript (session_id + messages, oldest-first) from the live ResumeSession path rather than session_id alone"
+  },
+  {
+    "rendered_message": "TurnStarted",
+    "status": "reserved",
+    "note": "adapter-synthesized on SendPrompt receipt; no engine source"
+  },
+  {
+    "rendered_message": "MobileInlineImage",
+    "status": "reserved",
+    "note": "mobile inline image input deferred: needs run_turn_streaming_with_image_sources (§5.12)"
+  }
+]

@@ -1,0 +1,19 @@
+---
+source: client-presentation/src/render/diff.rs
+expression: "fingerprint(&render(&old, &new, Some(\"x.txt\"), ThemeName::Dark))"
+---
+  0 | " 1   "[fg=Named(BrightBlack) bg=Default] "line1"[fg=Rgb(192, 197, 206) bg=Default]
+  1 | " 2   "[fg=Named(BrightBlack) bg=Default] "line2"[fg=Rgb(192, 197, 206) bg=Default]
+  2 | " 3 - "[fg=Rgb(220, 90, 90) bg=Rgb(61, 20, 27)] "line3"[fg=Rgb(248, 248, 242) bg=Rgb(61, 20, 27)]
+  3 | " 3 + "[fg=Rgb(80, 200, 80) bg=Rgb(17, 46, 21)] "CHANGED_TOP"[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)]
+  4 | " 4   "[fg=Named(BrightBlack) bg=Default] "line4"[fg=Rgb(192, 197, 206) bg=Default]
+  5 | " 5   "[fg=Named(BrightBlack) bg=Default] "line5"[fg=Rgb(192, 197, 206) bg=Default]
+  6 | " 6   "[fg=Named(BrightBlack) bg=Default] "line6"[fg=Rgb(192, 197, 206) bg=Default]
+  7 | "..."[fg=Named(BrightBlack) bg=Default]
+  8 | "35   "[fg=Named(BrightBlack) bg=Default] "line35"[fg=Rgb(192, 197, 206) bg=Default]
+  9 | "36   "[fg=Named(BrightBlack) bg=Default] "line36"[fg=Rgb(192, 197, 206) bg=Default]
+ 10 | "37   "[fg=Named(BrightBlack) bg=Default] "line37"[fg=Rgb(192, 197, 206) bg=Default]
+ 11 | "38 - "[fg=Rgb(220, 90, 90) bg=Rgb(61, 20, 27)] "line38"[fg=Rgb(248, 248, 242) bg=Rgb(61, 20, 27)]
+ 12 | "38 + "[fg=Rgb(80, 200, 80) bg=Rgb(17, 46, 21)] "CHANGED_BOTTOM"[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)]
+ 13 | "39   "[fg=Named(BrightBlack) bg=Default] "line39"[fg=Rgb(192, 197, 206) bg=Default]
+ 14 | "40   "[fg=Named(BrightBlack) bg=Default] "line40"[fg=Rgb(192, 197, 206) bg=Default]

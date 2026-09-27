@@ -1,0 +1,14 @@
+{
+  "tasks": [
+    {
+      "id": "abcd1234",
+      "cron": "*/5 * * * *",
+      "prompt": "check",
+      "createdAt": 1700000000000,
+      "recurring": true,
+      "createdBySessionId": "creator-session",
+      "createdByPid": 42,
+      "createdByProcStart": "process-start"
+    }
+  ]
+}

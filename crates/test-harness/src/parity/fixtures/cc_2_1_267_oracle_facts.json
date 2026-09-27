@@ -1,0 +1,67 @@
+{
+  "capture": {
+    "version": "2.1.267",
+    "binary": "~/.local/share/claude/versions/2.1.267",
+    "sha256": "a681f3008f0050029aeebcab3af51bb6a55ddeb625a3af3141a4416d43cd2558",
+    "captured": "2026-09-10",
+    "method": "read from the plain-JS chunks split on '// @bun @bytecode' (1657 chunks via ~/.claude/oracle-chunks/extract.py), NOT from claude-code/src, which is a stale mirror",
+    "note": "Each entry names the function or offset it came from. A count or a substring hit is never the evidence here — a bundled name, for example, is only a name when a registration says so."
+  },
+
+  "gate_defaults": {
+    "comment": "These carry the campaign's 'not a gap' rulings. If one flips upstream, the matching classification in accepted_divergences.json becomes wrong and nothing else would notice.",
+    "tengu_mcp_legacy_sse_fallback": { "default": true, "from": "H(\"tengu_mcp_legacy_sse_fallback\",!0)", "meaning": "the legacy HTTP+SSE rescue is LIVE upstream" },
+    "tengu_surface_failed_mcp_servers": { "default": true, "from": "I(\"tengu_surface_failed_mcp_servers\",!0)", "meaning": "failed MCP servers surface in the ToolSearch note" },
+    "tengu_lively_waffle": { "default": false, "from": "H(\"tengu_lively_waffle\",!1)", "meaning": "SubagentHandback is DORMANT upstream; absence here is alignment" },
+    "tengu_keybinding_customization_release": { "default": true, "from": "OF(){return H(\"tengu_keybinding_customization_release\",!0)}", "meaning": "keybindings-help is live upstream and genuinely missing here" }
+  },
+
+  "mcp_policy": {
+    "allowlist_exempt_scopes": ["enterprise", "managed"],
+    "allowlist_exempt_from": "XJ(e){return FTn.includes(e)} with FTn=[\"enterprise\",\"managed\"]",
+    "exemption_rule": "F6: deny first (Pme), then scope-exempt AND NOT expandedFromEnv AND NOT pluginSource, then the allowlist",
+    "expanded_from_env_from": "Fxo(entry) on the RAW entry: stdio command/args/env values, sse|http|ws url/header values, nothing for sse-ide|ws-ide|sdk|claudeai-proxy",
+    "managed_settings_key": {
+      "name": "managedMcpServers",
+      "accepted_types": ["http", "sse"],
+      "expand_vars": false,
+      "shape_error": "\"managedMcpServers\" must be an object keyed by server name (the .mcp.json mcpServers shape; Claude Desktop's array form of its same-named key is not accepted here: use the server name as the key and \"type\" instead of \"transport\"). No managed MCP servers are installed from it until it is fixed.",
+      "name_error": "server names may only contain letters, numbers, hyphens and underscores, and may not be __proto__, constructor or prototype"
+    },
+    "legacy_sse_rescue": {
+      "trigger_statuses": [400, 404, 405],
+      "predicate_from": "Hs(e): status in {400,404,405} AND the body does NOT parse as a JSON-RPC message (js(e) reads the `data:` line first)",
+      "absent_body_falls_back": true,
+      "budget_ms": { "min": 1000, "max": 5000 },
+      "post_method_not_allowed_is": "status === 405",
+      "project_scope_refusal": "Its url, command or args reference an environment variable; on connect Claude Code would expand it into a repo-authored command or url. Add it manually with `claude mcp add` if you trust this repo."
+    }
+  },
+
+  "goal_cleared_reasons": {
+    "comment": "kB(goal, reason) call sites — the reason is an argument, never a constant",
+    "from": "src_161508826.js",
+    "values": ["user_clear", "superseded", "context_limit", "api_error", "session_clear", "resume_swap"]
+  },
+
+  "bundled_skills": {
+    "comment": "Read off registrations — literal uo({name:\"…\"}) or a resolved variable. NOT off substring counts: `stuck` has ~50 occurrences and no registration.",
+    "count": 21,
+    "names": [
+      "artifact-components", "batch", "claude-api", "claude-in-chrome", "code-review",
+      "dataviz", "debug", "design-sync", "doctor", "explain-usage",
+      "fewer-permission-prompts", "keybindings-help", "loop", "memory-types", "run",
+      "run-skill-generator", "setup-claude", "update-config", "whiteboard",
+      "workflow-authoring", "workshop"
+    ],
+    "absent_despite_the_stale_mirror": ["skillify", "lorem-ipsum", "stuck"]
+  },
+
+  "sse_transport": {
+    "comment": "The legacy HTTP+SSE contract this port did not implement before ff8bda8b4",
+    "endpoint_event": "named `endpoint` event, resolved relative to the stream url",
+    "same_origin_required": true,
+    "same_origin_error": "Endpoint origin does not match connection origin: ",
+    "send_before_endpoint": "NotConnected"
+  }
+}

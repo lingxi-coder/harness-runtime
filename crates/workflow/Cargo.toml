@@ -1,0 +1,44 @@
+[package]
+name = "workflow"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# LingXi workflow runtime: executes claude-code-style workflow scripts that
+# orchestrate subagents. The model authors the scripts in JavaScript, so the
+# runtime embeds a JS engine (QuickJS via rquickjs) to run them with the same
+# semantics as claude-code's AsyncFunction-based executor.
+
+[dependencies]
+# The Workflow tool description + authoring reference (`description.rs`) live
+# here because both the tool and the `workflow-authoring` bundled skill read
+# them, and §8.1 forbids a command crate depending on a tool crate.
+platform-api = { path = "../platform-api" }
+serde.workspace = true
+once_cell = "1"
+
+# JSON parsing for phase-context injection into the batch opts (`__wf_phase`).
+serde_json.workspace = true
+# rquickjs vendors quickjs-ng and compiles it by default (no system lib).
+# NB: the `futures` feature (Rust-future <-> JS-promise bridge) pulls
+# async-lock 3.4.2 which requires rustc 1.85 > the workspace MSRV 1.82, so the
+# foundation uses the synchronous engine; the async/`parallel()` integration
+# resolves that pin in a later stage.
+rquickjs = { version = "0.6" }
+
+# Real JS parser for `meta`-block validation (claude-code parses the script to an
+# ESTree AST: ExportNamedDeclaration / ObjectExpression / pure-literal walk).
+# tree-sitter is already a workspace dependency (bash safety) and builds on the
+# MSRV-1.82 toolchain; the JS grammar is the lightest way to a real parse tree.
+tree-sitter = "=0.25.10"
+tree-sitter-javascript = "0.23"
+
+# rquickjs-sys 0.6 does not ship pregenerated bindings for iOS or Android.
+# Enable its existing bindgen path only on mobile targets; desktop targets keep
+# the exact dependency feature set and runtime behavior above.
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+rquickjs = { version = "0.6", features = ["bindgen"] }
+
+[lints]
+workspace = true

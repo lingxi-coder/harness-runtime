@@ -1,0 +1,8 @@
+---
+source: client-presentation/src/render/diff.rs
+expression: "fingerprint(&render(old, new, Some(\"main.rs\"), ThemeName::Dark))"
+---
+  0 | "1   "[fg=Named(BrightBlack) bg=Default] "fn"[fg=Rgb(180, 142, 173) bg=Default] " "[fg=Rgb(192, 197, 206) bg=Default] "main"[fg=Rgb(143, 161, 179) bg=Default] "("[fg=Rgb(192, 197, 206) bg=Default] ")"[fg=Rgb(192, 197, 206) bg=Default] " "[fg=Rgb(192, 197, 206) bg=Default] "{"[fg=Rgb(192, 197, 206) bg=Default]
+  1 | "2 - "[fg=Rgb(220, 90, 90) bg=Rgb(61, 20, 27)] "    let stale = 1;"[fg=Rgb(248, 248, 242) bg=Rgb(61, 20, 27)]
+  2 | "3 - "[fg=Rgb(220, 90, 90) bg=Rgb(61, 20, 27)] "    drop(stale);"[fg=Rgb(248, 248, 242) bg=Rgb(61, 20, 27)]
+  3 | "2   "[fg=Named(BrightBlack) bg=Default] "}"[fg=Rgb(192, 197, 206) bg=Default]

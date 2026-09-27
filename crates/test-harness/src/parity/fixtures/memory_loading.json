@@ -1,0 +1,58 @@
+{
+  "_source": "Walk: claude-code/src/memory/hierarchy.ts walkClaudeMdHierarchy (lines 22-71). Load: the 2.1.220 BINARY, Eds @230805636 -> EG @229022173, ELu @230811638 — NOT src/memory/loader.ts loadOneFile (lines 14-38), which this fixture used to cite and which is stale leaked TS: it describes a reader with no size cap.",
+  "_note": "Hierarchy walk is cwd → each parent → ~/.lingxi/. Within a directory, LINGXI.local.md (when present) precedes LINGXI.md so local overrides shadow canonical entries. CORRECTED — the old '_note' asserted 'GAP 4: there is NO per-file size drop', citing leaked TS (loader.ts safelyReadMemoryFileAsync). The 2.1.220 BINARY skips: Eds (@230805636) routes every memory file through EG (@229022173) — 'let o=await e.stat(t); if(!o.isFile()||o.size>r) return n?.(o),null' — with r = ELu = 4194304 (@230811638). The walk still DISCOVERS an oversized file (the guard is in the reader, not the scanner); it is dropped at load, which is what expected_skipped now records. Separately, the 40k-char limit really is a non-blocking warning only. Case-insensitive matching is OS-layer best-effort; mismatches emit tengu_memory_case_mismatch but do not block load. (Managed tier is exercised separately in hierarchy unit tests.)",
+  "scenarios": [
+    {
+      "name": "cwd_then_parent_then_home",
+      "layout": {
+        "home/.lingxi/LINGXI.md": "# user notes\n",
+        "repo/LINGXI.md": "# repo notes\n",
+        "repo/pkg/LINGXI.md": "# pkg notes\n"
+      },
+      "cwd": "repo/pkg",
+      "home": "home",
+      "expected_order": [
+        "repo/pkg/LINGXI.md",
+        "repo/LINGXI.md",
+        "home/.lingxi/LINGXI.md"
+      ]
+    },
+    {
+      "name": "local_override_precedes_canonical",
+      "layout": {
+        "home/.lingxi/LINGXI.md": "# user\n",
+        "repo/LINGXI.md": "# repo\n",
+        "repo/LINGXI.local.md": "# repo override\n"
+      },
+      "cwd": "repo",
+      "home": "home",
+      "expected_order": [
+        "repo/LINGXI.local.md",
+        "repo/LINGXI.md",
+        "home/.lingxi/LINGXI.md"
+      ]
+    },
+    {
+      "name": "oversized_file_is_skipped_rest_still_load",
+      "layout": {
+        "home/.lingxi/LINGXI.md": "# small home\n",
+        "repo/LINGXI.md": "OVERSIZED:11mb"
+      },
+      "cwd": "repo",
+      "home": "home",
+      "expected_order": [
+        "home/.lingxi/LINGXI.md"
+      ],
+      "expected_skipped": [
+        "repo/LINGXI.md"
+      ]
+    },
+    {
+      "name": "empty_tree_no_files",
+      "layout": {},
+      "cwd": "empty",
+      "home": "home",
+      "expected_order": []
+    }
+  ]
+}

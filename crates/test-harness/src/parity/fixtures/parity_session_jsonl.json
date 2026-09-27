@@ -1,0 +1,41 @@
+{
+  "_meta": {
+    "plan": "M5-14",
+    "spec_section": "§3 cross-cutting locks — byte-equivalent session JSONL",
+    "_lingxi_version": "0.6.0",
+    "description": "Cross-cutting parity: ConversationOrchestrator turn → JsonlWriter → read-back validates line format, field order, LF-only termination, and telemetry event linkage.",
+    "locks": {
+      "line_terminator": "LF (0x0A) only, no CRLF",
+      "json_format": "compact (no whitespace)",
+      "user_type": "external",
+      "is_sidechain_default": false,
+      "uuid_pattern": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+      "timestamp_pattern": "ISO-8601 UTC millisecond precision e.g. 2026-05-25T14:30:00.000Z"
+    },
+    "single_turn_sequence": [
+      {
+        "line": 1,
+        "type": "user",
+        "parent_uuid": null,
+        "role": "user"
+      },
+      {
+        "line": 2,
+        "type": "attachment",
+        "parent_uuid": "line1",
+        "attachment_type": "prompt_snapshot",
+        "why": "claude-code 2.1.270 `lje(e)` (src_169588164.js) enables the static system-prompt snapshot unless CLAUDE_CODE_SIMPLE is set: `return e.systemPromptSnapshot === true || SESSION_KIND === 'bg' || REMOTE || !U2()`, and `function U2(){return a.CLAUDE_CODE_SIMPLE}` (src_167887003.js). With the env unset -- which is the default this fixture describes -- the snapshot is recorded, so a single turn is three lines, not two."
+      },
+      {
+        "line": 3,
+        "type": "assistant",
+        "parent_uuid": "line2",
+        "role": "assistant"
+      }
+    ],
+    "session_telemetry_events": [
+      "tengu_session_appended"
+    ],
+    "single_turn_sequence_provenance": "Derived from the oracle's gate, not captured from a session. This fixture's other fields date to plan M5-14 / lingxi 0.6.0 and predate `prompt_snapshot` entirely; the original two-line sequence was the port's own early expectation, never an upstream recording, and it had been failing on main since the feature landed."
+  }
+}

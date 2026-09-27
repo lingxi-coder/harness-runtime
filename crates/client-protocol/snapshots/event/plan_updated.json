@@ -1,0 +1,15 @@
+{
+  "type": "plan_updated",
+  "tasks": [
+    {
+      "subject": "Port the diff renderer",
+      "active_form": "Porting the diff renderer",
+      "state": "in_progress"
+    },
+    {
+      "id": "task_2",
+      "subject": "Regenerate the bindings",
+      "state": "pending"
+    }
+  ]
+}

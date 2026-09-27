@@ -1,0 +1,15 @@
+{
+  "type": "turn_ended",
+  "outcome": {
+    "type": "end_turn"
+  },
+  "stop_reason": "end_turn",
+  "cost": {
+    "total_usd": 0.0123,
+    "input_tokens": 1200,
+    "output_tokens": 340,
+    "api_calls": 3,
+    "session_duration_secs": 42,
+    "formatted": "$0.0123"
+  }
+}

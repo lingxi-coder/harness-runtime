@@ -1,0 +1,21 @@
+Remote Control - Control local sessions from claude.ai/code or the Claude mobile app
+
+USAGE
+  claude remote-control [options]
+
+OPTIONS
+  --name <name>
+  --remote-control-session-name-prefix <prefix>
+  -c, --continue
+  --session-id <id>
+  --permission-mode <mode>
+  --debug-file <path>
+  -v, --verbose
+  --spawn <mode>                   same-dir, worktree, session (default: same-dir)
+  --capacity <N>                   default: 32
+  --[no-]create-session-in-dir     default: on
+
+LINGXI BOUNDARY
+  This command requires Anthropic's private relay/auth service. LingXi exposes
+  compatible parsing/help and returns an explicit non-zero unsupported result;
+  it does not present its local desktop bridge as remote-control parity.

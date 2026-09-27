@@ -1,0 +1,188 @@
+{
+  "version": "2.1.263",
+  "binary_sha256": "ef5d2909c8af49f31ab6d5487e90316777bc2fac170adfe8160716caa8aaf4f9",
+  "source": "Mocked localhost /v1/messages requests from the real binary; isolated HOME/config, fake API key, all proxies restricted to the mock; ENABLE_TOOL_SEARCH=false. No real API responses or credentials.",
+  "cases": [
+    {
+      "cross_session": false,
+      "teams": false,
+      "request_sha256": "36edb7389c40bbc38ffcd1754e299143b604b3fc397d4681bd9cc4ff93fb6e3c",
+      "input_schema_json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"to\":{\"description\":\"Recipient: teammate name\",\"type\":\"string\",\"allOf\":[{\"pattern\":\"^[^\\\\n\\\\r]*$\"},{\"pattern\":\"^[\\\\s\\\\S]{0,300}$\"}]},\"summary\":{\"description\":\"A 5-10 word summary shown as a one-line preview in the UI. Defaults to the first line of a plain-text message; longer summaries are truncated to 200 characters rather than rejected.\",\"type\":\"string\",\"maxLength\":200},\"message\":{\"description\":\"Plain text message content\",\"type\":\"string\"}},\"required\":[\"to\",\"message\"],\"additionalProperties\":false}",
+      "prompt": "# SendMessage\n\nSend a message to another agent.\n\n```json\n{\"to\": \"researcher\", \"summary\": \"assign task 1\", \"message\": \"start on task #1\"}\n```\n\n| `to` | |\n|---|---|\n| `\"researcher\"` | Teammate by name |\n| `\"main\"` | The main conversation (background subagents only) |\n\nYour plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to agents by name — names keep working after an agent completes (a send resumes it from its transcript). Use the raw `agentId` (format `a...-...`) from its spawn result only when the agent has no name, or when a newer agent took the name (latest wins). When relaying, don't quote the original — it's already rendered to the user."
+    },
+    {
+      "cross_session": false,
+      "teams": true,
+      "request_sha256": "eae3b847a63ab0fbe3ce657979cd638bf7f792b9c8743391d74cb5c00caadd03",
+      "input_schema_json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"to\":{\"description\":\"Recipient: teammate name\",\"type\":\"string\",\"allOf\":[{\"pattern\":\"^[^\\\\n\\\\r]*$\"},{\"pattern\":\"^[\\\\s\\\\S]{0,300}$\"}]},\"summary\":{\"description\":\"A 5-10 word summary shown as a one-line preview in the UI. Defaults to the first line of a plain-text message; longer summaries are truncated to 200 characters rather than rejected.\",\"type\":\"string\",\"maxLength\":200},\"message\":{\"anyOf\":[{\"description\":\"Plain text message content\",\"type\":\"string\"},{\"anyOf\":[{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"const\":\"shutdown_request\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"type\"],\"additionalProperties\":false},{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"const\":\"shutdown_response\"},\"request_id\":{\"type\":\"string\",\"minLength\":1,\"allOf\":[{\"pattern\":\"^[^\\\\n\\\\r]*$\"},{\"pattern\":\"^[\\\\s\\\\S]{0,300}$\"}]},\"approve\":{\"type\":\"boolean\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"type\",\"request_id\",\"approve\"],\"additionalProperties\":false},{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"const\":\"plan_approval_response\"},\"request_id\":{\"type\":\"string\",\"minLength\":1,\"allOf\":[{\"pattern\":\"^[^\\\\n\\\\r]*$\"},{\"pattern\":\"^[\\\\s\\\\S]{0,300}$\"}]},\"approve\":{\"type\":\"boolean\"},\"feedback\":{\"type\":\"string\"}},\"required\":[\"type\",\"request_id\",\"approve\"],\"additionalProperties\":false}]}]}},\"required\":[\"to\",\"message\"],\"additionalProperties\":false}",
+      "prompt": "# SendMessage\n\nSend a message to another agent.\n\n```json\n{\"to\": \"researcher\", \"summary\": \"assign task 1\", \"message\": \"start on task #1\"}\n```\n\n| `to` | |\n|---|---|\n| `\"researcher\"` | Teammate by name |\n| `\"main\"` | The main conversation (background subagents only) |\n\nYour plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to agents by name — names keep working after an agent completes (a send resumes it from its transcript). Use the raw `agentId` (format `a...-...`) from its spawn result only when the agent has no name, or when a newer agent took the name (latest wins). When relaying, don't quote the original — it's already rendered to the user.\n\n## Protocol responses (legacy)\n\nIf you receive a JSON message with `type: \"shutdown_request\"` or `type: \"plan_approval_request\"`, respond with the matching `_response` type — echo the `request_id`, set `approve` true/false:\n\n```json\n{\"to\": \"team-lead\", \"message\": {\"type\": \"shutdown_response\", \"request_id\": \"...\", \"approve\": true}}\n{\"to\": \"researcher\", \"message\": {\"type\": \"plan_approval_response\", \"request_id\": \"...\", \"approve\": false, \"feedback\": \"add error handling\"}}\n```\n\nApproving shutdown terminates your process. Rejecting plan sends the teammate back to revise. Don't originate `shutdown_request` unless asked. Don't send structured JSON status messages — report progress through your task tools if you have them, otherwise in plain prose."
+    },
+    {
+      "cross_session": true,
+      "teams": false,
+      "request_sha256": "f93e493760029a87cd5898a75468c6961fa7454028a7874db3ba4ef899aec177",
+      "input_schema_json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"to\":{\"description\":\"Recipient: a name from ListAgents (append its \\\" [ref]\\\" only when a listing or an error shows one), a teammate name, \\\"main\\\", or a background agent's agentId\",\"type\":\"string\",\"allOf\":[{\"pattern\":\"^[^\\\\n\\\\r]*$\"},{\"pattern\":\"^[\\\\s\\\\S]{0,300}$\"}]},\"summary\":{\"description\":\"A 5-10 word label for your own transcript row (not transmitted — the recipient previews the first line of `message`). Truncated to 200 characters rather than rejected.\",\"type\":\"string\",\"maxLength\":200},\"message\":{\"default\":\"\",\"description\":\"Plain text message content. The recipient's human sees only the FIRST LINE as a one-line preview until they expand it, so make the first line a clear, self-contained sentence saying what this is about — not a greeting, preamble, or bare @-mention.\",\"type\":\"string\"},\"notify_when_idle\":{\"description\":\"Ask a session ON THIS MACHINE to send you ONE notice when it next goes idle (finishes its turn with nothing queued) or exits — opt-in, one-shot, no polling. With a message: deliver it now AND subscribe. Without a message (omit it): a pure subscription that costs the other session nothing.\",\"type\":\"boolean\"}},\"required\":[\"to\",\"message\"],\"additionalProperties\":false}",
+      "prompt": "# SendMessage\n\nSend a message to another agent.\n\n```json\n{\"to\": \"researcher\", \"summary\": \"assign task 1\", \"message\": \"start on task #1\"}\n```\n\n| `to` | |\n|---|---|\n| `\"researcher\"` | Teammate by name |\n| `\"main\"` | The main conversation (background subagents only) |\n| `\"worker\"` | Any agent from `ListAgents` — subagent, another local Claude session |\n| `\"worker [3fa9c1]\"` | Same, plus its `[ref]` — only when a listing or an error shows one |\n\nYour plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to agents by name — names keep working after an agent completes (a send resumes it from its transcript). Use the raw `agentId` (format `a...-...`) from its spawn result only when the agent has no name, or when a newer agent took the name (latest wins). When relaying, don't quote the original — it's already rendered to the user.\n\n## Cross-session\n\nUse `ListAgents` to discover targets. Every row leads with the agent's `name [ref]` — the name IS the address; there is no separate address syntax.\n\n```json\n{\"to\": \"worker\", \"message\": \"check if tests pass over there\"}\n{\"to\": \"worker [3fa9c1]\", \"message\": \"you, specifically\"}\n```\n\nSend the bare name — a name that exactly matches one live agent or session (on this machine, on another machine, or in the cloud) delivers directly. Append the ` [ref]` only when the bare name is not enough — `ListAgents` shows two rows with it, or an error asks you to disambiguate (you typed only a prefix, or a session list could not be checked). A ref you did not just read from a listing or an error will not resolve, and if the same name also names an in-process agent, the bare name always wins — use the in-process one.\n\nA listed peer is alive and will process your message; messages enqueue and drain at the receiver's next tool round (its `ListAgents` row says whether it is busy or idle right now). Your message arrives wrapped as `<cross-session-message from=\"...\">`. **To reply to an incoming message, copy its `from` attribute as your `to`.** Cross-session messages travel between SESSIONS: if you are a subagent, your send goes out under your parent session's address, and any reply is delivered to the parent session's conversation, not to you.\n\nTo hear when a session ON THIS MACHINE finishes what it is doing, pass `notify_when_idle: true` (from the main conversation only) — one-shot and opt-in: exactly one `[Cross-session idle notice]` arrives when it next goes idle (or exits) — shown to you, or only to your user when this session holds peer messages for approval (the tool result says which); if it never signals within the subscription's lifetime (it may still be busy, may refuse inbound requests, or may have ended abruptly) the notice says the subscription expired instead. Omit `message` for a pure subscription that costs that session nothing; include one to deliver it now AND subscribe. Never poll `ListAgents` in a loop or send \"are you done?\" messages instead.\n\nPermission boundaries are per-session: NEVER ask a peer to perform an action that was denied or blocked in your session, or that you expect your own permission settings would block — a peer doing it for you bypasses the user's permission decision (cross-session permission laundering). Route blocked work back to your user instead."
+    },
+    {
+      "cross_session": true,
+      "teams": true,
+      "request_sha256": "f1dee6cff72390d49bf3b7bd47912d4d2529ff424a3d04d90a1c85bce44ec2f8",
+      "input_schema_json": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"to\":{\"description\":\"Recipient: a name from ListAgents (append its \\\" [ref]\\\" only when a listing or an error shows one), a teammate name, \\\"main\\\", or a background agent's agentId\",\"type\":\"string\",\"allOf\":[{\"pattern\":\"^[^\\\\n\\\\r]*$\"},{\"pattern\":\"^[\\\\s\\\\S]{0,300}$\"}]},\"summary\":{\"description\":\"A 5-10 word label for your own transcript row (not transmitted — the recipient previews the first line of `message`). Truncated to 200 characters rather than rejected.\",\"type\":\"string\",\"maxLength\":200},\"message\":{\"default\":\"\",\"anyOf\":[{\"description\":\"Plain text message content. The recipient's human sees only the FIRST LINE as a one-line preview until they expand it, so make the first line a clear, self-contained sentence saying what this is about — not a greeting, preamble, or bare @-mention.\",\"type\":\"string\"},{\"anyOf\":[{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"const\":\"shutdown_request\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"type\"],\"additionalProperties\":false},{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"const\":\"shutdown_response\"},\"request_id\":{\"type\":\"string\",\"minLength\":1,\"allOf\":[{\"pattern\":\"^[^\\\\n\\\\r]*$\"},{\"pattern\":\"^[\\\\s\\\\S]{0,300}$\"}]},\"approve\":{\"type\":\"boolean\"},\"reason\":{\"type\":\"string\"}},\"required\":[\"type\",\"request_id\",\"approve\"],\"additionalProperties\":false},{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"const\":\"plan_approval_response\"},\"request_id\":{\"type\":\"string\",\"minLength\":1,\"allOf\":[{\"pattern\":\"^[^\\\\n\\\\r]*$\"},{\"pattern\":\"^[\\\\s\\\\S]{0,300}$\"}]},\"approve\":{\"type\":\"boolean\"},\"feedback\":{\"type\":\"string\"}},\"required\":[\"type\",\"request_id\",\"approve\"],\"additionalProperties\":false}]}]},\"notify_when_idle\":{\"description\":\"Ask a session ON THIS MACHINE to send you ONE notice when it next goes idle (finishes its turn with nothing queued) or exits — opt-in, one-shot, no polling. With a message: deliver it now AND subscribe. Without a message (omit it): a pure subscription that costs the other session nothing.\",\"type\":\"boolean\"}},\"required\":[\"to\",\"message\"],\"additionalProperties\":false}",
+      "prompt": "# SendMessage\n\nSend a message to another agent.\n\n```json\n{\"to\": \"researcher\", \"summary\": \"assign task 1\", \"message\": \"start on task #1\"}\n```\n\n| `to` | |\n|---|---|\n| `\"researcher\"` | Teammate by name |\n| `\"main\"` | The main conversation (background subagents only) |\n| `\"worker\"` | Any agent from `ListAgents` — subagent, another local Claude session |\n| `\"worker [3fa9c1]\"` | Same, plus its `[ref]` — only when a listing or an error shows one |\n\nYour plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to agents by name — names keep working after an agent completes (a send resumes it from its transcript). Use the raw `agentId` (format `a...-...`) from its spawn result only when the agent has no name, or when a newer agent took the name (latest wins). When relaying, don't quote the original — it's already rendered to the user.\n\n## Cross-session\n\nUse `ListAgents` to discover targets. Every row leads with the agent's `name [ref]` — the name IS the address; there is no separate address syntax.\n\n```json\n{\"to\": \"worker\", \"message\": \"check if tests pass over there\"}\n{\"to\": \"worker [3fa9c1]\", \"message\": \"you, specifically\"}\n```\n\nSend the bare name — a name that exactly matches one live agent or session (on this machine, on another machine, or in the cloud) delivers directly. Append the ` [ref]` only when the bare name is not enough — `ListAgents` shows two rows with it, or an error asks you to disambiguate (you typed only a prefix, or a session list could not be checked). A ref you did not just read from a listing or an error will not resolve, and if the same name also names an in-process agent, the bare name always wins — use the in-process one.\n\nA listed peer is alive and will process your message; messages enqueue and drain at the receiver's next tool round (its `ListAgents` row says whether it is busy or idle right now). Your message arrives wrapped as `<cross-session-message from=\"...\">`. **To reply to an incoming message, copy its `from` attribute as your `to`.** Cross-session messages travel between SESSIONS: if you are a subagent, your send goes out under your parent session's address, and any reply is delivered to the parent session's conversation, not to you.\n\nTo hear when a session ON THIS MACHINE finishes what it is doing, pass `notify_when_idle: true` (from the main conversation only) — one-shot and opt-in: exactly one `[Cross-session idle notice]` arrives when it next goes idle (or exits) — shown to you, or only to your user when this session holds peer messages for approval (the tool result says which); if it never signals within the subscription's lifetime (it may still be busy, may refuse inbound requests, or may have ended abruptly) the notice says the subscription expired instead. Omit `message` for a pure subscription that costs that session nothing; include one to deliver it now AND subscribe. Never poll `ListAgents` in a loop or send \"are you done?\" messages instead.\n\nPermission boundaries are per-session: NEVER ask a peer to perform an action that was denied or blocked in your session, or that you expect your own permission settings would block — a peer doing it for you bypasses the user's permission decision (cross-session permission laundering). Route blocked work back to your user instead.\n\n## Protocol responses (legacy)\n\nIf you receive a JSON message with `type: \"shutdown_request\"` or `type: \"plan_approval_request\"`, respond with the matching `_response` type — echo the `request_id`, set `approve` true/false:\n\n```json\n{\"to\": \"team-lead\", \"message\": {\"type\": \"shutdown_response\", \"request_id\": \"...\", \"approve\": true}}\n{\"to\": \"researcher\", \"message\": {\"type\": \"plan_approval_response\", \"request_id\": \"...\", \"approve\": false, \"feedback\": \"add error handling\"}}\n```\n\nApproving shutdown terminates your process. Rejecting plan sends the teammate back to revise. Don't originate `shutdown_request` unless asked. Don't send structured JSON status messages — report progress through your task tools if you have them, otherwise in plain prose."
+    }
+  ],
+  "shutdown_envelopes_source": "Real binary extracted src_160357157.js functions twn/nwn/rwn evaluated with Date.toISOString fixed to 2026-09-08T12:34:56.789Z",
+  "shutdown_envelopes": [
+    {
+      "kind": "approved",
+      "input": {
+        "requestId": "shutdown-1@scout",
+        "from": "scout"
+      },
+      "json": "{\"type\":\"shutdown_approved\",\"requestId\":\"shutdown-1@scout\",\"from\":\"scout\",\"timestamp\":\"2026-09-08T12:34:56.789Z\"}"
+    },
+    {
+      "kind": "approved",
+      "input": {
+        "requestId": "shutdown-1@scout",
+        "from": "scout",
+        "backendType": "in-process"
+      },
+      "json": "{\"type\":\"shutdown_approved\",\"requestId\":\"shutdown-1@scout\",\"from\":\"scout\",\"timestamp\":\"2026-09-08T12:34:56.789Z\",\"backendType\":\"in-process\"}"
+    },
+    {
+      "kind": "approved",
+      "input": {
+        "requestId": "shutdown-1@scout",
+        "from": "scout",
+        "paneId": "%4",
+        "backendType": "tmux"
+      },
+      "json": "{\"type\":\"shutdown_approved\",\"requestId\":\"shutdown-1@scout\",\"from\":\"scout\",\"timestamp\":\"2026-09-08T12:34:56.789Z\",\"paneId\":\"%4\",\"backendType\":\"tmux\"}"
+    },
+    {
+      "kind": "approved",
+      "input": {
+        "requestId": "shutdown-1@scout",
+        "from": "scout",
+        "paneId": "pane-4",
+        "backendType": "iterm2"
+      },
+      "json": "{\"type\":\"shutdown_approved\",\"requestId\":\"shutdown-1@scout\",\"from\":\"scout\",\"timestamp\":\"2026-09-08T12:34:56.789Z\",\"paneId\":\"pane-4\",\"backendType\":\"iterm2\"}"
+    },
+    {
+      "kind": "rejected",
+      "input": {
+        "requestId": "shutdown-1@scout",
+        "from": "scout",
+        "reason": "Still working"
+      },
+      "json": "{\"type\":\"shutdown_rejected\",\"requestId\":\"shutdown-1@scout\",\"from\":\"scout\",\"reason\":\"Still working\",\"timestamp\":\"2026-09-08T12:34:56.789Z\"}"
+    },
+    {
+      "kind": "request",
+      "input": {
+        "requestId": "shutdown-1@scout",
+        "from": "team-lead"
+      },
+      "json": "{\"type\":\"shutdown_request\",\"requestId\":\"shutdown-1@scout\",\"from\":\"team-lead\",\"timestamp\":\"2026-09-08T12:34:56.789Z\"}"
+    },
+    {
+      "kind": "request",
+      "input": {
+        "requestId": "shutdown-1@scout",
+        "from": "team-lead",
+        "reason": "All done"
+      },
+      "json": "{\"type\":\"shutdown_request\",\"requestId\":\"shutdown-1@scout\",\"from\":\"team-lead\",\"reason\":\"All done\",\"timestamp\":\"2026-09-08T12:34:56.789Z\"}"
+    }
+  ],
+  "plan_response_source": "Real binary extracted src_174624321.js Js/Qs payload object expressions evaluated with Date.toISOString fixed to 2026-09-08T12:34:56.789Z. wut in src_174604194.js normalizes live leader mode and maps plan to default; U2 is identity in this external binary.",
+  "plan_responses": [
+    {
+      "approved": true,
+      "mode": "default",
+      "json": "{\"type\":\"plan_approval_response\",\"requestId\":\"plan-1@scout\",\"approved\":true,\"timestamp\":\"2026-09-08T12:34:56.789Z\",\"permissionMode\":\"default\"}"
+    },
+    {
+      "approved": true,
+      "mode": "default",
+      "feedback": "Proceed carefully",
+      "json": "{\"type\":\"plan_approval_response\",\"requestId\":\"plan-1@scout\",\"approved\":true,\"feedback\":\"Proceed carefully\",\"timestamp\":\"2026-09-08T12:34:56.789Z\",\"permissionMode\":\"default\"}"
+    },
+    {
+      "approved": true,
+      "mode": "acceptEdits",
+      "json": "{\"type\":\"plan_approval_response\",\"requestId\":\"plan-1@scout\",\"approved\":true,\"timestamp\":\"2026-09-08T12:34:56.789Z\",\"permissionMode\":\"acceptEdits\"}"
+    },
+    {
+      "approved": true,
+      "mode": "acceptEdits",
+      "feedback": "Proceed carefully",
+      "json": "{\"type\":\"plan_approval_response\",\"requestId\":\"plan-1@scout\",\"approved\":true,\"feedback\":\"Proceed carefully\",\"timestamp\":\"2026-09-08T12:34:56.789Z\",\"permissionMode\":\"acceptEdits\"}"
+    },
+    {
+      "approved": true,
+      "mode": "auto",
+      "json": "{\"type\":\"plan_approval_response\",\"requestId\":\"plan-1@scout\",\"approved\":true,\"timestamp\":\"2026-09-08T12:34:56.789Z\",\"permissionMode\":\"auto\"}"
+    },
+    {
+      "approved": true,
+      "mode": "auto",
+      "feedback": "Proceed carefully",
+      "json": "{\"type\":\"plan_approval_response\",\"requestId\":\"plan-1@scout\",\"approved\":true,\"feedback\":\"Proceed carefully\",\"timestamp\":\"2026-09-08T12:34:56.789Z\",\"permissionMode\":\"auto\"}"
+    },
+    {
+      "approved": true,
+      "mode": "bypassPermissions",
+      "json": "{\"type\":\"plan_approval_response\",\"requestId\":\"plan-1@scout\",\"approved\":true,\"timestamp\":\"2026-09-08T12:34:56.789Z\",\"permissionMode\":\"bypassPermissions\"}"
+    },
+    {
+      "approved": true,
+      "mode": "bypassPermissions",
+      "feedback": "Proceed carefully",
+      "json": "{\"type\":\"plan_approval_response\",\"requestId\":\"plan-1@scout\",\"approved\":true,\"feedback\":\"Proceed carefully\",\"timestamp\":\"2026-09-08T12:34:56.789Z\",\"permissionMode\":\"bypassPermissions\"}"
+    },
+    {
+      "approved": false,
+      "feedback": "Revise this plan",
+      "json": "{\"type\":\"plan_approval_response\",\"requestId\":\"plan-1@scout\",\"approved\":false,\"feedback\":\"Revise this plan\",\"timestamp\":\"2026-09-08T12:34:56.789Z\"}"
+    }
+  ],
+  "routing_source": "Real binary src_174624321.js Gs routing object evaluated directly for four optional-color combinations; preview input kept shorter than truncation width.",
+  "routing_cases": [
+    {
+      "sender": "scout",
+      "target": "@reviewer",
+      "summary": "Inspect findings",
+      "content": "Finished",
+      "json": "{\"sender\":\"scout\",\"target\":\"@reviewer\",\"summary\":\"Inspect findings\",\"content\":\"Finished\"}"
+    },
+    {
+      "sender": "scout",
+      "target": "@reviewer",
+      "targetColor": "green",
+      "summary": "Inspect findings",
+      "content": "Finished",
+      "json": "{\"sender\":\"scout\",\"target\":\"@reviewer\",\"targetColor\":\"green\",\"summary\":\"Inspect findings\",\"content\":\"Finished\"}"
+    },
+    {
+      "sender": "scout",
+      "senderColor": "blue",
+      "target": "@reviewer",
+      "summary": "Inspect findings",
+      "content": "Finished",
+      "json": "{\"sender\":\"scout\",\"senderColor\":\"blue\",\"target\":\"@reviewer\",\"summary\":\"Inspect findings\",\"content\":\"Finished\"}"
+    },
+    {
+      "sender": "scout",
+      "senderColor": "blue",
+      "target": "@reviewer",
+      "targetColor": "green",
+      "summary": "Inspect findings",
+      "content": "Finished",
+      "json": "{\"sender\":\"scout\",\"senderColor\":\"blue\",\"target\":\"@reviewer\",\"targetColor\":\"green\",\"summary\":\"Inspect findings\",\"content\":\"Finished\"}"
+    }
+  ]
+}

@@ -1,0 +1,4795 @@
+{
+  "version": "2.1.270",
+  "binarySha256": "a506b6d970a4cf44f6abdb53a81ddcd5d3b0ce042a95c502fe9d1f946bdb8807",
+  "sources": {
+    "src_165047929.js": "5f497c0a717fb02d58357ce8f70e0ce16185e59756fab2604ea1990c074333a9",
+    "src_198617341.js": "53dfb397aa9ee26b7e8d327fdb03ca70bbecec32f0e6dfdfd40c2e358e085c0b",
+    "src_169588164.js": "6ca868e57efc9aced712464189ae66546f8f3f4ddc8ecf6501f4f37253a5f686",
+    "src_169577058.js": "2ce8342fd74ef98fd364f836605834377a6148c42bb090eccf5c8a10d9fc7543",
+    "src_185261434.js": "79eb8c79b8b94f9a36a7ce446662247be90c4f851f1d55a59b609aee5c87499f",
+    "src_185268442.js": "1cc55a3994a3f1e42cbe3c584f6ea912dfbaacba526c50b5096c6620f952eacb",
+    "src_185273754.js": "6e03fb94f05286c5a2285c9b38b8073db5f8b10ec29fcdc77edfc0f3231b4f16",
+    "src_165140675.js": "f35b7f7c81c672df281cad966889206e3f841bfef60ccfcd9e75a56682ce3e72"
+  },
+  "schemas": {
+    "ScheduleWakeup": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "delaySeconds": {
+          "description": "Seconds from now to wake up. Clamped to [60, 3600] by the runtime. Required unless `stop` is true.",
+          "type": "number"
+        },
+        "reason": {
+          "description": "One short sentence explaining the chosen delay. Goes to telemetry and is shown to the user. Be specific. Required unless `stop` is true.",
+          "type": "string"
+        },
+        "prompt": {
+          "description": "The /loop input to fire on wake-up. Pass the same /loop input verbatim each turn so the next firing re-enters the skill and continues the loop. For autonomous /loop (no user prompt), pass the literal sentinel `<<autonomous-loop-dynamic>>` instead (the dynamic-pacing variant, not the CronCreate-mode `<<autonomous-loop>>`). Required unless `stop` is true.",
+          "type": "string"
+        },
+        "stop": {
+          "description": "Set to true to end the dynamic loop immediately instead of scheduling another wakeup. When true, all other fields are ignored and no further wakeups fire.",
+          "type": "boolean"
+        },
+        "noop": {
+          "description": "true = nothing changed (you checked and there is nothing to report). false = something happened worth keeping (edited a file, posted a message, advanced state, surfaced a finding). Consecutive noop:true ticks are collapsed in the user's terminal view and tracked as a streak. Required unless `stop` is true.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CronCreate": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "cron": {
+          "description": "Standard 5-field cron expression in local time: \"M H DoM Mon DoW\" (e.g. \"*/5 * * * *\" = every 5 minutes, \"30 14 28 2 *\" = Feb 28 at 2:30pm local once).",
+          "type": "string"
+        },
+        "prompt": {
+          "description": "The prompt to enqueue at each fire time.",
+          "type": "string"
+        },
+        "recurring": {
+          "description": "true (default) = fire on every cron match until deleted or auto-expired after 7 days. false = fire once at the next match, then auto-delete. Use false for \"remind me at X\" one-shot requests with pinned minute/hour/dom/month.",
+          "type": "boolean"
+        },
+        "durable": {
+          "description": "",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cron",
+        "prompt"
+      ],
+      "additionalProperties": false
+    },
+    "CronDelete": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Job ID returned by CronCreate.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "CronList": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  "cases": [
+    {
+      "tool": "ScheduleWakeup",
+      "input": null,
+      "coerced": null,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `null`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received null"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": false,
+      "coerced": false,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received boolean\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": 0,
+      "coerced": 0,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": "",
+      "coerced": "",
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": [],
+      "coerced": [],
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `array`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received array"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {},
+      "coerced": {},
+      "success": true,
+      "normalized": {},
+      "callError": "`delaySeconds` and `reason` are required when `stop` is not true."
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "unexpected": 1
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "unexpected": 1
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"unexpected\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"unexpected\\\"\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nAn unexpected parameter `unexpected` was provided",
+      "issues": [
+        {
+          "code": "unrecognized_keys",
+          "keys": [
+            "unexpected"
+          ],
+          "path": [],
+          "message": "Unrecognized key: \"unexpected\""
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "2": true,
+        "10": true,
+        "constructor": true,
+        "__proto__": true,
+        "toString": true
+      },
+      "coerced": {
+        "2": true,
+        "10": true,
+        "constructor": true,
+        "__proto__": true,
+        "toString": true
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"2\",\n      \"10\",\n      \"constructor\",\n      \"toString\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized keys: \\\"2\\\", \\\"10\\\", \\\"constructor\\\", \\\"toString\\\"\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issues:\nAn unexpected parameter `2` was provided\nAn unexpected parameter `10` was provided\nAn unexpected parameter `constructor` was provided\nAn unexpected parameter `toString` was provided",
+      "issues": [
+        {
+          "code": "unrecognized_keys",
+          "keys": [
+            "2",
+            "10",
+            "constructor",
+            "toString"
+          ],
+          "path": [],
+          "message": "Unrecognized keys: \"2\", \"10\", \"constructor\", \"toString\""
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "__proto__": {
+          "injected": true
+        }
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "__proto__": {
+          "injected": true
+        }
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": null,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": null,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"delaySeconds\"\n    ],\n    \"message\": \"Invalid input: expected number, received null\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `delaySeconds` type is expected as `number` but provided as `null`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "delaySeconds"
+          ],
+          "message": "Invalid input: expected number, received null"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": false,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": false,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"delaySeconds\"\n    ],\n    \"message\": \"Invalid input: expected number, received boolean\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `delaySeconds` type is expected as `number` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "delaySeconds"
+          ],
+          "message": "Invalid input: expected number, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": true,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": true,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"delaySeconds\"\n    ],\n    \"message\": \"Invalid input: expected number, received boolean\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `delaySeconds` type is expected as `number` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "delaySeconds"
+          ],
+          "message": "Invalid input: expected number, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 0,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 0,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 0,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 1.5,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 1.5,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 1.5,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": "",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": "",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"delaySeconds\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `delaySeconds` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "delaySeconds"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": [],
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": [],
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"delaySeconds\"\n    ],\n    \"message\": \"Invalid input: expected number, received array\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `delaySeconds` type is expected as `number` but provided as `array`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "delaySeconds"
+          ],
+          "message": "Invalid input: expected number, received array"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": {},
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": {},
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"delaySeconds\"\n    ],\n    \"message\": \"Invalid input: expected number, received object\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `delaySeconds` type is expected as `number` but provided as `object`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "delaySeconds"
+          ],
+          "message": "Invalid input: expected number, received object"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": "true",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": "true",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"delaySeconds\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `delaySeconds` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "delaySeconds"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": "false",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": "false",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"delaySeconds\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `delaySeconds` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "delaySeconds"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": "120",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": "1e2",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": "1e2",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"delaySeconds\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `delaySeconds` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "delaySeconds"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": "Infinity",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": "Infinity",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"delaySeconds\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `delaySeconds` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "delaySeconds"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": "﻿120﻿",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": "120",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": "120",
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"delaySeconds\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `delaySeconds` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "delaySeconds"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "callError": "`delaySeconds` and `reason` are required when `stop` is not true."
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": null,
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": null,
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"reason\"\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `reason` type is expected as `string` but provided as `null`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "reason"
+          ],
+          "message": "Invalid input: expected string, received null"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": false,
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": false,
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"reason\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `reason` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "reason"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": true,
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": true,
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"reason\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `reason` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "reason"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": 0,
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": 0,
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"reason\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `reason` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "reason"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": 1.5,
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": 1.5,
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"reason\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `reason` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "reason"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": [],
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": [],
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"reason\"\n    ],\n    \"message\": \"Invalid input: expected string, received array\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `reason` type is expected as `string` but provided as `array`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "reason"
+          ],
+          "message": "Invalid input: expected string, received array"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": {},
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": {},
+        "prompt": "p",
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"reason\"\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `reason` type is expected as `string` but provided as `object`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "reason"
+          ],
+          "message": "Invalid input: expected string, received object"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "true",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "true",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "true",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "false",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "false",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "false",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "120",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "120",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "120",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "1e2",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "1e2",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "1e2",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "Infinity",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "Infinity",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "Infinity",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "﻿120﻿",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "﻿120﻿",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "﻿120﻿",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "120",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "120",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "120",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "prompt": "p",
+        "noop": false
+      },
+      "callError": "`delaySeconds` and `reason` are required when `stop` is not true."
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": null,
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": null,
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `null`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received null"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": false,
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": false,
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": true,
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": true,
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": 0,
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": 0,
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": 1.5,
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": 1.5,
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": [],
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": [],
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received array\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `array`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received array"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": {},
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": {},
+        "noop": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `object`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received object"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "true",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "true",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "true",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "false",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "false",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "false",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "120",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "120",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "120",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "1e2",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "1e2",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "1e2",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "Infinity",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "Infinity",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "Infinity",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "﻿120﻿",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "﻿120﻿",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "﻿120﻿",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "120",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "120",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "120",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "noop": false
+      },
+      "callError": "`prompt` is required when `stop` is not true."
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": null
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received null\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `null`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received null"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "stop": false,
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": true
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": true
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "stop": true,
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": 0
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": 1.5
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": 1.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": ""
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": ""
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": []
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": []
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received array\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `array`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received array"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": {}
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received object\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `object`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received object"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "true"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "true"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "false"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "false"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "120"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "120"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "1e2"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "1e2"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "Infinity"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "Infinity"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "﻿120﻿"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "﻿120﻿"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "120"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": "120"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": null
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received null\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `null`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received null"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": true
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": true
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": true
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": 0
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": 1.5
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": 1.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": ""
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": ""
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": []
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": []
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received array\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `array`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received array"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": {}
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received object\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `object`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received object"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "true"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "true"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "false"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "false"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "120"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "120"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "1e2"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "1e2"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "Infinity"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "Infinity"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "﻿120﻿"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "﻿120﻿"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "120"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": "120"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p"
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p"
+      },
+      "callError": "`noop` is required when `stop` is not true."
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "stop": true
+      },
+      "coerced": {
+        "stop": true
+      },
+      "success": true,
+      "normalized": {
+        "stop": true
+      }
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "stop": true,
+        "noop": null
+      },
+      "coerced": {
+        "stop": true,
+        "noop": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"noop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received null\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `noop` type is expected as `boolean` but provided as `null`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "noop"
+          ],
+          "message": "Invalid input: expected boolean, received null"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "stop": true,
+        "delaySeconds": "1e2"
+      },
+      "coerced": {
+        "stop": true,
+        "delaySeconds": "1e2"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"delaySeconds\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `delaySeconds` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "delaySeconds"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "stop": true,
+        "extra": 0
+      },
+      "coerced": {
+        "stop": true,
+        "extra": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"extra\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"extra\\\"\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nAn unexpected parameter `extra` was provided",
+      "issues": [
+        {
+          "code": "unrecognized_keys",
+          "keys": [
+            "extra"
+          ],
+          "path": [],
+          "message": "Unrecognized key: \"extra\""
+        }
+      ]
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "stop": false
+      },
+      "coerced": {
+        "stop": false
+      },
+      "success": true,
+      "normalized": {
+        "stop": false
+      },
+      "callError": "`delaySeconds` and `reason` are required when `stop` is not true."
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p"
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p"
+      },
+      "callError": "`noop` is required when `stop` is not true."
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r"
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r"
+      },
+      "success": true,
+      "normalized": {
+        "delaySeconds": 120,
+        "reason": "r"
+      },
+      "callError": "`prompt` is required when `stop` is not true."
+    },
+    {
+      "tool": "ScheduleWakeup",
+      "input": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": null
+      },
+      "coerced": {
+        "delaySeconds": 120,
+        "reason": "r",
+        "prompt": "p",
+        "noop": false,
+        "stop": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"stop\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received null\"\n  }\n]",
+      "display": "ScheduleWakeup failed due to the following issue:\nThe parameter `stop` type is expected as `boolean` but provided as `null`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "stop"
+          ],
+          "message": "Invalid input: expected boolean, received null"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": null,
+      "coerced": null,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `null`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received null"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": false,
+      "coerced": false,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received boolean\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": 0,
+      "coerced": 0,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": "",
+      "coerced": "",
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": [],
+      "coerced": [],
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `array`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received array"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {},
+      "coerced": {},
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"cron\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]",
+      "display": "CronCreate failed due to the following issues:\nThe required parameter `cron` is missing\nThe required parameter `prompt` is missing",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "cron"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "p"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "unexpected": 1
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "unexpected": 1
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"unexpected\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"unexpected\\\"\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nAn unexpected parameter `unexpected` was provided",
+      "issues": [
+        {
+          "code": "unrecognized_keys",
+          "keys": [
+            "unexpected"
+          ],
+          "path": [],
+          "message": "Unrecognized key: \"unexpected\""
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "2": true,
+        "10": true,
+        "constructor": true,
+        "__proto__": true,
+        "toString": true
+      },
+      "coerced": {
+        "2": true,
+        "10": true,
+        "constructor": true,
+        "__proto__": true,
+        "toString": true
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"cron\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"2\",\n      \"10\",\n      \"constructor\",\n      \"toString\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized keys: \\\"2\\\", \\\"10\\\", \\\"constructor\\\", \\\"toString\\\"\"\n  }\n]",
+      "display": "CronCreate failed due to the following issues:\nThe required parameter `cron` is missing\nThe required parameter `prompt` is missing\nAn unexpected parameter `2` was provided\nAn unexpected parameter `10` was provided\nAn unexpected parameter `constructor` was provided\nAn unexpected parameter `toString` was provided",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "cron"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "code": "unrecognized_keys",
+          "keys": [
+            "2",
+            "10",
+            "constructor",
+            "toString"
+          ],
+          "path": [],
+          "message": "Unrecognized keys: \"2\", \"10\", \"constructor\", \"toString\""
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "__proto__": {
+          "injected": true
+        }
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "__proto__": {
+          "injected": true
+        }
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "p"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": null,
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": null,
+        "prompt": "p"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"cron\"\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `cron` type is expected as `string` but provided as `null`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "cron"
+          ],
+          "message": "Invalid input: expected string, received null"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": false,
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": false,
+        "prompt": "p"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"cron\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `cron` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "cron"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": true,
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": true,
+        "prompt": "p"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"cron\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `cron` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "cron"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": 0,
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": 0,
+        "prompt": "p"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"cron\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `cron` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "cron"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": 1.5,
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": 1.5,
+        "prompt": "p"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"cron\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `cron` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "cron"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "",
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": "",
+        "prompt": "p"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "",
+        "prompt": "p"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": [],
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": [],
+        "prompt": "p"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"cron\"\n    ],\n    \"message\": \"Invalid input: expected string, received array\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `cron` type is expected as `string` but provided as `array`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "cron"
+          ],
+          "message": "Invalid input: expected string, received array"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": {},
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": {},
+        "prompt": "p"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"cron\"\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `cron` type is expected as `string` but provided as `object`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "cron"
+          ],
+          "message": "Invalid input: expected string, received object"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "true",
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": "true",
+        "prompt": "p"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "true",
+        "prompt": "p"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "false",
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": "false",
+        "prompt": "p"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "false",
+        "prompt": "p"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "120",
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": "120",
+        "prompt": "p"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "120",
+        "prompt": "p"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "1e2",
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": "1e2",
+        "prompt": "p"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "1e2",
+        "prompt": "p"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "Infinity",
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": "Infinity",
+        "prompt": "p"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "Infinity",
+        "prompt": "p"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "﻿120﻿",
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": "﻿120﻿",
+        "prompt": "p"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "﻿120﻿",
+        "prompt": "p"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "120",
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": "120",
+        "prompt": "p"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "120",
+        "prompt": "p"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "prompt": "p"
+      },
+      "coerced": {
+        "prompt": "p"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"cron\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe required parameter `cron` is missing",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "cron"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": null
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `null`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received null"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": false
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": true
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": true
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": 0
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": 1.5
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": 1.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": ""
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": ""
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": ""
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": []
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": []
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received array\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `array`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received array"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": {}
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `prompt` type is expected as `string` but provided as `object`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received object"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "true"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "true"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "true"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "false"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "false"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "false"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "120"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "120"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "120"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "1e2"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "1e2"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "1e2"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "Infinity"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "Infinity"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "Infinity"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "﻿120﻿"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "﻿120﻿"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "﻿120﻿"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "120"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "120"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "120"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *"
+      },
+      "coerced": {
+        "cron": "* * * * *"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"prompt\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe required parameter `prompt` is missing",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "prompt"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": null
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"recurring\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received null\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `recurring` type is expected as `boolean` but provided as `null`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "recurring"
+          ],
+          "message": "Invalid input: expected boolean, received null"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": false
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": false
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": false
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": true
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": true
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": true
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": 0
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"recurring\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `recurring` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "recurring"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": 1.5
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": 1.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"recurring\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `recurring` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "recurring"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": ""
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": ""
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"recurring\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `recurring` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "recurring"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": []
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": []
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"recurring\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received array\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `recurring` type is expected as `boolean` but provided as `array`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "recurring"
+          ],
+          "message": "Invalid input: expected boolean, received array"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": {}
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"recurring\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received object\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `recurring` type is expected as `boolean` but provided as `object`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "recurring"
+          ],
+          "message": "Invalid input: expected boolean, received object"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": "true"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": true
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": true
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": "false"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": false
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": false
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": "120"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": "120"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"recurring\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `recurring` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "recurring"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": "1e2"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": "1e2"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"recurring\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `recurring` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "recurring"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": "Infinity"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": "Infinity"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"recurring\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `recurring` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "recurring"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": "﻿120﻿"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": "﻿120﻿"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"recurring\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `recurring` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "recurring"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": "120"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "recurring": "120"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"recurring\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `recurring` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "recurring"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "p"
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": null
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durable\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received null\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `durable` type is expected as `boolean` but provided as `null`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "durable"
+          ],
+          "message": "Invalid input: expected boolean, received null"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": false
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": false
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": false
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": true
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": true
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": true
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": 0
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durable\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `durable` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "durable"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": 1.5
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": 1.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durable\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `durable` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "durable"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": ""
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": ""
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durable\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `durable` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "durable"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": []
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": []
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durable\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received array\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `durable` type is expected as `boolean` but provided as `array`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "durable"
+          ],
+          "message": "Invalid input: expected boolean, received array"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": {}
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durable\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received object\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `durable` type is expected as `boolean` but provided as `object`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "durable"
+          ],
+          "message": "Invalid input: expected boolean, received object"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": "true"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": true
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": true
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": "false"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": false
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": false
+      }
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": "120"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": "120"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durable\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `durable` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "durable"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": "1e2"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": "1e2"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durable\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `durable` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "durable"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": "Infinity"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": "Infinity"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durable\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `durable` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "durable"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": "﻿120﻿"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": "﻿120﻿"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durable\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `durable` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "durable"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": "120"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p",
+        "durable": "120"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"durable\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "CronCreate failed due to the following issue:\nThe parameter `durable` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "durable"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronCreate",
+      "input": {
+        "cron": "* * * * *",
+        "prompt": "p"
+      },
+      "coerced": {
+        "cron": "* * * * *",
+        "prompt": "p"
+      },
+      "success": true,
+      "normalized": {
+        "cron": "* * * * *",
+        "prompt": "p"
+      }
+    },
+    {
+      "tool": "CronDelete",
+      "input": null,
+      "coerced": null,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `null`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received null"
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": false,
+      "coerced": false,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received boolean\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": 0,
+      "coerced": 0,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": "",
+      "coerced": "",
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": [],
+      "coerced": [],
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `array`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received array"
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": {},
+      "coerced": {},
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"id\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe required parameter `id` is missing",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": "a"
+      },
+      "coerced": {
+        "id": "a"
+      },
+      "success": true,
+      "normalized": {
+        "id": "a"
+      }
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": "a",
+        "unexpected": 1
+      },
+      "coerced": {
+        "id": "a",
+        "unexpected": 1
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"unexpected\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"unexpected\\\"\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nAn unexpected parameter `unexpected` was provided",
+      "issues": [
+        {
+          "code": "unrecognized_keys",
+          "keys": [
+            "unexpected"
+          ],
+          "path": [],
+          "message": "Unrecognized key: \"unexpected\""
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "2": true,
+        "10": true,
+        "constructor": true,
+        "__proto__": true,
+        "toString": true
+      },
+      "coerced": {
+        "2": true,
+        "10": true,
+        "constructor": true,
+        "__proto__": true,
+        "toString": true
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"id\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"2\",\n      \"10\",\n      \"constructor\",\n      \"toString\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized keys: \\\"2\\\", \\\"10\\\", \\\"constructor\\\", \\\"toString\\\"\"\n  }\n]",
+      "display": "CronDelete failed due to the following issues:\nThe required parameter `id` is missing\nAn unexpected parameter `2` was provided\nAn unexpected parameter `10` was provided\nAn unexpected parameter `constructor` was provided\nAn unexpected parameter `toString` was provided",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "code": "unrecognized_keys",
+          "keys": [
+            "2",
+            "10",
+            "constructor",
+            "toString"
+          ],
+          "path": [],
+          "message": "Unrecognized keys: \"2\", \"10\", \"constructor\", \"toString\""
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": "a",
+        "__proto__": {
+          "injected": true
+        }
+      },
+      "coerced": {
+        "id": "a",
+        "__proto__": {
+          "injected": true
+        }
+      },
+      "success": true,
+      "normalized": {
+        "id": "a"
+      }
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": null
+      },
+      "coerced": {
+        "id": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"id\"\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe parameter `id` type is expected as `string` but provided as `null`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "id"
+          ],
+          "message": "Invalid input: expected string, received null"
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": false
+      },
+      "coerced": {
+        "id": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"id\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe parameter `id` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "id"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": true
+      },
+      "coerced": {
+        "id": true
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"id\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe parameter `id` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "id"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": 0
+      },
+      "coerced": {
+        "id": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"id\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe parameter `id` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "id"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": 1.5
+      },
+      "coerced": {
+        "id": 1.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"id\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe parameter `id` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "id"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": ""
+      },
+      "coerced": {
+        "id": ""
+      },
+      "success": true,
+      "normalized": {
+        "id": ""
+      }
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": []
+      },
+      "coerced": {
+        "id": []
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"id\"\n    ],\n    \"message\": \"Invalid input: expected string, received array\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe parameter `id` type is expected as `string` but provided as `array`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "id"
+          ],
+          "message": "Invalid input: expected string, received array"
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": {}
+      },
+      "coerced": {
+        "id": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"id\"\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe parameter `id` type is expected as `string` but provided as `object`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "id"
+          ],
+          "message": "Invalid input: expected string, received object"
+        }
+      ]
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": "true"
+      },
+      "coerced": {
+        "id": "true"
+      },
+      "success": true,
+      "normalized": {
+        "id": "true"
+      }
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": "false"
+      },
+      "coerced": {
+        "id": "false"
+      },
+      "success": true,
+      "normalized": {
+        "id": "false"
+      }
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": "120"
+      },
+      "coerced": {
+        "id": "120"
+      },
+      "success": true,
+      "normalized": {
+        "id": "120"
+      }
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": "1e2"
+      },
+      "coerced": {
+        "id": "1e2"
+      },
+      "success": true,
+      "normalized": {
+        "id": "1e2"
+      }
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": "Infinity"
+      },
+      "coerced": {
+        "id": "Infinity"
+      },
+      "success": true,
+      "normalized": {
+        "id": "Infinity"
+      }
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": "﻿120﻿"
+      },
+      "coerced": {
+        "id": "﻿120﻿"
+      },
+      "success": true,
+      "normalized": {
+        "id": "﻿120﻿"
+      }
+    },
+    {
+      "tool": "CronDelete",
+      "input": {
+        "id": "120"
+      },
+      "coerced": {
+        "id": "120"
+      },
+      "success": true,
+      "normalized": {
+        "id": "120"
+      }
+    },
+    {
+      "tool": "CronDelete",
+      "input": {},
+      "coerced": {},
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"id\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]",
+      "display": "CronDelete failed due to the following issue:\nThe required parameter `id` is missing",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ]
+    },
+    {
+      "tool": "CronList",
+      "input": null,
+      "coerced": null,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]",
+      "display": "CronList failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `null`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received null"
+        }
+      ]
+    },
+    {
+      "tool": "CronList",
+      "input": false,
+      "coerced": false,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received boolean\"\n  }\n]",
+      "display": "CronList failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received boolean"
+        }
+      ]
+    },
+    {
+      "tool": "CronList",
+      "input": 0,
+      "coerced": 0,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "CronList failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "tool": "CronList",
+      "input": "",
+      "coerced": "",
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "CronList failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "tool": "CronList",
+      "input": [],
+      "coerced": [],
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]",
+      "display": "CronList failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `array`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received array"
+        }
+      ]
+    },
+    {
+      "tool": "CronList",
+      "input": {},
+      "coerced": {},
+      "success": true,
+      "normalized": {}
+    },
+    {
+      "tool": "CronList",
+      "input": {},
+      "coerced": {},
+      "success": true,
+      "normalized": {}
+    },
+    {
+      "tool": "CronList",
+      "input": {
+        "unexpected": 1
+      },
+      "coerced": {
+        "unexpected": 1
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"unexpected\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"unexpected\\\"\"\n  }\n]",
+      "display": "CronList failed due to the following issue:\nAn unexpected parameter `unexpected` was provided",
+      "issues": [
+        {
+          "code": "unrecognized_keys",
+          "keys": [
+            "unexpected"
+          ],
+          "path": [],
+          "message": "Unrecognized key: \"unexpected\""
+        }
+      ]
+    },
+    {
+      "tool": "CronList",
+      "input": {
+        "2": true,
+        "10": true,
+        "constructor": true,
+        "__proto__": true,
+        "toString": true
+      },
+      "coerced": {
+        "2": true,
+        "10": true,
+        "constructor": true,
+        "__proto__": true,
+        "toString": true
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"2\",\n      \"10\",\n      \"constructor\",\n      \"toString\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized keys: \\\"2\\\", \\\"10\\\", \\\"constructor\\\", \\\"toString\\\"\"\n  }\n]",
+      "display": "CronList failed due to the following issues:\nAn unexpected parameter `2` was provided\nAn unexpected parameter `10` was provided\nAn unexpected parameter `constructor` was provided\nAn unexpected parameter `toString` was provided",
+      "issues": [
+        {
+          "code": "unrecognized_keys",
+          "keys": [
+            "2",
+            "10",
+            "constructor",
+            "toString"
+          ],
+          "path": [],
+          "message": "Unrecognized keys: \"2\", \"10\", \"constructor\", \"toString\""
+        }
+      ]
+    },
+    {
+      "tool": "CronList",
+      "input": {
+        "__proto__": {
+          "injected": true
+        }
+      },
+      "coerced": {
+        "__proto__": {
+          "injected": true
+        }
+      },
+      "success": true,
+      "normalized": {}
+    }
+  ]
+}

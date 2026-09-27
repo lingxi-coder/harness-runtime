@@ -1,0 +1,30 @@
+---
+source: crates/tui/src/render/markdown.rs
+expression: "render(\"run `cargo test --workspace` now\", &theme())"
+---
+- spans:
+    - text: "run "
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: cargo test --workspace
+      style:
+        fg:
+          Named: Magenta
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: " now"
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text

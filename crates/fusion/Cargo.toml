@@ -1,0 +1,34 @@
+[package]
+name = "fusion"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Fusion multi-model deliberation orchestrator"
+
+[dependencies]
+platform-api = { path = "../platform-api" }
+sidequery = { path = "../sidequery" }
+protocol = { path = "../protocol" }
+cost = { path = "../cost" }
+core = { path = "../core" }
+telemetry = { path = "../telemetry" }
+# `sidequery` already pulls this into the build graph transitively; naming it
+# directly lets the missing-usage settlement fallback reuse
+# `count_tokens::approximate_tokens_for_bytes` instead of hand-rolling a
+# second, divergent bytes-per-token formula (user-directed T1 policy).
+llm-runtime = { path = "../llm-runtime" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util.workspace = true
+tracing.workspace = true
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
+
+[lints]
+workspace = true

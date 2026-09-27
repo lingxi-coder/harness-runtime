@@ -1,0 +1,11 @@
+{
+  "type": "app_runtime_changed",
+  "app_id": "habits-1a2b",
+  "state": "stopped",
+  "details": {
+    "state": "stopped",
+    "mode": "static_export",
+    "suspension_reason": "backgrounded",
+    "recovery_state": "pending"
+  }
+}

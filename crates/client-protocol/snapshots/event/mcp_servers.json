@@ -1,0 +1,20 @@
+{
+  "type": "mcp_servers",
+  "servers": [
+    {
+      "name": "filesystem",
+      "status": {
+        "type": "connected"
+      },
+      "transport": "stdio"
+    },
+    {
+      "name": "github",
+      "status": {
+        "type": "error",
+        "reason": "handshake timeout"
+      },
+      "transport": "http"
+    }
+  ]
+}

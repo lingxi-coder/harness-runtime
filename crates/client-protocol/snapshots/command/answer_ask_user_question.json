@@ -1,0 +1,7 @@
+{
+  "type": "answer_ask_user_question",
+  "request_id": 9,
+  "answers": {
+    "Which database should the app use?": "SQLite"
+  }
+}

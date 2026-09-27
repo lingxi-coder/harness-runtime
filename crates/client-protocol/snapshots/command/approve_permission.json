@@ -1,0 +1,7 @@
+{
+  "type": "approve_permission",
+  "request_id": 7,
+  "response": {
+    "type": "allow_once"
+  }
+}

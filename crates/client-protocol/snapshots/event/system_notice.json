@@ -1,0 +1,5 @@
+{
+  "type": "system_notice",
+  "message": "Conversation changes could not be saved.",
+  "is_error": true
+}

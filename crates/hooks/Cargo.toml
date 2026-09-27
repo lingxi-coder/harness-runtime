@@ -1,0 +1,37 @@
+[package]
+name = "hooks"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+protocol = { path = "../protocol" }
+telemetry = { path = "../telemetry" }
+platform-api = { path = "../platform-api" }
+core = { path = "../core" }
+# Internal path dep (no new Cargo.lock package): the hook `if`-condition matcher
+# reuses the ported permission-rule parser + per-tool content matchers
+# (`PermissionRuleValue::from_rule_string`, `shell_command`, `shell_rule_matching`).
+permission = { path = "../permission" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+regex = "1"
+url = "2"
+# Function hooks run plugin-supplied JS. QuickJS is used for a specific
+# property: a bare context has NO host bindings — no fs, no net, no process, no
+# env — so "deny by default" is the engine's starting state rather than
+# something this crate has to construct. See `function_hook::Sandbox`.
+rquickjs = { version = "0.6" }
+
+[lints]
+workspace = true
+
+# rquickjs-sys 0.6 ships no pregenerated bindings for iOS/Android; mirror the
+# `workflow` crate's target-gated bindgen so mobile builds resolve identically.
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+rquickjs = { version = "0.6", features = ["bindgen"] }

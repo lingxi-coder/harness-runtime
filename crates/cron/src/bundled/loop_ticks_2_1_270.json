@@ -1,0 +1,122 @@
+[
+  {
+    "name": "auto_cron",
+    "persistent": false,
+    "push": false,
+    "text": "# Autonomous loop tick\n\nRun the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron will fire the next tick automatically — do not call ScheduleWakeup from this tick."
+  },
+  {
+    "name": "auto_dynamic",
+    "persistent": false,
+    "push": false,
+    "text": "# Autonomous loop tick (dynamic pacing)\n\nRun the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick.\n\nYou scheduled this tick via the ScheduleWakeup tool (not a recurring cron). To keep the loop alive, call ScheduleWakeup again at the end of this turn with `prompt` set to the literal sentinel `<<autonomous-loop-dynamic>>` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.\n\nIf a Monitor is armed (check TaskList), keep `delaySeconds` at 1200–1800s — the Monitor is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before deciding whether to re-arm. To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor (use TaskList to find its task ID if no longer in context)."
+  },
+  {
+    "name": "file_cron",
+    "persistent": false,
+    "push": false,
+    "text": "# /loop tick — loop.md tasks\n\nWork the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron will fire the next tick automatically — do not call ScheduleWakeup from this tick."
+  },
+  {
+    "name": "file_dynamic",
+    "persistent": false,
+    "push": false,
+    "text": "# /loop tick — loop.md tasks (dynamic pacing)\n\nWork the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick.\n\nYou scheduled this tick via the ScheduleWakeup tool (not a recurring cron). To keep the loop alive, call ScheduleWakeup again at the end of this turn with `prompt` set to the literal sentinel `<<loop.md-dynamic>>` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.\n\nIf a Monitor is armed (check TaskList), keep `delaySeconds` at 1200–1800s — the Monitor is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before deciding whether to re-arm. To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor (use TaskList to find its task ID if no longer in context)."
+  },
+  {
+    "name": "absent_dynamic",
+    "persistent": false,
+    "push": false,
+    "text": "# /loop tick — loop.md absent (dynamic pacing)\n\nloop.md is not currently present. Run the autonomous check using the loop instructions established earlier in this conversation.\n\nYou scheduled this tick via the ScheduleWakeup tool (not a recurring cron). To keep the loop alive — and to pick up loop.md if it is recreated — call ScheduleWakeup again at the end of this turn with `prompt` set to the literal sentinel `<<loop.md-dynamic>>` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.\n\nIf a Monitor is armed (check TaskList), keep `delaySeconds` at 1200–1800s — the Monitor is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before deciding whether to re-arm. To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor (use TaskList to find its task ID if no longer in context)."
+  },
+  {
+    "name": "auto_cron",
+    "persistent": false,
+    "push": true,
+    "text": "# Autonomous loop tick\n\nRun the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron will fire the next tick automatically — do not call ScheduleWakeup from this tick.\n\nUse PushNotification when the loop can't move further without the user, or when something landed that they'd want to act on now: newly blocked on a decision you won't make alone, third straight tick with nothing to do, you're ending the loop, or a major update arrived (CI went red, a review changes the plan). Progress you made yourself isn't a trigger — the transcript covers that. One ping per state, not per tick."
+  },
+  {
+    "name": "auto_dynamic",
+    "persistent": false,
+    "push": true,
+    "text": "# Autonomous loop tick (dynamic pacing)\n\nRun the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick.\n\nYou scheduled this tick via the ScheduleWakeup tool (not a recurring cron). To keep the loop alive, call ScheduleWakeup again at the end of this turn with `prompt` set to the literal sentinel `<<autonomous-loop-dynamic>>` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.\n\nIf a Monitor is armed (check TaskList), keep `delaySeconds` at 1200–1800s — the Monitor is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before deciding whether to re-arm. To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor (use TaskList to find its task ID if no longer in context).\n\nUse PushNotification when the loop can't move further without the user, or when something landed that they'd want to act on now: newly blocked on a decision you won't make alone, third straight tick with nothing to do, you're ending the loop, or a major update arrived (CI went red, a review changes the plan). Progress you made yourself isn't a trigger — the transcript covers that. One ping per state, not per tick."
+  },
+  {
+    "name": "file_cron",
+    "persistent": false,
+    "push": true,
+    "text": "# /loop tick — loop.md tasks\n\nWork the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron will fire the next tick automatically — do not call ScheduleWakeup from this tick.\n\nUse PushNotification when the loop can't move further without the user, or when something landed that they'd want to act on now: newly blocked on a decision you won't make alone, third straight tick with nothing to do, you're ending the loop, or a major update arrived (CI went red, a review changes the plan). Progress you made yourself isn't a trigger — the transcript covers that. One ping per state, not per tick."
+  },
+  {
+    "name": "file_dynamic",
+    "persistent": false,
+    "push": true,
+    "text": "# /loop tick — loop.md tasks (dynamic pacing)\n\nWork the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick.\n\nYou scheduled this tick via the ScheduleWakeup tool (not a recurring cron). To keep the loop alive, call ScheduleWakeup again at the end of this turn with `prompt` set to the literal sentinel `<<loop.md-dynamic>>` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.\n\nIf a Monitor is armed (check TaskList), keep `delaySeconds` at 1200–1800s — the Monitor is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before deciding whether to re-arm. To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor (use TaskList to find its task ID if no longer in context).\n\nUse PushNotification when the loop can't move further without the user, or when something landed that they'd want to act on now: newly blocked on a decision you won't make alone, third straight tick with nothing to do, you're ending the loop, or a major update arrived (CI went red, a review changes the plan). Progress you made yourself isn't a trigger — the transcript covers that. One ping per state, not per tick."
+  },
+  {
+    "name": "absent_dynamic",
+    "persistent": false,
+    "push": true,
+    "text": "# /loop tick — loop.md absent (dynamic pacing)\n\nloop.md is not currently present. Run the autonomous check using the loop instructions established earlier in this conversation.\n\nYou scheduled this tick via the ScheduleWakeup tool (not a recurring cron). To keep the loop alive — and to pick up loop.md if it is recreated — call ScheduleWakeup again at the end of this turn with `prompt` set to the literal sentinel `<<loop.md-dynamic>>` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.\n\nIf a Monitor is armed (check TaskList), keep `delaySeconds` at 1200–1800s — the Monitor is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before deciding whether to re-arm. To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor (use TaskList to find its task ID if no longer in context).\n\nUse PushNotification when the loop can't move further without the user, or when something landed that they'd want to act on now: newly blocked on a decision you won't make alone, third straight tick with nothing to do, you're ending the loop, or a major update arrived (CI went red, a review changes the plan). Progress you made yourself isn't a trigger — the transcript covers that. One ping per state, not per tick."
+  },
+  {
+    "name": "auto_cron",
+    "persistent": true,
+    "push": false,
+    "text": "# Autonomous loop tick\n\nRun the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron will fire the next tick automatically — do not call ScheduleWakeup from this tick."
+  },
+  {
+    "name": "auto_dynamic",
+    "persistent": true,
+    "push": false,
+    "text": "# Autonomous loop tick (dynamic pacing)\n\nRun the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick.\n\nYou scheduled this tick via the ScheduleWakeup tool (not a recurring cron). To keep the loop alive, call ScheduleWakeup again at the end of this turn with `prompt` set to the literal sentinel `<<autonomous-loop-dynamic>>` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.\n\nIf a Monitor is armed (check TaskList), keep `delaySeconds` at 1200–1800s — the Monitor is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before deciding whether to re-arm. To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor (use TaskList to find its task ID if no longer in context)."
+  },
+  {
+    "name": "file_cron",
+    "persistent": true,
+    "push": false,
+    "text": "# /loop tick — loop.md tasks\n\nWork the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron will fire the next tick automatically — do not call ScheduleWakeup from this tick."
+  },
+  {
+    "name": "file_dynamic",
+    "persistent": true,
+    "push": false,
+    "text": "# /loop tick — loop.md tasks (dynamic pacing)\n\nWork the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick.\n\nYou scheduled this tick via the ScheduleWakeup tool (not a recurring cron). To keep the loop alive, call ScheduleWakeup again at the end of this turn with `prompt` set to the literal sentinel `<<loop.md-dynamic>>` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.\n\nIf a Monitor is armed (check TaskList), keep `delaySeconds` at 1200–1800s — the Monitor is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before deciding whether to re-arm. To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor (use TaskList to find its task ID if no longer in context)."
+  },
+  {
+    "name": "absent_dynamic",
+    "persistent": true,
+    "push": false,
+    "text": "# /loop tick — loop.md absent (dynamic pacing)\n\nloop.md is not currently present. Run the autonomous check using the loop instructions established earlier in this conversation.\n\nYou scheduled this tick via the ScheduleWakeup tool (not a recurring cron). To keep the loop alive — and to pick up loop.md if it is recreated — call ScheduleWakeup again at the end of this turn with `prompt` set to the literal sentinel `<<loop.md-dynamic>>` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.\n\nIf a Monitor is armed (check TaskList), keep `delaySeconds` at 1200–1800s — the Monitor is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before deciding whether to re-arm. To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor (use TaskList to find its task ID if no longer in context)."
+  },
+  {
+    "name": "auto_cron",
+    "persistent": true,
+    "push": true,
+    "text": "# Autonomous loop tick\n\nRun the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron will fire the next tick automatically — do not call ScheduleWakeup from this tick.\n\nUse PushNotification when the loop can't move further without the user, or when something landed that they'd want to act on now: newly blocked on a decision you won't make alone, you're ending the loop, or a major update arrived (CI went red, a review changes the plan). Progress you made yourself isn't a trigger — the transcript covers that. One ping per state, not per tick."
+  },
+  {
+    "name": "auto_dynamic",
+    "persistent": true,
+    "push": true,
+    "text": "# Autonomous loop tick (dynamic pacing)\n\nRun the autonomous check using the loop instructions established earlier in this conversation. If you cannot find them, treat this as a no-op tick.\n\nYou scheduled this tick via the ScheduleWakeup tool (not a recurring cron). To keep the loop alive, call ScheduleWakeup again at the end of this turn with `prompt` set to the literal sentinel `<<autonomous-loop-dynamic>>` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.\n\nIf a Monitor is armed (check TaskList), keep `delaySeconds` at 1200–1800s — the Monitor is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before deciding whether to re-arm. To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor (use TaskList to find its task ID if no longer in context).\n\nUse PushNotification when the loop can't move further without the user, or when something landed that they'd want to act on now: newly blocked on a decision you won't make alone, you're ending the loop, or a major update arrived (CI went red, a review changes the plan). Progress you made yourself isn't a trigger — the transcript covers that. One ping per state, not per tick."
+  },
+  {
+    "name": "file_cron",
+    "persistent": true,
+    "push": true,
+    "text": "# /loop tick — loop.md tasks\n\nWork the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick. The recurring cron will fire the next tick automatically — do not call ScheduleWakeup from this tick.\n\nUse PushNotification when the loop can't move further without the user, or when something landed that they'd want to act on now: newly blocked on a decision you won't make alone, third straight tick with nothing to do, you're ending the loop, or a major update arrived (CI went red, a review changes the plan). Progress you made yourself isn't a trigger — the transcript covers that. One ping per state, not per tick."
+  },
+  {
+    "name": "file_dynamic",
+    "persistent": true,
+    "push": true,
+    "text": "# /loop tick — loop.md tasks (dynamic pacing)\n\nWork the tasks from the loop.md contents established earlier in this conversation. If you cannot find them, treat this as a no-op tick.\n\nYou scheduled this tick via the ScheduleWakeup tool (not a recurring cron). To keep the loop alive, call ScheduleWakeup again at the end of this turn with `prompt` set to the literal sentinel `<<loop.md-dynamic>>` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.\n\nIf a Monitor is armed (check TaskList), keep `delaySeconds` at 1200–1800s — the Monitor is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before deciding whether to re-arm. To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor (use TaskList to find its task ID if no longer in context).\n\nUse PushNotification when the loop can't move further without the user, or when something landed that they'd want to act on now: newly blocked on a decision you won't make alone, third straight tick with nothing to do, you're ending the loop, or a major update arrived (CI went red, a review changes the plan). Progress you made yourself isn't a trigger — the transcript covers that. One ping per state, not per tick."
+  },
+  {
+    "name": "absent_dynamic",
+    "persistent": true,
+    "push": true,
+    "text": "# /loop tick — loop.md absent (dynamic pacing)\n\nloop.md is not currently present. Run the autonomous check using the loop instructions established earlier in this conversation.\n\nYou scheduled this tick via the ScheduleWakeup tool (not a recurring cron). To keep the loop alive — and to pick up loop.md if it is recreated — call ScheduleWakeup again at the end of this turn with `prompt` set to the literal sentinel `<<loop.md-dynamic>>` and `noop` set to `true` if this tick changed nothing (or `false` if it did) — otherwise the loop ends after this tick.\n\nIf a Monitor is armed (check TaskList), keep `delaySeconds` at 1200–1800s — the Monitor is the wake signal and this is only the fallback heartbeat. If you were woken by a `<task-notification>`, handle the event before deciding whether to re-arm. To stop the loop, call ScheduleWakeup with `stop: true` and TaskStop the monitor (use TaskList to find its task ID if no longer in context).\n\nUse PushNotification when the loop can't move further without the user, or when something landed that they'd want to act on now: newly blocked on a decision you won't make alone, you're ending the loop, or a major update arrived (CI went red, a review changes the plan). Progress you made yourself isn't a trigger — the transcript covers that. One ping per state, not per tick."
+  }
+]

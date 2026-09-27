@@ -1,0 +1,6 @@
+{
+  "type": "typescript_lsp_mode_changed",
+  "requested": "auto",
+  "effective": "off",
+  "available": false
+}

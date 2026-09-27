@@ -1,0 +1,13 @@
+{
+  "type": "session_list",
+  "sessions": [
+    {
+      "uuid": "33333333-3333-4333-8333-333333333333",
+      "title": "Implement the parser",
+      "modified_rfc3339": "2026-06-02T12:00:00Z",
+      "message_count": 17,
+      "mode": "code",
+      "path": "/home/dev/.lingxi/sessions/33333333.jsonl"
+    }
+  ]
+}

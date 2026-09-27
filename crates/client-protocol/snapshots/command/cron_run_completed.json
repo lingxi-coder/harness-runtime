@@ -1,0 +1,7 @@
+{
+  "type": "cron_run_completed",
+  "run_id": "run-1",
+  "session_id": "session-1",
+  "summary": "Completed",
+  "error": null
+}

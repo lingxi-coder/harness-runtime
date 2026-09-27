@@ -1,0 +1,64 @@
+{
+  "_source": [
+    "claude-code/src/tools/MCPTool/MCPTool.ts",
+    "claude-code/src/tools/McpAuthTool/McpAuthTool.ts",
+    "claude-code/src/tools/ListMcpResourcesTool/ListMcpResourcesTool.ts",
+    "claude-code/src/tools/ReadMcpResourceTool/ReadMcpResourceTool.ts",
+    "claude-code/src/tools/LSPTool/LSPTool.ts",
+    "docs/superpowers/specs/2026-05-24-m4-tools-implementation-design.md §7 lines 685-700",
+    "lingxi-core/crates/mcp/src/client.rs:489 (McpClientError::Timeout Display)"
+  ],
+  "_note": "M4-07 surfaces the upstream MCP + LSP tool family. The LSPTool operation set is locked at all 9 M2-03 operations (goToDefinition/findReferences/hover/documentSymbol/workspaceSymbol/goToImplementation/prepareCallHierarchy/incomingCalls/outgoingCalls); the former 4-operation/5-deferred note was stale after the dispatcher and operation constants were completed. McpAuthTool reads from lingxi_mcp::McpRegistry rather than from settings.mcpServers.* because the M3-01 SettingsJson schema does not yet contain an mcpServers field. The MCP timeout error literal is the verbatim Display impl of McpClientError::Timeout (M2-02b lock). Tool registry names drop the `Tool` suffix per cross-review fix (commit 6607e0a).",
+
+  "tool_names": {
+    "mcp_tool": "MCP",
+    "mcp_auth_tool": "McpAuth",
+    "list_mcp_resources_tool": "ListMcpResourcesTool",
+    "read_mcp_resource_tool": "ReadMcpResourceTool",
+    "lsp_tool": "LSP"
+  },
+
+  "wire_identifiers": {
+    "mcp_full_name_prefix": "mcp__",
+    "mcp_full_name_separator": "__",
+    "mcp_timeout_display_template": "MCP server \"{server}\" tool \"{tool}\" timed out after {secs}s",
+    "mcp_timeout_concrete_example": "MCP server \"filesystem\" tool \"read\" timed out after 60s",
+    "lsp_position_error": "LSP position must be 1-based (line >= 1, character >= 1)",
+    "lsp_server_not_running_template": "LSP server '{name}' is not running",
+    "lsp_operations_locked": ["goToDefinition", "findReferences", "hover", "documentSymbol", "workspaceSymbol", "goToImplementation", "prepareCallHierarchy", "incomingCalls", "outgoingCalls"]
+  },
+
+  "telemetry_events": [
+    "tengu_tool_mcp_started",
+    "tengu_tool_mcp_completed",
+    "tengu_tool_mcp_failed",
+    "tengu_tool_mcp_auth_started",
+    "tengu_tool_mcp_auth_completed",
+    "tengu_tool_mcp_auth_failed",
+    "tengu_tool_list_mcp_resources_started",
+    "tengu_tool_list_mcp_resources_completed",
+    "tengu_tool_list_mcp_resources_failed",
+    "tengu_tool_read_mcp_resource_started",
+    "tengu_tool_read_mcp_resource_completed",
+    "tengu_tool_read_mcp_resource_failed",
+    "tengu_tool_lsp_started",
+    "tengu_tool_lsp_completed",
+    "tengu_tool_lsp_failed"
+  ],
+
+  "auth_kind_mapping": {
+    "stdio": "none",
+    "sse_with_oauth": "oauth",
+    "sse_with_headers_helper": "headers_helper",
+    "sse_with_static_headers_only": "static_headers",
+    "sse_bare": "none",
+    "http_with_oauth": "oauth",
+    "http_with_static_headers_only": "static_headers",
+    "http_bare": "none",
+    "websocket_with_headers": "static_headers",
+    "websocket_bare": "none",
+    "inProcess": "none",
+    "sseIde": "none",
+    "sdkControl": "none"
+  }
+}

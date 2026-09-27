@@ -1,0 +1,38 @@
+{
+  "type": "tool_use_result",
+  "id": "toolu_01",
+  "tool": "Read",
+  "result_json": "{\"content\":\"file body\"}",
+  "is_error": false,
+  "display": {
+    "headline": "Added 1 line",
+    "headline_kind": "added",
+    "headline_args": [
+      1
+    ],
+    "diff": {
+      "file_path": "/tmp/example.txt",
+      "language": "txt",
+      "gutter_width": 1,
+      "additions": 1,
+      "removals": 0,
+      "truncated_rows": 0,
+      "rows": [
+        {
+          "kind": "add",
+          "line_no": 1,
+          "hunk": 0,
+          "segments": [
+            {
+              "text": "file body",
+              "class": "plain",
+              "rgb": 12633550
+            }
+          ]
+        }
+      ]
+    },
+    "body": "file body",
+    "body_lines": 1
+  }
+}

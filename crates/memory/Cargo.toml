@@ -1,0 +1,40 @@
+[package]
+name = "memory"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+protocol = { path = "../protocol" }
+platform-api = { path = "../platform-api" }
+# Only for `jsonl::path::project_dir_name` — the SAME project-dir sanitizer the
+# session transcripts use, so a project's memories sit beside its sessions
+# instead of inventing a second naming scheme (MEM-2).
+session = { path = "../session" }
+branding.workspace = true
+sidequery = { path = "../sidequery" }
+secret = { path = "../secret" }
+telemetry = { path = "../telemetry" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+thiserror.workspace = true
+regex = "1"
+tracing.workspace = true
+tokio = { version = "1", features = ["sync", "time"] }
+walkdir = "2.5"
+glob = "0.3"
+
+[dev-dependencies]
+tempfile = "3.13"
+async-trait.workspace = true
+filetime = "0.2"
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+# session_memory tests construct a forked-extract fixture (ToolUseOptions + a
+# SideQueryResponse{cost::Usage}); the library itself gains no new deps.
+cost = { path = "../cost" }
+tool-api = { path = "../tool-api" }
+
+[lints]
+workspace = true

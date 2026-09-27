@@ -1,0 +1,54 @@
+{
+  "type": "app_event",
+  "event": {
+    "type": "managed_mcp_inventory_changed",
+    "servers": [
+      {
+        "serverName": "local_app_habits-1a2b",
+        "appId": "habits-1a2b",
+        "appName": "Habits",
+        "enabled": true,
+        "status": "enabled",
+        "settingsRevision": 6,
+        "enabledTools": [
+          "save_habit"
+        ],
+        "pinnedToCurrentConversation": true,
+        "buildId": "build-0001",
+        "catalogSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "toolSurfaceSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+        "toolCount": 2,
+        "authoringRevision": 3,
+        "publicationState": "published_unverified",
+        "mcpVerification": {
+          "status": "passed",
+          "summary": "MCP schema, binding and isolation checks passed."
+        },
+        "uiVerification": {
+          "status": "unavailable",
+          "summary": "UI verification runner is unavailable.",
+          "code": "verification_unavailable"
+        },
+        "widget": {
+          "resourceUri": "ui://local-app/habits-1a2b/8888888888888888888888888888888888888888888888888888888888888888/mcp-app.html",
+          "mimeType": "text/html;profile=mcp-app",
+          "resourceSha256": "8888888888888888888888888888888888888888888888888888888888888888"
+        },
+        "tools": [
+          {
+            "name": "save_habit",
+            "title": "Track habits",
+            "description": "Create or update one habit entry.",
+            "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"date\":{\"type\":\"string\"}},\"required\":[\"date\"]}",
+            "outputSchemaJson": "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"required\":[\"ok\"]}",
+            "annotationsJson": "{\"readOnlyHint\":false}",
+            "executionJson": "{\"taskSupport\":\"optional\"}",
+            "visibleMetaJson": "{\"anthropic/requiresUserInteraction\":true}",
+            "semanticFlowJson": "{\"flowId\":\"local-app-save\",\"source\":\"active\"}",
+            "permissionCeiling": "ask"
+          }
+        ]
+      }
+    ]
+  }
+}

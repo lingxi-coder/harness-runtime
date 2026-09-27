@@ -1,0 +1,4 @@
+interface:
+  display_name: "Phaser 2D Local App"
+  short_description: "Build Phaser-based local app scenes"
+  default_prompt: "Use $phaser-2d-local-app to implement this LingXi local app with the persisted Phaser 2D runtime profile, explicit scene lifecycle, and bridge-safe input rules."

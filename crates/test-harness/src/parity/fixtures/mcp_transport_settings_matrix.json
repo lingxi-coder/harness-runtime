@@ -1,0 +1,6 @@
+{
+  "_source": "claude-code/src/services/mcp/types.ts: McpServerConfigSchema (user-facing transport union)",
+  "_note": "claude-code exposes four user-facing transport types in settings JSON: stdio, sse, http, ws. InProcess and SdkControl are internal-only and never round-trip through user/project/managed settings. SseIde/WsIde (oracle sse-ide/ws-ide) are members of the PLUGIN mcpServers union and are managed by the local /ide controller. PosixMcpTransport::connect() claims Stdio/Sse/Http/SseIde/WsIde; generic WebSocket remains available through the dedicated connect_ws helper. The fixture documents the categorisation; the driver below builds each spec variant programmatically and asserts the production transport's response.",
+  "user_facing_kinds": ["Stdio", "Sse", "Http", "WebSocket"],
+  "internal_only_kinds": ["InProcess", "SdkControl"]
+}

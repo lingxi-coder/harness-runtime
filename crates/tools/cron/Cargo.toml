@@ -1,0 +1,38 @@
+[package]
+name = "tool-cron"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+branding.workspace = true
+tool-api = { path = "../../tool-api" }
+platform-api = { path = "../../platform-api" }
+protocol = { path = "../../protocol" }
+permission = { path = "../../permission" }
+telemetry = { path = "../../telemetry" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+# `[loop] keepalive …` human log lines (binary `C(...)` console output).
+tracing.workspace = true
+once_cell = "1"
+rand = "0.9"
+thiserror.workspace = true
+unicode-width = "=0.1.14"
+unicode-segmentation = "=1.12.0"
+# Reuse the live scheduler's local-timezone source for the `next_fire_unix_secs`
+# preview (keeps the preview consistent with where the `cron` scheduler actually
+# fires). Only `cron::schedule::local_offset_seconds` is used — no `unsafe` here.
+cron = { path = "../../cron" }
+
+[dev-dependencies]
+tool-api = { path = "../../tool-api", features = ["test-support"] }
+core = { path = "../../core" }
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

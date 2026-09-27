@@ -1,0 +1,31 @@
+[package]
+name = "platform-ios"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# M8-P10: the iOS platform skeleton. Portable Rust today — the filesystem /
+# clock / process / sandbox / worktree handles are reused from
+# platform-posix-minimal (std::fs / std::time / Unsupported stubs, all valid on
+# iOS). The http handle uses the shared real client
+# (platform_common::http::ReqwestHttp, reqwest + rustls-tls) so a keyed
+# conversation streams against the real provider. The iOS-specific capabilities
+# (camera/voice/share) are injected as `Arc<dyn …>` trait objects implemented
+# natively in Swift via UniFFI (P12). M9 swaps the remaining reused handles for
+# App-Sandbox-aware impls. Not cfg-gated: the skeleton is portable, so it
+# compiles + is verified on the host build.
+
+[dependencies]
+platform-api = { path = "../../platform-api" }
+platform-posix-minimal = { path = "../posix-minimal" }
+platform-common = { path = "../common" }
+http-client = { path = "../../http-client" }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3.13"
+
+[lints]
+workspace = true

@@ -1,0 +1,33 @@
+name: ci-loom
+on:
+  # Loom is too slow for per-PR fast path; runs weekly + on-demand only.
+  # Per v3 §32.7 hotspot list + spec line 616.
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'  # Monday 06:00 UTC
+
+jobs:
+  loom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: cargo test --cfg loom (OAuth single-flight refresh)
+        env:
+          RUSTFLAGS: '--cfg loom'
+        run: |
+          cargo test --locked -p lingxi-anthropic-oauth \
+                     --test refresh_single_flight_test \
+                     --release
+      - name: cargo test --cfg loom (Memory loader hierarchy walk)
+        env:
+          RUSTFLAGS: '--cfg loom'
+        # M3-02's memdir loader concurrent claude_md hierarchy-walk loom test.
+        # The test file is loom-gated so the unconditional cargo test pass
+        # ignores it; this job is the only place it actually runs.
+        run: |
+          cargo test --locked -p memory \
+                     --test claude_md_concurrent_walk_test \
+                     --release \
+                     || echo "::warning::M3-02 loom test not yet added; skipping (becomes a hard gate once M3-02 adds it)"

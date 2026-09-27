@@ -1,0 +1,206 @@
+{
+  "phase": "4",
+  "tasks": [
+    {
+      "id": "P4.0",
+      "title": "Unified build workflow launch-context enricher",
+      "gate": "§7.1 / §8.3 / §11.1: namespaced local-app-build accepts only operation/app_id/spec/revision_prompt/quality_level and Host injects authoritative app, scaffold, profile, template, dependency, collections, and catalog context",
+      "owns": [
+        "crates/plugins/lingxi-local-app/workflows/local-app-build.js",
+        "crates/harness-runtime/src/mobile/workflow_support.rs",
+        "crates/harness-runtime/src/mobile/local_app_plugin_binding.rs",
+        "crates/harness-runtime/src/mobile/local_app_template_catalog.rs",
+        "crates/harness-runtime/src/mobile/host.rs"
+      ],
+      "crates": [
+        "harness-runtime",
+        "workflow"
+      ],
+      "testPackages": [
+        "harness-runtime",
+        "workflow"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "allow caller renderer, template_id, runtime_profile, workspace_path, or host_context to override Host launch context",
+        "mustNameInOutput": [
+          "host_context",
+          "operation"
+        ]
+      },
+      "addedTests": [
+        "build_workflow_rejects_authority_override_args",
+        "create_launch_context_contains_catalog_without_persisted_profile",
+        "update_verify_launch_context_reads_persisted_profile",
+        "workflow_identity_is_lingxi_local_app_namespaced"
+      ],
+      "deps": [
+        "P3.3"
+      ],
+      "notes": "Host context is an enricher of the existing workflow runner; no new direct Host-call primitive is introduced."
+    },
+    {
+      "id": "P4.1",
+      "title": "Real unified create/update/verify agent orchestration",
+      "gate": "§10 / §11 / §18 Phase 4: local-app-build invokes selector→designer→builder→operator/tester/verifier with same-plugin namespaced identity; create uses the opaque handle and update/verify use persisted Profile",
+      "owns": [
+        "crates/plugins/lingxi-local-app/workflows/local-app-build.js",
+        "crates/plugins/lingxi-local-app/workflows/local-app-use-test.js",
+        "crates/plugins/lingxi-local-app/skills/create-local-app/SKILL.md",
+        "crates/plugins/lingxi-local-app/skills/local-app-test/SKILL.md",
+        "crates/harness-runtime/src/mobile/workflow_support.rs",
+        "crates/harness-runtime/src/mobile/host.rs"
+      ],
+      "crates": [
+        "harness-runtime",
+        "workflow"
+      ],
+      "testPackages": [
+        "harness-runtime",
+        "workflow"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "replace a required namespaced agent() call with a fabricated success object or route create by caller renderer",
+        "mustNameInOutput": [
+          "agent",
+          "lingxi-local-app"
+        ]
+      },
+      "addedTests": [
+        "create_orchestration_calls_selector_before_designer",
+        "create_downstream_agents_resolve_handle_through_host",
+        "update_verify_skip_selector_and_route_from_persisted_profile",
+        "agent_identity_chain_is_namespaced_and_ordered"
+      ],
+      "deps": [
+        "P4.0"
+      ],
+      "notes": "The workflow remains staging/evidence-only until later receipt/publish phases. The independent Agent tool remains absent on mobile; workflow agent() is the only orchestration channel."
+    },
+    {
+      "id": "P4.2",
+      "title": "Profile-specific verification policies and structured reports",
+      "gate": "§11.2-§11.3 / §18 Phase 4: DOM, Canvas2D, Three, Phaser, and Babylon policy gates are Host-derived and structured UseTestReport/findings reject malformed or insufficient evidence",
+      "owns": [
+        "crates/plugins/lingxi-local-app/workflows/local-app-use-test.js",
+        "crates/plugins/lingxi-local-app/schemas/use-test-report.schema.json",
+        "crates/plugins/lingxi-local-app/schemas/qa-report.schema.json",
+        "crates/harness-runtime/src/mobile/workflow_support.rs",
+        "crates/harness-runtime/src/mobile/host.rs"
+      ],
+      "crates": [
+        "harness-runtime",
+        "workflow"
+      ],
+      "testPackages": [
+        "harness-runtime",
+        "workflow"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "treat zero canvas surfaces, zero frames, missing motion evidence, or malformed findings as a passing report",
+        "mustNameInOutput": [
+          "render",
+          "motion",
+          "finding"
+        ]
+      },
+      "addedTests": [
+        "dom_render_not_applicable_is_valid",
+        "canvas_zero_surfaces_and_zero_frames_block",
+        "canvas_motion_requires_two_frames",
+        "three_phaser_babylon_inherit_canvas_gates",
+        "malformed_finding_is_a_synthetic_blocker",
+        "babylon_policy_is_hermetic_but_catalog_unavailable"
+      ],
+      "deps": [
+        "P4.1"
+      ],
+      "notes": "Babylon's report policy is tested hermetically, while the real-device Babylon availability gate remains false. Render/motion/data/webview are ordinary blocking findings, not pre-finding terminal errors."
+    },
+    {
+      "id": "P4.3",
+      "title": "Operator/tester/verifier repair loop and quality budgets",
+      "gate": "§11.3-§11.4: operator and tester evidence flow to verifier findings; blocking findings consume one round per repair agent call, with fast=1, balanced=1, thorough=2 and Canvas rejecting fast",
+      "owns": [
+        "crates/plugins/lingxi-local-app/workflows/local-app-build.js",
+        "crates/plugins/lingxi-local-app/workflows/local-app-use-test.js",
+        "crates/plugins/lingxi-local-app/agents/operator.md",
+        "crates/plugins/lingxi-local-app/agents/tester.md",
+        "crates/plugins/lingxi-local-app/agents/verifier.md",
+        "crates/harness-runtime/src/mobile/workflow_support.rs"
+      ],
+      "crates": [
+        "harness-runtime",
+        "workflow"
+      ],
+      "testPackages": [
+        "harness-runtime",
+        "workflow"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "grant a third repair round or let Canvas use quality_level=fast",
+        "mustNameInOutput": [
+          "repair_budget_exhausted",
+          "quality_level"
+        ]
+      },
+      "addedTests": [
+        "repair_budget_fast_is_one",
+        "repair_budget_balanced_is_one",
+        "repair_budget_thorough_is_two",
+        "canvas_fast_is_rejected",
+        "all_blocking_findings_share_one_repair_round",
+        "budget_exhaustion_names_remaining_finding_ids"
+      ],
+      "deps": [
+        "P4.2"
+      ],
+      "notes": "The repair prompt carries design, profile, evidence, and prior changes. Tester/verifier cannot write source or build; only the Builder repair leg may do so."
+    },
+    {
+      "id": "P4.4",
+      "title": "Specialist routing matrix across five runtime profiles",
+      "gate": "§9.3 / §11.1 / §18 Phase 4: Host-derived profile family routes to the correct specialist for all five profiles and never makes Babylon available without the catalog gate",
+      "owns": [
+        "crates/harness-runtime/src/mobile/local_app_plugin_binding.rs",
+        "crates/harness-runtime/src/mobile/host.rs",
+        "crates/plugins/lingxi-local-app/agents",
+        "crates/plugins/lingxi-local-app/skills"
+      ],
+      "crates": [
+        "harness-runtime",
+        "workflow"
+      ],
+      "testPackages": [
+        "harness-runtime",
+        "workflow"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "derive specialist from selector text or route unavailable babylon_3d to a successful verifier",
+        "mustNameInOutput": [
+          "Babylon",
+          "unavailable"
+        ]
+      },
+      "addedTests": [
+        "profile_family_routes_to_expected_specialist",
+        "specialist_routing_never_reads_caller_renderer",
+        "unavailable_babylon_fails_closed",
+        "operator_tester_verifier_identity_chain_is_proven"
+      ],
+      "deps": [
+        "P4.3"
+      ],
+      "notes": "The runtime profile is Host authority. No Phase 5 MCP receipt/catalog/permissions or native UI work is included."
+    }
+  ]
+}

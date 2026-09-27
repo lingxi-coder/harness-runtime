@@ -1,0 +1,52 @@
+[package]
+name = "tool-web"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+branding.workspace = true
+tool-api = { path = "../../tool-api" }
+platform-api = { path = "../../platform-api" }
+protocol = { path = "../../protocol" }
+permission = { path = "../../permission" }
+telemetry = { path = "../../telemetry" }
+# Side-query seam for the WebFetch "apply" step (process fetched markdown with
+# a small-fast model). The concrete client is injected at the desktop root.
+sidequery = { path = "../../sidequery" }
+# HTML→markdown for the WebFetch apply step (the Rust analogue of claude-code's
+# `turndown`). Optional + gated behind `web-markdown` so engine-mobile/minimal
+# never resolves it.
+htmd = { version = "=0.1.6", optional = true }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+# Drives the SSE event stream from `HttpTransport::stream_sse` to completion
+# (`StreamExt::next`) in the WebSearch streaming path. Same workspace pin used
+# by `platform-common`'s `LlmTransportBridge` SSE consumer.
+futures-util = { workspace = true }
+once_cell = "1"
+url = "2"
+thiserror.workspace = true
+# Current month/year for the WebSearch description's runtime date slot
+# (claude-code computes it at render time; format "<Month> <Year>").
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[features]
+# Enables HTML→markdown conversion + the small-fast apply step. OFF by default
+# so the mobile/minimal builds (which never enable it) don't pull `htmd`.
+web-markdown = ["dep:htmd"]
+
+[dev-dependencies]
+tool-api = { path = "../../tool-api", features = ["test-support"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+# web tool tests use MockHttpTransport/ScriptedResponse fixtures (dev-cycle to
+# test-harness is allowed by cargo since it's dev-only).
+test-harness = { path = "../../test-harness" }
+# Temp dirs for the binary-persist (`persist.rs`) unit tests.
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -1,0 +1,30 @@
+[package]
+name = "migrations"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# SubscriptionType for the subscriber-gated migrations' fail-closed context.
+llm-runtime = { path = "../llm-runtime" }
+protocol = { path = "../protocol" }
+telemetry = { path = "../telemetry" }
+branding.workspace = true
+serde_json.workspace = true
+# `get_or_create_user_id` device-id generation (randomBytes(32).toString('hex')).
+uuid = { version = "1.10", features = ["v4"] }
+# Used by every migration (warn-and-continue branches).
+tracing.workspace = true
+# tokio fs in the changelog migration (wx-create write).
+tokio = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "3"
+# Capturing AnalyticsSink impl in test_support (emission-contract tests).
+async-trait.workspace = true
+# async #[tokio::test] runtimes across the crate.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

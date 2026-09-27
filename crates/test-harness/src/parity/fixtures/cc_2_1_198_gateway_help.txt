@@ -1,0 +1,7 @@
+Usage: claude gateway [options]
+
+Run the enterprise auth/telemetry gateway
+
+Options:
+  --config <path>  Path to gateway YAML config
+  -h, --help       Display help for command

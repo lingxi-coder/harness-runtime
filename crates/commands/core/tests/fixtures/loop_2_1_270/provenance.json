@@ -1,0 +1,33 @@
+{
+  "version": "2.1.270",
+  "binarySha256": "a506b6d970a4cf44f6abdb53a81ddcd5d3b0ce042a95c502fe9d1f946bdb8807",
+  "chunks": [
+    {
+      "name": "src_192949468.js",
+      "sha256": "8d85e6c776e792462d2645387323fb45efc508070fe9ffbb8121ca37ca4845fb"
+    },
+    {
+      "name": "src_186131770.js",
+      "sha256": "76d796406e2e9124ed51549eaf863d4c8a9f8f33c6c596c4ef315dbb0e1a0a98"
+    }
+  ],
+  "preambles": [
+    {
+      "bytes": 4972,
+      "sha256": "8baa2e53d41f65f6b776661c36a888c26a42ac475d7fb0e14d105eb6e27580f7"
+    },
+    {
+      "bytes": 5380,
+      "sha256": "3b682315b0a4a9f8c56dba9b3ff7e53d85cdb622d058c6166c469d1828318439"
+    }
+  ],
+  "normalizations": [],
+  "commandVariants": 60,
+  "tickVariants": 20,
+  "cloudOffer": "disabled (CLAUDE_CODE_REMOTE=true)",
+  "monitorTimeouts": [
+    0,
+    600000,
+    1800000
+  ]
+}

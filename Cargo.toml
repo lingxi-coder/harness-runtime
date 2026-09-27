@@ -1,0 +1,374 @@
+[workspace]
+exclude = ["third_party/git2-rs/git2", "third_party/git2-rs/libgit2-sys", "third_party/libssh2-sys", "third_party/mbedtls-sys"]
+resolver = "2"
+members = [
+    "crates/harness-runtime",
+    "crates/branding",
+    "crates/protocol",
+    "crates/client-protocol",
+    "crates/client-adapter",
+    "crates/client-presentation",
+    "crates/configuration-admin",
+    "crates/tool-api",
+    "crates/tools/file",
+    "crates/tools/shell",
+    "crates/tools/shell-mobile",
+    "crates/tools/git-mobile",
+    "crates/tools/task",
+    "crates/tools/web",
+    "crates/tools/plan",
+    "crates/tools/meta",
+    "crates/tools/cron",
+    "crates/tools/ui",
+    "crates/tools/skill",
+    "crates/tools/worktree",
+    "crates/tools/lsp",
+    "crates/tools/mcp",
+    "crates/tools/agent",
+    "crates/tools/workflow",
+    "crates/tools/mobile",
+    "crates/tools/computer-use",
+    "crates/tools/android-use",
+    "crates/core",
+    "crates/platform-api",
+    "crates/test-harness",
+    "crates/secret",
+    "crates/cost",
+    "crates/permission",
+    "crates/hooks",
+    "crates/memory",
+    "crates/migrations",
+    "crates/jsonrpc",
+    "crates/mcp",
+    "crates/llm-runtime",
+    "crates/http-client",
+    "crates/provider-config",
+    "crates/orchestrator",
+    "crates/compaction",
+    "crates/agent",
+    "crates/tasks",
+    "crates/task-store",
+    "crates/workflow",
+    "crates/coordinator",
+    "crates/sidequery",
+    "crates/fusion",
+    "crates/skill-api",
+    "crates/command-api",
+    "crates/commands/core",
+    "crates/outputstyles",
+    "crates/msgqueue",
+    "crates/session",
+    "crates/cron",
+    "crates/local-apps",
+    "crates/sandbox",
+    "crates/sandbox-runtime",
+    "crates/sandbox-runtime-runner",
+    "crates/apply-seccomp",
+    "crates/lsp",
+    "crates/telemetry",
+    "crates/telemetry-macros",
+    "crates/bridge",
+    "crates/plugin",
+    "crates/platforms/common",
+    "crates/platforms/posix-minimal",
+    "crates/platforms/posix",
+    "crates/platforms/pty",
+    "crates/platforms/windows",
+    "crates/platforms/ios",
+    "crates/platforms/android",
+    "crates/platforms/android-libcap",
+    "crates/platforms/android-minijail",
+    "crates/platforms/macos-computer-control",
+    "crates/platforms/posix/tests/fixtures/mock_stdio_mcp",
+
+]
+
+# Fixtures are workspace members so they share lockfile + target/ dir, but
+# they MUST NOT be part of the default build set — CI release jobs should
+# build only the real crates, not the integration-test fixtures.
+default-members = [
+    "crates/harness-runtime",
+    "crates/branding",
+    "crates/protocol",
+    "crates/client-protocol",
+    "crates/client-adapter",
+    "crates/client-presentation",
+    "crates/tool-api",
+    "crates/tools/file",
+    "crates/tools/shell",
+    "crates/tools/shell-mobile",
+    "crates/tools/git-mobile",
+    "crates/tools/task",
+    "crates/tools/web",
+    "crates/tools/plan",
+    "crates/tools/meta",
+    "crates/tools/cron",
+    "crates/tools/ui",
+    "crates/tools/skill",
+    "crates/tools/worktree",
+    "crates/tools/lsp",
+    "crates/tools/mcp",
+    "crates/tools/agent",
+    "crates/tools/workflow",
+    "crates/tools/mobile",
+    "crates/tools/computer-use",
+    "crates/tools/android-use",
+    "crates/core",
+    "crates/platform-api",
+    "crates/secret",
+    "crates/cost",
+    "crates/permission",
+    "crates/hooks",
+    "crates/memory",
+    "crates/migrations",
+    "crates/jsonrpc",
+    "crates/mcp",
+    "crates/llm-runtime",
+    "crates/provider-config",
+    "crates/orchestrator",
+    "crates/compaction",
+    "crates/agent",
+    "crates/tasks",
+    "crates/task-store",
+    "crates/workflow",
+    "crates/coordinator",
+    "crates/sidequery",
+    "crates/fusion",
+    "crates/skill-api",
+    "crates/command-api",
+    "crates/commands/core",
+    "crates/outputstyles",
+    "crates/msgqueue",
+    "crates/session",
+    "crates/cron",
+    "crates/local-apps",
+    "crates/sandbox",
+    "crates/sandbox-runtime",
+    "crates/sandbox-runtime-runner",
+    "crates/lsp",
+    "crates/telemetry",
+    "crates/telemetry-macros",
+    "crates/bridge",
+    "crates/plugin",
+    "crates/platforms/common",
+    "crates/platforms/posix-minimal",
+    "crates/platforms/posix",
+    "crates/platforms/pty",
+    "crates/platforms/windows",
+
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+authors = ["LingXi Code Contributors"]
+repository = "https://github.com/lingxi-coder/harness-runtime"
+
+[workspace.dependencies]
+# Single source of truth for the product namespace (paths, filenames, env
+# prefix, brand name). Path is workspace-root-relative so every member uses
+# `branding.workspace = true` regardless of its own depth.
+branding = { path = "crates/branding" }
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` keeps `serde_json::Map` keys in insertion order across
+# Value round-trips. Required for claude-code wire-byte fidelity: outbound
+# MCP/LSP requests serialize through the JSON-RPC router's
+# `serde_json::to_value(params)` pass and the resulting bytes must keep
+# the order claude-code emits (e.g. `capabilities` declared as
+# `{"roots":{},"elicitation":{}}`, not the alphabetized
+# `{"elicitation":{},"roots":{}}`).
+serde_json = { version = "1", features = ["preserve_order"] }
+# `indexmap` gives an insertion-order-preserving map. Used for MCP transport
+# `headers` so the `getServerKey` config hash byte-matches claude-code, whose
+# `JSON.stringify({type,url,headers})` serializes header keys in the config's
+# insertion order (not sorted). See `platform_api::McpHeaders` / `oauth::server_key`.
+# Capped below 2.8: newer indexmap releases require the `edition2024` Cargo
+# feature, which the workspace's pinned toolchain (rust-toolchain.toml,
+# 1.82.0) cannot parse.
+indexmap = { version = ">=2, <2.8", features = ["serde"] }
+thiserror = "2"
+tracing = "0.1"
+async-trait = "0.1"
+# UniFFI (mobile in-process transport). Pinned to 0.28.3 — the version whose
+# dependency tree is vendored in the local registry cache, so
+# `cargo build --offline --features uniffi` resolves without network (M10 F3-00
+# GATE-ZERO). With `default-features = false` the resolved set is
+# uniffi/uniffi_core/uniffi_macros/uniffi_meta/uniffi_checksum_derive +
+# async-compat (the `tokio` feature) — `uniffi_build`/`uniffi_udl`/`cargo_metadata`
+# are NOT pulled (those only matter with the `bindgen`/`cargo-metadata` default
+# feature). MSRV: 0.28.x declares no explicit `rust-version` and compiles under
+# the workspace toolchain `rust-version = "1.94"` (no bump required — verified by
+# a clean offline build). `tokio` enables the async foreign-executor scaffolding
+# needed by F3-07. `client-protocol` adds this as an OPTIONAL dep gated behind
+# its `uniffi` feature, so the default (bridge-server) build never pulls it.
+uniffi = { version = "0.28.3", default-features = false, features = ["tokio"] }
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+
+# dev-only
+proptest = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio-util = { version = "0.7", features = ["codec", "io", "rt"] }
+bytes = "1"
+dashmap = "6"
+futures = "0.3"
+crossterm = "0.28"
+tokio-stream = "0.1"
+
+[workspace.lints.rust]
+# Workspace-wide default: `deny` (not `forbid`) so the one module in
+# `platform-posix` that needs `libc::setsid()` via `pre_exec`
+# can opt into `#![allow(unsafe_code)]`. Every other crate in the
+# workspace adds a crate-level `#![forbid(unsafe_code)]` in its
+# `lib.rs`, which preserves the original hard constraint.
+unsafe_code = "deny"
+missing_docs = "warn"
+# `cfg(loom)` is a custom cfg name set via `RUSTFLAGS="--cfg loom"` for the
+# loom model-checker tests (e.g. `llm-runtime/tests/refresh_single_flight_test.rs`).
+# Declare it so rustc's `unexpected_cfgs` lint doesn't fire under `-D warnings`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[workspace.lints.clippy]
+# `pedantic` was switched on aspirationally and never honoured. Measured
+# 2026-09-16 with `--workspace --all-targets --all-features`: 9,846 distinct
+# warnings, of which the great majority are pedantic-group. CI declares
+# `clippy --workspace --all-targets -- -D warnings`, so the gate has been
+# unpassable since the day the group was enabled — and this repository has no
+# remote, so nothing ever ran it to say so.
+#
+# Enumerating forty `allow` lines would have been a roundabout way of writing
+# one, so the group is off and the lints worth keeping are named individually
+# below. Turning it back on is a deliberate project, not a flag flip. The
+# largest categories are doc_markdown (1,584 — comments here cite oracle
+# symbols bare and minified, `zb()`, `KWr()`, `@228931361`), large_futures
+# (703 — the fix is `Box::pin`, a runtime change), too_many_lines (545 — the
+# composition roots wire the runtime in one reviewable place by design),
+# default_trait_access (498), redundant_closure_for_method_calls (483) and
+# match_same_arms (350 — arms are kept apart on purpose so each mirrors and
+# comments the matching upstream `switch` branch).
+pedantic = { level = "allow", priority = -1 }
+
+# Kept ON out of the pedantic group: each of these has a bug behind it rather
+# than a style preference, and each is at or near zero today (measured
+# 2026-09-16: inefficient_to_string 9, no_effect_underscore_binding 4, the
+# other six 0). That is what makes keeping them enforceable rather than
+# aspirational — the distinction the group above failed.
+manual_assert = "warn"
+inefficient_to_string = "warn"
+inconsistent_struct_constructor = "warn"
+iter_without_into_iter = "warn"
+mut_mut = "warn"
+no_effect_underscore_binding = "warn"
+same_functions_in_if_condition = "warn"
+# suspicious_operation_groupings: turned back OFF on measurement. It fired 5
+# times on 2026-09-16 and every one was a false positive — it reads a pair like
+# `edge.from_revision == binding.revision` as a mis-paired field access, when
+# the two names are deliberately different fields on different types
+# (`from_revision` on a migration edge vs `revision` on a binding), and likewise
+# `content.len() != digest.len() || content.as_slice() != digest.as_bytes()`.
+# Zero true positives, five sites it would make worse to "fix".
+suspicious_operation_groupings = "allow"
+
+# --- outside pedantic, allowed on measured evidence ------------------------
+# `await_holding_lock` fires 295 times and every one is a TEST serialization
+# lock — `tests_env_lock()`, `test_telemetry_capture_lock()`,
+# `MANAGED_ENV_LOCK`, `agent_view_env_lock()`. Those guards are held across
+# `.await` because that is their entire purpose: serialising tests that touch
+# process globals.
+# ⚠️ The day a real `std::sync::Mutex` IS held across an await in shipping
+# code, this allow hides it. Use `tokio::sync::Mutex` in async production paths.
+await_holding_lock = "allow"
+
+# --- shape lints this codebase answers to differently, measured 2026-09-16 ---
+# Each count below is distinct findings from
+# `clippy --workspace --all-targets --all-features`. These are not style
+# preferences the tree happens to violate; each names a shape the architecture
+# chose on purpose, so the lint would be asking for a different design rather
+# than a fix.
+#
+# too_many_arguments (80): the composition roots in `apps/*` wire the runtime
+#   in one reviewable place by design (see ARCHITECTURE.md — library crates
+#   make no shipping choices, so the assembly is wide by construction).
+# type_complexity (52): the engine seams carry composed generic types
+#   (`Option<Arc<dyn Trait>>`, boxed futures) because `platform_api` is trait
+#   objects all the way down.
+# large_enum_variant (24) / result_large_err (4): the wire and event enums
+#   mirror `client-protocol` DTOs one-for-one; boxing a variant to satisfy the
+#   lint would change the shape the version guard pins.
+# result_unit_err (14) / double_must_use (8): API-shape opinions, no bug behind
+#   either.
+# doc_lazy_continuation (71): doc-comment indentation only; it renders the same.
+too_many_arguments = "allow"
+type_complexity = "allow"
+large_enum_variant = "allow"
+result_large_err = "allow"
+result_unit_err = "allow"
+double_must_use = "allow"
+doc_lazy_continuation = "allow"
+
+# --- style/complexity tail, measured 2026-09-16 -----------------------------
+# What is left after the pedantic decision above and two full `--fix` passes:
+# 170 findings, none with a bug behind it, spread thin (37 is the largest
+# cluster, 33 of the lints fire five times or fewer). They are mechanical
+# rewrites — a `Default` struct literal instead of field-by-field assignment,
+# `?` instead of an explicit `is_none` guard, a `write!` loop instead of
+# `map(format!).collect()`.
+#
+# They are OFF rather than fixed for one reason: `clippy --fix` cannot do them
+# (only 20 of the 224 carried a machine-applicable suggestion), and it broke
+# the build five times when it tried — every time by deleting an import that
+# only a `cfg(test)` module reached through `use super::*`. Hand-rewriting 170
+# sites across 40 crates to satisfy a style lint is a worse trade than saying
+# so here, and CI needs `-D warnings` to mean something today.
+#
+# Turning one back on is a normal afternoon: delete its line, run the lint,
+# fix what it names. The counts are what it cost on 2026-09-16.
+field_reassign_with_default = "allow"   # 37
+format_collect = "allow"                # 13
+question_mark = "allow"                 # 11
+nonminimal_bool = "allow"               # 10
+if_same_then_else = "allow"             #  6
+needless_range_loop = "allow"           #  6
+unnecessary_get_then_check = "allow"    #  6
+ptr_arg = "allow"                       #  6
+const_is_empty = "allow"                #  5
+manual_clamp = "allow"                  #  5
+redundant_guards = "allow"              #  4
+assertions_on_constants = "allow"       #  4
+redundant_closure = "allow"             #  4
+needless_borrow = "allow"               #  4
+comparison_chain = "allow"              #  3
+format_in_format_args = "allow"         #  3
+suspicious_open_options = "allow"       #  2
+useless_conversion = "allow"            #  2
+while_let_loop = "allow"                #  2
+collapsible_match = "allow"             #  2
+filter_map_bool_then = "allow"          #  2
+unwrap_or_default = "allow"             #  2
+trim_split_whitespace = "allow"         #  2
+match_single_binding = "allow"          #  2
+items_after_test_module = "allow"       #  1
+manual_strip = "allow"                  #  1
+should_implement_trait = "allow"        #  1
+unnecessary_mut_passed = "allow"        #  1
+same_item_push = "allow"                #  1
+needless_update = "allow"               #  1
+wildcard_in_or_patterns = "allow"       #  1
+iter_cloned_collect = "allow"           #  1
+chars_next_cmp = "allow"                #  1
+manual_pattern_char_comparison = "allow"#  1
+unnecessary_unwrap = "allow"            #  1
+op_ref = "allow"                        #  1
+search_is_some = "allow"                #  1
+missing_const_for_thread_local = "allow"#  1
+len_zero = "allow"                      #  1
+match_like_matches_macro = "allow"      #  1
+unnecessary_filter_map = "allow"        #  1
+
+[profile.dev]
+debug = 1
+split-debuginfo = "unpacked"
+
+[profile.release]
+lto = "thin"

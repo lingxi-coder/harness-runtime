@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "node_executable": "/usr/bin/node",
+  "vite_executable": "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules/vite/bin/vite.js",
+  "dependency_snapshot": {
+    "source": "embedded:runtime-profiles/react-dom/r4/pnpm-lock.yaml",
+    "materialize_into": "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules",
+    "guest_mount": "forbidden",
+    "selection_policy": "exact_lock_only",
+    "install_command": "pnpm install --frozen-lockfile --ignore-scripts --no-runtime --prefer-offline"
+  },
+  "build_mount": {
+    "kind": "LocalAppBuild",
+    "count": 1,
+    "host_path_policy": "workspace_or_staging_or_store_root",
+    "guest_path": "/var/lingxi/local-app-build/{app_id}/{channel}/project",
+    "writable": true
+  },
+  "commands": {
+    "vite_static_build": {
+      "argv": [
+        "/usr/bin/node",
+        "--max-old-space-size={build_node_old_space_size_mib}",
+        "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules/vite/bin/vite.js",
+        "build",
+        "--outDir",
+        "dist",
+        "--emptyOutDir"
+      ],
+      "cwd": "/var/lingxi/local-app-build/{app_id}/{channel}/project",
+      "output_dir": "dist",
+      "environment": {
+        "NODE_ENV": "production",
+        "HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/home",
+        "TMPDIR": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/tmp",
+        "TMP": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/tmp",
+        "TEMP": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/tmp",
+        "XDG_CACHE_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-cache",
+        "XDG_CONFIG_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-config",
+        "XDG_DATA_HOME": "/var/lingxi/local-app-build/{app_id}/{channel}/project/.lingxi-build-state/xdg-data"
+      },
+      "network_policy": "disabled",
+      "memory_limit_policy": "physical_memory_tier",
+      "timeout_ms": 1800000
+    }
+  },
+  "limits": {
+    "build_concurrency": 1,
+    "build_node_old_space_percent": 75,
+    "build_memory_tiers": [
+      {
+        "physical_memory_max_exclusive_bytes": 6442450944,
+        "process_tree_memory_bytes": 2147483648,
+        "node_max_old_space_size_mib": 1536
+      },
+      {
+        "physical_memory_max_exclusive_bytes": 8589934592,
+        "process_tree_memory_bytes": 3221225472,
+        "node_max_old_space_size_mib": 2304
+      },
+      {
+        "physical_memory_max_exclusive_bytes": null,
+        "process_tree_memory_bytes": 4294967296,
+        "node_max_old_space_size_mib": 3072
+      }
+    ],
+    "runtime_process_tree_memory_bytes": 838860800,
+    "max_page_size": 100,
+    "max_batch_mutations": 50
+  }
+}

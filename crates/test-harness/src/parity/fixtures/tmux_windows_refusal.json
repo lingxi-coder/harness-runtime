@@ -1,0 +1,7 @@
+{
+  "_source": "claude-code spec §6.5: tmux is not supported on Windows. WindowsSwarmBackend mirrors claude-code's refusal — see platforms/windows/src/swarm.rs (M2-01 wire-fidelity note).",
+  "_note": "claude-code refuses `--tmux` on Windows with a literal error string '--tmux is not supported on Windows'. The Rust port encodes the refusal via SwarmError::Unsupported (the error type itself has no string payload; the human-readable message is the variant's Display impl 'swarm not supported on this platform' — see crates/platform-api/src/swarm.rs). The intent matches: Windows callers get a hard refusal at the trait boundary.",
+  "expected_is_available": false,
+  "expected_variant": "Unsupported",
+  "expected_display_message": "swarm not supported on this platform"
+}

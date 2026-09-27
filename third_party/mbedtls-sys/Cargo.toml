@@ -1,0 +1,23 @@
+[package]
+name = "mbedtls-sys"
+version = "3.6.2"
+edition = "2021"
+build = "build.rs"
+links = "mbedtls"
+license = "Apache-2.0 OR GPL-2.0-or-later"
+description = "LingXi-local cc-built seam for the vendored mbedTLS C (TLS + crypto for libgit2/libssh2)"
+publish = false
+
+[lib]
+name = "mbedtls_sys"
+path = "lib.rs"
+
+[build-dependencies.cc]
+version = "1.0.25"
+
+# NOTE: `[lints] workspace = true` is intentionally omitted. This crate lives
+# under `third_party/` (outside the `lingxi-code/` workspace dir), exactly like
+# the sibling vendored `libgit2-sys` / `libssh2-sys` seams, so cargo's
+# workspace-root discovery for lints inheritance does not reach the root
+# manifest. The crate is a pure cc build seam (one doc-commented empty lib.rs),
+# so the workspace lint set (deny unsafe_code / warn missing_docs) is moot.

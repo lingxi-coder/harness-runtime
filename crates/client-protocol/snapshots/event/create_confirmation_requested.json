@@ -1,0 +1,66 @@
+{
+  "type": "app_event",
+  "event": {
+    "type": "create_confirmation_requested",
+    "request": {
+      "requestId": "create-0001",
+      "appId": "habits-1a2b",
+      "name": "Habits",
+      "brief": "Track streaks and notes",
+      "selectedTemplate": {
+        "templateId": "react-dom-r1",
+        "surface": "dom",
+        "summary": "Best for forms and lists"
+      },
+      "runtimeProfile": {
+        "family": "react_dom",
+        "revision": 1,
+        "contractSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+        "surface": "dom",
+        "corePackages": [
+          {
+            "name": "react",
+            "version": "19.0.0"
+          },
+          {
+            "name": "@ionic/react",
+            "version": "9.0.0"
+          }
+        ],
+        "cacheStatus": "bundled",
+        "downloadStatus": "bundled",
+        "available": true
+      },
+      "reason": "The user asked for a compact habit list.",
+      "rejected": [
+        {
+          "templateId": "three-3d-r1",
+          "reason": "3D is unnecessary for this brief."
+        }
+      ],
+      "initialTools": [
+        {
+          "name": "save_habit",
+          "title": "Track habits",
+          "description": "Create or update one habit entry.",
+          "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"date\":{\"type\":\"string\"}},\"required\":[\"date\"]}",
+          "outputSchemaJson": "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"required\":[\"ok\"]}",
+          "annotationsJson": "{\"readOnlyHint\":false}",
+          "executionJson": "{\"taskSupport\":\"optional\"}",
+          "visibleMetaJson": "{\"anthropic/requiresUserInteraction\":true}",
+          "semanticFlowJson": "{\"flowId\":\"local-app-save\",\"source\":\"active\"}",
+          "permissionCeiling": "ask"
+        }
+      ],
+      "requiredGates": [
+        {
+          "gateId": "ui_runner",
+          "label": "UI runner available",
+          "status": "pending",
+          "available": true,
+          "detail": "Will run after approval."
+        }
+      ]
+    }
+  }
+}

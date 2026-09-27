@@ -1,0 +1,57 @@
+[package]
+name = "permission"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+branding = { path = "../branding" }
+protocol = { path = "../protocol" }
+telemetry = { path = "../telemetry" }
+platform-api = { path = "../platform-api" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "io-std", "fs"] }
+tracing.workspace = true
+regex = "1"
+# WHATWG URL parser — the Rust analogue of the JS `new URL(...)` claude-code
+# uses to key `WebFetch(domain:${new URL(n).hostname})` rules (`_qa`,
+# offset ~201711761). `host_str()` reproduces `.hostname`: it Punycode/IDNA-
+# encodes IDN hosts and percent-decodes the host. Already in Cargo.lock (2.5.8,
+# pulled in by `tools/web`).
+url = "2"
+# Faithful gitignore-glob matcher for file-path permission rules (3a) — the
+# Rust analogue of claude-code's `ignore` npm lib; already in Cargo.lock.
+ignore = "0.4"
+# WIZARD-06 `/auto-mode-setup --apply-file`: sha256 of the proposal file's exact
+# bytes (`--expect-sha256` hash gate) + the secure `O_NOFOLLOW`/`nlink==1` read.
+sha2 = "0.10"
+libc = "0.2"
+# tree-sitter bash AST (claude-code's `treeSitterAnalysis`). Optional + gated
+# behind `bash-ast` so the default/minimal build never compiles the grammar.
+tree-sitter = { version = "=0.25.10", optional = true }
+tree-sitter-bash = { version = "=0.25.1", optional = true }
+
+[features]
+# AST-precision layer over bash safety (claude-code's tree-sitter path). OFF by
+# default; enabled by engine-desktop. Feature off => byte-identical legacy path.
+bash-ast = ["dep:tree-sitter", "dep:tree-sitter-bash"]
+
+[dev-dependencies]
+# M8-P7-final: the tool_name_parity_test reads TOOL_NAME constants directly from
+# the per-category tool crates (the `tools` monolith is dissolved). dev-dep
+# cycles (these crates dep `permission`) are allowed by cargo.
+tool-file = { path = "../tools/file" }
+tool-shell = { path = "../tools/shell" }
+tool-web = { path = "../tools/web" }
+tool-agent = { path = "../tools/agent" }
+tool-mcp = { path = "../tools/mcp" }
+tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "macros"] }
+# WIZARD-06 apply-file secure-read integration tests (symlink / nlink / cap).
+tempfile = "3"
+
+[lints]
+workspace = true

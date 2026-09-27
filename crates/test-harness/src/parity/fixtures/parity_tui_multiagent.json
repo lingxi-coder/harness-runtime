@@ -1,0 +1,34 @@
+{
+  "scenarios": [
+    {
+      "name": "task_footer",
+      "tasks": [{"task_type": "local_bash", "status": "running", "description": "cargo build"}],
+      "expected_contains": ["1 shell"]
+    },
+    {
+      "name": "task_rows",
+      "rows": [
+        {"task_type": "local_bash", "status": "completed", "description": "ls", "expected": "ls (done)"},
+        {"task_type": "remote_agent", "status": "running", "description": "deploy", "expected": "deploy"},
+        {"task_type": "in_process_teammate", "status": "running", "description": "alice", "expected": "@alice"}
+      ]
+    },
+    {
+      "name": "coordinator_chrome",
+      "team_footer_expected": "teammate",
+      "teammate_header_expected": "Viewing @alice",
+      "agent_progress_expected": ["Done", "tool"]
+    },
+    {
+      "name": "worker_permission",
+      "badge_expected": "@worker",
+      "pending_expected": ["Waiting for team lead approval", "Tool:", "Action:"]
+    },
+    {
+      "name": "agents_screen",
+      "agents": [{"name": "explorer", "description": "find things"}],
+      "list_expected": ["Agents", "explorer"],
+      "detail_expected": ["Description", "Tools:"]
+    }
+  ]
+}

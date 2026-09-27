@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lingxi.local/local-app/qa-report.schema.json",
+  "title": "Local App immutable QA result",
+  "description": "Exact durable QaResult DTO. Compact operator/tester/verifier role output is defined separately in workflow-agent-results.schema.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "status": { "const": "candidate" },
+    "identity": { "$ref": "#/$defs/identity" },
+    "scenario_judgements": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "$ref": "#/$defs/judgement" } },
+    "findings": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/finding" } },
+    "evidence": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/evidence" } },
+    "verification_scope": { "$ref": "#/$defs/verification_scope" },
+    "previous_result_id": { "anyOf": [{ "$ref": "#/$defs/token" }, { "type": "null" }] },
+    "finalized_at_ms": { "$ref": "#/$defs/positive_integer" },
+    "result_sha256": { "$ref": "#/$defs/digest" }
+  },
+  "required": ["schema_version", "status", "identity", "scenario_judgements", "findings", "evidence", "verification_scope", "previous_result_id", "finalized_at_ms", "result_sha256"],
+  "$defs": {
+    "token": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9_.:-]+$" },
+    "qa_handle": { "type": "string", "pattern": "^qa_[A-Za-z0-9]{32}$" },
+    "app_id": { "type": "string", "minLength": 1, "maxLength": 54, "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "positive_integer": { "type": "integer", "minimum": 1 },
+    "runtime_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "family": { "enum": ["react_dom", "canvas_2d", "three_3d", "phaser_2d", "babylon_3d"] },
+        "revision": { "$ref": "#/$defs/positive_integer" },
+        "contractSha256": { "$ref": "#/$defs/digest" }
+      },
+      "required": ["family", "revision", "contractSha256"]
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "app_id": { "$ref": "#/$defs/app_id" },
+        "workflow_run_id": { "$ref": "#/$defs/token" },
+        "qa_handle": { "$ref": "#/$defs/qa_handle" },
+        "build_id": { "$ref": "#/$defs/token" },
+        "runtime_profile": { "$ref": "#/$defs/runtime_profile" },
+        "verification_strategy": { "enum": ["fast", "balanced", "thorough"] },
+        "dependency_snapshot_sha256": { "$ref": "#/$defs/digest" },
+        "authoring_contract_sha256": { "$ref": "#/$defs/digest" },
+        "manifest_revision": { "$ref": "#/$defs/positive_integer" },
+        "runtime_generation": { "$ref": "#/$defs/positive_integer" }
+      },
+      "required": ["app_id", "workflow_run_id", "qa_handle", "build_id", "runtime_profile", "verification_strategy", "dependency_snapshot_sha256", "authoring_contract_sha256", "manifest_revision", "runtime_generation"]
+    },
+    "verification_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "declared_target_ids": { "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } },
+        "in_scope_target_ids": { "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } },
+        "unverified_target_ids": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } },
+        "unverified_scenario_ids": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } }
+      },
+      "required": ["declared_target_ids", "in_scope_target_ids", "unverified_target_ids", "unverified_scenario_ids"]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/token" },
+        "format": { "enum": ["json", "txt", "png", "jpg", "webp"] },
+        "byte_len": { "type": "integer", "minimum": 1, "maximum": 8388608 },
+        "sha256": { "$ref": "#/$defs/digest" },
+        "created_at_ms": { "$ref": "#/$defs/positive_integer" }
+      },
+      "required": ["artifact_id", "format", "byte_len", "sha256", "created_at_ms"]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "evidence_id": { "$ref": "#/$defs/token" },
+        "scenario_id": { "$ref": "#/$defs/token" },
+        "target_id": { "$ref": "#/$defs/token" },
+        "kind": { "enum": ["inspect", "ui_action", "bridge_write", "query", "capture", "native_target_provenance", "console", "runtime_error"] },
+        "source": { "const": "host" },
+        "recorded_at_ms": { "$ref": "#/$defs/positive_integer" },
+        "event_id": { "$ref": "#/$defs/token" },
+        "caused_by": { "anyOf": [{ "$ref": "#/$defs/token" }, { "type": "null" }] },
+        "artifact": { "$ref": "#/$defs/artifact" }
+      },
+      "required": ["evidence_id", "scenario_id", "target_id", "kind", "source", "recorded_at_ms", "event_id", "caused_by", "artifact"]
+    },
+    "judgement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scenario_id": { "$ref": "#/$defs/token" },
+        "status": { "enum": ["passed", "failed"] },
+        "evidence_ids": { "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 16384 }
+      },
+      "required": ["scenario_id", "status", "evidence_ids", "summary"]
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/token" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 16384 },
+        "blocking": { "type": "boolean" },
+        "resolved_by_evidence_ids": { "type": "array", "maxItems": 4096, "uniqueItems": true, "items": { "$ref": "#/$defs/token" } }
+      },
+      "required": ["id", "message", "blocking", "resolved_by_evidence_ids"]
+    }
+  }
+}

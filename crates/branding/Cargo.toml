@@ -1,0 +1,11 @@
+[package]
+name = "branding"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+# The crate the brand gate is built on had no `[lints]` at all, so it never
+# inherited `unsafe_code = "deny"` from the workspace.
+[lints]
+workspace = true

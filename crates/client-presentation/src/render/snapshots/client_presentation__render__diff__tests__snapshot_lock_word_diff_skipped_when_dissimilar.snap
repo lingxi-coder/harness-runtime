@@ -1,0 +1,6 @@
+---
+source: client-presentation/src/render/diff.rs
+expression: "fingerprint(&render(\"aaaaaaaa\\n\", \"zzzzzzzz\\n\", Some(\"x.txt\"),\nThemeName::Dark,))"
+---
+  0 | "1 - "[fg=Rgb(220, 90, 90) bg=Rgb(61, 20, 27)] "aaaaaaaa"[fg=Rgb(248, 248, 242) bg=Rgb(61, 20, 27)]
+  1 | "1 + "[fg=Rgb(80, 200, 80) bg=Rgb(17, 46, 21)] "zzzzzzzz"[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)]

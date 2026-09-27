@@ -1,0 +1,5 @@
+{
+  "type": "update_settings",
+  "destination": "user",
+  "patch_json": "{\"outputStyle\":\"terse\"}"
+}

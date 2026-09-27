@@ -1,0 +1,4 @@
+interface:
+  display_name: "Accessibility"
+  short_description: "Enforce local app a11y across DOM and canvas"
+  default_prompt: "Use $accessibility to define or audit the accessibility contract for this LingXi local app across iOS, Android, and desktop targets."

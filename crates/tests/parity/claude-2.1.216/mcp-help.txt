@@ -1,0 +1,27 @@
+Usage: claude mcp serve [options]
+
+Start the Claude Code MCP server
+
+Options:
+  -d, --debug  Enable debug mode
+  -h, --help   Display help for command
+  --verbose    Override verbose mode setting from config
+
+Usage: claude mcp login [options] <name>
+
+Authenticate with an MCP server (HTTP, SSE, or claude.ai connector)
+
+Options:
+  -h, --help    Display help for command
+  --no-browser  Print the authorization URL instead of opening a browser (for SSH/headless sessions — paste the redirect URL back when prompted)
+
+Usage: claude mcp logout [options] <name>
+
+Clear stored OAuth credentials for an MCP server
+
+Usage: claude mcp add-from-claude-desktop [options]
+
+Import MCP servers from Claude Desktop (Mac and WSL only)
+
+Options:
+  -s, --scope <scope>  Configuration scope (local, user, or project) (default: "local")

@@ -1,0 +1,9 @@
+{
+  "type": "execute_app_bridge_request",
+  "request": {
+    "request_id": "bridge-00000001",
+    "app_id": "habits-1a2b",
+    "operation": "query_data",
+    "payload_json": "{\"collection\":\"items\"}"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "type": "skills",
+  "skills": [
+    {
+      "name": "greet",
+      "source_dir": "/home/user/.lingxi/skills/greet"
+    },
+    {
+      "name": "pr-review",
+      "source_dir": "/repo/.lingxi/skills/pr-review"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+# Build/runtime outputs only. package-lock.json is intentionally NOT ignored:
+# committing it after the first stage run pins the whole npm dependency tree.
+node_modules/
+.next/
+out/
+npm-debug.log*

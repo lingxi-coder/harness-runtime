@@ -1,0 +1,7 @@
+{
+  "type": "loop_wakeup",
+  "message": "Claude resuming /loop wakeup (Sep 7 3:04pm) · 3 no-op ticks since Sep 7 2:14pm",
+  "companion": "[3 prior /loop wakeups found nothing actionable; loop is healthy.]",
+  "streak": 3,
+  "since_ms": 1788790449000
+}

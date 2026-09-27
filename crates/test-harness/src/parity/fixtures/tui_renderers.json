@@ -1,0 +1,44 @@
+{
+  "_meta": {
+    "plan": "M6-09",
+    "spec_section": "§5.3 parity_tui_renderers.json",
+    "_lingxi_version": "0.7.0",
+    "_claude_code_version": "2026-05-28-snapshot",
+    "description": "Snapshot-style validation of the TUI's stable visual surfaces. Compares the pure-string renderers (format_status_line / format_spinner_line / render_entry_to_string) to golden expected text captured from claude-code's TSX renderers with the same input. The pure-string renderers are the same functions the iocraft components delegate to, so this locks the rendered text without driving an offscreen terminal. Color/style assertions are covered separately by the per-component unit tests; this fixture locks the text layer (markers, prefixes, separators, JSON preview spacing, truncation suffix)."
+  },
+  "status_line": {
+    "fixed_state": {
+      "model": "claude-opus-4-5-20250929",
+      "cwd": "/Users/user/projects/lingxi",
+      "cost": "$0.1234",
+      "context_pct": 0.42,
+      "mode": "default"
+    },
+    "expected_rendered_text": "claude-opus-4-5-20250929 /Users/user/projects/lingxi $0.1234 42% default"
+  },
+  "spinner_frames": [
+    { "tick": 0, "rotation": 0, "expected_frame": "·", "expected_verb": "Crunching", "expected_line": "· Crunching…" },
+    { "tick": 5, "rotation": 0, "expected_frame": "✽", "expected_verb": "Crunching", "expected_line": "✽ Crunching…" },
+    { "tick": 9, "rotation": 0, "expected_frame": "✳", "expected_verb": "Crunching", "expected_line": "✳ Crunching…" }
+  ],
+  "message_renderers": {
+    "user_text": {
+      "body": "what is the weather like in tokyo?",
+      "expected_rendered_text": "> what is the weather like in tokyo?"
+    },
+    "assistant_text": {
+      "body": "It is sunny in Tokyo with a high of 24°C.",
+      "expected_rendered_text": "● It is sunny in Tokyo with a high of 24°C."
+    },
+    "assistant_tool_use_collapsed": {
+      "tool": "Read",
+      "input": { "file_path": "/etc/hosts" },
+      "expected_rendered_text": "● Read(/etc/hosts)"
+    },
+    "user_tool_result_collapsed": {
+      "tool": "Read",
+      "result": { "content": "127.0.0.1 localhost\n::1 localhost" },
+      "expected_rendered_text": "  ⎿  127.0.0.1 localhost (+1 lines)"
+    }
+  }
+}

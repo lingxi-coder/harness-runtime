@@ -1,0 +1,29 @@
+{
+  "_source": "claude-code/src/utils/worktree.ts (branch prefix + path layout + slug validation)",
+  "_note": "Branch prefix is the literal 'worktree-' (NOT 'lingxi/', NOT 'claude/'). Worktrees live at <repo_root>/.lingxi/worktrees/<flatten_slug(slug)> with '/' flattened to '+'. Slug validation: each '/'-separated segment matches [a-zA-Z0-9._-]+, total length 1..=64. See platforms/posix/src/worktree.rs::validate_worktree_slug and ::flatten_slug.",
+  "cases": [
+    {
+      "slug": "feature-x",
+      "expected_branch": "worktree-feature-x",
+      "expected_path_suffix": ".lingxi/worktrees/feature-x"
+    },
+    {
+      "slug": "user/feature",
+      "expected_branch": "worktree-user+feature",
+      "expected_path_suffix": ".lingxi/worktrees/user+feature"
+    },
+    {
+      "slug": "team/area/widget",
+      "expected_branch": "worktree-team+area+widget",
+      "expected_path_suffix": ".lingxi/worktrees/team+area+widget"
+    }
+  ],
+  "invalid_slugs": [
+    "bad slug",
+    "with$dollar",
+    "",
+    "leading/",
+    "/leading",
+    "trailing+sign"
+  ]
+}

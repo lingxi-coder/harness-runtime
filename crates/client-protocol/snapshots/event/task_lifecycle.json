@@ -1,0 +1,4 @@
+{
+  "type": "task_lifecycle",
+  "event_json": "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"b12345678\",\"description\":\"background job\",\"task_type\":\"local_bash\"}"
+}

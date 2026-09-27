@@ -1,0 +1,40 @@
+[package]
+name = "compaction"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# SC-06: the product noun in the unknown-model auto-compact notice
+# (`branding::PRODUCT_NAME`).
+branding.workspace = true
+protocol = { path = "../protocol" }
+platform-api = { path = "../platform-api" }
+core = { path = "../core" }
+llm-runtime = { path = "../llm-runtime" }
+cost = { path = "../cost" }
+hooks = { path = "../hooks" }
+sidequery = { path = "../sidequery" }
+# PARITY: binary `Zne` post-compact cleanup resets the autonomous-loop
+# first-delivery state on a main-thread compact (resetAutonomousLoopDelivered).
+tool-cron = { path = "../tools/cron" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+regex = "1"
+# P2-12: the process-global invoked-skill registry (`Pt.invokedSkills` mirror).
+once_cell = "1"
+
+[dev-dependencies]
+# Only used by the autocompact unit test to construct a `CacheSafeParams`
+# (which carries a `tool_api::ToolUseOptions`).
+tool-api = { path = "../tool-api" }
+# Post-compact reset test flips the loop-prompt flag via the test-only override.
+telemetry = { path = "../telemetry" }
+
+[lints]
+workspace = true

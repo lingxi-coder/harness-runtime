@@ -1,0 +1,2 @@
+{"candidates":[{"content":{"role":"model","parts":[{"text":"On it."}]}}]}
+{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"Bash","args":{"command":"ls"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2}}

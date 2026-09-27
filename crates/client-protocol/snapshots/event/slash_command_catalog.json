@@ -1,0 +1,15 @@
+{
+  "type": "slash_command_catalog",
+  "commands": [
+    {
+      "name": "model",
+      "description": "Switch the active model",
+      "source": "builtin",
+      "aliases": [
+        "m"
+      ],
+      "argument_hint": "[model]",
+      "menu_description": "Switch model"
+    }
+  ]
+}

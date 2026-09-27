@@ -1,0 +1,442 @@
+{
+  "phase": "1",
+  "tasks": [
+    {
+      "id": "P1.0",
+      "title": "Checked-in performance baselines file with non-zero hard limits",
+      "gate": "§19.0 missing field, zero value, or non-numeric placeholder fails validation outright",
+      "owns": [
+        "docs/local-apps/performance-baselines/local-app-plugin-v1.json"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "set builtin_archive_max_bytes to 0",
+        "mustNameInOutput": [
+          "builtin_archive_max_bytes"
+        ]
+      },
+      "addedTests": [
+        "a_zero_threshold_is_rejected",
+        "a_missing_field_is_rejected",
+        "a_non_numeric_placeholder_is_rejected"
+      ],
+      "deps": [],
+      "notes": "WAVE 0 — authored before anything is measured. Writing thresholds after measuring is precisely the retroactive gate §19.0 forbids. The ten values are fixed by §19.0; the 124 tracked runtime-profile source files total 387,943 bytes, so 4 MiB / 12 MiB are not a rubber stamp on the status quo."
+    },
+    {
+      "id": "P1.1",
+      "title": "Prune node_modules/dist/.vite/.lingxi-build-state before the packer's directory walk",
+      "gate": "§19.2 the archive digest on a checkout that has run pnpm install equals the digest on a clean checkout",
+      "owns": [
+        "crates/plugin/src/mcpb.rs",
+        "crates/local-apps/src/packer.rs"
+      ],
+      "crates": [
+        "plugin",
+        "local-apps"
+      ],
+      "testPackages": [
+        "plugin",
+        "local-apps"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "remove the prune list so the walk descends into node_modules",
+        "mustNameInOutput": [
+          "MAX_FILES"
+        ]
+      },
+      "addedTests": [
+        "digest_is_identical_on_a_dirty_and_a_clean_checkout",
+        "a_file_outside_the_inventory_in_a_non_prune_dir_fails_the_build"
+      ],
+      "deps": [
+        "P1.0"
+      ],
+      "notes": "NOT optional hardening. plugin/src/mcpb.rs:16 sets MAX_FILES = 10_000; measured on disk at lap/baseline, babylon-3d holds 20,093 files and phaser-2d 13,014 after pnpm install, and the whole templates tree is 524 MiB against a 4 MiB gate — 131x. Without pruning the packer rejects two of the five families outright. §19.2's 'dirty checkout' reverse case is simply the current state of the tree: the four ignored dirs are already materialized."
+    },
+    {
+      "id": "P1.2",
+      "title": "Deterministic builtin archive and inventory, built from a SYNTHETIC fixture plugin root",
+      "gate": "§19.2 deterministic archive/inventory golden",
+      "owns": [
+        "crates/local-apps/src/packer.rs",
+        "crates/local-apps/tests/fixtures/synthetic-plugin"
+      ],
+      "crates": [
+        "local-apps"
+      ],
+      "testPackages": [
+        "local-apps"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "introduce a timestamp into the archive so two builds differ",
+        "mustNameInOutput": [
+          "digest"
+        ]
+      },
+      "addedTests": [
+        "two_builds_of_the_same_root_produce_the_same_digest"
+      ],
+      "deps": [
+        "P1.1"
+      ],
+      "notes": "The packer MUST pack a synthetic fixture root, not the real package. Otherwise §19.2's packer gates and Phase 2's completion condition reference each other: the packer cannot be tested until 27 skills / 7 agents / 112 assets exist, and none of those can be validated until the packer exists. §18 gestures at this ('parallel tracks do not constitute a cycle') without ever naming the fixture that makes it true. Packing the REAL package is a separate, late task."
+    },
+    {
+      "id": "P1.3",
+      "title": "Packer rejects path traversal, duplicate paths and symlink escape",
+      "gate": "§19.2 path traversal, duplicate path, symlink escape rejection",
+      "owns": [
+        "crates/local-apps/src/packer.rs"
+      ],
+      "crates": [
+        "local-apps"
+      ],
+      "testPackages": [
+        "local-apps"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "allow a ../ component through the path check",
+        "mustNameInOutput": [
+          "traversal"
+        ]
+      },
+      "addedTests": [
+        "path_traversal_is_rejected",
+        "duplicate_path_is_rejected",
+        "symlink_escape_is_rejected"
+      ],
+      "deps": [
+        "P1.2"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P1.4",
+      "title": "Mobile atomic materialization with digest verification",
+      "gate": "§19.2 a single-byte tamper fails the digest; an interrupted materialization does not replace a previous verified root",
+      "owns": [
+        "crates/harness-runtime/src/mobile/builtin_bundle.rs"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "accept an archive whose digest does not match the inventory",
+        "mustNameInOutput": [
+          "digest"
+        ]
+      },
+      "addedTests": [
+        "single_byte_tamper_fails_digest",
+        "interrupted_materialization_keeps_the_previous_verified_root",
+        "no_previous_root_and_failed_materialization_returns_builtin_bundle_unavailable"
+      ],
+      "deps": [
+        "P1.3"
+      ],
+      "notes": "The original 'interrupted materialization does not replace previous verified root' is VACUOUSLY TRUE in the first-install case, so it must be split into with-previous-root and without-previous-root. Without a previous root the contract is: return builtin_bundle_unavailable — do not panic, do not half-register."
+    },
+    {
+      "id": "P1.5",
+      "title": "Idempotent short-circuit: an unchanged digest does not unpack or re-verify file by file",
+      "gate": "§19.2 marker field, missing manifest/inventory/component entry, and symlink root each have a reverse case",
+      "owns": [
+        "crates/harness-runtime/src/mobile/builtin_bundle.rs"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "short-circuit on the marker alone without checking the digest",
+        "mustNameInOutput": [
+          "marker"
+        ]
+      },
+      "addedTests": [
+        "unchanged_digest_skips_unpack",
+        "a_missing_manifest_defeats_the_short_circuit",
+        "a_missing_inventory_defeats_the_short_circuit",
+        "a_missing_component_entry_defeats_the_short_circuit",
+        "a_symlink_root_defeats_the_short_circuit"
+      ],
+      "deps": [
+        "P1.4"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P1.6",
+      "title": "engine-mobile takes a dependency on the plugin crate and composes PluginManager",
+      "gate": "§19.2 mobile discovers exactly one plugin, name=lingxi-local-app, source=BuiltIn",
+      "owns": [
+        "crates/apps/engine-mobile/Cargo.toml",
+        "crates/harness-runtime/src/mobile/mod.rs",
+        "crates/harness-runtime/src/mobile/local_app_plugin_binding.rs"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "let a second plugin source reach the mobile registry",
+        "mustNameInOutput": [
+          "lingxi-local-app"
+        ]
+      },
+      "addedTests": [
+        "mobile_discovers_exactly_one_plugin",
+        "mobile_loads_only_the_builtin_source"
+      ],
+      "deps": [
+        "P1.5",
+        "P0a.9"
+      ],
+      "notes": "NEW CRATE EDGE. plugin/ is not a dependency of engine-mobile at lap/baseline: engine-mobile's Cargo.toml has no plugin edge and its src/ has zero PluginManager/PluginSource hits, while engine-desktop/Cargo.toml:64 and apps/cli/Cargo.toml:97 do. scripts/check_deps.py classifies plugin/ as `engine` and apps/* as `app`, and FORBIDDEN has no `app` key, so the edge is legal and no gate change is needed — but §19.0's binary-size and startup budgets now bind. Budget for the argument even though the dependency checker will not raise it."
+    },
+    {
+      "id": "P1.7",
+      "title": "register_verified_builtin is called exactly once, from the composition module",
+      "gate": "§19.3 planting a second call site must go red and print file:line",
+      "owns": [
+        "crates/harness-runtime/src/mobile/mod.rs",
+        "scripts/check_component_literals.py"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "add a second register_verified_builtin call site in a non-composition module",
+        "mustNameInOutput": [
+          "register_verified_builtin"
+        ]
+      },
+      "addedTests": [
+        "register_verified_builtin_has_exactly_one_call_site"
+      ],
+      "deps": [
+        "P1.6"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P1.8",
+      "title": "Wire the command/skill/agent/workflow registries to the live plugin inventory",
+      "gate": "§19.2 one live registry drives both listing and invocation",
+      "owns": [
+        "crates/harness-runtime/src/mobile/mod.rs",
+        "crates/harness-runtime/src/mobile/local_apps_host.rs"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "let listing read the inventory while invocation reads a separate copy",
+        "mustNameInOutput": [
+          "registry"
+        ]
+      },
+      "addedTests": [
+        "listing_and_invocation_share_one_registry"
+      ],
+      "deps": [
+        "P1.7"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P1.9",
+      "title": "Single-plugin enable/disable/status protocol, including the bare enabledPlugins key",
+      "gate": "§19.2 three-way behaviour of a bare enabledPlugins[\"lingxi-local-app\"]: explicit true + default false => Loaded; explicit false => PluginState::Disabled and PRESENT in the registry; key missing => manifest default",
+      "owns": [
+        "crates/harness-runtime/src/mobile/mod.rs",
+        "crates/client-protocol/src/commands.rs"
+      ],
+      "crates": [
+        "harness-runtime",
+        "client-protocol"
+      ],
+      "testPackages": [
+        "harness-runtime",
+        "client-protocol"
+      ],
+      "exclusive": true,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "make explicit-false drop the plugin from the registry instead of marking it Disabled",
+        "mustNameInOutput": [
+          "Disabled"
+        ]
+      },
+      "addedTests": [
+        "explicit_true_with_default_false_loads",
+        "explicit_false_is_disabled_not_absent",
+        "missing_key_uses_the_manifest_default",
+        "native_toggle_writes_back_the_same_bare_key",
+        "state_survives_restart",
+        "a_changed_plugin_id_after_restart_does_not_break_provenance"
+      ],
+      "deps": [
+        "P1.8"
+      ],
+      "notes": "Touches client-protocol, which is exclusive. BEFORE adding any ClientCommand variant, read the UniFFI metadata budget note in the harness README: the enum's metadata buffer is 14,137 of 16,384 bytes at lap/baseline (86.3% consumed, 2,247 free), doc comments are copied verbatim into it, and overflow is an error[E0080] at const-eval that breaks BOTH mobile builds while cargo build --workspace and the whole test suite stay green."
+    },
+    {
+      "id": "P1.10",
+      "title": "Wire the bundle chain: packer -> materializer -> PluginManager",
+      "gate": "clean-sweep review finding, severity high",
+      "owns": [
+        "crates/harness-runtime/src/mobile/host.rs",
+        "crates/harness-runtime/src/mobile/builtin_bundle.rs",
+        "crates/local-apps/src/packer.rs"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "break the production call from host boot into materialization and show a test naming it goes red",
+        "mustNameInOutput": [
+          "builtin_bundle",
+          "materializ"
+        ]
+      },
+      "addedTests": [
+        "mobile_boot_materializes_the_builtin_bundle",
+        "the_packer_output_is_what_the_materializer_consumes"
+      ],
+      "deps": [],
+      "notes": "🚨 CONFIRMED BY THE CLEAN-SWEEP REVIEW AND BY DIRECT GREP. `builtin_bundle::` has ZERO callers outside its own file. P1.1-P1.5 built the packer, the deterministic archive, the rejection rules, atomic materialization and the idempotent short-circuit — and nothing in production invokes any of it. P1.6/P1.8 wired PluginManager, but the chain that produces and installs the bundle it manages is not connected at either end.\n\nThis is the same 'implemented but not wired' class this branch kept finding in EXISTING code — confirm_runtime_profile, the threshold validator, plugin workflows — and has now reproduced in its own work. Every one of those tasks is individually green and collectively inert.\n\n⚠️ The gate must be a PRODUCTION path assertion, not another unit test. The existing tests all pass today with zero production callers, which is exactly the proof that they cannot detect this."
+    },
+    {
+      "id": "P1.11",
+      "title": "Route ClientCommand::PluginCommand and emit PluginStatusChanged",
+      "gate": "clean-sweep review finding, severity high",
+      "owns": [
+        "crates/harness-runtime/src/mobile/host.rs",
+        "crates/harness-runtime/src/mobile/mod.rs"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "remove the PluginCommand match arm and show a test naming the unrouted command goes red",
+        "mustNameInOutput": [
+          "PluginCommand",
+          "plugin_status_changed"
+        ]
+      },
+      "addedTests": [
+        "a_plugin_command_reaches_the_manager",
+        "toggling_enabled_emits_plugin_status_changed"
+      ],
+      "deps": [],
+      "notes": "🚨 CONFIRMED BY GREP. `ClientCommand::PluginCommand` has ZERO match arms outside client-protocol, and `PluginStatusChanged` has ZERO emitters. P1.9 landed the wire contract, hand-written goldens on both sides, and the TypeScript mirror — and no engine handles the command or produces the event.\n\nSo the three-way enabledPlugins behaviour §19.2 specifies is pinned by DTO round-trip tests and reachable by nobody. A client can send the command and will be answered by nothing."
+    },
+    {
+      "id": "P1.12",
+      "title": "Give the four script gates an execution trigger",
+      "gate": "clean-sweep review finding, severity high",
+      "owns": [
+        "scripts/",
+        "..github/workflows/ci.yml"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "introduce a known leak and show the trigger surfaces it without anyone invoking the gate by hand",
+        "mustNameInOutput": [
+          "check-brand-leaks"
+        ]
+      },
+      "addedTests": [
+        "every_checked_in_gate_has_an_execution_trigger"
+      ],
+      "deps": [],
+      "notes": "CONFIRMED: no reference to check-brand-leaks / check-skill-frontmatter / check-i18n-pairing / lap-gate in .github/workflows, and `git remote -v` is EMPTY — there is no CI to run them.\n\nThis was known at pre-flight and recorded then ('every §19 gate must be a checked-in script invoked by name, not \"CI executes X\"'), which is why the gates are scripts rather than workflow steps. But nothing closed the loop: they run when a human or an agent remembers. This session already lost one round to exactly that — the brand gate went unrun after three content commits and eight legitimate entries sat red until an unrelated question surfaced them.\n\n⚠️ Registering them in ci.yml buys nothing until a remote exists. A local pre-commit hook or a make-style entry point is the reachable version. Decide deliberately; do not add a CI step that never fires and call it done."
+    },
+    {
+      "id": "P1.13",
+      "title": "Reconcile the duplicate plugin-workflow port against upstream main",
+      "gate": "rebase-time duplicate-port finding, severity high",
+      "owns": [
+        "crates/plugin/src/workflow.rs",
+        "crates/plugin/src/lib.rs",
+        "crates/plugin/src/manifest.rs",
+        "crates/workflow/tests/plugin_workflow_scripts.rs"
+      ],
+      "crates": [
+        "plugin"
+      ],
+      "testPackages": [
+        "plugin",
+        "workflow"
+      ],
+      "exclusive": true,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "break the SURVIVING registration path and show a test names it; then verify the OTHER path does not silently keep the test green",
+        "mustNameInOutput": [
+          "with_plugin_workflows"
+        ]
+      },
+      "addedTests": [],
+      "deps": [
+        "P1.9"
+      ],
+      "notes": "MEASURED at merge-base main...HEAD (main +79, branch +45).\n\nBOTH SIDES INDEPENDENTLY ADDED `workflows: Vec<ComponentPath>` TO `PluginComponents`. This is the repo's known red flag: a clean auto-merge between two ports of one function means silent double execution and spliced tests.\n\nmain (parity/mcp-2251 batch, commits 78447b957 + ee8d7c09d 'Fix round 1: reach the plugin-workflow registry from production'):\n  - slot placed after `themes`; consumed at plugin/src/manager.rs:750 inside the discovery loop\n  - gated on `self.plugin_workflows.is_some()`, wired by `with_plugin_workflows` at THREE\n    real composition roots (engine-desktop/src/lib.rs:8528, :9332, :10266)\n  - oracle-faithful: MAX_WORKFLOW_SCRIPT_BYTES=524288, validate_meta, symlink-follow semantics,\n    and an explicit note that `experimental.workflows` has NO alias (unlike themes)\n\nbranch (P1.9): slot appended last; a NEW FILE plugin/src/workflow.rs (~520 lines).\n  ZERO PRODUCTION CALLERS. Every public symbol resolves only to the `pub use` re-export in\n  plugin/src/lib.rs:78-79. `script_digest` and `verify_resume_digest`: 0 references anywhere.\n  The single non-re-export caller, `build_plugin_workflow_inventory` at\n  engine-desktop/src/lib.rs:16810, is inside the `#[cfg(test)]` module that opens at line 10574.\n  That test calls the real `discover_plugin_set` and then — in its own words — walks\n  'all the way to the composition root's bootstrap front door' before performing the final\n  inventory step BY HAND. Walking to the front door is not going through it.\n\n⚠️ Because plugin/src/workflow.rs is a NEW FILE with no counterpart on main, a rebase merges it\nwith ZERO CONFLICT while main's manager.rs loop also survives. The struct field collides (different\npositions) and will conflict visibly; the behaviour will not. Resolving only the visible conflict\nis how the double registration ships.\n\nDIRECTION: take main's implementation; drop the branch's slot and workflow.rs. Keep only the\nlocal-app-specific residue — the checked-in plugin workflow scripts and\nworkflow/tests/plugin_workflow_scripts.rs — retargeted at main's registry.\n\nAlso stale on the branch: the doc comment at engine-desktop/src/lib.rs:16500-16501 records\n`grep -c 'components.workflows' plugin/src/manager.rs` -> 0 as the JUSTIFICATION for building a\nseparate module. That grep now returns non-zero on main. The reason the module exists has expired.\n\nThis is the FOURTH 'implemented but not wired' instance on this branch (with P1.10 builtin_bundle,\nP1.11 PluginCommand, P1.12 script gates) and the only one found by looking at the rebase rather\nthan at the branch — no per-task gate could have seen it, because the defect is a relationship\nbetween the branch and upstream, not a property of either."
+    }
+  ]
+}

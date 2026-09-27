@@ -1,0 +1,6 @@
+{
+  "type": "upsert_mcp_server",
+  "scope": "project",
+  "name": "linear",
+  "config_json": "{\"command\":\"npx\",\"args\":[\"-y\",\"linear-mcp\"]}"
+}

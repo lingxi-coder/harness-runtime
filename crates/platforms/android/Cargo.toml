@@ -1,0 +1,47 @@
+[package]
+name = "platform-android"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# M8-P10: the Android platform skeleton. Portable Rust today — the filesystem /
+# clock / process / sandbox / worktree handles are reused from
+# platform-posix-minimal. The http handle uses the shared real client
+# (platform_common::http::ReqwestHttp, reqwest + rustls-tls) so a keyed
+# conversation streams against the real provider. The Android-specific
+# capabilities (camera/voice/share) are injected as `Arc<dyn …>` trait objects
+# implemented natively in Kotlin via UniFFI (P12). M9 swaps the remaining reused
+# handles for scoped-storage-aware impls. Not cfg-gated: portable, host-verified.
+
+[dependencies]
+platform-api = { path = "../../platform-api" }
+platform-posix-minimal = { path = "../posix-minimal" }
+platform-common = { path = "../common" }
+platform-pty = { path = "../pty" }
+http-client = { path = "../../http-client" }
+async-trait.workspace = true
+tracing.workspace = true
+# `rt` for `tokio::task::spawn_blocking` (the runner wraps the blocking jailed
+# spawn so it never stalls the async executor).
+tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time"] }
+nix = { version = "0.27", default-features = false, features = ["signal", "process"] }
+# Unconditional (NOT target-gated): the runner's safe translation layer
+# (JailSpec/JailedOutput/build_net_deny_bpf/run_jailed + the per-arch helpers)
+# must be reachable from the host build of `platform-android` so the runner can
+# be host-tested. The FFI inside `platform-android-minijail` is itself
+# `cfg(target_os = "android")`, so its host build compiles a pure stub (P0a) —
+# `platform-android` stays `forbid(unsafe_code)` either way.
+platform-android-minijail = { path = "../android-minijail" }
+# Content-hash identity check for bundled helpers before execve (P5). Pure-safe
+# Rust — no unsafe needed; pinned to match sibling crates (android-minijail, etc.).
+sha2 = "0.10"
+hex = "0.4"
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile = "3"
+
+[lints]
+workspace = true

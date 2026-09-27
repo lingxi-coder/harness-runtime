@@ -1,0 +1,18 @@
+{
+  "type": "audio_capabilities_changed",
+  "capabilities": {
+    "service_epoch": 3,
+    "support_revision": 2,
+    "supported_operations": [
+      "listen",
+      "speak"
+    ],
+    "readiness": [
+      {
+        "operation": "listen",
+        "state": "needs_permission"
+      }
+    ],
+    "max_payload_bytes": 12533760
+  }
+}

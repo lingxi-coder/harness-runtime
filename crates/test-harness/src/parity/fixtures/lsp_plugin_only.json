@@ -1,0 +1,9 @@
+{
+  "_source": "claude-code/src/services/lsp/config.ts: getAllLspServers (lines 15-79). claude-code only consults getPluginLspServers() — user/project settings cannot register LSP servers.",
+  "behavior": "LspRegistry::register_config is pub(crate) — only crates/plugin may register LSP servers",
+  "rationale": "claude-code config.ts::getAllLspServers() only consults getPluginLspServers(); user/project settings cannot register LSP servers",
+  "permitted_callers": [
+    "crates/lsp/src/registry.rs (internal: register_plugin_servers wraps register_config)",
+    "crates/plugin/src/manager.rs (via the public register_plugin_servers entry point)"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "version": "2.1.270",
+  "binarySha256": "a506b6d970a4cf44f6abdb53a81ddcd5d3b0ce042a95c502fe9d1f946bdb8807",
+  "requests": [
+    {
+      "path": "/v1/messages?beta=true",
+      "toolSchemas": [
+        {
+          "name": "Bash",
+          "$schema": "https://json-schema.org/draft/2020-12/schema"
+        }
+      ]
+    }
+  ]
+}

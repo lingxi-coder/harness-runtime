@@ -1,0 +1,31 @@
+{
+  "name": "brand-normalize-sample",
+  "version": "1.0.0",
+  "description": "Fixture plugin tree for the P0a.7 brand-token normalization tests (design spec section 19.1). References every plugin-contract env-var substitution token so the normalizer has something real to map.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${LINGXI_PLUGIN_ROOT}/hooks/run.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "mcpServers": {
+    "sample": {
+      "command": "${LINGXI_PLUGIN_ROOT}/bin/server",
+      "args": [
+        "--data-dir",
+        "${LINGXI_PLUGIN_DATA}/cache",
+        "--project",
+        "${LINGXI_PROJECT_DIR}"
+      ],
+      "env": {}
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "type": "scheduled_run_turn",
+  "run_id": "run-1",
+  "prompt": "Daily brief",
+  "model": "openai/model",
+  "reasoning": {
+    "type": "automatic"
+  }
+}

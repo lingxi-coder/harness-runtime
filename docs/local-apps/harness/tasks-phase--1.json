@@ -1,0 +1,424 @@
+{
+  "phase": "-1",
+  "tasks": [
+    {
+      "id": "P-1.0",
+      "title": "Component-literal scanner as a Rust test whose needles come from the LIVE registry, with a counted allowlist",
+      "gate": "§19.3 production literal scanner planted-positive; three mandatory reverse cases (a) discovery-derived needle (b) namespaced FQN (c) un-allowlisted new module",
+      "owns": [
+        "crates/apps/engine-mobile/tests/component_literal_scan.rs",
+        "crates/apps/engine-mobile/tests/component_literal_allowlist.txt"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "plant the namespaced FQN `lingxi-local-app:local-app-build` (NOT the basename) into harness-runtime/src/mobile/local_apps_host.rs",
+        "mustNameInOutput": [
+          "local_apps_host.rs",
+          "lingxi-local-app:local-app-build"
+        ]
+      },
+      "addedTests": [
+        "scanner_rejects_namespaced_fqn_not_just_basename",
+        "scanner_rejects_a_literal_in_a_module_no_allowlist_mentions",
+        "scanner_needle_comes_from_discovery_not_from_a_static_array",
+        "allowlist_entry_count_matches_the_committed_baseline"
+      ],
+      "deps": [],
+      "notes": "§19.3's literal wording — `tasks/src` and `tools/workflow/src` contain no Local App workflow basename — CANNOT be green on landing, because Phase -1 step 1 explicitly KEEPS both existing registrations (tools/workflow/src/builtins.rs plus three .js files in that directory). Ship the allowlist explicit and counted, reaching 0 only at Phase 9. Without the count, the obvious way to make the red gate green is to exempt the directory, which silently disables the scanner for all of tools/workflow/. The count is the thing that makes that visible.\n\nSCOPED AT lap/baseline. §19.3's reverse case (a) as written needs a verified Plugin inventory, which does not exist until Phase 0a/2. §18 step 7 is explicit that Phase -1 derives needles from the EXISTING live registries and Phase 2 switches to Plugin inventory. At Phase -1 the live source is mobile_skill_registry() (harness-runtime/src/mobile/mod.rs:383 -> skill_api::register_mobile), so case (a) becomes: add a skill to the live registry, confirm the needle set GROWS, then plant that new name in local_apps_host.rs and require red. That is why this is a Rust test and not a python grep gate — a python scanner cannot call into the registry, and a needle list it kept itself would be the static array the gate exists to forbid.\n\nKNOWN COUPLING, adjudicated after the write stage. The scanner's WORKFLOW needles are derived from `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` (tools/workflow/src/lib.rs:310) — which is the array P-1.9 DELETES. This is an ordering defect in the decomposition, not in the writer's judgment: P-1.0 was sequenced first and pointed at P-1.9's deletion target. The alternative live source, `BUILTIN_WORKFLOWS` (tools/workflow/src/builtins.rs:93), does survive Phase -1 — Phase -1 step 1 keeps both registrations — but it also contains `deep-research`, and no property distinguishing a Local App workflow from it exists until P-1.6 introduces LocalAppWorkflowTaskScope. So the bootstrap is real. Resolution: keep this source, and make P-1.9 responsible for re-pointing the scanner. When P-1.9 deletes the array this test FAILS TO COMPILE, which is loud and correct. The only wrong resolution is hardcoding the two names here — that turns the gate into the static array it exists to forbid."
+    },
+    {
+      "id": "P-1.1",
+      "title": "Add the LocalAppPluginBinding composition adapter",
+      "gate": "§19.3 Host contract carries no workflow/skill/agent names",
+      "owns": [
+        "crates/harness-runtime/src/mobile/local_app_plugin_binding.rs",
+        "crates/harness-runtime/src/mobile/mod.rs"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "make the binding resolve a workflow handle by string name instead of by typed handle",
+        "mustNameInOutput": [
+          "local_app_plugin_binding"
+        ]
+      },
+      "addedTests": [
+        "binding_resolves_a_typed_handle_not_a_name"
+      ],
+      "deps": [
+        "P-1.0"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P-1.2",
+      "title": "Bind Host launch-context injection to the resolved handle",
+      "gate": "§19.3 workflow context is injected only by the Host; caller-supplied host_context/profile/template/renderer/surface is rejected or overridden",
+      "owns": [
+        "crates/harness-runtime/src/mobile/workflow_support.rs",
+        "crates/harness-runtime/src/mobile/local_app_plugin_binding.rs"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "change the runtime_profile injection in apply_materialized_local_app_collections_with_identity from object.insert(..) to object.entry(..).or_insert_with(..), so a caller-supplied value survives",
+        "mustNameInOutput": [
+          "runtime_profile",
+          "caller_supplied_runtime_profile_is_overridden_by_the_host"
+        ]
+      },
+      "addedTests": [
+        "caller_supplied_runtime_profile_is_overridden_by_the_host",
+        "caller_supplied_expected_writable_collections_is_overridden_by_the_host",
+        "host_injected_arg_keys_are_exactly_the_expected_set",
+        "update_manifest_rejects_a_caller_supplied_surface"
+      ],
+      "deps": [
+        "P-1.1"
+      ],
+      "notes": "DESCRIPTOR CORRECTED after the verify pass ran lap_gate.py against it and it FAILED. Two errors, both mine, both from writing the descriptor out of the design's §19.3 wording without checking the symbols exist in this codebase:\n  - plantedFailure named `host_context`, which does not exist anywhere in the local-apps surface. The     only workspace hits are the unrelated permission classifier (permission/src/host_context.rs). A gate     whose must-name string cannot appear can never pass.\n  - owns named local_apps_host.rs + local_app_plugin_binding.rs; the uncovered half of §19.3 is actually     the workflow-args seam in workflow_support.rs. The profile/surface half in local_apps_host.rs already     HAS tests at HEAD (create_rejects_runtime_profile_and_surface_overrides,     scaffold_rejects_an_empty_brief_and_an_unknown_surface, create_app_in_shell_mode_rejects_a_surface),     so testing there would have been redundant while the workflow injection had nothing.\n\nThe lesson generalises: a descriptor written from design prose can name a symbol the code does not have, and `lap-gate.sh tasks` cannot catch that — it validates that a must-name string EXISTS, not that it is REACHABLE. Descriptors for later phases should be re-grounded against the code before their task starts."
+    },
+    {
+      "id": "P-1.3",
+      "title": "Delete the Profile -> workflow-name map in workflow_support",
+      "gate": "§19.3 no Local App workflow basename derives authority",
+      "owns": [
+        "crates/harness-runtime/src/mobile/workflow_support.rs"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "restore the ReactDomR1 => \"local-app-build\" arm",
+        "mustNameInOutput": [
+          "workflow_support",
+          "local-app-build"
+        ]
+      },
+      "addedTests": [
+        "profile_no_longer_selects_a_workflow_by_name"
+      ],
+      "deps": [
+        "P-1.1"
+      ],
+      "notes": "The map is at workflow_support.rs:1286-1290 at lap/baseline. Anchor on the symbol, never the line.\n\nTHREE OBSERVATIONS FROM P-1.1'S VERIFICATION — for this task, not defects in P-1.1.\n1. ALL_BUILD_TARGETS is a hardcoded [LocalAppBuildTarget; 5]. A new variant DOES hard-error in expected_binding's wildcard-free match (proven: adding a 6th gave error[E0004] at both local_app_plugin_binding.rs:119 and workflow_support.rs:1192), but filling in that arm alone compiles and passes — nothing ties the array length to the variant count, so the new mapping would ship unexercised. If this task reshapes the routing, tie iteration to the enum.\n2. The `is pinned to runtime profile {family}, which` clause is asserted by nothing. All four refusal assertions check the app id plus the ordered `must use ...; refusing caller-selected workflow ...` fragment, so dropping the family from the message leaves the suite green. Diagnostic quality, not security content — but the binding's doc claims the family is preserved and that claim is unpinned.\n3. `{app_id:?}` vs `{app_id}` is unpinned; contains(\"demo1234\") passes either way, so the debug quoting could silently become plain. Cosmetic."
+    },
+    {
+      "id": "P-1.4",
+      "title": "Make LINGXI.md contract prose prompt-layer neutral",
+      "gate": "§19.3 Host contract carries no workflow names",
+      "owns": [
+        "crates/harness-runtime/src/mobile/local_apps_host.rs"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "put the literal `local-app-build` back into the LINGXI.md contract prose",
+        "mustNameInOutput": [
+          "local_apps_host.rs",
+          "local-app-build"
+        ]
+      },
+      "addedTests": [
+        "lingxi_md_contract_prose_names_no_workflow"
+      ],
+      "deps": [
+        "P-1.3"
+      ],
+      "notes": "Workflow names are baked into the contract PROSE at local_apps_host.rs:5977 and :6010, with a test at :11845. Prose is exactly what a name-based scanner sees and a type-based refactor does not."
+    },
+    {
+      "id": "P-1.5",
+      "title": "Mobile Local App skill registration iterates mobile_skill_registry() instead of a second hardcoded list",
+      "gate": "§19.3 skill listing / Skill invocation / slash invocation share one registry",
+      "owns": [
+        "crates/harness-runtime/src/mobile/mod.rs"
+      ],
+      "crates": [
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "reintroduce a second hardcoded skill name into the array",
+        "mustNameInOutput": [
+          "lib.rs"
+        ]
+      },
+      "addedTests": [
+        "mobile_skill_list_is_derived_from_the_live_registry"
+      ],
+      "deps": [
+        "P-1.0"
+      ],
+      "notes": "The hardcoded 10-skill array is at lib.rs:437-460. Phase -1 only removes the SECOND list; switching the provider to PluginManager inventory is Phase 2."
+    },
+    {
+      "id": "P-1.6",
+      "title": "Introduce the typed LocalAppWorkflowTaskScope { app_id, purpose }",
+      "gate": "§19.3 typed task scope still lets the build workflow take a workspace lease and read workflowModel",
+      "owns": [
+        "crates/tasks/src/lib.rs",
+        "crates/tasks/src/scope.rs"
+      ],
+      "crates": [
+        "tasks"
+      ],
+      "testPackages": [
+        "tasks"
+      ],
+      "exclusive": true,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "widen the scope so any workflow whose meta.name matches is admitted",
+        "mustNameInOutput": [
+          "LocalAppWorkflowTaskScope"
+        ]
+      },
+      "addedTests": [
+        "scope_is_constructed_by_the_host_not_derived_from_meta_name"
+      ],
+      "deps": [
+        "P-1.2"
+      ],
+      "notes": "\n\nRE-GROUNDED before the task starts. `LocalAppWorkflowTaskScope` has ZERO hits and `tasks/src/scope.rs` does not exist — both CORRECT, because this task creates them. A must-name string for a symbol the task introduces is legitimate; the plant runs after the type exists. Noted so a later reader does not mistake this for the stale-descriptor defect P-1.2 hit, where `host_context` named a symbol that never existed anywhere."
+    },
+    {
+      "id": "P-1.7",
+      "title": "Workspace lease reads the typed scope; delete the tasks/src workflow-name list",
+      "gate": "§19.3 a custom workflow with the same name gets NO workspace lease",
+      "owns": [
+        "crates/tasks/Cargo.toml",
+        "crates/tasks/src/handlers/local_workflow.rs",
+        "crates/tasks/src/lib.rs",
+        "crates/tasks/src/registry.rs"
+      ],
+      "crates": [
+        "tasks"
+      ],
+      "testPackages": [
+        "tasks"
+      ],
+      "exclusive": true,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "reinstate the LOCAL_APP_BUILD_WORKFLOWS array at tasks/src/lib.rs:37 and key the lease off it",
+        "mustNameInOutput": [
+          "LOCAL_APP_BUILD_WORKFLOWS"
+        ]
+      },
+      "addedTests": [
+        "a_build_purpose_blocks_delete_at_the_guard",
+        "a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_delete",
+        "a_same_named_custom_workflow_gets_no_workspace_lease",
+        "a_use_test_purpose_still_blocks_delete_at_the_guard",
+        "an_mcp_authoring_purpose_still_blocks_delete_at_the_guard",
+        "app_id_grammar_agrees_with_local_apps_ids"
+      ],
+      "deps": [
+        "P-1.6"
+      ],
+      "notes": "\n\nMEASURED BLAST RADIUS (re-grounded before P-1.6 started). `tasks::LOCAL_APP_BUILD_WORKFLOWS` has 5 reader sites, of which the two that matter are `tasks/src/registry.rs:918` and `tasks/src/handlers/local_workflow.rs:523` — both PRODUCTION and both outside `tasks/src/lib.rs`, which is all this descriptor's `owns` currently names. Add both files to the owned set when this task runs, or it cannot delete the array it is asked to delete.\n\n🚨 FOUR GREEN-BY-CONSTRUCTION HAZARDS, handed over by P-1.6's verify pass. Each was demonstrated or traced, not speculated.\n\n(a) THE Option<scope> FALLBACK. The natural incremental migration is `scope: Option<..>` with `match scope { Some(s) => s.requires_workspace_lease(), None => LOCAL_APP_BUILD_WORKFLOWS.contains(..) }`. Every new test builds a Some, so the None arm is never exercised and stays green FOREVER — while every launch this task misses, and every task row persisted before the migration, takes the name-derived arm. P-1.9 would then 'delete the array' by inlining the two literals into that arm.\n\n(b) SCAN-ROOT BLIND SPOT. coordinator/, cron/ and apps/cli/ all depend on `tasks` and NONE is a component-scanner root (SCAN_ROOTS = engine-mobile/src, tasks/src, tools/workflow/src). A fallback that lands in any of them is invisible to that gate.\n\n(c) THE DELETE GUARD CAN ONLY WEAKEN. blocks_delete() is a constant true, so the type cannot express 'this row carries no authority' — that discrimination necessarily lives in the Option. If find_nonterminal_local_app_workflows (registry.rs:918) is rewritten as 'rows whose scope is Some', any Local App workflow launched without a scope stops blocking delete entirely and the App becomes deletable mid-build. Required tests, renamed by P-1.8 because the original name I wrote was ambiguous — \"no scope\" reads as `scope: None`, which per §8.1 must grant NOTHING, while the test actually pins a `Some` with a non-Build purpose: a_build_purpose_blocks_delete_at_the_guard (control), a_use_test_purpose_still_blocks_delete_at_the_guard, an_mcp_authoring_purpose_still_blocks_delete_at_the_guard.\n\n(d) THE PREDICATES ARE ADVISORY. Nothing forces a caller to consult requires_workspace_lease(). Keeping the old name check ALONGSIDE the typed one as 'defense in depth' restores the exact grant while the suite stays green, because the typed path also works. This task's stated gate covers only the MODEL DEFAULT — not the lease, not the delete guard. Required test: a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_delete.\n\nINHERITED FOLLOW-UP from P-1.6. scope.rs mirrors local_apps::ids::is_valid_app_id's grammar with a corpus copied from that crate's own tests, because adding a production `local-apps` edge to `tasks` would drag bundled SQLite, vendored libgit2 and two tree-sitter grammars into a crate with 5 dependents for a 6-line predicate. A DEV-dependency is the right answer — check_deps.py excludes dev deps, so it is gate-legal and costs production builds nothing — and it enables a real cross-crate agreement test. Until then the two corpora can drift silently. tasks/Cargo.toml is now owned for this.\n\n⚠️ AND THE LIMIT P-1.6 COULD NOT CLOSE: the type guarantees the PURPOSE is the Host's choice and the app_id is well formed. It does NOT guarantee OWNERSHIP — `for_build(\"victim-app\")` succeeds, because the type cannot know entitlement. §8.1 requires defending a forged `args.app_id`; that half is THIS task's obligation. The Host MUST take app_id from the resolved LocalAppPluginBinding handle, never from caller args. scope.rs's `a_well_formed_victim_app_id_is_still_accepted` encodes the limit so it cannot be mistaken for a guarantee."
+    },
+    {
+      "id": "P-1.8",
+      "title": "Delete guard for all three purposes reads the typed scope",
+      "gate": "§19.3 all Local App workflows block App delete; a same-named custom workflow does not",
+      "owns": [
+        "crates/tasks/src/lib.rs"
+      ],
+      "crates": [
+        "tasks"
+      ],
+      "testPackages": [
+        "tasks"
+      ],
+      "exclusive": true,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "let a custom workflow named local-app-build block a delete",
+        "mustNameInOutput": [
+          "delete"
+        ]
+      },
+      "addedTests": [
+        "all_three_purposes_block_delete",
+        "a_same_named_custom_workflow_does_not_block_delete"
+      ],
+      "deps": [
+        "P-1.7"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P-1.9",
+      "title": "workflowModel default reads the typed scope; delete the tools/workflow name list and apply_local_app_build_default_model",
+      "gate": "§19.3 a custom workflow with the same name gets no model default",
+      "owns": [
+        "crates/apps/engine-desktop/src/lib.rs",
+        "crates/harness-runtime/src/mobile/local_apps_build.rs",
+        "crates/harness-runtime/src/mobile/workflow_support.rs",
+        "crates/apps/engine-mobile/tests/component_literal_scan.rs",
+        "crates/tools/workflow/src/lib.rs"
+      ],
+      "crates": [
+        "tool-workflow",
+        "engine-desktop"
+      ],
+      "testPackages": [
+        "tool-workflow",
+        "engine-desktop"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "reinstate the LOCAL_APP_BUILD_WORKFLOWS array at tools/workflow/src/lib.rs:310 and key the model default off it",
+        "mustNameInOutput": [
+          "LOCAL_APP_BUILD_WORKFLOWS"
+        ]
+      },
+      "addedTests": [
+        "a_same_named_custom_workflow_gets_no_model_default",
+        "scanner_workflow_needles_survive_the_name_list_deletion"
+      ],
+      "deps": [
+        "P-1.8"
+      ],
+      "notes": "apps/engine-desktop/src/lib.rs:1853 is the ONLY Local App reference in the entire desktop product and it calls apply_local_app_build_default_model, the function this task deletes. That one call site is the whole desktop blast radius for Phase -1.\n\nINHERITED OBLIGATION from P-1.0. Deleting LOCAL_APP_BUILD_WORKFLOWS breaks the compile of apps/engine-mobile/tests/component_literal_scan.rs, which derives its workflow needles from that array. That is intended: the failure is loud rather than silent. This task must re-point those needles at a source that survives — the typed scope from P-1.6, or BUILTIN_WORKFLOWS filtered by that typed property. ⛔ Do NOT resolve it by writing the two names into the test. A hardcoded needle list is precisely the static array this gate exists to forbid, it would stop covering any workflow added later, and it would stay green forever while doing so.\n\n🚨 SCOPE CORRECTED — measured, not estimated. Deleting `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` is not a one-file change. Production readers, counted above each file's first `#[cfg(test)]`:\n    harness-runtime/src/mobile/workflow_support.rs   11  (ALL production, zero in test regions)\n    harness-runtime/src/mobile/local_apps_build.rs    1\n    harness-runtime/src/mobile/local_apps_host.rs     3  (all in the test region, which starts at 8874)\n    apps/engine-mobile/tests/component_literal_scan.rs 3  (P-1.0's needle source — the known coupling)\nThe original descriptor owned only tools/workflow/src/lib.rs and engine-desktop, which would have made this task impossible to complete inside its own ownership. workflow_support.rs and local_apps_build.rs are now owned.\n⚠️ Those 11 sites are the REAL work of this task: each one currently asks 'is this workflow name in the list', and each must instead ask the typed scope from P-1.6. A change that deletes the array but leaves the 11 questions name-shaped has moved the problem, not removed it."
+    },
+    {
+      "id": "P-1.10",
+      "title": "Re-enter the five Canvas hard gates as policy = canvas_*, preserving them across the name deletion",
+      "gate": "§19.5 the five existing Canvas gates still bite after drive_local_workflow(\"local-canvas-build\") is gone",
+      "owns": [
+        "crates/tools/workflow/src/builtins.rs"
+      ],
+      "crates": [
+        "tool-workflow"
+      ],
+      "testPackages": [
+        "tool-workflow"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "make the zero-surfaces case pass (return Ok) while leaving both test functions in place",
+        "mustNameInOutput": [
+          "canvas_zero_surfaces_blocks_even_when_render_and_motion_pass"
+        ]
+      },
+      "addedTests": [
+        "canvas_policy_is_selected_by_typed_policy_not_by_workflow_name",
+        "render_check_status_not_applicable_has_a_behavioural_case"
+      ],
+      "deps": [
+        "P-1.9"
+      ],
+      "notes": "HIGHEST silent-loss risk in the backlog. Five Canvas hard gates reach their policy through drive_local_workflow(\"local-canvas-build\"), a name §8.3 deletes — exactly 1 call site at lap/baseline. Merging the workflows without re-entering the policy makes five gates vanish with every test still green. Exit criterion: the call-site count reaches 0 AND both named functions still exist (builtins.rs:1944 and :2509 at lap/baseline). If the count hits 0 and the functions are gone, the gates were deleted, not migrated — anchor on function names, never line numbers. Separately, render_check.status=\"not_applicable\" has NO behavioural test today: builtins.rs:2263 pins a schema-description string, which is copy-pinning, not a gate. That case is net-new, not a migration."
+    },
+    {
+      "id": "P-1.11",
+      "title": "Cut the workflow-name trigger binding in skill-api, and pin the two look-alikes that must NOT be touched",
+      "gate": "§19.3 no Local App component name carries authority outside the composition binding",
+      "owns": [
+        "crates/skill-api/src/builtin/bundled.rs",
+        "crates/apps/engine-mobile/tests/component_literal_scan.rs",
+        "crates/apps/engine-mobile/tests/component_literal_allowlist.txt"
+      ],
+      "crates": [
+        "skill-api",
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "skill-api",
+        "harness-runtime"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "restore \"local-app-build\" to the create-local-app skill's triggers array in bundled.rs",
+        "mustNameInOutput": [
+          "bundled.rs",
+          "local-app-build"
+        ]
+      },
+      "addedTests": [
+        "a_workflow_name_is_not_a_skill_trigger",
+        "skill_triggers_survive_a_workflow_rename"
+      ],
+      "deps": [
+        "P-1.9"
+      ],
+      "notes": "FOUND BY THE P-1.0 VERIFICATION PASS, outside the three scan roots, and confirmed by hand at lap/baseline.\n\nTHE DEFECT. skill-api/src/builtin/bundled.rs:43 gives the create-local-app SKILL the trigger array [\"create local app\", \"local app\", \"local-app-build\"]. The third entry is a WORKFLOW name used as a skill trigger phrase — a cross-component name binding, which is exactly the shape §19.3 exists to remove. It is genuine production code: there is no #[cfg(test)] above that line. Phase 4 merges the two workflows, at which point this trigger silently stops matching and nothing in the suite notices. The skill NAMES in the same file are the definition site and are legitimately unscannable; the trigger is not.\n\n⛔ THE LOOK-ALIKE THAT MUST NOT BE 'FIXED'. platform-api/src/mobile_linux.rs:46 declares LOCAL_APP_BUILD_ROOT = \"/var/lingxi/local-app-build\". That string coincides with a workflow name but is a FILESYSTEM MOUNT ROOT, not a reference to the workflow. It carries no name-derived authority, and renaming it to track a renamed workflow would silently move a path on real devices — the same class of silent data loss as renaming a SQLite table, which nothing in this repo would catch. Add it to the allowlist with this reasoning if traits/src ever enters the scan surface; do not touch the value.\n\nTEMPLATES, for the record. local-apps/templates/runtime-profiles/** is compiled into production wholesale by include_bytes! via the profile_file! macro, and the scanner cannot see it. Grepped at lap/baseline: it contains ZERO component-name needles today. That is a fact with a date on it, not a guarantee — it is the tree runtime-profile work touches, so the Phase 1 packer (P1.2) should carry the assertion rather than this scanner.\n\nSCOPE. Deliberately NOT solved by widening SCAN_ROOTS. Adding skill-api/src and traits/src would make the scanner red on landing for two occurrences of very different kinds, and the cheapest way to green that is an allowlist entry — which would preserve the defect while looking like it had been handled.\n\nRE-GROUNDED before the task starts. The must-name `bundled.rs` has zero hits as file CONTENT — expected, since it is a path, not a symbol. It can therefore only reach the output if the test PRINTS the path in its failure message. That is a real constraint on how the test must be written, not a free property: an assertion that fails with `assert!(!triggers.contains(...))` and no message would satisfy the gate's `failures:` requirement while never naming the file, and the gate would pass. Write the assertion with a message naming skill-api/src/builtin/bundled.rs.\nVerified still present at re-grounding time: bundled.rs contains the `local-app-build` trigger."
+    },
+    {
+      "id": "P-1.12",
+      "title": "Re-mint the Local App workflow scope at the restart-adoption seam",
+      "gate": "§19.3 a build in flight across an engine restart still blocks its App's delete",
+      "owns": [
+        "crates/tasks/src/registry.rs",
+        "crates/tasks/src/task_trait.rs",
+        "crates/harness-runtime/src/mobile/workflow_support.rs",
+        "crates/harness-runtime/src/mobile/host.rs"
+      ],
+      "crates": [
+        "tasks",
+        "harness-runtime"
+      ],
+      "testPackages": [
+        "tasks",
+        "harness-runtime"
+      ],
+      "exclusive": true,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "drop the re-minted scope at register_adopted_workflow so an adopted row carries scope: None",
+        "mustNameInOutput": [
+          "register_adopted_workflow",
+          "blocks"
+        ]
+      },
+      "addedTests": [
+        "an_adopted_in_flight_build_still_blocks_its_apps_delete",
+        "an_adopted_forged_workflow_still_gets_no_scope"
+      ],
+      "deps": [
+        "P-1.7"
+      ],
+      "notes": "DISCLOSED RESIDUAL from P-1.7's fix round, narrower than what it replaced but real. register_adopted_workflow (tasks/src/registry.rs:1078) sets scope: None, so a Local App build that was in flight across an engine restart comes back Paused — non-terminal — and does NOT block its app's delete. The pre-P-1.7 name-based guard DID block it.\n\nWindow: engine restart during a build, then the user deletes that app. Narrow, but a real loss of a protection that existed before.\n\n⛔ IT CANNOT BE CLOSED BY READING THE CHECKPOINT. The checkpoint records whatever the original caller supplied, so a custom workflow's checkpoint carries its forged args.app_id just as faithfully as a real build's — trusting it reopens exactly the vector P-1.7 closed. Closing it means RE-MINTING at the adoption seam from state the Host re-resolves on load: the app still exists, is still scaffolded, and is still pinned to the adopted workflow_id. AdoptedWorkflow has no way to express that today.\n\nThe framing to keep, corrected during P-1.7 (P-1.6's doc and my brief both had it wrong): the app_id must be one the Host RESOLVED, not one it was TOLD. The LocalAppPluginBinding handle names a WORKFLOW, not an app, so 'take the app_id from the binding handle' was impossible as written.\n\n🚨 A SECOND TRIPWIRE THIS TASK MUST CARRY, from P-1.7's verify pass. `TaskState` still derives `Deserialize`, and `#[serde(skip)]` on the scope field means it defaults to `None` on any future read-back — with NO compile error. So the day a persistence seam lands, the delete guard silently reverts to exactly today's adoption gap, and nothing fails. state.rs's doc says to re-mint at that seam; a doc is not a mechanism. Land a compile-time or test-time tripwire together with the seam.\n\nAlso recorded from that pass: only `for_build` is ever minted in production — `for_use_test` and `for_mcp_authoring` have no call sites outside tests. `blocks_delete()`'s 'every purpose blocks' contract is therefore UNEXERCISED in production. Not a regression (the old name-based guard covered strictly less), but the three-purpose surface is aspirational until the use-test and MCP-authoring workflows get their own mint."
+    }
+  ]
+}

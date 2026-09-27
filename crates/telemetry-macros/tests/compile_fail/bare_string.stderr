@@ -1,0 +1,13 @@
+error: audit rejected: BadPayload::model: disallowed field type `String` — user-derived strings must use Verified or PiiTagged (spec §7 line 772-774)
+  --> tests/compile_fail/bare_string.rs:4:5
+   |
+4  | /     telemetry_macros::_audit_source!(r#"
+5  | |         #[derive(serde::Serialize, serde::Deserialize)]
+6  | |         #[serde(deny_unknown_fields)]
+7  | |         pub struct BadPayload {
+8  | |             pub model: String,
+9  | |         }
+10 | |     "#);
+   | |_______^
+   |
+   = note: this error originates in the macro `telemetry_macros::_audit_source` (in Nightly builds, run with -Z macro-backtrace for more info)

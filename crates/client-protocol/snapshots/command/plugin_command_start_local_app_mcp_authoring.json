@@ -1,0 +1,8 @@
+{
+  "type": "plugin_command",
+  "command": {
+    "type": "start_local_app_mcp_authoring",
+    "app_id": "habits-1a2b",
+    "user_goal": "Let the model save and summarize my habit data."
+  }
+}

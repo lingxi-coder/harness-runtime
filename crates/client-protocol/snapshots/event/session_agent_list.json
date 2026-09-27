@@ -1,0 +1,16 @@
+{
+  "type": "session_agent_list",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "agents": [
+    {
+      "agent_id": "main",
+      "name": "Main agent",
+      "agent_type": "main",
+      "model": "deepseek-flash",
+      "model_profile": "deepseek",
+      "status": "running",
+      "latest_activity": "Working on the selected conversation",
+      "updated_at_ms": 1750000000000
+    }
+  ]
+}

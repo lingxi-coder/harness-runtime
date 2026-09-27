@@ -1,0 +1,63 @@
+{
+  "_source": "lingxi-tui M7-11..15 screens via the live app::dispatch(Submit) slash-command intercept + root::handle_screen_key dispatcher; claude-code @ 2026-05-28-snapshot Doctor.tsx / ResumeConversation.tsx / Settings/ / memory/ / MessageSelector.",
+  "_claude_code_version": "2026-05-28-snapshot",
+  "_note": "Scripted screen flows driven through the SAME synchronous paths the live mount uses: slash-command opens via app::dispatch(KeyAction::Submit) (the live submit intercept), screen keys via the per-variant reducers (resume::handle_resume_key / settings::apply_settings_key / memory::handle_memory_key / message_selector::handle_message_selector_key), close via AppState::close_screen. Settings opens async in the live binary (pending_open_settings -> root::pump_open_settings); the sync half (raise the flag) is asserted here and the open is then driven directly via open_settings, mirroring the pump. Asserts STATE transitions + screen-row substrings (structure, not exact per-token color, per spec §0 Q3).",
+  "scenarios": [
+    {
+      "name": "doctor_open_rows_close",
+      "open_command": "/doctor",
+      "expected_active_screen": "doctor",
+      "expected_row_substrings": ["lingxi-cli", "unknown"],
+      "expected_section_headers": ["Diagnostics", "Terminal"],
+      "close_key": "Esc",
+      "expected_active_screen_after_close": null
+    },
+    {
+      "name": "resume_list_select",
+      "scripted_sessions": [
+        { "uuid": "11111111-1111-1111-1111-111111111111", "summary": "first session" },
+        { "uuid": "22222222-2222-2222-2222-222222222222", "summary": "second session" }
+      ],
+      "expected_active_screen": "resume",
+      "nav_keys": ["Down"],
+      "select_key": "Enter",
+      "expected_selected_index": 1,
+      "expected_selected_uuid": "22222222-2222-2222-2222-222222222222",
+      "expected_resume_sets_should_exit": true
+    },
+    {
+      "name": "settings_tab_nav",
+      "open_command": "/config",
+      "expected_pending_open_tab": "config",
+      "open_on_tab": "config",
+      "expected_active_screen": "settings",
+      "tab_keys": ["Right", "Right"],
+      "expected_tab_sequence": ["usage", "settings"],
+      "close_key": "Esc",
+      "expected_active_screen_after_close": null
+    },
+    {
+      "name": "memory_open_close",
+      "open_command": "/memory",
+      "expected_active_screen": "memory",
+      "close_key": "Esc",
+      "expected_active_screen_after_close": null
+    },
+    {
+      "name": "search_jump_export",
+      "messages": [
+        { "kind": "user", "body": "hello there" },
+        { "kind": "assistant", "body": "the needle is here" },
+        { "kind": "user", "body": "more text" }
+      ],
+      "search_query": "needle",
+      "expected_match_count_at_least": 1,
+      "expected_first_match_index": 1,
+      "jump_key": "Enter",
+      "export_command": "/export",
+      "expected_export_mode": "export",
+      "export_writes_file": true,
+      "expected_export_contains": "needle"
+    }
+  ]
+}

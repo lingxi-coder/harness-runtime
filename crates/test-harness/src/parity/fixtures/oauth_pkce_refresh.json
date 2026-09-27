@@ -1,0 +1,31 @@
+{
+  "_source": "claude-code/src/services/auth/oauth-client.ts + src/constants/oauth.ts (commit 6a25909, 2026-05-23)",
+  "_note": "OAuth endpoints + refresh grant_type + scopes + proactive lead formula are byte-for-byte from claude-code. The authorize endpoint is on claude.ai (the user-facing domain); token + revoke endpoints live on console.anthropic.com. Scope order matters — emitted as the space-joined `scope=` body parameter in `read:user write:messages read:projects` order. The proactive wake formula `min(remaining/2, 5*60)` is locked at the second granularity; sub-second arithmetic is allowed (and tested in proactive_lead_test.rs). OAUTHREF.5 CORRECTION: the `refresh_expired_error_string` / `scope_rejected_error_string` below are LingXi-DESIGN messages, NOT claude-code byte-for-byte — claude-code's refresh path throws a generic `Token refresh failed: ${statusText}` with no re-auth string. They are pinned here as LingXi values (the RefreshExpired string is also a proactive-loop control-flow key), not as TS-parity targets.",
+  "authorize_endpoint": "https://claude.com/cai/oauth/authorize",
+  "token_endpoint": "https://platform.claude.com/v1/oauth/token",
+  "revocation_endpoint": "https://platform.claude.com/v1/oauth/token/revoke",
+  "refresh_grant_type": "refresh_token",
+  "scopes_in_order": [
+    "org:create_api_key",
+    "user:profile",
+    "user:inference",
+    "user:sessions:claude_code",
+    "user:mcp_servers",
+    "user:file_upload"
+  ],
+  "loopback_redirect_uri_template": "http://127.0.0.1:{port}/callback",
+  "refresh_expired_error_string": "Session expired. Re-authenticate?",
+  "scope_rejected_error_string": "Scope upgrade denied by provider",
+  "proactive_lead_cap_seconds": 300,
+  "proactive_lead_formula": "min(remaining_lifetime / 2, 5 * 60) seconds",
+  "telemetry_event_names": [
+    "tengu_oauth_refresh_started",
+    "tengu_oauth_refresh_succeeded",
+    "tengu_oauth_refresh_failed",
+    "tengu_oauth_scope_upgraded",
+    "tengu_oauth_proactive_canceled"
+  ],
+  "keychain_service": "lingxi",
+  "keychain_account": "claude-code-credentials",
+  "_endpoint_provenance": "2026-07-25 re-verified against the 2.1.220 production endpoint block: CLAUDE_AI_AUTHORIZE_URL=https://claude.com/cai/oauth/authorize, TOKEN_URL=https://platform.claude.com/v1/oauth/token. The previous console.anthropic.com / claude.ai spellings appear 0 times in that binary. NOTE: the oracle's block defines NO revocation URL, so revocation_endpoint is LingXi-derived and is NOT byte-verified against the oracle. Scopes re-derived from the oracle's `O0i = dedupe([...uYm, ...rrt])` (uYm=[org:create_api_key, user:profile]; rrt=[user:profile, user:inference, user:sessions:claude_code, user:mcp_servers, user:file_upload]); the previous read:user / write:messages / read:projects appear 0 times."
+}

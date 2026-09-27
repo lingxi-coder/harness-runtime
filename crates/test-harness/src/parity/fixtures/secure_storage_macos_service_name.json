@@ -1,0 +1,46 @@
+{
+  "_source": "claude-code/src/utils/macOsKeychainHelpers.ts: getMacOsKeychainStorageServiceName (and macOsKeychainStorage.ts which calls it)",
+  "_note": "macOS Keychain service name format: format!(\"{base}{oauth_suffix}{service_suffix}{dir_hash}\"). `base` is 'LingXi'. `oauth_suffix` is empty for the default OAuth flow, '-{flow}' otherwise. `service_suffix` is '-credentials' for OAuth entries and empty for the legacy API-key entry. `dir_hash` is empty when using the default config dir; otherwise '-' + first 8 hex chars of sha256(config_dir).",
+  "cases": [
+    {
+      "label": "default config dir, default oauth, credentials suffix",
+      "input_base": "LingXi",
+      "input_oauth_suffix": "",
+      "input_service_suffix": "-credentials",
+      "input_dir_hash": "",
+      "expected_service_name": "LingXi-credentials"
+    },
+    {
+      "label": "non-default config dir",
+      "input_base": "LingXi",
+      "input_oauth_suffix": "",
+      "input_service_suffix": "-credentials",
+      "input_dir_hash": "-abc12345",
+      "expected_service_name": "LingXi-credentials-abc12345"
+    },
+    {
+      "label": "non-default oauth flow, default dir",
+      "input_base": "LingXi",
+      "input_oauth_suffix": "-enterprise",
+      "input_service_suffix": "-credentials",
+      "input_dir_hash": "",
+      "expected_service_name": "LingXi-enterprise-credentials"
+    },
+    {
+      "label": "non-default oauth + non-default dir",
+      "input_base": "LingXi",
+      "input_oauth_suffix": "-enterprise",
+      "input_service_suffix": "-credentials",
+      "input_dir_hash": "-abc12345",
+      "expected_service_name": "LingXi-enterprise-credentials-abc12345"
+    },
+    {
+      "label": "legacy API-key entry (no credentials suffix), default dir",
+      "input_base": "LingXi",
+      "input_oauth_suffix": "",
+      "input_service_suffix": "",
+      "input_dir_hash": "",
+      "expected_service_name": "LingXi"
+    }
+  ]
+}

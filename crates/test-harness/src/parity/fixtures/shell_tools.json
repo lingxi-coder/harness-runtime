@@ -1,0 +1,64 @@
+{
+  "_source": "claude-code/src/tools/{BashTool,PowerShellTool,REPLTool,SleepTool}/* (commit snapshot 2026-03-31)",
+  "_note": "Locked wire identifiers for M4-02 shell tools. Every value here is asserted byte-for-byte by lingxi-core/crates/test-harness/tests/parity_shell_tools.rs against the public constants/strings exported from lingxi-tools. Drift here is the parity-break alarm.",
+  "tool_names": ["Bash", "PowerShell", "REPL", "Sleep"],
+  "bash": {
+    "default_timeout_ms": 120000,
+    "max_timeout_ms": 600000,
+    "shell_paths": {
+      "linux": "/bin/bash",
+      "macos": "/bin/zsh"
+    },
+    "timeout_error_template": "Bash command timed out after {N}ms",
+    "background_response_keys": ["pid", "task_id", "task_output_path"],
+    "telemetry_events": [
+      "tengu_tool_bash_started",
+      "tengu_tool_bash_completed",
+      "tengu_tool_bash_failed",
+      "tengu_tool_bash_timeout"
+    ]
+  },
+  "powershell": {
+    "default_timeout_ms": 120000,
+    "max_timeout_ms": 600000,
+    "executables": {
+      "windows": "powershell.exe",
+      "unix": "pwsh"
+    },
+    "missing_pwsh_error_substring": "pwsh not found in PATH",
+    "telemetry_events": [
+      "tengu_tool_powershell_started",
+      "tengu_tool_powershell_completed",
+      "tengu_tool_powershell_failed"
+    ]
+  },
+  "repl": {
+    "default_timeout_ms": 120000,
+    "supported_languages": ["python", "node", "ruby"],
+    "python_exec_unix": "python3",
+    "python_exec_windows": "python.exe",
+    "node_exec": "node",
+    "ruby_exec": "ruby",
+    "telemetry_events": [
+      "tengu_tool_repl_started",
+      "tengu_tool_repl_completed",
+      "tengu_tool_repl_failed"
+    ]
+  },
+  "sleep": {
+    "max_duration_ms": 600000,
+    "telemetry_events": [
+      "tengu_tool_sleep_started",
+      "tengu_tool_sleep_completed",
+      "tengu_tool_sleep_failed"
+    ]
+  },
+  "ansi_strip": {
+    "regex_literal": "\\x1b\\[[0-9;]*[a-zA-Z]"
+  },
+  "output_truncation": {
+    "max_length": 30000,
+    "suffix": "\n\n... [{N} lines truncated] ..."
+  },
+  "sandbox_refusal_windows_literal": "sandbox not supported on this platform"
+}

@@ -1,0 +1,21 @@
+{
+  "type": "ask_user_question",
+  "request": {
+    "request_id": 9,
+    "questions": [
+      {
+        "question": "Which database should the app use?",
+        "header": "Storage",
+        "options": [
+          {
+            "label": "SQLite",
+            "description": "Local, file-backed, zero setup.",
+            "preview": "app.sqlite"
+          }
+        ],
+        "multi_select": false
+      }
+    ],
+    "timeout_secs": 120
+  }
+}

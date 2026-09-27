@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "apps": [
+    {
+      "id": "aaaa1111",
+      "name": "Fixture Ready",
+      "brief": "a ready fixture app with a full runtime record",
+      "gitEnabled": true,
+      "createdAtMs": 1753000000000,
+      "updatedAtMs": 1753000000100,
+      "workflowState": "ready",
+      "conversationId": "conv-fixture-1",
+      "workspaceRel": "apps/aaaa1111/workspace",
+      "scaffolded": true
+    },
+    {
+      "id": "bbbb2222",
+      "name": "Fixture Minimal",
+      "brief": "a minimal fixture app without git",
+      "gitEnabled": false,
+      "createdAtMs": 1753000000000,
+      "updatedAtMs": 1753000000000,
+      "workflowState": "draft",
+      "workspaceRel": "apps/bbbb2222/workspace",
+      "scaffolded": true
+    }
+  ]
+}

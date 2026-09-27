@@ -1,0 +1,16 @@
+{
+  "type": "app_event",
+  "event": {
+    "type": "verification_summary_changed",
+    "app_id": "habits-1a2b",
+    "publication_state": "published_verified",
+    "mcp_verification": {
+      "status": "passed",
+      "summary": "Catalog and MCP verification are current."
+    },
+    "ui_verification": {
+      "status": "unverified",
+      "summary": "UI verification has not run on this build."
+    }
+  }
+}

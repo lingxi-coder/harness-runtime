@@ -1,0 +1,14 @@
+{
+  "_source": "claude-code/src/services/mcp/client.ts: createMcpClient (lines 985-1002) — clientInfo + capabilities literals",
+  "_note": "Wire identity: clientInfo.name='lingxi', title='LingXi', websiteUrl='https://claude.com/claude-code'. Version is CARGO_PKG_VERSION of the lingxi-mcp crate at compile time (the runtime check verifies this rather than baking a number into the fixture). capabilities.roots is {listChanged:true} (parity 2.1.207 J7n(): the client advertises it will send notifications/roots/list_changed when its working-dir set changes); capabilities.elicitation is a LITERAL empty object (Java MCP SDK rejects {form:{},url:{}}).",
+  "expected_protocol_version": "2025-11-25",
+  "expected_client_info": {
+    "name": "lingxi",
+    "title": "LingXi",
+    "websiteUrl": "https://claude.com/claude-code"
+  },
+  "expected_capabilities_shape": {
+    "roots": { "listChanged": true },
+    "elicitation": {}
+  }
+}

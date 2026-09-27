@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "family": "phaser_2d",
+  "sourceFamily": "phaser-2d",
+  "revision": 4,
+  "files": [
+    {
+      "path": ".gitignore",
+      "bytes": 174,
+      "sha256": "4df5a015fff472de65883adb871fd5d88dccaaa7127125dbf4a6cd413b7e2e14"
+    },
+    {
+      "path": "package.json",
+      "bytes": 595,
+      "sha256": "b7c94ec9422b3c74e37f194ae714335074b1547767e65060354ecd10384c0b78"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "bytes": 41782,
+      "sha256": "d7361a1cd59a5a9ac183b967cde2952a3e9583d39e0c9ac4b94e76b0f86e97c2"
+    },
+    {
+      "path": "pnpm-workspace.yaml",
+      "bytes": 250,
+      "sha256": "15f0560df0683938cbbccfd0e18ff04b5ead8ac23b476c8fabcf943039e85e19"
+    },
+    {
+      "path": "jsconfig.json",
+      "bytes": 178,
+      "sha256": "16483bf217fb5eb6832af370f522d7e56b19f18f6915f52fa5cdad7068ab6c29"
+    },
+    {
+      "path": "index.html",
+      "bytes": 814,
+      "sha256": "476553be9e767a2ad9f13d24674013b28d5b281844c7bcfadffd1ef410545e00"
+    },
+    {
+      "path": "vite.config.mjs",
+      "bytes": 2765,
+      "sha256": "775b971bab24f1fdab2bd5cf495c9494a01d3fd547bf107df6defb3524e7690c"
+    },
+    {
+      "path": ".lingxi/source-policy.json",
+      "bytes": 819,
+      "sha256": "30166b86b60c448e6b2e5756a69ab6988d5d90d483961e85aef9f10aedfef42f"
+    },
+    {
+      "path": "lib/lingxi-bridge.js",
+      "bytes": 12163,
+      "sha256": "d51c409f65064466ea71d50266aa6fe458a28f4922443d455c4b0898bfae8743"
+    },
+    {
+      "path": "lib/device-context.js",
+      "bytes": 77,
+      "sha256": "0b7c1e0c0b8a7e8f2223a9fc15980c66940962b3b1d095196655aa1777499f97"
+    },
+    {
+      "path": "lib/platform-adapter.js",
+      "bytes": 2829,
+      "sha256": "c83f0860ffbf63866a3e90089033b8ccb234a9f55009bb74671b9d9ff26d5a03"
+    },
+    {
+      "path": "lib/lingxi-provider.jsx",
+      "bytes": 6242,
+      "sha256": "bc4521f4262ee05e3704c6487b3785ac4d4b955c19f8b3697d0f5332a4921157"
+    },
+    {
+      "path": "lib/frame-loop.js",
+      "bytes": 4421,
+      "sha256": "2993f78d017c73c607ca753e7da5eaadcde21d5fa50ee4139b9ac57703c8a0a3"
+    },
+    {
+      "path": "lib/phaser-runtime.js",
+      "bytes": 2754,
+      "sha256": "ec754828471ae9ec35560e53d5b79ee4cfaf29d2b7ef1717944e38bb39f9e80c"
+    },
+    {
+      "path": "styles/foundation.css",
+      "bytes": 3061,
+      "sha256": "c2054e4a26b31d8a9cdd9099b8ae98e3c3754a1f1c3c9b3fa1fcdce0036f7636"
+    },
+    {
+      "path": "app/main.jsx",
+      "bytes": 455,
+      "sha256": "9ac1ad859f25459f796429f34f432c753e8c9d5938505b9105db1d32e80a4ef0"
+    },
+    {
+      "path": "app/app.jsx",
+      "bytes": 267,
+      "sha256": "7c844b690a08200b82d6dc7e495e1500a59971e8b71500f55f4a7eeaa186c9ac"
+    },
+    {
+      "path": "app/providers.jsx",
+      "bytes": 1116,
+      "sha256": "adece99fb309c8e1c5b1587b0b816e8d221b259918da11636658254bab46ab29"
+    },
+    {
+      "path": "app/error-boundary.jsx",
+      "bytes": 2195,
+      "sha256": "4b4e6fb48ba16a90930adefafca5e7cdd0f09aca10987d48ffa21cbe217ca2a2"
+    },
+    {
+      "path": "app/globals.css",
+      "bytes": 710,
+      "sha256": "489e0778c470e711264d4bd53dac2247e9d0cd5e213c6bda14468ef988231dca"
+    },
+    {
+      "path": "app/screens/game-screen.jsx",
+      "bytes": 6747,
+      "sha256": "6967f5f425b8d1164d10cc47a6b189f5b90210afa4342d76cf3a77b151f4c32a"
+    },
+    {
+      "path": "src/stores/game-store.js",
+      "bytes": 1135,
+      "sha256": "f99e9d74e20652ec05ec2688defd4643c319524edc226c77f792cb6ca2417f9d"
+    },
+    {
+      "path": "public/.gitkeep",
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    }
+  ],
+  "totalBytes": 91550
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ionic React Local App"
+  short_description: "Build Local Apps on the pinned Ionic stack"
+  default_prompt: "Use $ionic-react-local-app to implement this LingXi local app inside the pinned Ionic React scaffold and bridge constraints."

@@ -1,0 +1,20 @@
+{
+  "request_id": 42,
+  "reason": "automate chat",
+  "apps": [
+    {
+      "label": "Slack"
+    },
+    {
+      "label": "Chrome"
+    }
+  ],
+  "tier": "full",
+  "clipboard_read": false,
+  "clipboard_write": false,
+  "system_key_combos": false,
+  "tcc_state": {
+    "accessibility": true,
+    "screen_recording": false
+  }
+}

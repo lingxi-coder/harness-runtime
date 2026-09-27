@@ -1,0 +1,38 @@
+# One task, asked two ways. Everything else is shared so the two runs are
+# paired and their difference is attributable to the arm, not to the setup.
+name: patch-atomic-config-write
+tags:
+  - patch
+runs: 2
+max_turns: 6
+arms:
+  - label: single
+  - label: fusion
+    prompt: |
+      /fusion --models anthropic:claude-opus-5,openai:gpt-5.4,google:gemini-3-pro
+      This writer must survive a crash: after any crash the file on disk must be either the
+      previous complete version or the new complete version, never a partial one. Propose the
+      change.
+
+      ```rust
+      pub fn write_config(path: &Path, config: &Config) -> io::Result<()> {
+          let mut file = File::create(path)?;
+          file.write_all(&serde_json::to_vec(config)?)?;
+          Ok(())
+      }
+      ```
+    settings:
+      fusion:
+        enabled: true
+prompt: |
+  This writer must survive a crash: after any crash the file on disk must be either the
+  previous complete version or the new complete version, never a partial one. Propose the
+  change.
+
+  ```rust
+  pub fn write_config(path: &Path, config: &Config) -> io::Result<()> {
+      let mut file = File::create(path)?;
+      file.write_all(&serde_json::to_vec(config)?)?;
+      Ok(())
+  }
+  ```

@@ -1,0 +1,99 @@
+{
+  "version": "2.1.263",
+  "binary_sha256": "ef5d2909c8af49f31ab6d5487e90316777bc2fac170adfe8160716caa8aaf4f9",
+  "agent_descriptions": {
+    "name": "Name for the spawned agent. Makes it addressable via SendMessage({to: name}) while running.",
+    "team_name": "Deprecated; ignored. The session has a single implicit team.",
+    "mode": "Deprecated; ignored. Subagents inherit the parent session's permission mode; agent-definition frontmatter may override it.",
+    "run_in_background": "Agents run in the background by default; you will be notified when one completes. Set to false only when your very next action depends on this agent's result and nothing else could usefully happen while it runs — otherwise leave it in the background so the user can hand you other work."
+  },
+  "agent_errors": [
+    "Teammates cannot spawn other teammates — the team roster is flat. To spawn a subagent instead, omit the `name` parameter.",
+    "In-process teammates cannot spawn background agents. Use run_in_background=false for synchronous subagents."
+  ],
+  "oracle_excerpts": [
+    {
+      "chunk": "src_160988549.js",
+      "chunk_sha256": "8a46eeba9de2b74fa4af25cf31418abdfd68bf491a0e9cc1e675b68f5143eb1c",
+      "utf8_byte_offset": 3511030,
+      "source": "TGo=m(()=>{let e=c({name:s().regex(Kir,{message:\"name must start with a letter or digit and contain only letters, digits, underscores, or hyphens (max 64 chars)\"}).refine((t)=>t!==cp,{message:`\"${cp}\" is reserved \\u2014 SendMessage routes it to the main conversation`}).refine((t)=>!l0(t),{message:'name must not be a reserved recipient (\"main\" or \"team-lead\", in any spelling) or have the shape of an agent id \\u2014 those already address an agent directly'}).optional().describe(\"Name for the spawned agent. Makes it addressable via SendMessage({to: name}) while running.\"),team_name:s().optional().describe(\"Deprecated; ignored. The session has a single implicit team.\"),mode:Blr().optional().describe(\"Deprecated; ignored. Subagents inherit the parent session's permission mode; agent-definition frontmatter may override it.\")});return EGo().merge(e).extend({isolation:X([\"worktree\",\"remote\"]).optional().describe('Isolation mode. \"worktree\" creates a temporary git worktree so the agent works on an isolated copy of the repo. \"remote\" launches the agent in a remote cloud environment (always runs in background; availability is gated).'),cwd:s().optional().describe('Absolute path to run the agent in. Overrides the working directory for all filesystem and shell operations within this agent. Mutually exclusive with isolation: \"worktree\".')})}),",
+      "binary_byte_offset": 164499579
+    },
+    {
+      "chunk": "src_174624321.js",
+      "chunk_sha256": "ceb751a60c60c9ce0fafd61a5c5cba7ed5c1cdb4ab30c4efa4f3a3c33dbaa511",
+      "utf8_byte_offset": 22166,
+      "source": "function _s(e){return c({to:s().regex(Te,\"must be a single-line recipient name or address\").regex(Ms,`recipient longer than any listed name or address (max ${us} characters)`).describe(e?`Recipient: a name from ${$i} (append its \" [ref]\" only when a listing or an error shows one), a teammate name, \"main\", or a background agent's agentId`:\"Recipient: teammate name\"),summary:s().max(_Ce).optional().describe(e?`A 5-10 word label for your own transcript row (not transmitted \\u2014 the recipient previews the first line of \\`message\\`). Truncated to ${_Ce} characters rather than rejected.`:`A 5-10 word summary shown as a one-line preview in the UI. Defaults to the first line of a plain-text message; longer summaries are truncated to ${_Ce} characters rather than rejected.`),message:e?Ke(ys).default(bs):Ke(),...e&&{notify_when_idle:NE(O().optional()).describe(\"Ask a session ON THIS MACHINE to send you ONE notice when it next goes idle (finishes its turn with nothing queued) or exits \\u2014 opt-in, one-shot, no polling. With a message: deliver it now AND subscribe. Without a message (omit it): a pure subscription that costs the other session nothing.\")}})}var ws=m(()=>_s(!1)),Ss=m(()=>_s(!0)),Ps=m(()=>ws().extend({message:Re()})),Us=m(()=>Ss().extend({message:Re(ys).default(bs)}));function Se(){if(Mo())return zr()?Ss():Us();return zr()?ws():Ps()}",
+      "binary_byte_offset": 174646487
+    },
+    {
+      "chunk": "src_160357157.js",
+      "chunk_sha256": "204a091f2469909f47d98d032f95fadc33024ef3b106b441e264eba422644059",
+      "utf8_byte_offset": 36504,
+      "source": "[\"shutdown_request\",{requestId:{kind:\"request-id\"},from:{kind:\"envelope-pinned-id\"},reason:{kind:\"body\",bound:kC},timestamp:{kind:\"timestamp\"}}],[\"shutdown_approved\",{requestId:{kind:\"request-id\"},from:{kind:\"envelope-pinned-id\"},timestamp:{kind:\"timestamp\"},paneId:{kind:\"pane-id\"},backendType:{kind:\"backend-type\"}}],[\"shutdown_rejected\",{requestId:{kind:\"request-id\"},from:{kind:\"envelope-pinned-id\"},reason:{kind:\"body\",bound:kC},timestamp:{kind:\"timestamp\"}}],",
+      "binary_byte_offset": 160393661
+    },
+    {
+      "chunk": "src_183125516.js",
+      "chunk_sha256": "1ce0cadfcc46c31a5d375e8330fe867cd7a09f098a8c7860eed0cc60a9889038",
+      "utf8_byte_offset": 2450,
+      "source": "var l=\"session\";function c(t){return`${l}-${t.slice(0,8)}`}function p(){if(TYt()===void 0){let t=process.env.CLAUDE_INTERNAL_ASSISTANT_TEAM_NAME||null;delete process.env.CLAUDE_INTERNAL_ASSISTANT_TEAM_NAME,QLn(t)}return TYt()??null}async function x(t,n){let i=t?.existingTeamName||p(),e=i??c(K()),a=ix(fs,e),m=ioe(e);if(!(i?await Pf(e,n):null)){let r={name:e,createdAt:Date.now(),leadAgentId:a,leadSessionId:K(),members:[{agentId:a,name:fs,agentType:fs,joinedAt:Date.now(),tmuxPaneId:\"leader\",cwd:he(),subscriptions:[],backendType:\"in-process\"}]};await LGt(e,r,n).catch((T)=>DGt(e,T))}TZn(e);let o=K();if(e!==o)await d(Wk(o),Wk(e)).catch(()=>{});await CXe(e,n),Wbn(e);let s=ef[0];return{teamContext:{teamName:e,teamFilePath:m,leadAgentId:a,teammates:{[a]:{name:fs,agentType:fs,color:s,tmuxSessionName:\"in-process\",tmuxPaneId:\"leader\",cwd:he(),spawnedAt:Date.now()}}},teammateColors:{assignments:new Map([[a,s]]),index:1}}}export{x as initializeSessionTeam};\n",
+      "binary_byte_offset": 183127966
+    },
+    {
+      "chunk": "src_160357157.js",
+      "chunk_sha256": "204a091f2469909f47d98d032f95fadc33024ef3b106b441e264eba422644059",
+      "utf8_byte_offset": 11433,
+      "binary_byte_offset": 160368590,
+      "source": "function zE(){if(a.CLAUDE_CODE_TASK_LIST_ID)return a.CLAUDE_CODE_TASK_LIST_ID;let e=iS();if(e)return e.teamName;return ii()||ds().taskList.leaderTeamName||K()}"
+    },
+    {
+      "chunk": "src_159610765.js",
+      "chunk_sha256": "69b3336c6312a3cf5ae94429f1fa2d34a015dfaa57d4eab2ff47455a8bd17f02",
+      "utf8_byte_offset": 2182,
+      "binary_byte_offset": 159612947,
+      "source": "class d{updated=Le();leaderTeamName=void 0;reset(){if(this.leaderTeamName===void 0)return;this.leaderTeamName=void 0;try{this.updated.emit()}catch{}}}class l{inbound=new n;receipts=new s;outbound=new o;ingress=new r;swarmPermissions=new t;mailbox=new i;taskList=new d}var m=new j(()=>new l);function ds(){return m.of(B().host)}\n"
+    },
+    {
+      "chunk": "src_160988549.js",
+      "chunk_sha256": "8a46eeba9de2b74fa4af25cf31418abdfd68bf491a0e9cc1e675b68f5143eb1c",
+      "utf8_byte_offset": 3539241,
+      "binary_byte_offset": 164527790,
+      "source": "text:`Spawned successfully. (This tool result is internal metadata \\u2014 never quote or paste any part of it, including the ID below, into a user-facing reply.)\nagent_id: ${o.teammate_id}\nname: ${o.name}\nThe agent is now running and will receive instructions via mailbox.`"
+    },
+    {
+      "chunk": "src_160355091.js",
+      "chunk_sha256": "1d152b1a5bd3b322ea8f02f7601e991b84d4ef541886f5eb7e827089cdc95cf0",
+      "utf8_byte_offset": 663,
+      "binary_byte_offset": 160355754,
+      "source": "var KE={red:\"red_FOR_SUBAGENTS_ONLY\",blue:\"blue_FOR_SUBAGENTS_ONLY\",green:\"green_FOR_SUBAGENTS_ONLY\",yellow:\"yellow_FOR_SUBAGENTS_ONLY\",purple:\"purple_FOR_SUBAGENTS_ONLY\",orange:\"orange_FOR_SUBAGENTS_ONLY\",pink:\"pink_FOR_SUBAGENTS_ONLY\",cyan:\"cyan_FOR_SUBAGENTS_ONLY\"},ef=Object.keys(KE);"
+    },
+    {
+      "chunk": "src_156627426.js",
+      "chunk_sha256": "3e2b2351d20b87a7fdf8acbeff839df94172cd77e99e7065d41b80c712e1b494",
+      "utf8_byte_offset": 1200,
+      "binary_byte_offset": 156628626,
+      "source": "var Xe=\"[\\\\w-]{1,63}\",Ye=new RegExp(`^${Xe}$`),bn=/^[\\w-]{1,128}$/;function TXt(e){return bn.test(e)}var Cn=new RegExp(`^a(?:${Xe}-)?[0-9a-f]{16}$`);function Mb(e){return Cn.test(e)?e:null}"
+    },
+    {
+      "chunk": "src_158095655.js",
+      "chunk_sha256": "e3e0b34454c00c8bc912296c5e55c4a217d80a8b6bebd0f4420c8995c0622e24",
+      "utf8_byte_offset": 660182,
+      "binary_byte_offset": 158755837,
+      "source": "function yr(e){return e.normalize(\"NFKC\").replace(/[\\p{Cc}\\p{Cf}]/gu,(t)=>/\\s/.test(t)?t:\"\").trim().toLowerCase().replace(/\\s+/g,\"-\")}function tge(e){return typeof e!==\"string\"||l0(e)}function iRe(e,t){return e.name===fs&&t!==void 0&&e.agentId===t}function SU(e){let t=e.teamContext;if(t?.leadAgentId&&t.isLeader!==!1)return t.leadAgentId;let r=ii(t);return r?ix(fs,r):void 0}function nge(e,t){return e.members.filter((r)=>iRe(r,t)||!tge(r.name))}function l0(e){let t=yr(e);return t===cp||t===fs||Mb(t)!==null}"
+    },
+    {
+      "chunk": "src_160357157.js",
+      "chunk_sha256": "204a091f2469909f47d98d032f95fadc33024ef3b106b441e264eba422644059",
+      "utf8_byte_offset": 44519,
+      "binary_byte_offset": 160401676,
+      "source": "function twn(e){return{type:\"shutdown_request\",requestId:e.requestId,from:e.from,reason:e.reason,timestamp:new Date().toISOString()}}function nwn(e){return{type:\"shutdown_approved\",requestId:e.requestId,from:e.from,timestamp:new Date().toISOString(),paneId:e.paneId,backendType:e.backendType}}function rwn(e){return{type:\"shutdown_rejected\",requestId:e.requestId,from:e.from,reason:e.reason,timestamp:new Date().toISOString()}}"
+    }
+  ],
+  "implicit_team_name_examples": [
+    {
+      "session_id": "12345678-1234-1234-1234-123456789abc",
+      "team_name": "session-12345678"
+    }
+  ]
+}

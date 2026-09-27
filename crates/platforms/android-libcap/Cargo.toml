@@ -1,0 +1,19 @@
+# Static libcap for Android targets — a build-only crate: it compiles the
+# vendored libcap sources (third_party/libcap) with the NDK toolchain and
+# emits link flags; the lib.rs is empty. libcap is BSD-3-Clause OR GPL-2.0
+# (we use the BSD option; see OSS notices).
+[package]
+name = "platform-android-libcap"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+links = "cap"
+
+[build-dependencies]
+# `cc` is not in [workspace.dependencies]; declared directly here.
+cc = "1"
+
+[lints]
+workspace = true

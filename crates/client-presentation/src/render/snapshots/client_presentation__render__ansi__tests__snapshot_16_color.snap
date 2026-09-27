@@ -1,0 +1,30 @@
+---
+source: crates/tui/src/render/ansi.rs
+expression: "parse_ansi(\"\\x1b[31mERR\\x1b[0m\\x1b[1mB\\x1b[0m tail\")"
+---
+- spans:
+    - text: ERR
+      style:
+        fg:
+          Named: Red
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: B
+      style:
+        fg: Default
+        bg: Default
+        bold: true
+        italic: false
+        underline: false
+      kind: Text
+    - text: " tail"
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text

@@ -1,0 +1,55 @@
+---
+source: crates/tui/src/render/markdown.rs
+expression: "render(\"1. first\\n2. second\\n3. third\", &theme())"
+---
+- spans:
+    - text: "1. "
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: first
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+- spans:
+    - text: "2. "
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: second
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+- spans:
+    - text: "3. "
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: third
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text

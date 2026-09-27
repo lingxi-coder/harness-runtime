@@ -1,0 +1,7 @@
+{
+  "type": "error",
+  "kind": {
+    "type": "transport"
+  },
+  "message": "connection reset"
+}

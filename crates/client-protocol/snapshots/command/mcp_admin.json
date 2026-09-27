@@ -1,0 +1,9 @@
+{
+  "type": "mcp_admin",
+  "command": {
+    "action": "save_server",
+    "operation_id": 32,
+    "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "payload_json": "{\"scope\":\"project\",\"name\":\"filesystem\",\"config\":{\"command\":\"npx\",\"args\":[\"-y\",\"@modelcontextprotocol/server-filesystem\"]}}"
+  }
+}

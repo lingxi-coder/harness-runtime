@@ -1,0 +1,8 @@
+{
+  "type": "model_list",
+  "models": [
+    "anthropic/claude-opus-4-8",
+    "openai/gpt-5.5"
+  ],
+  "current": "anthropic/claude-opus-4-8"
+}

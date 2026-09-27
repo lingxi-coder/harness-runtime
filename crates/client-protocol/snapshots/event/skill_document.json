@@ -1,0 +1,4 @@
+{
+  "type": "skill_document",
+  "document_json": "{\"id\":\"user:greet\",\"content\":\"---\\ndescription: greet\\n---\\n\"}"
+}

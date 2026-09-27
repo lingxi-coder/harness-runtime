@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "feature": "local-apps",
+  "kit": "app-runtime-spike",
+  "phase": 0,
+  "target_abi": "arm64-v8a",
+  "device_network": "offline — every external artifact is fetched on the Mac and pushed over adb",
+  "rootfs": {
+    "distribution": "Alpine Linux",
+    "version": "3.21.3",
+    "branch": "v3.21",
+    "architecture": "aarch64",
+    "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.3-aarch64.tar.gz",
+    "sha256": "ead8a4b37867bd19e7417dd078748e2312c0aea364403d96758d63ea8ff261ea",
+    "pin_source": "docs/mobile-linux/mobile-linux-pins.json (rootfs.archives.arm64-v8a)"
+  },
+  "proot": {
+    "source": "built locally from the pinned OpenMinis PRoot fork — never downloaded",
+    "build_command": "clients/android/scripts/build-mobile-linux-native.sh --variant <play|direct>",
+    "artifacts": [
+      "clients/android/app/src/<variant>/jniLibs/arm64-v8a/libproot.so",
+      "clients/android/app/src/<variant>/jniLibs/arm64-v8a/libproot-loader.so"
+    ],
+    "pin_source": "docs/mobile-linux/mobile-linux-pins.json (components.proot, components.openminis)"
+  },
+  "node_runtime": {
+    "provider": "Alpine apk packages, branch v3.21, architecture aarch64",
+    "url_template": "https://dl-cdn.alpinelinux.org/alpine/v3.21/<repo>/aarch64/<name>-<version>.apk",
+    "docker_resolver_image": "alpine:3.21.3",
+    "docker_resolver_image_digest": "REPLACE_WITH_REAL_DIGEST",
+    "resolve_closure_command": "docker run --rm --platform linux/arm64 -v <apks-dir>:/out alpine:3.21.3 sh -c 'apk update -q && apk fetch --recursive --output /out nodejs'",
+    "forbidden_package_patterns": [
+      "npm-*",
+      "nodejs-npm-*",
+      "corepack-*",
+      "yarn-*",
+      "pnpm-*"
+    ],
+    "apk_closure_note": "The authoritative closure is whatever `apk fetch --recursive nodejs` returns at pin time (nodejs plus its shared-library dependencies). After the first `stage-spike.sh --step fetch` + `--step verify` run, paste the generated build/staging/spike-pins.candidate.json apk_closure array here verbatim.",
+    "apk_closure": [
+      {
+        "file": "REPLACE_WITH_REAL_FILENAME.apk",
+        "sha256": "REPLACE_WITH_REAL_SHA256"
+      }
+    ]
+  },
+  "next_template": {
+    "template_path": "docs/mobile-linux/app-runtime-spike/template",
+    "next_semver_range": "^16.0.0",
+    "react_semver_range": "^19.0.0",
+    "resolved_next_version": "REPLACE_WITH_REAL_VERSION",
+    "lockfile": "template/package-lock.json — commit it after the first stage run; its npm sha512 integrity entries are the per-package pins for the whole node_modules tree",
+    "registry": "https://registry.npmjs.org/",
+    "swc_native_binding": {
+      "package": "@next/swc-linux-arm64-musl",
+      "version_rule": "must equal resolved_next_version exactly (Next.js refuses mismatched native bindings)",
+      "version": "REPLACE_WITH_REAL_VERSION",
+      "url_template": "https://registry.npmjs.org/@next/swc-linux-arm64-musl/-/swc-linux-arm64-musl-<version>.tgz",
+      "sha256": "REPLACE_WITH_REAL_SHA256"
+    }
+  }
+}

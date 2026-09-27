@@ -1,0 +1,41 @@
+---
+source: tui/src/render/markdown.rs
+assertion_line: 758
+expression: "render(\"> quoted line\\n> second\", &theme())"
+---
+- spans:
+    - text: "▎ "
+      style:
+        fg:
+          Named: BrightBlack
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: quoted line
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: true
+        underline: false
+      kind: Text
+- spans:
+    - text: "▎ "
+      style:
+        fg:
+          Named: BrightBlack
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: second
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: true
+        underline: false
+      kind: Text

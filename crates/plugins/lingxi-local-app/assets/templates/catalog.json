@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 2,
+  "toolchainKey": "pnpm@12.5.1/node@26.9.0",
+  "templates": [
+    {
+      "templateId": "react-dom-r4",
+      "family": "react_dom",
+      "revision": 4,
+      "surface": "dom",
+      "summary": "DOM app shell with Ionic React routing",
+      "recommendedFor": [
+        "forms",
+        "data pages",
+        "routed navigation"
+      ],
+      "notFor": [
+        "custom game loop"
+      ],
+      "contractSha256": "04d33ddb7b05787e65cfaa476a1510c97d599a571c0e9e41518e73b30faa5ef0",
+      "inventorySha256": "6fbda4d4bdc84a514c19c3d020c7d4a930f99c926adebd658b9ba64562473565",
+      "mcpDefaultEnabled": false,
+      "mcpSuggestions": [
+        "Post-create exposure: start with a read-only search or lookup tool over the app's existing collections.",
+        "Post-create exposure: render structuredContent in app/mcp-widget before adding mutating tools.",
+        "Post-create exposure: use ui/message for follow-up prompts instead of encoding host-specific bridge calls."
+      ],
+      "available": true
+    },
+    {
+      "templateId": "canvas-2d-r4",
+      "family": "canvas_2d",
+      "revision": 4,
+      "surface": "canvas",
+      "summary": "Whole-surface 2D canvas runtime with a bounded frame loop",
+      "recommendedFor": [
+        "2D visualization",
+        "custom canvas",
+        "single-surface interaction"
+      ],
+      "notFor": [
+        "ordinary forms"
+      ],
+      "contractSha256": "9d67bf7d72da635a8c2ace4f8000d065977c95a55dc6ab47b695b9ce84e4a3ff",
+      "inventorySha256": "cc46172b07b84debf25fc06a3b7a7fbcbde40a2db8f52cfe56d946ee01ed88d2",
+      "mcpDefaultEnabled": false,
+      "mcpSuggestions": [
+        "Post-create exposure: expose read-only scene or frame state before adding write paths.",
+        "Post-create exposure: use the widget to inspect structuredContent snapshots alongside the canvas runtime.",
+        "Post-create exposure: keep tool contracts semantic and app-scoped; do not encode transport details."
+      ],
+      "available": true
+    },
+    {
+      "templateId": "three-3d-r4",
+      "family": "three_3d",
+      "revision": 4,
+      "surface": "canvas",
+      "summary": "Three.js 3D scene runtime with lifecycle helpers",
+      "recommendedFor": [
+        "3D scene",
+        "WebGL visualization",
+        "camera interaction"
+      ],
+      "notFor": [
+        "ordinary forms"
+      ],
+      "contractSha256": "65c09a0c41903a1f2e5b9a948b93f10dcd4483f4b5be44f2bb65c92dac94f673",
+      "inventorySha256": "a591bceb4d3f1b07ac189a1ea30b053466fab1b9335321585d3c48bfb15b8b34",
+      "mcpDefaultEnabled": false,
+      "mcpSuggestions": [
+        "Post-create exposure: expose semantic scene queries such as selected object, camera, or asset inspection.",
+        "Post-create exposure: use structuredContent for tool results and let the widget render comparison views.",
+        "Post-create exposure: keep the widget bridge MCP-first, with no ChatGPT-only fallback path."
+      ],
+      "available": true
+    },
+    {
+      "templateId": "phaser-2d-r4",
+      "family": "phaser_2d",
+      "revision": 4,
+      "surface": "canvas",
+      "summary": "Scene-based 2D game runtime with sprite support",
+      "recommendedFor": [
+        "multi-scene game",
+        "sprites",
+        "tilemap",
+        "collision"
+      ],
+      "notFor": [
+        "ordinary forms",
+        "static data pages"
+      ],
+      "contractSha256": "f238192f55367317ef2330d27cca4032f337805526eaf7646208df50245b28dd",
+      "inventorySha256": "e241d315846dbb5fdac9abbc3251483f0fd74323e3f710262aea58443adc710d",
+      "mcpDefaultEnabled": false,
+      "mcpSuggestions": [
+        "Post-create exposure: start with read-only gameplay state or inventory lookups.",
+        "Post-create exposure: use the widget to inspect structuredContent for debugging and moderation flows.",
+        "Post-create exposure: add mutating tools only after the read-only semantic surface is stable."
+      ],
+      "available": true
+    },
+    {
+      "templateId": "babylon-3d-r4",
+      "family": "babylon_3d",
+      "revision": 4,
+      "surface": "canvas",
+      "summary": "Babylon 3D runtime with glTF and Havok integration (availability gated)",
+      "recommendedFor": [
+        "advanced 3D scene",
+        "glTF",
+        "physics"
+      ],
+      "notFor": [
+        "ordinary forms"
+      ],
+      "contractSha256": "2f63ea6fe3d3032980bcc106cf36a4216c71b7fafa52c724a37acd36201963f5",
+      "inventorySha256": "67120b030d7179ffde3af1953e1617be4940d1e8fc407f11676d48698dbeceaa",
+      "mcpDefaultEnabled": false,
+      "mcpSuggestions": [
+        "Post-create exposure unavailable until Babylon real-device validation is complete."
+      ],
+      "available": false,
+      "availabilityReason": "babylon_3d remains gated pending iOS/Android Babylon + glTF + Havok real-device validation"
+    }
+  ]
+}

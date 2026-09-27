@@ -1,0 +1,94 @@
+[
+  {
+    "cron": "* * * * *",
+    "text": "Every minute"
+  },
+  {
+    "cron": "*/1 * * * *",
+    "text": "Every minute"
+  },
+  {
+    "cron": "*/5 * * * *",
+    "text": "Every 5 minutes"
+  },
+  {
+    "cron": "*/4294967296 * * * *",
+    "text": "Every 4294967296 minutes"
+  },
+  {
+    "cron": "*/1000000000000000000000 * * * *",
+    "text": "Every 1e+21 minutes"
+  },
+  {
+    "cron": "0 * * * *",
+    "text": "Every hour"
+  },
+  {
+    "cron": "7 * * * *",
+    "text": "Every hour at :07"
+  },
+  {
+    "cron": "00 * * * *",
+    "text": "Every hour"
+  },
+  {
+    "cron": "0 */1 * * *",
+    "text": "Every hour"
+  },
+  {
+    "cron": "7 */2 * * *",
+    "text": "Every 2 hours at :07"
+  },
+  {
+    "cron": "0 */4294967296 * * *",
+    "text": "Every 4294967296 hours"
+  },
+  {
+    "cron": "0 0 * * *",
+    "text": "Every day at 12:00 AM"
+  },
+  {
+    "cron": "30 12 * * *",
+    "text": "Every day at 12:30 PM"
+  },
+  {
+    "cron": "59 23 * * *",
+    "text": "Every day at 11:59 PM"
+  },
+  {
+    "cron": "0 9 * * 0",
+    "text": "Every Sunday at 9:00 AM"
+  },
+  {
+    "cron": "0 9 * * 7",
+    "text": "Every Sunday at 9:00 AM"
+  },
+  {
+    "cron": "0 9 * * 6",
+    "text": "Every Saturday at 9:00 AM"
+  },
+  {
+    "cron": "0 9 * * 1-5",
+    "text": "Weekdays at 9:00 AM"
+  },
+  {
+    "cron": "0 9 * * 0,6",
+    "text": "0 9 * * 0,6"
+  },
+  {
+    "cron": "30 14 28 2 *",
+    "text": "30 14 28 2 *"
+  },
+  {
+    "cron": "bad",
+    "text": "bad"
+  },
+  {
+    "cron": "﻿* * * * *﻿",
+    "text": "Every minute"
+  },
+  {
+    "cron": "** * * *",
+    "text": "** * * *"
+  }
+]

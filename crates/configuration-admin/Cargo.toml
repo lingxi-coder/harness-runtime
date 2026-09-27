@@ -1,0 +1,39 @@
+[package]
+name = "configuration-admin"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+branding.workspace = true
+client-protocol = { path = "../client-protocol" }
+client-adapter = { path = "../client-adapter" }
+chrono = { version = "0.4", features = ["serde"] }
+core = { path = "../core" }
+futures.workspace = true
+hooks = { path = "../hooks" }
+mcp = { path = "../mcp" }
+migrations = { path = "../migrations" }
+permission = { path = "../permission" }
+platform-api = { path = "../platform-api" }
+protocol = { path = "../protocol" }
+plugin = { path = "../plugin" }
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+secret = { path = "../secret" }
+skill-api = { path = "../skill-api" }
+serde.workspace = true
+serde_json.workspace = true
+telemetry = { path = "../telemetry" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[lints]
+workspace = true

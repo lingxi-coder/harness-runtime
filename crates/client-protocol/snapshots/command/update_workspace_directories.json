@@ -1,0 +1,8 @@
+{
+  "type": "update_workspace_directories",
+  "destination": "local",
+  "add": [
+    "/tmp/extra"
+  ],
+  "remove": []
+}

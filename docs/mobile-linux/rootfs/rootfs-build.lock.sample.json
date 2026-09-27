@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "alpine": {
+    "version": "3.24.2",
+    "branch": "v3.24",
+    "repositories": [
+      "https://dl-cdn.alpinelinux.org/alpine/v3.24/main",
+      "https://dl-cdn.alpinelinux.org/alpine/v3.24/community"
+    ]
+  },
+  "policy": {
+    "archive_format": "tar.gz",
+    "busybox_applet_strategy": "hardlink",
+    "apk_disabled": false,
+    "interactive_package_install_allowed": true,
+    "forbidden_package_manager_paths": [
+      "/usr/bin/corepack",
+      "/usr/bin/yarn"
+    ],
+    "fixed_primary_packages": [
+      "apk-tools",
+      "busybox",
+      "ca-certificates",
+      "git",
+      "libstdc++",
+      "openssh-client-default",
+      "py3-pip",
+      "py3-virtualenv",
+      "python3"
+    ],
+    "fixed_package_versions": {
+      "ca-certificates": "20260909-r0",
+      "git": "2.54.0-r0",
+      "openssh-client-default": "10.3_p1-r1",
+      "py3-pip": "26.1.2-r0",
+      "py3-virtualenv": "21.3.3-r0",
+      "python3": "3.14.7-r1",
+      "libstdc++": "15.2.0-r5"
+    }
+  },
+  "resolved_packages": [
+    {
+      "name": "apk-tools",
+      "version": "REPLACE_WITH_REAL_VERSION",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "aarch64",
+      "origin": "apk-tools"
+    },
+    {
+      "name": "busybox",
+      "version": "REPLACE_WITH_REAL_VERSION",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "aarch64",
+      "origin": "busybox"
+    },
+    {
+      "name": "git",
+      "version": "2.54.0-r0",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "aarch64",
+      "origin": "git"
+    },
+    {
+      "name": "node-source",
+      "version": "26.9.0",
+      "license": "MIT",
+      "architecture": "aarch64",
+      "origin": "https://nodejs.org/dist/v26.9.0/node-v26.9.0.tar.xz"
+    },
+    {
+      "name": "npm",
+      "version": "12.0.2",
+      "license": "Artistic-2.0",
+      "architecture": "aarch64",
+      "origin": "https://registry.npmjs.org/npm/-/npm-12.0.2.tgz"
+    },
+    {
+      "name": "openssh-client-default",
+      "version": "10.3_p1-r1",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "aarch64",
+      "origin": "openssh"
+    },
+    {
+      "name": "py3-pip",
+      "version": "26.1.2-r0",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "aarch64",
+      "origin": "py3-pip"
+    },
+    {
+      "name": "py3-virtualenv",
+      "version": "21.3.3-r0",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "aarch64",
+      "origin": "py3-virtualenv"
+    },
+    {
+      "name": "python3",
+      "version": "3.14.7-r1",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "aarch64",
+      "origin": "python3"
+    },
+    {
+      "name": "ca-certificates",
+      "version": "20260909-r0",
+      "license": "REPLACE_WITH_REAL_LICENSE",
+      "architecture": "aarch64",
+      "origin": "ca-certificates"
+    },
+    {
+      "name": "typescript-native",
+      "version": "7.0.2",
+      "license": "Apache-2.0",
+      "architecture": "aarch64",
+      "origin": "@typescript/typescript-linux-arm64"
+    },
+    {
+      "name": "pnpm",
+      "version": "12.5.1",
+      "license": "MIT",
+      "architecture": "aarch64",
+      "origin": "https://registry.npmjs.org/pnpm/-/pnpm-12.5.1.tgz"
+    }
+  ]
+}

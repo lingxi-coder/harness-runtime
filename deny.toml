@@ -1,0 +1,104 @@
+# cargo-deny config (schema v2 / cargo-deny >= 0.19). Run by the CI `supply-chain`
+# job's `cargo deny check` step.
+#
+# TOOLCHAIN NOTE: use the workspace Rust 1.94 toolchain for metadata and
+# builds. cargo-deny >= 0.19 is required for CVSS-4.0 advisories.
+#
+# Scope: supply-chain hygiene (licenses / advisories / duplicate versions /
+# sources). The COMPOSITION-ROOT *architectural* dependency rules (design §8.1 —
+# tool independence, platform isolation, apps-are-leaves, API-crate purity) are
+# enforced by `scripts/check-deps.sh`, which runs as a separate CI step and is
+# verifiable offline. Kept deliberately permissive here so supply-chain noise
+# never masks an architectural regression.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+# Vulnerabilities are denied by cargo-deny default; curate explicit ignores here
+# (with justification) if a transitive advisory blocks a release.
+#
+# Most entries below are against PRE-EXISTING transitive dependencies (the
+# TLS / cert-validation stack, `time`, `yaml-rust`, `rustls-pemfile`) — they are
+# curated here so the freshly-fetched RUSTSEC database (which gained these
+# 2025/2026 entries) does not block the supply-chain gate on dependencies this
+# task does not own. The two `uniffi`-introduced entries (`bincode`, `paste`)
+# are explicitly called out below. Each carries the RUSTSEC id; revisit when the
+# owning crates are upgraded.
+ignore = [
+    # `bincode 1.x` flagged unmaintained (2.x is a rewrite). Pulled by
+    # `syntect` (TUI syntax highlighting) and `uniffi_macros`; both pin 1.3.x.
+    "RUSTSEC-2025-0141",
+    # `paste 1.0.15` flagged unmaintained (author archived the repo; no CVE, no
+    # safe upgrade). NEW under F3-00: introduced transitively ONLY via
+    # `uniffi_core 0.28.3 -> uniffi 0.28.3` (proc-macro token pasting in the
+    # generated FFI scaffolding) — there is no other path to it in the lock.
+    # uniffi 0.28.x has no release that drops `paste`, so it cannot be removed
+    # without bumping the entire uniffi family; revisit when the uniffi pin moves.
+    "RUSTSEC-2024-0436",
+    # `rustls-pemfile` unmaintained — folded into `rustls-pki-types`. Transitive
+    # via the TLS stack; no API-affecting change pending here.
+    "RUSTSEC-2025-0134",
+    # `rustls-webpki 0.102.8` cert-validation advisories (CRL authority, URI /
+    # wildcard name-constraint handling, CRL-parse panic). Transitive TLS dep;
+    # tracked for a coordinated TLS-stack bump outside this task.
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+    # `time 0.3.36` parser stack-exhaustion DoS. Transitive; not on a network
+    # parsing path that accepts untrusted format strings here.
+    "RUSTSEC-2026-0009",
+    # `yaml-rust` unmaintained (superseded by `yaml-rust2`). Transitive.
+    "RUSTSEC-2024-0320",
+]
+
+[bans]
+# Duplicate versions are a warning, not a hard failure (the workspace pins many
+# deps but transitive duplicates happen); promote to "deny" in a future hardening.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# Broad permissive allow-list covering the Rust ecosystem the workspace pulls in.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    # MPL-2.0 also covers the `uniffi` family (uniffi / uniffi_core /
+    # uniffi_macros / uniffi_meta / uniffi_checksum_derive), pinned 0.28.3 and
+    # vendored offline for the M10 mobile FFI surface (F3-00). Their additional
+    # transitive licenses — async-compat (Apache-2.0 OR MIT), camino / fs-err /
+    # static_assertions (MIT OR Apache-2.0), bincode (MIT) — are all already
+    # permitted by the entries above, so no new license term is introduced.
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "0BSD",
+    "BSL-1.0",
+    "OpenSSL",
+    # CDLA-Permissive-2.0 is the license of `webpki-roots` (the Mozilla CA root
+    # bundle pulled transitively via the TLS stack). It is an OSI/SPDX-recognized
+    # permissive "data" license with no copyleft obligation — allowed so the
+    # supply-chain gate reflects the actual transitive set.
+    "CDLA-Permissive-2.0",
+]
+
+# Workspace-internal crates (path members such as the `mock_stdio_mcp` test
+# fixture) carry no published license field; they are not distributed, so skip
+# the license check for first-party path crates rather than annotating each.
+private = { ignore = true }
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-git = ["https://github.com/lingxi-coder/llm-client"]
+required-git-spec = "rev"

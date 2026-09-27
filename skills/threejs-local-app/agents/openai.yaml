@@ -1,0 +1,4 @@
+interface:
+  display_name: "Three.js Local App"
+  short_description: "Build disciplined Three.js local app scenes"
+  default_prompt: "Use $threejs-local-app to implement this LingXi local app with Three.js 0.185.1 and explicit lifecycle, input, and disposal rules."

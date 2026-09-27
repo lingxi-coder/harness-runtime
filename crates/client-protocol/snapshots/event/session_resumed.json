@@ -1,0 +1,56 @@
+{
+  "type": "session_resumed",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "mode": "code",
+  "messages": [
+    {
+      "role": "user",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Resume me."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Here is the plan."
+        },
+        {
+          "type": "thinking",
+          "thinking": "I should read the file first.",
+          "signature": "sig_think"
+        },
+        {
+          "type": "redacted_thinking",
+          "data": "REDACTED_BASE64"
+        },
+        {
+          "type": "compact_boundary",
+          "messages_before": 12,
+          "messages_after": 3,
+          "summary": "hidden compact summary"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01",
+          "tool": "Edit",
+          "input_json": "{\"file_path\":\"/tmp/x\",\"old_string\":\"a\",\"new_string\":\"b\"}"
+        },
+        {
+          "type": "tool_result",
+          "id": "toolu_01",
+          "tool": "Edit",
+          "result_json": "{\"ok\":true}",
+          "is_error": false,
+          "old_string": "a",
+          "new_string": "b",
+          "file_path": "/tmp/x"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "type": "task_list",
+  "status_filter": {
+    "type": "running"
+  }
+}

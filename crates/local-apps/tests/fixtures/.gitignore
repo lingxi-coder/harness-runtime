@@ -1,0 +1,8 @@
+# The repo-root .gitignore ignores `.lingxi/` at ANY depth (it is the live
+# per-project state dir). The fixture trees below deliberately CONTAIN
+# `workspace/.lingxi/` documents — they are the checked-in persisted-schema
+# goldens (see ../serde_compat.rs), not live state — so re-include them here.
+# Without this negation, `git add`/`git add -A` silently skips the fixture
+# `app.json` / `design-spec.json` files and the serde_compat tests fail on
+# every fresh clone.
+!**/.lingxi/

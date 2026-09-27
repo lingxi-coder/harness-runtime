@@ -1,0 +1,4 @@
+{
+  "type": "mcp_configuration_snapshot",
+  "snapshot_json": "{\"scopes\":[{\"scope\":\"user\",\"raw_json\":\"{}\"}],\"runtime_servers\":[]}"
+}

@@ -1,0 +1,7 @@
+{
+  "type": "plugin_command",
+  "command": {
+    "type": "get_status",
+    "plugin_id": "lingxi-local-app"
+  }
+}

@@ -1,0 +1,11 @@
+Status:
+  Session:     abc-123
+  Model:       claude-opus-4-7
+  Messages:    17
+  Cost:        $0.0421
+  Tokens:      4500+1200
+  MCP:         1/2 connected
+  Hooks:       3 registered
+  Agents:      5 available
+  Started:     2026-05-26T10:00:00Z
+  Working dir: /repo

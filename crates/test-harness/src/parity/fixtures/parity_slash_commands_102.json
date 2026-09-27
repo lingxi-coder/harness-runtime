@@ -1,0 +1,855 @@
+{
+  "_meta": {
+    "plan": "M5-09",
+    "spec_section": "§3 M5-09 row + §4.6 (Slash commands)",
+    "_claude_code_version": "see CHANGELOG v0.6.0 baseline",
+    "_count_history": "106-name surface (2026-07-14 H-BIN-11 slash-parity pass vs 2.1.207 added the five pre-lock-missed local-jsx commands background/cd/focus/tui/usage-credits, re-locking 101->106; unimplemented stays 47 because all five are target-implemented interactive_only). Prior: 101-name surface (2026-07-04 batch-8 tail added the net-new headless autocompact; the same batch-8 pass added fork/goal/recap/reload-skills/skill-doctor/stop -> 100; prior 94-name surface from the 2026-06-20 slash parity #66/#67). implemented is target runtime status. | 2026-07-25: x402 removed (0 hits in the 2.1.220 oracle binary), re-locking 106->105; /agents description rebranded .claude/agents/ -> .lingxi/agents/ to match this workspace's paths. | 2026-07-25 (b): +auto-mode-setup (2.1.220 WIZARD-06 `{type:\"local\",supportsNonInteractive:!0}`), re-locking 105->106. It is palette-HIDDEN (`get isHidden(){return!_n()}` with `_n()=!isInteractive`), so /help is unchanged at 79 lines. | 2026-07-29: /btw moved from entitlement-gated non-goal to the production isolated side-query handler, re-locking unimplemented 46->45. | 2026-08-13: +workflows, the pre-existing 2.1.205 local-jsx command already implemented by the TUI; shared/headless clients receive a live task-registry snapshot, re-locking 106->107. | 2026-08-20 (cc2.1.238 byte-alignment): one-in/one-out at 107 — `review` DELETED upstream (`name:\"review\"` 2.1.220 = 1 hit, 2.1.238 = 0; the PR-review surface moved into the bundled `code-review` skill), and `subtask` (`{type:\"local-jsx\",name:\"subtask\",argumentHint:\"<task>\"}` @ 2.1.238 296247354) added — it was already implemented by `command_core::subtask` and registered by batch 8, but was missing from BUILTIN_COMMAND_NAMES so it never reached /help or the palette. implemented/unimplemented counts are unchanged (both rows are implemented:true). | 2026-08-20 (SLASH-13): +powerup, re-locking 107->108. `Rkl={type:\"local-jsx\",name:\"powerup\",description:\"Discover Claude Code features through quick interactive lessons\",requires:{ink:!0}}` @ 2.1.238 296124285 is an UNGATED member of the builtin table `ijT()` (no isEnabled, no isHidden), so upstream advertises it in every interactive session; the 2026-07-04 triage had excluded it for having no LingXi body, which is inconsistent with the 39 other body-less rows the port already advertises. implemented:false, so unimplemented_count_lock 45->46. Its SLASH-13 siblings stay out on oracle evidence: scroll-speed needs Ws() (fullscreen renderer, statsig-off by default) and daemon hangs off open:()=>nXe() with nXe(){return!1}. | 2026-09-14 (cc2.1.270): /output-style REINSTATED, re-locking 86->87. It was dropped at 2.1.183 and came back in 2.1.269 as a type:\"local\" command object (QNt) with supportsNonInteractive:!0; the type:\"local-jsx\" \"moved to /config\" sibling is gated on tengu_maple_sundial, which defaults FALSE, so it is dormant and is NOT the shipping surface.",
+    "_current_audit": "2026-09-01: stale 2.1.251 internal command objects plus policy-only /heapdump removed from the 2.1.252 surface; /brief now toggles live mode, /powerup renders/persists lessons, and provider-neutral /ide manages secure local IDE endpoints. Current implementation count is 67 and unimplemented count is 19.",
+    "total_count_lock": 87,
+    "core_count_lock": 19,
+    "unimplemented_count_lock": 19,
+    "stub_literal_template": "{name}: not implemented in v0.6.0 (M5)",
+    "unknown_literal_template": "Unknown command: /{name}"
+  },
+  "commands": [
+    {
+      "name": "add-dir",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires mutable permission AppState and sandbox refresh; headless seam not wired"
+    },
+    {
+      "name": "advisor",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "stub",
+      "rust_status": "faithful_stub",
+      "target_status": "correct_by_design_stub",
+      "requires_tui": false
+    },
+    {
+      "name": "agents",
+      "is_core": true,
+      "implemented": true,
+      "description": "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "auto-mode-setup",
+      "is_core": true,
+      "implemented": true,
+      "description": "Teach auto mode about your environment, plus optional rule tweaks",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "autocompact",
+      "is_core": false,
+      "implemented": true,
+      "description": "Configure the auto-compact window size",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "autofix-pr",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "stub",
+      "rust_status": "faithful_stub",
+      "target_status": "correct_by_design_stub",
+      "requires_tui": false
+    },
+    {
+      "name": "background",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires live bg-daemon detach of the running session (frees the terminal); TUI/daemon seam not wired headlessly"
+    },
+    {
+      "name": "branch",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires transcript fork plus live session resume; headless seam not wired"
+    },
+    {
+      "name": "brief",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "btw",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "headless uses the same isolated side query; TUI owns the reopenable exchange panel"
+    },
+    {
+      "name": "bug",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "cd",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires the live SessionCwd cell swap plus the interactive confirm dialog and tengu_cd_command; headless seam not wired"
+    },
+    {
+      "name": "chrome",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "clear",
+      "is_core": true,
+      "implemented": true,
+      "description": "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "color",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires TUI agent color state"
+    },
+    {
+      "name": "commit",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "prompt",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "commit-push-pr",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "prompt",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "compact",
+      "is_core": true,
+      "implemented": true,
+      "description": "Free up context by summarizing the conversation so far",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "config",
+      "is_core": true,
+      "implemented": true,
+      "description": "Open settings",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "context",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "copy",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires clipboard access to the rendered TUI conversation buffer"
+    },
+    {
+      "name": "desktop",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "diff",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires TUI diff dialog over live message history"
+    },
+    {
+      "name": "doctor",
+      "is_core": true,
+      "implemented": true,
+      "description": "Diagnose and verify your LingXi installation and settings",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "effort",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "exit",
+      "is_core": true,
+      "implemented": true,
+      "description": "Exit the CLI",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "export",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "extra-usage",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "fast",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "remote-or-host",
+      "rust_status": "implemented_handle_bound",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "feedback",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "files",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "focus",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires the fullscreen (alt-screen) renderer LingXi lacks; falls back to the interactive-only notice"
+    },
+    {
+      "name": "fork",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "goal",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "help",
+      "is_core": true,
+      "implemented": true,
+      "description": "Show help and available commands",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "hooks",
+      "is_core": true,
+      "implemented": true,
+      "description": "View hook configurations for tool events",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "ide",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "remote-or-host",
+      "rust_status": "implemented_handle_bound",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "init",
+      "is_core": true,
+      "implemented": true,
+      "description": "Initialize a new LINGXI.md file with codebase documentation",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "init-verifiers",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "prompt",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "insights",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "prompt",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "install",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "install-github-app",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "install-slack-app",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "keybindings",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "login",
+      "is_core": true,
+      "implemented": true,
+      "description": "Sign in with your Anthropic account",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "logout",
+      "is_core": true,
+      "implemented": true,
+      "description": "Sign out from your Anthropic account",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "mcp",
+      "is_core": true,
+      "implemented": true,
+      "description": "Manage MCP servers",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "memory",
+      "is_core": true,
+      "implemented": true,
+      "description": "Edit LINGXI.md files and memory settings",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "mobile",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "model",
+      "is_core": true,
+      "implemented": true,
+      "description": "Set the AI model for LingXi",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "output-style",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented"
+    },
+    {
+      "name": "passes",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "permissions",
+      "is_core": true,
+      "implemented": true,
+      "description": "Manage allow and deny tool permission rules",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "plan",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires mutable permission mode AppState and plan editor state"
+    },
+    {
+      "name": "plugin",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires interactive plugin manager UI"
+    },
+    {
+      "name": "powerup",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "privacy-settings",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires Claude Grove remote API and interactive privacy dialog"
+    },
+    {
+      "name": "rate-limit-options",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "recap",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "release-notes",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "reload-plugins",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires the retained PluginRuntime refresh callback; generic/headless registry has no live plugin runtime"
+    },
+    {
+      "name": "reload-skills",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "remote-env",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "rename",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires live session metadata AppState and optional bridge title sync"
+    },
+    {
+      "name": "resume",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "rewind",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires TUI message selector and checkpoint restore flow"
+    },
+    {
+      "name": "security-review",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "prompt",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "session",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "skill-doctor",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "skills",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "status",
+      "is_core": true,
+      "implemented": true,
+      "description": "Show LingXi status including version, model, account, API connectivity, and tool statuses",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "statusline",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "prompt",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "stickers",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "stop",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "subtask",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "tasks",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires TUI tasks screen and live task state"
+    },
+    {
+      "name": "teleport",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "stub",
+      "rust_status": "faithful_stub",
+      "target_status": "correct_by_design_stub",
+      "requires_tui": false
+    },
+    {
+      "name": "terminal-setup",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "writes terminal or IDE config through an interactive setup flow"
+    },
+    {
+      "name": "theme",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires TUI theme picker and settings state"
+    },
+    {
+      "name": "tui",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "requires a fullscreen (alt-screen) renderer to switch to; LingXi ships a single inline-viewport renderer"
+    },
+    {
+      "name": "ultraplan",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "upgrade",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "usage",
+      "is_core": true,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "implemented_handle_bound",
+      "target_status": "implemented",
+      "requires_tui": false,
+      "description": "Show session cost, plan usage, and what's contributing to your limits"
+    },
+    {
+      "name": "usage-credits",
+      "is_core": false,
+      "implemented": true,
+      "claude_type": "local-jsx",
+      "rust_status": "interactive_only",
+      "target_status": "implemented",
+      "requires_tui": true,
+      "defer_reason": "bnr()-gated credit-purchase UI (local-jsx interactive / local non-interactive); interactive/renderer seam not wired"
+    },
+    {
+      "name": "version",
+      "is_core": true,
+      "implemented": true,
+      "description": "Show this session's version (autoupdate may have a newer one)",
+      "claude_type": "local",
+      "rust_status": "implemented",
+      "target_status": "implemented",
+      "requires_tui": false
+    },
+    {
+      "name": "voice",
+      "is_core": false,
+      "implemented": false,
+      "claude_type": "remote-or-host",
+      "rust_status": "stub",
+      "target_status": "deferred",
+      "requires_tui": false,
+      "defer_reason": "host/remote service dependency deferred"
+    },
+    {
+      "name": "workflows",
+      "is_core": false,
+      "implemented": true,
+      "description": "Browse running and completed workflows",
+      "claude_type": "local-jsx",
+      "rust_status": "implemented_handle_bound",
+      "target_status": "implemented",
+      "requires_tui": false
+    }
+  ]
+}

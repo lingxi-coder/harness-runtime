@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontend Design"
+  short_description: "Define target-specific local app presentation"
+  default_prompt: "Use $frontend-design to produce a target-specific design_spec for this LingXi local app before implementation."

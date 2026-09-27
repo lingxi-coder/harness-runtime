@@ -1,0 +1,5 @@
+{
+  "type": "settings_snapshot",
+  "effective_json": "{\"model\":\"claude-opus-4-7\"}",
+  "provenance_json": "{\"model\":\"user-settings\"}"
+}

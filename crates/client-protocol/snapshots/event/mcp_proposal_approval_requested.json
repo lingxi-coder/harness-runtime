@@ -1,0 +1,81 @@
+{
+  "type": "app_event",
+  "event": {
+    "type": "mcp_proposal_approval_requested",
+    "request": {
+      "requestId": "proposal-0001",
+      "appId": "habits-1a2b",
+      "workflowRunId": "wf-0002",
+      "summary": "Add save_habit and remove summarize_habits",
+      "proposalSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "approvalContractSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "toolSurfaceSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "toolDiffs": [
+        {
+          "kind": "removed",
+          "name": "summarize_habits",
+          "before": {
+            "name": "summarize_habits",
+            "title": "Track habits",
+            "description": "Create or update one habit entry.",
+            "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"date\":{\"type\":\"string\"}},\"required\":[\"date\"]}",
+            "outputSchemaJson": "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"required\":[\"ok\"]}",
+            "annotationsJson": "{\"readOnlyHint\":false}",
+            "executionJson": "{\"taskSupport\":\"optional\"}",
+            "visibleMetaJson": "{\"anthropic/requiresUserInteraction\":true}",
+            "semanticFlowJson": "{\"flowId\":\"local-app-save\",\"source\":\"active\"}",
+            "permissionCeiling": "ask"
+          }
+        },
+        {
+          "kind": "changed",
+          "name": "save_habit",
+          "before": {
+            "name": "save_habit",
+            "title": "Track habits",
+            "description": "Create or update one habit entry.",
+            "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"date\":{\"type\":\"string\"}},\"required\":[\"date\"]}",
+            "outputSchemaJson": "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"required\":[\"ok\"]}",
+            "annotationsJson": "{\"readOnlyHint\":false}",
+            "executionJson": "{\"taskSupport\":\"optional\"}",
+            "visibleMetaJson": "{\"anthropic/requiresUserInteraction\":true}",
+            "semanticFlowJson": "{\"flowId\":\"local-app-save\",\"source\":\"active\"}",
+            "permissionCeiling": "ask"
+          },
+          "after": {
+            "name": "save_habit",
+            "title": "Track habits",
+            "description": "Create or update one completed-habits entry.",
+            "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"date\":{\"type\":\"string\"}},\"required\":[\"date\"]}",
+            "outputSchemaJson": "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"required\":[\"ok\"]}",
+            "annotationsJson": "{\"readOnlyHint\":false}",
+            "executionJson": "{\"taskSupport\":\"optional\"}",
+            "visibleMetaJson": "{\"anthropic/requiresUserInteraction\":true}",
+            "semanticFlowJson": "{\"flowId\":\"local-app-save\",\"source\":\"active\"}",
+            "permissionCeiling": "ask"
+          },
+          "changedFields": [
+            "description",
+            "input_schema",
+            "permission_ceiling"
+          ]
+        }
+      ],
+      "requiredFlowChanges": [
+        "Add a save step for notes."
+      ],
+      "excludedCapabilities": [
+        "calendar"
+      ],
+      "pendingGates": [
+        {
+          "gateId": "ui_runner",
+          "label": "UI runner available",
+          "status": "pending",
+          "available": true,
+          "detail": "Will run after approval."
+        }
+      ]
+    }
+  }
+}

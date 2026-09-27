@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "milestone": "M6-07",
+  "description": "Locks the empty-state literals for /mcp, /hooks and one non-empty sample per command. /agents is the 2.1.198 removed-wizard guidance (M4): same text regardless of configured agents.",
+  "empty_states": {
+    "mcp":    "No MCP servers configured. Use `claude mcp add` to add a server.\n",
+    "hooks":  "No hooks configured\n",
+    "agents": "The /agents wizard has been removed.\n\nAsk Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  • .lingxi/agents/       (this project)\n  • ~/.lingxi/agents/     (all projects)\n\nDocs: https://code.claude.com/docs/en/sub-agents"
+  },
+  "non_empty_sample": {
+    "mcp": {
+      "input": [
+        { "name": "filesystem", "status": "Disconnected", "transport": "stdio" },
+        { "name": "memory",     "status": "Connected",    "transport": "stdio" }
+      ],
+      "output": "MCP servers (2):\n  filesystem  disconnected  stdio\n  memory  connected  stdio\n"
+    },
+    "hooks": {
+      "input": [
+        { "name": "./fmt.sh", "event": "PreToolUse", "matcher": "Write|Edit", "timeout_ms": 30000 }
+      ],
+      "output": "Hooks (1):\n  ./fmt.sh  PreToolUse  30000ms\n"
+    },
+    "agents": {
+      "input": [
+        { "name": "reviewer", "description": "Reviews code", "tools_allowed": ["Read", "Grep"] }
+      ],
+      "output": "The /agents wizard has been removed.\n\nAsk Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  • .lingxi/agents/       (this project)\n  • ~/.lingxi/agents/     (all projects)\n\nDocs: https://code.claude.com/docs/en/sub-agents"
+    }
+  }
+}

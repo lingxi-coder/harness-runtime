@@ -1,0 +1,8 @@
+{
+  "type": "audio_cancel",
+  "identity": {
+    "id": "00000000-0000-4000-8000-000000000007",
+    "generation": 2,
+    "service_epoch": 3
+  }
+}

@@ -1,0 +1,7 @@
+---
+source: crates/tui/src/render/markdown.rs
+expression: "fence_structure(&render(\"text\\n```python\\nprint(1)\", &theme()))"
+---
+[P]text
+
+[C]print[C]([C]1[C])

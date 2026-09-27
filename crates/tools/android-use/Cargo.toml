@@ -1,0 +1,26 @@
+[package]
+name = "tool-android-use"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# M8-P11b: the `android_use` tool — Android on-device UI automation. Skeleton
+# routes to the shared Arc<dyn ComputerControl> seam (an Android accessibility
+# backend, injected via UniFFI in P12). Linked only by engine-mobile on Android.
+
+[dependencies]
+tool-api = { path = "../../tool-api" }
+platform-api = { path = "../../platform-api" }
+permission = { path = "../../permission" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+once_cell = "1"
+
+[dev-dependencies]
+tool-api = { path = "../../tool-api", features = ["test-support"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

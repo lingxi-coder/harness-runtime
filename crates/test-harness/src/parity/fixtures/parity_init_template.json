@@ -1,0 +1,17 @@
+{
+  "_meta": {
+    "plan": "M5-10",
+    "source": "claude-code/src/commands/init.ts:6-26 (OLD_INIT_PROMPT)",
+    "_claude_code_version": "see CHANGELOG v0.6.0 baseline"
+  },
+  "byte_length": 1582,
+  "line_count": 21,
+  "sha256": "f379e92cdef57db5223a0af64d7bf3014b0c7ca4a5afa9f1deaf873635f2eb5a",
+  "first_sentence": "Please analyze this codebase and create a LINGXI.md file, which will be given to future instances of LingXi to operate in this repository.",
+  "must_contain_substrings": [
+    "# LINGXI.md",
+    "This file provides guidance to LingXi (claude.ai/code) when working with code in this repository.",
+    "If there's already a LINGXI.md, suggest improvements to it.",
+    "Be sure to prefix the file with the following text:"
+  ]
+}

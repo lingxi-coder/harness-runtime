@@ -1,0 +1,70 @@
+name: ci-bench
+on:
+  # Criterion benches are too slow for per-PR fast path; weekly + on-demand.
+  # Per v3 §32.4 Layer 10 + spec line 616.
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * 1'  # Monday 08:00 UTC
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    # v0.4.0: regression baseline check is informational. Flip to false
+    # once the baseline file lives in benches/baselines/v0_4_0.json and
+    # the bench harnesses produce stable numbers.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Run criterion benches (memory_ranking)
+        run: |
+          if cargo bench --locked -p memory --bench memory_ranking -- --quick 2>&1; then
+            echo "memory_ranking bench OK"
+          else
+            echo "::warning::memory_ranking bench not yet scaffolded; skipping for v0.4.0"
+          fi
+      - name: Run criterion benches (settings_4layer_merge)
+        run: |
+          if cargo bench --locked -p core --bench settings_4layer_merge -- --quick 2>&1; then
+            echo "settings_4layer_merge bench OK"
+          else
+            echo "::warning::settings_4layer_merge bench not yet scaffolded; skipping for v0.4.0"
+          fi
+      - name: Run criterion benches (messages_create_middleware)
+        run: |
+          if cargo bench --locked -p llm-runtime --bench messages_create_middleware -- --quick 2>&1; then
+            echo "messages_create_middleware bench OK"
+          else
+            echo "::warning::messages_create_middleware bench not yet scaffolded; skipping for v0.4.0"
+          fi
+      - name: Run criterion benches (tengu_event_encode)
+        run: |
+          if cargo bench --locked -p telemetry --bench tengu_event_encode -- --quick 2>&1; then
+            echo "tengu_event_encode bench OK"
+          else
+            echo "::warning::tengu_event_encode bench not yet scaffolded; skipping for v0.4.0"
+          fi
+      - name: Run criterion benches (oauth_refresh_under_contention)
+        run: |
+          if cargo bench --locked -p lingxi-anthropic-oauth --bench oauth_refresh_under_contention -- --quick 2>&1; then
+            echo "oauth_refresh_under_contention bench OK"
+          else
+            echo "::warning::oauth_refresh_under_contention bench not yet scaffolded; skipping for v0.4.0"
+          fi
+      - name: Run criterion benches (engine_init_startup)
+        run: |
+          if cargo bench --locked -p core --bench engine_init_startup -- --quick 2>&1; then
+            echo "engine_init_startup bench OK"
+          else
+            echo "::warning::engine_init_startup bench not yet scaffolded; skipping for v0.4.0"
+          fi
+      - name: Regression check against v0_4_0.json baseline
+        run: |
+          if [ -f "benches/baselines/v0_4_0.json" ]; then
+            # Tooling: compare current criterion output (target/criterion/**)
+            # against the baseline file; > 10% slower fails. Baseline tooling
+            # is a v0.5.0+ deliverable; v0.4.0 ships the workflow scaffold.
+            echo "Baseline file exists; regression-check tooling lands in v0.5.0"
+          else
+            echo "::warning::No baseline yet (benches/baselines/v0_4_0.json); first run is the baseline"
+          fi

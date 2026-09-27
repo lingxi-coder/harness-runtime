@@ -1,0 +1,1 @@
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"[2 prior /loop wakeups found nothing actionable; loop is healthy.]"},"isMeta":true,"turnCompanion":true,"uuid":"22222222-2222-4222-8222-222222222222","timestamp":"2026-09-12T09:00:00.000Z","userType":"external","entrypoint":"cli","cwd":"/fixture","sessionId":"session-1","version":"0.12.0"}

@@ -1,0 +1,5300 @@
+{
+  "version": "2.1.270",
+  "binarySha256": "a506b6d970a4cf44f6abdb53a81ddcd5d3b0ce042a95c502fe9d1f946bdb8807",
+  "sources": {
+    "src_165047929.js": "5f497c0a717fb02d58357ce8f70e0ce16185e59756fab2604ea1990c074333a9",
+    "src_198617341.js": "53dfb397aa9ee26b7e8d327fdb03ca70bbecec32f0e6dfdfd40c2e358e085c0b",
+    "src_169588164.js": "6ca868e57efc9aced712464189ae66546f8f3f4ddc8ecf6501f4f37253a5f686",
+    "src_167716440.js": "4c6f8c57c2254689f143f5dab69b31145e193dee0b66cc4e7f2bf4329298b302",
+    "src_177711820.js": "60f2cd51af50a777920eabedd958b2d4023a0c04eb6af09ce8ef68b4d3616c8f",
+    "src_165140675.js": "f35b7f7c81c672df281cad966889206e3f841bfef60ccfcd9e75a56682ce3e72"
+  },
+  "schemas": {
+    "legacy": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "description": {
+          "description": "Short human-readable description of what you are monitoring (shown in notifications).",
+          "type": "string"
+        },
+        "timeout_ms": {
+          "description": "Kill the monitor after this deadline. Default 300000ms, max 3600000ms. Ignored when persistent is true.",
+          "default": 300000,
+          "type": "number",
+          "minimum": 1000
+        },
+        "persistent": {
+          "description": "Run for the lifetime of the session (no timeout). Use for session-length watches like PR monitoring or log tails. Stop with TaskStop.",
+          "default": false,
+          "type": "boolean"
+        },
+        "command": {
+          "description": "Shell command or script. Each stdout line is an event; exit ends the watch.",
+          "type": "string"
+        },
+        "ws": {
+          "description": "WebSocket to open. Each text frame is an event; binary frames are reported as a placeholder line. Socket close ends the watch. Cannot be combined with command.",
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "protocols": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+              }
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "description",
+        "timeout_ms",
+        "persistent"
+      ],
+      "additionalProperties": false
+    },
+    "bounded": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "description": {
+          "description": "Short human-readable description of what you are monitoring (shown in notifications).",
+          "type": "string"
+        },
+        "timeout_ms": {
+          "description": "Kill the monitor after this deadline. Default 300000ms. Deadlines above 1800000ms are capped to 1800000ms. You are notified at expiry and can re-arm.",
+          "default": 300000,
+          "type": "number",
+          "minimum": 1000,
+          "maximum": 3600000
+        },
+        "command": {
+          "description": "Shell command or script. Each stdout line is an event; exit ends the watch.",
+          "type": "string"
+        },
+        "ws": {
+          "description": "WebSocket to open. Each text frame is an event; binary frames are reported as a placeholder line. Socket close ends the watch. Cannot be combined with command.",
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "protocols": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+              }
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "description",
+        "timeout_ms"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "cases": [
+    {
+      "mode": "legacy",
+      "input": null,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `null`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received null"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": false,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": 0,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": "",
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": [],
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `array`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received array"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {},
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe required parameter `description` is missing",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "extra": 1
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"extra\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"extra\\\"\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nAn unexpected parameter `extra` was provided",
+      "issues": [
+        {
+          "code": "unrecognized_keys",
+          "keys": [
+            "extra"
+          ],
+          "path": [],
+          "message": "Unrecognized key: \"extra\""
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [],
+          "message": "exactly one of command or ws"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": {
+          "url": "wss://example.com"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [],
+          "message": "exactly one of command or ws"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo",
+        "__proto__": true
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": "echo"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": null,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `null`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received null"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": false,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": true,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": 0,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": 1.5,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "",
+        "command": "echo ready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": [],
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received array\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `array`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received array"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": {},
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `object`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received object"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "true",
+        "command": "echo ready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "true",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "false",
+        "command": "echo ready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "false",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "120",
+        "command": "echo ready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "120",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": 999,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": 1000,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": 1000.5,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": 3600000,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": 3600001,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `null`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received null"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": true
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": 1.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": ""
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [],
+          "message": "exactly one of command or ws"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": []
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received array\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `array`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received array"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `object`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received object"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "true"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": "true"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "false"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": "false"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "120"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": "120"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": 999
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": 1000
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": 1000.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": 3600000
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": 3600001
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `null`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received null"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": true
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 1.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": ""
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": []
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `array`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received array"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe required parameter `ws.url` is missing",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": "true"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": "false"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": "120"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 999
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 1000
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 1000.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 3600000
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 3600001
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `null`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received null"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": true
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "display": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "issues": [
+        {
+          "origin": "number",
+          "code": "too_small",
+          "minimum": 1000,
+          "inclusive": true,
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Too small: expected number to be >=1000"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 1.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "display": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "issues": [
+        {
+          "origin": "number",
+          "code": "too_small",
+          "minimum": 1000,
+          "inclusive": true,
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Too small: expected number to be >=1000"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": ""
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": []
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received array\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `array`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received array"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received object\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `object`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received object"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": "true"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": "false"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": "120"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 999
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "display": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "issues": [
+        {
+          "origin": "number",
+          "code": "too_small",
+          "minimum": 1000,
+          "inclusive": true,
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Too small: expected number to be >=1000"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 1000
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 1000,
+        "persistent": false,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 1000.5
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 1000.5,
+        "persistent": false,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 3600000
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 3600000,
+        "persistent": false,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 3600001
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"timeout_ms must be ≤ 3600000\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"timeout_ms must be ≤ 3600000\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "timeout_ms must be ≤ 3600000"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `null`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received null"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": false
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": true
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": true,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 1.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": ""
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": []
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received array\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `array`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received array"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received object\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `object`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received object"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": "true"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": "false"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": "120"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `string`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received string"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 999
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 1000
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 1000.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 3600000
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 3600001
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"boolean\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"persistent\"\n    ],\n    \"message\": \"Invalid input: expected boolean, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `persistent` type is expected as `boolean` but provided as `number`",
+      "issues": [
+        {
+          "expected": "boolean",
+          "code": "invalid_type",
+          "path": [
+            "persistent"
+          ],
+          "message": "Invalid input: expected boolean, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": ""
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [],
+          "message": "exactly one of command or ws"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": " "
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": " "
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo\nready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": "echo\nready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo\rready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "command"
+          ],
+          "message": "command contains control characters that would be hidden in the approval dialog"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo\tready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": "echo\tready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo\u0000ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "command"
+          ],
+          "message": "command contains control characters that would be hidden in the approval dialog"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echoready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "command"
+          ],
+          "message": "command contains control characters that would be hidden in the approval dialog"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echoready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "command"
+          ],
+          "message": "command contains control characters that would be hidden in the approval dialog"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo‮ready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "command": "echo‮ready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "ws": {
+          "url": "wss://example.com"
+        }
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "WS://EXAMPLE.COM"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "ws": {
+          "url": "WS://EXAMPLE.COM"
+        }
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "ws:example.com"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "ws": {
+          "url": "ws:example.com"
+        }
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "ws://user@example.com"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com/a b"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "ws": {
+          "url": "wss://example.com/a b"
+        }
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com/\t"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com/\n"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com/\r"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url contains control characters that would be hidden in the approval dialog\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url contains control characters that would be hidden in the approval dialog\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url contains control characters that would be hidden in the approval dialog"
+        },
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "https://example.com"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://例子.com"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://[::1]"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "ws": {
+          "url": "wss://[::1]"
+        }
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com:99999"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://%65xample.com"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "ws": {
+          "url": "wss://%65xample.com"
+        }
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://@example.com"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "ws": {
+          "url": "wss://@example.com"
+        }
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe required parameter `ws.url` is missing",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": 1
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws.url` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": null
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws.url` type is expected as `string` but provided as `null`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "Invalid input: expected string, received null"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com",
+          "extra": 1
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "ws": {
+          "url": "wss://example.com"
+        }
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com",
+          "protocols": []
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "persistent": false,
+        "ws": {
+          "url": "wss://example.com",
+          "protocols": []
+        }
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com",
+          "protocols": [
+            "p",
+            "p"
+          ]
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"protocols must be unique\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"protocols must be unique\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "protocols"
+          ],
+          "message": "protocols must be unique"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com",
+          "protocols": [
+            "",
+            "p p",
+            1
+          ]
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      0\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      1\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      2\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws.protocols[2]` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "origin": "string",
+          "code": "invalid_format",
+          "format": "regex",
+          "pattern": "/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/",
+          "path": [
+            "ws",
+            "protocols",
+            0
+          ],
+          "message": "protocol must be an RFC 6455 token"
+        },
+        {
+          "origin": "string",
+          "code": "invalid_format",
+          "format": "regex",
+          "pattern": "/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/",
+          "path": [
+            "ws",
+            "protocols",
+            1
+          ],
+          "message": "protocol must be an RFC 6455 token"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "protocols",
+            2
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com",
+          "protocols": null
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"array\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"Invalid input: expected array, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws.protocols` type is expected as `array` but provided as `null`",
+      "issues": [
+        {
+          "expected": "array",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "protocols"
+          ],
+          "message": "Invalid input: expected array, received null"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "bad",
+          "protocols": [
+            "bad token",
+            "bad token"
+          ]
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      0\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      1\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"protocols must be unique\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      0\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      1\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"protocols must be unique\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        },
+        {
+          "origin": "string",
+          "code": "invalid_format",
+          "format": "regex",
+          "pattern": "/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/",
+          "path": [
+            "ws",
+            "protocols",
+            0
+          ],
+          "message": "protocol must be an RFC 6455 token"
+        },
+        {
+          "origin": "string",
+          "code": "invalid_format",
+          "format": "regex",
+          "pattern": "/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/",
+          "path": [
+            "ws",
+            "protocols",
+            1
+          ],
+          "message": "protocol must be an RFC 6455 token"
+        },
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "protocols"
+          ],
+          "message": "protocols must be unique"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "bad",
+          "protocols": [
+            1
+          ]
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      0\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws.protocols[0]` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "protocols",
+            0
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 3600001,
+        "persistent": true
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 3600001,
+        "persistent": true,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "timeout_ms": 3600001
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"timeout_ms must be ≤ 3600000\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"timeout_ms must be ≤ 3600000\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [],
+          "message": "exactly one of command or ws"
+        },
+        {
+          "code": "custom",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "timeout_ms must be ≤ 3600000"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": 1,
+        "command": "bad\u0000",
+        "timeout_ms": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        },
+        {
+          "origin": "number",
+          "code": "too_small",
+          "minimum": 1000,
+          "inclusive": true,
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Too small: expected number to be >=1000"
+        },
+        {
+          "code": "custom",
+          "path": [
+            "command"
+          ],
+          "message": "command contains control characters that would be hidden in the approval dialog"
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 0,
+        "extra": 1
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  },\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"extra\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"extra\\\"\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nAn unexpected parameter `extra` was provided",
+      "issues": [
+        {
+          "origin": "number",
+          "code": "too_small",
+          "minimum": 1000,
+          "inclusive": true,
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Too small: expected number to be >=1000"
+        },
+        {
+          "code": "unrecognized_keys",
+          "keys": [
+            "extra"
+          ],
+          "path": [],
+          "message": "Unrecognized key: \"extra\""
+        }
+      ]
+    },
+    {
+      "mode": "legacy",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com",
+          "protocols": [
+            "",
+            ""
+          ]
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      0\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      1\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"protocols must be unique\"\n  }\n]",
+      "display": "[\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      0\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      1\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"protocols must be unique\"\n  }\n]",
+      "issues": [
+        {
+          "origin": "string",
+          "code": "invalid_format",
+          "format": "regex",
+          "pattern": "/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/",
+          "path": [
+            "ws",
+            "protocols",
+            0
+          ],
+          "message": "protocol must be an RFC 6455 token"
+        },
+        {
+          "origin": "string",
+          "code": "invalid_format",
+          "format": "regex",
+          "pattern": "/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/",
+          "path": [
+            "ws",
+            "protocols",
+            1
+          ],
+          "message": "protocol must be an RFC 6455 token"
+        },
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "protocols"
+          ],
+          "message": "protocols must be unique"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": null,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `null`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received null"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": false,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": 0,
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": "",
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": [],
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `` type is expected as `object` but provided as `array`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [],
+          "message": "Invalid input: expected object, received array"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {},
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe required parameter `description` is missing",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "extra": 1
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [],
+          "message": "exactly one of command or ws"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": {
+          "url": "wss://example.com"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [],
+          "message": "exactly one of command or ws"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo",
+        "__proto__": true
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": null,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `null`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received null"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": false,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": true,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": 0,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": 1.5,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "",
+        "command": "echo ready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": [],
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received array\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `array`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received array"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": {},
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `object`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received object"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "true",
+        "command": "echo ready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "true",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "false",
+        "command": "echo ready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "false",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "120",
+        "command": "echo ready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "120",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": 999,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": 1000,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": 1000.5,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": 3600000,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": 3600001,
+        "command": "echo ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `null`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received null"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": true
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": 1.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": ""
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [],
+          "message": "exactly one of command or ws"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": []
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received array\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `array`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received array"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received object\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `object`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received object"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "true"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "true"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "false"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "false"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "120"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "120"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": 999
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": 1000
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": 1000.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": 3600000
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": 3600001
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `command` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "command"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `null`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received null"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": true
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 1.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": ""
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": []
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received array\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `array`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received array"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe required parameter `ws.url` is missing",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": "true"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": "false"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": "120"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `string`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received string"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 999
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 1000
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 1000.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 3600000
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "ws": 3600001
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\"\n    ],\n    \"message\": \"Invalid input: expected object, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws` type is expected as `object` but provided as `number`",
+      "issues": [
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "ws"
+          ],
+          "message": "Invalid input: expected object, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": null
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `null`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received null"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": false
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": true
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received boolean\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `boolean`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received boolean"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "display": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "issues": [
+        {
+          "origin": "number",
+          "code": "too_small",
+          "minimum": 1000,
+          "inclusive": true,
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Too small: expected number to be >=1000"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 1.5
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "display": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "issues": [
+        {
+          "origin": "number",
+          "code": "too_small",
+          "minimum": 1000,
+          "inclusive": true,
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Too small: expected number to be >=1000"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": ""
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": []
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received array\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `array`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received array"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received object\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `object`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received object"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": "true"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": "false"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": "120"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"number\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Invalid input: expected number, received string\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `timeout_ms` type is expected as `number` but provided as `string`",
+      "issues": [
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Invalid input: expected number, received string"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 999
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "display": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "issues": [
+        {
+          "origin": "number",
+          "code": "too_small",
+          "minimum": 1000,
+          "inclusive": true,
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Too small: expected number to be >=1000"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 1000
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 1000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 1000.5
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 1000.5,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 3600000
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 3600000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 3600001
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_big\",\n    \"maximum\": 3600000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"timeout_ms must be ≤ 3600000\"\n  }\n]",
+      "display": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_big\",\n    \"maximum\": 3600000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"timeout_ms must be ≤ 3600000\"\n  }\n]",
+      "issues": [
+        {
+          "origin": "number",
+          "code": "too_big",
+          "maximum": 3600000,
+          "inclusive": true,
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "timeout_ms must be ≤ 3600000"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": null
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": false
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": true
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 0
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 1.5
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": ""
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": []
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": {}
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": "true"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": "false"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": "120"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 999
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 1000
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 1000.5
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 3600000
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "persistent": 3600001
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": ""
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [],
+          "message": "exactly one of command or ws"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": " "
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": " "
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo\nready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo\nready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo\rready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "command"
+          ],
+          "message": "command contains control characters that would be hidden in the approval dialog"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo\tready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo\tready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo\u0000ready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "command"
+          ],
+          "message": "command contains control characters that would be hidden in the approval dialog"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echoready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "command"
+          ],
+          "message": "command contains control characters that would be hidden in the approval dialog"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echoready"
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "command"
+          ],
+          "message": "command contains control characters that would be hidden in the approval dialog"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo‮ready"
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "command": "echo‮ready"
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "ws": {
+          "url": "wss://example.com"
+        }
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "WS://EXAMPLE.COM"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "ws": {
+          "url": "WS://EXAMPLE.COM"
+        }
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "ws:example.com"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "ws": {
+          "url": "ws:example.com"
+        }
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "ws://user@example.com"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com/a b"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "ws": {
+          "url": "wss://example.com/a b"
+        }
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com/\t"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com/\n"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com/\r"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url contains control characters that would be hidden in the approval dialog\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url contains control characters that would be hidden in the approval dialog\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url contains control characters that would be hidden in the approval dialog"
+        },
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "https://example.com"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://例子.com"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://[::1]"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "ws": {
+          "url": "wss://[::1]"
+        }
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com:99999"
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://%65xample.com"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "ws": {
+          "url": "wss://%65xample.com"
+        }
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://@example.com"
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "ws": {
+          "url": "wss://@example.com"
+        }
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {}
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe required parameter `ws.url` is missing",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": 1
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws.url` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": null
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"Invalid input: expected string, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws.url` type is expected as `string` but provided as `null`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "Invalid input: expected string, received null"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com",
+          "extra": 1
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "ws": {
+          "url": "wss://example.com"
+        }
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com",
+          "protocols": []
+        }
+      },
+      "success": true,
+      "normalized": {
+        "description": "d",
+        "timeout_ms": 300000,
+        "ws": {
+          "url": "wss://example.com",
+          "protocols": []
+        }
+      }
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com",
+          "protocols": [
+            "p",
+            "p"
+          ]
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"protocols must be unique\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"protocols must be unique\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "protocols"
+          ],
+          "message": "protocols must be unique"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com",
+          "protocols": [
+            "",
+            "p p",
+            1
+          ]
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      0\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      1\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      2\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws.protocols[2]` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "origin": "string",
+          "code": "invalid_format",
+          "format": "regex",
+          "pattern": "/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/",
+          "path": [
+            "ws",
+            "protocols",
+            0
+          ],
+          "message": "protocol must be an RFC 6455 token"
+        },
+        {
+          "origin": "string",
+          "code": "invalid_format",
+          "format": "regex",
+          "pattern": "/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/",
+          "path": [
+            "ws",
+            "protocols",
+            1
+          ],
+          "message": "protocol must be an RFC 6455 token"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "protocols",
+            2
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com",
+          "protocols": null
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"array\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"Invalid input: expected array, received null\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws.protocols` type is expected as `array` but provided as `null`",
+      "issues": [
+        {
+          "expected": "array",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "protocols"
+          ],
+          "message": "Invalid input: expected array, received null"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "bad",
+          "protocols": [
+            "bad token",
+            "bad token"
+          ]
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      0\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      1\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"protocols must be unique\"\n  }\n]",
+      "display": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      0\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      1\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"protocols must be unique\"\n  }\n]",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        },
+        {
+          "origin": "string",
+          "code": "invalid_format",
+          "format": "regex",
+          "pattern": "/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/",
+          "path": [
+            "ws",
+            "protocols",
+            0
+          ],
+          "message": "protocol must be an RFC 6455 token"
+        },
+        {
+          "origin": "string",
+          "code": "invalid_format",
+          "format": "regex",
+          "pattern": "/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/",
+          "path": [
+            "ws",
+            "protocols",
+            1
+          ],
+          "message": "protocol must be an RFC 6455 token"
+        },
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "protocols"
+          ],
+          "message": "protocols must be unique"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "bad",
+          "protocols": [
+            1
+          ]
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"url\"\n    ],\n    \"message\": \"url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace\"\n  },\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      0\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `ws.protocols[0]` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "url"
+          ],
+          "message": "url must be a valid ASCII ws:// or wss:// URL with no userinfo or whitespace"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "ws",
+            "protocols",
+            0
+          ],
+          "message": "Invalid input: expected string, received number"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 3600001,
+        "persistent": true
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_big\",\n    \"maximum\": 3600000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"timeout_ms must be ≤ 3600000\"\n  }\n]",
+      "display": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_big\",\n    \"maximum\": 3600000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"timeout_ms must be ≤ 3600000\"\n  }\n]",
+      "issues": [
+        {
+          "origin": "number",
+          "code": "too_big",
+          "maximum": 3600000,
+          "inclusive": true,
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "timeout_ms must be ≤ 3600000"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "timeout_ms": 3600001
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_big\",\n    \"maximum\": 3600000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"timeout_ms must be ≤ 3600000\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "display": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_big\",\n    \"maximum\": 3600000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"timeout_ms must be ≤ 3600000\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"exactly one of command or ws\"\n  }\n]",
+      "issues": [
+        {
+          "origin": "number",
+          "code": "too_big",
+          "maximum": 3600000,
+          "inclusive": true,
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "timeout_ms must be ≤ 3600000"
+        },
+        {
+          "code": "custom",
+          "path": [],
+          "message": "exactly one of command or ws"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": 1,
+        "command": "bad\u0000",
+        "timeout_ms": 0
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"description\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  },\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"command\"\n    ],\n    \"message\": \"command contains control characters that would be hidden in the approval dialog\"\n  }\n]",
+      "display": "Monitor failed due to the following issue:\nThe parameter `description` type is expected as `string` but provided as `number`",
+      "issues": [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "description"
+          ],
+          "message": "Invalid input: expected string, received number"
+        },
+        {
+          "origin": "number",
+          "code": "too_small",
+          "minimum": 1000,
+          "inclusive": true,
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Too small: expected number to be >=1000"
+        },
+        {
+          "code": "custom",
+          "path": [
+            "command"
+          ],
+          "message": "command contains control characters that would be hidden in the approval dialog"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "command": "echo ready",
+        "timeout_ms": 0,
+        "extra": 1
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "display": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 1000,\n    \"inclusive\": true,\n    \"path\": [\n      \"timeout_ms\"\n    ],\n    \"message\": \"Too small: expected number to be >=1000\"\n  }\n]",
+      "issues": [
+        {
+          "origin": "number",
+          "code": "too_small",
+          "minimum": 1000,
+          "inclusive": true,
+          "path": [
+            "timeout_ms"
+          ],
+          "message": "Too small: expected number to be >=1000"
+        }
+      ]
+    },
+    {
+      "mode": "bounded",
+      "input": {
+        "description": "d",
+        "ws": {
+          "url": "wss://example.com",
+          "protocols": [
+            "",
+            ""
+          ]
+        }
+      },
+      "success": false,
+      "raw": "[\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      0\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      1\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"protocols must be unique\"\n  }\n]",
+      "display": "[\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      0\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/\",\n    \"path\": [\n      \"ws\",\n      \"protocols\",\n      1\n    ],\n    \"message\": \"protocol must be an RFC 6455 token\"\n  },\n  {\n    \"code\": \"custom\",\n    \"path\": [\n      \"ws\",\n      \"protocols\"\n    ],\n    \"message\": \"protocols must be unique\"\n  }\n]",
+      "issues": [
+        {
+          "origin": "string",
+          "code": "invalid_format",
+          "format": "regex",
+          "pattern": "/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/",
+          "path": [
+            "ws",
+            "protocols",
+            0
+          ],
+          "message": "protocol must be an RFC 6455 token"
+        },
+        {
+          "origin": "string",
+          "code": "invalid_format",
+          "format": "regex",
+          "pattern": "/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/",
+          "path": [
+            "ws",
+            "protocols",
+            1
+          ],
+          "message": "protocol must be an RFC 6455 token"
+        },
+        {
+          "code": "custom",
+          "path": [
+            "ws",
+            "protocols"
+          ],
+          "message": "protocols must be unique"
+        }
+      ]
+    }
+  ],
+  "fractionalResult": "Monitor started (task m12345678, timeout 1000.5ms). You will be notified on each event. Keep working — do not poll or sleep. Events may arrive while you are waiting for the user — an event is not their reply."
+}

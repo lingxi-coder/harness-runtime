@@ -1,0 +1,7 @@
+{
+  "request_id": 8,
+  "kind": {
+    "type": "exit_plan_mode",
+    "plan": "1. read files\n2. edit"
+  }
+}

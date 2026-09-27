@@ -1,0 +1,20 @@
+{
+  "type": "hooks",
+  "hooks": [
+    {
+      "name": "format-on-write",
+      "event": "PostToolUse",
+      "matcher": "Write|Edit",
+      "timeout_ms": 60000,
+      "hook_type": "command",
+      "source": "User settings (~/.lingxi/settings.json)",
+      "content": "./format.sh",
+      "status_message": "Formatting",
+      "blocking": true,
+      "async": false,
+      "priority": 0,
+      "async_rewake": false,
+      "if_condition": "Write(*.ts)"
+    }
+  ]
+}

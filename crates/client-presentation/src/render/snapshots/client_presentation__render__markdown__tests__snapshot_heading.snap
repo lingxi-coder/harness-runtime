@@ -1,0 +1,23 @@
+---
+source: crates/tui/src/render/markdown.rs
+expression: "render(\"# Title\\n\\n## Sub\", &theme())"
+---
+- spans:
+    - text: Title
+      style:
+        fg: Default
+        bg: Default
+        bold: true
+        italic: true
+        underline: true
+      kind: Text
+- spans: []
+- spans:
+    - text: Sub
+      style:
+        fg: Default
+        bg: Default
+        bold: true
+        italic: false
+        underline: false
+      kind: Text

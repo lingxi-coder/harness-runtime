@@ -1,0 +1,5 @@
+{
+  "type": "resolve_app_capability_request",
+  "request_id": "cap-00000001",
+  "decision": "allow_always"
+}

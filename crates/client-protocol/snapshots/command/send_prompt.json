@@ -1,0 +1,14 @@
+{
+  "type": "send_prompt",
+  "text": "summarize the diff",
+  "prompt_mode": {
+    "type": "normal"
+  },
+  "images": [
+    {
+      "media_type": "image/png",
+      "base64": "iVBORw0KGgo="
+    }
+  ],
+  "turn_id": 1
+}

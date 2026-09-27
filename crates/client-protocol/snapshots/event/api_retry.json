@@ -1,0 +1,7 @@
+{
+  "type": "api_retry",
+  "message": "rate limited",
+  "attempt": 2,
+  "max_retries": 5,
+  "delay_ms": 1000
+}

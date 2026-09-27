@@ -1,0 +1,25 @@
+{
+  "type": "app_event",
+  "event": {
+    "type": "app_dependency_change_confirmation_requested",
+    "request": {
+      "requestId": "dependency-00000001",
+      "appId": "habits-1a2b",
+      "reason": "pre_resolution_no_network",
+      "changes": [
+        {
+          "kind": "add",
+          "package": "dayjs",
+          "version": "1.11.13",
+          "cacheStatus": "unknown_until_resolution",
+          "downloadStatus": "may_be_required"
+        }
+      ],
+      "licenseRisk": "unknown_until_resolution",
+      "sbomRisk": "unknown_until_resolution",
+      "lifecycleScriptsBlocked": true,
+      "nativeAddonsBlocked": true,
+      "rollbackPolicy": "rollback_on_validation_failure"
+    }
+  }
+}

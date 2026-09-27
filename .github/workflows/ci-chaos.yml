@@ -1,0 +1,33 @@
+name: ci-chaos
+on:
+  # Chaos tests are non-trivial in runtime (each scenario sets up fault
+  # injection); weekly + on-demand. Per v3 §32.4 Layer 12 + spec line 616.
+  workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * 1'  # Monday 09:00 UTC
+
+jobs:
+  chaos:
+    runs-on: ubuntu-latest
+    # Chaos is a hard gate, per the brief. If a chaos scenario fails the
+    # release is blocked — that IS the gate's purpose.
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - securestorage_refuses          # M2-06 reuse — already had this scenario
+          - fs_watch_drops_events          # M2-05 reuse
+          - http_5xx_burst_across_retry_window   # M3-03 retry middleware
+          - oauth_token_expires_mid_request      # M3-04 reactive refresh
+          - telemetry_sink_rejects               # M3-06 InMemorySink reject path
+          - partial_write_settings_json          # M3-01 loader half-written file
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Run chaos scenario ${{ matrix.scenario }}
+        run: |
+          # Chaos scenarios are #[ignore]-gated in their crate; opt them in
+          # via the --ignored flag and pattern-match the scenario name.
+          # If the scenario doesn't exist yet, fail loudly (NOT a warning).
+          # The matrix only lists scenarios this plan commits to shipping.
+          cargo test --locked --workspace -- --ignored "chaos_${{ matrix.scenario }}" --exact

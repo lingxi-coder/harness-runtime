@@ -1,0 +1,6 @@
+{
+  "type": "tool_heartbeat",
+  "id": "toolu_01",
+  "tool": "Read",
+  "elapsed_ms": 1500
+}

@@ -1,0 +1,7 @@
+---
+source: client-presentation/src/render/diff.rs
+expression: "fingerprint(&render_with_width(\"keep\\ndrop me\\n\", \"keep\\nadded line\\n\",\nSome(\"x.txt\"), ThemeName::Dark, 30,))"
+---
+  0 | "1   "[fg=Named(BrightBlack) bg=Default] "keep"[fg=Rgb(192, 197, 206) bg=Default]
+  1 | "2 - "[fg=Rgb(220, 90, 90) bg=Rgb(61, 20, 27)] "drop me"[fg=Rgb(248, 248, 242) bg=Rgb(61, 20, 27)] "                   "[fg=Default bg=Rgb(61, 20, 27)]
+  2 | "2 + "[fg=Rgb(80, 200, 80) bg=Rgb(17, 46, 21)] "added line"[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] "                "[fg=Default bg=Rgb(17, 46, 21)]

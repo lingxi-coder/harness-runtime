@@ -1,0 +1,25 @@
+{
+  "type": "doctor_report",
+  "report": {
+    "checks": [
+      {
+        "name": "config-dir",
+        "status": {
+          "type": "pass"
+        }
+      },
+      {
+        "name": "api-key",
+        "status": {
+          "type": "warn"
+        },
+        "detail": "using env override"
+      }
+    ],
+    "summary": {
+      "passed": 1,
+      "warnings": 1,
+      "failed": 0
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "type": "new_session",
+  "cwd": "/home/dev/project",
+  "model": "claude-opus-4-7"
+}

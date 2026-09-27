@@ -1,0 +1,59 @@
+[package]
+name = "tool-api"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+protocol = { path = "../protocol" }
+session = { path = "../session" }
+branding.workspace = true
+permission = { path = "../permission" }
+# NOTE (M8-P3): `engine` is carried transitively via the unchanged
+# `ToolUseContext::session: SessionState` field. The design's clean ToolCtx
+# (full Platform handles, no engine dep) is a P4 reshape — this dep is cut then.
+core = { path = "../core" }
+# M8-P5: BuiltinToolContext (the construction-time handle every builtin tool
+# takes) moved here so per-category tool crates (tools/file, tools/shell, …)
+# can construct tools without depending on the `tools` monolith. Pulls in the
+# handle-providing crates. The design §5.1 ToolCtx reshape will slim this later.
+platform-api = { path = "../platform-api" }
+telemetry = { path = "../telemetry" }
+sandbox = { path = "../sandbox" }
+mcp = { path = "../mcp" }
+lsp = { path = "../lsp" }
+# SessionCwd (worktree 206 parity): lock-free-read switchable cwd/trusted-dirs
+# cell. Not yet pinned at the workspace level — no other crate uses it.
+# NOTE: `command-api` was intentionally dropped here (§8.1 layering fix) — the
+# shell-expansion seams' real host runner + policy gate live in
+# `tools/skill/src/prompt_shell.rs`, so `tool-api` no longer depends on it.
+arc-swap = "1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+# `CancellationToken` (the per-call cancel seam for the streaming executor) is
+# available in the default surface of tokio-util 0.7 — no extra feature needed.
+tokio-util = { workspace = true }
+image = { version = "=0.24.9", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+base64 = "=0.22.1"
+# Only used by the feature-gated test_support module (mock FileSystem stream).
+futures = { version = "0.3", optional = true }
+
+[features]
+test-support = ["dep:futures"]
+
+[dev-dependencies]
+# registry.rs #[cfg(test)] builds a Lazy schema fixture.
+once_cell = "1"
+tempfile = "3"
+# test_support.rs (compiled under cfg(test)) uses `futures::Stream` for the
+# mock FileSystem event stream; the [dependencies] entry is feature-gated
+# (test-support), so the crate's own tests need it here too.
+futures = { workspace = true }
+
+[lints]
+workspace = true

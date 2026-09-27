@@ -1,0 +1,39 @@
+[package]
+name = "llm-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client", rev = "9b0323f10f76c5834acafedaa04470c4e96346f2", default-features = false }
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url = "2"
+base64 = "0.22"
+httpdate = "1"
+sha2 = "0.10"
+# "process" — `aws_auth::ShellAwsAuthProcess` runs the awsAuthRefresh /
+# awsCredentialExport scripts (2.1.198 ZBd/gIn/t2d port).
+tokio = { workspace = true, features = ["sync", "time", "net", "io-util", "macros", "rt-multi-thread", "process"] }
+platform-api = { path = "../platform-api" }
+protocol = { path = "../protocol" }
+async-trait = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+telemetry = { path = "../telemetry" }
+secret = { path = "../secret" }
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+iana-time-zone = "0.1"
+rand = "0.9"
+urlencoding = "2"
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

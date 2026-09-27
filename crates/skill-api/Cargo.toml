@@ -1,0 +1,37 @@
+[package]
+name = "skill-api"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# M8-P8: the skill abstraction crate — Skill data model, SkillRegistry (trigger
+# discovery), markdown frontmatter loader, and MCP-derived skill builders.
+# Extracted from the former monolithic `skills` crate; mirrors the `tool-api`
+# pattern. The model-visible `Skill` *tool* lives in `tool-skill` (P7);
+# compiled-in builtin skill templates live in this crate's `builtin` module.
+
+[dependencies]
+# Conditional-skill `paths:` matching uses gitignore semantics, the same
+# `ignore` crate the `.worktreeinclude` matcher uses.
+ignore = "0.4"
+tracing = { workspace = true }
+telemetry = { path = "../telemetry" }
+branding = { path = "../branding" }
+protocol = { path = "../protocol" }
+platform-api = { path = "../platform-api" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+thiserror.workspace = true
+# EXPERIMENTAL_SKILL_SEARCH skill-discovery prefetch (register-but-disable,
+# default OFF): the one-shot-backed background discovery handle + the async
+# candidate-source seam. Mirrors the `memory` crate's prefetch deps.
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+
+[lints]
+workspace = true

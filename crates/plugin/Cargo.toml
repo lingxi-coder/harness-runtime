@@ -1,0 +1,67 @@
+[package]
+name = "plugin"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+branding.workspace = true
+protocol = { path = "../protocol" }
+platform-api = { path = "../platform-api" }
+tool-api = { path = "../tool-api" }
+hooks = { path = "../hooks" }
+mcp = { path = "../mcp" }
+agent = { path = "../agent" }
+skill-api = { path = "../skill-api" }
+command-api = { path = "../command-api" }
+outputstyles = { path = "../outputstyles" }
+lsp = { path = "../lsp" }
+# Shared plugin-workflow registry type + `meta.name` extraction for the
+# `workflows` manifest field (§14) — see `workflow::PluginWorkflowRegistry`.
+# `tool-workflow` and `tasks` already depend on `workflow`, so this is the one
+# acyclic crate both the writer (here) and the readers can share without
+# either reader depending on `plugin`.
+workflow = { path = "../workflow" }
+secret = { path = "../secret" }
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+serde_yaml = "0.9"
+thiserror.workspace = true
+async-trait.workspace = true
+url = "2"
+semver = "1"
+tokio = { version = "1", features = ["sync", "fs", "io-util", "rt"] }
+tracing.workspace = true
+# Git plugin-source clone (Stage 1 install arm) — the same vendored libgit2 the
+# Android git tool uses, so no new external system dependency is introduced.
+git2 = { path = "../../third_party/git2-rs/git2", default-features = false, features = ["vendored-libgit2", "https", "ssh"] }
+# .mcpb bundle install (Stage 3): pure-Rust zip extract + SHA-256 integrity +
+# a temp extract dir.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
+tempfile = "3"
+# syntaxHighlighting.hljsLanguages `remote`/`integrity` shape validation
+# (already a transitive dependency via `mcp`, so this adds no new build).
+regex = "1"
+telemetry = { path = "../telemetry" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "fs", "macros", "rt", "rt-multi-thread"] }
+tempfile = "3"
+platform-posix = { path = "../platforms/posix" }
+tool-api = { path = "../tool-api", features = ["test-support"] }
+# Exercise the production MCP tool rebuild path from plugin materialization
+# tests (load → scope → connect/cache → registered-tool refresh).
+tool-mcp = { path = "../tools/mcp" }
+# Build local git fixtures for the Stage-1 git-install-arm test (file:// clone).
+git2 = { path = "../../third_party/git2-rs/git2", default-features = false, features = ["vendored-libgit2"] }
+# Build .mcpb zip fixtures for the Stage-3 tests.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+futures-util.workspace = true
+tracing-subscriber = { version = "0.3", features = ["registry"] }
+
+[lints]
+workspace = true

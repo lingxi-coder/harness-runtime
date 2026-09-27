@@ -1,0 +1,5 @@
+{
+  "type": "restore_app_checkpoint",
+  "app_id": "habits-1a2b",
+  "checkpoint_id": "ckpt-00000001"
+}

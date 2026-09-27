@@ -1,0 +1,8 @@
+---
+source: client-presentation/src/render/diff.rs
+expression: "fingerprint(&render(old, new, Some(\"main.rs\"), ThemeName::Dark))"
+---
+  0 | "1   "[fg=Named(BrightBlack) bg=Default] "fn"[fg=Rgb(180, 142, 173) bg=Default] " "[fg=Rgb(192, 197, 206) bg=Default] "main"[fg=Rgb(143, 161, 179) bg=Default] "("[fg=Rgb(192, 197, 206) bg=Default] ")"[fg=Rgb(192, 197, 206) bg=Default] " "[fg=Rgb(192, 197, 206) bg=Default] "{"[fg=Rgb(192, 197, 206) bg=Default]
+  1 | "2 + "[fg=Rgb(80, 200, 80) bg=Rgb(17, 46, 21)] "    "[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] "let"[fg=Rgb(180, 142, 173) bg=Rgb(17, 46, 21)] " total "[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] "="[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] " "[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] "compute"[fg=Rgb(150, 181, 180) bg=Rgb(17, 46, 21)] "("[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] "1"[fg=Rgb(208, 135, 112) bg=Rgb(17, 46, 21)] ","[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] " "[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] "2"[fg=Rgb(208, 135, 112) bg=Rgb(17, 46, 21)] ")"[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] ";"[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)]
+  2 | "3 + "[fg=Rgb(80, 200, 80) bg=Rgb(17, 46, 21)] "    "[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] "println!"[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] "("[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] "\""[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] "{total}"[fg=Rgb(208, 135, 112) bg=Rgb(17, 46, 21)] "\""[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] ")"[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)] ";"[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)]
+  3 | "4   "[fg=Named(BrightBlack) bg=Default] "}"[fg=Rgb(192, 197, 206) bg=Default]

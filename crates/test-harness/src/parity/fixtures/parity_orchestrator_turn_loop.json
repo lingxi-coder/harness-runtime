@@ -1,0 +1,55 @@
+{
+  "_meta": {
+    "plan": "M5-14",
+    "spec_section": "§3 M5-02 row + §5 testing matrix",
+    "_lingxi_version": "0.6.0",
+    "description": "End-to-end turn loop locks: prompt → API call → optional tool dispatch → response back to model → end_turn. Uses MockApiClient (scripted batched responses)."
+  },
+  "scenarios": [
+    {
+      "name": "single_turn_no_tools",
+      "user_prompt": "say hi",
+      "expected_turn_count": 1,
+      "expected_session_messages": 2,
+      "expected_outcome": "EndTurn"
+    },
+    {
+      "name": "max_turns_cap",
+      "user_prompt": "loop forever",
+      "max_turns_override": 2,
+      "expected_outcome": "MaxTurnsReached"
+    },
+    {
+      "name": "cancel_before_first_turn",
+      "user_prompt": "do something",
+      "pre_cancel": true,
+      "expected_outcome": "Cancelled"
+    },
+    {
+      "name": "cost_after_one_turn",
+      "model": "claude-opus-4-6",
+      "response_usage": { "input_tokens": 1000, "output_tokens": 500 },
+      "expected_cost_after_turn": {
+        "total_nano_usd": 17500000,
+        "total_usd": 0.0175,
+        "input_tokens": 1000,
+        "output_tokens": 500,
+        "api_calls": 1
+      }
+    },
+    {
+      "name": "force_compact_50_messages",
+      "seed_history_size": 50,
+      "expected_messages_before": 50,
+      "expected_messages_after_max": 49,
+      "expected_marker_present": true,
+      "expected_marker_prefix": "Conversation compacted"
+    }
+  ],
+  "telemetry_invariants": {
+    "events_fired_per_normal_turn": [
+      "tengu_orchestrator_conversation_started",
+      "tengu_orchestrator_conversation_completed"
+    ]
+  }
+}

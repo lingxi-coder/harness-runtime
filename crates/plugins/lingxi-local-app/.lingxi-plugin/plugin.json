@@ -1,0 +1,14 @@
+{
+  "name": "lingxi-local-app",
+  "displayName": "LingXi Local App",
+  "version": "1.0.0",
+  "description": "Create, update, run, verify and expose LingXi Local Apps through app-specific MCP tools.",
+  "author": {
+    "name": "LingXi"
+  },
+  "license": "UNLICENSED",
+  "defaultEnabled": true,
+  "skills": "./skills/",
+  "agents": "./agents/",
+  "workflows": "./workflows/"
+}

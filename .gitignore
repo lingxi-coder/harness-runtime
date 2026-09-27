@@ -1,0 +1,8 @@
+/target/
+/build/
+/.cache/
+.DS_Store
+__pycache__/
+*.pyc
+!crates/**/.lingxi/
+!crates/**/.lingxi/source-policy.json

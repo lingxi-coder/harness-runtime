@@ -1,0 +1,8 @@
+{
+  "type": "plugin_command",
+  "command": {
+    "type": "set_enabled",
+    "plugin_id": "lingxi-local-app",
+    "enabled": true
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "_source": "claude-code/src/utils/sandbox/sandbox-adapter.ts: convertToSandboxRuntimeConfig (lines 38-103)",
+  "_note": "Edit(allow)→allowWrite, Edit(deny)→denyWrite, Read(deny)→denyRead, WebFetch(domain:...)→network.allowedDomains. NOTE: there is NO Read(allow)→allowRead branch in claude-code (sandbox-adapter.ts:309-326 walks permissions.allow for Edit only, and permissions.deny for Edit+Read); allowRead is sourced EXCLUSIVELY from sandbox.filesystem.allowRead (sandbox-adapter.ts:343-347). So a Read(allow) rule contributes nothing → allowRead stays []. allowWrite is seeded with '.' (cwd is always writable, sandbox-adapter.ts:225) BEFORE rule-derived paths; with a Default SandboxConvertContext (no claudeTempDir/seed paths) the only seed is '.'. Bash(...) intentionally ignored — its decision lives in should_use_sandbox. claude-code's path-resolver treats `/path` as relative to the settings directory and `//path` as an absolute escape hatch — see resolve_path_pattern_for_sandbox in path_pattern.rs.",
+  "input_settings": {
+    "permissions": {
+      "allow": [
+        "Edit(//Users/alice/projects/*)",
+        "Read(//Users/alice/projects/*)",
+        "Bash(npm install:*)",
+        "WebFetch(domain:api.anthropic.com)",
+        "WebFetch(domain:github.com)"
+      ],
+      "deny": [
+        "Edit(//etc/*)",
+        "Read(//Users/alice/.ssh/*)"
+      ]
+    },
+    "sandbox": {
+      "enabled": true,
+      "failIfUnavailable": false
+    },
+    "settingsDir": "/Users/alice/.lingxi"
+  },
+  "expected_runtime_config": {
+    "enabled": true,
+    "failIfUnavailable": false,
+    "filesystem": {
+      "allowWrite": [".", "/Users/alice/projects/*"],
+      "denyWrite": ["/etc/*"],
+      "allowRead": [],
+      "denyRead": ["/Users/alice/.ssh/*"]
+    },
+    "network": {
+      "allowedDomains": ["api.anthropic.com", "github.com"]
+    }
+  }
+}

@@ -1,0 +1,6 @@
+---
+source: client-presentation/src/render/diff.rs
+expression: "fingerprint(&render(\"function oldName(param)\\n\", \"function newName(param)\\n\",\nSome(\"x.js\"), ThemeName::Dark,))"
+---
+  0 | "1 - "[fg=Rgb(220, 90, 90) bg=Rgb(61, 20, 27)] "function"[fg=Rgb(248, 248, 242) bg=Rgb(61, 20, 27)] " "[fg=Rgb(248, 248, 242) bg=Rgb(61, 20, 27)] "oldName(param)"[fg=Rgb(248, 248, 242) bg=Rgb(89, 44, 53)]
+  1 | "1 + "[fg=Rgb(80, 200, 80) bg=Rgb(17, 46, 21)] "function"[fg=Default bg=Rgb(17, 46, 21)] " "[fg=Default bg=Rgb(17, 46, 21)] "newName(param)"[fg=Default bg=Rgb(28, 83, 48)]

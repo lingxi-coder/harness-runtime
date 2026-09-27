@@ -1,0 +1,9 @@
+{
+  "type": "plugin_admin",
+  "command": {
+    "action": "preview_operation",
+    "operation_id": 33,
+    "revision": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "payload_json": "{\"action\":\"install\",\"plugin_id\":\"lingxi-local-app\"}"
+  }
+}

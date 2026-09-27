@@ -1,0 +1,20 @@
+{
+  "type": "audio_request",
+  "request": {
+    "identity": {
+      "id": "00000000-0000-4000-8000-000000000007",
+      "generation": 2,
+      "service_epoch": 3
+    },
+    "owner": {
+      "type": "session",
+      "session_id": "session-1"
+    },
+    "timeout_budget_ms": 1000,
+    "max_payload_bytes": 12533760,
+    "operation": {
+      "type": "listen",
+      "language": "zh-CN"
+    }
+  }
+}

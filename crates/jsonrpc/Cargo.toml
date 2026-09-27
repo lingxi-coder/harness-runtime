@@ -1,0 +1,24 @@
+[package]
+name = "jsonrpc"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "io-util"] }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
+dashmap = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[lints]
+workspace = true

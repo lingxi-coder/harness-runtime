@@ -1,0 +1,58 @@
+{
+  "_source": "claude-code @ commit 6a25909 — src/settings/loader.ts:loadEffectiveSettings (4-layer chain) + src/settings/merger.ts:mergeSettings (per-field strategy)",
+  "_note": "Priority (highest first) is env > managed/policy > cli > local > project > user > defaults — i.e. shared-project (.claude/settings.json) BEATS user (~/.claude/settings.json), matching Anthropic's documented order and the 2.1.215 binary's ascending merge chain userSettings,projectSettings,localSettings,flagSettings,policySettings (later-wins). Array fields (trustedDirectories, additionalDirectories, enabledTools, additionalIncludes) concat-dedup in ascending-priority order (lowest first); object fields (sandbox, hooks, permissions) deep-merge; outputStyle is a string in claude-code (settings/types.ts:639) so it is scalar-override like every other non-array/non-object field. Env prefix priority is LINGXI_ > CLAUDE_CODE_ > CLAUDE_ (LingXi-only; claude-code uses only CLAUDE_*). The $schema field is NOT emitted by claude-code @ 6a25909 — we tolerate it on read for future-compat. PII routing: user paths and raw env values go to _PROTO_-prefixed metadata keys per spec §26.2. Regenerated 2026-07-19 to correct an inverted user>project ordering (verified against 2.1.215 binary).",
+  "input_defaults": {
+    "model": "claude-sonnet-4-5",
+    "trustedDirectories": ["/opt/lingxi/defaults"],
+    "enabledTools": ["Bash", "Read"]
+  },
+  "input_project_settings_json": {
+    "trustedDirectories": ["/srv/project"],
+    "enabledTools": ["Edit"],
+    "hooks": {
+      "PreToolUse": {"Bash": ["echo project-pre"]}
+    }
+  },
+  "input_user_settings_json": {
+    "model": "claude-opus-4-7",
+    "trustedDirectories": ["/home/alice/work"],
+    "enabledTools": ["Read", "Grep"],
+    "hooks": {
+      "PreToolUse": {"Read": ["echo user-pre"]}
+    }
+  },
+  "input_env": {
+    "LINGXI_TRUSTED_DIRECTORIES": "/tmp/emergency",
+    "LINGXI_MODEL": "claude-haiku-4-5"
+  },
+  "expected_effective_settings": {
+    "model": "claude-haiku-4-5",
+    "trustedDirectories": [
+      "/opt/lingxi/defaults",
+      "/home/alice/work",
+      "/srv/project",
+      "/tmp/emergency"
+    ],
+    "enabledTools": ["Bash", "Read", "Grep", "Edit"],
+    "hooks": {
+      "PreToolUse": {
+        "Bash": ["echo project-pre"],
+        "Read": ["echo user-pre"]
+      }
+    }
+  },
+  "expected_provenance": {
+    "model": ["env"],
+    "trustedDirectories": ["defaults", "user", "project", "env"],
+    "enabledTools": ["defaults", "user", "project"],
+    "hooks": ["project"]
+  },
+  "expected_telemetry_event_names": [
+    "tengu_settings_loaded"
+  ],
+  "expected_telemetry_loaded_keys": [
+    "layers_present",
+    "had_env_override",
+    "_PROTO_user_path"
+  ]
+}

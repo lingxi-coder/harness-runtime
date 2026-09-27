@@ -1,0 +1,30 @@
+[package]
+name = "tool-mobile"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Mobile-exclusive builtin tools (camera / audio / notification /
+# clipboard / share), folded from the former one-crate-per-tool split. Pure Rust
+# — each routes to an `Arc<dyn …Control>` capability in BuiltinToolContext
+# (Swift/Kotlin impl injected via UniFFI). Linked only by engine-mobile.
+
+[dependencies]
+tool-api = { path = "../../tool-api" }
+platform-api = { path = "../../platform-api" }
+permission = { path = "../../permission" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
+once_cell = "1"
+
+[dev-dependencies]
+tool-api = { path = "../../tool-api", features = ["test-support"] }
+protocol = { path = "../../protocol" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true

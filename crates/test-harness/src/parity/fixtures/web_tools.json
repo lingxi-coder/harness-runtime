@@ -1,0 +1,28 @@
+{
+  "_source": "claude-code/src/tools/WebFetchTool/utils.ts + WebSearchTool/WebSearchTool.ts",
+  "_note": "Byte-aligned locks for the web tools, now TS-faithful: WebFetch caps the TRANSFER at 10 MB (MAX_HTTP_CONTENT_LENGTH, utils.ts:112) and the converted MARKDOWN at 100k chars (MAX_MARKDOWN_LENGTH, utils.ts:128) — the prior single 5 MB body cap was a divergence and has been removed. Event names follow the M3-06 lock (_completed suffix, not _succeeded). error_templates.http_status is now the `iIp` SUCCESS-result body (status sentence + body note) returned for HTTP >= 400 — claude-code does NOT throw on >= 400; {status_text} comes from the Node/bun STATUS_CODES table (`status_reason_phrase`).",
+  "webfetch_max_transfer_bytes": 10485760,
+  "webfetch_max_markdown_len": 100000,
+  "webfetch_max_redirects": 10,
+  "webfetch_truncation_suffix": "\n\n[Content truncated due to length...]",
+  "webfetch_user_agent_prefix": "claude-code-tool/",
+  "webfetch_allowed_schemes": ["https", "http"],
+  "webfetch_timeout_secs": 60,
+  "websearch_tool_block_type": "web_search_20250305",
+  "websearch_tool_block_name": "web_search",
+  "websearch_max_uses": 8,
+  "websearch_default_max_tokens": 4096,
+  "websearch_anthropic_beta": "web-search-2025-03-05",
+  "event_names": [
+    "tengu_tool_web_fetch_started",
+    "tengu_tool_web_fetch_completed",
+    "tengu_tool_web_fetch_failed",
+    "tengu_tool_web_search_started",
+    "tengu_tool_web_search_completed",
+    "tengu_tool_web_search_failed"
+  ],
+  "error_templates": {
+    "http_status": "The server returned HTTP {status} {status_text}.\n\nThe response body was not retrieved. If this URL requires authentication, use an authenticated tool (e.g. `gh` for GitHub, or an MCP-provided fetch tool) instead of WebFetch.",
+    "dns_failure": "WebFetch: cannot resolve {host}"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "_source": "claude-code v2.1.185 binary — the xLr/e5 getBetas(model) assembler (reverse-engineered byte-for-byte).",
+  "_note": "Expected anthropic-beta header for the in-scope first-party (Anthropic) path, per model. The header is NOT static per provider×endpoint — it is gated per model/capability/request by e5(model). For claude-opus-4-8 (interactive, experimental betas on, standard speed) the messages.create set is the xLr core in declaration order: claude-code, interleaved-thinking, redact-thinking, thinking-token-count, context-management, prompt-caching-scope, mid-conversation-system. count_tokens intersects that with the ERr whitelist {claude-code, interleaved-thinking, context-management, oauth}. Vertex/Bedrock have provider-specific xLr branches (web-search-on-vertex, thinking-token-count-firstParty-only, bRr extraBodyParams) that are OUT OF SCOPE here (LingXi drives Provider::Anthropic only); the Bedrock/Vertex exclusion structure is covered by orchestrator::model::betas unit tests. The prior fixture encoded the over-emitting static 14-entry set (incl. fabricated token-efficient-tools-2026-03-28) and is replaced.",
+  "matrix": [
+    {
+      "provider": "anthropic",
+      "endpoint": "messages_create",
+      "model": "claude-opus-4-8",
+      "expected": "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07"
+    },
+    {
+      "provider": "anthropic",
+      "endpoint": "messages_create_stream",
+      "model": "claude-opus-4-8",
+      "expected": "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07"
+    },
+    {
+      "provider": "anthropic",
+      "endpoint": "count_tokens",
+      "model": "claude-opus-4-8",
+      "expected": "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27"
+    },
+    {
+      "provider": "anthropic",
+      "endpoint": "messages_create",
+      "model": "claude-sonnet-4-6",
+      "expected": "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+    },
+    {
+      "provider": "anthropic",
+      "endpoint": "messages_create",
+      "model": "claude-haiku-4-5",
+      "expected": "interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+    }
+  ]
+}

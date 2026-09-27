@@ -1,0 +1,7 @@
+{
+  "type": "task_output_chunk",
+  "task_id": "b12345678",
+  "content": "build output line\n",
+  "total_lines": 128,
+  "truncated": false
+}

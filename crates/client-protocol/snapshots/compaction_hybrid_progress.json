@@ -1,0 +1,2550 @@
+{
+  "description": "Phase-bounded time estimate. Only engine success yields 100; elapsed_ms is time in current phase.",
+  "params": {
+    "preparing": [
+      0,
+      10,
+      5,
+      9
+    ],
+    "summarizing": [
+      10,
+      75,
+      90,
+      84
+    ],
+    "restoring": [
+      85,
+      14,
+      10,
+      99
+    ]
+  },
+  "cases": [
+    {
+      "phase": "queued",
+      "elapsed_ms": -1000,
+      "percent": null
+    },
+    {
+      "phase": "queued",
+      "elapsed_ms": 0,
+      "percent": null
+    },
+    {
+      "phase": "queued",
+      "elapsed_ms": 1,
+      "percent": null
+    },
+    {
+      "phase": "queued",
+      "elapsed_ms": 1000,
+      "percent": null
+    },
+    {
+      "phase": "queued",
+      "elapsed_ms": 4000,
+      "percent": null
+    },
+    {
+      "phase": "queued",
+      "elapsed_ms": 5000,
+      "percent": null
+    },
+    {
+      "phase": "queued",
+      "elapsed_ms": 10000,
+      "percent": null
+    },
+    {
+      "phase": "queued",
+      "elapsed_ms": 20000,
+      "percent": null
+    },
+    {
+      "phase": "queued",
+      "elapsed_ms": 60000,
+      "percent": null
+    },
+    {
+      "phase": "queued",
+      "elapsed_ms": 90000,
+      "percent": null
+    },
+    {
+      "phase": "queued",
+      "elapsed_ms": 180000,
+      "percent": null
+    },
+    {
+      "phase": "queued",
+      "elapsed_ms": 600000,
+      "percent": null
+    },
+    {
+      "phase": "queued",
+      "elapsed_ms": 3600000,
+      "percent": null
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": -1000,
+      "percent": 0
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 0,
+      "percent": 0
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 1,
+      "percent": 0
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 255,
+      "percent": 0
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 256,
+      "percent": 0
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 257,
+      "percent": 1
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 258,
+      "percent": 1
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 811,
+      "percent": 1
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 812,
+      "percent": 1
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 813,
+      "percent": 2
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 814,
+      "percent": 2
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 1000,
+      "percent": 2
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 1437,
+      "percent": 2
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 1438,
+      "percent": 2
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 1439,
+      "percent": 3
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 1440,
+      "percent": 3
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 2152,
+      "percent": 3
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 2153,
+      "percent": 3
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 2154,
+      "percent": 4
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 2155,
+      "percent": 4
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 2988,
+      "percent": 4
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 2989,
+      "percent": 4
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 2990,
+      "percent": 5
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 2991,
+      "percent": 5
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 3991,
+      "percent": 5
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 3992,
+      "percent": 5
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 3993,
+      "percent": 6
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 3994,
+      "percent": 6
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 4000,
+      "percent": 6
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 5000,
+      "percent": 6
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 5248,
+      "percent": 6
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 5249,
+      "percent": 6
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 5250,
+      "percent": 7
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 5251,
+      "percent": 7
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 6930,
+      "percent": 7
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 6931,
+      "percent": 7
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 6932,
+      "percent": 8
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 6933,
+      "percent": 8
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 9484,
+      "percent": 8
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 9485,
+      "percent": 8
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 9486,
+      "percent": 9
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 9487,
+      "percent": 9
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 10000,
+      "percent": 9
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 20000,
+      "percent": 9
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 60000,
+      "percent": 9
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 90000,
+      "percent": 9
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 180000,
+      "percent": 9
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 600000,
+      "percent": 9
+    },
+    {
+      "phase": "preparing",
+      "elapsed_ms": 3600000,
+      "percent": 9
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": -1000,
+      "percent": 10
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 0,
+      "percent": 10
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 1,
+      "percent": 10
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 601,
+      "percent": 10
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 602,
+      "percent": 10
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 603,
+      "percent": 11
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 604,
+      "percent": 11
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 1000,
+      "percent": 11
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 1817,
+      "percent": 11
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 1818,
+      "percent": 11
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 1819,
+      "percent": 12
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 1820,
+      "percent": 12
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 3050,
+      "percent": 12
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 3051,
+      "percent": 12
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 3052,
+      "percent": 13
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 3053,
+      "percent": 13
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 4000,
+      "percent": 13
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 4300,
+      "percent": 13
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 4301,
+      "percent": 13
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 4302,
+      "percent": 14
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 4303,
+      "percent": 14
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 5000,
+      "percent": 14
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 5567,
+      "percent": 14
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 5568,
+      "percent": 14
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 5569,
+      "percent": 15
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 5570,
+      "percent": 15
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 6853,
+      "percent": 15
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 6854,
+      "percent": 15
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 6855,
+      "percent": 16
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 6856,
+      "percent": 16
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 8157,
+      "percent": 16
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 8158,
+      "percent": 16
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 8159,
+      "percent": 17
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 8160,
+      "percent": 17
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 9481,
+      "percent": 17
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 9482,
+      "percent": 17
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 9483,
+      "percent": 18
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 9484,
+      "percent": 18
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 10000,
+      "percent": 18
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 10824,
+      "percent": 18
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 10825,
+      "percent": 18
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 10826,
+      "percent": 19
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 10827,
+      "percent": 19
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 12188,
+      "percent": 19
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 12189,
+      "percent": 19
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 12190,
+      "percent": 20
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 12191,
+      "percent": 20
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 13573,
+      "percent": 20
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 13574,
+      "percent": 20
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 13575,
+      "percent": 21
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 13576,
+      "percent": 21
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 14979,
+      "percent": 21
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 14980,
+      "percent": 21
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 14981,
+      "percent": 22
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 14982,
+      "percent": 22
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 16407,
+      "percent": 22
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 16408,
+      "percent": 22
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 16409,
+      "percent": 23
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 16410,
+      "percent": 23
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 17859,
+      "percent": 23
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 17860,
+      "percent": 23
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 17861,
+      "percent": 24
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 17862,
+      "percent": 24
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 19335,
+      "percent": 24
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 19336,
+      "percent": 24
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 19337,
+      "percent": 25
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 19338,
+      "percent": 25
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 20000,
+      "percent": 25
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 20835,
+      "percent": 25
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 20836,
+      "percent": 25
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 20837,
+      "percent": 26
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 20838,
+      "percent": 26
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 22360,
+      "percent": 26
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 22361,
+      "percent": 26
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 22362,
+      "percent": 27
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 22363,
+      "percent": 27
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 23912,
+      "percent": 27
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 23913,
+      "percent": 27
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 23914,
+      "percent": 28
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 23915,
+      "percent": 28
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 25491,
+      "percent": 28
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 25492,
+      "percent": 28
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 25493,
+      "percent": 29
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 25494,
+      "percent": 29
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 27098,
+      "percent": 29
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 27099,
+      "percent": 29
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 27100,
+      "percent": 30
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 27101,
+      "percent": 30
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 28734,
+      "percent": 30
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 28735,
+      "percent": 30
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 28736,
+      "percent": 31
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 28737,
+      "percent": 31
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 30401,
+      "percent": 31
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 30402,
+      "percent": 31
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 30403,
+      "percent": 32
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 30404,
+      "percent": 32
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 32099,
+      "percent": 32
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 32100,
+      "percent": 32
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 32101,
+      "percent": 33
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 32102,
+      "percent": 33
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 33830,
+      "percent": 33
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 33831,
+      "percent": 33
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 33832,
+      "percent": 34
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 33833,
+      "percent": 34
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 35595,
+      "percent": 34
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 35596,
+      "percent": 34
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 35597,
+      "percent": 35
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 35598,
+      "percent": 35
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 37395,
+      "percent": 35
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 37396,
+      "percent": 35
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 37397,
+      "percent": 36
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 37398,
+      "percent": 36
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 39232,
+      "percent": 36
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 39233,
+      "percent": 36
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 39234,
+      "percent": 37
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 39235,
+      "percent": 37
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 41107,
+      "percent": 37
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 41108,
+      "percent": 37
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 41109,
+      "percent": 38
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 41110,
+      "percent": 38
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 43022,
+      "percent": 38
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 43023,
+      "percent": 38
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 43024,
+      "percent": 39
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 43025,
+      "percent": 39
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 44978,
+      "percent": 39
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 44979,
+      "percent": 39
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 44980,
+      "percent": 40
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 44981,
+      "percent": 40
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 46978,
+      "percent": 40
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 46979,
+      "percent": 40
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 46980,
+      "percent": 41
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 46981,
+      "percent": 41
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 49024,
+      "percent": 41
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 49025,
+      "percent": 41
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 49026,
+      "percent": 42
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 49027,
+      "percent": 42
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 51117,
+      "percent": 42
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 51118,
+      "percent": 42
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 51119,
+      "percent": 43
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 51120,
+      "percent": 43
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 53260,
+      "percent": 43
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 53261,
+      "percent": 43
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 53262,
+      "percent": 44
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 53263,
+      "percent": 44
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 55455,
+      "percent": 44
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 55456,
+      "percent": 44
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 55457,
+      "percent": 45
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 55458,
+      "percent": 45
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 57705,
+      "percent": 45
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 57706,
+      "percent": 45
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 57707,
+      "percent": 46
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 57708,
+      "percent": 46
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 60000,
+      "percent": 46
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 60013,
+      "percent": 46
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 60014,
+      "percent": 46
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 60015,
+      "percent": 47
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 60016,
+      "percent": 47
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 62382,
+      "percent": 47
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 62383,
+      "percent": 47
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 62384,
+      "percent": 48
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 62385,
+      "percent": 48
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 64814,
+      "percent": 48
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 64815,
+      "percent": 48
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 64816,
+      "percent": 49
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 64817,
+      "percent": 49
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 67314,
+      "percent": 49
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 67315,
+      "percent": 49
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 67316,
+      "percent": 50
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 67317,
+      "percent": 50
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 69886,
+      "percent": 50
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 69887,
+      "percent": 50
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 69888,
+      "percent": 51
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 69889,
+      "percent": 51
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 72533,
+      "percent": 51
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 72534,
+      "percent": 51
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 72535,
+      "percent": 52
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 72536,
+      "percent": 52
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 75261,
+      "percent": 52
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 75262,
+      "percent": 52
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 75263,
+      "percent": 53
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 75264,
+      "percent": 53
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 78074,
+      "percent": 53
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 78075,
+      "percent": 53
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 78076,
+      "percent": 54
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 78077,
+      "percent": 54
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 80977,
+      "percent": 54
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 80978,
+      "percent": 54
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 80979,
+      "percent": 55
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 80980,
+      "percent": 55
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 83977,
+      "percent": 55
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 83978,
+      "percent": 55
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 83979,
+      "percent": 56
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 83980,
+      "percent": 56
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 87081,
+      "percent": 56
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 87082,
+      "percent": 56
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 87083,
+      "percent": 57
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 87084,
+      "percent": 57
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 90000,
+      "percent": 57
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 90296,
+      "percent": 57
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 90297,
+      "percent": 57
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 90298,
+      "percent": 58
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 90299,
+      "percent": 58
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 93629,
+      "percent": 58
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 93630,
+      "percent": 58
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 93631,
+      "percent": 59
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 93632,
+      "percent": 59
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 97091,
+      "percent": 59
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 97092,
+      "percent": 59
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 97093,
+      "percent": 60
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 97094,
+      "percent": 60
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 100692,
+      "percent": 60
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 100693,
+      "percent": 60
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 100694,
+      "percent": 61
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 100695,
+      "percent": 61
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 104442,
+      "percent": 61
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 104443,
+      "percent": 61
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 104444,
+      "percent": 62
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 104445,
+      "percent": 62
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 108356,
+      "percent": 62
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 108357,
+      "percent": 62
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 108358,
+      "percent": 63
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 108359,
+      "percent": 63
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 112448,
+      "percent": 63
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 112449,
+      "percent": 63
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 112450,
+      "percent": 64
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 112451,
+      "percent": 64
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 116734,
+      "percent": 64
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 116735,
+      "percent": 64
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 116736,
+      "percent": 65
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 116737,
+      "percent": 65
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 121235,
+      "percent": 65
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 121236,
+      "percent": 65
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 121237,
+      "percent": 66
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 121238,
+      "percent": 66
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 125973,
+      "percent": 66
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 125974,
+      "percent": 66
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 125975,
+      "percent": 67
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 125976,
+      "percent": 67
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 130974,
+      "percent": 67
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 130975,
+      "percent": 67
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 130976,
+      "percent": 68
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 130977,
+      "percent": 68
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 136270,
+      "percent": 68
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 136271,
+      "percent": 68
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 136272,
+      "percent": 69
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 136273,
+      "percent": 69
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 141897,
+      "percent": 69
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 141898,
+      "percent": 69
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 141899,
+      "percent": 70
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 141900,
+      "percent": 70
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 147899,
+      "percent": 70
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 147900,
+      "percent": 70
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 147901,
+      "percent": 71
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 147902,
+      "percent": 71
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 154330,
+      "percent": 71
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 154331,
+      "percent": 71
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 154332,
+      "percent": 72
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 154333,
+      "percent": 72
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 161257,
+      "percent": 72
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 161258,
+      "percent": 72
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 161259,
+      "percent": 73
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 161260,
+      "percent": 73
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 168761,
+      "percent": 73
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 168762,
+      "percent": 73
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 168763,
+      "percent": 74
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 168764,
+      "percent": 74
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 176949,
+      "percent": 74
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 176950,
+      "percent": 74
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 176951,
+      "percent": 75
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 176952,
+      "percent": 75
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 180000,
+      "percent": 75
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 185956,
+      "percent": 75
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 185957,
+      "percent": 75
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 185958,
+      "percent": 76
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 185959,
+      "percent": 76
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 195966,
+      "percent": 76
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 195967,
+      "percent": 76
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 195968,
+      "percent": 77
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 195969,
+      "percent": 77
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 207231,
+      "percent": 77
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 207232,
+      "percent": 77
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 207233,
+      "percent": 78
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 207234,
+      "percent": 78
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 220110,
+      "percent": 78
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 220111,
+      "percent": 78
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 220112,
+      "percent": 79
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 220113,
+      "percent": 79
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 235145,
+      "percent": 79
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 235146,
+      "percent": 79
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 235147,
+      "percent": 80
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 235148,
+      "percent": 80
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 253205,
+      "percent": 80
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 253206,
+      "percent": 80
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 253207,
+      "percent": 81
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 253208,
+      "percent": 81
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 275824,
+      "percent": 81
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 275825,
+      "percent": 81
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 275826,
+      "percent": 82
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 275827,
+      "percent": 82
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 306106,
+      "percent": 82
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 306107,
+      "percent": 82
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 306108,
+      "percent": 83
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 306109,
+      "percent": 83
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 352081,
+      "percent": 83
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 352082,
+      "percent": 83
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 352083,
+      "percent": 84
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 352084,
+      "percent": 84
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 600000,
+      "percent": 84
+    },
+    {
+      "phase": "summarizing",
+      "elapsed_ms": 3600000,
+      "percent": 84
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": -1000,
+      "percent": 85
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 0,
+      "percent": 85
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 1,
+      "percent": 85
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 362,
+      "percent": 85
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 363,
+      "percent": 85
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 364,
+      "percent": 86
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 365,
+      "percent": 86
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 1000,
+      "percent": 86
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 1132,
+      "percent": 86
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 1133,
+      "percent": 86
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 1134,
+      "percent": 87
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 1135,
+      "percent": 87
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 1966,
+      "percent": 87
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 1967,
+      "percent": 87
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 1968,
+      "percent": 88
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 1969,
+      "percent": 88
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 2875,
+      "percent": 88
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 2876,
+      "percent": 88
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 2877,
+      "percent": 89
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 2878,
+      "percent": 89
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 3876,
+      "percent": 89
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 3877,
+      "percent": 89
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 3878,
+      "percent": 90
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 3879,
+      "percent": 90
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 4000,
+      "percent": 90
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 4988,
+      "percent": 90
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 4989,
+      "percent": 90
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 4990,
+      "percent": 91
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 4991,
+      "percent": 91
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 5000,
+      "percent": 91
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 6240,
+      "percent": 91
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 6241,
+      "percent": 91
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 6242,
+      "percent": 92
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 6243,
+      "percent": 92
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 7671,
+      "percent": 92
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 7672,
+      "percent": 92
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 7673,
+      "percent": 93
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 7674,
+      "percent": 93
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 9342,
+      "percent": 93
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 9343,
+      "percent": 93
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 9344,
+      "percent": 94
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 9345,
+      "percent": 94
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 10000,
+      "percent": 94
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 11348,
+      "percent": 94
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 11349,
+      "percent": 94
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 11350,
+      "percent": 95
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 11351,
+      "percent": 95
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 13861,
+      "percent": 95
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 13862,
+      "percent": 95
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 13863,
+      "percent": 96
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 13864,
+      "percent": 96
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 17226,
+      "percent": 96
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 17227,
+      "percent": 96
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 17228,
+      "percent": 97
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 17229,
+      "percent": 97
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 20000,
+      "percent": 97
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 22334,
+      "percent": 97
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 22335,
+      "percent": 97
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 22336,
+      "percent": 98
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 22337,
+      "percent": 98
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 33321,
+      "percent": 98
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 33322,
+      "percent": 98
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 33323,
+      "percent": 99
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 33324,
+      "percent": 99
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 60000,
+      "percent": 99
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 90000,
+      "percent": 99
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 180000,
+      "percent": 99
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 600000,
+      "percent": 99
+    },
+    {
+      "phase": "restoring",
+      "elapsed_ms": 3600000,
+      "percent": 99
+    },
+    {
+      "phase": "complete",
+      "elapsed_ms": -1000,
+      "percent": 100
+    },
+    {
+      "phase": "complete",
+      "elapsed_ms": 0,
+      "percent": 100
+    },
+    {
+      "phase": "complete",
+      "elapsed_ms": 1,
+      "percent": 100
+    },
+    {
+      "phase": "complete",
+      "elapsed_ms": 1000,
+      "percent": 100
+    },
+    {
+      "phase": "complete",
+      "elapsed_ms": 4000,
+      "percent": 100
+    },
+    {
+      "phase": "complete",
+      "elapsed_ms": 5000,
+      "percent": 100
+    },
+    {
+      "phase": "complete",
+      "elapsed_ms": 10000,
+      "percent": 100
+    },
+    {
+      "phase": "complete",
+      "elapsed_ms": 20000,
+      "percent": 100
+    },
+    {
+      "phase": "complete",
+      "elapsed_ms": 60000,
+      "percent": 100
+    },
+    {
+      "phase": "complete",
+      "elapsed_ms": 90000,
+      "percent": 100
+    },
+    {
+      "phase": "complete",
+      "elapsed_ms": 180000,
+      "percent": 100
+    },
+    {
+      "phase": "complete",
+      "elapsed_ms": 600000,
+      "percent": 100
+    },
+    {
+      "phase": "complete",
+      "elapsed_ms": 3600000,
+      "percent": 100
+    },
+    {
+      "phase": "error",
+      "elapsed_ms": -1000,
+      "percent": null
+    },
+    {
+      "phase": "error",
+      "elapsed_ms": 0,
+      "percent": null
+    },
+    {
+      "phase": "error",
+      "elapsed_ms": 1,
+      "percent": null
+    },
+    {
+      "phase": "error",
+      "elapsed_ms": 1000,
+      "percent": null
+    },
+    {
+      "phase": "error",
+      "elapsed_ms": 4000,
+      "percent": null
+    },
+    {
+      "phase": "error",
+      "elapsed_ms": 5000,
+      "percent": null
+    },
+    {
+      "phase": "error",
+      "elapsed_ms": 10000,
+      "percent": null
+    },
+    {
+      "phase": "error",
+      "elapsed_ms": 20000,
+      "percent": null
+    },
+    {
+      "phase": "error",
+      "elapsed_ms": 60000,
+      "percent": null
+    },
+    {
+      "phase": "error",
+      "elapsed_ms": 90000,
+      "percent": null
+    },
+    {
+      "phase": "error",
+      "elapsed_ms": 180000,
+      "percent": null
+    },
+    {
+      "phase": "error",
+      "elapsed_ms": 600000,
+      "percent": null
+    },
+    {
+      "phase": "error",
+      "elapsed_ms": 3600000,
+      "percent": null
+    },
+    {
+      "phase": "cancelled",
+      "elapsed_ms": -1000,
+      "percent": null
+    },
+    {
+      "phase": "cancelled",
+      "elapsed_ms": 0,
+      "percent": null
+    },
+    {
+      "phase": "cancelled",
+      "elapsed_ms": 1,
+      "percent": null
+    },
+    {
+      "phase": "cancelled",
+      "elapsed_ms": 1000,
+      "percent": null
+    },
+    {
+      "phase": "cancelled",
+      "elapsed_ms": 4000,
+      "percent": null
+    },
+    {
+      "phase": "cancelled",
+      "elapsed_ms": 5000,
+      "percent": null
+    },
+    {
+      "phase": "cancelled",
+      "elapsed_ms": 10000,
+      "percent": null
+    },
+    {
+      "phase": "cancelled",
+      "elapsed_ms": 20000,
+      "percent": null
+    },
+    {
+      "phase": "cancelled",
+      "elapsed_ms": 60000,
+      "percent": null
+    },
+    {
+      "phase": "cancelled",
+      "elapsed_ms": 90000,
+      "percent": null
+    },
+    {
+      "phase": "cancelled",
+      "elapsed_ms": 180000,
+      "percent": null
+    },
+    {
+      "phase": "cancelled",
+      "elapsed_ms": 600000,
+      "percent": null
+    },
+    {
+      "phase": "cancelled",
+      "elapsed_ms": 3600000,
+      "percent": null
+    },
+    {
+      "phase": "skipped",
+      "elapsed_ms": -1000,
+      "percent": null
+    },
+    {
+      "phase": "skipped",
+      "elapsed_ms": 0,
+      "percent": null
+    },
+    {
+      "phase": "skipped",
+      "elapsed_ms": 1,
+      "percent": null
+    },
+    {
+      "phase": "skipped",
+      "elapsed_ms": 1000,
+      "percent": null
+    },
+    {
+      "phase": "skipped",
+      "elapsed_ms": 4000,
+      "percent": null
+    },
+    {
+      "phase": "skipped",
+      "elapsed_ms": 5000,
+      "percent": null
+    },
+    {
+      "phase": "skipped",
+      "elapsed_ms": 10000,
+      "percent": null
+    },
+    {
+      "phase": "skipped",
+      "elapsed_ms": 20000,
+      "percent": null
+    },
+    {
+      "phase": "skipped",
+      "elapsed_ms": 60000,
+      "percent": null
+    },
+    {
+      "phase": "skipped",
+      "elapsed_ms": 90000,
+      "percent": null
+    },
+    {
+      "phase": "skipped",
+      "elapsed_ms": 180000,
+      "percent": null
+    },
+    {
+      "phase": "skipped",
+      "elapsed_ms": 600000,
+      "percent": null
+    },
+    {
+      "phase": "skipped",
+      "elapsed_ms": 3600000,
+      "percent": null
+    },
+    {
+      "phase": "future_phase",
+      "elapsed_ms": -1000,
+      "percent": null
+    },
+    {
+      "phase": "future_phase",
+      "elapsed_ms": 0,
+      "percent": null
+    },
+    {
+      "phase": "future_phase",
+      "elapsed_ms": 1,
+      "percent": null
+    },
+    {
+      "phase": "future_phase",
+      "elapsed_ms": 1000,
+      "percent": null
+    },
+    {
+      "phase": "future_phase",
+      "elapsed_ms": 4000,
+      "percent": null
+    },
+    {
+      "phase": "future_phase",
+      "elapsed_ms": 5000,
+      "percent": null
+    },
+    {
+      "phase": "future_phase",
+      "elapsed_ms": 10000,
+      "percent": null
+    },
+    {
+      "phase": "future_phase",
+      "elapsed_ms": 20000,
+      "percent": null
+    },
+    {
+      "phase": "future_phase",
+      "elapsed_ms": 60000,
+      "percent": null
+    },
+    {
+      "phase": "future_phase",
+      "elapsed_ms": 90000,
+      "percent": null
+    },
+    {
+      "phase": "future_phase",
+      "elapsed_ms": 180000,
+      "percent": null
+    },
+    {
+      "phase": "future_phase",
+      "elapsed_ms": 600000,
+      "percent": null
+    },
+    {
+      "phase": "future_phase",
+      "elapsed_ms": 3600000,
+      "percent": null
+    }
+  ]
+}

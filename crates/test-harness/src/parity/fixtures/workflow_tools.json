@@ -1,0 +1,80 @@
+{
+  "_source": "claude-code/src/tools/TodoWriteTool/TodoWriteTool.ts (TodoStatus literal union) + claude-code/src/tools/PlanModeTool/{Enter,Exit}PlanModeTool.ts ('[PLAN MODE]' / '[EXIT PLAN MODE]' markers) + claude-code/src/utils/worktree.ts (branch prefix 'worktree-', flatten '/' -> '+', path layout '.lingxi/worktrees/<flatten>')",
+  "_note": "M4-04 workflow tools. TodoState wire literals are 'pending' / 'in_progress' / 'completed' (NOT 'done', NOT 'todo' — spec §7 line 486). Plan markers are exact strings, no surrounding whitespace beyond what is shown. Worktree branch prefix + path segment + slug-flatten char are M2-01 locks reused verbatim. 15 tengu_tool_* event names form the M4-04 telemetry contract; the NAMES array in tengu/tool.rs grows from 52 (post-M4-03) to 67 in Task 2 (ALL_EVENT_NAMES 155 -> 170). Slug rules: each '/'-separated segment matches [a-zA-Z0-9._-]+, total length 1..=64, no empty segments, '+' rejected (because '+' is the flatten output — keeps the mapping injective).",
+  "todo_states": {
+    "pending": "pending",
+    "in_progress": "in_progress",
+    "completed": "completed"
+  },
+  "todo_aliases_rejected": ["done", "todo", "DONE", "Pending", "InProgress"],
+  "todo_error_strings": {
+    "empty_content": "Content cannot be empty",
+    "empty_active_form": "Active form cannot be empty",
+    "duplicate_id_template": "TodoWrite: duplicate id '{id}'",
+    "multi_in_progress_template": "TodoWrite: at most one todo may be 'in_progress' (got {N})"
+  },
+  "plan_mode": {
+    "_note": "2.1.266 has no plan-mode marker strings: EnterPlanMode returns {message} and ExitPlanMode returns {plan,isAgent,filePath,hasTaskTool,planWasEdited}. The former enter_marker/exit_marker entries were LingXi-invented and were removed together with the constants.",
+    "enter_already_in_mode": "EnterPlanMode: session is already in plan mode",
+    "exit_not_in_mode":      "ExitPlanMode: session is not in plan mode"
+  },
+  "worktree": {
+    "branch_prefix": "worktree-",
+    "path_segment":  ".lingxi/worktrees",
+    "flatten_char":  "+",
+    "max_slug_length": 64,
+    "valid_slugs": [
+      { "slug": "feature-x",         "expected_branch": "worktree-feature-x",          "expected_path_suffix": ".lingxi/worktrees/feature-x" },
+      { "slug": "user/feature",      "expected_branch": "worktree-user+feature",       "expected_path_suffix": ".lingxi/worktrees/user+feature" },
+      { "slug": "team/area/widget",  "expected_branch": "worktree-team+area+widget",   "expected_path_suffix": ".lingxi/worktrees/team+area+widget" },
+      { "slug": "plain",             "expected_branch": "worktree-plain",              "expected_path_suffix": ".lingxi/worktrees/plain" }
+    ],
+    "invalid_slugs": [
+      "",
+      "bad slug",
+      "with$dollar",
+      "leading/",
+      "/leading",
+      "a//b",
+      "a+b",
+      "trailing+sign"
+    ],
+    "error_string_templates": {
+      "invalid_slug_enter": "EnterWorktree: invalid slug: {detail}",
+      "invalid_slug_exit":  "ExitWorktree: invalid slug: {detail}",
+      "unsupported_enter":  "EnterWorktree: worktrees are not supported on this platform",
+      "unsupported_exit":   "ExitWorktree: worktrees are not supported on this platform",
+      "git_enter_template": "EnterWorktree: git error: {msg}",
+      "git_exit_template":  "ExitWorktree: git error: {msg}",
+      "io_enter_template":  "EnterWorktree: io error: {msg}",
+      "io_exit_template":   "ExitWorktree: io error: {msg}"
+    }
+  },
+  "tengu_events": {
+    "todo_write": [
+      "tengu_tool_todo_write_started",
+      "tengu_tool_todo_write_completed",
+      "tengu_tool_todo_write_failed"
+    ],
+    "enter_plan_mode": [
+      "tengu_tool_enter_plan_mode_started",
+      "tengu_tool_enter_plan_mode_completed",
+      "tengu_tool_enter_plan_mode_failed"
+    ],
+    "exit_plan_mode": [
+      "tengu_tool_exit_plan_mode_started",
+      "tengu_tool_exit_plan_mode_completed",
+      "tengu_tool_exit_plan_mode_failed"
+    ],
+    "enter_worktree": [
+      "tengu_tool_enter_worktree_started",
+      "tengu_tool_enter_worktree_completed",
+      "tengu_tool_enter_worktree_failed"
+    ],
+    "exit_worktree": [
+      "tengu_tool_exit_worktree_started",
+      "tengu_tool_exit_worktree_completed",
+      "tengu_tool_exit_worktree_failed"
+    ]
+  }
+}

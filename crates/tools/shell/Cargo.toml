@@ -1,0 +1,48 @@
+[package]
+name = "tool-shell"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.22"
+tool-api = { path = "../../tool-api" }
+platform-api = { path = "../../platform-api" }
+protocol = { path = "../../protocol" }
+# Internal path dep (no new Cargo.lock package — `hooks`'s graph is already
+# pulled in transitively via `tool-api` → `engine`): names the `CwdChangedFirer`
+# seam BashTool fires after a `cd` (1:1 `onCwdChangedForHooks`, Shell.ts:409).
+hooks = { path = "../../hooks" }
+permission = { path = "../../permission" }
+sandbox = { path = "../../sandbox" }
+telemetry = { path = "../../telemetry" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+once_cell = "1"
+thiserror.workspace = true
+# Finding #8: the cwd-reset event `tengu_bash_tool_reset_to_original_dir` is NOT
+# a registered tengu/ALL_EVENT_NAMES const (registry stays at 347) — claude-code
+# fires it via `j(...)` only on the non-TFo reset branch. We emit it as an inline
+# `tracing` event instead of registering a new tengu name. `tracing` is already
+# in the workspace lockfile (orchestrator/engine), so this adds no new package.
+tracing.workspace = true
+
+# BASH.6 sandbox-prompt dir name uses the REAL uid (1:1 TS `process.getuid?.()`).
+# `nix::unistd::getuid()` is a SAFE wrapper around `getuid(2)`, so this crate keeps
+# its `#![forbid(unsafe_code)]` (a raw `libc::getuid()` would need an `unsafe` block).
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.27", default-features = false, features = ["user"] }
+
+[dev-dependencies]
+tool-api = { path = "../../tool-api", features = ["test-support"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }
+# PHASE-2: `CancellationToken` for the Bash cancel-returns-Aborted unit test
+# (the production `ToolUseContext::cancel` token type, via tool-api's surface).
+tokio-util = { workspace = true }
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "android_api": 26,
+  "supported_abis": [
+    "arm64-v8a",
+    "x86_64"
+  ],
+  "components": {
+    "typescript_native": {
+      "version": "7.0.2",
+      "install_root": "/opt/lingxi/toolchains/typescript/7.0.2",
+      "npm_package": {
+        "name": "typescript",
+        "tarball": "https://registry.npmjs.org/typescript/-/typescript-7.0.2.tgz",
+        "integrity": "sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA=="
+      },
+      "platform_packages": {
+        "arm64-v8a": {
+          "name": "@typescript/typescript-linux-arm64",
+          "tarball": "https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.0.2.tgz",
+          "integrity": "sha512-Qh4eU4/y3yDjnfjjyPYihMj5/ODIlmt+Bzu17OI+fiSRDW57QmU5SiN63exPRNJPKUzcc1INa1NXdrJ+MqHjUQ==",
+          "tsc_sha256": "f86e8070c267b12d6c119bf567cb82d8b245e9d93da1864bc7c603cea10a8b2f"
+        },
+        "x86_64": {
+          "name": "@typescript/typescript-linux-x64",
+          "tarball": "https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-7.0.2.tgz",
+          "integrity": "sha512-EYdf2cNg7rgCWJnxCdJ+F3V39O8ihb37eHAu1LK8oAFizgTQbPOK7zHHXbPt8rX24COqODXeI3sIf0fCXG7H/A==",
+          "tsc_sha256": "4f2de678286401759b3fb4475bafe35b8f32b4b3a07d92642bbf37eadc9b34a4"
+        }
+      },
+      "license": "Apache-2.0"
+    }
+  },
+  "rootfs": {
+    "distribution": "Alpine Linux",
+    "version": "3.21.3",
+    "branch": "v3.21",
+    "license": "LicenseRef-Alpine-Aggregate",
+    "archives": {
+      "arm64-v8a": {
+        "architecture": "aarch64",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.3-aarch64.tar.gz",
+        "sha256": "ead8a4b37867bd19e7417dd078748e2312c0aea364403d96758d63ea8ff261ea"
+      },
+      "x86_64": {
+        "architecture": "x86_64",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-minirootfs-3.21.3-x86_64.tar.gz",
+        "sha256": "1a694899e406ce55d32334c47ac0b2efb6c06d7e878102d1840892ad44cd5239"
+      }
+    }
+  }
+}

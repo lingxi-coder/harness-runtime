@@ -1,0 +1,7 @@
+{
+  "type": "usage_update",
+  "input_tokens": 1200,
+  "output_tokens": 340,
+  "cache_read_tokens": 800,
+  "cache_creation_tokens": 64
+}

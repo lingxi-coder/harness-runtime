@@ -1,0 +1,53 @@
+{
+  "_source": "claude-code/src/tools/{FileReadTool,FileWriteTool,FileEditTool,NotebookEditTool,GlobTool,GrepTool}/utils.ts + spec docs/superpowers/specs/2026-05-24-m4-tools-implementation-design.md §7",
+  "_note": "Every value here MUST match the production constant byte-for-byte. Drift breaks claude-code wire parity. Citations: FileReadTool/utils.ts:158 (size cap error), FileEditTool/utils.ts:405 (patch truncation suffix). 1-based line indexing per claude-code semantics. Tool names match the claude-code tool registry exactly.",
+  "tools": ["Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep"],
+  "read_size_limit": {
+    "value": 262144,
+    "unit": "bytes",
+    "note": "256 KB. Locked at MAX_FILE_READ_SIZE. Error message is now byte-VERBATIM to claude-code FileTooLargeError (readFileInRange.ts:62-64), formatting both sizes via formatFileSize.",
+    "error_template": "File content ({size}) exceeds maximum allowed size ({max}). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file."
+  },
+  "binary_detection": {
+    "scan_window_bytes": 8192,
+    "note": "Primary detection is by extension (BINARY_EXTENSIONS, constants/files.ts) before any read; the 8 KB NUL scan is the fallback for extensionless/non-listed binaries. Message is byte-VERBATIM to FileReadTool.ts:479 with the lowercased extension interpolated.",
+    "error_template": "This tool cannot read binary files. The file appears to be a binary {ext} file. Please use appropriate tools for binary file analysis."
+  },
+  "path_blocked_error": {
+    "template": "File path {path} is outside trusted directories",
+    "_PROTO_path_key": "_PROTO_path",
+    "note": "PII-tagged path routes to proto-tagged BigQuery column."
+  },
+  "path_blocked_event_name": {
+    "value": "tengu_file_path_blocked",
+    "note": "Cross-cutting event (not in tengu/tool.rs registry); declared inline in shared/path_validation.rs."
+  },
+  "patch_truncation_suffix": {
+    "template": "\n\n... [{N} lines truncated] ...",
+    "source": "claude-code/src/tools/FileEditTool/utils.ts:405",
+    "note": "`{N}` is the literal placeholder substituted with the elided-line count."
+  },
+  "output_truncation": {
+    "max_length": 30000,
+    "suffix": "\n\n... [{N} lines truncated] ...",
+    "note": "Cross-cutting MAX_TOOL_OUTPUT_LENGTH in shared/output_truncation.rs."
+  },
+  "glob_cap": {
+    "value": 100,
+    "note": "MAX_GLOB_MATCHES. Excess returns truncated=true."
+  },
+  "grep_records_cap": {
+    "value": 10000,
+    "note": "GREP_RECORDS_CAP. Memory valve on RECORDED content-mode lines per file; never caps the count (claude-code/rg have no per-file cap). head_limit (default 250) is the real truncation; count mode reports the true total."
+  },
+  "line_indexing_base": {
+    "value": 1,
+    "note": "1-based for tool input/output (claude-code convention). LSP wire is 0-based — converted in M2-03."
+  },
+  "telemetry_events": {
+    "read":     ["tengu_tool_read_started", "tengu_tool_read_completed", "tengu_tool_read_failed"],
+    "write":    ["tengu_tool_write_started", "tengu_tool_write_completed", "tengu_tool_write_failed"],
+    "edit":     ["tengu_tool_edit_started", "tengu_tool_edit_completed", "tengu_tool_edit_failed"],
+    "notebook": ["tengu_tool_notebook_started", "tengu_tool_notebook_completed", "tengu_tool_notebook_failed"]
+  }
+}

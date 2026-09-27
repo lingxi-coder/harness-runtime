@@ -1,0 +1,10 @@
+{
+  "role": "system",
+  "blocks": [],
+  "loop_wakeup": {
+    "message": "fire",
+    "companion": "healthy",
+    "streak": 1,
+    "since_ms": 42
+  }
+}

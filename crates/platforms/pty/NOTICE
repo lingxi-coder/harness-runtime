@@ -1,0 +1,16 @@
+This crate contains code adapted from OpenAI Codex:
+
+  https://github.com/openai/codex/tree/b8c2d29cc23b41fa7c7f5f5483e92fc71099635a/codex-rs/utils/pty
+
+Copyright 2025 OpenAI
+Licensed under the Apache License, Version 2.0.
+
+The Windows ConPTY files under src/win were carried through the pinned Codex
+source and originate from WezTerm. LingXi additionally creates the child
+suspended, assigns it to a kill-on-close Job Object, and resumes it only after
+the process-tree ownership is established:
+
+  https://github.com/wezterm/wezterm/tree/main/pty
+
+Copyright 2018-Present Wez Furlong
+Licensed under the MIT License.

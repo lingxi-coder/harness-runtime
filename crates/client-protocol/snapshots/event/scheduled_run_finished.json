@@ -1,0 +1,6 @@
+{
+  "type": "scheduled_run_finished",
+  "run_id": "run-1",
+  "summary": "Completed",
+  "error": null
+}

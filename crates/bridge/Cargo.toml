@@ -1,0 +1,38 @@
+[package]
+name = "bridge"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+protocol = { path = "../protocol" }
+client-protocol = { path = "../client-protocol" }
+platform-api = { path = "../platform-api" }
+branding.workspace = true
+secret = { path = "../secret" }
+jsonrpc = { path = "../jsonrpc" }
+mcp = { path = "../mcp" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio = { version = "1", features = ["sync", "time", "rt"] }
+tracing.workspace = true
+rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "os_rng"] }
+dirs = "5"
+tokio-tungstenite = "0.21"
+futures-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.27", default-features = false, features = ["signal", "user"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3.13"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+http = "1"
+futures-util.workspace = true
+
+[lints]
+workspace = true

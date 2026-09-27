@@ -1,0 +1,69 @@
+{
+  "oracle": {
+    "version": "2.1.220",
+    "binary_sha256": "8addc857f3fe64d5a0368af9ee50321b50afb4a6918ba3ef018ab84f5dbbe081",
+    "capture_kind": "clean-room-black-box",
+    "captured_at": "2026-07-27",
+    "notes": "Contains only observable contracts and short public UI fragments; no binary or private source is embedded."
+  },
+  "pinned_contracts": {
+    "ultracode": {
+      "transitions": ["enter", "sparse", "exit"],
+      "default_sparse_cadence": 10,
+      "keyword": "ultracode"
+    },
+    "observer": {
+      "fields": ["observer", "observerMessage", "observeSubagents"],
+      "default_max_depth": 3
+    },
+    "deep_research": {
+      "manual_only": true,
+      "stages": ["Scope", "Search", "Fetch", "Verify", "Synthesize"],
+      "votes_per_claim": 3,
+      "max_fetch": 15
+    },
+    "opus_5_bash_addition": "Command output is displayed to you, not reliably to the user.",
+    "mcp_get_help": "Unapproved .mcp.json servers are shown as Pending approval and not connected to; approved servers are health-checked.",
+    "attached_left_arrow": {
+      "requires_confirmation": true,
+      "outcome": "detach"
+    },
+    "accessibility": {
+      "announces_edit_delta_only": true,
+      "focus_cursor_tracks_selected_row": true
+    }
+  },
+  "items": [
+    {"id":"FU-disabled-agent-server","wave":1,"target":"CLOSED"},
+    {"id":"FU-orch-7-currentdate","wave":2,"target":"CLOSED"},
+    {"id":"P1-user_prompt-log","wave":2,"target":"CLOSED"},
+    {"id":"M6-flagSettings-env-tier","wave":1,"target":"CLOSED"},
+    {"id":"FU-mcp-get-health","wave":1,"target":"CLOSED"},
+    {"id":"FU-afe-shadow","wave":1,"target":"CLOSED"},
+    {"id":"M7-plugin-warn-variant","wave":1,"target":"CLOSED"},
+    {"id":"M12-attach-detach","wave":3,"target":"CLOSED"},
+    {"id":"N-env-2","wave":3,"target":"CLOSED"},
+    {"id":"N-changelog-3","wave":3,"target":"CLOSED"},
+    {"id":"H6-remainder","wave":2,"target":"CLOSED"},
+    {"id":"N-protocol-5","wave":3,"target":"CLOSED"},
+    {"id":"M12-midturn-backgrounding","wave":3,"target":"CLOSED"},
+    {"id":"N-protocol-7","wave":2,"target":"CLOSED"},
+    {"id":"FU-mcpcli-5","wave":1,"target":"CLOSED"},
+    {"id":"M12-managed-row","wave":4,"target":"CLOSED"},
+    {"id":"FU-orch-decision-class","wave":2,"target":"CLOSED"},
+    {"id":"M5-issue-formatting","wave":1,"target":"CLOSED"},
+    {"id":"N-changelog-5","wave":4,"target":"CLOSED"},
+    {"id":"N-changelog-4","wave":4,"target":"CLOSED"},
+    {"id":"O1-code-review-background","wave":3,"target":"CLOSED"},
+    {"id":"O2-context-post-compact","wave":2,"target":"CLOSED"},
+    {"id":"O3-ctrl-j-paste-newline","wave":4,"target":"CLOSED"},
+    {"id":"O4-panel-focus-cursor","wave":4,"target":"CLOSED"},
+    {"id":"O5-microcompact-idle-gap","wave":2,"target":"CLOSED"}
+  ],
+  "divergences": [
+    {
+      "id": "N-env-3/N-protocol-8",
+      "reason": "Anthropic private account remote-memory endpoint and authentication contract are unavailable; LingXi does not fabricate a compatible backend."
+    }
+  ]
+}

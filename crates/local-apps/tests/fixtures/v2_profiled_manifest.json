@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 2,
+  "runtimeApiVersion": 2,
+  "appId": "profiled-v2",
+  "revision": 7,
+  "name": "Profiled Fixture",
+  "collections": [],
+  "allowedDomains": [
+    "api.example.com"
+  ],
+  "capabilities": [],
+  "surface": "canvas",
+  "runtimeProfile": {
+    "family": "three_3d",
+    "revision": 1,
+    "contractSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "dependencySnapshot": {
+    "requestedSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "packageSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "lockfileSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "dependencyTreeSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "sbomSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "toolchainKey": "pnpm@11.22.0/node@24.18.1",
+    "verifiedProfileContractSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

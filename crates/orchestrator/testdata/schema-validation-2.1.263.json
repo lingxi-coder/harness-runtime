@@ -1,0 +1,344 @@
+{
+  "oracle": "Claude Code 2.1.263 / Zod 4.4.3",
+  "sources": [
+    "src_156931063.js",
+    "src_188852458.js",
+    "src_160988549.js"
+  ],
+  "cases": [
+    {
+      "name": "enum",
+      "schema": {
+        "type": "string",
+        "enum": [
+          "a",
+          "b"
+        ]
+      },
+      "input": "c",
+      "expected": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"a\",\n      \"b\"\n    ],\n    \"path\": [],\n    \"message\": \"Invalid option: expected one of \\\"a\\\"|\\\"b\\\"\"\n  }\n]"
+    },
+    {
+      "name": "single_value",
+      "schema": {
+        "const": "a"
+      },
+      "input": "c",
+      "expected": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"a\"\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input: expected \\\"a\\\"\"\n  }\n]"
+    },
+    {
+      "name": "enum_missing",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "input": {},
+      "expected": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"a\",\n      \"b\"\n    ],\n    \"path\": [\n      \"mode\"\n    ],\n    \"message\": \"Invalid option: expected one of \\\"a\\\"|\\\"b\\\"\"\n  }\n]"
+    },
+    {
+      "name": "enum_wrong_type",
+      "schema": {
+        "type": "string",
+        "enum": [
+          "a",
+          "b"
+        ]
+      },
+      "input": 3,
+      "expected": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      \"a\",\n      \"b\"\n    ],\n    \"path\": [],\n    \"message\": \"Invalid option: expected one of \\\"a\\\"|\\\"b\\\"\"\n  }\n]"
+    },
+    {
+      "name": "min_string",
+      "schema": {
+        "type": "string",
+        "minLength": 5
+      },
+      "input": "a",
+      "expected": "[\n  {\n    \"origin\": \"string\",\n    \"code\": \"too_small\",\n    \"minimum\": 5,\n    \"inclusive\": true,\n    \"path\": [],\n    \"message\": \"Too small: expected string to have >=5 characters\"\n  }\n]"
+    },
+    {
+      "name": "max_string_utf16",
+      "schema": {
+        "type": "string",
+        "maxLength": 1
+      },
+      "input": "😀",
+      "expected": "[\n  {\n    \"origin\": \"string\",\n    \"code\": \"too_big\",\n    \"maximum\": 1,\n    \"inclusive\": true,\n    \"path\": [],\n    \"message\": \"Too big: expected string to have <=1 characters\"\n  }\n]"
+    },
+    {
+      "name": "valid_string_utf16",
+      "schema": {
+        "type": "string",
+        "minLength": 2
+      },
+      "input": "😀",
+      "expected": null
+    },
+    {
+      "name": "pattern",
+      "schema": {
+        "type": "string",
+        "pattern": "^x$"
+      },
+      "input": "a",
+      "expected": "[\n  {\n    \"origin\": \"string\",\n    \"code\": \"invalid_format\",\n    \"format\": \"regex\",\n    \"pattern\": \"/^x$/\",\n    \"path\": [],\n    \"message\": \"Invalid string: must match pattern /^x$/\"\n  }\n]"
+    },
+    {
+      "name": "int",
+      "schema": {
+        "type": "integer"
+      },
+      "input": 1.5,
+      "expected": "Tool failed due to the following issue:\nThe parameter `` type is expected as `int` but provided as `number`"
+    },
+    {
+      "name": "url",
+      "schema": {
+        "type": "string",
+        "format": "uri"
+      },
+      "input": "bad",
+      "expected": "[\n  {\n    \"code\": \"invalid_format\",\n    \"format\": \"url\",\n    \"path\": [],\n    \"message\": \"Invalid URL\"\n  }\n]"
+    },
+    {
+      "name": "array",
+      "schema": {
+        "type": "array",
+        "maxItems": 1,
+        "items": {
+          "type": "string"
+        }
+      },
+      "input": [
+        "a",
+        "b"
+      ],
+      "expected": "[\n  {\n    \"origin\": \"array\",\n    \"code\": \"too_big\",\n    \"maximum\": 1,\n    \"inclusive\": true,\n    \"path\": [],\n    \"message\": \"Too big: expected array to have <=1 items\"\n  }\n]"
+    },
+    {
+      "name": "array_child",
+      "schema": {
+        "type": "array",
+        "minItems": 3,
+        "items": {
+          "type": "string"
+        }
+      },
+      "input": [
+        3
+      ],
+      "expected": "Tool failed due to the following issue:\nThe parameter `[0]` type is expected as `string` but provided as `number`"
+    },
+    {
+      "name": "number",
+      "schema": {
+        "type": "number",
+        "minimum": 5
+      },
+      "input": 1,
+      "expected": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_small\",\n    \"minimum\": 5,\n    \"inclusive\": true,\n    \"path\": [],\n    \"message\": \"Too small: expected number to be >=5\"\n  }\n]"
+    },
+    {
+      "name": "union",
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "number"
+          }
+        ]
+      },
+      "input": true,
+      "expected": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected string, received boolean\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"number\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected number, received boolean\"\n        }\n      ]\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input\"\n  }\n]"
+    },
+    {
+      "name": "union_dirty",
+      "schema": {
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 5
+          },
+          {
+            "type": "number"
+          }
+        ]
+      },
+      "input": "a",
+      "expected": "[\n  {\n    \"origin\": \"string\",\n    \"code\": \"too_small\",\n    \"minimum\": 5,\n    \"inclusive\": true,\n    \"path\": [],\n    \"message\": \"Too small: expected string to have >=5 characters\"\n  }\n]"
+    },
+    {
+      "name": "nested_union",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          }
+        },
+        "required": [
+          "x"
+        ]
+      },
+      "input": {
+        "x": true
+      },
+      "expected": "[\n  {\n    \"code\": \"invalid_union\",\n    \"errors\": [\n      [\n        {\n          \"expected\": \"string\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected string, received boolean\"\n        }\n      ],\n      [\n        {\n          \"expected\": \"number\",\n          \"code\": \"invalid_type\",\n          \"path\": [],\n          \"message\": \"Invalid input: expected number, received boolean\"\n        }\n      ]\n    ],\n    \"path\": [\n      \"x\"\n    ],\n    \"message\": \"Invalid input\"\n  }\n]"
+    },
+    {
+      "name": "declaration_order",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "z": {
+            "type": "string"
+          },
+          "a": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "a"
+            ]
+          }
+        },
+        "required": [
+          "z",
+          "a",
+          "mode"
+        ]
+      },
+      "input": {
+        "mode": "bad"
+      },
+      "expected": "Tool failed due to the following issues:\nThe required parameter `z` is missing\nThe required parameter `a` is missing"
+    },
+    {
+      "name": "strict_keys",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "x"
+        ],
+        "additionalProperties": false
+      },
+      "input": {
+        "x": "a",
+        "extra": 2
+      },
+      "expected": "Tool failed due to the following issue:\nAn unexpected parameter `extra` was provided"
+    },
+    {
+      "name": "numeric_literal_1",
+      "schema": {
+        "const": 1
+      },
+      "input": "bad",
+      "expected": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      1\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input: expected 1\"\n  }\n]"
+    },
+    {
+      "name": "numeric_literal_0",
+      "schema": {
+        "const": 0
+      },
+      "input": "bad",
+      "expected": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      0\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input: expected 0\"\n  }\n]"
+    },
+    {
+      "name": "numeric_literal_1e-7",
+      "schema": {
+        "const": 1e-7
+      },
+      "input": "bad",
+      "expected": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      1e-7\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input: expected 1e-7\"\n  }\n]"
+    },
+    {
+      "name": "numeric_literal_0.000001",
+      "schema": {
+        "const": 0.000001
+      },
+      "input": "bad",
+      "expected": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      0.000001\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input: expected 0.000001\"\n  }\n]"
+    },
+    {
+      "name": "numeric_literal_100000000000000000000",
+      "schema": {
+        "const": 100000000000000000000
+      },
+      "input": "bad",
+      "expected": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      100000000000000000000\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input: expected 100000000000000000000\"\n  }\n]"
+    },
+    {
+      "name": "numeric_literal_1e+21",
+      "schema": {
+        "const": 1e+21
+      },
+      "input": "bad",
+      "expected": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      1e+21\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input: expected 1e+21\"\n  }\n]"
+    },
+    {
+      "name": "numeric_literal_1e+23",
+      "schema": {
+        "const": 1e+23
+      },
+      "input": "bad",
+      "expected": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      1e+23\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input: expected 1e+23\"\n  }\n]"
+    },
+    {
+      "name": "numeric_literal_1000000000000000100",
+      "schema": {
+        "const": 1000000000000000100
+      },
+      "input": "bad",
+      "expected": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      1000000000000000100\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input: expected 1000000000000000100\"\n  }\n]"
+    },
+    {
+      "name": "numeric_literal_9007199254740992",
+      "schema": {
+        "const": 9007199254740992
+      },
+      "input": "bad",
+      "expected": "[\n  {\n    \"code\": \"invalid_value\",\n    \"values\": [\n      9007199254740992\n    ],\n    \"path\": [],\n    \"message\": \"Invalid input: expected 9007199254740992\"\n  }\n]"
+    },
+    {
+      "name": "numeric_keys",
+      "schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "input": {
+        "2": 1,
+        "10": 1,
+        "01": 1
+      },
+      "expected": "Tool failed due to the following issues:\nAn unexpected parameter `2` was provided\nAn unexpected parameter `10` was provided\nAn unexpected parameter `01` was provided"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "request_id": 10,
+  "kind": {
+    "type": "tool_use_confirm",
+    "tool_name": "Edit",
+    "tool_input_json": "{\"file_path\":\"/tmp/x\"}",
+    "default_allow": true
+  },
+  "worker": {
+    "name": "reviewer",
+    "color": "cyan"
+  }
+}

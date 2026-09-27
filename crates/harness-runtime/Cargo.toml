@@ -1,0 +1,356 @@
+[package]
+name = "harness-runtime"
+version = "0.9.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+autotests = false
+
+[features]
+default = [
+    "core",
+]
+core = [
+    "dep:orchestrator",
+    "dep:agent",
+    "dep:platform-api",
+    "dep:protocol",
+    "dep:tool-api",
+    "dep:session",
+    "dep:permission",
+    "dep:hooks",
+    "dep:mcp",
+    "dep:compaction",
+    "dep:sidequery",
+    "dep:cost",
+    "dep:tasks",
+    "dep:skill-api",
+    "dep:command-api",
+]
+desktop = [
+    "core",
+    "dep:branding",
+    "dep:command-core",
+    "dep:cron",
+    "dep:core",
+    "dep:memory",
+    "dep:migrations",
+    "dep:provider-config",
+    "dep:platform-common",
+    "dep:secret",
+    "permission/bash-ast",
+    "dep:sandbox",
+    "dep:sandbox-runtime-runner",
+    "dep:telemetry",
+    "dep:bridge",
+    "dep:plugin",
+    "dep:outputstyles",
+    "dep:lsp",
+    "fusion",
+    "collaboration",
+    "dep:platform-posix",
+    "dep:platform-macos-computer-control",
+    "dep:client-adapter",
+    "dep:client-protocol",
+    "dep:tracing",
+    "dep:tokio",
+    "tokio/rt-multi-thread",
+    "tokio/macros",
+    "tokio/sync",
+    "dep:dirs",
+    "dep:futures-core",
+    "dep:futures",
+    "dep:tokio-stream",
+    "dep:tool-file",
+    "tool-file/image-read",
+    "tool-file/pdf-read",
+    "tool-file/pdf-render",
+    "dep:tool-shell",
+    "dep:tool-task",
+    "dep:tool-web",
+    "tool-web/web-markdown",
+    "dep:tool-plan",
+    "dep:tool-meta",
+    "dep:tool-cron",
+    "dep:tool-ui",
+    "dep:tool-skill",
+    "dep:tool-agent",
+    "dep:tool-workflow",
+    "workflow",
+    "dep:tool-mcp",
+    "dep:tool-lsp",
+    "dep:tool-worktree",
+    "dep:tool-computer-use",
+    "dep:tool-mobile",
+    "dep:nix",
+    "dep:platform-windows",
+]
+mobile = [
+    "core",
+    "dep:core",
+    "dep:configuration-admin",
+    "dep:migrations",
+    "dep:branding",
+    "dep:client-adapter",
+    "dep:client-protocol",
+    "dep:msgqueue",
+    "dep:platform-common",
+    "dep:secret",
+    "dep:sandbox",
+    "dep:telemetry",
+    "dep:platform-posix-minimal",
+    "dep:memory",
+    "dep:tool-workflow",
+    "workflow",
+    "dep:provider-config",
+    "dep:local-apps",
+    "dep:jsonrpc",
+    "dep:tool-mcp",
+    "dep:futures-util",
+    "dep:reqwest",
+    "reqwest/rustls-tls",
+    "dep:sha2",
+    "dep:uuid",
+    "dep:plugin",
+    "dep:lsp",
+    "dep:lsp-types",
+    "dep:tool-lsp",
+    "dep:outputstyles",
+    "dep:tokio",
+    "tokio/rt-multi-thread",
+    "tokio/macros",
+    "tokio/sync",
+    "tokio/time",
+    "tokio/net",
+    "tokio/io-util",
+    "tokio/fs",
+    "dep:base64",
+    "dep:tracing",
+    "dep:url",
+    "dep:tool-file",
+    "tool-file/image-read",
+    "dep:tool-task",
+    "dep:tool-web",
+    "tool-web/web-markdown",
+    "dep:tool-plan",
+    "dep:tool-meta",
+    "dep:tool-cron",
+    "dep:cron",
+    "dep:tool-ui",
+    "dep:tool-skill",
+    "dep:tool-mobile",
+    "dep:tool-shell-mobile",
+    "dep:tool-git-mobile",
+    "dep:command-core",
+    "dep:platform-ios",
+    "dep:platform-android",
+]
+uniffi = [
+    "mobile",
+    "dep:uniffi",
+    "client-adapter/uniffi",
+    "client-protocol/uniffi",
+]
+android-computer-use = [
+    "mobile",
+    "dep:tool-android-use",
+]
+
+fusion = [
+    "core",
+    "dep:fusion",
+]
+
+workflow = [
+    "core",
+    "dep:workflow",
+]
+
+collaboration = [
+    "core",
+    "dep:coordinator",
+]
+
+[dependencies]
+agent = { path = "../agent", optional = true }
+async-trait = { workspace = true }
+base64 = { version = "0.22", optional = true }
+branding = { workspace = true, optional = true }
+bridge = { path = "../bridge", optional = true }
+client-adapter = { path = "../client-adapter", optional = true }
+client-protocol = { path = "../client-protocol", optional = true }
+command-api = { path = "../command-api", optional = true }
+command-core = { path = "../commands/core", optional = true }
+compaction = { path = "../compaction", optional = true }
+configuration-admin = { path = "../configuration-admin", optional = true }
+coordinator = { path = "../coordinator", optional = true }
+core = { path = "../core", optional = true }
+cost = { path = "../cost", optional = true }
+cron = { path = "../cron", optional = true }
+dirs = { version = "5", optional = true }
+fusion = { path = "../fusion", optional = true }
+futures = { workspace = true, optional = true }
+futures-core = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+hooks = { path = "../hooks", optional = true }
+jsonrpc = { path = "../jsonrpc", optional = true }
+local-apps = { path = "../local-apps", optional = true }
+lsp = { path = "../lsp", optional = true }
+lsp-types = { version = "0.95", optional = true }
+mcp = { path = "../mcp", optional = true }
+memory = { path = "../memory", optional = true }
+migrations = { path = "../migrations", optional = true }
+llm-runtime = { path = "../llm-runtime" }
+msgqueue = { path = "../msgqueue", optional = true }
+orchestrator = { path = "../orchestrator", optional = true }
+outputstyles = { path = "../outputstyles", optional = true }
+permission = { path = "../permission", optional = true }
+platform-api = { path = "../platform-api", optional = true }
+platform-common = { path = "../platforms/common", optional = true }
+platform-macos-computer-control = { path = "../platforms/macos-computer-control", optional = true }
+platform-posix = { path = "../platforms/posix", optional = true }
+platform-posix-minimal = { path = "../platforms/posix-minimal", optional = true }
+plugin = { path = "../plugin", optional = true }
+protocol = { path = "../protocol", optional = true }
+provider-config = { path = "../provider-config", optional = true }
+reqwest = { version = "=0.12.28", default-features = false, optional = true }
+sandbox = { path = "../sandbox", optional = true }
+sandbox-runtime-runner = { path = "../sandbox-runtime-runner", optional = true }
+secret = { path = "../secret", optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+session = { path = "../session", optional = true }
+sha2 = { version = "0.10", optional = true }
+sidequery = { path = "../sidequery", optional = true }
+skill-api = { path = "../skill-api", optional = true }
+tasks = { path = "../tasks", optional = true }
+telemetry = { path = "../telemetry", optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
+tokio-util = { workspace = true }
+tool-agent = { path = "../tools/agent", optional = true }
+tool-android-use = { path = "../tools/android-use", optional = true }
+tool-api = { path = "../tool-api", optional = true }
+tool-computer-use = { path = "../tools/computer-use", optional = true }
+tool-cron = { path = "../tools/cron", optional = true }
+tool-file = { path = "../tools/file", optional = true }
+tool-git-mobile = { path = "../tools/git-mobile", optional = true }
+tool-lsp = { path = "../tools/lsp", optional = true }
+tool-mcp = { path = "../tools/mcp", optional = true }
+tool-meta = { path = "../tools/meta", optional = true }
+tool-mobile = { path = "../tools/mobile", optional = true }
+tool-plan = { path = "../tools/plan", optional = true }
+tool-shell = { path = "../tools/shell", optional = true }
+tool-shell-mobile = { path = "../tools/shell-mobile", optional = true }
+tool-skill = { path = "../tools/skill", optional = true }
+tool-task = { path = "../tools/task", optional = true }
+tool-ui = { path = "../tools/ui", optional = true }
+tool-web = { path = "../tools/web", optional = true }
+tool-workflow = { path = "../tools/workflow", optional = true }
+tool-worktree = { path = "../tools/worktree", optional = true }
+tracing = { version = "0.1", optional = true }
+uniffi = { workspace = true, optional = true }
+url = { version = "2", optional = true }
+uuid = { version = "1.10", optional = true }
+workflow = { path = "../workflow", optional = true }
+
+[build-dependencies]
+local-apps = { path = "../local-apps", optional = true }
+serde_json = { workspace = true }
+
+[target."cfg(unix)".dependencies]
+nix = { version = "0.27", default-features = false, features = ["user"], optional = true }
+
+[target."cfg(windows)".dependencies]
+platform-windows = { path = "../platforms/windows", optional = true }
+
+[target."cfg(target_os = \"ios\")".dependencies]
+platform-ios = { path = "../platforms/ios", optional = true }
+
+[target."cfg(target_os = \"android\")".dependencies]
+platform-android = { path = "../platforms/android", optional = true }
+
+[dev-dependencies]
+toml = "0.8"
+async-trait = { workspace = true }
+base64 = { version = "0.22" }
+client-protocol = { path = "../client-protocol" }
+insta = { version = "1.40", features = ["yaml"] }
+orchestrator = { path = "../orchestrator" }
+tempfile = { version = "3", features = [] }
+test-harness = { path = "../test-harness" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }
+tool-api = { path = "../tool-api", features = ["test-support"] }
+
+[[test]]
+name = "decision_contract"
+path = "tests/decision_contract.rs"
+
+[[test]]
+name = "audio_injection"
+path = "tests/desktop/audio_injection.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "background_output_writer"
+path = "tests/desktop/background_output_writer.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "coordinator_activation"
+path = "tests/desktop/coordinator_activation.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "desktop_tool_list_snapshot"
+path = "tests/desktop/desktop_tool_list_snapshot.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "pool_starvation"
+path = "tests/desktop/pool_starvation.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "sandbox_startup_test"
+path = "tests/desktop/sandbox_startup_test.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "settings_watch_spawn"
+path = "tests/desktop/settings_watch_spawn.rs"
+required-features = ["desktop"]
+
+[[test]]
+name = "component_literal_scan"
+path = "tests/mobile/component_literal_scan.rs"
+required-features = ["mobile"]
+
+[[test]]
+name = "local_app_image_read"
+path = "tests/mobile/local_app_image_read.rs"
+required-features = ["mobile"]
+
+[[test]]
+name = "mobile_git_gating"
+path = "tests/mobile/mobile_git_gating.rs"
+required-features = ["mobile"]
+
+[[test]]
+name = "mobile_shell_gating"
+path = "tests/mobile/mobile_shell_gating.rs"
+required-features = ["mobile"]
+
+[[test]]
+name = "mobile_tool_list_snapshot"
+path = "tests/mobile/mobile_tool_list_snapshot.rs"
+required-features = ["mobile"]
+
+[[test]]
+name = "skeleton_test"
+path = "tests/mobile/skeleton_test.rs"
+required-features = ["mobile"]
+
+[lints]
+workspace = true

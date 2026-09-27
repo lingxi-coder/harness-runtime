@@ -1,0 +1,47 @@
+[package]
+name = "client-protocol"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+protocol = { path = "../protocol" }
+serde.workspace = true
+thiserror.workspace = true
+# `serde_json` is DELIBERATELY OMITTED — `serde_json::Value` must NOT enter the
+# contract crate (governing decision §0.4: tool payloads are JSON Strings on the
+# wire because `Value` is not UniFFI-representable).
+#
+# `uniffi` is declared as an optional dep so the SAME DTOs can compile plain
+# (bridge-server) or as UniFFI types (mobile). The package is vendored/pinned
+# offline in F3-00 (workspace dep, 0.28.3, `default-features = false` +
+# `tokio`); it is pulled ONLY when the `uniffi` feature below is enabled, so the
+# default (bridge-server) build needs no network and adds no FFI machinery.
+uniffi = { workspace = true, optional = true }
+
+[dev-dependencies]
+# `serde_json` is a DEV-ONLY dependency: the round-trip + (F1-08) snapshot tests
+# need a JSON codec to assert wire shape, but `serde_json::Value` must never
+# enter the contract itself (§0.4). Keeping it under `[dev-dependencies]` honors
+# "no new prod dep — dev-only" (plan F1-08).
+serde_json.workspace = true
+# DEV-ONLY, under `--features uniffi` only (see `[features]` below): decodes
+# a `#[derive(uniffi::Record)]` type's compile-time metadata buffer so a test
+# can assert a field actually carries a UniFFI constructor default, instead of
+# trusting that a `#[uniffi(default = …)]` attribute compiled. Pinned to the
+# same 0.28.3 release as the `uniffi` dep itself (this crate embeds the reader
+# half of the same wire format `uniffi_macros` 0.28.3 writes).
+uniffi_meta = "=0.28.3"
+
+[features]
+default = []
+# The `uniffi` feature activates the optional `uniffi` dep so the SAME DTOs
+# compile plain (bridge-server, default build) and, when enabled, as UniFFI
+# types (mobile). F3-00 wired the optional dep + pinned `uniffi` offline; F3-01
+# adds the `#[cfg_attr(feature = "uniffi", …)]` derives + `setup_scaffolding!`.
+# No `serde_json`/`Value` dependency is ever introduced (§0.4).
+uniffi = ["dep:uniffi"]
+
+[lints]
+workspace = true

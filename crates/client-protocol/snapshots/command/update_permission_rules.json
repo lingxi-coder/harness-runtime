@@ -1,0 +1,9 @@
+{
+  "type": "update_permission_rules",
+  "destination": "project",
+  "behavior": "allow",
+  "add": [
+    "Bash(ls:*)"
+  ],
+  "remove": []
+}

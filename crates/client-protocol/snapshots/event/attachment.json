@@ -1,0 +1,7 @@
+{
+  "type": "attachment",
+  "attachment": {
+    "type": "nested_memory",
+    "display_path": "src/LINGXI.md"
+  }
+}

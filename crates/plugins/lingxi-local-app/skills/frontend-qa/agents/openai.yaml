@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontend QA"
+  short_description: "Verify local apps with evidence and target matrix"
+  default_prompt: "Use $frontend-qa to produce an evidence-backed qa_report for this LingXi local app across browser, native WebView, and target-specific surfaces."

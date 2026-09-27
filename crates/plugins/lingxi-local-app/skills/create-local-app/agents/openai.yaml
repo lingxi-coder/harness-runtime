@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Local App"
+  short_description: "Build a local-capability-first LingXi app"
+  default_prompt: "Use $create-local-app to confirm the app with the user, then design, build, and verify a local-capability-first LingXi app."

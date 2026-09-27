@@ -1,0 +1,8 @@
+{
+  "type": "app_event",
+  "event": {
+    "type": "app_checkpoints_changed",
+    "app_id": "habits-1a2b",
+    "checkpoints": []
+  }
+}

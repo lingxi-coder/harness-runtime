@@ -1,0 +1,9 @@
+{
+  "type": "hook_admin",
+  "command": {
+    "action": "save_document",
+    "operation_id": 34,
+    "revision": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "payload_json": "{\"scope\":\"local\",\"hooks\":{\"preToolUse\":[]}}"
+  }
+}

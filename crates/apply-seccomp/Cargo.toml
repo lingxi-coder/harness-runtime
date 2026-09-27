@@ -1,0 +1,18 @@
+[package]
+name = "apply-seccomp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# The binary is Linux-only (it installs a seccomp BPF filter and `execvp`s the
+# workload). On non-Linux targets it builds a stub `main` that errors, so the
+# workspace still builds on macOS/Windows. The `seccompiler` + `nix` + `libc`
+# deps are therefore gated to the Linux target only.
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.5"
+nix = { version = "0.27", default-features = false, features = ["process"] }
+libc = "0.2"
+
+[lints]
+workspace = true

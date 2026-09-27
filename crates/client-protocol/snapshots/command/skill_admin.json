@@ -1,0 +1,9 @@
+{
+  "type": "skill_admin",
+  "command": {
+    "action": "save_document",
+    "operation_id": 31,
+    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "payload_json": "{\"skill_id\":\"/home/dev/.lingxi/skills/greet\",\"content\":\"---\\ndescription: greet\\n---\\n\"}"
+  }
+}

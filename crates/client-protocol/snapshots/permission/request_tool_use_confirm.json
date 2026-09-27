@@ -1,0 +1,9 @@
+{
+  "request_id": 7,
+  "kind": {
+    "type": "tool_use_confirm",
+    "tool_name": "Bash",
+    "tool_input_json": "{\"command\":\"ls -la\"}",
+    "default_allow": false
+  }
+}

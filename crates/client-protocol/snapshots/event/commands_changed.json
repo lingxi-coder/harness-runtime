@@ -1,0 +1,14 @@
+{
+  "type": "commands_changed",
+  "commands": [
+    {
+      "name": "compact",
+      "description": "Compact the conversation history.",
+      "source": "builtin",
+      "aliases": [
+        "cmp"
+      ],
+      "menu_description": "Compact chat"
+    }
+  ]
+}

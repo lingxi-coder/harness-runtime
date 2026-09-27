@@ -1,0 +1,7 @@
+{
+  "type": "task_status_changed",
+  "task_id": "b12345678",
+  "status": {
+    "type": "running"
+  }
+}

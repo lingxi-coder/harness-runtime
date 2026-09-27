@@ -1,0 +1,4 @@
+{
+  "type": "scheduled_task_fire",
+  "message": "Scheduled task fired: check the deploy"
+}

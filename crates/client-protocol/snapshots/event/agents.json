@@ -1,0 +1,13 @@
+{
+  "type": "agents",
+  "agents": [
+    {
+      "name": "reviewer",
+      "description": "Reviews diffs for correctness",
+      "tools_allowed": [
+        "Read",
+        "Grep"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,98 @@
+[package]
+name = "orchestrator"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+url = "2"
+base64 = "0.22"
+branding.workspace = true
+protocol = { path = "../protocol" }
+core = { path = "../core" }
+platform-api = { path = "../platform-api" }
+llm-runtime = { path = "../llm-runtime" }
+tool-api = { path = "../tool-api" }
+# Finding #73: the byte-locked todo/task reminder text consts + renderers live
+# in `tool_task::reminder` (alongside the TodoWrite/Task tools they describe).
+# No cycle: `tool-task` depends only on the shared lower tier
+# (core/tool-api/platform-api/protocol/permission/telemetry), never on orchestrator.
+tool-task = { path = "../tools/task" }
+tool-workflow = { path = "../tools/workflow" }
+tool-skill = { path = "../tools/skill" }
+# REM-05: the `edited_text_file` (changed-files) reminder needs the jsdiff
+# `structuredPatch` port at context 8 (`tool_file::structured_patch::
+# build_structured_patch_with_context`). Default features only — the image/PDF
+# codecs stay off. No cycle: `tool-file` depends on the shared lower tier
+# (tool-api/platform-api/protocol/permission/telemetry/branding) and never on
+# orchestrator; `permission` already carries this same edge.
+tool-file = { path = "../tools/file" }
+memory = { path = "../memory" }
+# EXPERIMENTAL_SKILL_SEARCH skill-discovery prefetch handle/result types
+# (register-but-disable, default OFF) — the per-turn discovery side-channel
+# armed/consumed by the orchestrator, mirroring the `memory` prefetch trio.
+skill-api = { path = "../skill-api" }
+migrations = { path = "../migrations" }
+permission = { path = "../permission" }
+hooks = { path = "../hooks" }
+mcp = { path = "../mcp" }
+agent = { path = "../agent" }
+cost = { path = "../cost" }
+compaction = { path = "../compaction" }
+sidequery = { path = "../sidequery" }
+session = { path = "../session" }
+telemetry = { path = "../telemetry" }
+outputstyles = { path = "../outputstyles" }
+# JSON-Schema (Draft 7 / 2020-12) validator for the tool-input gate (the Rust
+# analogue of claude-code's `inputSchema.safeParse`). Lightest adequate
+# pure-Rust option (few transitive crates, most already in the workspace).
+boon = "0.6"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+iana-time-zone = "0.1"
+# §F conditional-rule glob matching: the Rust analogue of claude-code's `ignore`
+# npm lib (gitignore-style globs). Same crate `permission`/`tools/file` use;
+# already in Cargo.lock.
+ignore = "0.4"
+rand = "0.8"
+regex = "1"
+async-trait.workspace = true
+dirs = "5"
+futures = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "process", "fs"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+unicode-segmentation = "=1.12.0"
+unicode-width = "=0.1.14"
+sha2 = "0.10"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+
+[dev-dependencies]
+# Reuse the existing tool-api test context for actual native Monitor dispatch fixtures.
+tool-api = { path = "../tool-api", features = ["test-support"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tempfile = "3"
+once_cell = "1"
+platform-posix = { path = "../platforms/posix" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+
+[features]
+default = []
+test-support = []
+# Default-off feature flags mirroring claude-code `betas.ts` build features
+# (ported from the former api-client/betas.rs). When OFF (the external default)
+# the corresponding `anthropic-beta` entry is never emitted by
+# `model::betas::assemble_beta_header`, keeping the header byte-identical to
+# the external claude-code build.
+# - `connector_text`        ≙ TS `feature('CONNECTOR_TEXT')`        → SUMMARIZE_CONNECTOR_TEXT
+# - `transcript_classifier` ≙ TS `feature('TRANSCRIPT_CLASSIFIER')` → AFK_MODE
+connector_text = []
+transcript_classifier = []
+
+[lints]
+workspace = true

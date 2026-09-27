@@ -1,0 +1,80 @@
+Commands:
+  /add-dir              Add a new working directory
+  /agents               (removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/
+  /autocompact          Configure the auto-compact window size
+  /background           Send this session to the background and free the terminal
+  /branch               Create a branch of the current conversation at this point
+  /brief                Toggle brief-only mode
+  /btw                  Ask a quick side question without interrupting the main conversation
+  /bug                  Report a bug or share your conversation
+  /cd                   Move this session to a new working directory
+  /chrome               Open Claude in Chrome settings
+  /clear                Start a new session with empty context; previous session stays on disk (resumable with /resume)
+  /color                Set the prompt bar color for this session
+  /commit               Create a git commit
+  /commit-push-pr       Commit, push, and open a PR
+  /compact              Free up context by summarizing the conversation so far
+  /config               Open settings
+  /context              Visualize current context usage as a colored grid
+  /copy                 Copy Claude's last response to clipboard (or /copy N for the Nth-latest)
+  /desktop              Continue the current session in Claude Desktop
+  /diff                 View uncommitted changes and per-turn diffs
+  /doctor               Diagnose and verify your LingXi installation and settings
+  /effort               Set effort level for model usage
+  /exit                 Exit the CLI
+  /export               Export the current conversation to a file or clipboard
+  /fast                 Toggle fast mode
+  /feedback             Submit feedback about LingXi
+  /files                List all files currently in context
+  /focus                Toggle focus view: just your prompt, summary, and response
+  /fork                 Copy this conversation into a new background session and keep working here
+  /goal                 Set a goal — keep working until the condition is met
+  /help                 Show help and available commands
+  /hooks                View hook configurations for tool events
+  /ide                  Manage IDE integrations and show status
+  /init                 Initialize a new LINGXI.md file with codebase documentation
+  /init-verifiers       Create verifier skill(s) for automated verification of code changes
+  /insights             Generate a report analyzing your LingXi sessions
+  /install              Install LingXi native build
+  /install-github-app   Set up Claude GitHub Actions for a repository
+  /install-slack-app    Install the Claude Slack app
+  /keybindings          Open your keyboard shortcuts file
+  /login                Sign in with your Anthropic account
+  /logout               Sign out from your Anthropic account
+  /mcp                  Manage MCP servers
+  /memory               Edit LINGXI.md files and memory settings
+  /mobile               Show QR code to download the Claude mobile app
+  /model                Set the AI model for LingXi
+  /output-style         List output styles or switch to one
+  /passes               Share a free week of LingXi with friends and earn extra usage
+  /permissions          Manage allow and deny tool permission rules
+  /plan                 Enable plan mode or view the current session plan
+  /plugin               Manage LingXi plugins
+  /powerup              Discover LingXi features through quick interactive lessons
+  /privacy-settings     View and update your privacy settings
+  /recap                Generate a one-line session recap now
+  /release-notes        View release notes
+  /reload-plugins       Activate pending plugin changes in the current session
+  /reload-skills        Pick up skills added or changed on disk during this session
+  /remote-env           Configure the default remote environment for teleport sessions
+  /rename               Rename the current conversation
+  /resume               Resume a previous conversation
+  /rewind               Restore the code and/or conversation to a previous point
+  /security-review      Complete a security review of the pending changes on the current branch
+  /session              Show remote session URL and QR code
+  /skill-doctor         Show which loaded skills are unused and costing context
+  /skills               List available skills
+  /status               Show LingXi status including version, model, account, API connectivity, and tool statuses
+  /statusline           Set up LingXi's status line UI
+  /stickers             Order LingXi stickers
+  /stop                 Stop this background session; transcript and worktree are kept
+  /subtask              Send a subagent off with your full context; its result comes back here
+  /tasks                View and manage everything running in the background
+  /terminal-setup       Install Shift+Enter key binding for newlines
+  /theme                Change the theme
+  /tui                  Set the terminal UI renderer (default | fullscreen)
+  /ultraplan            LingXi on the web drafts an advanced plan you can edit and approve
+  /upgrade              Upgrade to Max for higher rate limits and more Opus
+  /usage                Show session cost, plan usage, and what's contributing to your limits
+  /voice                Toggle voice mode
+  /workflows            Browse running and completed workflows

@@ -1,0 +1,11 @@
+# L3 冻结身份清单 —— 这些标识符的名字就是句柄，改名等于放弃状态。
+# 格式: <相对仓库根的路径>:<必须存在的字面量>  # 理由
+#
+# 每一条都必须带理由。一条没有理由的豁免会在下一次审计里被当成遗漏。
+# G5 规则会检查每条的目标是否还存在 —— 死豁免是清单在腐烂的信号。
+#
+# Plan A 阶段本清单为空：Plan A 不改名，所以还没有需要冻结的东西。
+# Plan B 的第一个任务就是填满它。
+
+crates/tools/skill/src/prompt_shell.rs:CLAUDECODE  # 上游标记，唯一消费者是用户自己的 rc 文件（仓库外）。Plan B 前不动。
+crates/mcp/src/headers_helper.rs:CLAUDE_PLUGIN_ROOT  # 已安装插件的 headersHelper 脚本键入的已发布名。Plan B 才移除。

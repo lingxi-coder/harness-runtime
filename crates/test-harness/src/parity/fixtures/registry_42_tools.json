@@ -1,0 +1,15 @@
+{
+  "_source": "docs/superpowers/specs/2026-05-24-m4-tools-implementation-design.md §1 Goal (lines 1-60); claude-code upstream tools/ directory.",
+  "_note": "Registry cardinality lock for the base builtin surface before capability-driven MCP resource tools are added. Driver derives the sorted-name set from by_category at runtime; do not add a parallel flat list (single source of truth). Count history: 40 at v0.5.0, 42, then 43 when 2.1.232 added ListAgents. Claude Code 2.1.238's base surface includes WaitForMcpServers and ReportFindings; the generic MCP dispatcher is an internal compatibility path and is not a production builtin, while MCP resource tools are dynamic and therefore intentionally absent. Claude Code 2.1.263 removes explicit TeamCreate/TeamDelete; sessions own implicit teams. The file name is historical; the numbers in the assertions are the lock.",
+  "total": 40,
+  "by_category": {
+    "file": ["Read", "Write", "Edit", "NotebookEdit", "Glob"],
+    "search": ["Grep"],
+    "shell": ["Bash", "PowerShell", "REPL", "Sleep"],
+    "web": ["WebFetch", "WebSearch"],
+    "workflow": ["TodoWrite", "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree"],
+    "agent": ["Agent", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "TaskOutput", "SendMessage", "ListAgents"],
+    "mcp_lsp": ["McpAuth", "WaitForMcpServers", "LSP"],
+    "system": ["AskUserQuestion", "SendUserMessage", "Config", "Skill", "CronCreate", "CronDelete", "CronList", "ToolSearch", "RemoteTrigger", "StructuredOutput", "ReportFindings"]
+  }
+}

@@ -1,0 +1,21 @@
+[package]
+name = "telemetry-macros"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Compile-time audit macros for the telemetry tengu event tree"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+
+[dev-dependencies]
+trybuild = "=1.0.99"
+
+[lints]
+workspace = true

@@ -1,0 +1,60 @@
+[package]
+name = "platform-macos-computer-control"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# M8-P11b follow-up: a REAL `ComputerControl` backend for macOS desktop,
+# replacing the `computer_control: None` stub at engine-desktop's composition
+# root. Parity note: claude-code's own backend is macOS-only too (Swift +
+# Rust/enigo native modules, `executor.ts`'s `createCliExecutor` throws on
+# `process.platform !== 'darwin'`) — this crate mirrors that platform
+# restriction, but reaches the OS through pure-Rust crates (`enigo` for
+# mouse/keyboard, `xcap` for screen capture, `arboard` for the clipboard,
+# `objc2-app-kit` for NSWorkspace/NSRunningApplication app management) instead
+# of a bundled Swift module, so there is no native toolchain/signing
+# dependency beyond what the Rust build already requires.
+#
+# Compiles on every desktop target (enigo/xcap/arboard are themselves
+# cross-platform), but every method returns `ComputerError::Unsupported` off
+# macOS via `#[cfg(target_os = "macos")]` — `MacosComputerControl::new()` is
+# only exported when the target is actually darwin, so a non-macOS composition
+# root simply never constructs one (mirrors upstream's darwin-only guard).
+
+[dependencies]
+platform-api = { path = "../../platform-api" }
+async-trait.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Every version pin below is load-bearing: the workspace is hard-pinned to
+# Rust 1.82.0 (rust-toolchain.toml), and the current releases of most of
+# these crates (and several of THEIR transitive deps) have moved to the
+# `edition2024` Cargo feature, which 1.82's cargo cannot parse at all — not a
+# soft warning, a hard resolver failure. Each pin below is the newest release
+# confirmed to still resolve+build clean under 1.82.0.
+enigo = "=0.3.0"
+xcap = "=0.5.2"
+# xcap depends on `image = "0.25"` unconstrained; left alone the resolver
+# floats to the newest 0.25.x, which pulls in `moxcms` (edition2024). Pinning
+# our own requirement to the last edition2021-compatible patch forces the
+# whole graph down to it.
+image = { version = "=0.25.6", default-features = false, features = ["png"] }
+arboard = { version = "3", default-features = false } # default "image"/"image-data" features pull the same moxcms chain; we only need text
+plist = "=1.8.0" # 1.10+ requires rustc 1.88
+# Transitive-only pin (via xcap's zbus/wayland stack) — nothing here imports
+# `time` directly, but leaving it unconstrained lets the resolver float to a
+# `time-core` that requires edition2024.
+time-core = "=0.1.2"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "NSApplication"] }
+tokio = { workspace = true, features = ["time"] }
+# Builds the `{ kAXTrustedCheckOptionPrompt: true }` options dictionary
+# `AXIsProcessTrustedWithOptions` takes (tcc.rs) — already in the dependency
+# graph transitively (via objc2/xcap's macOS bindings), pinned here directly
+# since this crate calls its types by name.
+core-foundation = "0.10"
+
+[lints]
+workspace = true

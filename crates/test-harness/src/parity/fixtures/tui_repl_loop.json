@@ -1,0 +1,42 @@
+{
+  "_meta": {
+    "plan": "M6-09",
+    "spec_section": "§5.3 parity_tui_repl_loop.json",
+    "_lingxi_version": "0.7.0",
+    "_claude_code_version": "2026-05-28-snapshot",
+    "description": "Scripted interactive flows driven synchronously through lingxi_tui::events::keymap::handle_key against a real AppState. The scripted orchestrator output (assistant text, tool-use blocks, tool results, permission requests, cancellation) is injected directly into AppState the same way the orchestrator_bridge pump would, then the resulting scrollback + state transitions + permission oneshot are asserted. This is the same driving surface M6-05's parity_tui_permission_dialogs uses — no async transport mock needed."
+  },
+  "scenarios": [
+    {
+      "name": "single_turn_no_tools",
+      "description": "User types 'hi', presses Enter; orchestrator returns one text message; assistant text renders below the user text.",
+      "keys": ["h", "i", "Enter"],
+      "submitted_line": "hi",
+      "scripted_assistant_text": "Hi there!",
+      "expected_scrollback": [
+        { "kind": "UserText", "body": "hi" },
+        { "kind": "AssistantText", "body": "Hi there!" }
+      ]
+    },
+    {
+      "name": "turn_with_tool_use_and_permission",
+      "description": "User types 'list files', presses Enter; orchestrator streams a Read tool use, then a tool-use permission dialog appears; user presses 1 (Allow Once); tool executes; result renders.",
+      "keys": ["l", "i", "s", "t", " ", "f", "i", "l", "e", "s", "Enter"],
+      "submitted_line": "list files",
+      "tool_use": { "tool": "Read", "input": { "file_path": "/etc/hosts" } },
+      "permission_key": "1",
+      "expected_permission_decision": "AllowOnce",
+      "tool_result": { "tool": "Read", "result": { "content": "127.0.0.1 localhost" } },
+      "expected_scrollback_kinds_in_order": ["UserText", "AssistantToolUse", "UserToolResult"]
+    },
+    {
+      "name": "cancel_during_streaming",
+      "description": "User types 'long task', presses Enter; orchestrator starts streaming (in_flight_turn set); user presses Ctrl-C; turn cancels; scrollback shows the interrupt marker.",
+      "keys": ["l", "o", "n", "g", " ", "t", "a", "s", "k", "Enter"],
+      "submitted_line": "long task",
+      "cancel_key": "C-c",
+      "expected_user_text_contains": "interrupted by user",
+      "expected_cancel_token_cancelled": true
+    }
+  ]
+}

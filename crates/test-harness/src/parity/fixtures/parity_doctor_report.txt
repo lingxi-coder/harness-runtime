@@ -1,0 +1,7 @@
+Doctor:
+  [OK] config-dir: ok
+  [!!] api-key: warning
+      ANTHROPIC_API_KEY not set
+  [XX] network: failed
+      ping timed out
+  Summary: 1 passed, 1 warnings, 1 failed

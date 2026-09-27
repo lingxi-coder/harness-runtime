@@ -1,0 +1,14 @@
+{
+  "type": "session_agent_updated",
+  "session_id": "22222222-2222-4222-8222-222222222222",
+  "agent": {
+    "agent_id": "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "name": "Researcher",
+    "agent_type": "general-purpose",
+    "model": "deepseek-flash",
+    "model_profile": "deepseek",
+    "status": "completed",
+    "latest_activity": "Finished source review",
+    "updated_at_ms": 1750000000123
+  }
+}

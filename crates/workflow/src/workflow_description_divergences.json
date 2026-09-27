@@ -1,0 +1,51 @@
+{
+  "_doc": [
+    "REGISTER OF NAMED LOCAL DIVERGENCES from the two byte-locked oracle texts",
+    "of the Workflow tool, both reproduced byte-for-byte from claude-code",
+    "v2.1.267:",
+    "  * `workflow_description.txt` -- the tool description (`t`), sent on every",
+    "    request;",
+    "  * `workflow_authoring_skill.txt` -- the authoring reference (`wpn()`),",
+    "    served by the `workflow-authoring` bundled skill on demand.",
+    "2.1.267 split what 2.1.245 shipped as one 19,200-byte description, so each",
+    "entry now names which of the two it edits via `target`.",
+    "",
+    "Why this file exists: the lock used to be a single number,",
+    "`assert_eq!(DESCRIPTION.len(), 19200)`. That number cannot tell",
+    "'we deliberately diverge here, for this reason' apart from 'the text drifted",
+    "by accident' -- both read as the same red. So the oracle file stays exactly",
+    "as the binary ships it, every intentional edit lives here with an id and a",
+    "reason, and the composed description is oracle + these, in order.",
+    "",
+    "Rules the tests enforce (`description_*` in lib.rs):",
+    "  * `target` selects the oracle text: \"description\" or \"skill\".",
+    "  * `anchor` must occur EXACTLY ONCE in that text -- and ZERO times in the",
+    "    other one, so a passage that moves between the two documents fails by",
+    "    name rather than silently keeping a stale target. If an oracle refresh",
+    "    moves or rewords the anchored passage, composition fails by name",
+    "    instead of silently landing the insert somewhere else.",
+    "  * ids are unique and `reason` is non-empty -- an unexplained divergence",
+    "    is the thing this register exists to prevent.",
+    "  * the composed length must equal the oracle length plus the registered",
+    "    inserts, so an unregistered edit to either file still trips a length",
+    "    check the way the old single number did."
+  ],
+  "divergences": [
+    {
+      "id": "local-app-create-handoff",
+      "target": "description",
+      "finding": "r4-backlog-01",
+      "reason": "The oracle enumerates five EXHAUSTIVE opt-in clauses and closes with 'For any other task ... do NOT call this tool.' None of the five covers the local-app create flow, so the tool description forbids that flow's only hand-off. The nearest clause requires that the USER invoked the skill; in this flow the Host's guided contract has the MODEL self-invoke `lingxi-local-app:create-local-app` (local_apps_host.rs), and that skill then specifies the Workflow call (skills/create-local-app/SKILL.md). Verified: `grep -i 'local.app' workflow_description.txt` returns zero, so no carve-out exists, and the description is live on the mobile surface (host.rs constructs WorkflowTool::new over this text). Without this clause every create is a call the model is told not to make.",
+      "anchor": "- The user asked you to run a specific named or saved workflow.\n",
+      "text": "- A Host-owned guided contract the user started hands off to a registered skill whose instructions specify the call. Today that is only the local-app create flow: the user asks for an app, the Host contract hands off to `lingxi-local-app:create-local-app`, and that skill names the `Workflow` call as a required step. The opt-in is the flow the user started, not the tool name.\n"
+    },
+    {
+      "id": "workflow-fusion-hook",
+      "target": "skill",
+      "finding": "F005/round-7",
+      "reason": "The shipped runtime provides a script-body hook the oracle cannot know about: `fusion(prompt, opts?)` (Agent Fusion, commit f5f27c978). A script only ever learns which hooks exist from this description, so an undocumented hook is an unreachable one — and the two option rules that are easiest to get wrong have no other home either: `dimensions` entries must be lowercase snake_case (an undocumented `dimensions: ['Coverage']` is rejected by platform_api::normalize_dimensions), and `crossProvider` throws rather than silently downgrading when it is not allowed. Registered here rather than edited into workflow_description.txt so the oracle stays byte-locked to claude-code v2.1.245 and this addition keeps a name.",
+      "anchor": "child syntax error; catch to handle gracefully.\n",
+      "text": "- fusion(prompt: string, opts?: {preset?: 'quality'|'fast', models?: Array<{profile?: string, model: string}>, dimensions?: string[] /* lowercase snake_case, at most 12, never a provider/model/panel name */, partialOk?: boolean, maxPanel?: number, crossProvider?: boolean}): Promise<object> — run a bounded multi-model deliberation panel (several models independently answer `prompt`, a judge model scores and picks/merges the strongest answer) and resolve with a compact result object ({run_id, status: 'completed'|'needs_parent', final_text, decision, panels, usage, timing, egress_profiles} — snake_case keys exactly as the host serializes them; `final_text` is the answer) — never the raw per-model reports. This is EXPENSIVE: roughly the cost of `opts.maxPanel` (default 2-3) concurrent full agent runs plus one judge call, so reserve it for a genuinely contested decision where a second independent opinion changes the outcome — not as a routine agent() replacement. Counts toward `budget.spent()` like any agent() call, and is rejected immediately (before any provider is contacted, zero cost) when Fusion is disabled for this session, the per-workflow fusion() call cap is reached, or the turn's token budget is already exhausted. `opts.crossProvider` defaults to false; requesting it when not allowed throws rather than silently downgrading. Catch to handle a rejection gracefully — check `e.name` for `WorkflowBudgetExceededError` / `WorkflowFusionCapError` / `WorkflowFusionDisabledError` / `WorkflowFusionOptionError`.\n"
+    }
+  ]
+}

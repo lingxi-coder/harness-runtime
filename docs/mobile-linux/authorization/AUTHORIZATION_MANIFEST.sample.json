@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-07-28",
+  "status": "placeholder",
+  "artifacts": [
+    {
+      "id": "proot",
+      "path": "proot-authorization.txt",
+      "sha256": "REPLACE_WITH_REAL_SHA256"
+    },
+    {
+      "id": "ish",
+      "path": "ish-authorization.txt",
+      "sha256": "REPLACE_WITH_REAL_SHA256"
+    },
+    {
+      "id": "alpine",
+      "path": "alpine-redistribution.txt",
+      "sha256": "REPLACE_WITH_REAL_SHA256"
+    }
+  ]
+}

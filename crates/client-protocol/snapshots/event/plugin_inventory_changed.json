@@ -1,0 +1,22 @@
+{
+  "type": "app_event",
+  "event": {
+    "type": "plugin_inventory_changed",
+    "inventory": {
+      "pluginId": "lingxi-local-app",
+      "displayName": "Local App Plugin",
+      "source": "builtin",
+      "version": "2.0.0-dev",
+      "bundleSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "state": "loaded",
+      "manifestDefaultEnabled": true,
+      "counts": {
+        "skills": 27,
+        "agents": 1,
+        "workflows": 6,
+        "templates": 4
+      },
+      "validationError": "The verified builtin bundle root is missing."
+    }
+  }
+}

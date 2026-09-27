@@ -1,0 +1,12 @@
+{
+  "type": "app_event",
+  "event": {
+    "type": "app_bridge_response",
+    "response": {
+      "request_id": "bridge-00000001",
+      "app_id": "habits-1a2b",
+      "ok": true,
+      "result_json": "[]"
+    }
+  }
+}

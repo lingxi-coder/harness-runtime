@@ -1,0 +1,46 @@
+{
+  "name": "oracle-parity-sample",
+  "version": "2.0.0",
+  "description": "Fixture plugin tree for the P0a.8 oracle/host component-inventory parity test (design spec section 19.1). Exercises manifest fields, commands, agents, skills, output styles, workflows, hooks, mcpServers and lspServers together so oracle_parity.rs has a full component set to compare, not just the hooks+mcp pair the P0a.7 sample covers.",
+  "author": { "name": "Fixture Author" },
+  "homepage": "https://example.com/oracle-parity-sample",
+  "license": "MIT",
+  "keywords": ["fixture", "parity"],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${LINGXI_PLUGIN_ROOT}/hooks/run.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "mcpServers": {
+    "sample": {
+      "command": "${LINGXI_PLUGIN_ROOT}/bin/server",
+      "args": [
+        "--data-dir",
+        "${LINGXI_PLUGIN_DATA}/cache",
+        "--project",
+        "${LINGXI_PROJECT_DIR}"
+      ],
+      "env": {
+        "SAMPLE_STATE_DIR": "${LINGXI_PLUGIN_DATA}/state"
+      }
+    }
+  },
+  "lspServers": {
+    "sample-lsp": {
+      "command": "${LINGXI_PLUGIN_ROOT}/bin/sample-lsp",
+      "args": ["--cache", "${LINGXI_PLUGIN_DATA}/lsp"],
+      "extensionToLanguage": { ".sample": "sample" },
+      "triggerLanguages": ["sample"],
+      "rootDirMarkers": ["sample.toml"]
+    }
+  }
+}

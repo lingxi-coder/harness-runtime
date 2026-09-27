@@ -1,0 +1,104 @@
+{
+  "_source": "docs/superpowers/specs/2026-05-23-m3-engine-completion-design.md §7 Wire identifiers (lines 620-810); claude-code upstream commit 6a25909 (2026-05-23)",
+  "_note": "High-level smoke fixture for v0.4.0. Cross-checks that every M3 sub-plan's locked literal is reachable through its crate's public API. NOT a substitute for the per-subsystem parity drivers (parity_settings_merge.rs etc.); this driver only verifies presence + byte-equality, not behavioral roundtrip. Per v3 §32.6 parity protocol.",
+  "settings": {
+    "user_settings_file_suffix": "/.lingxi/settings.json",
+    "project_settings_file_suffix": ".lingxi/settings.json",
+    "env_prefix_priority": ["LINGXI_"],
+    "tengu_settings_events": [
+      "tengu_settings_loaded",
+      "tengu_settings_invalid_env",
+      "tengu_settings_parse_error"
+    ]
+  },
+  "memory": {
+    "project_memory_filename": "LINGXI.md",
+    "local_override_filename": "LINGXI.local.md",
+    "memdir_suffix": "/.lingxi/memdir/",
+    "team_memory_suffix": "/.lingxi/team-mem/",
+    "max_memory_file_size_bytes": 10485760,
+    "memory_age_penalty_days": 30,
+    "memory_age_hard_drop_days": 365,
+    "memory_min_age_weight_bps": 1000,
+    "default_relevant_memories": 5,
+    "tengu_memory_events": [
+      "tengu_agent_memory_loaded",
+      "tengu_memory_secret_redacted"
+    ]
+  },
+  "api_client": {
+    "base_url": "https://api.anthropic.com",
+    "version_header": "anthropic-version: 2023-06-01",
+    "user_agent_prefix": "claude-cli/",
+    "user_agent_suffix": " (external, cli)",
+    "retry_default_attempts": 3,
+    "retry_backoff_ms": [500, 1000, 2000],
+    "retry_jitter_pct": 20,
+    "streaming_timeout_secs": 600,
+    "messages_create_timeout_secs": 120,
+    "count_tokens_timeout_secs": 30,
+    "anthropic_beta_constants": [
+      "claude-code-20250219",
+      "interleaved-thinking-2025-05-14",
+      "context-1m-2025-08-07",
+      "context-management-2025-06-27",
+      "structured-outputs-2025-12-15",
+      "web-search-2025-03-05",
+      "advanced-tool-use-2025-11-20",
+      "tool-search-tool-2025-10-19",
+      "effort-2025-11-24",
+      "task-budgets-2026-03-13",
+      "prompt-caching-scope-2026-01-05",
+      "fast-mode-2026-02-01",
+      "redact-thinking-2026-02-12",
+      "token-efficient-tools-2026-03-28",
+      "advisor-tool-2026-03-01",
+      "oauth-2025-04-20"
+    ]
+  },
+  "oauth": {
+    "authorize_endpoint": "https://claude.ai/oauth/authorize",
+    "token_endpoint": "https://console.anthropic.com/v1/oauth/token",
+    "oauth_beta_header_value": "oauth-2025-04-20",
+    "refresh_grant_type": "refresh_token",
+    "pkce_method": "S256",
+    "redirect_uri_template": "http://127.0.0.1:{port}/callback",
+    "login_flow_deadline_secs": 300,
+    "scopes": ["read:user", "write:messages", "read:projects"],
+    "tengu_oauth_events": [
+      "tengu_oauth_refresh_started",
+      "tengu_oauth_refresh_succeeded",
+      "tengu_oauth_refresh_failed",
+      "tengu_oauth_scope_upgraded",
+      "tengu_oauth_proactive_canceled"
+    ]
+  },
+  "cost_events": {
+    "tengu_cost_event_names": [
+      "tengu_api_success",
+      "tengu_cost_budget_warning",
+      "tengu_cost_budget_exceeded"
+    ],
+    "is_batch_request_reserved_in_m3": true,
+    "tengu_api_event_names_subset": [
+      "tengu_api_request_started",
+      "tengu_api_request_succeeded",
+      "tengu_api_request_failed",
+      "tengu_api_rate_limited"
+    ]
+  },
+  "telemetry": {
+    "expected_total_event_count_at_least": 143,
+    "module_event_counts": {
+      "api": 25,
+      "agent": 30,
+      "session": 15,
+      "tool": 40,
+      "cost": 10,
+      "oauth": 8,
+      "memory": 12,
+      "settings": 3
+    },
+    "statsig_wire_keys": ["event_name", "value", "metadata"]
+  }
+}

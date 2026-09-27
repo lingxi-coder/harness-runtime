@@ -1,0 +1,39 @@
+name: ci-fuzz
+on:
+  # Fuzz is too slow for per-PR fast path; runs daily + on-demand only.
+  # Per v3 §32.4 Layer 9 + spec line 616.
+  workflow_dispatch:
+  schedule:
+    - cron: '0 7 * * *'  # Daily 07:00 UTC
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    # v0.4.0: fuzz harness failures are warnings, NOT hard gates.
+    # v0.5.0+: flip this to false. Per the brief.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        harness:
+          - settings_json_parse
+          - anthropic_beta_assemble
+          - memdir_canonicalizer
+          - tengu_payload_deserialize
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        # cargo-fuzz requires nightly for libFuzzer integration.
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version '^0.13'
+      - name: Run fuzz harness ${{ matrix.harness }} (5-minute budget)
+        run: |
+          # -max_total_time=300 caps each harness at 5 minutes.
+          # If a harness directory is missing, fail loudly (the M3 sub-plans
+          # were expected to scaffold these; if they didn't, the verification
+          # gate in Phase F surfaces the absence).
+          if [ -d "fuzz/fuzz_targets" ] && [ -f "fuzz/fuzz_targets/${{ matrix.harness }}.rs" ]; then
+            cargo fuzz run ${{ matrix.harness }} -- -max_total_time=300
+          else
+            echo "::warning::fuzz harness ${{ matrix.harness }} not yet scaffolded; skipping for v0.4.0"
+          fi

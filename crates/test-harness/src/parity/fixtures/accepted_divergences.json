@@ -1,0 +1,235 @@
+{
+  "_doc": [
+    "REGISTER OF ACCEPTED DIVERGENCES from Claude Code — the things this port",
+    "deliberately does differently, and the guards that only LOOK like removable",
+    "redundancy. A parity audit must triage anything listed here as settled, not",
+    "re-find it as a gap.",
+    "",
+    "Why it is a file and not a note: this list lived outside the repository, in a",
+    "Claude memory, while code and tests referenced it. CI could not read it, a",
+    "fresh clone could not read it, and nothing could tell whether an entry was",
+    "still true. Migrating it on 2026-09-10 immediately found two that were not:",
+    "the plugin function-hook runtime, recorded as 'absent and not new', had since",
+    "been built (AG-15); and 'crossreview', recorded as a LingXi-exclusive feature,",
+    "has zero production hits and survives only in old design docs. Both are kept",
+    "below as `retired` rather than deleted, because a divergence that quietly",
+    "disappears is indistinguishable from one nobody has checked.",
+    "",
+    "Shape borrowed from `workflow/src/workflow_description_divergences.json`,",
+    "which replaced a bare byte-count with an anchored register for the same",
+    "reason: a count cannot tell 'deliberate' from 'drifted'.",
+    "",
+    "Each active entry carries at least one anchor, checked by",
+    "`tests/parity_accepted_divergences.rs`:",
+    "  * `present` — the text must still appear at `path`. This is the anchor for",
+    "    'we do it our own way': it fails when the thing we point at is renamed or",
+    "    deleted, i.e. when the entry stops describing the code.",
+    "  * `absent`  — the text must have zero hits under `path`. This is the anchor",
+    "    for 'we deliberately do not have this', and it is the half that would have",
+    "    caught the function-hook entry the day it went stale.",
+    "",
+    "`decided_by: \"user\"` means a human made the call on that date and it is not",
+    "the auditor's to revisit; `decided_by: \"oracle\"` means the binary itself",
+    "settles it (a default-false gate, a stale mirror) and new oracle evidence can."
+  ],
+  "divergences": [
+    {
+      "id": "multi-llm-providers",
+      "kind": "divergence",
+      "finding": "Claude Code speaks only to Anthropic's API.",
+      "reason": "LingXi is a multi-provider product by design (OpenAI, GLM, Bedrock, Vertex, OpenAI Responses/WebSocket, plus provider catalog and routing). Any code path that branches on model identity must therefore have defined behaviour for an id it does not recognise — that is the normal case here, not an edge.",
+      "decided_on": "2026-07-02",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        { "kind": "present", "path": "crates/llm-runtime/src/types.rs", "text": "pub enum ProviderId" }
+      ]
+    },
+    {
+      "id": "own-web-tooling",
+      "kind": "divergence",
+      "finding": "Claude Code ships its own web search stack.",
+      "reason": "LingXi implements WebSearch itself (Tavily-backed). Do not port Claude's stack over it.",
+      "decided_on": "2026-07-02",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        { "kind": "present", "path": "crates/tools/web/src/web_search.rs", "text": "Tavily" }
+      ]
+    },
+    {
+      "id": "mobile-surfaces",
+      "kind": "divergence",
+      "finding": "Claude Code has no mobile host.",
+      "reason": "LingXi ships Android and iOS surfaces. They are additions, not gaps, and a parity sweep must not try to reconcile them against a CLI that has no equivalent.",
+      "decided_on": "2026-07-02",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        { "kind": "present", "path": "crates/harness-runtime/src/lib.rs", "text": "pub mod mobile;" }
+      ]
+    },
+    {
+      "id": "branding-namespace",
+      "kind": "divergence",
+      "finding": "Claude Code uses CLAUDE_* env vars, ~/.claude and CLAUDE.md.",
+      "reason": "LingXi uses its own namespace throughout. Env-var kill switches should accept both spellings where parity-relevant, but the canonical names are LingXi's.",
+      "decided_on": "2026-06-27",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        { "kind": "present", "path": "crates/branding/src/lib.rs", "text": "pub const ENV_PREFIX" }
+      ]
+    },
+    {
+      "id": "workflow-description-sixth-clause",
+      "kind": "divergence",
+      "finding": "The Workflow tool description enumerates five EXHAUSTIVE opt-in clauses and closes with 'For any other task ... do NOT call this tool.'",
+      "reason": "None of the five covers the local-app create flow, where the MODEL self-invokes the create skill and that skill specifies the Workflow call. Without a sixth clause every create is a call the model has been told not to make. The edit itself is registered byte-for-byte next door.",
+      "decided_on": "2026-09-05",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        { "kind": "present", "path": "crates/workflow/src/workflow_description_divergences.json", "text": "local-app-create-handoff" }
+      ]
+    },
+    {
+      "id": "cron-expires-at",
+      "kind": "divergence",
+      "finding": "Claude Code auto-expires recurring jobs seven days after creation (`recurringMaxAgeMs`), and says so in the CronCreate result, schema and prompt.",
+      "reason": "LingXi has no global age limit: expiry is per task via `expiresAt`, and absent means never. The CronCreate prompt's seven-day paragraph is gated on the port's own `default_recurring_max_age()`, so it stays byte-exact to the oracle exactly where the behaviour exists. The dynamic /loop aged-out guard is a separate mechanism and stays oracle-faithful.",
+      "decided_on": "2026-09-07",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        { "kind": "present", "path": "crates/cron/src/lib.rs", "text": "default_recurring_max_age" },
+        { "kind": "absent", "path": "crates/cron", "text": "Auto-expires after 7 days" }
+      ]
+    },
+    {
+      "id": "propose-goal-and-ultraplan",
+      "kind": "divergence",
+      "finding": "2.1.266 has a `ProposeGoal` tool and a cloud 'ultraplan' remote plan mode.",
+      "reason": "ProposeGoal is dormant twice over upstream: its flag defaults false and its isEnabled also bails on non-interactive or remote, which is this engine's shape. It also needs an interactive dialog and a message-queue enqueue there is no seat for. Ultraplan is plan mode running in Claude Code on the web, with cloud session URLs and PR delivery — no substrate here. The name still appears in the ported upstream tool-name tables; what is absent is any implementation.",
+      "decided_on": "2026-09-08",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        { "kind": "absent", "path": "crates/tools", "text": "ProposeGoal" },
+        { "kind": "absent", "path": "crates/commands", "text": "ProposeGoal" }
+      ]
+    },
+    {
+      "id": "subagent-handback",
+      "kind": "divergence",
+      "finding": "2.1.267 adds a subagent hand-back contract: a child delivers its report through a dedicated tool, with an enforcement path and a send/flagged/withheld disposition.",
+      "reason": "Gated on `tengu_lively_waffle`, which defaults FALSE, plus auto-mode. On a host with no statsig backend — this port — a default install of 2.1.267 behaves exactly as LingXi does, so the absence IS the alignment. Building it now would port a mechanism upstream does not run. Revisit if the gate flips or the env override appears in a real environment.",
+      "decided_on": "2026-09-10",
+      "decided_by": "oracle",
+      "status": "active",
+      "anchors": [
+        { "kind": "absent", "path": "crates/tools", "text": "SubagentHandback" },
+        { "kind": "present", "path": "crates/test-harness/src/parity/fixtures/cc_2_1_267_oracle_facts.json", "text": "tengu_lively_waffle" }
+      ]
+    },
+    {
+      "id": "turn-interrupt-markers",
+      "kind": "divergence",
+      "finding": "Upstream carries two turn-interrupt strings alongside `[Request interrupted by user]`: one for a tool call that had started when the turn was ended to deliver a message, one for a call that had not run.",
+      "reason": "They describe a mechanism this port deliberately does not have — ending a turn MID-TOOL-CALL to deliver an inbound message. Here a message queues, the agent parks, and the queue drains as a digest at rest. Porting the strings would produce markers nothing can emit. Reopen only alongside an interrupting-delivery path; both are needed then, and the distinction between them matters.",
+      "decided_on": "2026-09-10",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        { "kind": "present", "path": "crates/tasks/src/observer.rs", "text": "non-interrupting" },
+        { "kind": "absent", "path": "crates", "text": "Tool call skipped:" }
+      ]
+    },
+    {
+      "id": "ghost-bundled-skills",
+      "kind": "divergence",
+      "finding": "`claude-code/src/skills/bundled/index.ts` lists `skillify` and `lorem-ipsum`.",
+      "reason": "That mirror is stale: both are zero hits in the 2.1.267 and 2.1.263 binaries, and skill names survive minification as string literals, so a zero there is decisive. `stuck` is not one either — it has many hits as the English word and no registration. The bundled set must be read off registrations, never off a substring count.",
+      "decided_on": "2026-09-10",
+      "decided_by": "oracle",
+      "status": "active",
+      "anchors": [
+        { "kind": "absent", "path": "crates/commands/core/src/bundled", "text": "lorem-ipsum" },
+        { "kind": "present", "path": "crates/test-harness/tests/parity_claude_2_1_267.rs", "text": "lorem-ipsum" }
+      ]
+    },
+    {
+      "id": "plugin-surface-modules",
+      "kind": "divergence",
+      "finding": "2.1.267 introduces plugin surface modules and a JSX render runtime (`$.ui.resolve`, `ClientElements`, `exportTree`, the Box/Text/Button/Client/Svg element set).",
+      "reason": "New in 267 and unbuilt here. It shares the JS-worker seam with the rest of the plugin runtime — scope it as its own project or not at all, never as an audit finding.",
+      "decided_on": "2026-09-10",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        { "kind": "absent", "path": "crates/plugin", "text": "exportTree" },
+        { "kind": "present", "path": "crates/docs/parity-2.1.267-mcp-plugin-2026-09-10.md", "text": "surface module" }
+      ]
+    },
+    {
+      "id": "claude-branded-builtin-agents",
+      "kind": "divergence",
+      "finding": "2.1.223 ships a `claude-code-guide` builtin agent and a `claude` catch-all.",
+      "reason": "Both steer the user toward Claude-specific documentation and products, which is wrong in a multi-provider product. Removed deliberately; do not resurrect either for byte parity. The reverse correction also stands: the agent model enum's `fable` value IS native upstream and is parity, not a divergence.",
+      "decided_on": "2026-08-06",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        { "kind": "absent", "path": "crates/agent/src/builtins.rs", "text": "name: \"claude-code-guide\"" }
+      ]
+    },
+    {
+      "id": "claudeai-proxy-parser-fidelity",
+      "kind": "guard",
+      "finding": "The `claudeai-proxy` transport and the claude.ai connector surface are out of scope, but two PARSER-fidelity gaps were explicitly authorized for fixing.",
+      "reason": "`request_timeout_ms` was being folded into `timeout` where the oracle declares neither the field nor a transform, and `id` is REQUIRED for this transport and was neither modelled nor validated. Do NOT revert these as anti-parity, and do NOT generalize the carve-out: the deliberate fold onto the Http transport and the whole connector feature surface remain out of scope. 'Make the parser honest about a shape we already accept' is the boundary.",
+      "decided_on": "2026-08-29",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        { "kind": "present", "path": "crates/mcp/src/json_config.rs", "text": "claudeai-proxy" }
+      ]
+    },
+    {
+      "id": "cost-and-stats-aliases",
+      "kind": "guard",
+      "finding": "`/cost` and `/stats` have no independent content — they are aliases of `/usage`.",
+      "reason": "This LOOKS like removable redundancy and is not: Claude Code itself defines the usage command with those two aliases, so deleting them would be the divergence. The real recorded gap is `/usage` CONTENT missing upstream rows, which is data-plumbing-gated. Fix direction is to fill `/usage`, never to remove `/cost`.",
+      "decided_on": "2026-07-12",
+      "decided_by": "oracle",
+      "status": "active",
+      "anchors": [
+        { "kind": "present", "path": "crates/commands/core/src/register.rs", "text": "register_alias(\"cost\".to_string(), \"usage\".to_string())" }
+      ]
+    },
+    {
+      "id": "plugin-function-hook-runtime",
+      "kind": "divergence",
+      "finding": "`functionHooks` / `hooks-worker` — the JS-worker hook runtime, present in 2.1.245 through 2.1.267 alike.",
+      "reason": "Recorded as a long-standing absence rather than a 2.1.267 delta, on the grounds that the whole JS-worker hook runtime was zero hits here and `HookEvent` carried only the command hooks.",
+      "decided_on": "2026-09-10",
+      "decided_by": "user",
+      "status": "retired",
+      "retired_on": "2026-09-10",
+      "retired_because": "Overtaken the same day: the AG-15 series built it. `hooks/src/function_hook.rs` exists, `HookEvent` carries the function-hook path, and a plugin can declare one. The entry is kept rather than deleted because it is the case that proves why this register has `absent` anchors — it was true when written and false a few commits later, and nothing outside a person's memory would have noticed.",
+      "anchors": []
+    },
+    {
+      "id": "crossreview",
+      "kind": "divergence",
+      "finding": "Recorded as a LingXi-exclusive feature alongside the mobile surfaces.",
+      "reason": "Listed among the additions a parity sweep must not try to reconcile against Claude Code.",
+      "decided_on": "2026-07-02",
+      "decided_by": "user",
+      "status": "retired",
+      "retired_on": "2026-09-10",
+      "retired_because": "Zero hits in production code at migration time; it survives only in `docs/multi-agent-*.md` design notes. Either it was never built or it was removed, and an entry defending a feature that does not exist protects nothing while making the list look longer than it is.",
+      "anchors": []
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "_source": "lingxi-tui M7-04/05 renderers + render::{markdown,syntax,diff}; claude-code @ 2026-05-28-snapshot src/components/messages/*.tsx + StructuredDiff/colorDiff.ts + utils/markdown.ts",
+  "_claude_code_version": "2026-05-28-snapshot",
+  "_note": "Locks high-value renderer strings/markers, markdown element STRUCTURE (one StyledLine per visual line + element markers), syntax-highlight STRUCTURE (line counts / fence boundaries — NOT per-token color, see spec §0 Q3), and StructuredDiff layout (gutter line-numbers + +/- markers, hunk-header `@@ ... @@`). Per-token highlight color is an explicit literal-lock EXCEPTION. Color/style is covered by the per-component unit tests + insta snapshots in lingxi-tui. All golden strings extracted from the real renderers (the StyledLine plain_text projection), not invented.",
+  "renderers": {
+    "compact_boundary": {
+      "expected_rendered_text": "\n✻ Conversation compacted (ctrl+o for history)\n"
+    },
+    "bash_input": {
+      "command": "ls -la",
+      "expected_rendered_text": "! ls -la"
+    },
+    "image": {
+      "image_id": 1,
+      "expected_rendered_text": "[Image #1]"
+    },
+    "grouped_tool_use": {
+      "tool": "Read",
+      "expected_group_header": "● Read"
+    }
+  },
+  "markdown": {
+    "heading":     { "input": "# Title",          "expected_structure": ["Title"] },
+    "bold_italic": { "input": "**b** _i_",         "expected_structure": ["b i"] },
+    "list":        { "input": "- a\n- b",          "expected_structure": ["- a", "- b"] },
+    "blockquote":  { "input": "> q",               "expected_structure": ["▎ q"] },
+    "inline_code": { "input": "`x`",               "expected_structure": ["x"] },
+    "fenced_block":{ "input": "```rust\nfn f(){}\n```", "expected_fence_lang": "rust", "expected_line_count": 1, "expected_lines": ["fn f(){}"] }
+  },
+  "syntax": {
+    "rust":    { "code": "fn main() {}", "lang": "rust", "expected_line_count": 1, "expected_first_line_text": "fn main() {}" },
+    "json":    { "code": "{\"a\":1}",    "lang": "json", "expected_line_count": 1, "expected_first_line_text": "{\"a\":1}" },
+    "unknown": { "code": "blah",          "lang": "zzz",  "expected_line_count": 1, "expected_first_line_text": "blah", "note": "unknown lang falls back to plain, no panic" }
+  },
+  "diff": {
+    "add_remove_modify": {
+      "old": "a\nb\nc\n",
+      "new": "a\nB\nc\nd\n",
+      "path": "x.txt",
+      "expected_markers": ["+", "-"],
+      "expected_hunk_header_prefix": "@@",
+      "expected_hunk_header": "@@ -1,3 +1,4 @@",
+      "expected_minus_lines": ["b"],
+      "expected_plus_lines": ["B", "d"]
+    }
+  }
+}

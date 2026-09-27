@@ -1,0 +1,11 @@
+---
+source: client-presentation/src/render/diff.rs
+expression: "format!(\"total_lines: {}\\n--- head ---\\n{head}--- tail ---\\n{tail}\",\nlines.len())"
+---
+total_lines: 101
+--- head ---
+  0 | "  1 + "[fg=Rgb(80, 200, 80) bg=Rgb(17, 46, 21)] "add0"[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)]
+  1 | "  2 + "[fg=Rgb(80, 200, 80) bg=Rgb(17, 46, 21)] "add1"[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)]
+--- tail ---
+  0 | "100 + "[fg=Rgb(80, 200, 80) bg=Rgb(17, 46, 21)] "add99"[fg=Rgb(192, 197, 206) bg=Rgb(17, 46, 21)]
+  1 | "… 50 more lines"[fg=Named(BrightBlack) bg=Default]

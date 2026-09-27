@@ -1,0 +1,45 @@
+---
+source: crates/tui/src/render/markdown.rs
+expression: "render(\"normal **bold** and *italic* mix\", &theme())"
+---
+- spans:
+    - text: "normal "
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: bold
+      style:
+        fg: Default
+        bg: Default
+        bold: true
+        italic: false
+        underline: false
+      kind: Text
+    - text: " and "
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: italic
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: true
+        underline: false
+      kind: Text
+    - text: " mix"
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text

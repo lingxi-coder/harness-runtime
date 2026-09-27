@@ -1,0 +1,24 @@
+---
+source: crates/tui/src/render/ansi.rs
+expression: "parse_ansi(\"\\x1b[38;5;196mhot\\x1b[48;5;21m bg\\x1b[0m\")"
+---
+- spans:
+    - text: hot
+      style:
+        fg:
+          Indexed: 196
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+    - text: " bg"
+      style:
+        fg:
+          Indexed: 196
+        bg:
+          Indexed: 21
+        bold: false
+        italic: false
+        underline: false
+      kind: Text

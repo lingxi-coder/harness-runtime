@@ -1,0 +1,13 @@
+{
+  "type": "cron_run_requested",
+  "run_id": "run-1",
+  "task": {
+    "id": "task-1",
+    "cron": "0 9 * * *",
+    "prompt": "Daily brief",
+    "recurring": true,
+    "durable": true,
+    "permanent": false,
+    "created_at": 0
+  }
+}

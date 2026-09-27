@@ -1,0 +1,14 @@
+{
+  "type": "workflow_resumed",
+  "previous_task_id": "w12345678",
+  "task": {
+    "task_id": "b12345678",
+    "task_type": "bash",
+    "status": {
+      "type": "running"
+    },
+    "description": "run the test suite"
+  },
+  "run_id": "wf_abcdef",
+  "origin_session_id": "session-1"
+}

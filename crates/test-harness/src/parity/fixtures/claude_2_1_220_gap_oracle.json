@@ -1,0 +1,151 @@
+{
+  "oracle": {
+    "version": "2.1.220",
+    "binary_sha256": "8addc857f3fe64d5a0368af9ee50321b50afb4a6918ba3ef018ab84f5dbbe081",
+    "capture_kind": "clean-room-local-http-capture",
+    "captured_at": "2026-07-28",
+    "network": "loopback-only",
+    "notes": "Only hashes, lengths, headings, public help surfaces, and observable state are retained. Full private prompt text is not committed."
+  },
+  "fast_mode": {
+    "claude-opus-4-7": "on",
+    "capture": "2.1.220 catalog blob @225785080 — the claude-opus-4-7 entry reads capabilities:[\"effort\",\"max_effort\",\"xhigh_effort\",\"adaptive_thinking\",\"context_management\",\"fast_mode\"]. Corroborated by the env-block prompt at @113736244: \"toggled with /fast and is available on Opus 5/4.8/4.7.\"",
+    "supersedes": "An earlier entry recorded \"off\", sourced from the public 2.1.219 CHANGELOG rather than from this binary. It described a different version and was wrong for the sha256 pinned above; the port had encoded it in three tests."
+  },
+  "system_prompt_manifests": [
+    {
+      "requested_model": "claude-opus-5",
+      "wire_model": "claude-opus-5",
+      "length_bytes": 9464,
+      "sha256": "1f8ccebaa48872b28463b91f5175990696a519a4baa3154b924456d1c69c2ff4",
+      "blocks": 3,
+      "headings": [
+        "# Harness",
+        "# Session-specific guidance",
+        "# Memory",
+        "# Environment",
+        "# Context management",
+        "# Delivering work",
+        "# Corrections"
+      ]
+    },
+    {
+      "requested_model": "claude-fable-5",
+      "wire_model": "claude-fable-5",
+      "length_bytes": 10582,
+      "sha256": "d637334c430c97bfb30ce3c679eb27c6db3cc64f2b505cfc08dee1db3467846f",
+      "blocks": 3,
+      "headings": [
+        "# Harness",
+        "# Communicating with the user",
+        "# Session-specific guidance",
+        "# Memory",
+        "# Environment",
+        "# Context management"
+      ]
+    },
+    {
+      "requested_model": "claude-opus-4-8",
+      "wire_model": "claude-opus-4-8",
+      "length_bytes": 6138,
+      "sha256": "2e703f73fa28df4fc9ee3d7788935244ff64855cfea1b375f5f2ccbe7a26a802",
+      "blocks": 3,
+      "headings": [
+        "# Harness",
+        "# Session-specific guidance",
+        "# Memory",
+        "# Environment",
+        "# Context management"
+      ]
+    },
+    {
+      "requested_model": "claude-sonnet-5",
+      "wire_model": "claude-sonnet-5",
+      "length_bytes": 27636,
+      "sha256": "b28c77b6e0b1af05944ebc22fb5abfb5d0d488565ad5b4116e44957761151bfb",
+      "blocks": 3,
+      "headings": [
+        "# System",
+        "# Doing tasks",
+        "# Executing actions with care",
+        "# Using your tools",
+        "# Tone and style",
+        "# Text output (does not apply to tool calls)",
+        "# Session-specific guidance",
+        "# auto memory",
+        "## Types of memory",
+        "## What NOT to save in memory",
+        "## How to save memories",
+        "## When to access memories",
+        "## Before recommending from memory",
+        "## Memory and other forms of persistence",
+        "# Environment",
+        "# Context management"
+      ]
+    }
+  ],
+  "plugin_eval": {
+    "early_access_gate": "CLAUDE_CODE_WALNUT_SPIRE",
+    "ungated_exit_code": 1,
+    "help_sha256": "06dd4e2314d6d773d5d28550a07b19961748aa37be6c84d88cb1c524158aeae8",
+    "init_help_sha256": "a8c4b84e9de765d1bff4393ebe24a4c87107f99b503ee23afd327ffe5ad1e26f",
+    "help_exit_code": 0,
+    "init_help_exit_code": 0,
+    "options": [
+      "--ablation",
+      "--allow-tools",
+      "--case",
+      "--json",
+      "--judge-model",
+      "--keep-temp",
+      "--max-cost-usd",
+      "--model",
+      "--no-scaffold",
+      "--output-dir",
+      "--publish-report",
+      "--report",
+      "--runs",
+      "--scaffold",
+      "--tag",
+      "--threshold",
+      "--verbose"
+    ],
+    "init_options": [
+      "--bare"
+    ],
+    "bare_template": {
+      "prompt_frontmatter": {
+        "max_turns": 10,
+        "allowed_tools": ["Read", "Glob", "Grep", "Skill"]
+      },
+      "prompt_body": "TODO: describe what the agent should do",
+      "grader_frontmatter": {
+        "type": "llm",
+        "weight": 1
+      },
+      "grader_body": "TODO: describe what a successful response looks like"
+    },
+    "empty_suite": {
+      "exit_code": 1,
+      "schema_version": 1,
+      "partial": false,
+      "ablation": "none",
+      "threshold": 1,
+      "cases": [],
+      "aggregates": {
+        "casesTotal": 0,
+        "casesPassed": 0,
+        "overallScore": 0,
+        "overallPassRate": 0
+      }
+    },
+    "grader_types": [
+      "regex",
+      "tool_order",
+      "tool_used",
+      "file_exists",
+      "llm",
+      "baseline"
+    ]
+  }
+}

@@ -1,0 +1,547 @@
+//! `count_tokens` facade: real endpoint on Anthropic routes, documented
+//! character-based approximation elsewhere.
+
+use crate::{client::DefaultLlmClient, LlmError, LlmRequest, Transport};
+
+/// Coarse divisor shared by transcript-size estimates. Request-fit estimation
+/// below deliberately uses a more conservative divisor.
+pub const APPROX_CHARS_PER_TOKEN: u64 = 4;
+
+/// Conservative divisor for request-fit decisions. Structured JSON/tool
+/// schemas and CJK text commonly tokenize more densely than the generic
+/// four-bytes heuristic used by transcript-size estimates.
+const REQUEST_BYTES_PER_TOKEN: u64 = 3;
+
+/// Conservative token estimate for one image-like input when no provider
+/// counter is available.  This matches the order of magnitude used by Codex's
+/// model-visible history estimator without charging base64 bytes as text.
+const APPROX_MEDIA_TOKENS: u64 = 2_048;
+
+/// Count input tokens for `request`'s resolved route.
+pub async fn count_tokens(
+    client: &DefaultLlmClient,
+    transport: &dyn Transport,
+    request: &LlmRequest,
+) -> Result<u64, LlmError> {
+    match try_count_tokens_exact(client, transport, request).await? {
+        Some(tokens) => Ok(tokens),
+        None => Ok(approximate_tokens(request)),
+    }
+}
+
+/// Count tokens only when the resolved route exposes Anthropic's exact
+/// `count_tokens` endpoint. `None` means callers must use their documented
+/// fallback rather than mistaking the generic text approximation for an exact
+/// tool-schema count.
+pub async fn try_count_tokens_exact(
+    client: &DefaultLlmClient,
+    transport: &dyn Transport,
+    request: &LlmRequest,
+) -> Result<Option<u64>, LlmError> {
+    client.count_tokens_exact(request, transport).await
+}
+
+/// Structured provider-visible approximation used when no exact endpoint is
+/// available.
+///
+/// This is deliberately not described as tokenizer-accurate: providers apply
+/// model-specific chat templates after receiving the request.  It does cover
+/// every canonical message block plus tool declarations, tool choice and
+/// response schemas, then uses ceiling division so partial tokens are never
+/// rounded down.
+#[must_use]
+pub fn approximate_tokens(request: &LlmRequest) -> u64 {
+    let mut byte_len = 0u64;
+    for block in &request.system {
+        byte_len = byte_len.saturating_add(serialized_len(block));
+    }
+    for message in &request.messages {
+        byte_len = byte_len.saturating_add(serialized_len(&message.role));
+        for block in &message.content {
+            byte_len = byte_len.saturating_add(estimated_block_bytes(block));
+        }
+    }
+    for tool in &request.tools {
+        // Account for the provider's function/tool wrapper in addition to the
+        // canonical declaration itself.  The server may add further chat
+        // template text; the request-level fit margin covers that uncertainty.
+        byte_len = byte_len
+            .saturating_add(serialized_len(tool))
+            .saturating_add(48);
+    }
+    if let Some(tool_choice) = &request.tool_choice {
+        byte_len = byte_len.saturating_add(serialized_len(tool_choice));
+    }
+    if let Some(response_format) = &request.response_format {
+        byte_len = byte_len.saturating_add(serialized_len(response_format));
+    }
+
+    approximate_tokens_for_bytes(byte_len)
+}
+
+/// The byte-length-divisor half of [`approximate_tokens`], exposed so a
+/// caller estimating from a bare text/prompt string it already has in hand
+/// (not a full [`LlmRequest`] it would have to fabricate just to feed this
+/// function) still uses the SAME formula — never a second, divergent
+/// bytes-per-token constant. `approximate_tokens` itself is defined in terms
+/// of this function, so the two can never drift apart.
+#[must_use]
+pub fn approximate_tokens_for_bytes(byte_len: u64) -> u64 {
+    byte_len.div_ceil(REQUEST_BYTES_PER_TOKEN).max(1)
+}
+
+fn serialized_len<T: serde::Serialize>(value: &T) -> u64 {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len() as u64)
+}
+
+fn estimated_block_bytes(block: &crate::ContentBlock) -> u64 {
+    const TEXT_BLOCK_WRAPPER_BYTES: u64 = 30;
+
+    match block {
+        crate::ContentBlock::Text { text, .. } => {
+            serialized_len(text).saturating_add(TEXT_BLOCK_WRAPPER_BYTES)
+        }
+        crate::ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } => crate::protocol::json_string_len_from_utf16(utf16_code_units)
+            .saturating_add(TEXT_BLOCK_WRAPPER_BYTES),
+        crate::ContentBlock::ToolResult { output, .. }
+            if protocol::js_utf16::tool_result_units(output).is_some() =>
+        {
+            let units = protocol::js_utf16::tool_result_units(output).unwrap();
+            let text = String::from_utf16_lossy(&units);
+            let mut display = block.clone();
+            if let crate::ContentBlock::ToolResult { output, .. } = &mut display {
+                *output = serde_json::Value::String(text.clone());
+            }
+            serialized_len(&display)
+                .saturating_sub(serialized_len(&text))
+                .saturating_add(crate::protocol::json_string_len_from_utf16(&units))
+        }
+        crate::ContentBlock::Image { .. } => APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN,
+        crate::ContentBlock::ImageUrl { url } => {
+            (APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN).saturating_add(url.len() as u64)
+        }
+        crate::ContentBlock::Document { bytes, .. } => {
+            (APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN).max(bytes.len() as u64)
+        }
+        _ => serialized_len(block),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::DefaultLlmClient;
+    use crate::{
+        AuthStrategy, BoxFuture, Capabilities, ClientConfig, ContentBlock, CredentialConfig,
+        LlmRequest, Message, ModelProfile, PricingConfig, ProtocolFamily, ProviderId,
+        ProviderProfile, ProviderRequest, ProviderResponse, StreamingResponse, SystemBlock,
+        ToolDeclaration, Transport,
+    };
+    use std::sync::Mutex;
+
+    // ----------------------------------------------------------------
+    // Byte-length approximation math tests
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn approximate_tokens_empty_request_returns_one() {
+        let req = LlmRequest::new("model");
+        assert_eq!(approximate_tokens(&req), 1);
+    }
+
+    #[test]
+    fn approximate_tokens_for_bytes_shares_the_request_divisor() {
+        // The accessor must be the exact same ceiling-division formula
+        // `approximate_tokens` folds its own byte_len through — not a
+        // separately-hand-rolled divisor that could silently drift from it.
+        assert_eq!(
+            approximate_tokens_for_bytes(0),
+            1,
+            "empty input floors to 1"
+        );
+        assert_eq!(
+            approximate_tokens_for_bytes(REQUEST_BYTES_PER_TOKEN),
+            1,
+            "exactly one token's worth of bytes is 1 token"
+        );
+        assert_eq!(
+            approximate_tokens_for_bytes(REQUEST_BYTES_PER_TOKEN + 1),
+            2,
+            "one byte past a token boundary must round UP, not down"
+        );
+        assert_eq!(
+            approximate_tokens_for_bytes(9),
+            9_u64.div_ceil(REQUEST_BYTES_PER_TOKEN)
+        );
+    }
+
+    #[test]
+    fn approximate_tokens_includes_text_envelope() {
+        let req =
+            LlmRequest::new("model").with_user_text("1234567890123456789012345678901234567890");
+        assert_eq!(req.messages[0].content.len(), 1);
+        assert!(approximate_tokens(&req) > 10);
+    }
+
+    #[test]
+    fn approximate_tokens_uses_ceiling_division() {
+        let req = LlmRequest::new("model").with_user_text("12345");
+        let byte_len = serialized_len(&req.messages[0].role)
+            + estimated_block_bytes(&req.messages[0].content[0]);
+        assert_eq!(
+            approximate_tokens(&req),
+            byte_len.div_ceil(REQUEST_BYTES_PER_TOKEN)
+        );
+    }
+
+    #[test]
+    fn approximate_tokens_system_blocks_are_counted() {
+        let mut req = LlmRequest::new("model");
+        req.system.push(SystemBlock::text("12345678")); // 8 bytes
+        assert!(approximate_tokens(&req) >= 2);
+    }
+
+    #[test]
+    fn approximate_tokens_counts_media_blocks_without_base64_inflation() {
+        let mut req = LlmRequest::new("model");
+        req.messages.push(Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                bytes: vec![0u8; 100],
+            }],
+        });
+        assert_eq!(approximate_tokens(&req), APPROX_MEDIA_TOKENS + 2);
+    }
+
+    #[test]
+    fn approximate_tokens_counts_structured_messages_and_tools() {
+        let mut req = LlmRequest::new("model");
+        req.messages.push(Message {
+            role: "assistant".to_string(),
+            content: vec![
+                ContentBlock::TextJsUtf16 {
+                    text: "structured text".to_string(),
+                    utf16_code_units: "structured text".encode_utf16().collect(),
+                    cache_control: None,
+                },
+                ContentBlock::ToolCall {
+                    id: "call-1".to_string(),
+                    name: "lookup".to_string(),
+                    input: serde_json::json!({"query": "weather in San Francisco"}),
+                },
+                ContentBlock::ToolResult {
+                    tool_call_id: "call-1".to_string(),
+                    output: serde_json::json!({"temperature": 18, "unit": "celsius"}),
+                    is_error: false,
+                    cache_control: None,
+                    cache_reference: None,
+                },
+            ],
+        });
+        req.tools.push(ToolDeclaration {
+            name: "lookup".to_string(),
+            description: "Look up current information for a location".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"}
+                },
+                "required": ["query"]
+            }),
+            ..Default::default()
+        });
+
+        assert!(
+            approximate_tokens(&req) > 1,
+            "provider-visible structured content and tool declarations must contribute"
+        );
+    }
+
+    #[test]
+    fn text_js_utf16_ascii_estimate_matches_plain_text() {
+        let text = "restored ASCII skill content".repeat(100);
+        let mut plain = LlmRequest::new("model");
+        plain.messages.push(Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: text.clone(),
+                cache_control: None,
+            }],
+        });
+        let mut exact_utf16 = LlmRequest::new("model");
+        exact_utf16.messages.push(Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::TextJsUtf16 {
+                utf16_code_units: text.encode_utf16().collect(),
+                text,
+                cache_control: None,
+            }],
+        });
+
+        assert_eq!(approximate_tokens(&exact_utf16), approximate_tokens(&plain));
+    }
+
+    // ----------------------------------------------------------------
+    // Fake Transport for integration-style tests
+    // ----------------------------------------------------------------
+
+    #[derive(Debug)]
+    struct ScriptedTransport {
+        response: ProviderResponse,
+        seen: Mutex<Option<ProviderRequest>>,
+    }
+
+    impl ScriptedTransport {
+        fn returning(response: ProviderResponse) -> Self {
+            Self {
+                response,
+                seen: Mutex::new(None),
+            }
+        }
+    }
+
+    impl Transport for ScriptedTransport {
+        fn execute<'a>(
+            &'a self,
+            request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            *self.seen.lock().expect("lock") = Some(request.clone());
+            let response = self.response.clone();
+            Box::pin(async move { Ok(response) })
+        }
+
+        fn open_stream<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            Box::pin(async move {
+                Err(LlmError::Transport {
+                    message: "not used in count_tokens tests".to_string(),
+                })
+            })
+        }
+    }
+
+    fn anthropic_client() -> DefaultLlmClient {
+        std::env::set_var("LLM_COUNT_TOKENS_TEST_KEY", "ct-test-key");
+        DefaultLlmClient::from_config(ClientConfig {
+            providers: vec![ProviderProfile {
+                wire_profile: None,
+                regions: lingxi_llm_client::protocol::Region::all(),
+                provider_id: ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".to_string(),
+                base_url: "https://api.anthropic.com".to_string(),
+                protocol: ProtocolFamily::AnthropicMessages,
+                auth: AuthStrategy::ApiKey,
+                credential: CredentialConfig::Env {
+                    var: "LLM_COUNT_TOKENS_TEST_KEY".to_string(),
+                },
+                models: vec![ModelProfile {
+                    display_model: "Claude".to_string(),
+                    request_model: "claude-sonnet-4-20250514".to_string(),
+                    billing_model: "claude-sonnet-4".to_string(),
+                    aliases: vec!["claude".to_string()],
+                    description: None,
+                    metadata: Default::default(),
+                    capabilities: Capabilities {
+                        streaming: true,
+                        tools: true,
+                        ..Default::default()
+                    },
+                }],
+                pricing: PricingConfig::default(),
+                signing: None,
+                azure: None,
+                supports_websockets: false,
+                supports_websocket_compression: false,
+                websocket_connect_timeout_ms: None,
+                vision_delegate: None,
+                connection: Default::default(),
+            }],
+        })
+        .expect("client")
+    }
+
+    fn openai_client() -> DefaultLlmClient {
+        DefaultLlmClient::from_config(ClientConfig {
+            providers: vec![ProviderProfile {
+                wire_profile: None,
+                regions: lingxi_llm_client::protocol::Region::all(),
+                provider_id: ProviderId::OpenAI,
+                profile_name: "openai".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                protocol: ProtocolFamily::OpenAiChat,
+                auth: AuthStrategy::None,
+                credential: CredentialConfig::None,
+                models: vec![ModelProfile {
+                    display_model: "GPT".to_string(),
+                    request_model: "gpt-4".to_string(),
+                    billing_model: "gpt-4".to_string(),
+                    aliases: vec!["gpt".to_string()],
+                    description: None,
+                    metadata: Default::default(),
+                    capabilities: Capabilities {
+                        streaming: true,
+                        tools: true,
+                        ..Default::default()
+                    },
+                }],
+                pricing: PricingConfig::default(),
+                signing: None,
+                azure: None,
+                supports_websockets: false,
+                supports_websocket_compression: false,
+                websocket_connect_timeout_ms: None,
+                vision_delegate: None,
+                connection: Default::default(),
+            }],
+        })
+        .expect("client")
+    }
+
+    // ----------------------------------------------------------------
+    // Happy path: Anthropic → real endpoint → decode input_tokens
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn anthropic_happy_path_returns_count_tokens_from_response() {
+        let transport = ScriptedTransport::returning(ProviderResponse::json(
+            200,
+            serde_json::json!({ "input_tokens": 2095 }),
+        ));
+        let client = anthropic_client();
+        let req = LlmRequest::new("claude").with_user_text("hello world");
+
+        let count = count_tokens(&client, &transport, &req)
+            .await
+            .expect("count");
+
+        assert_eq!(count, 2095);
+        // Also verify the request was sent to the count_tokens endpoint.
+        let seen = transport
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("request sent");
+        assert!(
+            seen.url.ends_with("/v1/messages/count_tokens"),
+            "url={}",
+            seen.url
+        );
+        assert_eq!(
+            seen.headers.get("x-api-key").map(String::as_str),
+            Some("ct-test-key")
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_route_sends_count_tokens_beta_header() {
+        let transport = ScriptedTransport::returning(ProviderResponse::json(
+            200,
+            serde_json::json!({ "input_tokens": 42 }),
+        ));
+        let client = anthropic_client();
+        let req = LlmRequest::new("claude").with_user_text("hello");
+
+        let _ = count_tokens(&client, &transport, &req)
+            .await
+            .expect("count");
+
+        let seen = transport
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("request sent");
+        let expected = crate::model::betas::assemble_beta_header(
+            crate::model::betas::Provider::Anthropic,
+            crate::model::betas::Endpoint::CountTokens,
+            &crate::model::betas::BetaContext::for_model("claude-sonnet-4-20250514"),
+        );
+        assert_eq!(
+            seen.headers.get("anthropic-beta").map(String::as_str),
+            Some(expected.as_str()),
+            "anthropic-beta header must equal assemble_beta_header(Anthropic, CountTokens); got: {:?}",
+            seen.headers.get("anthropic-beta"),
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Non-Anthropic route → approximation fallback
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn non_anthropic_route_falls_back_to_approximation() {
+        // ScriptedTransport should NOT be called — count_tokens returns
+        // InvalidRequest before any network call.
+        let transport = ScriptedTransport::returning(ProviderResponse::json(
+            200,
+            serde_json::json!({ "input_tokens": 9999 }),
+        ));
+        let client = openai_client();
+        // The fallback includes provider-visible message structure as well as
+        // text, so it must be larger than the old raw-text / 4 heuristic.
+        let req = LlmRequest::new("gpt").with_user_text("12345678901234567890");
+        let expected = approximate_tokens(&req);
+
+        let count = count_tokens(&client, &transport, &req)
+            .await
+            .expect("count");
+
+        assert_eq!(count, expected);
+        assert!(count > 5);
+        // Transport must NOT have been called.
+        assert!(
+            transport.seen.lock().unwrap().is_none(),
+            "transport should not be called"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_count_reports_unavailable_for_non_anthropic_route() {
+        let transport = ScriptedTransport::returning(ProviderResponse::json(
+            200,
+            serde_json::json!({ "input_tokens": 9999 }),
+        ));
+        let client = openai_client();
+        let req = LlmRequest::new("gpt").with_user_text("hello");
+
+        assert_eq!(
+            try_count_tokens_exact(&client, &transport, &req)
+                .await
+                .expect("route resolution"),
+            None
+        );
+        assert!(transport.seen.lock().unwrap().is_none());
+    }
+
+    // ----------------------------------------------------------------
+    // 401 envelope → Authentication error propagates
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn authentication_error_propagates_from_401_response() {
+        let transport = ScriptedTransport::returning(ProviderResponse::json(
+            401,
+            serde_json::json!({
+                "type": "error",
+                "error": { "type": "authentication_error", "message": "invalid api key" }
+            }),
+        ));
+        let client = anthropic_client();
+        let req = LlmRequest::new("claude").with_user_text("hello");
+
+        let err = count_tokens(&client, &transport, &req)
+            .await
+            .expect_err("must fail");
+
+        assert!(
+            matches!(err, LlmError::Authentication { .. }),
+            "expected Authentication, got {err:?}"
+        );
+    }
+}

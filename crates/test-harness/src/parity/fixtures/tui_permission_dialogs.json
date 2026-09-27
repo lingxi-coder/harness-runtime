@@ -1,0 +1,51 @@
+{
+  "_comment": "Parity fixture for the M6-05 TUI permission dialogs. Lock the LingXi-locked button labels (which deliberately diverge from claude-code's React Select labels — claude-code uses 'Yes' / 'Yes, and don't ask again for X commands in Y' / 'No'; LingXi uses '[1] Allow Once / [2] Allow Always / [N] Deny' to surface the numeric-key affordance) AND the keymap, so any future label rename gets caught in CI.",
+  "_claude_code_version": "2026-05-28-snapshot",
+  "labels": {
+    "tool_use_confirm": {
+      "header_template": "Claude needs your permission to use {tool_name}",
+      "button_allow_once": "[1] Allow Once",
+      "button_allow_always": "[2] Allow Always",
+      "button_deny": "[N] Deny"
+    },
+    "exit_plan_mode": {
+      "header": "LingXi needs your approval for the plan",
+      "button_allow_once": "[1] Allow Once",
+      "button_allow_always": "[2] Allow Always",
+      "button_deny": "[N] Deny"
+    },
+    "bypass_permissions": {
+      "title": "WARNING: LingXi running in Bypass Permissions mode",
+      "body_1": "In Bypass Permissions mode, LingXi will not ask for your approval before running potentially dangerous commands.\nThis mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.",
+      "body_2": "By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.",
+      "confirm_word": "yes"
+    }
+  },
+  "key_bindings": {
+    "tool_use_confirm": [
+      { "key": "1", "expects": "AllowOnce" },
+      { "key": "2", "expects": "AllowAlways" },
+      { "key": "n", "expects": "Deny" },
+      { "key": "N", "expects": "Deny" },
+      { "key": "Esc", "expects": "Deny" },
+      { "key": "Enter@AllowOnce", "expects": "AllowOnce" }
+    ],
+    "exit_plan_mode": [
+      { "key": "1", "expects": "AllowOnce" },
+      { "key": "2", "expects": "AllowAlways" },
+      { "key": "n", "expects": "Deny" },
+      { "key": "N", "expects": "Deny" },
+      { "key": "Esc", "expects": "Deny" }
+    ],
+    "bypass_permissions": [
+      { "keys": ["y", "e", "s", "Enter"], "expects": "AllowOnce" },
+      { "keys": ["Esc"], "expects": "Deny" },
+      { "keys": ["N"], "expects": "Deny" },
+      { "keys": ["y", "Enter"], "expects": "no-resolution" }
+    ]
+  },
+  "focus_trap": {
+    "_comment": "When a dialog is open, key events do NOT reach PromptInput. This is enforced by events::keymap::handle_key.",
+    "behavior": "all_keys_route_to_dialog"
+  }
+}

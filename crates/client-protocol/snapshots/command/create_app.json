@@ -1,0 +1,11 @@
+{
+  "type": "create_app",
+  "name": "Habits",
+  "origin": "chat",
+  "brief": "Track daily habits with streaks",
+  "workflow_model": "deepseek/deepseek-flash",
+  "conversation_id": "55555555-5555-4555-8555-555555555555",
+  "surface": "canvas",
+  "mode": "scaffolded",
+  "request_id": "2f1e0d9c-8b7a-4655-9443-2211ffee0099"
+}

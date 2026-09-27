@@ -1,0 +1,50 @@
+[package]
+name = "platform-api"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# The subagent output guard flags escalation attempts naming THIS build's
+# settings paths, so it reads their canonical spellings from one place rather
+# than repeating string literals that could drift from the rest of the tree.
+branding.workspace = true
+protocol = { path = "../protocol" }
+uuid = { version = "1", features = ["v4"] }
+# The LSP transport exposes its live `Arc<jsonrpc::Connection>` so the registry
+# can bridge it into an `LspClient` (lsp `ensure_server_for_file`). jsonrpc is a
+# leaf crate (no `platform-api` dep) → no cycle.
+jsonrpc = { path = "../jsonrpc" }
+async-trait.workspace = true
+# `rg`'s width-aware truncation (`Xe`) segments by grapheme and measures display
+# columns, exactly like the oracle's `Intl.Segmenter` + `Bun.stringWidth` pair.
+unicode-segmentation = "=1.12.0"
+unicode-width = "=0.1.14"
+futures-core.workspace = true
+futures-util.workspace = true
+indexmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# `sync` carries the mpsc progress/terminal channels, `time` the monotonic
+# activation deadline, and `rt` lets an activated PreparedFusionRun outlive a
+# caller that drops its waiter. `io-util`, `fs` and `process` back the rooted
+# filesystem and sandbox helpers.
+tokio = { workspace = true, features = ["sync", "io-util", "fs", "process", "rt", "time"] }
+tokio-util.workspace = true
+fs2 = "0.4"
+tempfile = "3.13"
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "0.38", features = ["fs", "net", "process"] }
+# Apple LOCAL_PEERPID / getpeereid — rustix 0.38 has SO_PEERCRED on Linux only.
+libc = "0.2"
+
+[dev-dependencies]
+# `#[tokio::test]` for the async default-impl test on `HttpTransport`.
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+
+[lints]
+workspace = true

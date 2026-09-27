@@ -1,0 +1,68 @@
+{
+  "_source": "M4-08 system tools (8 builtins). Locks derived from docs/superpowers/specs/2026-05-24-m4-tools-implementation-design.md §7 (wire identifiers).",
+  "_note": "Single-fixture cover for all 8 tools. Diverged from plan: BuiltinToolContext NOT extended with home_dir_provider/cron_parser/etc traits — actual codebase pattern is std::env HOME + tokio::fs (matches M4-06 Team). SkillTool / ToolSearchTool inject lightweight loader/view traits to keep dispatcher wiring trivial. ScheduleCronTool inlines lingxi_cron parser to avoid the cycle lingxi-cron -> lingxi-tasks -> lingxi-agent -> lingxi-memory -> lingxi-sidequery -> lingxi-tools.",
+
+  "tool_names": {
+    "ask_user_question": "AskUserQuestion",
+    "brief": "SendUserMessage",
+    "config": "Config",
+    "skill": "Skill",
+    "schedule_cron": "CronCreate",
+    "cron_delete": "CronDelete",
+    "cron_list": "CronList",
+    "tool_search": "ToolSearch",
+    "remote_trigger": "RemoteTrigger",
+    "synthetic_output": "StructuredOutput"
+  },
+
+  "wire_identifiers": {
+    "max_ask_options": 4,
+    "max_ask_label_len": 60,
+    "max_ask_question_len": 200,
+    "brief_subdir": "brief",
+    "brief_file_suffix": ".txt",
+    "brief_task_id_prefix": "b",
+    "config_file_name": "settings.json",
+    "config_subdir": ".lingxi",
+    "config_fields_allowed": ["model", "outputStyle", "theme", "verbose"],
+    "max_skill_descriptor_len": 1024,
+    "cron_subdir": "cron",
+    "cron_file_suffix": ".json",
+    "cron_task_id_length": 8,
+    "six_field_rejection": "ScheduleCron: 6-field cron (with seconds) is not supported; use 5-field cron (minute hour day month weekday)",
+    "tool_search_max_results": 20
+  },
+
+  "path_templates": {
+    "brief":          "~/.lingxi/brief/<task_id>.txt",
+    "config":         "~/.lingxi/settings.json",
+    "schedule_cron":  "<project>/.lingxi/scheduled_tasks.json"
+  },
+
+  "telemetry_events": [
+    "tengu_tool_ask_user_question_started",
+    "tengu_tool_ask_user_question_completed",
+    "tengu_tool_ask_user_question_failed",
+    "tengu_tool_brief_started",
+    "tengu_tool_brief_completed",
+    "tengu_tool_brief_failed",
+    "tengu_tool_config_started",
+    "tengu_tool_config_completed",
+    "tengu_tool_config_failed",
+    "tengu_tool_skill_started",
+    "tengu_tool_skill_completed",
+    "tengu_tool_skill_failed",
+    "tengu_tool_schedule_cron_started",
+    "tengu_tool_schedule_cron_completed",
+    "tengu_tool_schedule_cron_failed",
+    "tengu_tool_tool_search_started",
+    "tengu_tool_tool_search_completed",
+    "tengu_tool_tool_search_failed",
+    "tengu_tool_remote_trigger_started",
+    "tengu_tool_remote_trigger_completed",
+    "tengu_tool_remote_trigger_failed",
+    "tengu_tool_synthetic_output_started",
+    "tengu_tool_synthetic_output_completed",
+    "tengu_tool_synthetic_output_failed"
+  ]
+}

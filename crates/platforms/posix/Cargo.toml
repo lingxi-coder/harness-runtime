@@ -1,0 +1,56 @@
+[package]
+name = "platform-posix"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+protocol = { path = "../../protocol" }
+platform-api = { path = "../../platform-api" }
+branding.workspace = true
+jsonrpc = { path = "../../jsonrpc" }
+# `mcp::RawConnectionProvider` is implemented on `PosixMcpTransport` so the
+# registry can bridge the transport-owned `Arc<jsonrpc::Connection>` into a
+# live `McpClient`. Dep DAG: posix → mcp → jsonrpc (no cycle; mcp has no posix dep).
+mcp = { path = "../../mcp" }
+lsp = { path = "../../lsp" }
+platform-common = { path = "../common" }
+http-client = { path = "../../http-client" }
+sandbox = { path = "../../sandbox" }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
+futures = "0.3"
+futures-core = { workspace = true }
+futures-util = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+fs2 = "0.4"
+notify = "8"
+notify-debouncer-mini = "0.6"
+tokio-stream = "0.1"
+which = "6"
+sha2 = "0.10"
+hex = "0.4"
+nix = { version = "0.27", default-features = false, features = ["signal", "process"] }
+libc = "0.2"
+unicode-normalization = "0.1"
+bytes = "1"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3.13"
+# Axum + tokio TcpListener for the MCP WebSocket roundtrip integration test
+# (`tests/mcp_ws_test.rs`). `ws` enables the WebSocketUpgrade extractor.
+axum = { version = "0.7", features = ["ws"] }
+url = "2"
+# `mcp` is a regular dependency (see `[dependencies]`); it is also used by the
+# integration test (`tests/mcp_client_stdio_test.rs`) that drives the real
+# `lingxi_mcp::McpClient` over a stdio-spawned mock MCP server.
+futures-util = "0.3"
+
+[lints]
+workspace = true

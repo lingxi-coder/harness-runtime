@@ -1,0 +1,5 @@
+{
+  "type": "cron_run_started",
+  "run_id": "run-1",
+  "session_id": "session-1"
+}

@@ -1,0 +1,38 @@
+[package]
+name = "platform-posix-minimal"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+protocol = { path = "../../protocol" }
+platform-api = { path = "../../platform-api" }
+http-client = { path = "../../http-client" }
+# `mcp` (+ its `jsonrpc` re-export via `RawConnectionProvider`) lets the stub
+# transport satisfy `mcp::RawConnectionProvider` so `engine-desktop` can build
+# the registry with `McpRegistry::with_raw_conn`. The stub owns no live
+# connections, so it always hands back `None`.
+mcp = { path = "../../mcp" }
+jsonrpc = { path = "../../jsonrpc" }
+async-trait.workspace = true
+tokio = { workspace = true, features = ["full"] }
+futures-core = { workspace = true }
+futures-util = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+fs2 = "0.4"
+
+# `libc::O_NOFOLLOW` + `OpenOptionsExt::custom_flags` harden the task-output
+# exclusive-create / no-follow append opens (mirrors `platforms/posix`). Unix
+# only; non-unix targets fall back to `create_new`/plain-append (see `fs.rs`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.13"
+
+[lints]
+workspace = true
