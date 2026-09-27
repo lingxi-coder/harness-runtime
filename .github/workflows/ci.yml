@@ -329,3 +329,15 @@ jobs:
         run: |
           cargo ndk -t "$HARNESS_ANDROID_ABI" --platform 29 check --locked -p protocol -p core -p platform-api -p llm-runtime
           cargo ndk -t "$HARNESS_ANDROID_ABI" --platform 29 check --locked -p harness-runtime --no-default-features --features "$HARNESS_FEATURES"
+
+  linux-seccomp-helper:
+    name: Linux seccomp helper (build, discovery, kernel enforcement)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Exercise the real helper in a custom target directory
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/harness-seccomp-target
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: python3 scripts/smoke-linux-seccomp.py
