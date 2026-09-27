@@ -5787,6 +5787,7 @@ impl std::fmt::Debug for DesktopAudio {
 /// use std::path::PathBuf;
 ///
 /// let cfg = DesktopConfig {
+///     build_info: harness_runtime::desktop::BuildInfo::new("1.0.0", "host123"),
 ///     enable_automation_scheduler: true,
 ///     host_workspace_trusted: None,
 ///     api_base: "https://api.anthropic.com".to_string(),
