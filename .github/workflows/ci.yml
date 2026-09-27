@@ -117,51 +117,32 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-  cross-compile-desktop:
-    runs-on: ubuntu-latest
+  core-platforms:
+    # Preserve the former cross-compile-desktop package/target coverage using
+    # each target's real toolchain: cross has no Apple/MSVC SDK Docker images.
+    name: Core platform (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-apple-darwin
-          - x86_64-pc-windows-msvc
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: ${{ matrix.target }}
-      - name: Install cross
-        run: cargo install cross --locked
-      - name: Cross-compile core crates
-        run: |
-          cross check --locked --target ${{ matrix.target }} -p protocol
-          cross check --locked --target ${{ matrix.target }} -p core
-          cross check --locked --target ${{ matrix.target }} -p platform-api
-          cross check --locked --target ${{ matrix.target }} -p llm-runtime
+      - name: Check all four core packages with the native SDK
+        run: cargo check --locked --target ${{ matrix.target }} -p protocol -p core -p platform-api -p llm-runtime
 
-  cross-compile-mobile:
-    runs-on: ubuntu-latest
-    continue-on-error: true   # M3 scope — informational only for v0.3.0
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - aarch64-linux-android
-          - aarch64-apple-ios
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
-        with:
-          targets: ${{ matrix.target }}
-      - name: Install cross
-        run: cargo install cross --locked
-      - name: Cross-compile core crates (informational)
-        run: |
-          cross check --locked --target ${{ matrix.target }} -p protocol
-          cross check --locked --target ${{ matrix.target }} -p core
-          cross check --locked --target ${{ matrix.target }} -p platform-api
-          cross check --locked --target ${{ matrix.target }} -p llm-runtime
+  # Former cross-compile-mobile checks of these same four packages now run
+  # below in harness-ios (Apple SDK) and harness-android (pinned Android NDK),
+  # alongside the complete runtime checks, without informational-only skipping.
 
   cross-compile-musl:
     # v3 §32.4 Layer 5: confirm the engine still type-checks against musl.
@@ -312,6 +293,7 @@ jobs:
           SDKROOT="$(xcrun --sdk "$HARNESS_APPLE_SDK" --show-sdk-path)"
           export SDKROOT
           export BINDGEN_EXTRA_CLANG_ARGS="--target=$HARNESS_CLANG_TARGET -isysroot $SDKROOT"
+          cargo check --locked --target "$HARNESS_TARGET" -p protocol -p core -p platform-api -p llm-runtime
           cargo check --locked -p harness-runtime --no-default-features --features mobile,uniffi --target "$HARNESS_TARGET"
 
   harness-android:
@@ -332,6 +314,9 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
+        with:
+          # The action default includes the retired SDK package "tools".
+          packages: platform-tools
       - name: Install pinned Android build tools
         run: |
           sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1"
@@ -341,4 +326,6 @@ jobs:
         env:
           HARNESS_ANDROID_ABI: ${{ matrix.abi }}
           HARNESS_FEATURES: ${{ matrix.features }}
-        run: cargo ndk -t "$HARNESS_ANDROID_ABI" --platform 29 check --locked -p harness-runtime --no-default-features --features "$HARNESS_FEATURES"
+        run: |
+          cargo ndk -t "$HARNESS_ANDROID_ABI" --platform 29 check --locked -p protocol -p core -p platform-api -p llm-runtime
+          cargo ndk -t "$HARNESS_ANDROID_ABI" --platform 29 check --locked -p harness-runtime --no-default-features --features "$HARNESS_FEATURES"
