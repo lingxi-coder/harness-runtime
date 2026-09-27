@@ -51,8 +51,8 @@ expect_rejection() {
     exit 1
   fi
 }
-STAGED_OUTPUT="${LINGXI_RUNTIME_TEST_OUTPUT_DIR:-${REPO_ROOT}/build}/local-app-supply-chain-test-${RANDOM}"
-IOS_STAGED_OUTPUT="${LINGXI_RUNTIME_TEST_OUTPUT_DIR:-${REPO_ROOT}/build}/local-app-supply-chain-test-${RANDOM}"
+STAGED_OUTPUT="${HARNESS_RUNTIME_TEST_OUTPUT_DIR:-${REPO_ROOT}/build}/local-app-supply-chain-test-${RANDOM}"
+IOS_STAGED_OUTPUT="${HARNESS_RUNTIME_TEST_OUTPUT_DIR:-${REPO_ROOT}/build}/local-app-supply-chain-test-${RANDOM}"
 trap 'chmod -R u+w "${TEMP_ROOT}" "${STAGED_OUTPUT}" "${IOS_STAGED_OUTPUT}" 2>/dev/null || true; rm -rf "${TEMP_ROOT}" "${STAGED_OUTPUT}" "${IOS_STAGED_OUTPUT}"' EXIT
 
 python3 "${TOOL}" --repo-root "${REPO_ROOT}"

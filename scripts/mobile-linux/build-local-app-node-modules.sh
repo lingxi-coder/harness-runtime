@@ -50,8 +50,8 @@ case "${ARCH}" in
   aarch64|x86_64) ;;
   *) echo "--arch must be aarch64 or x86_64" >&2; exit 2 ;;
 esac
-[[ -n "${ROOTFS}" ]] || ROOTFS="${LINGXI_RUNTIME_BUILD_ROOT:-${REPO_ROOT}/build}/local-app-rootfs/${ARCH}/rootfs.tar.gz"
-[[ -n "${OUTPUT}" ]] || OUTPUT="${LINGXI_RUNTIME_BUILD_ROOT:-${REPO_ROOT}/build}/local-app-node-modules/${ARCH}"
+[[ -n "${ROOTFS}" ]] || ROOTFS="${HARNESS_RUNTIME_BUILD_ROOT:-${REPO_ROOT}/build}/local-app-rootfs/${ARCH}/rootfs.tar.gz"
+[[ -n "${OUTPUT}" ]] || OUTPUT="${HARNESS_RUNTIME_BUILD_ROOT:-${REPO_ROOT}/build}/local-app-node-modules/${ARCH}"
 [[ "${OUTPUT}" == /* ]] || OUTPUT="${REPO_ROOT}/${OUTPUT}"
 [[ -f "${PINS}" ]] || { echo "missing pins: ${PINS}" >&2; exit 1; }
 if [[ ! -f "${ROOTFS}" ]]; then
