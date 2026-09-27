@@ -24,4 +24,6 @@ cargo test --locked --workspace --all-features --no-fail-fast
 
 客户端 UI、CLI/TUI 产品入口、原生宿主包装和应用签名仍在 LingXi。移动运行时供应链工具与宿主验证的接口见 `docs/mobile-linux/RUNTIME-SOURCE-CONTRACT.md`。迁移来源清单见 `docs/migration/source-manifest.json`。
 
+迁移验证结果与已知限制见 [验证记录](docs/migration/validation.md)。
+
 [English](README.en.md)

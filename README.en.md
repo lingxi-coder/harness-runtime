@@ -15,3 +15,5 @@ cargo test --locked --workspace --all-features --no-fail-fast
 ```
 
 The repository root is the Cargo workspace; `crates/` preserves component-relative source/resource layout. Vendored sources keep their patches and licenses. Build tools consume source read-only and support separate output/cache directories. No LingXi checkout is required. Product UI, executable entrypoints, native wrappers, and signing remain in LingXi. See `docs/mobile-linux/RUNTIME-SOURCE-CONTRACT.md` for resource integration and `docs/migration/source-manifest.json` for extraction provenance.
+
+See the [validation record](docs/migration/validation.md) for extraction evidence and remaining limitations.
