@@ -11,11 +11,11 @@ The runtime code imported from LingXi `01dcc428ba0c12522f6ee29b6474f3a4e0891c47`
 
 ## Host integration
 
-LingXi migration commit `0102773438de56fad21d1ce7d88fab18e96f82d2` passes its complete retained workspace tests: 2,780 passed, 0 failed, 4 ignored. Swift/Kotlin public interfaces were compared, and every generated Kotlin FFI declaration matches the new JNI exports. Android play/direct both build for arm64-v8a and x86_64, including mksh and toybox.
+LingXi migration commit `ddb7fc0ccfec5781ef88b4ec294206098932d0aa` delivers the atomic source/dependency switch and native build fixes. Its retained workspace was verified with complete tests: 2,780 passed, 0 failed, 4 ignored. Swift/Kotlin public interfaces were compared, and every generated Kotlin FFI declaration matches the new JNI exports. Android play/direct both build for arm64-v8a and x86_64, including mksh and toybox.
 
-The signed Flare macOS package passes path remapping, signing, static checks and application smoke through `npm run package:mac:flare -- --launch`. The local runtime checkout is physically absent throughout this package run, then restored. All 4,684 files in the pinned Cargo checkout retain their SHA-256 hashes. The package was built from the host commit above; ZIP SHA-256 is `63893a8dfd5934d66150a913bef5a5481a5b1c9ff9a286ac89d1933d101fdd52`.
+The signed Flare macOS package passes path remapping, signing, static checks and application smoke through `npm run package:mac:flare -- --launch`. The local runtime checkout is physically absent throughout this package run, then restored. All 4,684 files in the pinned Cargo checkout retain their SHA-256 hashes. The macOS package was built from the preserved validation commit `0102773438de56fad21d1ce7d88fab18e96f82d2`; subsequent production changes only affect iOS/Android build scripts; ZIP SHA-256 is `63893a8dfd5934d66150a913bef5a5481a5b1c9ff9a286ac89d1933d101fdd52`.
 
-The iOS arm64 simulator XCFramework passes generated Swift typecheck, FFI initialization and linking. Full local iOS packaging validation is recorded in the downstream delivery report.
+The full iOS XCFramework pipeline passes on Rust 1.94 at host code-validation commit `e672b8a6d0bfad00d057af57c2228c375ce3233e`: device arm64, simulator arm64/x86_64, source-built Node/rootfs/iSH, host helper tools and exact rootfs tree verification. Final generated Swift typecheck, normalized public interface comparison, host FFI initialization and simulator static linking pass. The final delivery commit adds documentation only to that code snapshot. The rootfs ZIP SHA-256 is `c7c4f3f7fcc8b7f646e19856d4ebee4b4e89fb4d8561ae2d029092445dbb5b54`. The build VM stopped normally and temporary iSH source patches were restored. Android host bindgen was also rebuilt on Rust 1.94; regenerated Kotlin is byte-identical for both variants and all 296 FFI declarations match all four JNI libraries.
 
 ## Actual CI
 
@@ -37,4 +37,8 @@ Android complete APK acceptance is blocked by missing existing PRoot/PTY/policy 
 
 ## Rollback
 
-Revert LingXi's migration commit to restore its original source/dependency layout; no user-data migration is required. The upstream snapshot and its original repository history remain available. Existing unrelated host document deletions were excluded from the migration commit.
+Revert LingXi migration commit `ddb7fc0ccfec5781ef88b4ec294206098932d0aa` to restore the complete prior source/dependency layout; no user-data migration is required. Its parent, resource preparation commit `e78020129f4d383538fbe8de5725e4fbe62d9b64`, first tracks the ten previously ignored required policy files with their original bytes and only forty existing branding inventory keys. An actual isolated revert of the final migration commit restored the exact preparation Git tree and all ten policy hashes. Earlier build commits remain on local validation branches, so recorded artifact origins stay available. Existing unrelated host document deletions and the standalone repository's concurrently created nested projects were excluded from all migration commits.
+
+## GitHub accounts and transport
+
+The local checkout pushes using `git@github.com-lingxi-coder:lingxi-coder/harness-runtime.git`. Cargo manifests retain the standard public URL and full revision for portable CI. On this workstation, a Git URL rewrite scoped to `https://github.com/lingxi-coder/` routes fetches through that account's SSH alias, and Cargo uses Git CLI. A fresh Cargo Git cache successfully fetched the pinned runtime revision through the alias; other GitHub account routes were unchanged.
