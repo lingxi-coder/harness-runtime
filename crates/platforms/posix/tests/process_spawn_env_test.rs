@@ -4,7 +4,8 @@
 
 #![cfg(unix)]
 
-use platform_api::{ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand, SandboxedTag};
+use mobile_linux_api::SandboxBackend;
+use platform_api::{ProcessCommand, ProcessRunner, SandboxedCommand, SandboxedTag};
 use platform_posix::process::PosixProcess;
 use std::collections::HashMap;
 

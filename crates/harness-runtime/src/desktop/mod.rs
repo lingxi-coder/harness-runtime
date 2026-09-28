@@ -6960,7 +6960,7 @@ pub async fn desktop_command_registry(
 ///
 /// This is the lifted shape of `apps/cli`'s `Runtime` (F2-01): moving the
 /// runtime wiring out of the CLI binary lets the bridge-server (which CANNOT
-/// depend on `apps/cli` — app→app is a leaf, `scripts/check_deps.py:99`)
+/// depend on `apps/cli` — app→app is a leaf, `scripts/checks/check_deps.py:99`)
 /// construct an identical orchestrator. The CLI now derives a `DesktopConfig`
 /// from `Argv`/env and calls `build`.
 /// (`!` bash mode) Desktop implementation of the TUI's
@@ -20738,7 +20738,7 @@ still flip to available"
         async fn run(
             &self,
             cmd: &platform_api::SandboxedCommand,
-        ) -> Result<platform_api::ProcessOutput, platform_api::ProcessError> {
+        ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
             let inner = cmd.inner();
             let exit_code = if inner.args == vec!["-V".to_string()] {
                 self.probe_exit
@@ -20749,7 +20749,7 @@ still flip to available"
                 .lock()
                 .unwrap()
                 .push((inner.command.clone(), inner.args.clone()));
-            Ok(platform_api::ProcessOutput {
+            Ok(mobile_linux_api::ProcessOutput {
                 stdout: String::new(),
                 stderr: if exit_code == 0 {
                     String::new()
@@ -20764,14 +20764,14 @@ still flip to available"
         async fn spawn_background(
             &self,
             _cmd: &platform_api::SandboxedCommand,
-        ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
-            Err(platform_api::ProcessError::Unsupported)
+        ) -> Result<platform_api::ProcessHandle, mobile_linux_api::ProcessError> {
+            Err(mobile_linux_api::ProcessError::Unsupported)
         }
 
         async fn kill(
             &self,
             _handle: &platform_api::ProcessHandle,
-        ) -> Result<(), platform_api::ProcessError> {
+        ) -> Result<(), mobile_linux_api::ProcessError> {
             Ok(())
         }
 
@@ -24584,7 +24584,7 @@ must be filtered out: got {after:?}"
     /// A fully-stubbed `BuiltinToolContext` — enough to enumerate registered
     /// names and probe per-tool behavior markers; no tool is ever invoked.
     fn stub_tool_ctx() -> tool_api::BuiltinToolContext {
-        tool_api::test_support::shell_test_ctx(platform_api::process::ProcessOutput {
+        tool_api::test_support::shell_test_ctx(mobile_linux_api::ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,

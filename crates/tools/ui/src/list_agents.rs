@@ -317,8 +317,8 @@ impl Tool for ListAgentsTool {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use mobile_linux_api::ProcessOutput;
     use platform_api::agent_name_registry::{AgentNameRegistry, InMemoryAgentNameRegistry};
-    use platform_api::process::ProcessOutput;
     use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRegistryError, TaskRegistryHandle,
         TaskUpdatePatch,

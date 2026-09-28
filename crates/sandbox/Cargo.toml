@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+mobile-linux-api.workspace = true
 protocol = { path = "../protocol" }
 platform-api = { path = "../platform-api" }
 permission = { path = "../permission" }

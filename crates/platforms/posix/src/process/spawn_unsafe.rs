@@ -61,8 +61,8 @@ pub(super) fn effective_uid() -> u32 {
 pub(super) async fn spawn_with_capability(
     mut command: Command,
     binding: Option<&platform_api::process::BackgroundTaskBinding>,
-) -> Result<tokio::process::Child, platform_api::ProcessError> {
-    use platform_api::ProcessError;
+) -> Result<tokio::process::Child, mobile_linux_api::ProcessError> {
+    use mobile_linux_api::ProcessError;
     use std::os::fd::AsRawFd;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let sink = binding.and_then(|binding| binding.on_exit.as_ref());

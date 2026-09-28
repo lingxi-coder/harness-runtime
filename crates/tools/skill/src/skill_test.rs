@@ -5,7 +5,7 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::process::ProcessOutput;
+    use mobile_linux_api::ProcessOutput;
     use protocol::{AgentId, SessionId};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, StubProcess};
 
@@ -933,7 +933,7 @@ mod tests {
         async fn run(
             &self,
             cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<ProcessOutput, platform_api::process::ProcessError> {
+        ) -> Result<ProcessOutput, mobile_linux_api::ProcessError> {
             if let Some(last) = cmd.inner().args.last() {
                 self.seen.lock().unwrap().push(last.clone());
             }
@@ -947,14 +947,13 @@ mod tests {
         async fn spawn_background(
             &self,
             _cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError>
-        {
-            Err(platform_api::process::ProcessError::Unsupported)
+        ) -> Result<platform_api::process::ProcessHandle, mobile_linux_api::ProcessError> {
+            Err(mobile_linux_api::ProcessError::Unsupported)
         }
         async fn kill(
             &self,
             _handle: &platform_api::process::ProcessHandle,
-        ) -> Result<(), platform_api::process::ProcessError> {
+        ) -> Result<(), mobile_linux_api::ProcessError> {
             Ok(())
         }
         fn is_available(&self) -> bool {
@@ -1401,8 +1400,8 @@ this turn, the skill is loaded — follow it directly rather than calling again.
 #[cfg(test)]
 mod fork_dispatch_tests {
     use super::*;
+    use mobile_linux_api::ProcessOutput;
     use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-    use platform_api::process::ProcessOutput;
     use platform_api::subagent_spawn::{
         AsyncLaunch, SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnError,
         SubagentSpawnRequest, SubagentSpawner, SubagentUsage,

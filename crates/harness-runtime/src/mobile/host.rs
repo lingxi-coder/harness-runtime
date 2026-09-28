@@ -86,6 +86,9 @@ use llm_runtime::{
     Credential, CredentialConfig, CredentialProvider, CredentialScope, DefaultLlmClient,
     ProviderId, Transport,
 };
+use mobile_linux_api::{
+    MobileLinuxCapability, MobileLinuxRuntime, MobileLinuxRuntimeMode, RootfsState, RootfsStatus,
+};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
 use orchestrator::test_support::StaticMemoryProvider;
@@ -104,8 +107,7 @@ use platform_api::http::{
     WebSocketConnectionWithMeta, WebSocketMessageStreamWithMeta,
 };
 use platform_api::{
-    AuthHandle, Clock, FileSystem, HttpTransport, MobileLinuxCapability, MobileLinuxRuntime,
-    MobileLinuxRuntimeMode, OrchestratorHandle, OutputStream, Platform, RootfsState, RootfsStatus,
+    AuthHandle, Clock, FileSystem, HttpTransport, OrchestratorHandle, OutputStream, Platform,
     SlashCommandDispatcher,
 };
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
@@ -1776,16 +1778,16 @@ fn lower_mobile_linux_mode(mode: MobileLinuxRuntimeMode) -> String {
     }
 }
 
-fn lower_mobile_linux_backend(backend: platform_api::SandboxBackend) -> String {
+fn lower_mobile_linux_backend(backend: mobile_linux_api::SandboxBackend) -> String {
     match backend {
-        platform_api::SandboxBackend::LinuxNamespaces => "linux-namespaces",
-        platform_api::SandboxBackend::LinuxFirejail => "linux-firejail",
-        platform_api::SandboxBackend::MacOsSandboxExec => "macos-sandbox-exec",
-        platform_api::SandboxBackend::WindowsJobObject => "windows-job-object",
-        platform_api::SandboxBackend::AndroidMinijail => "android-minijail",
-        platform_api::SandboxBackend::AndroidProot => "android-proot",
-        platform_api::SandboxBackend::IosIsh => "ios-ish",
-        platform_api::SandboxBackend::None => "none",
+        mobile_linux_api::SandboxBackend::LinuxNamespaces => "linux-namespaces",
+        mobile_linux_api::SandboxBackend::LinuxFirejail => "linux-firejail",
+        mobile_linux_api::SandboxBackend::MacOsSandboxExec => "macos-sandbox-exec",
+        mobile_linux_api::SandboxBackend::WindowsJobObject => "windows-job-object",
+        mobile_linux_api::SandboxBackend::AndroidMinijail => "android-minijail",
+        mobile_linux_api::SandboxBackend::AndroidProot => "android-proot",
+        mobile_linux_api::SandboxBackend::IosIsh => "ios-ish",
+        mobile_linux_api::SandboxBackend::None => "none",
     }
     .to_string()
 }
@@ -1913,8 +1915,8 @@ fn mobile_launch_is_interactive(
 }
 
 async fn mobile_typescript_lsp_ready(
-    runtime: &Arc<dyn platform_api::MobileLinuxRuntime>,
-    capability: Option<&platform_api::MobileLinuxCapability>,
+    runtime: &Arc<dyn mobile_linux_api::MobileLinuxRuntime>,
+    capability: Option<&mobile_linux_api::MobileLinuxCapability>,
     host_environment: Option<&platform_api::MobileHostEnvironment>,
 ) -> bool {
     if !capability.is_some_and(|value| value.available)
@@ -1931,13 +1933,13 @@ async fn mobile_typescript_lsp_ready(
     let Ok(mut status) = runtime.rootfs_status().await else {
         return false;
     };
-    if matches!(status.state, platform_api::RootfsState::Missing) {
+    if matches!(status.state, mobile_linux_api::RootfsState::Missing) {
         let Ok(booted) = runtime.boot().await else {
             return false;
         };
         status = booted;
     }
-    if !matches!(status.state, platform_api::RootfsState::Ready) {
+    if !matches!(status.state, mobile_linux_api::RootfsState::Ready) {
         return false;
     }
     let Some(active_root) = status.active_root else {
@@ -1945,7 +1947,7 @@ async fn mobile_typescript_lsp_ready(
     };
     let relative = std::path::Path::new("opt/lingxi/toolchains/typescript/7.0.2");
     let toolchain_root = match runtime.backend() {
-        platform_api::SandboxBackend::IosIsh => active_root.join("data").join(relative),
+        mobile_linux_api::SandboxBackend::IosIsh => active_root.join("data").join(relative),
         _ => active_root.join(relative),
     };
     if !toolchain_root.join("tsc").is_file() {
@@ -1965,13 +1967,13 @@ async fn mobile_typescript_lsp_ready(
 
 fn model_visible_mobile_cwd(
     path: &std::path::Path,
-    mounts: &[platform_api::MountSpec],
+    mounts: &[mobile_linux_api::MountSpec],
     has_mobile_linux_guest: bool,
 ) -> Option<String> {
     if !has_mobile_linux_guest {
         return None;
     }
-    platform_api::mobile_linux::map_host_path_to_guest(path, mounts).or_else(|| {
+    mobile_linux_api::map_host_path_to_guest(path, mounts).or_else(|| {
         path.to_str()
             .and_then(platform_api::mobile_runtime_environment::normalize_mobile_guest_cwd)
     })
@@ -2008,7 +2010,7 @@ fn build_mobile_subagent_env_renderer(
                 .to_str()
                 .and_then(platform_api::mobile_runtime_environment::normalize_mobile_guest_cwd)
         })
-        .unwrap_or_else(|| platform_api::mobile_linux::guest_paths::WORKSPACE_ROOT.to_string());
+        .unwrap_or_else(|| mobile_linux_api::guest_paths::WORKSPACE_ROOT.to_string());
 
     Arc::new(
         move |model_id: &str, cwd_override: Option<&std::path::Path>| {
@@ -2042,7 +2044,7 @@ mod mobile_tool_gate_tests {
     fn unavailable_mobile_linux_capability() -> MobileLinuxCapability {
         MobileLinuxCapability {
             available: false,
-            backend: platform_api::SandboxBackend::IosIsh,
+            backend: mobile_linux_api::SandboxBackend::IosIsh,
             mode: MobileLinuxRuntimeMode::MobileLinux,
             reason: Some("runtime unavailable".into()),
             streaming_output: false,
@@ -2127,11 +2129,11 @@ mod mobile_tool_gate_tests {
 
     #[test]
     fn workspace_prompt_paths_are_guest_only() {
-        let mounts = [platform_api::MountSpec {
+        let mounts = [mobile_linux_api::MountSpec {
             host_path: std::path::PathBuf::from("/native/workspace"),
             guest_path: "/workspace/app".into(),
             read_only: false,
-            purpose: platform_api::MountPurpose::Workspace,
+            purpose: mobile_linux_api::MountPurpose::Workspace,
         }];
 
         assert_eq!(
@@ -2164,11 +2166,11 @@ mod mobile_tool_gate_tests {
 
     #[test]
     fn mobile_subagent_env_renderer_uses_guest_paths_only() {
-        let mounts = vec![platform_api::MountSpec {
+        let mounts = vec![mobile_linux_api::MountSpec {
             host_path: std::path::PathBuf::from("/native/workspace"),
             guest_path: "/workspace/app".into(),
             read_only: false,
-            purpose: platform_api::MountPurpose::Workspace,
+            purpose: mobile_linux_api::MountPurpose::Workspace,
         }];
         let provider_mounts = mounts.clone();
         let provider = Arc::new(move |override_cwd: Option<&std::path::Path>| {
@@ -3769,7 +3771,7 @@ async fn build_mobile_inner_with_ask(
     // >1 we keep the engine cwd, i.e. today's behavior.
     let workspace_mounts: Vec<_> = mobile_linux_mounts
         .iter()
-        .filter(|m| matches!(m.purpose, platform_api::MountPurpose::Workspace))
+        .filter(|m| matches!(m.purpose, mobile_linux_api::MountPurpose::Workspace))
         .collect();
     // THE workspace mount, chosen once. `model_cwd` below reuses this instead
     // of running its own `.find()`: a bare `.find()` takes table order, so with
@@ -3797,7 +3799,7 @@ async fn build_mobile_inner_with_ask(
             // Canonical forms are used ONLY to decide. BOTH returned values are
             // raw, and that is load-bearing: `translate_model_path` resolves a
             // guest path to `mount.host_path.join(rest)` with NO
-            // canonicalization (`platform_api::mobile_linux::find_guest_mount` is
+            // canonicalization (`mobile_linux_api::find_guest_mount` is
             // pure path math). Returning the canonicalized spelling here would
             // leave `FsRoots.cwd` as `/private/var/...` while every translated
             // path arrives as `/var/...`; `path_matches_rule_pattern`
@@ -5261,7 +5263,7 @@ async fn build_mobile_inner_with_ask(
     // added later still resolve.
     orch_inner = if let Some(runtime) = mobile_linux.clone() {
         orch_inner.with_prompt_probe_cwd_resolver(std::sync::Arc::new(move |path| {
-            platform_api::mobile_linux::map_guest_path_to_host(
+            mobile_linux_api::map_guest_path_to_host(
                 &path.to_string_lossy(),
                 &runtime.current_mounts(),
             )

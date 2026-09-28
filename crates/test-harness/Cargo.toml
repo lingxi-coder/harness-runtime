@@ -14,6 +14,7 @@ default = []
 "10k-iterations" = []
 
 [dependencies]
+mobile-linux-api.workspace = true
 protocol = { path = "../protocol" }
 platform-api = { path = "../platform-api" }
 core = { path = "../core" }

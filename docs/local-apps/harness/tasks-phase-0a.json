@@ -6,8 +6,8 @@
       "title": "Extend the brand gate with the Claude-side plugin needles, and make it report line numbers",
       "gate": "§19.3 brand scanner planted-positive: a `.claude-plugin` literal under harness-runtime/src/mobile/ must go red and NAME FILE AND LINE",
       "owns": [
-        "scripts/check_brand_leaks.py",
-        "scripts/brand_leak_baseline.txt"
+        "scripts/checks/check_brand_leaks.py",
+        "scripts/checks/brand_leak_baseline.txt"
       ],
       "crates": [
         "harness-runtime"

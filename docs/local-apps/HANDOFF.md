@@ -77,7 +77,7 @@ The important ownership boundary is:
 | iOS client | `clients/ios/Sources/LocalApps/` | SwiftUI library/detail views, store, WKWebView bridge and structured UI control |
 | Android client | `clients/android/app/src/main/java/com/lingxi/code/localapps/` | Compose screens, view model, WebView bridge and structured UI control |
 | Templates | `lingxi-code/local-apps/templates/` | Verified pinned Vite scaffold and locked integration files |
-| Runtime supply chain | `docs/mobile-linux/local-app-runtime-*.json`, `lingxi-code/scripts/mobile-linux/` | Pinned Node/Vite runtime, SBOM, memory/network policy and verification |
+| Runtime supply chain | `docs/mobile-linux/local-app-runtime-*.json`, `lingxi-code/scripts/local-apps/` | Pinned Node/Vite runtime, SBOM, memory/network policy and verification |
 
 ## 4. Product flow and state
 
@@ -402,7 +402,7 @@ cargo test -p android-aar --features uniffi mobile_linux_
 Supply-chain verification:
 
 ```bash
-./lingxi-code/scripts/mobile-linux/test-local-app-supply-chain.sh
+./lingxi-code/scripts/tests/test-local-app-supply-chain.sh
 ```
 
 Native verification should additionally run the iOS and Android unit/integration suites when generated FFI bindings and platform projects are present. A Browser-only narrow viewport is insufficient for native bridge and platform behavior.

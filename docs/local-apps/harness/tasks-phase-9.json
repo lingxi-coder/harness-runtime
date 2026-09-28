@@ -55,8 +55,8 @@
         "apps/engine-mobile/tests/component_literal_scan.rs::scanner_workflow_needles_survive_the_name_list_deletion",
         "apps/engine-mobile/tests/component_literal_scan.rs::today_the_real_src_tree_matches_its_committed_allowlist",
         "local-apps/src/permissions.rs::new_workspace_gets_scoped_read_and_edit_rules",
-        "scripts/mobile-linux/verify-local-app-supply-chain.py",
-        "scripts/check-phase2-plugin.py"
+        "scripts/local-apps/verify-local-app-supply-chain.py",
+        "scripts/checks/check-phase2-plugin.py"
       ],
       "deps": ["P9.0"]
     },

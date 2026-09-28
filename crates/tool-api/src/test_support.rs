@@ -304,10 +304,12 @@ pub fn fresh_tx() -> ToolProgressSender {
 
 // ===== M4-02 shell-tool test stubs ==========================================
 
-use platform_api::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
+use mobile_linux_api::SandboxBackend;
+use mobile_linux_api::{ProcessError, ProcessOutput};
+use platform_api::process::{ProcessHandle, ProcessRunner};
 use platform_api::sandbox::{
-    ProcessCommand as SbxCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
-    SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
+    ProcessCommand as SbxCommand, Sandbox, SandboxCapability, SandboxError, SandboxFeatures,
+    SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
 use std::sync::Mutex;
 

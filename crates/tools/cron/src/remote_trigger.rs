@@ -1232,8 +1232,8 @@ impl Tool for RemoteTriggerTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mobile_linux_api::ProcessOutput;
     use platform_api::http::{HttpError, HttpTransport, SseStream};
-    use platform_api::process::ProcessOutput;
     use std::sync::Mutex;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 

@@ -129,7 +129,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -140,7 +140,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1601,7 +1601,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2165,6 +2165,7 @@ dependencies = [
  "mcp",
  "memory",
  "migrations",
+ "mobile-linux-api",
  "msgqueue",
  "nix 0.27.1",
  "orchestrator",
@@ -2299,6 +2300,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "core",
+ "mobile-linux-api",
  "permission",
  "platform-api",
  "protocol",
@@ -2485,7 +2487,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -3006,6 +3008,7 @@ dependencies = [
  "async-trait",
  "branding",
  "git2",
+ "mobile-linux-api",
  "platform-api",
  "rand 0.9.4",
  "rusqlite",
@@ -3296,7 +3299,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-android"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=26dc0648b540f764577600cc14f5b512d96b9782#26dc0648b540f764577600cc14f5b512d96b9782"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=46a294d80112bd33b96b5face26f51d261df07ba#46a294d80112bd33b96b5face26f51d261df07ba"
 dependencies = [
  "async-trait",
  "mobile-linux-api",
@@ -3310,7 +3313,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-api"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=26dc0648b540f764577600cc14f5b512d96b9782#26dc0648b540f764577600cc14f5b512d96b9782"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=46a294d80112bd33b96b5face26f51d261df07ba#46a294d80112bd33b96b5face26f51d261df07ba"
 dependencies = [
  "async-trait",
  "serde",
@@ -3320,7 +3323,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-core"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=26dc0648b540f764577600cc14f5b512d96b9782#26dc0648b540f764577600cc14f5b512d96b9782"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=46a294d80112bd33b96b5face26f51d261df07ba#46a294d80112bd33b96b5face26f51d261df07ba"
 dependencies = [
  "mobile-linux-api",
  "serde",
@@ -3433,7 +3436,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4016,6 +4019,7 @@ dependencies = [
  "mcp",
  "memory",
  "migrations",
+ "mobile-linux-api",
  "once_cell",
  "outputstyles",
  "permission",
@@ -4366,6 +4370,7 @@ dependencies = [
  "hex",
  "http-client",
  "mobile-linux-android",
+ "mobile-linux-api",
  "nix 0.27.1",
  "platform-android-minijail",
  "platform-api",
@@ -4382,7 +4387,7 @@ dependencies = [
 [[package]]
 name = "platform-android-libcap"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=26dc0648b540f764577600cc14f5b512d96b9782#26dc0648b540f764577600cc14f5b512d96b9782"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=46a294d80112bd33b96b5face26f51d261df07ba#46a294d80112bd33b96b5face26f51d261df07ba"
 dependencies = [
  "cc",
 ]
@@ -4390,7 +4395,7 @@ dependencies = [
 [[package]]
 name = "platform-android-minijail"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=26dc0648b540f764577600cc14f5b512d96b9782#26dc0648b540f764577600cc14f5b512d96b9782"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=46a294d80112bd33b96b5face26f51d261df07ba#46a294d80112bd33b96b5face26f51d261df07ba"
 dependencies = [
  "cc",
  "hex",
@@ -4442,6 +4447,7 @@ dependencies = [
  "ignore",
  "jsonrpc",
  "llm-runtime",
+ "mobile-linux-api",
  "mobile-linux-core",
  "platform-api",
  "protocol",
@@ -4464,6 +4470,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "http-client",
+ "mobile-linux-api",
  "platform-api",
  "platform-common",
  "platform-posix-minimal",
@@ -4509,6 +4516,7 @@ dependencies = [
  "libc",
  "lsp",
  "mcp",
+ "mobile-linux-api",
  "nix 0.27.1",
  "notify",
  "notify-debouncer-mini",
@@ -4542,6 +4550,7 @@ dependencies = [
  "jsonrpc",
  "libc",
  "mcp",
+ "mobile-linux-api",
  "platform-api",
  "protocol",
  "serde",
@@ -4555,7 +4564,7 @@ dependencies = [
 [[package]]
 name = "platform-pty"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=26dc0648b540f764577600cc14f5b512d96b9782#26dc0648b540f764577600cc14f5b512d96b9782"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=46a294d80112bd33b96b5face26f51d261df07ba#46a294d80112bd33b96b5face26f51d261df07ba"
 dependencies = [
  "anyhow",
  "filedescriptor",
@@ -4584,6 +4593,7 @@ dependencies = [
  "jsonrpc",
  "lsp",
  "mcp",
+ "mobile-linux-api",
  "notify",
  "notify-debouncer-mini",
  "platform-api",
@@ -4956,7 +4966,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls 0.23.40",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4993,7 +5003,7 @@ dependencies = [
  "cfg_aliases 0.2.1",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -5378,7 +5388,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5511,6 +5521,7 @@ name = "sandbox"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "mobile-linux-api",
  "permission",
  "platform-api",
  "protocol",
@@ -6032,7 +6043,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6217,6 +6228,7 @@ dependencies = [
  "llm-runtime",
  "local-apps",
  "mcp",
+ "mobile-linux-api",
  "permission",
  "platform-api",
  "protocol",
@@ -6328,6 +6340,7 @@ dependencies = [
  "lsp",
  "mcp",
  "memory",
+ "mobile-linux-api",
  "orchestrator",
  "outputstyles",
  "permission",
@@ -6736,6 +6749,7 @@ dependencies = [
  "image 0.24.9",
  "lsp",
  "mcp",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -6778,6 +6792,7 @@ dependencies = [
  "branding",
  "core",
  "cron",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -6832,6 +6847,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "git2",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -6900,6 +6916,7 @@ dependencies = [
  "branding",
  "core",
  "mcp",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -6918,6 +6935,7 @@ name = "tool-mobile"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -6955,6 +6973,7 @@ dependencies = [
  "async-trait",
  "base64",
  "hooks",
+ "mobile-linux-api",
  "nix 0.27.1",
  "once_cell",
  "permission",
@@ -6977,6 +6996,7 @@ name = "tool-shell-mobile"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -6994,6 +7014,7 @@ dependencies = [
  "command-api",
  "compaction",
  "core",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -7017,6 +7038,7 @@ dependencies = [
  "branding",
  "core",
  "cron",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -7040,6 +7062,7 @@ dependencies = [
  "async-trait",
  "client-presentation",
  "core",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -7102,6 +7125,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "core",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -7359,7 +7383,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7866,7 +7890,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

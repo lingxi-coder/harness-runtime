@@ -54,8 +54,8 @@
         "crates/local-apps/templates/runtime-profiles",
         "crates/harness-runtime/src/mobile/local_app_runtime_profiles.rs",
         "crates/harness-runtime/src/mobile/local_apps_build.rs",
-        "scripts/check-phase2-plugin.py",
-        "scripts/check-phase2-plugin.sh"
+        "scripts/checks/check-phase2-plugin.py",
+        "scripts/checks/check-phase2-plugin.sh"
       ],
       "crates": [
         "harness-runtime",
@@ -90,7 +90,7 @@
         "crates/harness-runtime/builtin-plugin-inventory.txt",
         "crates/harness-runtime/src/mobile/builtin_bundle.rs",
         "crates/plugins/lingxi-local-app/assets/templates/catalog.json",
-        "scripts/check-phase2-plugin.py"
+        "scripts/checks/check-phase2-plugin.py"
       ],
       "crates": [
         "harness-runtime",
@@ -125,7 +125,7 @@
         "crates/local-apps/assets",
         "crates/local-apps/src/permissions.rs",
         "crates/plugins/lingxi-local-app/assets/templates/catalog.json",
-        "scripts/check-phase2-plugin.py",
+        "scripts/checks/check-phase2-plugin.py",
         "crates/plugins/lingxi-local-app/workflows",
         "crates/workflow/tests/plugin_workflow_scripts.rs"
       ],

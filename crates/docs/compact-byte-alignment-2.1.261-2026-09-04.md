@@ -64,8 +64,8 @@ Main implementation entry points:
 From `lingxi-code`, with the pinned binary supplied locally:
 
 ```sh
-node scripts/compact_prompt_oracle.mjs /path/to/2.1.261/claude --check
-python3 scripts/compact_live_oracle.py /path/to/2.1.261/claude --output /tmp/compact-oracle
+node scripts/tests/compact_prompt_oracle.mjs /path/to/2.1.261/claude --check
+python3 scripts/tests/compact_live_oracle.py /path/to/2.1.261/claude --output /tmp/compact-oracle
 ```
 
 The first command evaluates only the pinned release's pure prompt functions

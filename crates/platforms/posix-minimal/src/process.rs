@@ -4,7 +4,8 @@
 //! call surfaces loudly during the demo.
 
 use async_trait::async_trait;
-use platform_api::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand};
+use mobile_linux_api::{ProcessError, ProcessOutput};
+use platform_api::{ProcessHandle, ProcessRunner, SandboxedCommand};
 
 /// Stub process runner.
 #[derive(Default)]

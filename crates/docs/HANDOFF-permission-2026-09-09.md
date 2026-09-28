@@ -202,7 +202,7 @@ starved harness was killed, the first three mutation results were lost with it.
 ## 6. Where things live
 
 - Audit report: `lingxi-code/docs/permission-byte-alignment-2.1.263-2026-09-07.md`
-- Regression gate: `lingxi-code/scripts/perm_verify_literals.py` (run from the
+- Regression gate: `lingxi-code/scripts/checks/perm_verify_literals.py` (run from the
   **repo root**; `perm_extract_literals.py` hardcodes `lingxi-code/permission/src`
   and takes the OUTPUT path as `argv[1]`)
 - Oracle binaries: `~/.local/share/claude/versions/{2.1.260,2.1.261,2.1.263,2.1.265}`.

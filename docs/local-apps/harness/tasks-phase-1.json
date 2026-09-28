@@ -219,7 +219,7 @@
         "P1.5",
         "P0a.9"
       ],
-      "notes": "NEW CRATE EDGE. plugin/ is not a dependency of engine-mobile at lap/baseline: engine-mobile's Cargo.toml has no plugin edge and its src/ has zero PluginManager/PluginSource hits, while engine-desktop/Cargo.toml:64 and apps/cli/Cargo.toml:97 do. scripts/check_deps.py classifies plugin/ as `engine` and apps/* as `app`, and FORBIDDEN has no `app` key, so the edge is legal and no gate change is needed — but §19.0's binary-size and startup budgets now bind. Budget for the argument even though the dependency checker will not raise it."
+      "notes": "NEW CRATE EDGE. plugin/ is not a dependency of engine-mobile at lap/baseline: engine-mobile's Cargo.toml has no plugin edge and its src/ has zero PluginManager/PluginSource hits, while engine-desktop/Cargo.toml:64 and apps/cli/Cargo.toml:97 do. scripts/checks/check_deps.py classifies plugin/ as `engine` and apps/* as `app`, and FORBIDDEN has no `app` key, so the edge is legal and no gate change is needed — but §19.0's binary-size and startup budgets now bind. Budget for the argument even though the dependency checker will not raise it."
     },
     {
       "id": "P1.7",

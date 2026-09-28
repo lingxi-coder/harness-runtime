@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+mobile-linux-api.workspace = true
 url = "2"
 base64 = "0.22"
 branding.workspace = true

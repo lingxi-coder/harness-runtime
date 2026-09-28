@@ -1332,14 +1332,14 @@ impl TaskOutputSink {
         }
     }
 
-    fn validate(&self, task_id: &str) -> Result<(), platform_api::ProcessError> {
+    fn validate(&self, task_id: &str) -> Result<(), mobile_linux_api::ProcessError> {
         if self
             .manager
             .path_for(task_id)
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))?
+            .map_err(|error| mobile_linux_api::ProcessError::Io(error.to_string()))?
             != self.path
         {
-            return Err(platform_api::ProcessError::Io(
+            return Err(mobile_linux_api::ProcessError::Io(
                 "supervisor task output identity mismatch".into(),
             ));
         }
@@ -1356,31 +1356,31 @@ impl platform_api::BackgroundExitSink for TaskOutputSink {
         &self,
         task_id: &str,
         content: &str,
-    ) -> Result<(), platform_api::ProcessError> {
+    ) -> Result<(), mobile_linux_api::ProcessError> {
         self.validate(task_id)?;
         self.manager
             .append(&self.path, content)
             .await
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+            .map_err(|error| mobile_linux_api::ProcessError::Io(error.to_string()))
     }
-    async fn flush_output(&self, task_id: &str) -> Result<(), platform_api::ProcessError> {
+    async fn flush_output(&self, task_id: &str) -> Result<(), mobile_linux_api::ProcessError> {
         self.validate(task_id)?;
         self.manager
             .flush_writer(&self.path)
             .await
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+            .map_err(|error| mobile_linux_api::ProcessError::Io(error.to_string()))
     }
     async fn finalize_persisted_output(
         &self,
         task_id: &str,
         max_bytes: u64,
-    ) -> Result<Option<u64>, platform_api::ProcessError> {
+    ) -> Result<Option<u64>, mobile_linux_api::ProcessError> {
         self.validate(task_id)?;
         self.manager
             .finalize_persisted_output(&self.path, max_bytes)
             .await
             .map(Some)
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+            .map_err(|error| mobile_linux_api::ProcessError::Io(error.to_string()))
     }
     async fn on_exit(&self, task_id: &str, exit_code: Option<i32>) {
         self.on_exit_with_status(task_id, exit_code, false).await;

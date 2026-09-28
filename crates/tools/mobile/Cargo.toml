@@ -11,6 +11,7 @@ license.workspace = true
 # (Swift/Kotlin impl injected via UniFFI). Linked only by engine-mobile.
 
 [dependencies]
+mobile-linux-api.workspace = true
 tool-api = { path = "../../tool-api" }
 platform-api = { path = "../../platform-api" }
 permission = { path = "../../permission" }

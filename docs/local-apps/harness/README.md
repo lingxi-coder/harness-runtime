@@ -2,7 +2,7 @@
 
 本目录是 `docs/local-apps/LOCAL-APP-PLUGIN-DESIGN-V2.md` 的**执行契约**：任务清单、
 测试基线，以及一批「今天就已经会骗人」的判据的实测记录。判据引擎在
-`scripts/lap_gate.py`（驱动 `lap-gate.sh`）。
+`scripts/checks/lap_gate.py`（驱动 `lap-gate.sh`）。
 
 所有数字都是在 `lap/baseline` 这个 commit 上**量出来的**，不是从设计文档抄的。
 设计文档里的数字凡与本文件冲突，以本文件为准，并把冲突记下来。
@@ -52,7 +52,7 @@ WebSearch(Tavily) 是**用户确认过的有意分歧**，所以这条红大概�
 
 ### 品牌门今天看不见 Claude 侧的 plugin 标识符
 
-在 `apps/engine-mobile/src/lib.rs` 里种字面量，`./scripts/check-brand-leaks.sh` 的表现：
+在 `apps/engine-mobile/src/lib.rs` 里种字面量，`./scripts/checks/check-brand-leaks.sh` 的表现：
 
 | 种进去的东西 | 结果 |
 | --- | --- |
@@ -250,10 +250,10 @@ iOS 客户端确实实现了 `RuntimeProfileSelection`（`clients/ios/Sources/Lo
 ## 用法
 
     cd lingxi-code
-    ./scripts/lap-gate.sh list          # 每个子命令守哪一条判据
-    ./scripts/lap-gate.sh selftest      # 引擎自己的 10 个种雷用例
-    ./scripts/lap-gate.sh tasks         # 加载时校验任务清单
-    ./scripts/lap-gate.sh precheck --baseline docs/local-apps/harness/baseline-stageB.json
+    ./scripts/checks/lap-gate.sh list          # 每个子命令守哪一条判据
+    ./scripts/checks/lap-gate.sh selftest      # 引擎自己的 10 个种雷用例
+    ./scripts/checks/lap-gate.sh tasks         # 加载时校验任务清单
+    ./scripts/checks/lap-gate.sh precheck --baseline docs/local-apps/harness/baseline-stageB.json
 
 重跑基线：
 
@@ -261,7 +261,7 @@ iOS 客户端确实实现了 `RuntimeProfileSelection`（`clients/ios/Sources/Lo
       -p tool-workflow -p local-apps -p skill-api -p engine-desktop -p permission \
       -p platform-api -p mcp -p bridge-server -p test-harness -p cli \
       --all-features --no-fail-fast 2>&1 | tee /tmp/stageB.txt
-    ./scripts/lap-gate.sh parse --run /tmp/stageB.txt --out /tmp/stageB.json
+    ./scripts/checks/lap-gate.sh parse --run /tmp/stageB.txt --out /tmp/stageB.json
 
 ⛔ `--all-features` 不能省：`engine-mobile` 的 Local App 模块全在
 `#[cfg(feature = "uniffi")]` 后面，452 个测试里有 450 个在没有这个 flag 时**不存在**。

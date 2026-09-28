@@ -44,7 +44,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # `orchestrator::OrchestratorError` (the turn `Result` lowered to `ClientEvent::Error`).
 # This is a READ-ONLY edge — the wrapper only reads these public types; it makes NO
 # engine-behavior change (governing decision §0). Both crates are engine-tier so the
-# edge is legal under `scripts/check_deps.py` (no `engine -> engine` rule in FORBIDDEN).
+# edge is legal under `scripts/checks/check_deps.py` (no `engine -> engine` rule in FORBIDDEN).
 orchestrator = { path = "../orchestrator" }
 async-trait.workspace = true
 # F3-02: optional UniFFI dep — pulled ONLY under the `uniffi` feature so the
@@ -69,7 +69,7 @@ serde_json.workspace = true
 # see that resolver's own doc comment). This is the SAME edge `tool-computer-use`
 # already takes on `tui-core` for the identical reason (a per-app-checkbox +
 # tier + capability-flags prompt can't ride the generic permission gate); it is
-# an `engine -> engine` edge, permitted by `scripts/check_deps.py`.
+# an `engine -> engine` edge, permitted by `scripts/checks/check_deps.py`.
 # (3c) Best-effort `warn!` when persisting an `AllowAlways` choice to
 # `settings.local.json` fails — surfaced rather than swallowed (a silent
 # persist failure would mislead the user into thinking the rule was saved).

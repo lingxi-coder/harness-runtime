@@ -1697,29 +1697,29 @@ impl platform_api::BackgroundExitSink for BackgroundBashExitSink {
         &self,
         task_id: &str,
         content: &str,
-    ) -> Result<(), platform_api::ProcessError> {
+    ) -> Result<(), mobile_linux_api::ProcessError> {
         self.registry
             .append_bash_output(task_id, content)
             .await
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+            .map_err(|error| mobile_linux_api::ProcessError::Io(error.to_string()))
     }
 
     async fn finalize_persisted_output(
         &self,
         task_id: &str,
         max_bytes: u64,
-    ) -> Result<Option<u64>, platform_api::ProcessError> {
+    ) -> Result<Option<u64>, mobile_linux_api::ProcessError> {
         self.registry
             .finalize_persisted_output(task_id, max_bytes)
             .await
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+            .map_err(|error| mobile_linux_api::ProcessError::Io(error.to_string()))
     }
 
-    async fn flush_output(&self, task_id: &str) -> Result<(), platform_api::ProcessError> {
+    async fn flush_output(&self, task_id: &str) -> Result<(), mobile_linux_api::ProcessError> {
         self.registry
             .flush_bash_output(task_id)
             .await
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+            .map_err(|error| mobile_linux_api::ProcessError::Io(error.to_string()))
     }
 
     async fn on_stall(&self, task_id: &str, tail: &str) {
@@ -3718,7 +3718,7 @@ impl Tool for BashTool {
                     mcp_meta: None,
                 })
             }
-            Err(platform_api::process::ProcessError::Timeout) => {
+            Err(mobile_linux_api::ProcessError::Timeout) => {
                 let mut meta: LogEventMetadata = HashMap::new();
                 meta.insert(
                     "request_id".into(),
@@ -3750,7 +3750,7 @@ impl Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::process::ProcessOutput;
+    use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_tx, shell_test_ctx};
 
     fn use_ctx() -> ToolUseContext {
@@ -4292,21 +4292,20 @@ mod tests {
         async fn run(
             &self,
             cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<ProcessOutput, platform_api::process::ProcessError> {
+        ) -> Result<ProcessOutput, mobile_linux_api::ProcessError> {
             *self.last_cwd.lock().unwrap() = cmd.inner().cwd.clone();
             Ok(self.out.clone())
         }
         async fn spawn_background(
             &self,
             _: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError>
-        {
+        ) -> Result<platform_api::process::ProcessHandle, mobile_linux_api::ProcessError> {
             unreachable!()
         }
         async fn kill(
             &self,
             _: &platform_api::process::ProcessHandle,
-        ) -> Result<(), platform_api::process::ProcessError> {
+        ) -> Result<(), mobile_linux_api::ProcessError> {
             Ok(())
         }
         fn is_available(&self) -> bool {
@@ -4613,20 +4612,20 @@ mod tests {
             async fn run(
                 &self,
                 _: &platform_api::sandbox::SandboxedCommand,
-            ) -> Result<ProcessOutput, platform_api::process::ProcessError> {
-                Err(platform_api::process::ProcessError::Timeout)
+            ) -> Result<ProcessOutput, mobile_linux_api::ProcessError> {
+                Err(mobile_linux_api::ProcessError::Timeout)
             }
             async fn spawn_background(
                 &self,
                 _: &platform_api::sandbox::SandboxedCommand,
-            ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError>
+            ) -> Result<platform_api::process::ProcessHandle, mobile_linux_api::ProcessError>
             {
                 unreachable!()
             }
             async fn kill(
                 &self,
                 _: &platform_api::process::ProcessHandle,
-            ) -> Result<(), platform_api::process::ProcessError> {
+            ) -> Result<(), mobile_linux_api::ProcessError> {
                 Ok(())
             }
             fn is_available(&self) -> bool {
@@ -4668,13 +4667,13 @@ mod tests {
             async fn run(
                 &self,
                 _: &platform_api::sandbox::SandboxedCommand,
-            ) -> Result<ProcessOutput, platform_api::process::ProcessError> {
+            ) -> Result<ProcessOutput, mobile_linux_api::ProcessError> {
                 unreachable!("bash foreground uses run_foreground")
             }
             async fn run_foreground(
                 &self,
                 _: &platform_api::sandbox::SandboxedCommand,
-            ) -> Result<platform_api::ForegroundOutcome, platform_api::process::ProcessError>
+            ) -> Result<platform_api::ForegroundOutcome, mobile_linux_api::ProcessError>
             {
                 Ok(platform_api::ForegroundOutcome::MovedToBackground(
                     platform_api::process::ProcessHandle {
@@ -4686,14 +4685,14 @@ mod tests {
             async fn spawn_background(
                 &self,
                 _: &platform_api::sandbox::SandboxedCommand,
-            ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError>
+            ) -> Result<platform_api::process::ProcessHandle, mobile_linux_api::ProcessError>
             {
                 unreachable!()
             }
             async fn kill(
                 &self,
                 _: &platform_api::process::ProcessHandle,
-            ) -> Result<(), platform_api::process::ProcessError> {
+            ) -> Result<(), mobile_linux_api::ProcessError> {
                 Ok(())
             }
             fn is_available(&self) -> bool {
@@ -5660,8 +5659,9 @@ mod tests {
 
     // ----- Background path: bespoke stub that returns a fake ProcessHandle. -----
 
+    use mobile_linux_api::ProcessError;
     use platform_api::process::{
-        ForegroundRunResult, ProcessError, ProcessHandle, ProcessOutputFile, ProcessRunner,
+        ForegroundRunResult, ProcessHandle, ProcessOutputFile, ProcessRunner,
     };
     use platform_api::sandbox::SandboxedCommand;
     use std::sync::Arc;
@@ -7552,10 +7552,9 @@ mod tests {
         async fn run(
             &self,
             _cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessOutput, platform_api::process::ProcessError>
-        {
+        ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
             std::fs::write(&self.write, "written by the command\n").unwrap();
-            Ok(platform_api::process::ProcessOutput {
+            Ok(mobile_linux_api::ProcessOutput {
                 stdout: "done\n".into(),
                 stderr: String::new(),
                 exit_code: 0,
@@ -7566,15 +7565,14 @@ mod tests {
         async fn spawn_background(
             &self,
             _cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError>
-        {
-            Err(platform_api::process::ProcessError::Unsupported)
+        ) -> Result<platform_api::process::ProcessHandle, mobile_linux_api::ProcessError> {
+            Err(mobile_linux_api::ProcessError::Unsupported)
         }
 
         async fn kill(
             &self,
             _handle: &platform_api::process::ProcessHandle,
-        ) -> Result<(), platform_api::process::ProcessError> {
+        ) -> Result<(), mobile_linux_api::ProcessError> {
             Ok(())
         }
 
@@ -7688,10 +7686,9 @@ mod tests {
         async fn run(
             &self,
             cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessOutput, platform_api::process::ProcessError>
-        {
+        ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
             self.commands.lock().unwrap().push(format!("{cmd:?}"));
-            Ok(platform_api::process::ProcessOutput {
+            Ok(mobile_linux_api::ProcessOutput {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
@@ -7702,15 +7699,14 @@ mod tests {
         async fn spawn_background(
             &self,
             _cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError>
-        {
-            Err(platform_api::process::ProcessError::Unsupported)
+        ) -> Result<platform_api::process::ProcessHandle, mobile_linux_api::ProcessError> {
+            Err(mobile_linux_api::ProcessError::Unsupported)
         }
 
         async fn kill(
             &self,
             _handle: &platform_api::process::ProcessHandle,
-        ) -> Result<(), platform_api::process::ProcessError> {
+        ) -> Result<(), mobile_linux_api::ProcessError> {
             Ok(())
         }
 

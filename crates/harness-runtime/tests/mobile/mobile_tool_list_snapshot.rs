@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used)]
 
 use harness_runtime::mobile::mobile_tool_registry;
-use platform_api::process::ProcessOutput;
+use mobile_linux_api::ProcessOutput;
 
 #[test]
 fn mobile_tool_list_snapshot() {

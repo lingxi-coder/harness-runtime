@@ -2,7 +2,7 @@
 //!
 //! The ONE rule that binds the two new M10 engine-tier crates
 //! (`client-protocol`, `client-adapter`) is the GLOBAL "apps/examples are
-//! leaves" invariant in `scripts/check_deps.py:99`: a non-leaf crate may not
+//! leaves" invariant in `scripts/checks/check_deps.py:99`: a non-leaf crate may not
 //! depend on an `apps/*` (or `examples/*`) leaf. Per governing decision §0.3
 //! there is NO `engine -> engine` rule, so the legal edges these crates carry
 //! (`client-protocol -> protocol`; `client-adapter -> {client-protocol,
@@ -12,7 +12,7 @@
 //! This test asserts that rule directly off `cargo metadata` (classifying each
 //! workspace dep the same way `check_deps.py::classify` does — `manifest_path`
 //! relative to `workspace_root`, first path segment == `apps`), AND runs the
-//! authoritative `scripts/check-deps.sh` gate and asserts exit 0. The metadata
+//! authoritative `scripts/checks/check-deps.sh` gate and asserts exit 0. The metadata
 //! assertions are a fast, crate-scoped fail-fast; the script run is the
 //! whole-workspace gate the CI job invokes.
 
@@ -31,7 +31,7 @@ fn workspace_root() -> PathBuf {
 }
 
 /// `cargo metadata --no-deps` for the workspace, parsed to JSON. Mirrors the
-/// invocation in `scripts/check-deps.sh` (offline first; the metadata call does
+/// invocation in `scripts/checks/check-deps.sh` (offline first; the metadata call does
 /// not need a full resolve, only the direct workspace edges).
 fn cargo_metadata() -> Value {
     let root = workspace_root();
@@ -167,11 +167,11 @@ fn check_deps_sh_green() {
         .arg(&script)
         .current_dir(&root)
         .output()
-        .expect("spawn scripts/check-deps.sh");
+        .expect("spawn scripts/checks/check-deps.sh");
 
     assert!(
         out.status.success(),
-        "scripts/check-deps.sh must exit 0 (no §8.1 dependency violations).\n\
+        "scripts/checks/check-deps.sh must exit 0 (no §8.1 dependency violations).\n\
          --- stdout ---\n{}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),

@@ -195,7 +195,7 @@ fn register_with_options(
 #[cfg(test)]
 mod ask_timeout_wiring_tests {
     use super::*;
-    use platform_api::process::ProcessOutput;
+    use mobile_linux_api::ProcessOutput;
     use serde_json::json;
     use std::sync::Arc;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};

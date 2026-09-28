@@ -27,8 +27,9 @@
 
 use async_trait::async_trait;
 use futures::Stream;
-use platform_api::mobile_linux::guest_paths;
-use platform_api::{FileContent, FileEvent, FileSystem, FlockGuard, FsError, MobileLinuxRuntime};
+use mobile_linux_api::guest_paths;
+use mobile_linux_api::MobileLinuxRuntime;
+use platform_api::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -255,7 +256,7 @@ impl FileSystem for GuestPathFileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::{
+    use mobile_linux_api::{
         LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
         MobileLinuxError, MobileLinuxRuntimeMode, MountPurpose, MountSpec, PtyOpenRequest,
         PtySessionHandle, RootfsStatus, SandboxBackend,
@@ -315,7 +316,7 @@ mod tests {
         async fn resize_pty(
             &self,
             _handle: &PtySessionHandle,
-            _size: platform_api::PtySize,
+            _size: mobile_linux_api::PtySize,
         ) -> Result<(), MobileLinuxError> {
             Err(MobileLinuxError::Unsupported)
         }

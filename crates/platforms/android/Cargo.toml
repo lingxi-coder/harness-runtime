@@ -15,6 +15,7 @@ license.workspace = true
 # handles for scoped-storage-aware impls. Not cfg-gated: portable, host-verified.
 
 [dependencies]
+mobile-linux-api.workspace = true
 platform-api = { path = "../../platform-api" }
 platform-posix-minimal = { path = "../posix-minimal" }
 platform-common = { path = "../common" }

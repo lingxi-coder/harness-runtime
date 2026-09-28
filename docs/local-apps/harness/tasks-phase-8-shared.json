@@ -61,7 +61,7 @@
     {
       "id": "P8S.2",
       "title": "Translation gate wiring in CI and check-all",
-      "gate": "§19.10: check-all and CI execute a real generate.py --check gate instead of a green substring path, and the gate is discoverable by scripts/test_gate_triggers.py",
+      "gate": "§19.10: check-all and CI execute a real generate.py --check gate instead of a green substring path, and the gate is discoverable by scripts/tests/test_gate_triggers.py",
       "owns": [
         ".github/workflows/ci.yml",
         "scripts/check-all.sh",
@@ -76,7 +76,7 @@
         "mustNameInOutput": ["check-translations-generated.sh", "generate.py --check"]
       },
       "addedTests": [
-        "scripts/test_gate_triggers.py",
+        "scripts/tests/test_gate_triggers.py",
         "check-all discovery includes translation freshness gate"
       ],
       "deps": ["P8S.1"],

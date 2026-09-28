@@ -10,7 +10,7 @@
 # is the whole point: a fifth gate written tomorrow by someone who has
 # never heard of this finding gets picked up automatically, because it is
 # discovered from the filesystem, not looked up in a list this file would
-# need editing to extend. scripts/test_gate_triggers.py enumerates the same
+# need editing to extend. scripts/tests/test_gate_triggers.py enumerates the same
 # directory independently and cross-checks it against what actually ran.
 #
 # Each gate is invoked for real — `exec`'d as a child process, its stdout
@@ -33,7 +33,7 @@ shopt -s nullglob
 gates=()
 non_executable=()
 seen=$'\n'
-for f in scripts/check-*.sh scripts/*-gate.sh; do
+for f in scripts/checks/check-*.sh scripts/checks/*-gate.sh; do
     base="$(basename "$f")"
     [[ "$base" == "check-all.sh" ]] && continue
     [[ -f "$f" ]] || continue
@@ -77,10 +77,10 @@ for g in "${gates[@]}"; do
             # closest thing an unattended trigger can run is the engine's
             # own self-test: it exercises all ten planted criteria in both
             # directions and fails if the judging logic itself regresses.
-            if ./scripts/lap-gate.sh selftest 2>&1; then rc=0; else rc=$?; fi
+            if ./scripts/checks/lap-gate.sh selftest 2>&1; then rc=0; else rc=$?; fi
             ;;
         *)
-            if ./scripts/"$g" 2>&1; then rc=0; else rc=$?; fi
+            if ./scripts/checks/"$g" 2>&1; then rc=0; else rc=$?; fi
             ;;
     esac
     echo "=== RESULT: $g exit=$rc ==="

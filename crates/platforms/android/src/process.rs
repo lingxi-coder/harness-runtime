@@ -7,11 +7,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use mobile_linux_api::{ProcessError, ProcessOutput, SandboxBackend};
 use platform_android_minijail::{JailRlimit, JailSpec};
-use platform_api::{
-    ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxBackend, SandboxedCommand,
-    SandboxedTag,
-};
+use platform_api::{ProcessHandle, ProcessRunner, SandboxedCommand, SandboxedTag};
 
 use crate::capabilities::CapabilityCache;
 use crate::policy::{AndroidSandboxPlan, NetProfile, RlimitResource};
@@ -257,9 +255,9 @@ impl ProcessRunner for AndroidMinijailProcessRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mobile_linux_api::{ProcessError, SandboxBackend};
     use platform_api::{
-        BackendPlanHandle, ProcessCommand, ProcessError, ProcessRunner, SandboxBackend,
-        SandboxedCommand, SandboxedTag,
+        BackendPlanHandle, ProcessCommand, ProcessRunner, SandboxedCommand, SandboxedTag,
     };
     use std::collections::HashMap;
 

@@ -9,7 +9,7 @@
 #![allow(clippy::unwrap_used)]
 
 use harness_runtime::mobile::mobile_tool_registry;
-use platform_api::process::ProcessOutput;
+use mobile_linux_api::ProcessOutput;
 use tool_api::{AndroidGitToolCtx, BuiltinToolContext};
 
 fn base_ctx() -> BuiltinToolContext {

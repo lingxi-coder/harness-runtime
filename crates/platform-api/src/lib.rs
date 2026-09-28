@@ -129,11 +129,11 @@ pub mod http;
 pub mod ide;
 mod live_session_words;
 pub mod live_sessions;
+pub mod local_app_paths;
 pub mod location;
 pub mod lsp;
 pub mod mailbox;
 pub mod mcp;
-pub mod mobile_linux;
 pub mod mobile_runtime_environment;
 pub mod model_attempt;
 pub mod model_capabilities;
@@ -258,14 +258,6 @@ pub use mailbox::{
     MailboxError as RouterMailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
 };
 pub use mcp::*;
-pub use mobile_linux::{
-    LinuxCommandRequest, LinuxCommandResult, LinuxEnforcementReceipt, LinuxProcessHandle,
-    MobileLinuxCapability, MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind,
-    MobileLinuxRuntime, MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskSnapshot,
-    MobileLinuxTaskStatus, MountPurpose, MountSpec, PtyOpenRequest, PtySessionHandle, PtySize,
-    RawStdioOpenRequest, RawStdioReadResult, RawStdioSessionHandle, RootfsState, RootfsStatus,
-    UnavailableMobileLinuxRuntime,
-};
 pub use mobile_runtime_environment::{
     MobileDeviceClass, MobileExecutionTarget, MobileHostEnvironment, MobileHostOs,
     MobileLaunchMode, MobileLifecyclePolicy, MobileNetworkPolicy, MobileRuntimeEnvironment,
@@ -303,8 +295,7 @@ pub use permission_gate::{
 pub use platform::Platform;
 pub use process::{
     BackgroundExitSink, BackgroundTaskBinding, ForegroundOutcome, ForegroundRunResult,
-    HookOutputObserver, HookRunOutcome, ProcessError, ProcessHandle, ProcessOutput,
-    ProcessOutputFile, ProcessRunner, ProcessStreamSink,
+    HookOutputObserver, HookRunOutcome, ProcessHandle, ProcessOutputFile, ProcessRunner,
 };
 pub use prompting_gate::{
     PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
@@ -316,9 +307,8 @@ pub use rooted_fs::{
 };
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use sandbox::{
-    BackendPlanHandle, NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend,
-    SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand,
-    SandboxedTag,
+    BackendPlanHandle, ProcessCommand, Sandbox, SandboxCapability, SandboxError, SandboxFeatures,
+    SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
 pub use secure_storage::{
     CredentialStoragePolicy, InMemorySecureStorage, SecureStorage, SecureStorageBackend,

@@ -30,11 +30,10 @@ use local_apps::{
     DataMigrationPreview, DataMutation, DataQuery, DataSortDirection, DataSortKey,
     PermissionDecision, SessionPermissions,
 };
-use platform_api::mobile_linux::guest_paths;
-use platform_api::{
-    LinuxCommandRequest, McpError, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy,
-    ResourceLimits,
+use mobile_linux_api::{
+    LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
 };
+use platform_api::McpError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -3753,7 +3752,7 @@ impl LocalAppsHostBroker {
         args.extend([
             "--prefer-offline".into(),
             "--store-dir".into(),
-            guest_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
+            platform_api::local_app_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
             "--reporter=append-only".into(),
         ]);
 
@@ -5189,7 +5188,7 @@ impl LocalAppsHostBroker {
         };
         let build_mount = MountSpec {
             host_path: workspace.clone(),
-            guest_path: guest_paths::local_app_build_project(app_id, "store"),
+            guest_path: platform_api::local_app_paths::local_app_build_project(app_id, "store"),
             read_only: false,
             purpose: MountPurpose::LocalAppBuild,
         };
@@ -5201,7 +5200,7 @@ impl LocalAppsHostBroker {
         }
         let store_mount = MountSpec {
             host_path: dependency_store,
-            guest_path: guest_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
+            guest_path: platform_api::local_app_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
             read_only: false,
             purpose: MountPurpose::Shared,
         };
@@ -11109,13 +11108,15 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 .map_err(|error| format!("create pnpm dependency store: {error}"))?;
             let build_mount = MountSpec {
                 host_path: workspace.clone(),
-                guest_path: guest_paths::local_app_build_project(&app_id, "store"),
+                guest_path: platform_api::local_app_paths::local_app_build_project(
+                    &app_id, "store",
+                ),
                 read_only: false,
                 purpose: MountPurpose::LocalAppBuild,
             };
             let store_mount = MountSpec {
                 host_path: dependency_store,
-                guest_path: guest_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
+                guest_path: platform_api::local_app_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
                 read_only: false,
                 purpose: MountPurpose::Shared,
             };
@@ -14070,7 +14071,7 @@ mod tests {
     use futures_util::stream;
     use local_apps::test_support::FixedClock;
     use local_apps::{storage, AppState, NoopAppEventObserver};
-    use platform_api::{
+    use mobile_linux_api::{
         LinuxCommandRequest, LinuxEnforcementReceipt, LinuxProcessHandle, MobileLinuxCapability,
         MobileLinuxError, MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus,
         NetworkPolicy, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState, RootfsStatus,
@@ -14304,7 +14305,7 @@ mod tests {
         async fn run(
             &self,
             request: LinuxCommandRequest,
-        ) -> Result<platform_api::LinuxCommandResult, MobileLinuxError> {
+        ) -> Result<mobile_linux_api::LinuxCommandResult, MobileLinuxError> {
             Self::enforce_network_policy(&request)?;
             Err(MobileLinuxError::Unsupported)
         }
@@ -14312,7 +14313,7 @@ mod tests {
         async fn run_isolated(
             &self,
             request: LinuxCommandRequest,
-        ) -> Result<platform_api::LinuxCommandResult, MobileLinuxError> {
+        ) -> Result<mobile_linux_api::LinuxCommandResult, MobileLinuxError> {
             *self.last_request.lock().await = Some(request.clone());
             self.isolated_requests.lock().await.push(request.clone());
             let build_mount = request.mounts.first().ok_or_else(|| {
@@ -14348,13 +14349,13 @@ mod tests {
                 && request.args.iter().any(|arg| arg == "--frozen-lockfile")
                 && self.fail_frozen_install.load(Ordering::SeqCst)
             {
-                return Ok(platform_api::LinuxCommandResult {
+                return Ok(mobile_linux_api::LinuxCommandResult {
                     stdout: String::new(),
                     stderr: "synthetic frozen install failure".into(),
                     exit_code: 1,
                     timed_out: false,
                     cancelled: false,
-                    enforcement: platform_api::LinuxEnforcementReceipt {
+                    enforcement: mobile_linux_api::LinuxEnforcementReceipt {
                         network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                         memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                     },
@@ -14381,13 +14382,13 @@ mod tests {
             if matches!(request.command.as_str(), "/usr/bin/pnpm")
                 && request.args.iter().any(|arg| arg == "--lockfile-only")
             {
-                return Ok(platform_api::LinuxCommandResult {
+                return Ok(mobile_linux_api::LinuxCommandResult {
                     stdout: "lockfile resolved".into(),
                     stderr: String::new(),
                     exit_code: 0,
                     timed_out: false,
                     cancelled: false,
-                    enforcement: platform_api::LinuxEnforcementReceipt {
+                    enforcement: mobile_linux_api::LinuxEnforcementReceipt {
                         network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                         memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                     },
@@ -14395,13 +14396,13 @@ mod tests {
             }
             if matches!(request.command.as_str(), "/usr/bin/node") {
                 if self.fail_build.load(Ordering::SeqCst) {
-                    return Ok(platform_api::LinuxCommandResult {
+                    return Ok(mobile_linux_api::LinuxCommandResult {
                         stdout: String::new(),
                         stderr: "synthetic build failure".into(),
                         exit_code: 1,
                         timed_out: false,
                         cancelled: false,
-                        enforcement: platform_api::LinuxEnforcementReceipt {
+                        enforcement: mobile_linux_api::LinuxEnforcementReceipt {
                             network_policy_enforced: self
                                 .enforcement_receipt
                                 .load(Ordering::SeqCst),
@@ -14427,13 +14428,13 @@ mod tests {
                 .map_err(|error| {
                     MobileLinuxError::Io(format!("write fake build output: {error}"))
                 })?;
-                return Ok(platform_api::LinuxCommandResult {
+                return Ok(mobile_linux_api::LinuxCommandResult {
                     stdout: "built".into(),
                     stderr: String::new(),
                     exit_code: 0,
                     timed_out: false,
                     cancelled: false,
-                    enforcement: platform_api::LinuxEnforcementReceipt {
+                    enforcement: mobile_linux_api::LinuxEnforcementReceipt {
                         network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                         memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                     },
@@ -14512,13 +14513,13 @@ mod tests {
                     MobileLinuxError::Io(format!("write fake installed package: {error}"))
                 })?;
             }
-            Ok(platform_api::LinuxCommandResult {
+            Ok(mobile_linux_api::LinuxCommandResult {
                 stdout: "ok".into(),
                 stderr: String::new(),
                 exit_code: 0,
                 timed_out: false,
                 cancelled: false,
-                enforcement: platform_api::LinuxEnforcementReceipt {
+                enforcement: mobile_linux_api::LinuxEnforcementReceipt {
                     network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                     memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                 },
