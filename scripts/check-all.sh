@@ -3,8 +3,8 @@
 # trigger for P1.12 (see docs/local-apps/... review history: three of these
 # gates shipped with 0 automation triggers and only human memory ran them).
 #
-# DISCOVERY, NOT A HARDCODED LIST. Gates are found by walking scripts/
-# (this directory only — not lap_gate_fixtures/, not mobile-linux/) for
+# Gates are discovered under scripts/checks/, excluding test fixtures and
+# Local Apps build helpers. Discovery selects
 # executable files matching the naming convention every gate wrapper in
 # this repo already follows: `check-*.sh` or `*-gate.sh`. That convention
 # is the whole point: a fifth gate written tomorrow by someone who has
@@ -20,13 +20,7 @@
 # distinction in test_gate_triggers.py.
 set -euo pipefail
 
-# All five gate wrappers resolve their own engine path via `cd
-# "$(dirname "$0")/.."` + a path relative to the NEW cwd. That only
-# resolves correctly when invoked as `./scripts/<name>.sh` from the
-# crates/ root (the same convention .github/workflows/ci.yml already
-# uses for check-deps.sh) — not from inside scripts/ itself, and not via
-# an absolute path. So: cd to crates/ once, then always invoke
-# `./scripts/<name>` — never `./"$name"` from inside this directory.
+# Run every gate from the workspace root; each wrapper resolves its own helpers.
 cd "$(dirname "$0")/.." || exit 1
 
 shopt -s nullglob
@@ -49,7 +43,7 @@ for f in scripts/checks/check-*.sh scripts/checks/*-gate.sh; do
 done
 
 if [[ ${#gates[@]} -eq 0 ]]; then
-    echo "check-all: discovered 0 gate scripts under scripts/ — discovery is broken, not the repo" >&2
+    echo "check-all: discovered 0 gate scripts under scripts/checks/ — discovery is broken, not the repo" >&2
     exit 1
 fi
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """P1.12 regression gate: every checked-in gate script in scripts/ must have
-a REAL execution trigger — not a comment mentioning its name, not a
+a real execution trigger — not a comment mentioning its name, not a
 hardcoded list that agrees with itself.
 
 WHY THIS EXISTS: a five-lens adversarial review of this branch found four
@@ -45,8 +45,7 @@ import sys
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "checks"
-LINGXI_CODE = SCRIPTS_DIR.parents[1]
-REPO_ROOT = LINGXI_CODE
+REPO_ROOT = SCRIPTS_DIR.parents[1]
 GATE_NAME_RE = re.compile(r"^(check-.*\.sh|.*-gate\.sh)$")
 SELF = "check-all.sh"
 
@@ -79,8 +78,7 @@ BLOCK_RE = re.compile(
 
 def discover_gates() -> set:
     """Enumerate gate scripts straight from the filesystem — never a
-    hardcoded list. Top-level scripts/ only (excludes lap_gate_fixtures/
-    and mobile-linux/, which are fixture/vendor trees, not gates); must be
+    hardcoded list. Only scripts/checks/ entries, excluding fixture and build-helper directories; must be
     a regular file matching the naming convention every gate wrapper in this
     repo already follows. Executability is checked separately and fails the
     test instead of making a broken gate disappear from discovery."""
@@ -103,13 +101,13 @@ def run_standalone(gate: str) -> tuple:
     each gate's recorded behaviour inside check-all.sh is checked against,
     both by exit code AND by the actual text it printed."""
     argv = ["./scripts/checks/" + gate] + ARGV_OVERRIDES.get(gate, [])
-    proc = subprocess.run(argv, cwd=str(LINGXI_CODE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.run(argv, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     return proc.returncode, proc.stdout
 
 
 def run_check_all() -> tuple:
     proc = subprocess.run(
-        ["./scripts/check-all.sh"], cwd=str(LINGXI_CODE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        ["./scripts/check-all.sh"], cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
     return proc.returncode, proc.stdout
 
@@ -129,6 +127,33 @@ def parse_invocations(output: str) -> dict:
     # started a gate and never reported what happened to it — don't let
     # that default itself into looking invoked.
     return {name: rc_block for name, rc_block in blocks.items() if name in running}
+
+
+
+def comparable_gate_output(output: str) -> str:
+    """Ignore unittest wall time while retaining its count, result, and diagnostics."""
+    return re.sub(
+        r"(?m)^(Ran \d+ tests? in )\d+(?:\.\d+)?s$",
+        r"\1<elapsed>s",
+        output.strip(),
+    )
+
+
+def output_comparison_preserves_gate_evidence() -> list[str]:
+    reference = "Ran 9 tests in 0.001s\n\nOK\nlocked source verified"
+    equivalent = "Ran 9 tests in 0.125s\n\nOK\nlocked source verified"
+    failures = []
+    if comparable_gate_output(reference) != comparable_gate_output(equivalent):
+        failures.append("unit-test elapsed time must not change gate evidence")
+    for altered in (
+        "",
+        reference.replace("9 tests", "8 tests"),
+        reference.replace("OK", "FAILED (failures=1)"),
+        reference.replace("locked source verified", "different source"),
+    ):
+        if comparable_gate_output(reference) == comparable_gate_output(altered):
+            failures.append("gate output comparison discarded counts, failures, or source evidence")
+    return failures
 
 
 def every_checked_in_gate_has_an_execution_trigger() -> list:
@@ -190,7 +215,7 @@ def every_checked_in_gate_has_an_execution_trigger() -> list:
                 f"script standalone (independent of check-all.sh) gives exit={reference_rc} "
                 "-- check-all.sh is not actually invoking this gate's real engine"
             )
-        elif invoked_text.strip() != reference_text.strip():
+        elif comparable_gate_output(invoked_text) != comparable_gate_output(reference_text):
             failures.append(
                 f"{gate}: exit codes agree but the output check-all.sh captured for this gate "
                 f"({invoked_text.strip()[:120]!r}) does not match an independent standalone run "
@@ -226,7 +251,8 @@ def every_checked_in_gate_has_an_execution_trigger() -> list:
 
 
 def main() -> int:
-    failures = every_checked_in_gate_has_an_execution_trigger()
+    failures = output_comparison_preserves_gate_evidence()
+    failures.extend(every_checked_in_gate_has_an_execution_trigger())
     if failures:
         print("FAIL: every_checked_in_gate_has_an_execution_trigger")
         for f in failures:
