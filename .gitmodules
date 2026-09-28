@@ -1,0 +1,3 @@
+[submodule "deps/llm-client"]
+	path = deps/llm-client
+	url = ../llm-client.git

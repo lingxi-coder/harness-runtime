@@ -2,6 +2,7 @@
 //! character-based approximation elsewhere.
 
 use crate::{client::DefaultLlmClient, LlmError, LlmRequest, Transport};
+use std::sync::Arc;
 
 /// Coarse divisor shared by transcript-size estimates. Request-fit estimation
 /// below deliberately uses a more conservative divisor.
@@ -20,7 +21,7 @@ const APPROX_MEDIA_TOKENS: u64 = 2_048;
 /// Count input tokens for `request`'s resolved route.
 pub async fn count_tokens(
     client: &DefaultLlmClient,
-    transport: &dyn Transport,
+    transport: Arc<dyn Transport>,
     request: &LlmRequest,
 ) -> Result<u64, LlmError> {
     match try_count_tokens_exact(client, transport, request).await? {
@@ -35,7 +36,7 @@ pub async fn count_tokens(
 /// tool-schema count.
 pub async fn try_count_tokens_exact(
     client: &DefaultLlmClient,
-    transport: &dyn Transport,
+    transport: Arc<dyn Transport>,
     request: &LlmRequest,
 ) -> Result<Option<u64>, LlmError> {
     client.count_tokens_exact(request, transport).await
@@ -46,8 +47,8 @@ pub async fn try_count_tokens_exact(
 ///
 /// This is deliberately not described as tokenizer-accurate: providers apply
 /// model-specific chat templates after receiving the request.  It does cover
-/// every canonical message block plus tool declarations, tool choice and
-/// response schemas, then uses ceiling division so partial tokens are never
+/// every canonical message block plus host and provider tool declarations,
+/// tool choice and output schemas, then uses ceiling division so partial tokens are never
 /// rounded down.
 #[must_use]
 pub fn approximate_tokens(request: &LlmRequest) -> u64 {
@@ -68,6 +69,17 @@ pub fn approximate_tokens(request: &LlmRequest) -> u64 {
         byte_len = byte_len
             .saturating_add(serialized_len(tool))
             .saturating_add(48);
+    }
+    for tool in &request.hosted_tools {
+        byte_len = byte_len
+            .saturating_add(serialized_len(tool))
+            .saturating_add(48);
+    }
+    for options in &request.native_options {
+        byte_len = byte_len.saturating_add(serialized_len(options));
+    }
+    if request.output_format != lingxi_llm_client::protocol::OutputFormat::Text {
+        byte_len = byte_len.saturating_add(serialized_len(&request.output_format));
     }
     if let Some(tool_choice) = &request.tool_choice {
         byte_len = byte_len.saturating_add(serialized_len(tool_choice));
@@ -261,6 +273,49 @@ mod tests {
     }
 
     #[test]
+    fn approximate_tokens_includes_hosted_tool_configuration() {
+        use lingxi_llm_client::protocol::{HostedTool, WebSearchConfig};
+
+        let mut request = LlmRequest::new("model").with_user_text("find sources");
+        let without_tools = approximate_tokens(&request);
+        request
+            .hosted_tools
+            .push(HostedTool::WebSearch(WebSearchConfig {
+                allowed_domains: vec!["example.com".into()],
+                ..Default::default()
+            }));
+        let with_tools = approximate_tokens(&request);
+        assert!(with_tools > without_tools);
+
+        let HostedTool::WebSearch(config) = &mut request.hosted_tools[0] else {
+            unreachable!()
+        };
+        config
+            .allowed_domains
+            .extend((0..100).map(|n| format!("source-{n}.example.com")));
+        assert!(approximate_tokens(&request) > with_tools + 500);
+    }
+
+    #[test]
+    fn approximate_tokens_includes_typed_output_schema() {
+        use lingxi_llm_client::protocol::OutputFormat;
+
+        let mut request = LlmRequest::new("model").with_user_text("produce a result");
+        let plain = approximate_tokens(&request);
+        request.output_format = OutputFormat::JsonSchema {
+            name: "result".into(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "answer": {"type": "string", "description": "Detailed instructions. ".repeat(100)}
+                }
+            }),
+            strict: true,
+        };
+        assert!(approximate_tokens(&request) > plain + 500);
+    }
+
+    #[test]
     fn text_js_utf16_ascii_estimate_matches_plain_text() {
         let text = "restored ASCII skill content".repeat(100);
         let mut plain = LlmRequest::new("model");
@@ -408,14 +463,14 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_happy_path_returns_count_tokens_from_response() {
-        let transport = ScriptedTransport::returning(ProviderResponse::json(
+        let transport = Arc::new(ScriptedTransport::returning(ProviderResponse::json(
             200,
             serde_json::json!({ "input_tokens": 2095 }),
-        ));
+        )));
         let client = anthropic_client();
         let req = LlmRequest::new("claude").with_user_text("hello world");
 
-        let count = count_tokens(&client, &transport, &req)
+        let count = count_tokens(&client, transport.clone(), &req)
             .await
             .expect("count");
 
@@ -440,14 +495,14 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_route_sends_count_tokens_beta_header() {
-        let transport = ScriptedTransport::returning(ProviderResponse::json(
+        let transport = Arc::new(ScriptedTransport::returning(ProviderResponse::json(
             200,
             serde_json::json!({ "input_tokens": 42 }),
-        ));
+        )));
         let client = anthropic_client();
         let req = LlmRequest::new("claude").with_user_text("hello");
 
-        let _ = count_tokens(&client, &transport, &req)
+        let _ = count_tokens(&client, transport.clone(), &req)
             .await
             .expect("count");
 
@@ -476,19 +531,19 @@ mod tests {
 
     #[tokio::test]
     async fn non_anthropic_route_falls_back_to_approximation() {
-        // ScriptedTransport should NOT be called — count_tokens returns
-        // InvalidRequest before any network call.
-        let transport = ScriptedTransport::returning(ProviderResponse::json(
+        // Routes without an exact counter use the local approximation and
+        // must not send a provider request.
+        let transport = Arc::new(ScriptedTransport::returning(ProviderResponse::json(
             200,
             serde_json::json!({ "input_tokens": 9999 }),
-        ));
+        )));
         let client = openai_client();
         // The fallback includes provider-visible message structure as well as
         // text, so it must be larger than the old raw-text / 4 heuristic.
         let req = LlmRequest::new("gpt").with_user_text("12345678901234567890");
         let expected = approximate_tokens(&req);
 
-        let count = count_tokens(&client, &transport, &req)
+        let count = count_tokens(&client, transport.clone(), &req)
             .await
             .expect("count");
 
@@ -503,15 +558,15 @@ mod tests {
 
     #[tokio::test]
     async fn exact_count_reports_unavailable_for_non_anthropic_route() {
-        let transport = ScriptedTransport::returning(ProviderResponse::json(
+        let transport = Arc::new(ScriptedTransport::returning(ProviderResponse::json(
             200,
             serde_json::json!({ "input_tokens": 9999 }),
-        ));
+        )));
         let client = openai_client();
         let req = LlmRequest::new("gpt").with_user_text("hello");
 
         assert_eq!(
-            try_count_tokens_exact(&client, &transport, &req)
+            try_count_tokens_exact(&client, transport.clone(), &req)
                 .await
                 .expect("route resolution"),
             None
@@ -525,17 +580,17 @@ mod tests {
 
     #[tokio::test]
     async fn authentication_error_propagates_from_401_response() {
-        let transport = ScriptedTransport::returning(ProviderResponse::json(
+        let transport = Arc::new(ScriptedTransport::returning(ProviderResponse::json(
             401,
             serde_json::json!({
                 "type": "error",
                 "error": { "type": "authentication_error", "message": "invalid api key" }
             }),
-        ));
+        )));
         let client = anthropic_client();
         let req = LlmRequest::new("claude").with_user_text("hello");
 
-        let err = count_tokens(&client, &transport, &req)
+        let err = count_tokens(&client, transport.clone(), &req)
             .await
             .expect_err("must fail");
 

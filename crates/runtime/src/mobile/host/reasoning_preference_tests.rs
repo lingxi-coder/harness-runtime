@@ -1,6 +1,6 @@
 mod reasoning_preference_tests {
     use super::*;
-    use client_protocol::controls::ReasoningSelectionDto;
+    use client::protocol::controls::ReasoningSelectionDto;
 
     #[test]
     fn reasoning_choice_survives_engine_restart_and_new_session() {
@@ -15,7 +15,7 @@ mod reasoning_preference_tests {
                 .await
                 .unwrap();
             assert_eq!(
-                command_core::effort::load_reasoning_default_selection_at(
+                command_api::builtins::effort::load_reasoning_default_selection_at(
                     &cfg.lingxi_home.join("settings.json")
                 ),
                 Some(platform_api::ReasoningSelection::Level { id: "high".into() })

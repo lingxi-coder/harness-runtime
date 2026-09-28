@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::mobile::local_apps_mcp::LocalAppsMcpTransport;
 use async_trait::async_trait;
-use client_adapter::{ClientEventListener, ListenerSink, MockSink, PermissionRequestSink};
-use client_protocol::events::ClientEvent;
-use client_protocol::listings::SessionModeDto;
+use client::adapter::{ClientEventListener, ListenerSink, MockSink, PermissionRequestSink};
+use client::protocol::events::ClientEvent;
+use client::protocol::listings::SessionModeDto;
 use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
 use platform_api::{OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult};
 use tokio::sync::Notify;
@@ -2220,7 +2220,7 @@ async fn mobile_runtime_binds_adapter_sinks() {
     assert!(
         gate.resolve(
             1,
-            client_protocol::permission::PermissionResponseDto::Deny,
+            client::protocol::permission::PermissionResponseDto::Deny,
             "Bash"
         )
         .await
@@ -2390,7 +2390,7 @@ async fn workflow_launches_and_completes_on_mobile() {
             event,
             ClientEvent::TaskStatusChanged { task_id, status, .. }
                 if task_id == &launched.task_id
-                    && *status == client_protocol::listings::TaskStatusDto::Completed
+                    && *status == client::protocol::listings::TaskStatusDto::Completed
         )),
         "workflow completion must be pushed to the mobile client"
     );
@@ -2687,10 +2687,10 @@ async fn build_mobile_default_loads_no_memory() {
 
 use super::{build_mobile_engine, MobileEngineHandle};
 use crate::mobile::local_apps_llm::test_support::ScriptedModel;
-use client_protocol::commands::ClientCommand;
-use client_protocol::error::ClientError;
-use client_protocol::events::{ClientEvent as Ev, TurnRecoveryStateDto};
-use client_protocol::permission::PermissionResponseDto;
+use client::protocol::commands::ClientCommand;
+use client::protocol::error::ClientError;
+use client::protocol::events::{ClientEvent as Ev, TurnRecoveryStateDto};
+use client::protocol::permission::PermissionResponseDto;
 use platform_api::audio::{
     AudioCapabilitySnapshot, AudioError, AudioOperation, AudioOperationContext, AudioOperationId,
     AudioOperationKind, AudioOperationSuccess, AudioOwner, AudioRecordingHandle, AudioService,
@@ -2856,7 +2856,7 @@ fn plugin_command_reaches_the_manager_and_reports_status() {
     handle.runtime().block_on(async {
         handle
             .submit(ClientCommand::PluginCommand {
-                command: client_protocol::local_apps::PluginCommandDto::GetStatus {
+                command: client::protocol::local_apps::PluginCommandDto::GetStatus {
                     plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                 },
             })
@@ -2868,13 +2868,13 @@ fn plugin_command_reaches_the_manager_and_reports_status() {
                 matches!(
                     event,
                     Ev::AppEvent {
-                        event: client_protocol::local_apps::AppEventDto::PluginStatusChanged {
+                        event: client::protocol::local_apps::AppEventDto::PluginStatusChanged {
                             status,
                         },
                     } if status.plugin_id == crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
                         && matches!(
                             status.state,
-                            client_protocol::local_apps::PluginActivationStateDto::Loaded
+                            client::protocol::local_apps::PluginActivationStateDto::Loaded
                         )
                 )
             }),
@@ -2971,7 +2971,7 @@ fn toggling_enabled_emits_plugin_status_changed_and_persists_the_bare_key() {
 
     handle.runtime().block_on(async {
         let command = |enabled| ClientCommand::PluginCommand {
-            command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+            command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                 plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                 enabled,
             },
@@ -2986,13 +2986,13 @@ fn toggling_enabled_emits_plugin_status_changed_and_persists_the_bare_key() {
                 matches!(
                     event,
                     Ev::AppEvent {
-                        event: client_protocol::local_apps::AppEventDto::PluginStatusChanged {
+                        event: client::protocol::local_apps::AppEventDto::PluginStatusChanged {
                             status,
                         },
                     } if status.plugin_id == crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
                         && matches!(
                             status.state,
-                            client_protocol::local_apps::PluginActivationStateDto::Disabled
+                            client::protocol::local_apps::PluginActivationStateDto::Disabled
                         )
                 )
             }),
@@ -3054,13 +3054,13 @@ fn toggling_enabled_emits_plugin_status_changed_and_persists_the_bare_key() {
                 matches!(
                     event,
                     Ev::AppEvent {
-                        event: client_protocol::local_apps::AppEventDto::PluginStatusChanged {
+                        event: client::protocol::local_apps::AppEventDto::PluginStatusChanged {
                             status,
                         },
                     } if status.plugin_id == crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
                         && matches!(
                             status.state,
-                            client_protocol::local_apps::PluginActivationStateDto::Loaded
+                            client::protocol::local_apps::PluginActivationStateDto::Loaded
                         )
                 )
             }),
@@ -3117,7 +3117,7 @@ fn disabled_state_is_present_and_status_survives_restart() {
         handle.runtime().block_on(async {
             handle
                 .submit(ClientCommand::PluginCommand {
-                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                    command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                         plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                         enabled: false,
                     },
@@ -3159,7 +3159,7 @@ fn disabled_state_is_present_and_status_survives_restart() {
             .is_none());
         restarted
             .submit(ClientCommand::PluginCommand {
-                command: client_protocol::local_apps::PluginCommandDto::GetStatus {
+                command: client::protocol::local_apps::PluginCommandDto::GetStatus {
                     plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                 },
             })
@@ -3169,12 +3169,12 @@ fn disabled_state_is_present_and_status_survives_restart() {
             matches!(
                 event,
                 Ev::AppEvent {
-                    event: client_protocol::local_apps::AppEventDto::PluginStatusChanged {
+                    event: client::protocol::local_apps::AppEventDto::PluginStatusChanged {
                         status,
                     },
                 } if matches!(
                     status.state,
-                    client_protocol::local_apps::PluginActivationStateDto::Disabled
+                    client::protocol::local_apps::PluginActivationStateDto::Disabled
                 )
             )
         }));
@@ -3236,10 +3236,10 @@ fn disabled_boot_defers_bundle_materialization_until_enable() {
             "disabled boot should retain no materialized PluginManager state"
         );
         for command in [
-            client_protocol::local_apps::PluginCommandDto::GetStatus {
+            client::protocol::local_apps::PluginCommandDto::GetStatus {
                 plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
             },
-            client_protocol::local_apps::PluginCommandDto::GetInventory {
+            client::protocol::local_apps::PluginCommandDto::GetInventory {
                 plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
             },
         ] {
@@ -3264,28 +3264,28 @@ fn disabled_boot_defers_bundle_materialization_until_enable() {
     assert!(events.iter().any(|event| matches!(
         event,
         Ev::AppEvent {
-            event: client_protocol::local_apps::AppEventDto::PluginStatusChanged { status }
+            event: client::protocol::local_apps::AppEventDto::PluginStatusChanged { status }
         } if matches!(
             status.state,
-            client_protocol::local_apps::PluginActivationStateDto::Disabled
+            client::protocol::local_apps::PluginActivationStateDto::Disabled
         )
     )));
     assert!(events.iter().any(|event| matches!(
         event,
         Ev::AppEvent {
-            event: client_protocol::local_apps::AppEventDto::PluginInventoryChanged {
+            event: client::protocol::local_apps::AppEventDto::PluginInventoryChanged {
                 inventory
             }
         } if matches!(
             inventory.state,
-            client_protocol::local_apps::PluginActivationStateDto::Disabled
+            client::protocol::local_apps::PluginActivationStateDto::Disabled
         ) && inventory.counts.skills > 0
     )));
 
     handle.runtime().block_on(async {
         handle
             .submit(ClientCommand::PluginCommand {
-                command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                     plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                     enabled: true,
                 },
@@ -3310,13 +3310,13 @@ fn concurrent_plugin_toggles_leave_disk_and_registry_consistent() {
     handle.runtime().block_on(async {
         for _ in 0..4 {
             let disable = handle.submit(ClientCommand::PluginCommand {
-                command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                     plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                     enabled: false,
                 },
             });
             let enable = handle.submit(ClientCommand::PluginCommand {
-                command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                     plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                     enabled: true,
                 },
@@ -3358,7 +3358,7 @@ fn failed_plugin_setting_write_rolls_live_state_back() {
     handle.runtime().block_on(async {
         let error = handle
             .submit(ClientCommand::PluginCommand {
-                command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                     plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                     enabled: false,
                 },
@@ -4619,7 +4619,7 @@ fn submit_lists_and_loads_nested_workflow_agents() {
                     && messages.iter().any(|message| message.blocks.iter().any(|block| {
                         matches!(
                             block,
-                            client_protocol::message::MessageBlockDto::Text { text }
+                            client::protocol::message::MessageBlockDto::Text { text }
                                 if text.contains("nested workflow child")
                         )
                     }))
@@ -4931,7 +4931,7 @@ fn submit_task_stop_skips_second_workflow_status_event() {
         listener
             .on_event(Ev::TaskStatusChanged {
                 task_id: task_id.clone(),
-                status: client_protocol::listings::TaskStatusDto::Cancelled,
+                status: client::protocol::listings::TaskStatusDto::Cancelled,
                 origin_session_id: None,
                 error: None,
             })
@@ -4964,7 +4964,7 @@ fn submit_task_stop_skips_second_workflow_status_event() {
 
 #[test]
 fn provider_credentials_round_trip_through_mobile_submit() {
-    use client_protocol::commands::ProviderCredentialSecretDto;
+    use client::protocol::commands::ProviderCredentialSecretDto;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let (handle, listener) = build_submit_handle_with_secure_store(tmp.path());
@@ -5546,7 +5546,7 @@ fn submit_pause_waits_for_owner_and_publishes_paused_without_cancelled() {
         assert!(!events.iter().any(|event| matches!(
             event,
             Ev::TurnEnded {
-                outcome: client_protocol::events::TurnOutcomeDto::Cancelled,
+                outcome: client::protocol::events::TurnOutcomeDto::Cancelled,
                 ..
             }
         )));
@@ -5966,9 +5966,9 @@ async fn lifecycle_listener_rewrites_cancelled_terminal_and_drops_late_events() 
     turn.cancel.cancel();
     listener
         .on_event(Ev::TurnEnded {
-            outcome: client_protocol::events::TurnOutcomeDto::EndTurn,
+            outcome: client::protocol::events::TurnOutcomeDto::EndTurn,
             stop_reason: Some("end_turn".to_string()),
-            cost: client_protocol::events::CostDto {
+            cost: client::protocol::events::CostDto {
                 total_usd: 0.0,
                 input_tokens: 0,
                 output_tokens: 0,
@@ -6003,7 +6003,7 @@ async fn lifecycle_listener_rewrites_cancelled_terminal_and_drops_late_events() 
     assert!(matches!(
         events.first(),
         Some(Ev::TurnEnded {
-            outcome: client_protocol::events::TurnOutcomeDto::Cancelled,
+            outcome: client::protocol::events::TurnOutcomeDto::Cancelled,
             stop_reason: Some(reason),
             ..
         }) if reason == "cancelled"
@@ -6022,9 +6022,9 @@ async fn lifecycle_listener_drops_quiesced_events_without_cancel_rewrite() {
 
     listener
         .on_event(Ev::TurnEnded {
-            outcome: client_protocol::events::TurnOutcomeDto::EndTurn,
+            outcome: client::protocol::events::TurnOutcomeDto::EndTurn,
             stop_reason: Some("end_turn".to_string()),
-            cost: client_protocol::events::CostDto {
+            cost: client::protocol::events::CostDto {
                 total_usd: 0.0,
                 input_tokens: 0,
                 output_tokens: 0,
@@ -6041,7 +6041,7 @@ async fn lifecycle_listener_drops_quiesced_events_without_cancel_rewrite() {
         .await;
     listener
         .on_event(Ev::Error {
-            kind: client_protocol::events::ErrorKindDto::Internal,
+            kind: client::protocol::events::ErrorKindDto::Internal,
             message: "late error".to_string(),
         })
         .await;
@@ -6082,7 +6082,7 @@ async fn lifecycle_listener_drops_unowned_live_payloads_but_forwards_questions()
         .await;
     listener
         .on_event(Ev::AskUserQuestion {
-            request: client_protocol::ask_user_question::AskUserQuestionRequestDto {
+            request: client::protocol::ask_user_question::AskUserQuestionRequestDto {
                 request_id: 7,
                 questions: Vec::new(),
                 timeout_secs: None,
@@ -6220,9 +6220,9 @@ async fn lifecycle_listener_delivers_terminal_event_the_journal_refuses() {
 
     listener
         .on_event(Ev::TurnEnded {
-            outcome: client_protocol::events::TurnOutcomeDto::EndTurn,
+            outcome: client::protocol::events::TurnOutcomeDto::EndTurn,
             stop_reason: Some("end_turn".to_string()),
-            cost: client_protocol::events::CostDto {
+            cost: client::protocol::events::CostDto {
                 total_usd: 0.0,
                 input_tokens: 0,
                 output_tokens: 0,
@@ -6355,7 +6355,7 @@ async fn lifecycle_listener_restores_running_when_a_question_resolves() {
 
     listener
         .on_event(Ev::AskUserQuestion {
-            request: client_protocol::ask_user_question::AskUserQuestionRequestDto {
+            request: client::protocol::ask_user_question::AskUserQuestionRequestDto {
                 request_id: 5,
                 questions: Vec::new(),
                 timeout_secs: None,
@@ -8113,8 +8113,8 @@ fn mobile_model_refs_keep_duplicate_provider_models_distinct() {
 // ── LOCAL-APPS (phase 1): handler-level tests (command in → state +
 //    events out) over the real engine handle ─────────────────────────────
 
-use client_protocol::commands::AppCreateModeDto;
-use client_protocol::local_apps::{
+use client::protocol::commands::AppCreateModeDto;
+use client::protocol::local_apps::{
     AppCreateOriginDto, AppErrorCodeDto, AppEventDto, AppRuntimeStateDto,
 };
 
@@ -8134,7 +8134,7 @@ async fn drain_events(handle: &MobileEngineHandle, listener: &FakeListener) -> V
     std::mem::take(&mut *listener.received.lock().await)
 }
 
-fn apps_changed_rows(events: &[Ev]) -> Option<Vec<client_protocol::local_apps::AppRecordDto>> {
+fn apps_changed_rows(events: &[Ev]) -> Option<Vec<client::protocol::local_apps::AppRecordDto>> {
     events.iter().rev().find_map(|event| match event {
         Ev::AppsChanged { apps } => Some(apps.clone()),
         _ => None,
@@ -8220,7 +8220,7 @@ fn create_app_is_refused_when_the_builtin_plugin_is_disabled() {
 
         handle
             .submit(ClientCommand::PluginCommand {
-                command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                     plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                     enabled: false,
                 },
@@ -8306,7 +8306,7 @@ fn local_app_create_tool_is_refused_when_the_builtin_plugin_is_disabled() {
 
             handle
                 .submit(ClientCommand::PluginCommand {
-                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                    command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                         plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                         enabled: false,
                     },
@@ -8449,7 +8449,7 @@ fn create_app_pins_an_init_session_and_lists_it() {
         assert_eq!(sessions[0].uuid, init_id);
         assert_eq!(
             sessions[0].kind,
-            client_protocol::local_apps::AppSessionKindDto::Init
+            client::protocol::local_apps::AppSessionKindDto::Init
         );
         assert_eq!(sessions[0].message_count, 0, "an anchor is empty");
     });
@@ -9666,7 +9666,7 @@ async fn submit_create(
     listener: &FakeListener,
     name: &str,
     brief: &str,
-    surface: Option<client_protocol::local_apps::AppSurfaceDto>,
+    surface: Option<client::protocol::local_apps::AppSurfaceDto>,
     mode: AppCreateModeDto,
     request_id: Option<&str>,
 ) -> Vec<Ev> {
@@ -9690,7 +9690,7 @@ async fn submit_create(
 /// The `AppCreated` row (record + correlation key) from a create's events.
 fn created_row(
     events: &[Ev],
-) -> Option<(client_protocol::local_apps::AppRecordDto, Option<String>)> {
+) -> Option<(client::protocol::local_apps::AppRecordDto, Option<String>)> {
     events.iter().find_map(|event| match event {
         Ev::AppEvent {
             event: AppEventDto::AppCreated { record, request_id },
@@ -9828,7 +9828,7 @@ fn create_app_in_shell_mode_rejects_a_surface() {
             &listener,
             "",
             "",
-            Some(client_protocol::local_apps::AppSurfaceDto::Dom),
+            Some(client::protocol::local_apps::AppSurfaceDto::Dom),
             AppCreateModeDto::Shell,
             Some("req-2"),
         )

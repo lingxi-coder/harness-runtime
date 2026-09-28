@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use client_adapter::test_support::MockSink;
-use client_adapter::AdapterOutputStream;
-use client_protocol::events::ClientEvent;
+use client::adapter::test_support::MockSink;
+use client::adapter::AdapterOutputStream;
+use client::protocol::events::ClientEvent;
 use platform_api::filesystem::FileSystem;
 use platform_api::team_spawn::TeamSpawnSeam;
 use platform_api::{OutputStream, RuntimeSpawner};
@@ -114,7 +114,7 @@ fn make_coordinator_fixture(api: &Arc<ScriptedApiClient>) -> CoordinatorFixture 
     // a `MockSink` — exactly the T08/T09 production lowering path.
     let mock_sink = MockSink::arc();
     let output: Arc<dyn OutputStream> = Arc::new(AdapterOutputStream::new(
-        mock_sink.clone() as Arc<dyn client_adapter::sink::ClientEventSink>
+        mock_sink.clone() as Arc<dyn client::adapter::sink::ClientEventSink>
     ));
     let status_sink = Arc::new(coordinator::CoordinatorStatusSink::new(
         team.clone(),

@@ -41,6 +41,21 @@ pub struct StructuredPatchHunk {
     pub lines: Vec<String>,
 }
 
+pub(crate) fn count_patch_lines(hunks: &[StructuredPatchHunk]) -> (u64, u64) {
+    let mut added = 0_u64;
+    let mut removed = 0_u64;
+    for hunk in hunks {
+        for line in &hunk.lines {
+            if line.starts_with('+') {
+                added += 1;
+            } else if line.starts_with('-') {
+                removed += 1;
+            }
+        }
+    }
+    (added, removed)
+}
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum SegKind {
     Unchanged,

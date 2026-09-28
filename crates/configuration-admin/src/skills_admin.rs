@@ -1,4 +1,4 @@
-use client_protocol::commands::SkillAdminCommandDto;
+use client::protocol::commands::SkillAdminCommandDto;
 use plugin::plugin_source_sha256;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

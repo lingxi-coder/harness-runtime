@@ -3,7 +3,9 @@
 
 use crate::definition::{HookDefinition, HookSource};
 use crate::events::{HookEvent, HookEventType};
-use crate::matcher::{is_bare_mcp_server_matcher, matches_if_condition, matches_pattern_with};
+use crate::matcher::{
+    comma_mode_for, is_bare_mcp_server_matcher, matches_if_condition, matches_pattern_with,
+};
 use platform_api::SubagentInheritance;
 use protocol::{AgentId, HookId, PluginId, SessionId};
 use std::collections::HashMap;
@@ -822,32 +824,6 @@ fn drop_http_for_session_events<'a>(
             _ => true,
         })
         .collect()
-}
-
-/// the binary's `atf` membership exactly (note: `FileChanged`,
-/// `UserPromptSubmit`, `Stop`, the task/teammate events, etc. are NOT in it).
-fn comma_mode_for(event_type: &HookEventType) -> bool {
-    matches!(
-        event_type,
-        HookEventType::PreToolUse
-            | HookEventType::PostToolUse
-            | HookEventType::PostToolUseFailure
-            | HookEventType::PermissionRequest
-            | HookEventType::PermissionDenied
-            | HookEventType::UserPromptExpansion
-            | HookEventType::SessionStart
-            | HookEventType::SessionEnd
-            | HookEventType::Setup
-            | HookEventType::PreCompact
-            | HookEventType::PostCompact
-            | HookEventType::Notification
-            | HookEventType::SubagentStart
-            | HookEventType::SubagentStop
-            | HookEventType::Elicitation
-            | HookEventType::ElicitationResult
-            | HookEventType::ConfigChange
-            | HookEventType::InstructionsLoaded
-    )
 }
 
 /// Emit claude-code 2.1.195's bare-MCP-server-matcher deprecation

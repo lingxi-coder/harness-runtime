@@ -83,7 +83,7 @@ pub struct ReplayedSession {
     /// The [`CLIENT_STATE_TOOLS`] results in [`Self::display_history`], keyed by
     /// `tool_use_id` — see [`client_state_tool_results_from_messages`]. A host
     /// lowering that transcript passes this to
-    /// `client_adapter::lowering::lower_transcript_with_tool_results` so a
+    /// `client::adapter::lowering::lower_transcript_with_tool_results` so a
     /// replayed subagent card still knows which call created it, and a replayed
     /// plan card still has its document and its approval.
     pub client_state_tool_results: std::collections::HashMap<String, Value>,

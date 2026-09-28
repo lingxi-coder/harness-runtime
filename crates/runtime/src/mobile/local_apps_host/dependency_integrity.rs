@@ -1,5 +1,5 @@
 use crate::mobile::local_app_runtime_profiles::toolchain_for_binding;
-use client_protocol::local_apps::AppDependencyChangeKindDto;
+use client::protocol::local_apps::AppDependencyChangeKindDto;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Map;

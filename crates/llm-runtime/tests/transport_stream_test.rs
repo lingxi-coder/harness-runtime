@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use llm_runtime::client::DefaultLlmClient;
@@ -377,7 +377,7 @@ fn responses_completed(id: &str) -> Vec<Result<RawStreamFrame, LlmError>> {
 
 #[tokio::test]
 async fn execute_stream_decodes_anthropic_event_sequence() {
-    let transport = StreamTransport::scripted(
+    let transport = Arc::new(StreamTransport::scripted(
         200,
         vec![
             frame(
@@ -395,11 +395,11 @@ async fn execute_stream_decodes_anthropic_event_sequence() {
             ),
             frame(r#"{"type":"message_stop"}"#),
         ],
-    );
+    ));
     let client = anthropic_client();
 
     let mut stream = client
-        .execute_stream(&streaming_request(), &transport)
+        .execute_stream(&streaming_request(), transport.clone())
         .await
         .expect("stream");
     let (events, error) = collect_events(&mut stream).await;
@@ -427,7 +427,7 @@ async fn execute_stream_threads_provider_metadata_headers_to_responses_decoder()
     headers.insert("x-codex-turn-state".to_string(), "turn-state".to_string());
     headers.insert("x-ratelimit-limit-requests".to_string(), "1000".to_string());
 
-    let transport = StreamTransport::scripted_with_headers(
+    let transport = Arc::new(StreamTransport::scripted_with_headers(
         200,
         headers.clone(),
         vec![
@@ -438,10 +438,10 @@ async fn execute_stream_threads_provider_metadata_headers_to_responses_decoder()
                 r#"{"type":"response.completed","response":{"id":"resp_1","model":"p-model","status":"completed","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}}"#,
             ),
         ],
-    );
+    ));
     let client = openai_responses_client();
     let mut stream = client
-        .execute_stream(&streaming_request(), &transport)
+        .execute_stream(&streaming_request(), transport.clone())
         .await
         .expect("stream");
     let (events, error) = collect_events(&mut stream).await;
@@ -460,11 +460,13 @@ async fn execute_stream_threads_provider_metadata_headers_to_responses_decoder()
 #[tokio::test]
 async fn prewarm_websocket_sends_generate_false_and_records_response_id() {
     let client = openai_responses_websocket_client();
-    let transport = ResponsesWsTransport::new(vec![responses_completed("resp_warm")]);
+    let transport = Arc::new(ResponsesWsTransport::new(vec![responses_completed(
+        "resp_warm",
+    )]));
     let mut session = ResponsesWebSocketSession::new();
 
     client
-        .prewarm_websocket(&streaming_request(), &transport, &mut session)
+        .prewarm_websocket(&streaming_request(), transport.clone(), &mut session)
         .await
         .expect("prewarm");
 
@@ -478,21 +480,21 @@ async fn prewarm_websocket_sends_generate_false_and_records_response_id() {
 #[tokio::test]
 async fn prewarmed_response_id_is_consumed_as_wire_delta_without_replacing_logical_snapshot() {
     let client = openai_responses_websocket_client();
-    let transport = ResponsesWsTransport::new(vec![
+    let transport = Arc::new(ResponsesWsTransport::new(vec![
         responses_completed("resp_warm"),
         responses_completed("resp_real"),
-    ]);
+    ]));
     let mut session = ResponsesWebSocketSession::new();
     let request = streaming_request();
 
     client
-        .prewarm_websocket(&request, &transport, &mut session)
+        .prewarm_websocket(&request, transport.clone(), &mut session)
         .await
         .expect("prewarm");
     assert!(session.last_response_from_prewarm());
 
     let mut stream = client
-        .execute_stream_with_session(&request, &transport, &mut session)
+        .execute_stream_with_session(&request, transport.clone(), &mut session)
         .await
         .expect("real stream");
     let (_, error) = collect_events(&mut stream).await;
@@ -516,11 +518,13 @@ async fn prewarmed_response_id_is_consumed_as_wire_delta_without_replacing_logic
 #[tokio::test]
 async fn responses_websocket_session_close_resets_state_and_closes_transport() {
     let client = openai_responses_websocket_client();
-    let transport = ResponsesWsTransport::new(vec![responses_completed("resp_1")]);
+    let transport = Arc::new(ResponsesWsTransport::new(vec![responses_completed(
+        "resp_1",
+    )]));
     let mut session = ResponsesWebSocketSession::new();
 
     let mut stream = client
-        .execute_stream_with_session(&streaming_request(), &transport, &mut session)
+        .execute_stream_with_session(&streaming_request(), transport.clone(), &mut session)
         .await
         .expect("stream");
     let (_, error) = collect_events(&mut stream).await;
@@ -537,15 +541,15 @@ async fn responses_websocket_session_close_resets_state_and_closes_transport() {
 #[tokio::test]
 async fn websocket_session_second_compatible_request_uses_previous_response_delta() {
     let client = openai_responses_websocket_client();
-    let transport = ResponsesWsTransport::new(vec![
+    let transport = Arc::new(ResponsesWsTransport::new(vec![
         responses_completed("resp_1"),
         responses_completed("resp_2"),
-    ]);
+    ]));
     let mut session = ResponsesWebSocketSession::new();
 
     let first_request = streaming_request();
     let mut first_stream = client
-        .execute_stream_with_session(&first_request, &transport, &mut session)
+        .execute_stream_with_session(&first_request, transport.clone(), &mut session)
         .await
         .expect("first stream");
     let (_, first_error) = collect_events(&mut first_stream).await;
@@ -554,7 +558,7 @@ async fn websocket_session_second_compatible_request_uses_previous_response_delt
     let mut second_request = first_request.clone();
     append_user_text(&mut second_request, "again");
     let mut second_stream = client
-        .execute_stream_with_session(&second_request, &transport, &mut session)
+        .execute_stream_with_session(&second_request, transport.clone(), &mut session)
         .await
         .expect("second stream");
     let (_, second_error) = collect_events(&mut second_stream).await;
@@ -574,15 +578,15 @@ async fn websocket_session_second_compatible_request_uses_previous_response_delt
 #[tokio::test]
 async fn websocket_session_non_input_change_disables_incremental_delta() {
     let client = openai_responses_websocket_client();
-    let transport = ResponsesWsTransport::new(vec![
+    let transport = Arc::new(ResponsesWsTransport::new(vec![
         responses_completed("resp_1"),
         responses_completed("resp_2"),
-    ]);
+    ]));
     let mut session = ResponsesWebSocketSession::new();
 
     let first_request = streaming_request();
     let mut first_stream = client
-        .execute_stream_with_session(&first_request, &transport, &mut session)
+        .execute_stream_with_session(&first_request, transport.clone(), &mut session)
         .await
         .expect("first stream");
     let (_, first_error) = collect_events(&mut first_stream).await;
@@ -592,7 +596,7 @@ async fn websocket_session_non_input_change_disables_incremental_delta() {
     second_request.temperature = Some(0.7);
     append_user_text(&mut second_request, "again");
     let mut second_stream = client
-        .execute_stream_with_session(&second_request, &transport, &mut session)
+        .execute_stream_with_session(&second_request, transport.clone(), &mut session)
         .await
         .expect("second stream");
     let (_, second_error) = collect_events(&mut second_stream).await;
@@ -614,12 +618,15 @@ async fn websocket_session_incomplete_response_disables_next_incremental_delta()
     let incomplete = vec![frame(
         r#"{"type":"response.incomplete","response":{"id":"resp_1","model":"p-model","status":"incomplete"}}"#,
     )];
-    let transport = ResponsesWsTransport::new(vec![incomplete, responses_completed("resp_2")]);
+    let transport = Arc::new(ResponsesWsTransport::new(vec![
+        incomplete,
+        responses_completed("resp_2"),
+    ]));
     let mut session = ResponsesWebSocketSession::new();
 
     let first_request = streaming_request();
     let mut first_stream = client
-        .execute_stream_with_session(&first_request, &transport, &mut session)
+        .execute_stream_with_session(&first_request, transport.clone(), &mut session)
         .await
         .expect("first stream");
     let (_, first_error) = collect_events(&mut first_stream).await;
@@ -629,7 +636,7 @@ async fn websocket_session_incomplete_response_disables_next_incremental_delta()
     let mut second_request = first_request.clone();
     append_user_text(&mut second_request, "again");
     let mut second_stream = client
-        .execute_stream_with_session(&second_request, &transport, &mut session)
+        .execute_stream_with_session(&second_request, transport.clone(), &mut session)
         .await
         .expect("second stream");
     let (_, second_error) = collect_events(&mut second_stream).await;
@@ -643,21 +650,21 @@ async fn websocket_session_incomplete_response_disables_next_incremental_delta()
 #[tokio::test]
 async fn websocket_session_426_fallback_latches_http_for_later_streams() {
     let client = openai_responses_websocket_client();
-    let transport = ResponsesWsTransport::with_426_fallback(vec![
+    let transport = Arc::new(ResponsesWsTransport::with_426_fallback(vec![
         responses_completed("http_1"),
         responses_completed("http_2"),
-    ]);
+    ]));
     let mut session = ResponsesWebSocketSession::new();
 
     let mut first_stream = client
-        .execute_stream_with_session(&streaming_request(), &transport, &mut session)
+        .execute_stream_with_session(&streaming_request(), transport.clone(), &mut session)
         .await
         .expect("first fallback stream");
     let (_, first_error) = collect_events(&mut first_stream).await;
     assert!(first_error.is_none(), "first error: {first_error:?}");
 
     let mut second_stream = client
-        .execute_stream_with_session(&streaming_request(), &transport, &mut session)
+        .execute_stream_with_session(&streaming_request(), transport.clone(), &mut session)
         .await
         .expect("second fallback stream");
     let (_, second_error) = collect_events(&mut second_stream).await;
@@ -671,12 +678,12 @@ async fn websocket_session_426_fallback_latches_http_for_later_streams() {
 
 #[tokio::test]
 async fn finish_emits_terminal_events_when_frames_end() {
-    let transport = StreamTransport::scripted(
+    let transport = Arc::new(StreamTransport::scripted(
         200,
         vec![frame(
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1,"totalTokenCount":3}}"#,
         )],
-    );
+    ));
     let client = client(
         ProtocolFamily::GeminiGenerateContent,
         ProviderId::Gemini,
@@ -684,7 +691,7 @@ async fn finish_emits_terminal_events_when_frames_end() {
     );
 
     let mut stream = client
-        .execute_stream(&streaming_request(), &transport)
+        .execute_stream(&streaming_request(), transport.clone())
         .await
         .expect("stream");
     let (events, error) = collect_events(&mut stream).await;
@@ -703,13 +710,13 @@ async fn finish_emits_terminal_events_when_frames_end() {
 
 #[tokio::test]
 async fn execute_stream_requires_stream_flag() {
-    let transport = StreamTransport::scripted(200, vec![]);
+    let transport = Arc::new(StreamTransport::scripted(200, vec![]));
     let client = anthropic_client();
 
     let error = client
         .execute_stream(
             &LlmRequest::new("p-model").with_user_text("hello"),
-            &transport,
+            transport.clone(),
         )
         .await
         .expect_err("must require stream flag");
@@ -731,10 +738,11 @@ async fn error_status_drains_frames_into_taxonomy() {
     transport
         .headers
         .insert("retry-after".to_string(), "7".to_string());
+    let transport = Arc::new(transport);
     let client = anthropic_client();
 
     let error = client
-        .execute_stream(&streaming_request(), &transport)
+        .execute_stream(&streaming_request(), transport.clone())
         .await
         .expect_err("error status");
 
@@ -746,7 +754,7 @@ async fn error_status_drains_frames_into_taxonomy() {
 
 #[tokio::test]
 async fn mid_stream_failure_after_events_is_stream_interrupted() {
-    let transport = StreamTransport::scripted(
+    let transport = Arc::new(StreamTransport::scripted(
         200,
         vec![
             frame(
@@ -756,11 +764,11 @@ async fn mid_stream_failure_after_events_is_stream_interrupted() {
                 message: "connection reset".to_string(),
             }),
         ],
-    );
+    ));
     let client = anthropic_client();
 
     let mut stream = client
-        .execute_stream(&streaming_request(), &transport)
+        .execute_stream(&streaming_request(), transport.clone())
         .await
         .expect("stream");
 
@@ -777,16 +785,16 @@ async fn mid_stream_failure_after_events_is_stream_interrupted() {
 
 #[tokio::test]
 async fn failure_before_any_event_stays_transport() {
-    let transport = StreamTransport::scripted(
+    let transport = Arc::new(StreamTransport::scripted(
         200,
         vec![Err(LlmError::Transport {
             message: "connection refused".to_string(),
         })],
-    );
+    ));
     let client = anthropic_client();
 
     let mut stream = client
-        .execute_stream(&streaming_request(), &transport)
+        .execute_stream(&streaming_request(), transport.clone())
         .await
         .expect("stream");
 
@@ -800,30 +808,30 @@ async fn failure_before_any_event_stays_transport() {
 #[tokio::test]
 async fn cancelling_a_websocket_response_invalidates_continuation_and_connection() {
     let client = openai_responses_websocket_client();
-    let transport = ResponsesWsTransport::new(vec![
+    let transport = Arc::new(ResponsesWsTransport::new(vec![
         responses_completed("before"),
         vec![frame(
             r#"{"type":"response.created","response":{"id":"cancelled","model":"gpt-5.2"}}"#,
         )],
         responses_completed("after"),
-    ]);
+    ]));
     let mut session = ResponsesWebSocketSession::new();
     let mut request = streaming_request();
     let mut stream = client
-        .execute_stream_with_session(&request, &transport, &mut session)
+        .execute_stream_with_session(&request, transport.clone(), &mut session)
         .await
         .unwrap();
     assert!(collect_events(&mut stream).await.1.is_none());
     append_user_text(&mut request, "second");
     let stream = client
-        .execute_stream_with_session(&request, &transport, &mut session)
+        .execute_stream_with_session(&request, transport.clone(), &mut session)
         .await
         .unwrap();
     drop(stream);
     assert_eq!(session.last_response_id(), None);
     append_user_text(&mut request, "third");
     let mut stream = client
-        .execute_stream_with_session(&request, &transport, &mut session)
+        .execute_stream_with_session(&request, transport.clone(), &mut session)
         .await
         .unwrap();
     assert!(collect_events(&mut stream).await.1.is_none());
@@ -831,4 +839,159 @@ async fn cancelling_a_websocket_response_invalidates_continuation_and_connection
     let sent = transport.sent_bodies();
     assert_eq!(sent.len(), 3);
     assert!(sent[2].get("previous_response_id").is_none());
+}
+
+#[tokio::test]
+async fn responses_stream_exposes_continuation_only_after_completion() {
+    let client = openai_responses_client();
+    let transport = Arc::new(StreamTransport::scripted(
+        200,
+        responses_completed("resp_scoped"),
+    ));
+    let mut request = streaming_request();
+    request.account_scope = Some("account-a".into());
+    let mut stream = client
+        .execute_stream(&request, transport)
+        .await
+        .expect("stream");
+    assert!(stream.continuation().is_none());
+
+    let (_, error) = collect_events(&mut stream).await;
+    assert!(error.is_none(), "stream error: {error:?}");
+    let continuation = stream.continuation().expect("completed continuation");
+    assert_eq!(continuation.response_id.as_str(), "resp_scoped");
+    assert_eq!(continuation.account_scope, "account-a");
+    assert_eq!(continuation.profile_name, "p");
+    assert_eq!(continuation.request_model, "p-model");
+
+    request.continuation = Some(continuation.clone());
+    let prepared = client
+        .prepare(&request)
+        .await
+        .expect("same-account follow-up");
+    assert_eq!(
+        prepared.provider_request.body_json["previous_response_id"],
+        "resp_scoped"
+    );
+    request.account_scope = Some("account-b".into());
+    assert!(matches!(
+        client.prepare(&request).await,
+        Err(LlmError::InvalidRequest { .. })
+    ));
+}
+
+#[tokio::test]
+async fn interrupted_responses_stream_does_not_expose_continuation() {
+    let client = openai_responses_client();
+    let transport = Arc::new(StreamTransport::scripted(
+        200,
+        vec![
+            frame(
+                r#"{"type":"response.created","response":{"id":"resp_partial","model":"p-model"}}"#,
+            ),
+            Err(LlmError::Transport {
+                message: "connection closed".into(),
+            }),
+        ],
+    ));
+    let mut request = streaming_request();
+    request.account_scope = Some("account-a".into());
+    let mut stream = client
+        .execute_stream(&request, transport)
+        .await
+        .expect("stream");
+    let (_, error) = collect_events(&mut stream).await;
+    assert!(error.is_some());
+    assert!(stream.continuation().is_none());
+}
+
+#[tokio::test]
+async fn responses_websocket_account_change_rebinds_session() {
+    let client = openai_responses_websocket_client();
+    let transport = Arc::new(ResponsesWsTransport::new(vec![
+        responses_completed("resp_account_a"),
+        responses_completed("resp_account_b"),
+    ]));
+    let mut session = ResponsesWebSocketSession::new();
+    let mut first_request = streaming_request();
+    first_request.account_scope = Some("account-a".into());
+    let mut first_stream = client
+        .execute_stream_with_session(&first_request, transport.clone(), &mut session)
+        .await
+        .expect("account-a stream");
+    assert!(collect_events(&mut first_stream).await.1.is_none());
+    assert_eq!(
+        first_stream
+            .continuation()
+            .expect("account-a continuation")
+            .account_scope,
+        "account-a"
+    );
+
+    let mut second_request = first_request.clone();
+    second_request.account_scope = Some("account-b".into());
+    append_user_text(&mut second_request, "continue under account b");
+    let mut second_stream = client
+        .execute_stream_with_session(&second_request, transport.clone(), &mut session)
+        .await
+        .expect("account-b stream");
+    assert!(collect_events(&mut second_stream).await.1.is_none());
+    let second_continuation = second_stream
+        .continuation()
+        .expect("account-b continuation");
+    let sent = transport.sent_bodies();
+    assert_eq!(sent.len(), 2);
+    assert!(
+        transport.open_count() == 2 && sent[1].get("previous_response_id").is_none(),
+        "account change must establish a fresh connection without the old account's continuation; opens={}, wire_previous_response_id={}, returned_account_scope={}",
+        transport.open_count(),
+        sent[1]["previous_response_id"],
+        second_continuation.account_scope,
+    );
+}
+
+#[tokio::test]
+async fn responses_websocket_preserves_explicit_continuation() {
+    let client = openai_responses_websocket_client();
+    let transport = Arc::new(ResponsesWsTransport::new(vec![
+        responses_completed("resp_session_cached"),
+        responses_completed("resp_after_explicit"),
+    ]));
+    let mut session = ResponsesWebSocketSession::new();
+    let mut first_request = streaming_request();
+    first_request.account_scope = Some("account-a".into());
+    let mut first_stream = client
+        .execute_stream_with_session(&first_request, transport.clone(), &mut session)
+        .await
+        .expect("first stream");
+    assert!(collect_events(&mut first_stream).await.1.is_none());
+    let mut explicit = first_stream
+        .continuation()
+        .expect("scoped continuation")
+        .clone();
+    explicit.response_id = lingxi_llm_client::protocol::ResponseId::new("resp_external_branch");
+
+    let mut second_request = first_request.clone();
+    second_request.continuation = Some(explicit);
+    append_user_text(&mut second_request, "continue the explicitly chosen branch");
+    let prepared = client
+        .prepare(&second_request)
+        .await
+        .expect("valid explicit continuation");
+    assert_eq!(
+        prepared.provider_request.body_json["previous_response_id"],
+        "resp_external_branch"
+    );
+    let mut second_stream = client
+        .execute_stream_with_session(&second_request, transport.clone(), &mut session)
+        .await
+        .expect("explicit continuation stream");
+    assert!(collect_events(&mut second_stream).await.1.is_none());
+    let sent = transport.sent_bodies();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(
+        sent[1]["previous_response_id"],
+        "resp_external_branch",
+        "WebSocket session compression must preserve the explicitly selected and validated continuation",
+    );
 }

@@ -334,9 +334,15 @@ pub async fn load_mobile_disk_commands_into_registry(
     home: &Path,
 ) {
     let no_managed = lingxi_home.join("__lingxi_no_managed_settings__");
-    command_core::load_and_register_custom_commands(registry, cwd, lingxi_home, &no_managed, home)
-        .await;
-    command_core::load_and_register_skill_commands_with_roots(
+    command_api::builtins::load_and_register_custom_commands(
+        registry,
+        cwd,
+        lingxi_home,
+        &no_managed,
+        home,
+    )
+    .await;
+    command_api::builtins::load_and_register_skill_commands_with_roots(
         registry,
         cwd,
         lingxi_home,

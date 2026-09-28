@@ -661,7 +661,7 @@ impl DesktopProposeRunner {
 }
 
 #[async_trait::async_trait]
-impl command_core::ProposeRunner for DesktopProposeRunner {
+impl command_api::builtins::ProposeRunner for DesktopProposeRunner {
     async fn run(&self, inv: &permission::auto_mode_argv::ProposeInvocation) -> serde_json::Value {
         let answers = ProposeAnswers {
             posture: inv.posture.clone(),
@@ -768,7 +768,7 @@ impl DesktopApplyRunner {
 }
 
 #[async_trait::async_trait]
-impl command_core::ApplyRunner for DesktopApplyRunner {
+impl command_api::builtins::ApplyRunner for DesktopApplyRunner {
     async fn run(
         &self,
         inv: &permission::auto_mode_argv::ApplyFileInvocation,
@@ -800,7 +800,7 @@ impl command_core::ApplyRunner for DesktopApplyRunner {
 #[cfg(test)]
 mod runner_tests {
     use super::*;
-    use command_core::ApplyRunner as _;
+    use command_api::builtins::ApplyRunner as _;
     use permission::auto_mode_argv::{ApplyFileInvocation, ApplyResult};
 
     fn runner(dir: &std::path::Path) -> DesktopApplyRunner {

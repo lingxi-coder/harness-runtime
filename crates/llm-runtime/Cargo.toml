@@ -5,8 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Independent duplex realtime sessions; Responses WebSockets still use the host transport.
+realtime-websocket = ["lingxi-llm-client/realtime-websocket"]
+
 [dependencies]
-lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client", rev = "9b0323f10f76c5834acafedaa04470c4e96346f2", default-features = false }
+lingxi-llm-client.workspace = true
 bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true

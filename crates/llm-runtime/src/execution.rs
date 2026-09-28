@@ -11,6 +11,9 @@ pub(crate) fn wire_error(error: LlmError) -> wire::LlmError {
         LlmError::Authentication { message } => wire::LlmError::Authentication { message },
         LlmError::PermissionDenied { message } => wire::LlmError::PermissionDenied { message },
         LlmError::CostUnavailable { message } => wire::LlmError::CostUnavailable { message },
+        LlmError::FileUploadOutcomeUnknown { message } => {
+            wire::LlmError::FileUploadOutcomeUnknown { message }
+        }
         LlmError::UnsupportedCapability { capability } => wire::LlmError::UnsupportedCapability {
             message: capability,
         },
@@ -27,6 +30,12 @@ pub(crate) struct HostTransport(pub Arc<dyn Transport>);
 impl sdk::Transport for HostTransport {
     async fn send(&self, request: sdk::HttpRequest) -> Result<sdk::StreamResponse, wire::LlmError> {
         self.0.send_raw(request).await
+    }
+    async fn send_stream(
+        &self,
+        request: sdk::HttpStreamRequest,
+    ) -> Result<sdk::StreamResponse, wire::LlmError> {
+        self.0.send_stream_raw(request).await
     }
     async fn connect_websocket(
         &self,
@@ -75,15 +84,18 @@ pub(crate) async fn prepare(
     })?;
     let mut input = crate::upstream::request(request, profile.protocol)?;
     input.model.clone_from(&route.display_model);
-    let draft = client
-        .prepare_draft_on(
-            &profile.profile_name,
-            &input,
-            &sdk::RequestOptions::default(),
-            mode,
-        )
-        .await
-        .map_err(crate::upstream::error)?;
+    let draft = Box::pin(client.prepare_draft_on(
+        &profile.profile_name,
+        &input,
+        &sdk::RequestOptions {
+            account_scope: request.account_scope.clone(),
+            file_account_scope: request.file_account_scope.clone(),
+            ..Default::default()
+        },
+        mode,
+    ))
+    .await
+    .map_err(crate::upstream::error)?;
     let http = draft.request();
     let mut host = ProviderRequest::post_json(
         http.url.clone(),
@@ -98,6 +110,7 @@ pub(crate) async fn prepare(
     }
     host.json_string_overrides =
         crate::upstream::message_string_overrides(request, profile.protocol)?;
+    crate::upstream::apply_request_compatibility(request, profile.protocol, &mut host)?;
     Ok((draft, host))
 }
 
@@ -120,7 +133,7 @@ pub(crate) async fn seal(
             .set_json_body(request.body_json.clone(), &request.json_string_overrides)
             .map_err(crate::upstream::error)?;
     }
-    draft.seal().await.map_err(crate::upstream::error)
+    Box::pin(draft.seal()).await.map_err(crate::upstream::error)
 }
 
 pub(crate) fn response(raw: &sdk::HttpResponse) -> ProviderResponse {
@@ -186,17 +199,42 @@ pub(crate) fn restore_error(error: wire::LlmError, failure: &HostFailure) -> Llm
         .take()
         .unwrap_or_else(|| crate::upstream::error(error))
 }
-pub(crate) fn decode(
-    collected: &sdk::CollectedResponse,
-) -> Result<wire::CompletionResponse, LlmError> {
-    collected.decode().map_err(|error| match error {
+pub(crate) fn decode(collected: &sdk::CollectedResponse) -> Result<wire::ChatResponse, LlmError> {
+    let decoded = collected.decode().map_err(|error| match error {
         wire::LlmError::ProviderInternal { message }
             if (200..300).contains(&collected.response().status) =>
         {
             LlmError::InvalidRequest { message }
         }
         other => crate::upstream::error(other),
-    })
+    })?;
+    let body = serde_json::from_slice(&collected.response().body).unwrap_or_default();
+    validate_response_content(&decoded, &body, collected.profile().protocol)?;
+    Ok(decoded)
+}
+
+/// Host turns must not silently settle a response whose malformed content was
+/// omitted by a permissive upstream decoder. Usage is observed before decoding.
+pub(crate) fn validate_response_content(
+    decoded: &wire::ChatResponse,
+    body: &serde_json::Value,
+    protocol: wire::ProtocolFamily,
+) -> Result<(), LlmError> {
+    if matches!(
+        protocol,
+        wire::ProtocolFamily::AnthropicMessages
+            | wire::ProtocolFamily::VertexClaude
+            | wire::ProtocolFamily::FoundryClaude
+            | wire::ProtocolFamily::BedrockClaude
+    ) && body["content"]
+        .as_array()
+        .is_some_and(|blocks| blocks.len() != decoded.message.content.len())
+    {
+        return Err(LlmError::InvalidRequest {
+            message: "provider response contains malformed content blocks".into(),
+        });
+    }
+    Ok(())
 }
 pub(crate) struct HostAuthenticator {
     pub client: crate::DefaultLlmClient,
@@ -222,20 +260,6 @@ impl sdk::Authenticator for HostAuthenticator {
                 *self.failure.lock().expect("host failure") = Some(error.clone());
                 wire_error(error)
             })
-    }
-}
-
-pub(crate) struct BorrowedHostTransport<'a>(pub &'a dyn Transport);
-#[async_trait::async_trait]
-impl sdk::Transport for BorrowedHostTransport<'_> {
-    async fn send(&self, request: sdk::HttpRequest) -> Result<sdk::StreamResponse, wire::LlmError> {
-        self.0.send_raw(request).await
-    }
-    async fn connect_websocket(
-        &self,
-        request: sdk::HttpRequest,
-    ) -> Result<Box<dyn sdk::transport::WebSocketConnection>, wire::LlmError> {
-        self.0.connect_raw(request).await
     }
 }
 

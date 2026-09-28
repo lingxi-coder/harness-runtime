@@ -8,10 +8,20 @@ license.workspace = true
 # M8-P9: the slash-command runtime abstraction — registry, dispatcher, parser,
 # argument substitution, data model, and the shared builtin scaffolding (99-name
 # table + /help/list renderers + unimplemented stub). Mirrors tool-api /
-# skill-api. Command *handlers* live in command-core (plus any platform handlers
+# skill-api. Command handlers live in the optional builtins module (plus platform handlers
 # registered directly in the engine-desktop / engine-mobile composition roots).
 
 [dependencies]
+core = { path = "../core", optional = true }
+schemars = { version = "0.8", optional = true }
+skill-api = { path = "../skill-api", optional = true }
+workflow = { path = "../workflow", optional = true }
+cron = { path = "../cron", optional = true }
+permission = { path = "../permission", optional = true }
+telemetry = { path = "../telemetry", optional = true }
+cost = { path = "../cost", optional = true }
+indexmap = { version = "2", optional = true }
+regex = { version = "1", optional = true }
 branding.workspace = true
 protocol = { path = "../protocol" }
 platform-api = { path = "../platform-api" }
@@ -30,3 +40,29 @@ tokio = { workspace = true, features = ["sync"] }
 
 [lints]
 workspace = true
+
+[features]
+default = []
+builtin-handlers = [
+    "dep:core",
+    "dep:schemars",
+    "dep:skill-api",
+    "dep:workflow",
+    "dep:cron",
+    "dep:permission",
+    "dep:telemetry",
+    "dep:cost",
+    "dep:indexmap",
+    "dep:regex",
+]
+
+[dev-dependencies]
+orchestrator = { path = "../orchestrator" }
+tool-api = { path = "../tool-api" }
+llm-runtime = { path = "../llm-runtime" }
+compaction = { path = "../compaction" }
+sha2 = "0.10"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+
+[build-dependencies]
+branding.workspace = true

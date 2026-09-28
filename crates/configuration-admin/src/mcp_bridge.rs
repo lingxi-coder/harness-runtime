@@ -18,7 +18,7 @@
 //! (`router.rs`'s `ClientCommand::RefreshListings` arm calling
 //! `handle.list_mcp_servers()`); this module is the WRITE side only —
 //! [`upsert_server`] / [`remove_server`], routed from
-//! [`client_protocol::commands::ClientCommand::UpsertMcpServer`] /
+//! [`client::protocol::commands::ClientCommand::UpsertMcpServer`] /
 //! `RemoveMcpServer`.
 //!
 //! `User` and `Local` both live inside the SAME `~/.lingxi.json` file, which
@@ -51,7 +51,7 @@
 
 use std::path::{Path, PathBuf};
 
-use client_protocol::commands::WritableScopeDto;
+use client::protocol::commands::WritableScopeDto;
 use mcp::{ConfigScope, McpRegistry};
 use migrations::global_config::{
     get_project_config, project_path_for_config, read_map as read_global_map, save_map,

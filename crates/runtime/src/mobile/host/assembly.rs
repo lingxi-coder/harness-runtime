@@ -7,11 +7,11 @@ use crate::mobile::{
     mobile_command_registry, register_android_ui_automation,
     turn_durability::DurableTurnStore,
 };
-use client_adapter::{
+use client::adapter::{
     AdapterOutputStream, AdapterPermissionGate, ClientEventListener, ListenerSink,
     PermissionRequestSink,
 };
-use client_protocol::events::ClientEvent;
+use client::protocol::events::ClientEvent;
 use command_api::model::BuiltinCommandHandler;
 use command_api::parse_slash_command;
 use command_api::RegistrySlashDispatcher;
@@ -69,8 +69,8 @@ use super::{
 /// (filesystem / http / clock / process / sandbox / worktree) and the device
 /// capabilities (camera / audio / share) are read from `platform`; everything
 /// else arrives via `cfg`. The `listener` becomes the adapter's
-/// [`client_adapter::ClientEventSink`] (wrapped in a [`ListenerSink`]) so every
-/// translated [`client_protocol::events::ClientEvent`] is delivered to the
+/// [`client::adapter::ClientEventSink`] (wrapped in a [`ListenerSink`]) so every
+/// translated [`client::protocol::events::ClientEvent`] is delivered to the
 /// foreign host; `permission_sink` is where the [`AdapterPermissionGate`]'s
 /// outbound permission requests go.
 ///
@@ -704,9 +704,10 @@ pub(super) async fn build_mobile_inner_with_ask(
     let auth: Arc<dyn AuthHandle> = anthropic_oauth_handle.clone();
 
     // (4) Orchestrator config from `cfg` (was a host env/arg read).
-    let persisted_reasoning_selection = command_core::effort::load_reasoning_default_selection_at(
-        &cfg.lingxi_home.join("settings.json"),
-    );
+    let persisted_reasoning_selection =
+        command_api::builtins::effort::load_reasoning_default_selection_at(
+            &cfg.lingxi_home.join("settings.json"),
+        );
     let mut orch_cfg = OrchestratorConfig::default();
     orch_cfg.output_style = provider_settings.output_style.clone();
     orch_cfg.output_style_dirs = vec![
@@ -2497,9 +2498,9 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Fill the shared registry slot so batch-8, the slash dispatcher, the
     // per-turn skill listing, and the Skill tool all observe ONE command set.
     let mut reg = mobile_command_registry(handle.clone(), auth.clone());
-    reg.register_builtin_handler(Arc::new(command_core::VersionHandler::with_build_info(
-        cfg.build_info,
-    )));
+    reg.register_builtin_handler(Arc::new(
+        command_api::builtins::VersionHandler::with_build_info(cfg.build_info),
+    ));
     crate::mobile::skill_loader::load_mobile_disk_commands_into_registry(
         &mut reg,
         &cwd,
@@ -2511,15 +2512,17 @@ pub(super) async fn build_mobile_inner_with_ask(
     // `/workflows`: mobile cannot open the TUI picker, so bind the shared
     // command handler to the same live registry that powers workflow tools and
     // return the picker's snapshot as a structured command-output result.
-    reg.register_builtin_handler(Arc::new(command_core::WorkflowsHandler::with_registry(
-        task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
-    )));
+    reg.register_builtin_handler(Arc::new(
+        command_api::builtins::WorkflowsHandler::with_registry(
+            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+        ),
+    ));
     // Batch 8 (`/fork`, `/goal`, `/recap`, `/reload-skills`, `/skill-doctor`,
     // `/stop`): wired here in the uniffi composition root because it needs the
     // shared `Arc<tokio::sync::RwLock<CommandRegistry>>` (tokio is uniffi-only in
     // this crate's default lib build). Mobile has no on-disk custom-skill
     // discovery layer, so no managed dir / no additional dirs / safe-mode off.
-    command_core::register_core_batch_8(
+    command_api::builtins::register_core_batch_8(
         &mut reg,
         handle.clone(),
         shared_command_registry.clone(),
@@ -2936,7 +2939,7 @@ pub fn build_mobile_engine_inner(
     });
 
     let event_sink = inner.event_sink.clone();
-    let ask_user_question_broker = Arc::new(client_adapter::BridgeAskUserQuestionBroker::new(
+    let ask_user_question_broker = Arc::new(client::adapter::AskUserQuestionBroker::new(
         event_sink.clone(),
     ));
     {
@@ -3355,7 +3358,7 @@ pub fn build_mobile_engine_inner(
                         };
                         if let Err(error) = result {
                             message_output.reset_message_buffer().await;
-                            sink.emit(client_adapter::map_orchestrator_error(&error))
+                            sink.emit(client::adapter::map_orchestrator_error(&error))
                                 .await;
                         }
                         settle_mobile_loop_turn(

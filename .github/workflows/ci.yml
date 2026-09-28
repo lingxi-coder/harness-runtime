@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Run every checked-in repository gate
         run: ./scripts/check-all.sh
       - name: Test gate rejection cases
@@ -24,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
@@ -33,13 +37,13 @@ jobs:
           cargo check --locked -p core --no-default-features
           cargo check --locked -p platform-api
 
-  # The mobile clients are the only consumers that turn `client-protocol`'s
+  # The mobile clients are the only consumers that turn `client`'s
   # `uniffi` feature on, and NOTHING else in this file builds with it: the
   # On 2026-08-27 `ClientCommand` grew past `uniffi_core`'s hardcoded
   # 16384-byte `MetadataBuffer` and stopped compiling for iOS/Android. Be
   # precise about what missed it, because the obvious story is wrong:
   # `unit-tests` runs `cargo test --workspace --all-features`, and
-  # `--all-features` turns on `client-protocol`'s own `uniffi` feature, so CI
+  # `--all-features` turns on `client`'s own `uniffi` feature, so CI
   # WOULD have gone red. What was blind was per-package local verification
   # (`cargo test -p bridge-server`, `-p core`, the electron suites) — none of
   # which enables the feature — so the break survived a whole 21-task run and
@@ -55,22 +59,31 @@ jobs:
   # Its own job, not a step in `compile-check`, so it reports under its own
   # name and cannot hide behind an unrelated earlier failure in that script.
   mobile-ffi-surface:
-    name: Mobile FFI surface (client-protocol --features uniffi)
+    name: Mobile FFI surface (client --features uniffi)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Client feature boundaries
+        run: |
+          cargo check --locked -p client --no-default-features
+          cargo check --locked -p client --no-default-features --features presentation
+          cargo check --locked -p client --no-default-features --features adapter
       - name: cargo check (the build iOS and Android actually need)
-        run: cargo check --locked -p client-protocol --features uniffi
+        run: cargo check --locked -p client --features uniffi
       - name: UniFFI metadata budget
         # Goes red ~4 KiB BEFORE the hard limit, while the crate still compiles
         # and a test can still run to say which type is running out of room.
-        run: cargo test --locked -p client-protocol --features uniffi --test uniffi_metadata_budget_test
+        run: cargo test --locked -p client --features uniffi --test uniffi_metadata_budget_test
 
   unit-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: cargo test
         # `--no-fail-fast` is load-bearing, not tidiness. Without it cargo stops
@@ -85,6 +98,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
@@ -110,6 +125,8 @@ jobs:
             target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: ${{ matrix.target }}
@@ -126,6 +143,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: x86_64-unknown-linux-musl
@@ -147,6 +166,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       # Use the workspace toolchain for both builds and dependency metadata.
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Install cargo-deny
@@ -180,6 +201,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: cargo test parity_* drivers
         run: |
@@ -217,6 +240,8 @@ jobs:
             features: android-computer-use
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Check each feature combination independently
         env:
@@ -237,6 +262,8 @@ jobs:
         os: [ubuntu-24.04, macos-14, windows-2022]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Check desktop runtime against the native platform
         run: cargo check --locked -p harness-runtime --no-default-features --features desktop
@@ -256,6 +283,8 @@ jobs:
             clang_target: arm64-apple-ios17.0-simulator
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: ${{ matrix.target }}
@@ -282,6 +311,8 @@ jobs:
         features: ["mobile,uniffi", "android-computer-use,uniffi"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: aarch64-linux-android,x86_64-linux-android
@@ -311,6 +342,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Exercise the real helper in a custom target directory
         env:

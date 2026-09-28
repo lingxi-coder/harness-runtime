@@ -1057,16 +1057,16 @@ pub(super) async fn note_fusion_catalog_credential_route(
 /// route can use the new credential. An incompatible protocol is persisted but
 /// reported as restart-required instead of falsely connected.
 pub(super) struct FusionCatalogRefreshingCredentialWriter {
-    pub(super) inner: Arc<dyn command_core::ConnectCredentialWriter>,
+    pub(super) inner: Arc<dyn command_api::builtins::ConnectCredentialWriter>,
     pub(super) refresher: FusionCatalogRefresher,
 }
 
 #[async_trait::async_trait]
-impl command_core::ConnectCredentialWriter for FusionCatalogRefreshingCredentialWriter {
+impl command_api::builtins::ConnectCredentialWriter for FusionCatalogRefreshingCredentialWriter {
     async fn prompt_and_store_key(
         &self,
         credential_id: &str,
-    ) -> Result<(), command_core::ConnectError> {
+    ) -> Result<(), command_api::builtins::ConnectError> {
         self.inner.prompt_and_store_key(credential_id).await?;
         let mutation_id = if credential_id == "anthropic" {
             "anthropic-api-key"
@@ -1078,7 +1078,7 @@ impl command_core::ConnectCredentialWriter for FusionCatalogRefreshingCredential
             .mark_credential_established(mutation_id)
             .await
         {
-            return Err(command_core::ConnectError::Network(
+            return Err(command_api::builtins::ConnectError::Network(
                 fusion_credential_restart_required_message(mutation_id),
             ));
         }
@@ -1093,23 +1093,24 @@ impl command_core::ConnectCredentialWriter for FusionCatalogRefreshingCredential
 /// (`EngineCopilotConnect::poll_to_completion`, `connect.rs`) — the exact
 /// path the finding [8] scenario names.
 pub(super) struct FusionCatalogRefreshingCopilotConnect {
-    pub(super) inner: Arc<dyn command_core::CopilotConnectDriver>,
+    pub(super) inner: Arc<dyn command_api::builtins::CopilotConnectDriver>,
     pub(super) refresher: FusionCatalogRefresher,
 }
 
 #[async_trait::async_trait]
-impl command_core::CopilotConnectDriver for FusionCatalogRefreshingCopilotConnect {
+impl command_api::builtins::CopilotConnectDriver for FusionCatalogRefreshingCopilotConnect {
     async fn begin(
         &self,
         domain: Option<&str>,
-    ) -> Result<command_core::CopilotConnectStep, command_core::ConnectError> {
+    ) -> Result<command_api::builtins::CopilotConnectStep, command_api::builtins::ConnectError>
+    {
         self.inner.begin(domain).await
     }
 
     async fn poll_to_completion(
         &self,
-        step: &command_core::CopilotConnectStep,
-    ) -> Result<(), command_core::ConnectError> {
+        step: &command_api::builtins::CopilotConnectStep,
+    ) -> Result<(), command_api::builtins::ConnectError> {
         self.inner.poll_to_completion(step).await?;
         // The Copilot device flow persists under the `github-copilot`
         // credential id (`EngineCopilotConnect::poll_to_completion`); naming
@@ -1120,7 +1121,7 @@ impl command_core::CopilotConnectDriver for FusionCatalogRefreshingCopilotConnec
             .mark_credential_established("github-copilot")
             .await
         {
-            return Err(command_core::ConnectError::Network(
+            return Err(command_api::builtins::ConnectError::Network(
                 fusion_credential_restart_required_message("github-copilot"),
             ));
         }
@@ -1137,20 +1138,20 @@ impl command_core::CopilotConnectDriver for FusionCatalogRefreshingCopilotConnec
 /// unwrapped, so a ChatGPT sign-in stayed invisible to Fusion for the rest of
 /// the process.
 pub(super) struct FusionCatalogRefreshingChatGptConnect {
-    pub(super) inner: Arc<dyn command_core::ChatGptConnectDriver>,
+    pub(super) inner: Arc<dyn command_api::builtins::ChatGptConnectDriver>,
     pub(super) refresher: FusionCatalogRefresher,
 }
 
 #[async_trait::async_trait]
-impl command_core::ChatGptConnectDriver for FusionCatalogRefreshingChatGptConnect {
-    async fn connect(&self) -> Result<String, command_core::ConnectError> {
+impl command_api::builtins::ChatGptConnectDriver for FusionCatalogRefreshingChatGptConnect {
+    async fn connect(&self) -> Result<String, command_api::builtins::ConnectError> {
         let message = self.inner.connect().await?;
         if !self
             .refresher
             .mark_credential_established("openai-chatgpt")
             .await
         {
-            return Err(command_core::ConnectError::Network(
+            return Err(command_api::builtins::ConnectError::Network(
                 fusion_credential_restart_required_message("openai-chatgpt"),
             ));
         }
@@ -1165,7 +1166,7 @@ impl command_core::ChatGptConnectDriver for FusionCatalogRefreshingChatGptConnec
 /// Every sign-IN seam refreshes Fusion's availability map, and
 /// `FusionCatalogRefresher`'s merge rule can never lower a `true` (see
 /// [`FusionCatalogRefresher::refresh_inner`]) — so once a process published
-/// `anthropic: true`, `/logout` (`command_core::LogoutHandler`, the TUI) and
+/// `anthropic: true`, `/logout` (`command_api::builtins::LogoutHandler`, the TUI) and
 /// the bridge-server's `ClientCommand::Logout` both left Fusion offering
 /// Anthropic models the session could no longer authenticate, for the rest of
 /// the process. Wrapping the ONE `Arc<dyn AuthHandle>` the whole desktop
@@ -1174,7 +1175,7 @@ impl command_core::ChatGptConnectDriver for FusionCatalogRefreshingChatGptConnec
 ///
 /// `login` notes the OAUTH route it just established (round-12 rework) and
 /// otherwise delegates untouched. `FusionCatalogRefreshingOAuthConnect` only
-/// covers the `/connect` picker; `/login` (`command_core::LoginHandler`) and
+/// covers the `/connect` picker; `/login` (`command_api::builtins::LoginHandler`) and
 /// the bridge-server's `ClientCommand::Login` drive this handle directly, and
 /// if their sign-in went unrecorded a later "delete the Anthropic API key"
 /// would fall back to a stale `anthropic_has_oauth == false` and clear a
@@ -1217,13 +1218,16 @@ impl AuthHandle for FusionCatalogClearingAuth {
 /// OAuth sign-in persists a credential exactly like an API-key write does,
 /// and `EngineOAuthConnect` was not one of the wrapped drivers.
 pub(super) struct FusionCatalogRefreshingOAuthConnect {
-    pub(super) inner: Arc<dyn command_core::OAuthConnectDriver>,
+    pub(super) inner: Arc<dyn command_api::builtins::OAuthConnectDriver>,
     pub(super) refresher: FusionCatalogRefresher,
 }
 
 #[async_trait::async_trait]
-impl command_core::OAuthConnectDriver for FusionCatalogRefreshingOAuthConnect {
-    async fn login(&self, provider_id: &str) -> Result<String, command_core::ConnectError> {
+impl command_api::builtins::OAuthConnectDriver for FusionCatalogRefreshingOAuthConnect {
+    async fn login(
+        &self,
+        provider_id: &str,
+    ) -> Result<String, command_api::builtins::ConnectError> {
         let message = self.inner.login(provider_id).await?;
         // Round-12 rework: this is the ONE seam where a bare `"anthropic"`
         // means the OAUTH route — `EngineOAuthConnect::login` maps it to
@@ -1245,7 +1249,7 @@ impl command_core::OAuthConnectDriver for FusionCatalogRefreshingOAuthConnect {
             .mark_credential_established(credential_id)
             .await
         {
-            return Err(command_core::ConnectError::Network(
+            return Err(command_api::builtins::ConnectError::Network(
                 fusion_credential_restart_required_message(credential_id),
             ));
         }

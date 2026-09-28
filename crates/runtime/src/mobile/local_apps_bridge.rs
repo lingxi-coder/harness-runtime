@@ -6,7 +6,7 @@
 //!
 //! - [`AppEmissionQueue`] is the bridge-owned ordered channel every app-surface
 //!   client event rides to the connection's single
-//!   [`client_adapter::ClientEventSink`] (the same channel every other client
+//!   [`client::adapter::ClientEventSink`] (the same channel every other client
 //!   event rides — governing decision §0.2): domain events enqueued by
 //!   [`SinkAppEventObserver`], plus the engine-synthesized events that have no
 //!   domain twin (`AppOperationFailed`, the `ListAppCheckpoints` reply rows);
@@ -27,9 +27,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use client_adapter::ClientEventSink;
-use client_protocol::events::ClientEvent;
-use client_protocol::local_apps::{
+use client::adapter::ClientEventSink;
+use client::protocol::events::ClientEvent;
+use client::protocol::local_apps::{
     AppCapabilityKindDto, AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto,
     AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto, AppDependencySnapshotDto,
     AppDetailsDto, AppErrorCodeDto, AppEventDto, AppManifestDto, AppRecordDto,

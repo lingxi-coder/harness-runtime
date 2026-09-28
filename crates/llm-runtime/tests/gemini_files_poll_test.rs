@@ -7,7 +7,7 @@
 //! with `start_paused` so tokio sleeps auto-advance and the suite is instant.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use llm_runtime::client::DefaultLlmClient;
@@ -160,18 +160,18 @@ fn status_response(state: &str) -> ProviderResponse {
 
 #[tokio::test(start_paused = true)]
 async fn wait_for_file_active_polls_until_active() {
-    let transport = ScriptedTransport::returning(vec![
+    let transport = Arc::new(ScriptedTransport::returning(vec![
         status_response("PROCESSING"),
         status_response("PROCESSING"),
         status_response("ACTIVE"),
-    ]);
+    ]));
     let client = gemini_client();
 
     let file = client
         .wait_for_file_active(
             "gemini",
             "files/abc",
-            &transport,
+            transport.clone(),
             FileActivationPoll::default(),
         )
         .await
@@ -204,17 +204,17 @@ async fn wait_for_file_active_polls_until_active() {
 
 #[tokio::test(start_paused = true)]
 async fn wait_for_file_active_fails_fast_on_failed_state() {
-    let transport = ScriptedTransport::returning(vec![
+    let transport = Arc::new(ScriptedTransport::returning(vec![
         status_response("PROCESSING"),
         status_response("FAILED"),
-    ]);
+    ]));
     let client = gemini_client();
 
     let error = client
         .wait_for_file_active(
             "gemini",
             "files/abc",
-            &transport,
+            transport.clone(),
             FileActivationPoll::default(),
         )
         .await
@@ -233,8 +233,9 @@ async fn wait_for_file_active_fails_fast_on_failed_state() {
 /// deadline), then the budget check fails at t = 10 → 6 requests total.
 #[tokio::test(start_paused = true)]
 async fn wait_for_file_active_times_out() {
-    let transport =
-        ScriptedTransport::returning((0..10).map(|_| status_response("PROCESSING")).collect());
+    let transport = Arc::new(ScriptedTransport::returning(
+        (0..10).map(|_| status_response("PROCESSING")).collect(),
+    ));
     let client = gemini_client();
     let poll = FileActivationPoll {
         interval: Duration::from_secs(2),
@@ -242,7 +243,7 @@ async fn wait_for_file_active_times_out() {
     };
 
     let error = client
-        .wait_for_file_active("gemini", "files/abc", &transport, poll)
+        .wait_for_file_active("gemini", "files/abc", transport.clone(), poll)
         .await
         .expect_err("budget exhaustion must error");
     assert!(matches!(
@@ -255,14 +256,14 @@ async fn wait_for_file_active_times_out() {
 
 #[tokio::test(start_paused = true)]
 async fn wait_for_file_active_rejects_non_gemini_family() {
-    let transport = ScriptedTransport::returning(vec![]);
+    let transport = Arc::new(ScriptedTransport::returning(vec![]));
     let client = anthropic_client();
 
     let error = client
         .wait_for_file_active(
             "claude",
             "files/abc",
-            &transport,
+            transport.clone(),
             FileActivationPoll::default(),
         )
         .await
@@ -280,18 +281,18 @@ async fn wait_for_file_active_rejects_non_gemini_family() {
 /// nor failure — the loop keeps polling until the budget runs out.
 #[tokio::test(start_paused = true)]
 async fn wait_for_file_active_unknown_state_keeps_polling() {
-    let transport = ScriptedTransport::returning(vec![
+    let transport = Arc::new(ScriptedTransport::returning(vec![
         status_response("PROCESSING"),
         status_response("SOMETHING_NEW"),
         status_response("ACTIVE"),
-    ]);
+    ]));
     let client = gemini_client();
 
     let file = client
         .wait_for_file_active(
             "gemini",
             "files/abc",
-            &transport,
+            transport.clone(),
             FileActivationPoll::default(),
         )
         .await

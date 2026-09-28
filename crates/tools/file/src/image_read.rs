@@ -37,41 +37,7 @@ pub fn is_image_extension(path: &std::path::Path) -> bool {
 
 /// `Cle` (cc-238.js @287754579) — magic-byte sniffer for the four media types
 /// the image path accepts. Returns `None` when the bytes are not one of them.
-#[must_use]
-pub fn sniff_image_media_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.len() < 4 {
-        return None;
-    }
-    if bytes[0] == 137 && bytes[1] == 80 && bytes[2] == 78 && bytes[3] == 71 {
-        return Some("image/png");
-    }
-    if bytes[0] == 255 && bytes[1] == 216 && bytes[2] == 255 {
-        return Some("image/jpeg");
-    }
-    if bytes.len() >= 6
-        && bytes[0] == 71
-        && bytes[1] == 73
-        && bytes[2] == 70
-        && bytes[3] == 56
-        && (bytes[4] == 55 || bytes[4] == 57)
-        && bytes[5] == 97
-    {
-        return Some("image/gif");
-    }
-    if bytes[0] == 82
-        && bytes[1] == 73
-        && bytes[2] == 70
-        && bytes[3] == 70
-        && bytes.len() >= 12
-        && bytes[8] == 87
-        && bytes[9] == 69
-        && bytes[10] == 66
-        && bytes[11] == 80
-    {
-        return Some("image/webp");
-    }
-    None
-}
+pub use tool_api::util::image_sniff::sniff_image_media_type;
 
 /// `t.toString("latin1").replace(/[^\x20-\x7e]/g,".")` — one char per byte, with
 /// every non-printable-ASCII byte rendered as `.`.

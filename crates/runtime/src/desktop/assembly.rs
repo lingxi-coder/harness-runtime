@@ -1,5 +1,5 @@
 use crate::desktop::ide::DesktopIdeHandle;
-use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
+use client::adapter::{AdapterPermissionGate, PermissionRequestSink};
 use command_api::model::BuiltinCommandHandler;
 use command_api::{parse_slash_command, CommandRegistry, RegistrySlashDispatcher};
 use cost::CostHydrator;
@@ -384,7 +384,7 @@ pub async fn build_with_credential_stack(
     // settings file used by `/effort`. Seed it before the first turn; an
     // explicit CLI effort remains higher priority and is left untouched.
     let persisted_reasoning_selection = if cfg.initial_effort.is_none() {
-        command_core::effort::load_reasoning_default_selection_at(
+        command_api::builtins::effort::load_reasoning_default_selection_at(
             &cfg.lingxi_home.join("settings.json"),
         )
     } else {
@@ -4473,14 +4473,14 @@ pub async fn build_with_credential_stack(
     // here too, and the TUI key view (which bypasses all four and writes
     // straight through `secret::CredentialManager`) reaches the same
     // refresher through `refresh_fusion_catalog_after_credential_write`.
-    let connect_copilot: Arc<dyn command_core::CopilotConnectDriver> =
+    let connect_copilot: Arc<dyn command_api::builtins::CopilotConnectDriver> =
         Arc::new(FusionCatalogRefreshingCopilotConnect {
             inner: Arc::new(crate::desktop::connect::EngineCopilotConnect::new(
                 credentials.clone(),
             )),
             refresher: fusion_catalog_refresher.clone(),
         });
-    let connect_writer: Arc<dyn command_core::ConnectCredentialWriter> =
+    let connect_writer: Arc<dyn command_api::builtins::ConnectCredentialWriter> =
         Arc::new(FusionCatalogRefreshingCredentialWriter {
             inner: Arc::new(crate::desktop::connect::EngineCredentialWriter::new(
                 credentials.clone(),
@@ -4491,7 +4491,7 @@ pub async fn build_with_credential_stack(
             )),
             refresher: fusion_catalog_refresher.clone(),
         });
-    let connect_chatgpt_inner: Arc<dyn command_core::ChatGptConnectDriver> =
+    let connect_chatgpt_inner: Arc<dyn command_api::builtins::ChatGptConnectDriver> =
         Arc::new(crate::desktop::connect::EngineChatGptConnect::new(
             openai_oauth_client,
             credentials.clone(),
@@ -4501,7 +4501,7 @@ pub async fn build_with_credential_stack(
     // round 4 wrapped. The OAuth driver below is built over the UNWRAPPED
     // ChatGPT driver so a ChatGPT sign-in through the picker refreshes once,
     // not twice.
-    let connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver> =
+    let connect_chatgpt: Arc<dyn command_api::builtins::ChatGptConnectDriver> =
         Arc::new(FusionCatalogRefreshingChatGptConnect {
             inner: connect_chatgpt_inner.clone(),
             refresher: fusion_catalog_refresher.clone(),
@@ -4511,7 +4511,7 @@ pub async fn build_with_credential_stack(
     // `/login` (the Anthropic `auth` handle) and `/connect chatgpt`
     // (`connect_chatgpt`); built here while both are still owned (the registry
     // call below moves `connect_chatgpt`).
-    let oauth_connect_driver: Arc<dyn command_core::OAuthConnectDriver> =
+    let oauth_connect_driver: Arc<dyn command_api::builtins::OAuthConnectDriver> =
         Arc::new(FusionCatalogRefreshingOAuthConnect {
             inner: Arc::new(crate::desktop::connect::EngineOAuthConnect::new(
                 auth.clone(),
@@ -4533,14 +4533,16 @@ pub async fn build_with_credential_stack(
         shared_command_registry.clone(),
     )
     .await;
-    reg.register_builtin_handler(Arc::new(command_core::VersionHandler::with_build_info(
-        cfg.build_info,
-    )));
+    reg.register_builtin_handler(Arc::new(
+        command_api::builtins::VersionHandler::with_build_info(cfg.build_info),
+    ));
     // The TUI intercepts `/workflows` to open its interactive picker. Bind the
     // same registry-backed text projection for headless/bridge dispatch paths.
-    reg.register_builtin_handler(Arc::new(command_core::WorkflowsHandler::with_registry(
-        task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
-    )));
+    reg.register_builtin_handler(Arc::new(
+        command_api::builtins::WorkflowsHandler::with_registry(
+            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+        ),
+    ));
     reg.register_builtin_handler(worktree_command_handler);
     if cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref()) {
         // `/cron` is an explicit management action. Keep it out of the model
@@ -4600,14 +4602,14 @@ pub async fn build_with_credential_stack(
             task_registry.clone(),
         ));
         let apply = std::sync::Arc::new(auto_mode_propose::DesktopApplyRunner::new(
-            command_core::auto_mode_setup::apply_file_roots(&cfg.lingxi_home),
+            command_api::builtins::auto_mode_setup::apply_file_roots(&cfg.lingxi_home),
             permission::PermissionPaths {
                 lingxi_home: cfg.lingxi_home.clone(),
                 cwd: cfg.cwd.clone(),
             },
         ));
         reg.register_builtin_handler(std::sync::Arc::new(
-            command_core::AutoModeSetupHandler::new()
+            command_api::builtins::AutoModeSetupHandler::new()
                 .with_propose(propose)
                 .with_apply(apply),
         ));
@@ -5123,7 +5125,7 @@ pub async fn build_with_credential_stack(
     if session_start.reload_skills {
         let home = dirs::home_dir().unwrap_or_else(|| cfg.lingxi_home.clone());
         let managed_dir = crate::desktop::settings_watch::managed_settings_dir();
-        let handler = command_core::reload_skills::ReloadSkillsHandler::with_all_roots(
+        let handler = command_api::builtins::reload_skills::ReloadSkillsHandler::with_all_roots(
             shared_command_registry.clone(),
             cfg.cwd.clone(),
             cfg.lingxi_home.clone(),

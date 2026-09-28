@@ -8,9 +8,9 @@ use crate::mobile::host::LocalAppBackgroundRunDto;
 use crate::mobile::local_apps_mcp::LocalAppsMcpHost;
 use crate::mobile::plan_approval::CreateApprovalAuthority;
 use async_trait::async_trait;
-use client_adapter::ClientEventSink;
-use client_protocol::events::ClientEvent;
-use client_protocol::local_apps::{
+use client::adapter::ClientEventSink;
+use client::protocol::events::ClientEvent;
+use client::protocol::local_apps::{
     AppAuthorizationDecisionDto, AppCapabilityKindDto, AppDependencyChangeConfirmationRequestDto,
     AppDependencyChangeDto, AppEventDto, AppRuntimeProfileDto, AppSurfaceDto, AppUiActionKindDto,
     AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto, LocalAppGateStatusDto,
@@ -6742,11 +6742,11 @@ use static_server::STATIC_ACCEPT_RETRY;
 #[cfg(test)]
 use crate::mobile::local_app_runtime_profiles::RuntimeToolchain;
 #[cfg(test)]
-use client_protocol::local_apps::AppBridgeOperationDto;
+use client::protocol::local_apps::AppBridgeOperationDto;
 #[cfg(test)]
-use client_protocol::local_apps::AppBridgeRequestDto;
+use client::protocol::local_apps::AppBridgeRequestDto;
 #[cfg(test)]
-use client_protocol::local_apps::ManagedLocalAppMcpStatusDto;
+use client::protocol::local_apps::ManagedLocalAppMcpStatusDto;
 #[cfg(test)]
 use dependency_integrity::clone_or_copy_tree;
 #[cfg(test)]

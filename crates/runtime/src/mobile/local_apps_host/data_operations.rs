@@ -1,7 +1,7 @@
 use super::authoring;
 use super::required_string;
 use super::LocalAppsHostBroker;
-use client_protocol::local_apps::AppCapabilityKindDto;
+use client::protocol::local_apps::AppCapabilityKindDto;
 use local_apps::load_manifest;
 use local_apps::AppCapability;
 use local_apps::AppDataStore;

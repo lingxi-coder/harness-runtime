@@ -254,10 +254,9 @@ pub async fn build_shared_credential_stack_with_policy(
     isolated_credential_storage: bool,
     credential_storage_policy: CredentialStoragePolicy,
 ) -> Result<SharedCredentialStack, BuildError> {
-    let http = Arc::new(
-        PosixHttp::new()
-            .with_monitor_proxy(Arc::new(sandbox_runtime_runner::MonitorProxyConnector)),
-    );
+    let http = Arc::new(PosixHttp::new().with_monitor_proxy(Arc::new(
+        crate::desktop::sandbox_runner::MonitorProxyConnector,
+    )));
     let clock = Arc::new(PosixClock::new());
     let credentials_path = lingxi_home.join(".credentials.json");
     // Only `NativePreferred` takes the ephemeral shortcut. `NativeOrMemory` is

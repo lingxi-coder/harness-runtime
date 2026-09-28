@@ -21,7 +21,7 @@ use super::MobileEngineError;
 #[derive(Clone)]
 pub struct MobileConfig {
     /// Host package identity used by `/version` (never part of the FFI DTO).
-    pub build_info: command_core::BuildInfo,
+    pub build_info: command_api::builtins::BuildInfo,
     /// API base URL (default `https://api.anthropic.com`).
     pub api_base: String,
     /// Anthropic API key. Empty string is valid — the orchestrator builds and
@@ -135,7 +135,7 @@ impl std::fmt::Debug for MobileConfig {
 impl Default for MobileConfig {
     fn default() -> Self {
         Self {
-            build_info: command_core::BuildInfo::default(),
+            build_info: command_api::builtins::BuildInfo::default(),
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             cwd: std::path::PathBuf::from("."),

@@ -16,8 +16,8 @@
 use super::{AgentOutputStream, BridgeFailure, LocalAppsHostBroker};
 use crate::mobile::local_apps_llm::{ChatMessage, ChatPart, ChatRequest, ChatRole};
 use base64::Engine as _;
-use client_protocol::events::ClientEvent;
-use client_protocol::local_apps::{AppCapabilityKindDto, AppEventDto};
+use client::protocol::events::ClientEvent;
+use client::protocol::local_apps::{AppCapabilityKindDto, AppEventDto};
 use futures_util::StreamExt;
 use llm_runtime::{ContentDelta, LlmEvent};
 use local_apps::AppCapability;
@@ -52,7 +52,7 @@ const CHAT_TIMEOUT: Duration = Duration::from_secs(120);
 struct LlmInflightGuard {
     app_id: String,
     slots: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    event_sink: std::sync::Arc<dyn client_adapter::ClientEventSink>,
+    event_sink: std::sync::Arc<dyn client::adapter::ClientEventSink>,
     armed: bool,
 }
 
@@ -529,9 +529,9 @@ mod tests {
     use crate::mobile::local_apps_profile::SharedLlm;
     use async_trait::async_trait;
     use base64::Engine as _;
-    use client_adapter::{ClientEventSink, MockSink};
-    use client_protocol::events::ClientEvent;
-    use client_protocol::local_apps::{
+    use client::adapter::{ClientEventSink, MockSink};
+    use client::protocol::events::ClientEvent;
+    use client::protocol::local_apps::{
         AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppEventDto,
     };
     use futures_util::stream;
@@ -1038,12 +1038,12 @@ mod tests {
                     event: AppEventDto::AppBridgeStreamFrame { frame, .. },
                 } => {
                     match frame {
-                        client_protocol::local_apps::AppBridgeStreamFrameDto::Data {
+                        client::protocol::local_apps::AppBridgeStreamFrameDto::Data {
                             seq,
                             data_json,
                             ..
                         } => data.push((seq, data_json)),
-                        client_protocol::local_apps::AppBridgeStreamFrameDto::Completed {
+                        client::protocol::local_apps::AppBridgeStreamFrameDto::Completed {
                             seq,
                             ..
                         } => completed_seq = Some(seq),

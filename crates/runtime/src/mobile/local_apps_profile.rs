@@ -3,8 +3,8 @@
 use crate::mobile::local_apps_host::LocalAppsHostBroker;
 use crate::mobile::local_apps_llm::LocalAppsLlm;
 use async_trait::async_trait;
-use client_adapter::ClientEventSink;
-use client_protocol::events::ClientEvent;
+use client::adapter::ClientEventSink;
+use client::protocol::events::ClientEvent;
 use local_apps::{AppError, AppEventFanout, AppService};
 use mobile_linux_api::MobileLinuxRuntime;
 use platform_api::Clock;

@@ -6,7 +6,7 @@
 
 use super::{BridgeFailure, LocalAppsHostBroker};
 use base64::Engine as _;
-use client_protocol::local_apps::AppCapabilityKindDto;
+use client::protocol::local_apps::AppCapabilityKindDto;
 use local_apps::AppCapability;
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};

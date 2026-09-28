@@ -200,6 +200,68 @@ fn guard_max_tokens_adjustment(
     }
 }
 
+/// Provider execution may have committed work before its response is lost.
+/// The host owns retries when using the SDK's single-dispatch interface, so it
+/// must preserve the SDK's no-replay boundary for hosted tools and scoped
+/// continuations. Apply it to every hosted tool, including future variants.
+/// Native execution history can resume work even without a tool declaration.
+fn allows_automatic_replay(request: &LlmRequest) -> bool {
+    request.hosted_tools.is_empty()
+        && request.continuation.is_none()
+        && request
+            .native_options
+            .iter()
+            .all(native_options_allow_replay)
+        && !request
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(|block| match block {
+                crate::ContentBlock::ServerToolUse { .. }
+                | crate::ContentBlock::AdvisorToolResult { .. } => true,
+                crate::ContentBlock::ProviderContent { value, .. } => {
+                    native_content_may_execute(value)
+                }
+                _ => false,
+            })
+}
+
+fn native_options_allow_replay(extension: &lingxi_llm_client::protocol::NativeExtension) -> bool {
+    use lingxi_llm_client::providers::anthropic::native::AnthropicRequestOptions;
+
+    // These options only declare tools executed by the host after a completed
+    // model response. Unknown extensions may carry provider-side container or
+    // conversation state, so they must not inherit ordinary chat's retry policy.
+    // Check raw keys too: a future SDK field must be reviewed before it becomes
+    // replayable merely because the typed decoder has learned to accept it.
+    extension
+        .data()
+        .as_object()
+        .is_some_and(|data| data.keys().all(|key| key == "client_toolsets"))
+        && extension.decode::<AnthropicRequestOptions>().is_ok()
+}
+
+fn native_content_may_execute(value: &serde_json::Value) -> bool {
+    match value.get("type").and_then(serde_json::Value::as_str) {
+        // These blocks preserve ordinary conversation state. Unknown native
+        // content stays conservative rather than silently enabling replay for
+        // a newly added server tool.
+        Some(
+            "lingxi_observation" | "text" | "thinking" | "redacted_thinking" | "reasoning"
+            | "chat_reasoning" | "tool_result",
+        ) => false,
+        Some("tool_use") => value.get("caller").is_some_and(|caller| {
+            !caller.is_null()
+                && caller.get("type").and_then(serde_json::Value::as_str) != Some("direct")
+        }),
+        Some("lingxi_replay_metadata") => value.get("block").is_none_or(native_content_may_execute),
+        // SDK replay companions can themselves contain a provider-native
+        // text/ reasoning block (for example cited Anthropic text).
+        Some("provider_content") => value.get("value").is_none_or(native_content_may_execute),
+        _ => true,
+    }
+}
+
 // ── Subscriber state ─────────────────────────────────────────────────────────
 
 /// Subscription flags — gates the 429 retry policy.
@@ -2236,6 +2298,7 @@ impl ApiService {
     /// | *(llm-runtime only)*    | `QuotaExceeded`                    | `"quota_exceeded"` |
     /// | *(llm-runtime only)*    | `ModelUnavailable`                 | `"model_unavailable"` |
     /// | *(llm-runtime only)*    | `CostUnavailable`                  | `"cost_unavailable"` |
+    /// | *(llm-runtime only)*    | `FileUploadOutcomeUnknown`         | `"file_upload_outcome_unknown"` |
     /// | *(llm-runtime only)*    | `UnsupportedCapability`            | `"unsupported_capability"` |
     fn error_kind(err: &LlmError) -> &'static str {
         match err {
@@ -2271,6 +2334,7 @@ impl ApiService {
             LlmError::QuotaExceeded => "quota_exceeded",
             LlmError::ModelUnavailable => "model_unavailable",
             LlmError::CostUnavailable { .. } => "cost_unavailable",
+            LlmError::FileUploadOutcomeUnknown { .. } => "file_upload_outcome_unknown",
             LlmError::MediaDelegationUnavailable { .. }
             | LlmError::MediaDelegationPartial { .. } => "media_delegation_unavailable",
             LlmError::UnsupportedCapability { .. } => "unsupported_capability",
@@ -2790,6 +2854,7 @@ impl ApiService {
             | LlmError::StreamInterrupted { .. }
             | LlmError::MalformedToolInput { .. }
             | LlmError::CostUnavailable { .. }
+            | LlmError::FileUploadOutcomeUnknown { .. }
             | LlmError::UnsupportedCapability { .. }
             | LlmError::MediaDelegationUnavailable { .. }
             | LlmError::MediaDelegationPartial { .. } => None,
@@ -2842,8 +2907,27 @@ impl ApiService {
     /// each [`DriveStep::Fallback`] the loop advances `chain_idx` and rebuilds
     /// `retry_control` with `chain[chain_idx]` (or disables fallback when
     /// exhausted).
+    // Keep the provider/retry state machine on the heap so every public wrapper
+    // does not embed and move its full future on the caller's stack.
+    fn drive_non_stream_seeded_with_chain<'a>(
+        &'a self,
+        req: LlmRequest,
+        retry_control: RetryControl,
+        initial_consecutive_overloaded: u8,
+        chain: &'a [String],
+        dispatch: DispatchHeaderState,
+    ) -> crate::BoxFuture<'a, Result<LlmResponse, LlmError>> {
+        Box::pin(self.drive_non_stream_inner(
+            req,
+            retry_control,
+            initial_consecutive_overloaded,
+            chain,
+            dispatch,
+        ))
+    }
+
     #[allow(clippy::too_many_lines)]
-    async fn drive_non_stream_seeded_with_chain(
+    async fn drive_non_stream_inner(
         &self,
         mut req: LlmRequest,
         mut retry_control: RetryControl,
@@ -2853,6 +2937,7 @@ impl ApiService {
     ) -> Result<LlmResponse, LlmError> {
         let request_id = new_request_id();
         let started = Instant::now();
+        let allow_replay = allows_automatic_replay(&req);
         // Sibling connections of this model's provider group, captured from the
         // FIRST prepare: once `req.profile` is pinned to one connection a later
         // resolve sees only that one, so the remaining hops must be held here.
@@ -2952,6 +3037,17 @@ impl ApiService {
             match resp_result {
                 Err(transport_err) => {
                     attempt.finish().await?;
+                    if !allow_replay {
+                        telemetry::emit_failed(
+                            &self.analytics,
+                            &req.model,
+                            &request_id,
+                            Self::error_kind(&transport_err),
+                            Self::status_of(&transport_err),
+                        )
+                        .await;
+                        return Err(transport_err);
+                    }
                     // (cc 2.1.219) dispatch-header degradation: a connection
                     // error on an attempt that carried anthropic-dispatch-id
                     // strips it for the rest of this query and retries
@@ -3126,6 +3222,21 @@ impl ApiService {
                                 decode_err.clone()
                             };
 
+                            if !allow_replay {
+                                if matches!(decode_err, LlmError::RateLimited { .. }) {
+                                    self.promote_pending_429();
+                                }
+                                telemetry::emit_failed(
+                                    &self.analytics,
+                                    &req.model,
+                                    &request_id,
+                                    Self::error_kind(&decode_err),
+                                    Self::status_of(&decode_err),
+                                )
+                                .await;
+                                return Err(decode_err);
+                            }
+
                             // 2.1.198 `V_c`/`G_c`/`s_f` + `Ygf`: an AWS-auth
                             // failure (401/403) on the Bedrock provider runs
                             // the awsAuthRefresh flow (`ZBd`) and retries,
@@ -3166,9 +3277,9 @@ impl ApiService {
                                 && Self::is_fast_mode_not_enabled(&decode_err)
                             {
                                 tracing::info!(
-                                    event = "fast_mode_disabled_retry",
-                                    "fast mode not enabled for this account/model; disabling and retrying"
-                                );
+                                event = "fast_mode_disabled_retry",
+                                "fast mode not enabled for this account/model; disabling and retrying"
+                            );
                                 req.speed = None;
                                 continue;
                             }
@@ -3750,12 +3861,8 @@ impl ApiService {
         tools: Vec<serde_json::Value>,
     ) -> Result<u64, LlmError> {
         let req = self.build_request(model, profile, system, messages, tools, false, None)?;
-        crate::model::count_tokens::count_tokens(
-            self.client.as_ref(),
-            self.transport.as_ref(),
-            &req,
-        )
-        .await
+        crate::model::count_tokens::count_tokens(self.client.as_ref(), self.transport.clone(), &req)
+            .await
     }
 
     /// Return an exact provider token count when the resolved route supports
@@ -3773,7 +3880,7 @@ impl ApiService {
         let req = self.build_request(model, profile, system, messages, tools, false, None)?;
         crate::model::count_tokens::try_count_tokens_exact(
             self.client.as_ref(),
-            self.transport.as_ref(),
+            self.transport.clone(),
             &req,
         )
         .await
@@ -3861,7 +3968,7 @@ impl ApiService {
         request.stream = true;
         let mut session = self.responses_ws_session.lock().await;
         self.client
-            .preconnect_websocket(&request, self.transport.as_ref(), &mut session)
+            .preconnect_websocket(&request, self.transport.clone(), &mut session)
             .await
     }
 
@@ -3901,7 +4008,7 @@ impl ApiService {
         self.inject_stream_headers(&mut prepared, &request_id, DispatchHeaderState::default());
         let mut session = self.responses_ws_session.lock().await;
         self.client
-            .prewarm_prepared_websocket(prepared, self.transport.as_ref(), &mut session)
+            .prewarm_prepared_websocket(prepared, self.transport.clone(), &mut session)
             .await
     }
 
@@ -3928,12 +4035,23 @@ impl ApiService {
     /// branch below reads `streaming.headers` and calls `resolve_retry_after`
     /// just as the non-stream path does, so 429+`retry-after` delays are
     /// honoured on the streaming path.
+    // The streaming driver owns the same large provider lifecycle as the
+    // non-stream driver; bound its callers' futures at the same layer.
+    fn drive_stream(
+        &self,
+        req: LlmRequest,
+    ) -> crate::BoxFuture<'_, Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError>>
+    {
+        Box::pin(self.drive_stream_inner(req))
+    }
+
     #[allow(clippy::too_many_lines)]
-    async fn drive_stream(
+    async fn drive_stream_inner(
         &self,
         mut req: LlmRequest,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         let request_id = new_request_id();
+        let allow_replay = allows_automatic_replay(&req);
         telemetry::emit_started(&self.analytics, &req.model, &request_id, true).await;
         if let Some(query_source) = req.query_source.as_deref() {
             telemetry::emit_query_source(&self.analytics, &req.model, query_source).await;
@@ -4060,6 +4178,17 @@ impl ApiService {
             match opened {
                 Err(transport_err) => {
                     attempt.finish().await?;
+                    if !allow_replay {
+                        telemetry::emit_failed(
+                            &self.analytics,
+                            &req.model,
+                            &request_id,
+                            Self::error_kind(&transport_err),
+                            Self::status_of(&transport_err),
+                        )
+                        .await;
+                        return Err(transport_err);
+                    }
                     // The oracle permits one `StreamNoResponse` retry across the
                     // whole request, then terminates before generic retry logic.
                     // On the first occurrence it still flows through dispatch
@@ -4174,6 +4303,21 @@ impl ApiService {
                             decode_err.clone()
                         };
 
+                        if !allow_replay {
+                            if matches!(decode_err, LlmError::RateLimited { .. }) {
+                                self.promote_pending_429();
+                            }
+                            telemetry::emit_failed(
+                                &self.analytics,
+                                &req.model,
+                                &request_id,
+                                Self::error_kind(&decode_err),
+                                Self::status_of(&decode_err),
+                            )
+                            .await;
+                            return Err(decode_err);
+                        }
+
                         // 2.1.198 `V_c`/`G_c`/`s_f` + `Ygf` — stream connect
                         // twin of the non-stream AWS auth-refresh hook (see
                         // `drive_non_stream_seeded_with_chain`).
@@ -4199,9 +4343,9 @@ impl ApiService {
                             && Self::is_fast_mode_not_enabled(&decode_err)
                         {
                             tracing::info!(
-                                event = "fast_mode_disabled_retry",
-                                "fast mode not enabled for this account/model; disabling and retrying (stream)"
-                            );
+                            event = "fast_mode_disabled_retry",
+                            "fast mode not enabled for this account/model; disabling and retrying (stream)"
+                        );
                             req.speed = None;
                             continue;
                         }
@@ -4333,7 +4477,7 @@ impl ApiService {
                     // seeded back into the unfold so decoding is unchanged.
                     let mut seed: Option<Result<Option<lingxi_llm_client::StreamBatch>, LlmError>> =
                         None;
-                    if attempt_carried_dispatch {
+                    if attempt_carried_dispatch && allow_replay {
                         let first = match stream_idle_timeout {
                             Some(t) => {
                                 // Wall clock across the same wait the monotonic
@@ -5074,3 +5218,7 @@ fn new_request_id() -> String {
 #[cfg(test)]
 #[path = "service_test.rs"]
 mod service_test;
+
+#[cfg(test)]
+#[path = "service_hosted_retry_test.rs"]
+mod service_hosted_retry_test;

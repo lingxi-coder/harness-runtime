@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 protocol = { path = "../protocol" }
-client-protocol = { path = "../client-protocol" }
+client = { path = "../client" }
 platform-api = { path = "../platform-api" }
 branding.workspace = true
 secret = { path = "../secret" }

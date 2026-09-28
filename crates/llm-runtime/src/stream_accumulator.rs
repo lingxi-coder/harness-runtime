@@ -529,6 +529,14 @@ pub async fn accumulate_stream_salvaging(
                 match acc.stop_block(index) {
                     Ok(block) => {
                         if let Some(block) = block.into_content_block() {
+                            if let ContentBlock::ProviderContent { value, .. } = &block {
+                                if value["type"] == "lingxi_observation" {
+                                    if let Some(metadata) = value.get("metadata") {
+                                        provider_metadata = metadata.clone();
+                                    }
+                                    continue;
+                                }
+                            }
                             let key = crate::stream_content_order(index);
                             let position =
                                 content_indices.partition_point(|existing| existing <= &key);
@@ -559,6 +567,9 @@ pub async fn accumulate_stream_salvaging(
                     stop_reason = Some(sr);
                 }
                 if let Some(mut u) = delta_usage {
+                    if let Some(metadata) = u.provider_metadata.get("stream") {
+                        provider_metadata = metadata.clone();
+                    }
                     if let Some(estimate) = u.cost_estimate.take() {
                         cost = Some(estimate);
                     }
@@ -728,6 +739,35 @@ mod tests {
                 provider_metadata: Value::Null,
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn host_observations_update_response_metadata_without_token_usage() {
+        let metadata = serde_json::json!({"llm_client":{"web_search":[{"citations":[{"url":"https://example.com"}]}]}});
+        let response = accumulate_stream(boxed(vec![
+            message_start("m", "model"),
+            LlmEvent::ContentBlockStart {
+                index: u32::MAX,
+                content_block: ContentBlock::ProviderContent {
+                    protocol: "open_ai_responses".into(),
+                    value: serde_json::json!({"type":"lingxi_observation","metadata":metadata}),
+                },
+            },
+            LlmEvent::ContentBlockStop { index: u32::MAX },
+            LlmEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some("end_turn".into()),
+                    stop_details: None,
+                },
+                usage: None,
+            },
+            LlmEvent::MessageStop,
+        ]))
+        .await
+        .unwrap();
+        assert_eq!(response.provider_metadata, metadata);
+        assert_eq!(response.usage, Usage::default());
+        assert!(response.content.is_empty());
     }
 
     #[tokio::test]

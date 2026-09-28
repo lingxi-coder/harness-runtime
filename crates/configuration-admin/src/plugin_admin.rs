@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::settings_bridge::{apply_patch, build_snapshot, SettingsContext};
-use client_protocol::commands::WritableScopeDto;
+use client::protocol::commands::WritableScopeDto;
 
 #[derive(Debug, Serialize)]
 struct InstalledPluginRow {

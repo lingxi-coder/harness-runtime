@@ -59,6 +59,7 @@ pub mod retry;
 pub mod route;
 #[allow(missing_docs)]
 pub mod service;
+pub mod services;
 pub mod sigv4;
 pub mod ssl;
 pub mod stream_accumulator;
@@ -106,6 +107,10 @@ pub use error::{
 };
 pub use fusion_hints::hints_for;
 pub use lingxi_llm_client::framing::eventstream::{crc32, EventStreamMessage, EventStreamSplitter};
+pub use lingxi_llm_client::protocol::{
+    ContinuationRef, HostedTool, NativeExtension, NativeType, OutputFormat, PromptCachePolicy,
+    WebSearchConfig,
+};
 pub use lingxi_llm_client::SseFrameSplitter;
 pub use model_attempt::{
     ModelAttemptHooks, ModelAttemptLease, ModelAttemptSettlement, ModelAttemptUsageCompleteness,
@@ -137,6 +142,7 @@ pub use registry::{ConnectionHop, MediaRoute, ModelListing, ModelRegistry, Resol
 pub use retry::{ResponseMetadata, RetryDecision, RetryPolicy};
 pub use route::Route;
 pub use service::{ApiService, RetryInfo, RetryReporter, SubscriberState};
+pub use services::{ProviderServiceSnapshot, ProviderServices};
 pub use ssl::{detect_ssl_code, is_ssl_code, ssl_hint};
 pub use transport::{
     BoxFuture, FrameStream, ResponsesWebSocketTransportSession, StreamingResponse, Transport,

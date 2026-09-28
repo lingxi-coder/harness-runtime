@@ -7,7 +7,7 @@
 
 use super::LocalAppsHostBroker;
 use crate::mobile::host::LocalAppBackgroundRunDto;
-use client_protocol::local_apps::{AppCapabilityKindDto, AppEventDto};
+use client::protocol::local_apps::{AppCapabilityKindDto, AppEventDto};
 use local_apps::{AppCapability, BackgroundTaskStatus, CapabilityId};
 use serde_json::{json, Map, Value};
 use std::time::Duration;
@@ -311,7 +311,7 @@ impl LocalAppsHostBroker {
 
     pub(crate) async fn emit_background_task_changed(&self, outcome: &LocalAppBackgroundRunDto) {
         self.event_sink
-            .emit(client_protocol::events::ClientEvent::AppEvent {
+            .emit(client::protocol::events::ClientEvent::AppEvent {
                 event: AppEventDto::AppBackgroundTaskChanged {
                     app_id: outcome.app_id.clone(),
                     task_id: outcome.task_id.clone(),
@@ -1139,8 +1139,8 @@ mod tests {
     use super::*;
     use crate::mobile::local_apps_mcp::LocalAppsMcpHost;
     use async_trait::async_trait;
-    use client_adapter::ClientEventSink;
-    use client_protocol::events::ClientEvent;
+    use client::adapter::ClientEventSink;
+    use client::protocol::events::ClientEvent;
     use local_apps::test_support::FixedClock;
     use local_apps::{
         AppService, BackgroundJournalEntry, BackgroundTaskRecord, BackgroundTrigger,

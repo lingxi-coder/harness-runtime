@@ -25,8 +25,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use client_adapter::ClientEventListener;
-use client_protocol::events::ClientEvent;
+use client::adapter::ClientEventListener;
+use client::protocol::events::ClientEvent;
 use local_apps::{sha256_hex, AppAuthoringSpec};
 use serde::Deserialize;
 
@@ -235,7 +235,7 @@ impl ClientEventListener for PlanApprovalWatcher {
         origin_session_id: String,
         task_id: String,
         run_id: String,
-        progress: client_protocol::listings::WorkflowProgressDto,
+        progress: client::protocol::listings::WorkflowProgressDto,
     ) {
         self.inner
             .on_workflow_progress(origin_session_id, task_id, run_id, progress)

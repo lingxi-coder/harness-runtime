@@ -57,6 +57,23 @@ struct ArcTransport(Arc<dyn HttpTransport>);
 
 #[async_trait]
 impl HttpTransport for ArcTransport {
+    async fn send_stream(
+        &self,
+        req: platform_api::http::HttpStreamRequest,
+    ) -> Result<platform_api::http::RawByteStreamWithMeta, HttpError> {
+        self.0.send_stream(req).await
+    }
+
+    async fn stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(
+        &self,
+        req: HttpRequest,
+        resolved: Option<platform_api::ResolvedAddressOverride>,
+    ) -> Result<platform_api::http::RawByteStreamWithMeta, HttpError> {
+        self.0
+            .stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(req, resolved)
+            .await
+    }
+
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
         self.0.request(req).await
     }
@@ -506,7 +523,7 @@ impl SideQueryClient for ProviderSideQueryClient {
         let arc_transport = ArcTransport(Arc::clone(transport));
         let bridge = LlmTransportBridge::new(arc_transport);
 
-        let resp = client.execute(&llm_req, &bridge).await?;
+        let resp = client.execute(&llm_req, Arc::new(bridge)).await?;
 
         Ok(decode_response(
             resp,
@@ -604,7 +621,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                 let arc_transport = ArcTransport(Arc::clone(transport));
                 let bridge = LlmTransportBridge::new(arc_transport);
                 client
-                    .execute(&llm_req, &bridge)
+                    .execute(&llm_req, Arc::new(bridge))
                     .await
                     .map_err(map_structured_llm_error)?
             }

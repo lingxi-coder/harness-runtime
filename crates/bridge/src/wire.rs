@@ -10,11 +10,11 @@
 //! public types are re-exported at the crate root, so consumers write
 //! `bridge::ServerHello` regardless.
 
-use client_protocol::audio::AudioCapabilitySnapshotDto;
-use client_protocol::computer_access::ComputerAccessRequestDto;
-use client_protocol::events::ClientEvent;
-use client_protocol::permission::PermissionRequest;
-use client_protocol::version::CLIENT_PROTOCOL_VERSION;
+use client::protocol::audio::AudioCapabilitySnapshotDto;
+use client::protocol::computer_access::ComputerAccessRequestDto;
+use client::protocol::events::ClientEvent;
+use client::protocol::permission::PermissionRequest;
+use client::protocol::version::CLIENT_PROTOCOL_VERSION;
 use serde::{Deserialize, Serialize};
 
 /// Bridge wire-protocol version this build speaks.
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped `0.1.0` → `0.2.0` in M10-F2 for the server-push event [`Frame`] and
 /// the `client_protocol_version` carry on [`Capabilities`]. This is the
 /// **envelope** version (framing/handshake), distinct from the contract-level
-/// [`client_protocol::version::CLIENT_PROTOCOL_VERSION`] exchanged independently
+/// [`client::protocol::version::CLIENT_PROTOCOL_VERSION`] exchanged independently
 /// inside [`Capabilities`] (governing decision §0.10).
 pub const BRIDGE_PROTOCOL_VERSION: &str = "0.2.0";
 
@@ -39,7 +39,7 @@ pub struct Capabilities {
     /// Endpoint exposes the slash-command surface.
     pub supports_commands: bool,
     /// The `client-protocol` DTO contract version this endpoint speaks
-    /// (`client_protocol::version::CLIENT_PROTOCOL_VERSION`). Exchanged
+    /// (`client::protocol::version::CLIENT_PROTOCOL_VERSION`). Exchanged
     /// INDEPENDENTLY of [`BRIDGE_PROTOCOL_VERSION`]: the wire envelope and the
     /// DTO contract are versioned separately (governing decision §0.10).
     pub client_protocol_version: String,
@@ -74,7 +74,7 @@ impl Default for Capabilities {
 /// This is applied INDEPENDENTLY to both versioned numbers exchanged in the
 /// handshake — [`BRIDGE_PROTOCOL_VERSION`] (the wire envelope, carried on
 /// [`ClientHello::protocol_version`]) and
-/// [`client_protocol::version::CLIENT_PROTOCOL_VERSION`] (the DTO contract,
+/// [`client::protocol::version::CLIENT_PROTOCOL_VERSION`] (the DTO contract,
 /// carried on [`Capabilities::client_protocol_version`]) — and a mismatch in
 /// EITHER refuses the connection.
 ///
@@ -176,7 +176,7 @@ pub struct AuthResponse {
 /// that third arm:
 ///
 /// - [`Frame::Request`] — a client→server command. `params` is a
-///   [`client_protocol::commands::ClientCommand`] serialized as JSON; `id`
+///   [`client::protocol::commands::ClientCommand`] serialized as JSON; `id`
 ///   correlates the matching [`Frame::Response`].
 /// - [`Frame::Response`] — the server→client reply to a request, echoing its
 ///   `id`. `result` is a [`ClientEvent`]/reply payload as JSON.
@@ -185,7 +185,7 @@ pub struct AuthResponse {
 ///   are not correlated to any request.
 /// - [`Frame::PermissionRequest`] — an UNSOLICITED server→client
 ///   [`PermissionRequest`] push (F2-06). [`PermissionRequest`] is a STANDALONE
-///   frozen DTO in [`client_protocol::permission`], NOT a [`ClientEvent`]
+///   frozen DTO in [`client::protocol::permission`], NOT a [`ClientEvent`]
 ///   variant, so it cannot ride on [`Frame::Event`]. It gets its own arm here
 ///   (additive — the enum is `#[non_exhaustive]`, so no `client-protocol`
 ///   snapshot changes). Like an event it carries **no** envelope `id`; the inner

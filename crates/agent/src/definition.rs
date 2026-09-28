@@ -327,7 +327,7 @@ fn parse_effort_from_string(value: &str) -> Option<AgentEffort> {
 /// JS-`parseInt(str, 10)` semantics: skip leading whitespace, take an optional
 /// `+`/`-`, then consume leading ASCII digits; ignore any trailing garbage;
 /// return `None` (NaN) when no digits are found.
-fn parse_int_radix10(s: &str) -> Option<i64> {
+pub(crate) fn parse_int_radix10(s: &str) -> Option<i64> {
     let t = s.trim_start();
     let mut chars = t.chars().peekable();
     let mut out = String::new();

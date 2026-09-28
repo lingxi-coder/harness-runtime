@@ -174,7 +174,7 @@ fn assert_only_real_local_app_tool_tokens(text: &str, label: &str) {
     );
 }
 use async_trait::async_trait;
-use client_adapter::{ClientEventSink, MockSink};
+use client::adapter::{ClientEventSink, MockSink};
 use futures_util::stream;
 use local_apps::test_support::FixedClock;
 use local_apps::{storage, AppState, NoopAppEventObserver};
@@ -3161,7 +3161,7 @@ async fn a_pending_native_approval_is_re_announced_verbatim_to_a_reattaching_cli
     // back" is checked on the wire content, not on a count alone.
     let event = |request_id: &str| AppEventDto::LocalAppOperationFailed {
         app_id: Some("app-reattach".into()),
-        code: client_protocol::local_apps::LocalAppPluginErrorCodeDto::PluginDisabled,
+        code: client::protocol::local_apps::LocalAppPluginErrorCodeDto::PluginDisabled,
         message: "r3-failure-paths-02 fixture event; only its request_id is under test".into(),
         request_id: Some(request_id.to_string()),
     };
@@ -6840,7 +6840,7 @@ async fn a_refused_native_create_approval_cleans_up_the_candidate_state() {
 fn dummy_native_approval_event() -> AppEventDto {
     AppEventDto::LocalAppOperationFailed {
         app_id: None,
-        code: client_protocol::local_apps::LocalAppPluginErrorCodeDto::PluginDisabled,
+        code: client::protocol::local_apps::LocalAppPluginErrorCodeDto::PluginDisabled,
         message: "r4-tests-honesty-05 fixture event; content is not under test".into(),
         request_id: None,
     }

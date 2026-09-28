@@ -40,7 +40,7 @@ use crate::env::{encode_sandboxed_command, Platform};
 use crate::fs_args::{ReadConfig, WriteConfig};
 use crate::path_utils::{
     contains_glob_chars, get_dangerous_directories, glob_to_regex, normalize_path_for_sandbox,
-    DANGEROUS_FILES,
+    posix_dirname, DANGEROUS_FILES,
 };
 
 /// Per-process random session suffix `_<9 base36 chars>_SBX`, mirroring the TS
@@ -92,16 +92,6 @@ pub fn generate_log_tag(command: &str) -> String {
 pub fn escape_path(path_str: &str) -> String {
     // serde_json::to_string on a &str never fails.
     serde_json::to_string(path_str).unwrap_or_else(|_| format!("\"{path_str}\""))
-}
-
-/// POSIX `path.dirname` (local copy; the `path_utils` one is private).
-fn posix_dirname(p: &str) -> String {
-    let normalized = p.trim_end_matches('/');
-    match normalized.rfind('/') {
-        None => ".".to_string(),
-        Some(0) => "/".to_string(),
-        Some(idx) => normalized[..idx].to_string(),
-    }
 }
 
 /// POSIX `path.resolve(cwd, p)` where `cwd` is absolute (local copy mirroring

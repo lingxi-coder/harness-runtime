@@ -7,6 +7,7 @@
 //! - Overwrite is allowed unconditionally.
 //! - Content is UTF-8; no BOM is written.
 
+use crate::structured_patch::count_patch_lines;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -579,21 +580,6 @@ impl Tool for FileWriteTool {
             mcp_meta: None,
         })
     }
-}
-
-fn count_patch_lines(hunks: &[crate::structured_patch::StructuredPatchHunk]) -> (u64, u64) {
-    let mut added = 0_u64;
-    let mut removed = 0_u64;
-    for hunk in hunks {
-        for line in &hunk.lines {
-            if line.starts_with('+') {
-                added += 1;
-            } else if line.starts_with('-') {
-                removed += 1;
-            }
-        }
-    }
-    (added, removed)
 }
 
 #[cfg(test)]

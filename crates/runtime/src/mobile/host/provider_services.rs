@@ -1,4 +1,4 @@
-use client_protocol::listings::{ModelDetailsDto, ProviderModelCatalogEntryDto};
+use client::protocol::listings::{ModelDetailsDto, ProviderModelCatalogEntryDto};
 use llm_runtime::oauth::anthropic::handle::OAuthHandle;
 use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
 use llm_runtime::oauth::openai as openai_oauth;
@@ -135,7 +135,7 @@ pub(super) fn provider_model_catalog_from_listings(
 ) -> Vec<ProviderModelCatalogEntryDto> {
     platform_api::provider_model_catalog(listings)
         .iter()
-        .map(client_adapter::lowering::lower_provider_model_catalog_entry)
+        .map(client::adapter::lowering::lower_provider_model_catalog_entry)
         .collect()
 }
 
@@ -971,13 +971,13 @@ pub(super) fn apply_mobile_profile_allowlist(
 /// Android cannot drift).
 pub(super) fn lower_auth_state(
     info: Option<platform_api::auth::LoginInfo>,
-) -> client_protocol::listings::AuthStateDto {
+) -> client::protocol::listings::AuthStateDto {
     match info {
-        Some(li) => client_protocol::listings::AuthStateDto::SignedIn {
+        Some(li) => client::protocol::listings::AuthStateDto::SignedIn {
             email: li.email,
             org_id: li.org_id,
         },
-        None => client_protocol::listings::AuthStateDto::SignedOut,
+        None => client::protocol::listings::AuthStateDto::SignedOut,
     }
 }
 

@@ -9,8 +9,8 @@
 
 use super::{BridgeFailure, LocalAppsHostBroker};
 use async_trait::async_trait;
-use client_protocol::events::ClientEvent;
-use client_protocol::local_apps::{AppAgentProfileProposalDto, AppCapabilityKindDto, AppEventDto};
+use client::protocol::events::ClientEvent;
+use client::protocol::local_apps::{AppAgentProfileProposalDto, AppCapabilityKindDto, AppEventDto};
 use local_apps::mailbox::{load_mailbox, save_mailbox};
 use local_apps::{
     AgentBudget, AgentSessionRecord, AgentSessionStatus, AppAgentProfile, AppAgentProfileProposal,
@@ -106,7 +106,7 @@ impl AgentTurnControl {
 /// Output adapter for the app Agent stream contract. It also collects the
 /// final text so `agent.send` can use the same executor as `agent.stream`.
 pub(crate) struct AgentOutputStream {
-    event_sink: Arc<dyn client_adapter::ClientEventSink>,
+    event_sink: Arc<dyn client::adapter::ClientEventSink>,
     app_id: String,
     request_id: String,
     stream_id: Option<String>,
@@ -119,7 +119,7 @@ pub(crate) struct AgentOutputStream {
 
 impl AgentOutputStream {
     pub(crate) fn new(
-        event_sink: Arc<dyn client_adapter::ClientEventSink>,
+        event_sink: Arc<dyn client::adapter::ClientEventSink>,
         app_id: &str,
         request_id: &str,
         stream_id: Option<String>,
@@ -128,7 +128,7 @@ impl AgentOutputStream {
     }
 
     pub(crate) fn with_budget(
-        event_sink: Arc<dyn client_adapter::ClientEventSink>,
+        event_sink: Arc<dyn client::adapter::ClientEventSink>,
         app_id: &str,
         request_id: &str,
         stream_id: Option<String>,
@@ -148,7 +148,7 @@ impl AgentOutputStream {
         }
     }
 
-    async fn emit_frame(&self, frame: client_protocol::local_apps::AppBridgeStreamFrameDto) {
+    async fn emit_frame(&self, frame: client::protocol::local_apps::AppBridgeStreamFrameDto) {
         let frame_json = serde_json::to_string(&frame).unwrap_or_else(|_| "{}".into());
         self.event_sink
             .emit(ClientEvent::AppEvent {
@@ -162,7 +162,7 @@ impl AgentOutputStream {
             return;
         };
         self.emit_frame(
-            client_protocol::local_apps::AppBridgeStreamFrameDto::Started {
+            client::protocol::local_apps::AppBridgeStreamFrameDto::Started {
                 app_id: self.app_id.clone(),
                 request_id: self.request_id.clone(),
                 stream_id: stream_id.clone(),
@@ -177,7 +177,7 @@ impl AgentOutputStream {
         };
         let seq = self.next_seq.load(Ordering::Relaxed);
         self.emit_frame(
-            client_protocol::local_apps::AppBridgeStreamFrameDto::Completed {
+            client::protocol::local_apps::AppBridgeStreamFrameDto::Completed {
                 app_id: self.app_id.clone(),
                 request_id: self.request_id.clone(),
                 stream_id: stream_id.clone(),
@@ -193,7 +193,7 @@ impl AgentOutputStream {
         };
         let seq = self.next_seq.load(Ordering::Relaxed);
         self.emit_frame(
-            client_protocol::local_apps::AppBridgeStreamFrameDto::Cancelled {
+            client::protocol::local_apps::AppBridgeStreamFrameDto::Cancelled {
                 app_id: self.app_id.clone(),
                 request_id: self.request_id.clone(),
                 stream_id: stream_id.clone(),
@@ -210,7 +210,7 @@ impl AgentOutputStream {
         };
         let seq = self.next_seq.load(Ordering::Relaxed);
         self.emit_frame(
-            client_protocol::local_apps::AppBridgeStreamFrameDto::Error {
+            client::protocol::local_apps::AppBridgeStreamFrameDto::Error {
                 app_id: self.app_id.clone(),
                 request_id: self.request_id.clone(),
                 stream_id: stream_id.clone(),
@@ -275,13 +275,15 @@ impl OutputStream for AgentOutputStream {
             return;
         };
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        self.emit_frame(client_protocol::local_apps::AppBridgeStreamFrameDto::Data {
-            app_id: self.app_id.clone(),
-            request_id: self.request_id.clone(),
-            stream_id: stream_id.clone(),
-            seq,
-            data_json: serde_json::json!({"text": text}).to_string(),
-        })
+        self.emit_frame(
+            client::protocol::local_apps::AppBridgeStreamFrameDto::Data {
+                app_id: self.app_id.clone(),
+                request_id: self.request_id.clone(),
+                stream_id: stream_id.clone(),
+                seq,
+                data_json: serde_json::json!({"text": text}).to_string(),
+            },
+        )
         .await;
     }
 
@@ -1099,9 +1101,9 @@ mod tests {
     use super::{update_agent_session_after_turn, AgentOutputStream, LocalAppsAgentExecutor};
     use crate::mobile::local_apps_host::LocalAppsHostBroker;
     use async_trait::async_trait;
-    use client_adapter::{ClientEventSink, MockSink};
-    use client_protocol::events::ClientEvent;
-    use client_protocol::local_apps::{
+    use client::adapter::{ClientEventSink, MockSink};
+    use client::protocol::events::ClientEvent;
+    use client::protocol::local_apps::{
         AppBridgeOperationDto, AppBridgeRequestDto, AppEventDto, AppUiActionKindDto,
         AppUiRequestDto,
     };
@@ -1663,13 +1665,13 @@ mod tests {
         assert_eq!(frames.len(), 3);
         assert!(matches!(
             frames[0].0,
-            client_protocol::local_apps::AppBridgeStreamFrameDto::Started { .. }
+            client::protocol::local_apps::AppBridgeStreamFrameDto::Started { .. }
         ));
         assert!(frames[1].1.contains("dataJson"));
         assert!(!frames[1].1.contains("data_json"));
         assert!(matches!(
             frames[2].0,
-            client_protocol::local_apps::AppBridgeStreamFrameDto::Completed { seq: 1, .. }
+            client::protocol::local_apps::AppBridgeStreamFrameDto::Completed { seq: 1, .. }
         ));
     }
 

@@ -486,7 +486,10 @@ fn response_format_json_object_encodes_text_format() {
 
 #[test]
 fn response_format_json_schema_encodes_text_format() {
-    let schema = serde_json::json!({"type": "object", "properties": {"x": {"type": "string"}}});
+    let schema = serde_json::json!({
+        "type": "object", "properties": {"x": {"type": "string"}},
+        "required": ["x"], "additionalProperties": false
+    });
     let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
     request.response_format = Some(llm_runtime::ResponseFormat::JsonSchema {
         schema: schema.clone(),
@@ -878,18 +881,35 @@ fn encrypted_reasoning_without_summary_survives_replay() {
 }
 
 #[test]
-fn decode_response_unknown_output_items_are_skipped() {
+fn decode_response_preserves_hosted_and_unknown_output_items() {
+    let web_search = serde_json::json!({
+        "type": "web_search_call", "id": "ws_1", "status": "completed"
+    });
+    let future_output = serde_json::json!({
+        "type": "future_provider_item", "id": "native_1", "result": {"value": 42}
+    });
     let decoded = decode(completed_body(&serde_json::json!([
-        {"type": "web_search_call", "id": "ws_1", "status": "completed"},
+        web_search.clone(),
+        future_output.clone(),
         {"type": "message", "role": "assistant",
          "content": [{"type": "output_text", "text": "hi"}]},
     ])));
     assert_eq!(
         decoded.content,
-        vec![ContentBlock::Text {
-            text: "hi".to_string(),
-            cache_control: None
-        }]
+        vec![
+            ContentBlock::ProviderContent {
+                protocol: "open_ai_responses".into(),
+                value: web_search,
+            },
+            ContentBlock::ProviderContent {
+                protocol: "open_ai_responses".into(),
+                value: future_output,
+            },
+            ContentBlock::Text {
+                text: "hi".to_string(),
+                cache_control: None,
+            },
+        ]
     );
 }
 

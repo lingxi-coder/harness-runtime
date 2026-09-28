@@ -23,6 +23,8 @@ jobs:
           - partial_write_settings_json          # M3-01 loader half-written file
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Run chaos scenario ${{ matrix.scenario }}
         run: |

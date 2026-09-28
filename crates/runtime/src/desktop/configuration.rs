@@ -296,7 +296,7 @@ impl Default for DesktopEngineConfig {
 #[derive(Clone)]
 pub struct DesktopConfig {
     /// Host package identity used by `/version`.
-    pub build_info: command_core::BuildInfo,
+    pub build_info: command_api::builtins::BuildInfo,
     /// Whether this runtime owns versioned automation dispatch. CLI defaults to
     /// true; desktop hosts enable it only for their persistent scope controller.
     pub enable_automation_scheduler: bool,
@@ -1036,7 +1036,7 @@ impl std::fmt::Debug for DesktopConfig {
 impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
-            build_info: command_core::BuildInfo::default(),
+            build_info: command_api::builtins::BuildInfo::default(),
             enable_automation_scheduler: true,
             host_workspace_trusted: None,
             api_base: "https://api.anthropic.com".to_string(),

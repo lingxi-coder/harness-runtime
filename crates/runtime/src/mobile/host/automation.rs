@@ -1,8 +1,8 @@
 use crate::mobile::local_apps_host::canonical_cwd_string;
 use async_trait::async_trait;
-use client_adapter::{ClientEventListener, PermissionRequestSink};
-use client_protocol::events::ClientEvent;
-use client_protocol::permission::{
+use client::adapter::{ClientEventListener, PermissionRequestSink};
+use client::protocol::events::ClientEvent;
+use client::protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
 use platform_api::{Clock, FileSystem, OrchestratorHandle, Platform};

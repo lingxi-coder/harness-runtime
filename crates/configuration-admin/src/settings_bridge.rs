@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use client_protocol::commands::WritableScopeDto;
+use client::protocol::commands::WritableScopeDto;
 use lingxi_core::settings::env_parser;
 use lingxi_core::settings::merger::merge_raw_layer;
 use migrations::settings_update::{read_settings_map, settings_path, WritableScope};
@@ -410,16 +410,16 @@ fn permission_rule_source(destination: WritableScopeDto) -> permission::Permissi
 /// Map the wire-level rule-behavior bucket to `permission`'s own enum.
 #[must_use]
 pub fn permission_behavior(
-    behavior: client_protocol::commands::PermissionBehaviorDto,
+    behavior: client::protocol::commands::PermissionBehaviorDto,
 ) -> permission::PermissionBehavior {
     match behavior {
-        client_protocol::commands::PermissionBehaviorDto::Allow => {
+        client::protocol::commands::PermissionBehaviorDto::Allow => {
             permission::PermissionBehavior::Allow
         }
-        client_protocol::commands::PermissionBehaviorDto::Deny => {
+        client::protocol::commands::PermissionBehaviorDto::Deny => {
             permission::PermissionBehavior::Deny
         }
-        client_protocol::commands::PermissionBehaviorDto::Ask => {
+        client::protocol::commands::PermissionBehaviorDto::Ask => {
             permission::PermissionBehavior::Ask
         }
     }
@@ -434,7 +434,7 @@ pub fn permission_behavior(
 #[must_use]
 pub fn permission_rule_from_wire(
     raw: &str,
-    behavior: client_protocol::commands::PermissionBehaviorDto,
+    behavior: client::protocol::commands::PermissionBehaviorDto,
     destination: WritableScopeDto,
 ) -> permission::PermissionRule {
     permission::PermissionRule {
@@ -668,7 +668,7 @@ pub struct LoweredSettings {
 
 /// Lower a snapshot to the wire payloads. A pure function called by the
 /// router, matching how the router lowers every other reply through the pure
-/// `client_adapter::lowering` fns rather than lowering inside the builder.
+/// `client::adapter::lowering` fns rather than lowering inside the builder.
 ///
 /// Serialization of a `BTreeMap<String, Value>` and of the file list cannot
 /// fail (both are plain JSON objects/arrays with string keys), but a panic at
@@ -1956,7 +1956,7 @@ mod tests {
 
     #[test]
     fn permission_behavior_maps_every_bucket() {
-        use client_protocol::commands::PermissionBehaviorDto;
+        use client::protocol::commands::PermissionBehaviorDto;
         assert_eq!(
             permission_behavior(PermissionBehaviorDto::Allow),
             permission::PermissionBehavior::Allow
@@ -1977,7 +1977,7 @@ mod tests {
     /// rule resolves correctly.
     #[test]
     fn permission_rule_from_wire_carries_the_destinations_source() {
-        use client_protocol::commands::PermissionBehaviorDto;
+        use client::protocol::commands::PermissionBehaviorDto;
         let rule = permission_rule_from_wire(
             "Bash(ls:*)",
             PermissionBehaviorDto::Allow,
@@ -1998,7 +1998,7 @@ mod tests {
     /// pins that no validation was smuggled into the mapping layer.
     #[test]
     fn permission_rule_from_wire_never_rejects_malformed_input() {
-        use client_protocol::commands::PermissionBehaviorDto;
+        use client::protocol::commands::PermissionBehaviorDto;
         let rule = permission_rule_from_wire(
             "Bash(ls:*",
             PermissionBehaviorDto::Deny,

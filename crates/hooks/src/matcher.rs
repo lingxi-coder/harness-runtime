@@ -23,11 +23,38 @@
 //! wired alongside the tool-name matcher in
 //! [`crate::registry::HookRegistry::match_event`].
 
+use crate::events::HookEventType;
 use permission::shell_command::{command_from_input, rule_matches_any_subcommand};
 use permission::shell_rule_matching::match_wildcard_pattern;
 use permission::PermissionRuleValue;
 use regex::Regex;
 use std::collections::HashMap;
+
+/// the binary's `atf` membership exactly (note: `FileChanged`,
+/// `UserPromptSubmit`, `Stop`, the task/teammate events, etc. are NOT in it).
+pub(crate) fn comma_mode_for(event_type: &HookEventType) -> bool {
+    matches!(
+        event_type,
+        HookEventType::PreToolUse
+            | HookEventType::PostToolUse
+            | HookEventType::PostToolUseFailure
+            | HookEventType::PermissionRequest
+            | HookEventType::PermissionDenied
+            | HookEventType::UserPromptExpansion
+            | HookEventType::SessionStart
+            | HookEventType::SessionEnd
+            | HookEventType::Setup
+            | HookEventType::PreCompact
+            | HookEventType::PostCompact
+            | HookEventType::Notification
+            | HookEventType::SubagentStart
+            | HookEventType::SubagentStop
+            | HookEventType::Elicitation
+            | HookEventType::ElicitationResult
+            | HookEventType::ConfigChange
+            | HookEventType::InstructionsLoaded
+    )
+}
 
 /// Maps a legacy tool name to its canonical name — `normalizeLegacyToolName`
 /// (`permissionRuleParser.ts:21-33`): `LEGACY_TOOL_NAME_ALIASES[name] ?? name`.

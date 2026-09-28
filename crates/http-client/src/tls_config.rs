@@ -667,6 +667,28 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 200);
         assert_eq!(resp.text().await.unwrap(), "ok");
 
+        // Provider traffic delegates to the SDK but retains this same CA and
+        // client identity through its constrained builder configurator.
+        use futures_util::StreamExt;
+        use lingxi_llm_client::Transport as _;
+        let provider = lingxi_llm_client::HttpTransport::with_client_configurator(|builder| {
+            with_id.apply_to_builder(builder.resolve(host, addr))
+        })
+        .unwrap();
+        let mut response = provider
+            .send_stream(lingxi_llm_client::HttpStreamRequest {
+                method: "POST".into(),
+                url: url.clone(),
+                headers: vec![],
+                body: futures_util::stream::empty().boxed(),
+                content_length: 0,
+                timeout: Some(std::time::Duration::from_secs(5)),
+            })
+            .await
+            .expect("SDK upload must inherit custom CA and mTLS identity");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.next().await.unwrap().unwrap(), "ok");
+
         // Without identity → the server rejects the handshake.
         let without_id = TlsSettings {
             client_cert: None,
@@ -683,6 +705,24 @@ mod tests {
         assert!(
             resp.is_err(),
             "server requires a client cert; the identity-less client must fail, got: {resp:?}"
+        );
+        let provider = lingxi_llm_client::HttpTransport::with_client_configurator(|builder| {
+            without_id.apply_to_builder(builder.resolve(host, addr))
+        })
+        .unwrap();
+        let result = provider
+            .send_stream(lingxi_llm_client::HttpStreamRequest {
+                method: "POST".into(),
+                url,
+                headers: vec![],
+                body: futures_util::stream::empty().boxed(),
+                content_length: 0,
+                timeout: Some(std::time::Duration::from_secs(5)),
+            })
+            .await;
+        assert!(
+            result.is_err(),
+            "SDK must not bypass the server's mTLS requirement"
         );
     }
 

@@ -51,6 +51,7 @@ mod fusion_pool_admission_test;
 pub mod fusion_recorder;
 pub mod ide;
 mod pane_teammate;
+mod sandbox_runner;
 pub mod session_agents;
 pub mod session_state;
 pub mod settings_watch;
@@ -58,16 +59,15 @@ mod skill_loader;
 #[cfg(test)]
 mod watcher_test_support;
 
-use client_adapter::AdapterPermissionGate;
+use client::adapter::AdapterPermissionGate;
+pub use command_api::builtins::{runtime_build_info, BuildInfo};
 use command_api::model::BuiltinCommandHandler;
 use command_api::{
     parse_slash_command, CommandRegistry, CommandResult, ParsedSlashCommand,
     RegistrySlashDispatcher,
 };
-/// Rust-only host identity and separately compiled runtime identity.
-pub use command_core::{runtime_build_info, BuildInfo};
 
-use command_core::{
+use command_api::builtins::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
 };
@@ -1739,9 +1739,9 @@ pub async fn desktop_command_registry(
     auth: Arc<dyn AuthHandle>,
     cwd: &std::path::Path,
     lingxi_home: &std::path::Path,
-    connect_writer: Arc<dyn command_core::ConnectCredentialWriter>,
-    connect_copilot: Arc<dyn command_core::CopilotConnectDriver>,
-    connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver>,
+    connect_writer: Arc<dyn command_api::builtins::ConnectCredentialWriter>,
+    connect_copilot: Arc<dyn command_api::builtins::CopilotConnectDriver>,
+    connect_chatgpt: Arc<dyn command_api::builtins::ChatGptConnectDriver>,
     gates: CustomizationGates,
     strict_plugin_only_skills: bool,
     // `--add-dir` roots. Each contributes `<root>/<DOT_DIR>/skills` to skill
@@ -1765,7 +1765,7 @@ pub async fn desktop_command_registry(
     // shadow conflict.
     let cron_enabled =
         cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref());
-    command_core::register_bundled_skills(&mut reg, cron_enabled);
+    command_api::builtins::register_bundled_skills(&mut reg, cron_enabled);
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle.clone(), auth.clone());
     // (H-BIN-09) Override the generic `/login` handler with one that enforces the
@@ -1774,14 +1774,14 @@ pub async fn desktop_command_registry(
     // wins over the plain handler `register_core_batch_2` just registered. Hosts
     // without a managed policy tier (mobile) keep the plain, unrestricted handler.
     reg.register_builtin_handler(Arc::new(
-        command_core::LoginHandler::new(auth)
+        command_api::builtins::LoginHandler::new(auth)
             .with_org_policy(Arc::new(crate::desktop::connect::DesktopLoginOrgPolicy)),
     ));
     register_core_batch_4(&mut reg, handle.clone());
     register_core_batch_5(&mut reg, handle.clone());
     // Plan 3c: wire `/connect` over the engine-supplied credential-writer +
     // Copilot device-flow + ChatGPT OAuth seams.
-    command_core::register::register_core_connect(
+    command_api::builtins::register::register_core_connect(
         &mut reg,
         connect_writer,
         connect_copilot,
@@ -1808,7 +1808,7 @@ pub async fn desktop_command_registry(
     // `/recap`, `/reload-skills`, `/skill-doctor`, `/stop`). Wired here (after
     // the skill-discovery roots are known, before the `disables_skills` early
     // return) so the builtins register regardless of the customization gate.
-    command_core::register_core_batch_8(
+    command_api::builtins::register_core_batch_8(
         &mut reg,
         handle.clone(),
         shared_registry,
@@ -1830,12 +1830,17 @@ pub async fn desktop_command_registry(
     }
     let (registered, registered_skills) = if strict_plugin_only_skills {
         (
-            command_core::load_and_register_managed_custom_commands(&mut reg, &managed_dir).await,
-            command_core::load_and_register_managed_skill_commands(&mut reg, &managed_dir).await,
+            command_api::builtins::load_and_register_managed_custom_commands(
+                &mut reg,
+                &managed_dir,
+            )
+            .await,
+            command_api::builtins::load_and_register_managed_skill_commands(&mut reg, &managed_dir)
+                .await,
         )
     } else {
         (
-            command_core::load_and_register_custom_commands(
+            command_api::builtins::load_and_register_custom_commands(
                 &mut reg,
                 cwd,
                 lingxi_home,
@@ -1843,7 +1848,7 @@ pub async fn desktop_command_registry(
                 &home,
             )
             .await,
-            command_core::load_and_register_skill_commands_with_roots(
+            command_api::builtins::load_and_register_skill_commands_with_roots(
                 &mut reg,
                 cwd,
                 lingxi_home,
@@ -1854,12 +1859,14 @@ pub async fn desktop_command_registry(
             .await,
         )
     };
-    reg.register_builtin_handler(Arc::new(command_core::SkillsHandler::with_all_roots(
-        cwd.to_path_buf(),
-        lingxi_home.to_path_buf(),
-        Some(managed_dir),
-        additional_skill_dirs,
-    )));
+    reg.register_builtin_handler(Arc::new(
+        command_api::builtins::SkillsHandler::with_all_roots(
+            cwd.to_path_buf(),
+            lingxi_home.to_path_buf(),
+            Some(managed_dir),
+            additional_skill_dirs,
+        ),
+    ));
     tracing::debug!(
         custom_commands = registered,
         skill_commands = registered_skills,
@@ -2337,11 +2344,11 @@ pub struct DesktopRuntime {
     /// GitHub Copilot in `/connect` runs the real web sign-in (browser open +
     /// device-code poll + token store) instead of an inert key field. Also
     /// registered in the engine `/connect` command group (same Arc).
-    pub connect_copilot: Arc<dyn command_core::CopilotConnectDriver>,
+    pub connect_copilot: Arc<dyn command_api::builtins::CopilotConnectDriver>,
     /// (T2b) Unified OAuth sign-in driver for the TUI `/connect` picker. Drives
     /// the browser flow for the first-party OAuth providers (Anthropic Pro/Max,
     /// OpenAI ChatGPT) — replacing the honest-but-inert `Unavailable` screen.
-    pub oauth_connect_driver: Arc<dyn command_core::OAuthConnectDriver>,
+    pub oauth_connect_driver: Arc<dyn command_api::builtins::OAuthConnectDriver>,
     /// (P1-08 runtime `/add-dir`) The SAME `Arc<SessionCwd>` the file tools gate
     /// on. The CLI `/add-dir` effect calls `add_trusted_dir(...)` on it so a
     /// directory added mid-session is immediately accessible to
@@ -2471,10 +2478,10 @@ impl tasks::handlers::local_workflow::WorkflowProgressSink for DesktopWorkflowEv
 ///
 /// Standalone CLI workflows such as `plugin eval --scaffold` use this factory
 /// so they receive the same runtime-backed filesystem and network enforcement
-/// as model-invoked shell tools without depending on the concrete runner crate.
+/// as model-invoked shell tools without depending on the concrete runner implementation.
 #[must_use]
 pub fn new_live_sandbox_runner() -> Arc<dyn tool_api::SandboxRunner> {
-    Arc::new(sandbox_runtime_runner::SandboxRuntimeRunner::new())
+    Arc::new(sandbox_runner::SandboxRuntimeRunner::new())
 }
 
 /// `XV` — the name upstream's `mUe` puts on the synthetic tool call it hands
@@ -2487,9 +2494,7 @@ pub fn new_live_sandbox_runner() -> Arc<dyn tool_api::SandboxRunner> {
 /// classifier to match a rule against a name the rule never mentions.
 const SANDBOX_NETWORK_TOOL: &str = "SandboxNetworkAccess";
 
-fn sandbox_network_ask_callback(
-    permission_gate: Arc<dyn PermissionGate>,
-) -> sandbox_runtime_runner::AskFn {
+fn sandbox_network_ask_callback(permission_gate: Arc<dyn PermissionGate>) -> sandbox_runner::AskFn {
     // `ive` — upstream memoises the verdict per `host:port`. Its ALLOW arm is
     // keyed on a transcript watermark (`CLe`: message count + last uuid) and
     // expires when the conversation moves on; its BLOCK arm is `reuse:"always"`
@@ -2539,11 +2544,9 @@ fn sandbox_network_ask_callback(
 fn new_live_sandbox_runner_with_permission_gate(
     permission_gate: Arc<dyn PermissionGate>,
 ) -> Arc<dyn tool_api::SandboxRunner> {
-    Arc::new(
-        sandbox_runtime_runner::SandboxRuntimeRunner::with_ask_callback(
-            sandbox_network_ask_callback(permission_gate),
-        ),
-    )
+    Arc::new(sandbox_runner::SandboxRuntimeRunner::with_ask_callback(
+        sandbox_network_ask_callback(permission_gate),
+    ))
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -2625,7 +2628,7 @@ pub enum BuildError {
 ///
 /// - `output` is the [`platform_api::OutputStream`] the orchestrator pushes turn
 ///   events to. The CLI supplies its NDJSON/plain/TUI sink; the bridge-server
-///   supplies a `client_adapter::AdapterOutputStream`. The SAME `build` serves
+///   supplies a `client::adapter::AdapterOutputStream`. The SAME `build` serves
 ///   both.
 /// - `permission_sink` is the destination for the [`AdapterPermissionGate`]'s
 ///   outbound `PermissionRequest`s. It is wired ONLY when
@@ -3341,7 +3344,7 @@ fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
 /// `lingxi_core::settings::Settings::load` seam). When `true`, the agent-view
 /// fork/subtask surface is disabled exactly like `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`
 /// (binary `I2i()` — `settings.disableAgentView === true`), threaded into
-/// [`command_core::register_core_batch_8`] via
+/// [`command_api::builtins::register_core_batch_8`] via
 /// [`platform_api::agent_view::is_enabled_with_setting`] (M-03). Returns `false` on any
 /// load failure or when the key is unset — the frozen default (agent view
 /// enabled; the env half still applies independently).
@@ -4127,7 +4130,7 @@ impl platform_api::RepoRootReloader for DesktopRepoRootReloader {
                 .iter()
                 .map(|root| root.join(branding::DOT_DIR).join("skills"))
                 .collect();
-            let handler = command_core::ReloadSkillsHandler::with_all_roots(
+            let handler = command_api::builtins::ReloadSkillsHandler::with_all_roots(
                 self.registry.clone(),
                 self.cwd.clone(),
                 self.lingxi_home.clone(),

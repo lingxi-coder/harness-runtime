@@ -21,6 +21,25 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// interpreted here — non-2xx responses come back as data and the
 /// orchestration layer routes them through the codec error taxonomy.
 pub trait Transport: Send + Sync {
+    /// Send a one-shot upload without buffering, replaying, or following
+    /// redirects. Files, audio and remote skill services use this byte seam.
+    /// Existing hosts fail explicitly until they provide streaming uploads.
+    fn send_stream_raw(
+        &self,
+        _request: lingxi_llm_client::HttpStreamRequest,
+    ) -> BoxFuture<
+        '_,
+        Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>,
+    > {
+        Box::pin(async {
+            Err(
+                lingxi_llm_client::protocol::LlmError::UnsupportedCapability {
+                    message: "transport does not support streaming request bodies".into(),
+                },
+            )
+        })
+    }
+
     /// Raw byte seam consumed by the shared executor. Platform transports
     /// override this directly; the default supports in-memory host fixtures.
     fn send_raw(

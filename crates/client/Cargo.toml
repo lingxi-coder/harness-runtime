@@ -1,0 +1,67 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+presentation = [
+    "dep:unicode-width",
+    "dep:unicode-segmentation",
+    "dep:unicode-normalization",
+    "dep:syntect",
+    "dep:pulldown-cmark",
+    "dep:similar",
+    "dep:tool-api",
+    "dep:serde_json",
+]
+adapter = [
+    "presentation",
+    "dep:platform-api",
+    "dep:permission",
+    "dep:session",
+    "dep:chrono",
+    "dep:orchestrator",
+    "dep:async-trait",
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:tracing",
+]
+test-support = ["adapter"]
+uniffi = ["dep:uniffi"]
+
+[dependencies]
+protocol = { path = "../protocol" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+uniffi = { workspace = true, optional = true }
+unicode-width = { version = "=0.1.14", optional = true }
+unicode-segmentation = { version = "=1.12.0", optional = true }
+unicode-normalization = { version = "=0.1.25", optional = true }
+syntect = { version = "=5.3.0", default-features = false, features = ["default-fancy"], optional = true }
+pulldown-cmark = { version = "=0.13.4", default-features = false, optional = true }
+similar = { version = "=2.7.0", optional = true }
+tool-api = { path = "../tool-api", optional = true }
+platform-api = { path = "../platform-api", optional = true }
+permission = { path = "../permission", optional = true }
+session = { path = "../session", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
+orchestrator = { path = "../orchestrator", optional = true }
+async-trait = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+syn = { version = "2", features = ["full", "visit"] }
+insta = { version = "1.40", features = ["yaml"] }
+uuid = { version = "1.10", features = ["v4"] }
+llm-runtime = { path = "../llm-runtime" }
+serde_json = { workspace = true }
+uniffi_meta = "=0.28.3"
+
+[lints]
+workspace = true

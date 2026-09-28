@@ -4,7 +4,7 @@
 //! resumable-upload protocol and every header byte is pinned here.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use llm_runtime::client::DefaultLlmClient;
 use llm_runtime::providers::gemini_files::{
@@ -399,14 +399,20 @@ fn upload_ok_response(state: &str) -> ProviderResponse {
 #[tokio::test]
 async fn upload_file_runs_the_two_step_authenticated_flow() {
     let upload_url = "https://generativelanguage.googleapis.com/upload/v1beta/files?upload_id=abc";
-    let transport = ScriptedTransport::returning(vec![
+    let transport = Arc::new(ScriptedTransport::returning(vec![
         start_ok_response(upload_url),
         upload_ok_response("ACTIVE"),
-    ]);
+    ]));
     let client = gemini_client();
 
     let file = client
-        .upload_file("gemini", vec![9, 8, 7], "image/png", "shot.png", &transport)
+        .upload_file(
+            "gemini",
+            vec![9, 8, 7],
+            "image/png",
+            "shot.png",
+            transport.clone(),
+        )
         .await
         .expect("uploaded file");
 
@@ -477,11 +483,11 @@ async fn upload_file_runs_the_two_step_authenticated_flow() {
 
 #[tokio::test]
 async fn upload_file_rejects_non_gemini_profiles() {
-    let transport = ScriptedTransport::returning(vec![]);
+    let transport = Arc::new(ScriptedTransport::returning(vec![]));
     let client = anthropic_client();
 
     let error = client
-        .upload_file("claude", vec![1], "image/png", "f", &transport)
+        .upload_file("claude", vec![1], "image/png", "f", transport.clone())
         .await
         .expect_err("must reject");
     assert!(matches!(
@@ -495,12 +501,14 @@ async fn upload_file_rejects_non_gemini_profiles() {
 #[tokio::test]
 async fn upload_file_errors_when_upload_url_header_is_missing() {
     // Start response with NO x-goog-upload-url header.
-    let transport =
-        ScriptedTransport::returning(vec![ProviderResponse::json(200, serde_json::Value::Null)]);
+    let transport = Arc::new(ScriptedTransport::returning(vec![ProviderResponse::json(
+        200,
+        serde_json::Value::Null,
+    )]));
     let client = gemini_client();
 
     let error = client
-        .upload_file("gemini", vec![1], "image/png", "f", &transport)
+        .upload_file("gemini", vec![1], "image/png", "f", transport.clone())
         .await
         .expect_err("must error");
     assert!(matches!(
@@ -513,14 +521,14 @@ async fn upload_file_errors_when_upload_url_header_is_missing() {
 
 #[tokio::test]
 async fn upload_file_passes_failed_state_through_without_error() {
-    let transport = ScriptedTransport::returning(vec![
+    let transport = Arc::new(ScriptedTransport::returning(vec![
         start_ok_response("https://generativelanguage.googleapis.com/upload/u?id=1"),
         upload_ok_response("FAILED"),
-    ]);
+    ]));
     let client = gemini_client();
 
     let file = client
-        .upload_file("gemini", vec![1], "image/png", "f", &transport)
+        .upload_file("gemini", vec![1], "image/png", "f", transport.clone())
         .await
         .expect("driver does not error on state");
     assert_eq!(file.state, "FAILED");
@@ -534,11 +542,11 @@ async fn upload_file_maps_error_statuses_through_the_gemini_taxonomy() {
             "error": {"code": 403, "message": "no", "status": "PERMISSION_DENIED"}
         }),
     );
-    let transport = ScriptedTransport::returning(vec![error_response]);
+    let transport = Arc::new(ScriptedTransport::returning(vec![error_response]));
     let client = gemini_client();
 
     let error = client
-        .upload_file("gemini", vec![1], "image/png", "f", &transport)
+        .upload_file("gemini", vec![1], "image/png", "f", transport.clone())
         .await
         .expect_err("must map status");
     assert!(matches!(error, LlmError::PermissionDenied { .. }));

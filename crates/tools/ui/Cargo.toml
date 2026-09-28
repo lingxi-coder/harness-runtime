@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 mobile-linux-api.workspace = true
-client-presentation = { path = "../../client-presentation" }
 tool-api = { path = "../../tool-api" }
 platform-api = { path = "../../platform-api" }
 protocol = { path = "../../protocol" }

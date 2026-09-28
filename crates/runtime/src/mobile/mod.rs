@@ -24,11 +24,11 @@
 // which records two near-misses where it said "dead" about live code.
 #![allow(dead_code)]
 
-use command_api::CommandRegistry;
 /// Rust-only host identity and separately compiled runtime identity.
-pub use command_core::{runtime_build_info, BuildInfo};
+pub use command_api::builtins::{runtime_build_info, BuildInfo};
+use command_api::CommandRegistry;
 
-use command_core::{
+use command_api::builtins::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
 };
@@ -113,7 +113,7 @@ mod mobile_lsp;
 mod plan_approval;
 
 #[cfg(feature = "mobile")]
-pub use client_protocol::listings::{
+pub use client::protocol::listings::{
     ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
     ModelPricingTierDto, SessionModeDto,
 };
@@ -150,7 +150,7 @@ pub use audio_service::{
     from_native_audio_service, max_audio_payload_bytes, AudioFfiError, NativeAudioService,
 };
 #[cfg(feature = "mobile")]
-pub use client_adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
+pub use client::adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
 
 // ---------------------------------------------------------------------------
 // P1.6 (§19.2) — mobile composes `PluginManager` for the first time.
@@ -1054,7 +1054,7 @@ pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry)
     // kill-switch (loop.ts:83); mobile starts no cron scheduler so a scheduled
     // job is inert, but the skill's listing/usage path is harmless and faithful.
     let cron_enabled = tool_cron::cron_tools_enabled();
-    command_core::register_bundled_skills(reg, cron_enabled);
+    command_api::builtins::register_bundled_skills(reg, cron_enabled);
 }
 
 #[cfg(test)]

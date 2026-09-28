@@ -11,7 +11,7 @@
 
 use super::{BridgeFailure, LocalAppsHostBroker};
 use base64::Engine as _;
-use client_protocol::local_apps::AppCapabilityKindDto;
+use client::protocol::local_apps::AppCapabilityKindDto;
 use local_apps::{load_permissions, AppCapability};
 use platform_api::audio::{
     AudioError, AudioErrorKind, AudioInitiator, AudioOperation, AudioOperationContext,
@@ -2410,9 +2410,9 @@ mod tests {
     use crate::mobile::local_apps_host::LocalAppsHostBroker;
     use async_trait::async_trait;
     use base64::Engine as _;
-    use client_adapter::{ClientEventSink, MockSink};
-    use client_protocol::events::ClientEvent;
-    use client_protocol::local_apps::{
+    use client::adapter::{ClientEventSink, MockSink};
+    use client::protocol::events::ClientEvent;
+    use client::protocol::local_apps::{
         AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppEventDto,
     };
     use local_apps::test_support::FixedClock;

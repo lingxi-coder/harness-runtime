@@ -1,11 +1,11 @@
-//! Engine implementations of the `/connect` seams (`command_core::connect`).
+//! Engine implementations of the `/connect` seams (`command_api::builtins::connect`).
 //!
 //! [`EngineCredentialWriter`] bridges the command-layer `ConnectCredentialWriter`
 //! onto a host secure-input port + the keychain (`CredentialManager::set_provider_key`).
 //! The secure prompt is rendered by the tui; tests inject a mock prompt.
 
 use async_trait::async_trait;
-use command_core::{ConnectCredentialWriter, ConnectError};
+use command_api::builtins::{ConnectCredentialWriter, ConnectError};
 use secret::CredentialManager;
 use std::sync::Arc;
 
@@ -61,7 +61,7 @@ impl ConnectCredentialWriter for EngineCredentialWriter {
     }
 }
 
-use command_core::{
+use command_api::builtins::{
     ChatGptConnectDriver, CopilotConnectDriver, CopilotConnectStep, OAuthConnectDriver,
 };
 use lingxi_core::settings::enterprise::{
@@ -462,16 +462,16 @@ impl OAuthConnectDriver for EngineOAuthConnect {
 
 /// Managed `forceLoginOrgUUID` enforcement for the interactive `/login` slash
 /// command (parity 2.1.207 H-BIN-09). The `/connect` picker enforces the pin
-/// inline in [`EngineOAuthConnect::login`]; `/login` ([`command_core::LoginHandler`])
+/// inline in [`EngineOAuthConnect::login`]; `/login` ([`command_api::builtins::LoginHandler`])
 /// is a distinct surface driving the same Anthropic `auth` handle, so it gets
-/// the SAME policy injected via [`command_core::LoginOrgPolicy`]. Reads the pin
+/// the SAME policy injected via [`command_api::builtins::LoginOrgPolicy`]. Reads the pin
 /// fresh at each login from the managed policy tiers
 /// ([`crate::desktop::managed_force_login_org_pin`]) and defers to the landed
 /// [`check_org_membership`].
 pub struct DesktopLoginOrgPolicy;
 
 #[async_trait]
-impl command_core::LoginOrgPolicy for DesktopLoginOrgPolicy {
+impl command_api::builtins::LoginOrgPolicy for DesktopLoginOrgPolicy {
     async fn check(&self, account_org_ids: &[String]) -> Result<(), String> {
         let pin = crate::desktop::managed_force_login_org_pin().await;
         match check_org_membership(&pin, account_org_ids) {
@@ -816,7 +816,7 @@ mod tests {
             .is_none());
     }
 
-    use command_core::CopilotConnectDriver;
+    use command_api::builtins::CopilotConnectDriver;
     use llm_runtime::copilot::{CopilotHttp, CopilotLogin, COPILOT_CLIENT_ID};
     use llm_runtime::transport::BoxFuture;
     use llm_runtime::LlmError;
