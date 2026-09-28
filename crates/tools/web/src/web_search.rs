@@ -13,7 +13,6 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::http::HttpError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -755,8 +754,8 @@ impl Tool for WebSearchTool {
                     elapsed_ms,
                 )
                 .await),
-            Err(message) => Err(self
-                .map_stream_error(&invocation_id, HttpError::Connection(message), elapsed_ms)
+            Err(error) => Err(self
+                .map_hosted_error(&invocation_id, error, elapsed_ms)
                 .await),
         }
     }
@@ -826,32 +825,22 @@ impl WebSearchTool {
         }
     }
 
-    /// Map a mid-stream / connect-phase [`HttpError`] to a [`ToolError`] and emit
-    /// the matching `WEB_SEARCH_FAILED` telemetry. Mirrors the blocking path's
-    /// error arms so failure classification is identical across both paths.
-    async fn map_stream_error(
+    async fn map_hosted_error(
         &self,
         invocation_id: &str,
-        err: HttpError,
+        error: tool_api::HostedSearchError,
         elapsed_ms: u64,
     ) -> ToolError {
-        match err {
-            HttpError::Status { status, .. } => {
-                self.emit_failed(invocation_id, "http_status", Some(status), elapsed_ms)
-                    .await;
-                ToolError::Transport(format!("WebSearch: HTTP {status} from messages_create"))
-            }
-            HttpError::Timeout(_) => {
-                self.emit_failed(invocation_id, "timeout", None, elapsed_ms)
-                    .await;
-                ToolError::Transport("WebSearch: request timed out".into())
-            }
-            other => {
-                self.emit_failed(invocation_id, "transport", None, elapsed_ms)
-                    .await;
-                ToolError::Transport(format!("WebSearch: transport failure: {other}"))
-            }
-        }
+        let kind = if error.timeout {
+            "timeout"
+        } else if error.http_status.is_some() {
+            "http_status"
+        } else {
+            "transport"
+        };
+        self.emit_failed(invocation_id, kind, error.http_status, elapsed_ms)
+            .await;
+        ToolError::Transport(format!("WebSearch: {}", error.message))
     }
 }
 
@@ -1256,7 +1245,7 @@ mod tests {
     struct Hosted {
         calls: AtomicUsize,
         seen: Mutex<Vec<tool_api::HostedSearchRequest>>,
-        fail: bool,
+        error: Option<tool_api::HostedSearchError>,
     }
     #[async_trait]
     impl tool_api::HostedWebSearchClient for Hosted {
@@ -1267,13 +1256,13 @@ mod tests {
             &self,
             request: tool_api::HostedSearchRequest,
             progress: tokio::sync::mpsc::UnboundedSender<()>,
-        ) -> Result<tool_api::HostedSearchOutput, String> {
+        ) -> Result<tool_api::HostedSearchOutput, tool_api::HostedSearchError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.seen.lock().unwrap().push(request);
             progress.send(()).unwrap();
             tokio::task::yield_now().await;
-            if self.fail {
-                return Err("unknown generation outcome".into());
+            if let Some(error) = &self.error {
+                return Err(error.clone());
             }
             Ok(tool_api::HostedSearchOutput {
                 results: vec![SearchResultEntry::Hit(
@@ -1325,7 +1314,11 @@ mod tests {
     #[tokio::test]
     async fn hosted_failure_does_not_trigger_a_second_model_request() {
         let hosted = Arc::new(Hosted {
-            fail: true,
+            error: Some(tool_api::HostedSearchError {
+                message: "unknown generation outcome".into(),
+                http_status: None,
+                timeout: false,
+            }),
             ..Default::default()
         });
         let tool = WebSearchTool::new(hosted_context(hosted.clone()));
@@ -1364,5 +1357,54 @@ mod tests {
             .unwrap();
         assert_eq!(registry.increments(), 1);
         assert_eq!(hosted.calls.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn hosted_error_telemetry_preserves_status_and_timeout() {
+        #[derive(Default)]
+        struct Sink(Mutex<Vec<(String, LogEventMetadata)>>);
+        #[async_trait]
+        impl telemetry::AnalyticsSink for Sink {
+            async fn log_event(&self, name: &str, metadata: LogEventMetadata) {
+                self.0.lock().unwrap().push((name.into(), metadata));
+            }
+            async fn log_event_async(&self, name: &str, metadata: LogEventMetadata) {
+                self.log_event(name, metadata).await;
+            }
+            fn name(&self) -> &str {
+                "search-test"
+            }
+        }
+        for (status, timeout, kind) in [
+            (Some(429), false, "http_status"),
+            (Some(401), false, "http_status"),
+            (None, true, "timeout"),
+            (None, false, "transport"),
+        ] {
+            let hosted = Arc::new(Hosted {
+                error: Some(tool_api::HostedSearchError {
+                    message: "failed".into(),
+                    http_status: status,
+                    timeout,
+                }),
+                ..Default::default()
+            });
+            let ctx = hosted_context(hosted.clone());
+            let sink = Arc::new(Sink::default());
+            ctx.bus.attach_sink(sink.clone()).await;
+            let (tx, _rx) = progress_channel();
+            assert!(WebSearchTool::new(ctx)
+                .call(json!({"query":"rust language"}), fresh_ctx(), tx)
+                .await
+                .is_err());
+            assert_eq!(hosted.calls.load(Ordering::SeqCst), 1);
+            let events = sink.0.lock().unwrap();
+            let failed = events
+                .iter()
+                .find(|(name, _)| name == WEB_SEARCH_FAILED)
+                .expect("failure telemetry");
+            let metadata = serde_json::to_value(&failed.1).unwrap();
+            assert_eq!(metadata["error_kind"], kind);
+            assert_eq!(metadata["status"], serde_json::to_value(status).unwrap());
+        }
     }
 }

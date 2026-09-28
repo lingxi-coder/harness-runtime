@@ -482,7 +482,8 @@ impl LocalAppsHostBroker {
                     LlmEvent::Completed { response } => {
                         stop_reason = response.stop_reason.clone().or(stop_reason);
                     }
-                    LlmEvent::MessageStart { .. }
+                    LlmEvent::WebSearch { .. }
+                    | LlmEvent::MessageStart { .. }
                     | LlmEvent::ContentBlockStart { .. }
                     | LlmEvent::ContentBlockDelta { .. }
                     | LlmEvent::ContentBlockStop { .. }

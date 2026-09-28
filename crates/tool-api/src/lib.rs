@@ -54,7 +54,8 @@ pub use defer::{
     mode_from_env, mode_from_values, DeferralState, ToolSearchMode, ENTER_WORKTREE_TOOL_NAME,
 };
 pub use hosted_search::{
-    HostedSearchOutput, HostedSearchRequest, HostedWebSearchClient, McpTokenCounter,
+    HostedSearchError, HostedSearchOutput, HostedSearchRequest, HostedWebSearchClient,
+    McpTokenCounter,
 };
 pub use model_prompt_gate::dh_simple_system_prompt;
 pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};

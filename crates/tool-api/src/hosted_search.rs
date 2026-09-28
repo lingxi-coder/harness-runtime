@@ -24,6 +24,17 @@ pub struct HostedSearchOutput {
     pub input_tokens: u64,
     pub output_tokens: u64,
 }
+/// Provider-neutral failure information retained for tool telemetry.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct HostedSearchError {
+    /// Safe caller-facing diagnostic.
+    pub message: String,
+    /// Provider response status when known.
+    pub http_status: Option<u16>,
+    /// Whether a host or transport deadline expired.
+    pub timeout: bool,
+}
 #[async_trait::async_trait]
 pub trait HostedWebSearchClient: Send + Sync {
     fn supports(&self, model: &str, profile: Option<&str>) -> bool;
@@ -34,5 +45,5 @@ pub trait HostedWebSearchClient: Send + Sync {
         &self,
         request: HostedSearchRequest,
         progress: tokio::sync::mpsc::UnboundedSender<()>,
-    ) -> Result<HostedSearchOutput, String>;
+    ) -> Result<HostedSearchOutput, HostedSearchError>;
 }

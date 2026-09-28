@@ -14,8 +14,7 @@ use bytes::BytesMut;
 use futures_core::stream::Stream;
 use futures_util::stream::StreamExt;
 use platform_api::http::{
-    RawByteStream, RawByteStreamWithMeta, ResolvedAddressOverride, SseStream,
-    SseStreamWithMeta,
+    RawByteStream, RawByteStreamWithMeta, ResolvedAddressOverride, SseStream, SseStreamWithMeta,
 };
 use platform_api::{HttpError, HttpTransport};
 use protocol::{HttpRequest, HttpResponse, SseEvent};
@@ -271,15 +270,11 @@ fn map_reqwest_connection_error(error: reqwest::Error, detailed: bool) -> HttpEr
     HttpError::Connection(message)
 }
 
-
-
 #[async_trait]
 impl HttpTransport for ReqwestHttp {
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
         self.send_request(req, None, false).await
     }
-
-
 
     async fn request_with_resolved_addrs(
         &self,

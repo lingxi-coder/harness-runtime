@@ -1603,6 +1603,9 @@ impl Decoder {
                     );
                 }
                 wire::StreamEvent::WebSearch { result } => {
+                    out.push(LlmEvent::WebSearch {
+                        result: result.clone(),
+                    });
                     append_observation(
                         &mut self.metadata,
                         "web_search",

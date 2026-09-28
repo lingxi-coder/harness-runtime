@@ -2379,6 +2379,84 @@ mod tests {
         assert_eq!((result.input_tokens, result.output_tokens), (7, 3));
         assert!(result.results.iter().any(|entry|matches!(entry,tool_api::hosted_search::SearchResultEntry::Hit(value) if value.to_string().contains("rust-lang.org"))));
     }
+    #[tokio::test]
+    async fn hosted_search_gemini_reports_queries_once_per_grounding_snapshot() {
+        use llm_runtime::services::sdk;
+        use serde_json::json;
+        use tool_api::HostedWebSearchClient;
+        struct SearchTransport;
+        #[async_trait::async_trait]
+        impl llm_runtime::Transport for SearchTransport {
+            async fn send(
+                &self,
+                request: sdk::HttpRequest,
+            ) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
+                use futures::StreamExt;
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                assert!(request.url.contains("gemini-search"));
+                assert!(body["tools"][0].get("googleSearch").is_some());
+                let grounding = json!({"webSearchQueries":["Rust","Rust docs"],"groundingChunks":[{"web":{"uri":"https://rust-lang.org","title":"Rust"}}]});
+                let events = vec![
+                    json!({"modelVersion":"gemini-search","candidates":[{"content":{"role":"model","parts":[{"text":"Rust"}]},"groundingMetadata":grounding}]}),
+                    json!({"candidates":[{"content":{"role":"model","parts":[]},"groundingMetadata":grounding,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10}}),
+                ];
+                Ok(sdk::StreamResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: futures::stream::iter(
+                        events
+                            .into_iter()
+                            .map(|event| Ok(format!("data: {event}\n\n").into())),
+                    )
+                    .boxed(),
+                })
+            }
+        }
+        let mut profile: ProviderProfile = serde_json::from_value(json!({
+            "provider_id":"gemini","profile_name":"search-google","base_url":"https://generativelanguage.googleapis.com/v1beta","protocol":"gemini_generate_content","auth":"none","credential":{"type":"none"},
+            "models":[{"display_model":"gemini-search","request_model":"gemini-search","billing_model":"gemini-search","capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
+        })).unwrap();
+        profile.protocol = ProtocolFamily::GeminiGenerateContent;
+        let mut wire: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
+            "provider_id":"gemini","profile_name":"search-google","base_url":"https://generativelanguage.googleapis.com/v1beta","protocol":"gemini_generate_content","auth":"none","models":[],"extra":{"web_search":"gemini"}
+        })).unwrap();
+        wire.regions = sdk::protocol::Region::all();
+        profile.wire_profile = Some(wire);
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![profile],
+            })
+            .unwrap(),
+        );
+        let adapter = ProviderApiAdapter::new(Arc::new(ApiService::new(
+            client,
+            Arc::new(SearchTransport),
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        )));
+        let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
+        let request = tool_api::HostedSearchRequest {
+            model: "gemini-search".into(),
+            profile: Some("search-google".into()),
+            query: "Rust".into(),
+            allowed_domains: vec![],
+            blocked_domains: vec![],
+        };
+        assert!(adapter.supports_request(&request));
+        let result = adapter.search(request, progress).await.unwrap();
+        assert_eq!(result.searches, 2);
+        assert!(updates.try_recv().is_ok());
+        assert!(updates.try_recv().is_ok());
+        assert!(
+            updates.try_recv().is_err(),
+            "duplicated final output counted twice"
+        );
+        assert_eq!((result.input_tokens, result.output_tokens), (7, 3));
+        assert!(result.results.iter().any(|entry|matches!(entry,tool_api::hosted_search::SearchResultEntry::Hit(value) if value.to_string().contains("rust-lang.org"))));
+    }
 }
 
 #[async_trait::async_trait]
@@ -2403,7 +2481,7 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
         &self,
         input: tool_api::HostedSearchRequest,
         progress: tokio::sync::mpsc::UnboundedSender<()>,
-    ) -> Result<tool_api::HostedSearchOutput, String> {
+    ) -> Result<tool_api::HostedSearchOutput, tool_api::HostedSearchError> {
         use futures::StreamExt;
         use llm_runtime::services::sdk;
         use llm_runtime::{ContentBlock, LlmEvent};
@@ -2435,12 +2513,20 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
         let searches = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let u = usage.clone();
         let n = searches.clone();
+        let mut search_progress = sdk::hosted_search::SearchProgress::default();
         let stream = self
             .service
             .stream_request(request)
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(hosted_search_error)?
             .inspect(move |event| match event {
+                Ok(LlmEvent::WebSearch { result }) => {
+                    let added = search_progress.observe(result);
+                    n.fetch_add(added, std::sync::atomic::Ordering::Relaxed);
+                    for _ in 0..added {
+                        let _ = progress.send(());
+                    }
+                }
                 Ok(LlmEvent::ContentBlockStart { content_block, .. }) => {
                     if sdk::hosted_search::search_started(
                         &serde_json::to_value(content_block).unwrap_or_default(),
@@ -2466,7 +2552,7 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
                 Err((partial, error)) if !partial.is_empty() => {
                     (partial, serde_json::Value::Null, Some(error.to_string()))
                 }
-                Err((_, error)) => return Err(error.to_string()),
+                Err((_, error)) => return Err(hosted_search_error(error)),
             };
         let native = blocks
             .iter()
@@ -2493,5 +2579,63 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
             input_tokens: usage.billable_tokens.input,
             output_tokens: usage.billable_tokens.output,
         })
+    }
+}
+
+fn hosted_search_error(error: llm_runtime::LlmError) -> tool_api::HostedSearchError {
+    use llm_runtime::LlmError;
+    let http_status = error.http_status().or(match &error {
+        LlmError::RateLimited { .. } => Some(429),
+        LlmError::Overloaded { .. } => Some(529),
+        LlmError::RequestTooLarge => Some(413),
+        _ => None,
+    });
+    tool_api::HostedSearchError {
+        http_status,
+        timeout: matches!(error, LlmError::TransportTimeout { .. }),
+        message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod hosted_error_tests {
+    use super::*;
+    #[test]
+    fn hosted_search_errors_keep_status_and_timeout() {
+        for (error, status, timeout) in [
+            (
+                llm_runtime::LlmError::RateLimited {
+                    retry_after: None,
+                    scope: None,
+                },
+                Some(429),
+                false,
+            ),
+            (
+                llm_runtime::LlmError::Authentication {
+                    message: "401 unauthorized".into(),
+                },
+                Some(401),
+                false,
+            ),
+            (
+                llm_runtime::LlmError::TransportTimeout {
+                    message: "deadline".into(),
+                },
+                None,
+                true,
+            ),
+            (
+                llm_runtime::LlmError::Transport {
+                    message: "disconnected".into(),
+                },
+                None,
+                false,
+            ),
+        ] {
+            let mapped = hosted_search_error(error);
+            assert_eq!(mapped.http_status, status);
+            assert_eq!(mapped.timeout, timeout);
+        }
     }
 }

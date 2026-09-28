@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use futures_util::{stream, StreamExt};
 use http_client::provider_transport;
-use lingxi_llm_client::{HttpStreamRequest, Transport};
 use lingxi_llm_client::protocol::LlmError;
 use lingxi_llm_client::HttpRequest;
+use lingxi_llm_client::{HttpStreamRequest, Transport};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -76,9 +76,15 @@ async fn streaming_upload_and_error_download_are_incremental_binary_streams() {
     assert!(response
         .headers
         .contains(&("retry-after".into(), "3".into())));
-    assert_eq!(response.body.next().await.unwrap().unwrap().as_ref(), [0, 255]);
+    assert_eq!(
+        response.body.next().await.unwrap().unwrap().as_ref(),
+        [0, 255]
+    );
     response_release.send(()).unwrap();
-    assert_eq!(response.body.next().await.unwrap().unwrap().as_ref(), [128, 1]);
+    assert_eq!(
+        response.body.next().await.unwrap().unwrap().as_ref(),
+        [128, 1]
+    );
     assert!(response.body.next().await.is_none());
     server.await.unwrap();
 }
@@ -99,7 +105,8 @@ async fn streaming_upload_rejects_conflicting_framing_headers_without_polling() 
             body_polls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![255])
         });
-        let result = provider_transport().unwrap()
+        let result = provider_transport()
+            .unwrap()
             .send_stream(HttpStreamRequest {
                 method: "POST".into(),
                 url: "http://127.0.0.1:9/files".into(),
@@ -119,10 +126,7 @@ async fn streaming_upload_errors_do_not_expose_url_credentials() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    for transport in [
-        provider_transport().unwrap(),
-        provider_transport().unwrap(),
-    ] {
+    for transport in [provider_transport().unwrap(), provider_transport().unwrap()] {
         let error = transport
             .send_stream(HttpStreamRequest {
                 method: "POST".into(),
@@ -158,7 +162,8 @@ async fn streaming_upload_surfaces_redirect_without_replaying_the_body() {
             .await
             .unwrap();
     });
-    let response = provider_transport().unwrap()
+    let response = provider_transport()
+        .unwrap()
         .send_stream(HttpStreamRequest {
             method: "POST".into(),
             url: format!("http://{address}/files"),
@@ -194,15 +199,13 @@ async fn sdk_raw_download_exposes_error_headers_before_the_body_finishes() {
     let transport = provider_transport().unwrap();
     let mut response = tokio::time::timeout(
         Duration::from_secs(5),
-        transport.send(
-            HttpRequest {
-                method: "GET".into(),
-                url: format!("http://{address}/files/content"),
-                headers: vec![],
-                body: Default::default(),
-                timeout: None,
-            },
-        ),
+        transport.send(HttpRequest {
+            method: "GET".into(),
+            url: format!("http://{address}/files/content"),
+            headers: vec![],
+            body: Default::default(),
+            timeout: None,
+        }),
     )
     .await
     .expect("error response headers must not wait for its body")
@@ -212,7 +215,10 @@ async fn sdk_raw_download_exposes_error_headers_before_the_body_finishes() {
         .headers
         .contains(&("retry-after".into(), "5".into())));
     release.send(()).unwrap();
-    assert_eq!(response.body.next().await.unwrap().unwrap().as_ref(), [0, 255]);
+    assert_eq!(
+        response.body.next().await.unwrap().unwrap().as_ref(),
+        [0, 255]
+    );
     assert!(response.body.next().await.is_none());
     server.await.unwrap();
 }
