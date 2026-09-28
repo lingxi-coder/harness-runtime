@@ -794,29 +794,37 @@ impl DefaultLlmClient {
         ) {
             return Ok(None);
         }
-        let (draft, host, failure) = self.count_draft(request, Some(transport.clone())).await?;
-        let call = crate::execution::seal(draft, &host)
-            .await
-            .map_err(|error| {
-                failure
-                    .lock()
-                    .expect("host failure")
-                    .take()
-                    .unwrap_or(error)
-            })?;
-        let collected = call
-            .dispatch_once_using(transport.as_ref(), || Ok(()))
-            .await
-            .map_err(crate::upstream::error)?
-            .collect()
-            .await
-            .map_err(crate::upstream::error)?;
-        let result = collected
-            .decode_token_count()
-            .map(Some)
-            .map_err(crate::upstream::error);
-        collected.finish().await;
-        result
+        // Counting is an auxiliary operation outside the generation watchdog.
+        // Bound preparation/authentication, dispatch and response collection together.
+        tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            let (draft, host, failure) = self.count_draft(request, Some(transport.clone())).await?;
+            let call = crate::execution::seal(draft, &host)
+                .await
+                .map_err(|error| {
+                    failure
+                        .lock()
+                        .expect("host failure")
+                        .take()
+                        .unwrap_or(error)
+                })?;
+            let collected = call
+                .dispatch_once_using(transport.as_ref(), || Ok(()))
+                .await
+                .map_err(crate::upstream::error)?
+                .collect()
+                .await
+                .map_err(crate::upstream::error)?;
+            let result = collected
+                .decode_token_count()
+                .map(Some)
+                .map_err(crate::upstream::error);
+            collected.finish().await;
+            result
+        })
+        .await
+        .map_err(|_| LlmError::TransportTimeout {
+            message: "Exact token counting exceeded its 120 second deadline".into(),
+        })?
     }
 
     /// Upload raw media bytes via the Gemini File API resumable protocol.

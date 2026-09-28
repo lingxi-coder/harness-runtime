@@ -4207,11 +4207,29 @@ impl ApiService {
                     );
                     // Connect-phase status ≥ 400: drain and decode as error.
                     if streaming.status() >= 400 {
-                        let collected = match streaming.collect().await {
+                        // Error responses do not enter the event watchdog below.
+                        // Bound their body collection too, respecting the host's
+                        // explicit watchdog-disable setting.
+                        let timeout = self
+                            .stream_idle_timeout_override
+                            .or_else(crate::model::stream_watchdog::resolve_stream_idle_timeout);
+                        let collect =
+                            async { streaming.collect().await.map_err(crate::upstream::error) };
+                        let result = match timeout {
+                            Some(timeout) => tokio::time::timeout(timeout, collect)
+                                .await
+                                .unwrap_or_else(|_| {
+                                    Err(LlmError::TransportTimeout {
+                                        message: "Timed out reading provider error response".into(),
+                                    })
+                                }),
+                            None => collect.await,
+                        };
+                        let collected = match result {
                             Ok(collected) => collected,
                             Err(error) => {
                                 attempt.finish().await?;
-                                return Err(crate::upstream::error(error));
+                                return Err(error);
                             }
                         };
                         let body_json = crate::execution::response(collected.response()).body_json;

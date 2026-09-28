@@ -286,7 +286,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_transport_failure_settles_as_no_provider_response() {
+    async fn a_transport_failure_keeps_unknown_execution_outcome() {
         let transport = FakeTransport::sequence(vec![FakeResponse::Err(LlmError::Transport {
             message: "connection refused".into(),
         })]);
@@ -301,13 +301,86 @@ mod tests {
             .is_err());
         let events = probe.events.lock().unwrap().clone();
         assert!(
-            events.contains(&"no-provider-response"),
-            "a dispatched attempt that saw no response must say so: {events:?}"
+            !events.contains(&"no-provider-response"),
+            "missing usage must leave the dispatched attempt unknown: {events:?}"
         );
         assert!(
             probe.observations.lock().unwrap().is_empty(),
             "nothing was observed, so nothing may be priced"
         );
+    }
+
+    struct IncompleteResponseTransport {
+        status: u16,
+    }
+    #[async_trait::async_trait]
+    impl Transport for IncompleteResponseTransport {
+        async fn send(
+            &self,
+            _: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            use futures::StreamExt;
+            let body = if self.status >= 400 {
+                futures::stream::pending().boxed()
+            } else {
+                futures::stream::iter(vec![
+                    Ok(
+                        r#"{"id":"msg","content":[{"type":"text","text":"generated"}],"usage":"#
+                            .into(),
+                    ),
+                    Err(lingxi_llm_client::protocol::LlmError::StreamInterrupted {
+                        message: "lost body after generation".into(),
+                    }),
+                ])
+                .boxed()
+            };
+            Ok(lingxi_llm_client::StreamResponse {
+                status: self.status,
+                headers: vec![],
+                body,
+            })
+        }
+    }
+    #[tokio::test]
+    async fn incomplete_nonstream_response_keeps_unknown_attempt() {
+        let service = make_adapter_with_retries(
+            Arc::new(IncompleteResponseTransport { status: 200 }),
+            Some(0),
+        );
+        let probe = Arc::new(AttemptProbe::default());
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        assert!(service
+            .execute_side_query_request(registered_request())
+            .await
+            .is_err());
+        assert_eq!(
+            *probe.events.lock().unwrap(),
+            vec!["begin", "dispatch", "finish-owned", "settled"]
+        );
+        assert!(probe.observations.lock().unwrap().is_empty());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn stalled_stream_error_body_times_out_and_settles_once() {
+        for status in [429, 500] {
+            let service = make_adapter_with_retries(
+                Arc::new(IncompleteResponseTransport { status }),
+                Some(3),
+            )
+            .with_stream_idle_timeout_override(Some(Duration::from_secs(5)));
+            let probe = Arc::new(AttemptProbe::default());
+            service.set_model_attempt_hooks(Arc::new(probe.clone()));
+            let result = tokio::time::timeout(
+                Duration::from_secs(6),
+                service.stream_request(registered_request()),
+            )
+            .await;
+            assert!(matches!(result, Ok(Err(LlmError::TransportTimeout { .. }))));
+            assert_eq!(
+                *probe.events.lock().unwrap(),
+                vec!["begin", "dispatch", "finish-owned", "settled"]
+            );
+        }
     }
 
     fn registered_request() -> LlmRequest {
@@ -552,8 +625,7 @@ mod tests {
             vec![
                 "begin",
                 "dispatch",
-                // The first physical send never saw a provider response.
-                "no-provider-response",
+                // Missing usage keeps the first physical attempt unknown.
                 "finish-owned",
                 "settled",
                 "begin",
@@ -687,8 +759,7 @@ mod tests {
             vec![
                 "begin",
                 "dispatch",
-                // The first physical send never saw a provider response.
-                "no-provider-response",
+                // Missing usage keeps the first physical attempt unknown.
                 "finish-owned",
                 "settled",
                 "begin",

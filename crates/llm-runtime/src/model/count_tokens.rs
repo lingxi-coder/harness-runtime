@@ -381,6 +381,46 @@ mod tests {
     }
     llm_runtime::impl_fixture_transport!(ScriptedTransport);
 
+    struct StalledCountTransport {
+        body: bool,
+    }
+    #[async_trait::async_trait]
+    impl Transport for StalledCountTransport {
+        async fn send(
+            &self,
+            _: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            use futures::StreamExt;
+            if !self.body {
+                return std::future::pending().await;
+            }
+            Ok(lingxi_llm_client::StreamResponse {
+                status: 200,
+                headers: vec![],
+                body: futures::stream::pending().boxed(),
+            })
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn exact_count_bounds_headers_and_body_without_transport_timeout() {
+        for body in [false, true] {
+            let client = anthropic_client();
+            let request = LlmRequest::new("Claude").with_user_text("hello");
+            let start = tokio::time::Instant::now();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(121),
+                try_count_tokens_exact(&client, Arc::new(StalledCountTransport { body }), &request),
+            )
+            .await;
+            assert!(
+                matches!(result, Ok(Err(LlmError::TransportTimeout { .. }))),
+                "{result:?}"
+            );
+            assert_eq!(start.elapsed(), std::time::Duration::from_secs(120));
+        }
+    }
+
     fn anthropic_client() -> DefaultLlmClient {
         std::env::set_var("LLM_COUNT_TOKENS_TEST_KEY", "ct-test-key");
         DefaultLlmClient::from_config(ClientConfig {
