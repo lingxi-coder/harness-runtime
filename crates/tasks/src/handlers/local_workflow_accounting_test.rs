@@ -114,13 +114,12 @@ async fn output_accounting_failure_blocks_peer_after_awaited_listing() {
         accounting_failed: Semaphore::new(0),
     });
     let scope = WorkflowOutputScope::new(probe.clone());
-    let run = run_workflow_script_with_live_updates_and_fusion_recorded(
+    let run = run_workflow_script_with_live_updates_recorded(
         "return await parallel([() => agent('A', {agentType:'probe'}), () => agent('B', {agentType:'probe'})]);",
         DEFAULT_WORKFLOW_SUBAGENT, "workflow", probe.clone(), probe.clone(), probe.clone(),
         None, None, None, None, None, None, 0, NestedConfig::default(),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)), CancellationToken::new(),
-        None, Some("batch-run".into()), None, None, None, Arc::new(AnalyticsBus::new()),
-        None, None, None, None, Some(scope),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(AnalyticsBus::new()),
+        None, None, None, Some(scope),
     );
     let release = async {
         probe.accounting_failed.acquire().await.unwrap().forget();

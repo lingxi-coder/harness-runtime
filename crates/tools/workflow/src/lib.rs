@@ -1574,19 +1574,18 @@ impl Tool for WorkflowTool {
         })?;
         let mut spec = Self::spec_from_input(&input);
         // A Workflow task can outlive the turn that launched it. Capture the
-        // owning session at this boundary so later `fusion()` calls continue
+        // owning session at this boundary so later `agent()` calls continue
         // to use the original session-scoped budget after a clear/resume or
         // model/router change.
         if let Some(session) = ctx.session.as_ref() {
             // WorkflowLaunchSpec is a host boundary: desktop/mobile task
-            // launchers use the bare UUID for transcript directory identity,
-            // while Fusion requests may add the `sess:` wire prefix later.
+            // launchers use the bare UUID for transcript directory identity.
             spec.session_uuid = Some(session.lock().await.session_id.as_uuid().to_string());
         } else if let Some(session_id) = ctx.origin_session_id {
             // Subagent tool invocations intentionally do not clone the live
             // SessionState mutex. Their trusted origin id is propagated on
             // the invocation context instead, so a background Workflow still
-            // binds later Fusion calls to the session that launched it.
+            // binds later calls to the session that launched it.
             spec.session_uuid = Some(session_id.as_uuid().to_string());
         }
         spec.tool_use_id = ctx.tool_use_id.as_ref().map(ToString::to_string);
@@ -2303,8 +2302,7 @@ mod tests {
         set_gate(true, true);
         let pointed = tool.prompt(&opts).await;
         assert!(
-            pointed.contains("`workflow-authoring`")
-                && !pointed.contains("- fusion(prompt: string"),
+            pointed.contains("`workflow-authoring`") && !pointed.contains("- workflow(nameOrRef:"),
             "with the skill registered and the Skill tool advertised, the description must point"
         );
 
@@ -2320,7 +2318,7 @@ mod tests {
             set_gate(registered, skill_tool);
             let inlined = tool.prompt(&opts).await;
             assert!(
-                inlined.contains("- fusion(prompt: string"),
+                inlined.contains("- workflow(nameOrRef:"),
                 "the reference must be inlined when {why}: otherwise the description points at \
                  documentation the model cannot load, and every hook it lists is unreachable"
             );
@@ -2346,7 +2344,6 @@ mod tests {
             "- parallel(thunks:",
             "- phase(",
             "- workflow(nameOrRef:",
-            "- fusion(prompt: string",
         ] {
             assert!(
                 inline.contains(hook),
@@ -2362,7 +2359,7 @@ mod tests {
             "the short branch must name the skill that carries the reference"
         );
         assert!(
-            !pointed.contains("- fusion(prompt: string"),
+            !pointed.contains("- workflow(nameOrRef:"),
             "the short branch is pointless if it still inlines the reference"
         );
         assert!(
@@ -2402,7 +2399,7 @@ mod tests {
             MODEL_FORCE_OMISSIONS.iter().map(|f| f.len()).sum::<usize>()
         );
         assert!(forced.starts_with("# Workflow authoring reference"));
-        assert!(forced.contains("- fusion(prompt: string"));
+        assert!(forced.contains("- workflow(nameOrRef:"));
     }
 
     /// The point of the 2.1.267 split, stated as a number so a regression that
@@ -2490,117 +2487,6 @@ mod tests {
             opt_in < clause && clause < closing,
             "the added clause must sit inside the opt-in list ({opt_in}..{closing}), got {clause}"
         );
-    }
-
-    /// The second registered divergence: the `fusion()` script hook. Agent
-    /// Fusion has no claude-code counterpart, so the oracle cannot document a
-    /// hook the shipped runtime provides — a script that never learns `fusion()`
-    /// exists cannot call it. Asserted on both sides so the bullet can neither
-    /// vanish from the shipped text nor creep into the oracle.
-    #[test]
-    fn the_shipped_authoring_reference_documents_the_fusion_hook() {
-        assert!(
-            !ORACLE_AUTHORING_SKILL.contains("fusion(prompt: string, opts?:"),
-            "the oracle must stay free of LingXi-only hooks; that is what the register is for"
-        );
-        assert!(
-            AUTHORING_SKILL.contains("fusion(prompt: string, opts?:"),
-            "the shipped description must document the fusion() script hook"
-        );
-        assert!(
-            AUTHORING_SKILL.contains("WorkflowFusionOptionError"),
-            "the catchable rejection names must be documented, or a script cannot handle them"
-        );
-        // `platform_api::normalize_dimensions`' real rules. Pinned as prose, not
-        // just as length: an undocumented `dimensions: ['Coverage']` is rejected,
-        // and until it was written down the rejection did not even reach the
-        // script as a named error.
-        assert!(
-            AUTHORING_SKILL
-                .contains("lowercase snake_case, at most 12, never a provider/model/panel name"),
-            "the dimensions rule must stay documented on the option it constrains"
-        );
-        // It belongs in the script-body hook list, next to the other hooks a
-        // script can call — not in the prose after it.
-        let hooks = AUTHORING_SKILL
-            .find("Script body hooks:")
-            .expect("the hook list must exist");
-        let bullet = AUTHORING_SKILL
-            .find("- fusion(prompt: string")
-            .expect("checked above");
-        let after_hooks = AUTHORING_SKILL
-            .find("Subagents are told their final text IS the return value")
-            .expect("the paragraph after the hook list must exist");
-        assert!(
-            hooks < bullet && bullet < after_hooks,
-            "the fusion() bullet must sit inside the hook list ({hooks}..{after_hooks}), got {bullet}"
-        );
-    }
-
-    /// Drift gate for the `fusion()` bullet's documented resolved-object shape.
-    /// Round 1 shipped `{runId, status, decision, panels, usage, timing, egress}`
-    /// in the description while `platform_api::FusionResult` actually
-    /// serializes `run_id` / `egress_profiles` (no `#[serde(rename_all)]`) and
-    /// carries `final_text` — the ONLY field with the deliberation's answer —
-    /// under no documented key at all. Nothing caught it: the byte-lock test
-    /// above only pins length + a handful of substrings, and the round-trip
-    /// test in `tasks` pins the real shape without ever comparing it back to
-    /// this description text. Parse the object literal out of the bullet and
-    /// assert every key it lists is an actual top-level key of a serialized
-    /// `FusionResult`, so the two can never independently drift again.
-    #[test]
-    fn fusion_bullet_documents_only_real_fusion_result_keys() {
-        let marker = "compact result object ({";
-        let start = AUTHORING_SKILL
-            .find(marker)
-            .expect("fusion() bullet documents the resolved object shape")
-            + marker.len()
-            - 1; // keep the leading '{'
-        let rest = &AUTHORING_SKILL[start..];
-        let end = rest
-            .find('}')
-            .expect("object literal in the fusion() bullet is closed");
-        let object_literal = &rest[1..end]; // strip the leading '{'
-        let documented_keys: Vec<&str> = object_literal
-            .split(',')
-            .map(|part| part.trim().split(':').next().unwrap().trim())
-            .collect();
-        assert!(
-            documented_keys.contains(&"run_id") && documented_keys.contains(&"final_text"),
-            "sanity: expected run_id and final_text among parsed keys, got {documented_keys:?}"
-        );
-
-        let sample = platform_api::FusionResult {
-            schema_version: 1,
-            run_id: "fu_test".into(),
-            status: platform_api::FusionStatus::Completed,
-            decision: platform_api::FusionDecision::Picked {
-                panel_id: "P1".into(),
-            },
-            final_text: "the answer".into(),
-            analysis: None,
-            panels: vec![platform_api::PanelOutcome {
-                panel_id: "P1".into(),
-                status: platform_api::PanelRunStatus::Completed,
-                duration_ms: 7,
-                error_category: None,
-                error_detail: None,
-                usage: None,
-            }],
-            usage: platform_api::FusionUsage::default(),
-            timing: platform_api::FusionTiming::default(),
-            egress_profiles: vec!["anthropic".into()],
-        };
-        let serialized = serde_json::to_value(&sample).expect("FusionResult serializes");
-        let actual_keys = serialized.as_object().expect("object");
-        for key in &documented_keys {
-            assert!(
-                actual_keys.contains_key(*key),
-                "fusion() bullet documents key `{key}` but FusionResult never serializes it \
-                 (actual keys: {:?}) — the description and the wire shape have drifted",
-                actual_keys.keys().collect::<Vec<_>>()
-            );
-        }
     }
 
     /// Managed `disableWorkflows: true` must disable the tool. Before this was

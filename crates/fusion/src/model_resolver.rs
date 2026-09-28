@@ -367,7 +367,6 @@ fn deny_cross_provider_if_needed(
     let allowed = match request.origin {
         FusionOrigin::Slash => true,
         FusionOrigin::Agent => config.allow_cross_provider_for_agent,
-        FusionOrigin::Workflow => config.allow_cross_provider_for_workflow,
     };
     if allowed {
         Ok(())
@@ -582,7 +581,6 @@ mod tests {
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
-            workflow_run_id: None,
         }
     }
 

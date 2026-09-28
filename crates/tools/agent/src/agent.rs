@@ -985,8 +985,8 @@ fn parse_fusion_preset(raw: Option<&str>) -> Result<FusionPreset, ToolError> {
     match raw {
         None => Err(ToolError::InvalidInput("missing fusion preset".into())),
         // The wire spelling and rejection message come from the single
-        // `FromStr` impl in platform-api so the Agent tool, `/fusion` and
-        // workflow `fusion()` reject an unknown preset identically.
+        // `FromStr` impl in platform-api so the Agent tool and `/fusion`
+        // reject an unknown preset identically.
         Some(other) => other
             .parse::<FusionPreset>()
             .map_err(|error| ToolError::InvalidInput(error.to_string())),
@@ -1051,7 +1051,6 @@ fn fusion_request_from_agent(
         cross_provider: parsed.cross_provider.unwrap_or(false),
         parent_profile,
         parent_model,
-        workflow_run_id: None,
     })
 }
 

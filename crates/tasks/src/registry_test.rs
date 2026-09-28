@@ -1819,7 +1819,6 @@ async fn a_fusion_row_survives_the_sweep_until_its_publication_settles() {
         cross_provider: false,
         parent_profile: "openai".into(),
         parent_model: "gpt-5.4".into(),
-        workflow_run_id: None,
     };
     let id = registry
         .spawn(
@@ -1896,7 +1895,6 @@ async fn spawn_publishes_the_handlers_captured_fusion_timeout_on_the_task_state(
         cross_provider: false,
         parent_profile: "openai".into(),
         parent_model: "gpt-5.4".into(),
-        workflow_run_id: None,
     };
 
     let id = registry
@@ -2042,8 +2040,6 @@ async fn budget_stop_matches_claude_background_agent_filter() {
                 resume_from_run_id: None,
                 args: None,
                 run_id: Some("wf_budget".into()),
-                parent_model: None,
-                parent_model_profile: None,
                 invocation_mode: Some("inline".into()),
                 workflow_source: Some("inline".into()),
                 script_is_verbatim_builtin: Some(false),
@@ -3075,7 +3071,6 @@ async fn fusion_activation_timestamp_is_published_after_task_created_hook() {
                         cross_provider: false,
                         parent_profile: "openai".into(),
                         parent_model: "gpt-5.4".into(),
-                        workflow_run_id: None,
                     },
                     conversation_id: "11111111-2222-4333-8444-555555555555".into(),
                 },
@@ -4105,8 +4100,6 @@ fn state_for_spawn_stamps_local_workflow_tool_use_id() {
         resume_from_run_id: None,
         args: Some(r#"{"scope":"src"}"#.into()),
         run_id: Some("wf_abcdef".into()),
-        parent_model: None,
-        parent_model_profile: None,
         invocation_mode: Some("inline".into()),
         workflow_source: Some("inline".into()),
         script_is_verbatim_builtin: Some(false),
@@ -5220,8 +5213,6 @@ async fn a_spawned_workflows_scope_is_what_blocks_its_apps_delete() {
             resume_from_run_id: None,
             args: Some(serde_json::json!({"app_id": "scoped-app"}).to_string()),
             run_id: Some("wf_scoped".into()),
-            parent_model: None,
-            parent_model_profile: None,
             invocation_mode: Some("named".into()),
             workflow_source: Some("built-in".into()),
             script_is_verbatim_builtin: Some(true),

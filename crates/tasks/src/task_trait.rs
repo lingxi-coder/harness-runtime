@@ -199,10 +199,6 @@ pub enum TaskSpawnInput {
         /// `None` ⇒ the worker mints one. Ignored when `resume_from_run_id` is
         /// set (the resume id wins).
         run_id: Option<String>,
-        /// Parent session model inherited by workflow-global `fusion()`.
-        parent_model: Option<String>,
-        /// Parent session model profile inherited by workflow-global `fusion()`.
-        parent_model_profile: Option<String>,
         // ── Telemetry fields (oracle §7 `tengu_workflow_launched` payload) ──
         /// How the workflow was invoked: `"scriptPath"` | `"named"` | `"inline"`.
         /// Derived from the original `WorkflowLaunchSpec` by the launcher.

@@ -1,59 +1,5 @@
 //! Fake-spawner / fake-side-query tests for the Fusion orchestrator.
 
-#[test]
-fn workflow_batch_concurrency_requires_host_guarantee_and_obeys_live_rollback() {
-    struct Registrar(usize);
-    impl crate::FusionAttemptRegistrar for Registrar {
-        fn workflow_batch_concurrency(&self) -> usize {
-            self.0
-        }
-        fn register(
-            &self,
-            _: crate::FusionAttemptRegistration,
-        ) -> Result<crate::RegisteredFusionAttempts, FusionError> {
-            panic!("reading a concurrency capability must not register work")
-        }
-    }
-    let mut config = test_config();
-    config.enabled = true;
-    let state = Arc::new(Mutex::new(Some(config.clone())));
-    let source = state.clone();
-    let orchestrator = FusionOrchestrator::new(
-        FakeSpawner::new(HashMap::new()),
-        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
-        Arc::new(move || source.lock().unwrap().clone().ok_or(FusionError::Internal)),
-        Arc::new(catalog()),
-    );
-    assert_eq!(
-        orchestrator.workflow_batch_concurrency(),
-        1,
-        "no registrar is always sequential"
-    );
-    for (capacity, expected) in [(0, 1), (1, 1), (2, 2), (99, 2)] {
-        assert_eq!(
-            orchestrator
-                .clone()
-                .with_attempt_registrar(Arc::new(Registrar(capacity)))
-                .workflow_batch_concurrency(),
-            expected
-        );
-    }
-    let orchestrator = orchestrator.with_attempt_registrar(Arc::new(Registrar(2)));
-    config.workflow_concurrency = 1;
-    *state.lock().unwrap() = Some(config.clone());
-    assert_eq!(orchestrator.workflow_batch_concurrency(), 1);
-    config.workflow_concurrency = 2;
-    config.enabled = false;
-    *state.lock().unwrap() = Some(config);
-    assert_eq!(orchestrator.workflow_batch_concurrency(), 1);
-    *state.lock().unwrap() = None;
-    assert_eq!(
-        orchestrator.workflow_batch_concurrency(),
-        1,
-        "failed reload cannot grant parallel work"
-    );
-}
-
 #[tokio::test]
 async fn panel_settlement_failure_after_execution_is_not_a_preflight_refund() {
     struct FailedFence;
@@ -932,7 +878,6 @@ fn request(prompt: &str) -> FusionRequest {
         cross_provider: true,
         parent_profile: "anthropic".into(),
         parent_model: "claude-sonnet-5".into(),
-        workflow_run_id: None,
     }
 }
 
@@ -2309,7 +2254,6 @@ async fn anthropic_only_catalog_clears_structured_output_preflight() {
         cross_provider: false,
         parent_profile: "anthropic".into(),
         parent_model: "claude-sonnet-5".into(),
-        workflow_run_id: None,
     };
     let result = orch.run(req, inherit(), None).await;
     let result = match result {
@@ -6861,7 +6805,6 @@ async fn analyst_overlaps_panel_telemetry_uses_canonical_model_key() {
         // tie-break key never discriminates among the analyst candidates.
         parent_profile: "somewhere-else".into(),
         parent_model: "unused".into(),
-        workflow_run_id: None,
     };
     let spawner = FakeSpawner::new(HashMap::new());
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);

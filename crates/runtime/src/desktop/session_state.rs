@@ -2560,7 +2560,7 @@ mod tests {
             platform_api::FusionRunId::generated(),
             Some(session_id),
             origin,
-            (origin == platform_api::FusionOrigin::Workflow).then(|| "workflow-test".to_string()),
+            None,
         )
     }
 
@@ -3096,7 +3096,7 @@ mod tests {
         ));
         assert_eq!(coordinator.journal().replay().unwrap().last_revision, 0);
 
-        let identity = fusion_identity(session_id, platform_api::FusionOrigin::Workflow);
+        let identity = fusion_identity(session_id, platform_api::FusionOrigin::Agent);
         let mut record = fusion_terminal(identity, None);
         record.result = Ok(completed_result(&platform_api::FusionRunId::generated()));
         assert!(matches!(

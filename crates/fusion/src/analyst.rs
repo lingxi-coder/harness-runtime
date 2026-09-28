@@ -873,7 +873,6 @@ mod tests {
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
-            workflow_run_id: None,
         };
         let analyst = ResolvedPanel {
             profile: "anthropic".into(),
@@ -928,7 +927,6 @@ attempt's real usage — the total is not incomplete"
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
-            workflow_run_id: None,
         };
         let analyst = ResolvedPanel {
             profile: "anthropic".into(),
@@ -1032,7 +1030,6 @@ error exit — before this fix every AnalystError arm dropped usage_acc entirely
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
-            workflow_run_id: None,
         };
         let analyst = ResolvedPanel {
             profile: "anthropic".into(),
@@ -1138,7 +1135,6 @@ must force the accumulator incomplete, even though the run went on to succeed"
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
-            workflow_run_id: None,
         };
 
         let decode_err =
@@ -1227,7 +1223,6 @@ length: user_message.len()={} decode_err.len()={}",
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
-            workflow_run_id: None,
         };
         let analyst = ResolvedPanel {
             profile: "anthropic".into(),

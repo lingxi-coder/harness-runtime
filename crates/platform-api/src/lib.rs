@@ -240,7 +240,6 @@ pub use fusion::{
     PanelRisk, PanelRunStatus, PreparedFusionRun, RiskSeverity, DEFAULT_FUSION_DIMENSIONS,
     DEFAULT_FUSION_DIMENSION_DESCRIPTIONS, FUSION_MAX_PANEL, FUSION_MIN_PANEL,
     FUSION_PANEL_POOL_CAP, FUSION_PANEL_TYPE, FUSION_SCHEMA_VERSION,
-    FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT,
 };
 pub use haptics::{HapticError, HapticService, HapticStyle};
 pub use http::{HttpError, HttpTransport, RawByteStreamWithMeta, ResolvedAddressOverride};

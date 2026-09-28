@@ -332,7 +332,6 @@ pub fn fusion_request_from_slash(
             .unwrap_or(slash_cross_provider_default),
         parent_profile,
         parent_model,
-        workflow_run_id: None,
     }
 }
 
@@ -388,10 +387,9 @@ fn parse_csv(raw: &str, flag: &str) -> Result<Vec<String>, String> {
 }
 
 /// Splits `raw` on commas, then parses each entry through the single
-/// `platform_api::parse_fusion_model_ref` the Agent tool and workflow
-/// `fusion()`'s preset parsing also route through, so a malformed entry (e.g.
-/// `openai:` — a colon with an empty model) is rejected identically from
-/// every entrypoint.
+/// `platform_api::parse_fusion_model_ref` the Agent tool also routes through,
+/// so a malformed entry (e.g. `openai:` — a colon with an empty model) is
+/// rejected identically from every entrypoint.
 fn parse_models(raw: &str) -> Result<Vec<FusionModelRef>, String> {
     let mut out = Vec::new();
     for item in parse_csv(raw, "--models")? {

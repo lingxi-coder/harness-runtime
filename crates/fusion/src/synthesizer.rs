@@ -241,7 +241,6 @@ mod tests {
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
-            workflow_run_id: None,
         }
     }
 

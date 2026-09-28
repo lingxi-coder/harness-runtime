@@ -154,8 +154,7 @@ impl FusionOrchestrator {
     /// Build an orchestrator from composition-root handles.
     ///
     /// `config_source` is consulted fresh on every [`Self::run`] and every
-    /// `agent_surface()`/`resolve_parent_profile()`/`workflow_fusion_call_cap()`
-    /// call (F007) — pass a bare [`FusionRuntimeConfig`] (which implements
+    /// `agent_surface()`/`resolve_parent_profile()` call (F007) — pass a bare [`FusionRuntimeConfig`] (which implements
     /// [`FusionConfigSource`] as a fixed value) for a config that never
     /// reloads, or a closure/struct backed by a live settings loader.
     #[must_use]
@@ -355,7 +354,6 @@ impl FusionOrchestrator {
             && match request.origin {
                 FusionOrigin::Slash => false,
                 FusionOrigin::Agent => !current.allow_cross_provider_for_agent,
-                FusionOrigin::Workflow => !current.allow_cross_provider_for_workflow,
             };
         if cross_provider_revoked {
             return Err(FusionError::CrossProviderDenied);
@@ -999,9 +997,7 @@ impl FusionOrchestrator {
             }
 
             // [Finding 12] The dollar side is now accounted for (the commit
-            // above), but a caller tracking a SEPARATE token budget (e.g.
-            // `local_workflow`'s `fusion()` bridge arm, whose shared `spent`
-            // pool only advances on `Ok`) has no way to learn what this
+            // above), but a caller tracking a SEPARATE token budget has no way to learn what this
             // errored run already billed — emit it on the progress channel
             // so such a caller can charge it before propagating the error.
             //
@@ -2660,29 +2656,6 @@ impl FusionExecutor for FusionOrchestrator {
                 profiles.next().is_none().then_some(profile)
             })
     }
-
-    fn workflow_fusion_call_cap(&self) -> u32 {
-        // F007: reload per call; fail closed to the trait default (20, the
-        // global hard ceiling — see the trait doc) on a reload error.
-        self.config_source
-            .load()
-            .map_or(20, |config| config.workflow_fusion_call_cap)
-    }
-
-    fn workflow_batch_concurrency(&self) -> usize {
-        let Some(registrar) = &self.attempt_registrar else {
-            return 1;
-        };
-        let Ok(config) = self.config_source.load() else {
-            return 1;
-        };
-        if !config.enabled {
-            return 1;
-        }
-        usize::from(config.workflow_concurrency)
-            .min(registrar.workflow_batch_concurrency())
-            .clamp(1, 2)
-    }
 }
 
 /// One-shot entrypoint retained for the crate's own tests.
@@ -2714,11 +2687,7 @@ impl FusionOrchestrator {
         // Routed through the same immutable preparation snapshot and owned
         // supervisor every host uses.
         let request_for_failure = request.clone();
-        let parent_operation_id = if request.origin == FusionOrigin::Workflow {
-            request.workflow_run_id.clone()
-        } else {
-            None
-        };
+        let parent_operation_id = None;
         let identity = FusionRunIdentity::new(
             FusionRunId::generated(),
             session_id,
@@ -3787,7 +3756,6 @@ fn fusion_origin_label(origin: FusionOrigin) -> &'static str {
     match origin {
         FusionOrigin::Agent => "agent",
         FusionOrigin::Slash => "slash",
-        FusionOrigin::Workflow => "workflow",
     }
 }
 
@@ -4196,7 +4164,6 @@ mod check_panel_bar_preflight_tests {
             cross_provider: false,
             parent_profile: "p".into(),
             parent_model: "m".into(),
-            workflow_run_id: None,
         }
     }
 
@@ -4374,8 +4341,7 @@ classified as preflight"
 /// not silently emit `realized_output_tokens: None` when the run's own
 /// panels already made real, billed provider calls before the outer
 /// cancel/timeout race decided the run — that number is what lets a caller
-/// tracking a SEPARATE token budget (`local_workflow`'s `fusion()` bridge
-/// arm) charge already-spent tokens instead of leaving its budget ceiling
+/// tracking a SEPARATE token budget charge already-spent tokens instead of leaving its budget ceiling
 /// stuck at whatever it was before the call. Kept inline rather than in
 /// `orchestrator_test.rs` so this fixer's changes stay isolated to files it
 /// owns (same rationale as `record_failed_analyst_usage_tests` above) — the
@@ -4561,7 +4527,6 @@ mod outer_err_arm_realized_tokens_tests {
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
-            workflow_run_id: None,
         }
     }
 

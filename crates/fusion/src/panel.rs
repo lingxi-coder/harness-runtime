@@ -974,8 +974,7 @@ fn spawn_panel_tasks(
 /// `partial_ok` is the CALLER's already-combined effective value —
 /// [Finding 20] `request.partial_ok && config.partial_ok` — not
 /// `config.partial_ok` alone: a request that opts out of partial results
-/// (`/fusion --no-partial`, the Agent tool's `partial_ok: false`, or
-/// workflow `fusion({partialOk:false})`) must seal the bar on the FIRST
+/// (`/fusion --no-partial` or the Agent tool's `partial_ok: false`) must seal the bar on the FIRST
 /// panel failure exactly the way a settings-level `fusion.partialOk: false`
 /// already does, instead of only being enforced after every panel has
 /// already burned a full `panel_total_timeout_ms` round-trip in

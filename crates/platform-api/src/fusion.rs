@@ -1,6 +1,6 @@
 //! Fusion — fifth run mode: multi-model deliberation DTOs and executor trait.
 //!
-//! Callers (Agent tool, `/fusion`, workflow) depend only on this module. The
+//! Callers (Agent tool, `/fusion`) depend only on this module. The
 //! concrete orchestrator lives in the `fusion` crate so `platform-api` stays a
 //! leaf. Side-query clients and settings snapshots are injected by the
 //! composition root into that orchestrator, not onto this trait.
@@ -66,18 +66,6 @@ pub const FUSION_PANEL_POOL_CAP: usize = FUSION_MAX_PANEL as usize;
 /// and never appears in the Agent listing.
 pub const FUSION_PANEL_TYPE: &str = "fusion-panel";
 
-/// Hard ceiling for workflow `fusion()` calls in a single workflow run.
-/// [`FusionExecutor::workflow_fusion_call_cap`] may return a lower value (a
-/// host/settings override), never higher — every caller clamps to this.
-/// `tasks::handlers::local_workflow` and this crate's own default
-/// [`FusionExecutor::workflow_fusion_call_cap`] read this constant directly.
-/// Settings validation (`core/src/settings/schema.rs`) and
-/// `fusion::config`'s literal default do NOT yet read it — they still
-/// hardcode `20` — so until those are consolidated onto this constant, do
-/// not treat this as the single source of truth; changing this value alone
-/// will not move the other two.
-pub const FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT: u32 = 20;
-
 /// Which surface started this Fusion run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,8 +74,6 @@ pub enum FusionOrigin {
     Agent,
     /// User slash `/fusion`.
     Slash,
-    /// Workflow `fusion()`.
-    Workflow,
 }
 
 /// Built-in panel selection preset.
@@ -101,7 +87,7 @@ pub enum FusionPreset {
 }
 
 /// Parse a preset from its wire string (`"quality"` / `"fast"`). The single
-/// implementation every caller (Agent tool, `/fusion`, workflow `fusion()`)
+/// implementation every caller (Agent tool, `/fusion`)
 /// parses a caller-supplied preset string through, so the accepted spelling
 /// and the rejection message stay identical across entrypoints.
 impl std::str::FromStr for FusionPreset {
@@ -304,9 +290,6 @@ pub struct FusionRequest {
     pub parent_profile: String,
     /// Parent wire model id.
     pub parent_model: String,
-    /// Workflow run id when origin is [`FusionOrigin::Workflow`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_run_id: Option<String>,
 }
 
 const fn fusion_schema_version() -> u16 {
@@ -428,7 +411,7 @@ pub struct FusionRunIdentity {
     pub session_id: Option<protocol::SessionId>,
     /// Entry surface that started this computation.
     pub origin: FusionOrigin,
-    /// Opaque host operation id (Agent invocation, task id, or workflow run).
+    /// Opaque host operation id (Agent invocation or task id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_operation_id: Option<String>,
 }
@@ -479,33 +462,6 @@ impl FusionSubmission {
             if parent_operation_id.trim().is_empty() {
                 return Err(FusionError::InvalidRequest(
                     "fusion parent operation id must be non-empty".into(),
-                ));
-            }
-        }
-        if request.origin == FusionOrigin::Workflow
-            && request
-                .workflow_run_id
-                .as_deref()
-                .is_none_or(|run_id| run_id.trim().is_empty())
-        {
-            return Err(FusionError::InvalidRequest(
-                "workflow fusion request must carry a non-empty workflow run id".into(),
-            ));
-        }
-        if request.origin != FusionOrigin::Workflow && request.workflow_run_id.is_some() {
-            return Err(FusionError::InvalidRequest(
-                "non-workflow fusion request cannot carry a workflow run id".into(),
-            ));
-        }
-        if request.origin == FusionOrigin::Workflow {
-            let parent_operation = identity.parent_operation_id.as_deref().ok_or_else(|| {
-                FusionError::InvalidRequest(
-                    "workflow fusion identity must carry a trusted parent operation".into(),
-                )
-            })?;
-            if request.workflow_run_id.as_deref() != Some(parent_operation) {
-                return Err(FusionError::InvalidRequest(
-                    "fusion workflow run does not match the trusted parent operation".into(),
                 ));
             }
         }
@@ -1243,7 +1199,7 @@ type PreparedRunner = Box<
 >;
 
 /// Host-trusted target that permits a terminal run to enqueue a parent-session
-/// Slash publication. Agent and Workflow entrypoints deliberately do not
+/// Slash publication. The Agent entrypoint deliberately does not
 /// receive this capability, even when they carry a session identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FusionSlashPublicationTarget {
@@ -2063,7 +2019,7 @@ impl DurableFusionOutboxRecord {
     }
 }
 
-/// Durable terminal projection shared by Slash, Agent, and Workflow. The
+/// Durable terminal projection shared by Slash and Agent. The
 /// optional outbox item is part of this same event, so terminal computation
 /// and trusted Slash publication are acknowledged together.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2134,7 +2090,7 @@ pub enum FusionStage {
 
 impl FusionStage {
     /// Fixed, human-readable label shared by every progress surface (Agent
-    /// tool forwarder, `/fusion` task DTO, workflow bridge) per design §7's
+    /// tool forwarder, `/fusion` task DTO) per design §7's
     /// copy — the ONE place that copy is spelled, so every entrypoint that
     /// renders `FusionStage` renders the SAME words (F005).
     #[must_use]
@@ -2175,8 +2131,7 @@ pub struct FusionProgress {
     /// this event is emitted at a point the orchestrator has already priced
     /// and committed real usage (today: only the `check_panel_bar` failure
     /// path in `run_inner`, right before it returns `Err`). `None` on every
-    /// other progress event — a caller that tracks a running token budget
-    /// (e.g. `tasks::handlers::local_workflow`'s `fusion()` bridge arm) can
+    /// other progress event — a caller that tracks a running token budget can
     /// charge this amount even when the overall call ends in `Err`, instead
     /// of treating an errored call as having spent nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2231,7 +2186,7 @@ pub struct FusionProgress {
 /// Fusion failure. Preflight variants guarantee zero provider calls.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FusionError {
-    /// Agent/workflow gated off.
+    /// Agent surface gated off.
     #[error("fusion is disabled")]
     Disabled,
     /// Mobile / unsupported host.
@@ -2772,15 +2727,6 @@ pub trait FusionExecutor: Send + Sync + 'static {
         None
     }
 
-    /// Trusted per-workflow Fusion concurrency, sampled at the batch boundary.
-    /// Values above one require metered prepared runs whose every physical
-    /// request atomically reserves money and the original output account before
-    /// dispatch. A scope or billing-mode label alone is not this capability.
-    /// Legacy and unqualified hosts remain sequential; callers hard-cap at two.
-    fn workflow_batch_concurrency(&self) -> usize {
-        1
-    }
-
     /// Agent listing / intercept gate. Default is disabled (inert).
     fn agent_surface(&self) -> FusionAgentSurface {
         FusionAgentSurface::default()
@@ -2790,8 +2736,8 @@ pub trait FusionExecutor: Send + Sync + 'static {
     /// call fail identically, checked BEFORE the `agent_surface().enabled`
     /// gate (F008). Lets a composition root that rejected an invalid
     /// `fusion.*` value (see `RejectedFusionExecutor`) surface the real
-    /// [`FusionError::InvalidConfiguration`] through the Agent tool and the
-    /// workflow bridge, instead of both falling back to `enabled: false`'s
+    /// [`FusionError::InvalidConfiguration`] through the Agent tool and
+    /// `/fusion`, instead of both falling back to `enabled: false`'s
     /// generic "not found"/`Disabled` message. Default `None` — an executor
     /// that never pins a rejection is unaffected.
     fn preflight_error(&self) -> Option<FusionError> {
@@ -2812,14 +2758,6 @@ pub trait FusionExecutor: Send + Sync + 'static {
             .map(str::trim)
             .filter(|profile| !profile.is_empty())
             .map(str::to_string)
-    }
-
-    /// Workflow-global `fusion()` call cap for one workflow run.
-    ///
-    /// Hosts may return a lower value, but callers must still enforce the
-    /// global hard ceiling of 20.
-    fn workflow_fusion_call_cap(&self) -> u32 {
-        FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT
     }
 }
 
@@ -3057,12 +2995,8 @@ mod tests {
         origin: FusionOrigin,
     ) -> (protocol::SessionId, FusionRunControl, FusionPreparedSummary) {
         let session_id = protocol::SessionId::new();
-        let identity = FusionRunIdentity::new(
-            FusionRunId::generated(),
-            Some(session_id),
-            origin,
-            (origin == FusionOrigin::Workflow).then(|| "workflow-test".to_string()),
-        );
+        let identity =
+            FusionRunIdentity::new(FusionRunId::generated(), Some(session_id), origin, None);
         let control = FusionRunControl::new(
             identity.clone(),
             1_000,
@@ -3298,29 +3232,6 @@ mod tests {
     }
 
     #[test]
-    fn workflow_fusion_call_cap_default_matches_the_single_hard_limit_constant() {
-        struct DefaultCapExecutor;
-        #[async_trait::async_trait]
-        impl FusionExecutor for DefaultCapExecutor {
-            fn prepare(
-                self: ::std::sync::Arc<Self>,
-                submission: crate::FusionSubmission,
-            ) -> Result<crate::PreparedFusionRun, crate::FusionError> {
-                let timeout = self.effective_timeout_ms();
-                crate::prepared_from_oneshot(
-                    submission,
-                    timeout,
-                    move |_request, _inherit, _progress| async move { unimplemented!() },
-                )
-            }
-        }
-        assert_eq!(
-            DefaultCapExecutor.workflow_fusion_call_cap(),
-            FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT
-        );
-    }
-
-    #[test]
     fn recommendation_roundtrips() {
         let rec = FusionRecommendation::Pick {
             panel_id: "P2".into(),
@@ -3451,11 +3362,7 @@ mod tests {
 
     #[test]
     fn supervisor_result_claim_atomically_preserves_the_winning_owner() {
-        for origin in [
-            FusionOrigin::Agent,
-            FusionOrigin::Slash,
-            FusionOrigin::Workflow,
-        ] {
+        for origin in [FusionOrigin::Agent, FusionOrigin::Slash] {
             let (_session_id, cancelled, _) = terminal_test_control(origin);
             assert!(cancelled.activate_at(Instant::now()));
             assert!(cancelled.request_cancel());
@@ -3483,11 +3390,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_origin_records_one_immutable_candidate_before_terminal_visibility() {
-        for origin in [
-            FusionOrigin::Agent,
-            FusionOrigin::Slash,
-            FusionOrigin::Workflow,
-        ] {
+        for origin in [FusionOrigin::Agent, FusionOrigin::Slash] {
             let (session_id, control, summary) = terminal_test_control(origin);
             let (recorder, seen_rx, release) =
                 ProbeTerminalRecorder::new(true, false, FusionPublicationReceipt::queued());
@@ -3557,11 +3460,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dropping_any_origin_claims_sealing_before_the_recorder_can_run() {
-        for origin in [
-            FusionOrigin::Agent,
-            FusionOrigin::Slash,
-            FusionOrigin::Workflow,
-        ] {
+        for origin in [FusionOrigin::Agent, FusionOrigin::Slash] {
             let (session_id, control, summary) = terminal_test_control(origin);
             let (recorder, seen_rx, release) =
                 ProbeTerminalRecorder::new(true, false, FusionPublicationReceipt::queued());
@@ -3601,11 +3500,7 @@ mod tests {
 
     #[tokio::test]
     async fn runner_and_recorder_panics_are_sealed_once_for_every_origin() {
-        for origin in [
-            FusionOrigin::Agent,
-            FusionOrigin::Slash,
-            FusionOrigin::Workflow,
-        ] {
+        for origin in [FusionOrigin::Agent, FusionOrigin::Slash] {
             let (session_id, control, summary) = terminal_test_control(origin);
             let (recorder, seen_rx, _) =
                 ProbeTerminalRecorder::new(false, true, FusionPublicationReceipt::queued());

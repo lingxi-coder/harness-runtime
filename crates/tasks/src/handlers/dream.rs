@@ -802,8 +802,6 @@ mod tests {
                     resume_from_run_id: None,
                     args: None,
                     run_id: None,
-                    parent_model: None,
-                    parent_model_profile: None,
                     invocation_mode: None,
                     workflow_source: None,
                     script_is_verbatim_builtin: None,

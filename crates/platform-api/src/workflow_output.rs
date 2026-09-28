@@ -10,7 +10,7 @@ use std::{fmt, sync::Arc};
 use async_trait::async_trait;
 use protocol::{MessageId, SessionId};
 
-use crate::{BudgetError, FusionRunId};
+use crate::BudgetError;
 
 /// Stable identities for legacy aggregate output; registered attempt output
 /// is published by its receipt instead and must not also use this path.
@@ -18,8 +18,6 @@ use crate::{BudgetError, FusionRunId};
 pub enum WorkflowOutputEventId {
     /// One main-loop response.
     MainResponse(MessageId),
-    /// One unregistered Fusion result, including a partial failure result.
-    LegacyFusion(FusionRunId),
     /// One workflow agent call.
     WorkflowAgent {
         /// Stable workflow run identity.

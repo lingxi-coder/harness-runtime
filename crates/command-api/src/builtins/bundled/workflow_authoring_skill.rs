@@ -16,8 +16,7 @@
 //! description and behind this skill, cutting the per-request footprint from
 //! about 5.7k tokens to 1k. The text itself lives with the tool
 //! (`workflow::description`), which owns both byte-locked
-//! oracle documents and the single divergence register that edits them —
-//! keeping the `fusion()` entry next to the hooks it belongs with.
+//! oracle documents and the single divergence register that edits them.
 //!
 //! ⚠️ Divergence: upstream gates registration on `isEnabled: () => qc()`
 //! (workflows enabled). This port registers unconditionally, because
@@ -65,7 +64,6 @@ mod tests {
             "- pipeline(items,",
             "- parallel(thunks:",
             "- workflow(nameOrRef:",
-            "- fusion(prompt: string",
         ] {
             assert!(body.contains(hook), "the reference must document {hook:?}");
         }

@@ -695,7 +695,10 @@ mod tests {
             .await
             .unwrap();
         a1.record_legacy(
-            WorkflowOutputEventId::LegacyFusion(platform_api::FusionRunId::generated()),
+            WorkflowOutputEventId::WorkflowAgent {
+                run_id: "wf_test".into(),
+                call_index: 0,
+            },
             30,
         )
         .unwrap();

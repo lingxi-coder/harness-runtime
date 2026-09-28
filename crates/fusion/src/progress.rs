@@ -56,8 +56,8 @@ pub fn emit_with_allocated(
 
 /// [Finding 12; round-3 review B2 extends this with `egress_profiles`] Same
 /// as [`emit`], but carries this run's realized output-token spend so far —
-/// for the one caller (`local_workflow`'s `fusion()` bridge arm) that needs
-/// to charge already-billed spend even when the overall call ends in
+/// for a caller that tracks its own token budget and needs to charge
+/// already-billed spend even when the overall call ends in
 /// `Err` — and, when the orchestrator already knows the resolved egress
 /// profile set at the emission point, that list too (see
 /// `tasks::handlers::local_fusion`'s failure-path `<egress-profiles>`

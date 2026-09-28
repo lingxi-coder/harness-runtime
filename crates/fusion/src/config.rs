@@ -15,7 +15,7 @@ use platform_api::{
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FusionRuntimeConfig {
-    /// Agent listing + workflow `fusion()` master switch.
+    /// Agent listing master switch.
     pub enabled: bool,
     /// Default preset for all entrypoints when the caller omits one.
     pub default_preset: FusionPreset,
@@ -59,15 +59,8 @@ pub struct FusionRuntimeConfig {
     pub slash_cross_provider_default: bool,
     /// Agent may request cross-provider.
     pub allow_cross_provider_for_agent: bool,
-    /// Workflow may request cross-provider.
-    pub allow_cross_provider_for_workflow: bool,
     /// Hard allowlist of profile names. Empty = unrestricted.
     pub allowed_profiles: Vec<String>,
-    /// Per-workflow `fusion()` call cap.
-    pub workflow_fusion_call_cap: u32,
-    /// Requested Fusion batch concurrency. Effective concurrency also requires
-    /// the attempt host's atomic output-reservation capability.
-    pub workflow_concurrency: u8,
     /// Configured panel roster in the operator's priority order. A preset takes
     /// the first `quality_panel_count` / `fast_panel_count` entries. Empty
     /// means UNCONFIGURED — preflight fails with
@@ -117,10 +110,7 @@ impl FusionRuntimeConfig {
             analysis_protocol_retries: 1,
             slash_cross_provider_default: true,
             allow_cross_provider_for_agent: false,
-            allow_cross_provider_for_workflow: false,
             allowed_profiles: Vec::new(),
-            workflow_fusion_call_cap: 20,
-            workflow_concurrency: 2,
             // Deliberately empty: there is no default model roster. Fusion
             // spends real money on every panel, and a default would mean the
             // set of models a run bills against could change under a working
@@ -227,17 +217,8 @@ impl FusionRuntimeConfig {
         if let Some(v) = settings.allow_cross_provider_for_agent {
             cfg.allow_cross_provider_for_agent = v;
         }
-        if let Some(v) = settings.allow_cross_provider_for_workflow {
-            cfg.allow_cross_provider_for_workflow = v;
-        }
         if let Some(ref names) = settings.allowed_profiles {
             cfg.allowed_profiles.clone_from(names);
-        }
-        if let Some(n) = settings.workflow_fusion_call_cap {
-            cfg.workflow_fusion_call_cap = n;
-        }
-        if let Some(n) = settings.workflow_concurrency {
-            cfg.workflow_concurrency = n;
         }
         if let Some(ref panels) = settings.panel_models {
             cfg.panel_models = panels.iter().map(choice_from_settings).collect();
@@ -347,7 +328,7 @@ impl Default for FusionRuntimeConfig {
 /// change, or `fusion.enabled=false` (the design's §11 kill switch) had no
 /// effect on the session's already-built orchestrator until a restart. A
 /// `FusionConfigSource` is consulted at the start of every `run()` and every
-/// `agent_surface()`/`workflow_fusion_call_cap()` call instead, so the next
+/// `agent_surface()` call instead, so the next
 /// call — not the next restart — sees a settings change.
 pub trait FusionConfigSource: Send + Sync {
     /// Reload the current effective config.
@@ -384,30 +365,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn workflow_concurrency_defaults_to_two_and_supports_sequential_rollback() {
-        assert_eq!(FusionRuntimeConfig::defaults().workflow_concurrency, 2);
-        for value in [1, 2] {
-            let settings = FusionSettingsJson {
-                workflow_concurrency: Some(value),
-                ..Default::default()
-            };
-            assert_eq!(
-                FusionRuntimeConfig::from_settings(&settings)
-                    .unwrap()
-                    .workflow_concurrency,
-                value
-            );
-        }
-        for value in [0, 3] {
-            assert!(FusionRuntimeConfig::from_settings(&FusionSettingsJson {
-                workflow_concurrency: Some(value),
-                ..Default::default()
-            })
-            .is_err());
-        }
-    }
 
     #[test]
     fn completion_policy_defaults_and_merged_partial_rejection() {

@@ -2717,13 +2717,6 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             .await
             .map_err(|error| tool_workflow::WorkflowLaunchError(error.to_string()))?;
         let launch_result = async {
-            // Read one coherent provider-qualified snapshot. Calling the live
-            // provider separately for model/profile could pair values from two
-            // session selections racing a mobile retarget.
-            let default_selection = self
-                .default_model_selection_provider
-                .get()
-                .and_then(|provider| provider());
             let subagents = orchestrator::transcript_paths::subagents_dir(
                 &self.lingxi_home,
                 &self.project_cwd.to_string_lossy(),
@@ -2878,12 +2871,6 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                             .as_ref()
                             .map(|v| serde_json::to_string(v).unwrap_or_default()),
                         run_id: Some(run_id.clone()),
-                        parent_model: default_selection
-                            .as_ref()
-                            .map(|selection| selection.model.clone()),
-                        parent_model_profile: default_selection
-                            .as_ref()
-                            .and_then(|selection| selection.model_profile.clone()),
                         invocation_mode: Some(invocation_mode),
                         workflow_source: Some(workflow_source),
                         script_is_verbatim_builtin: Some(script_is_verbatim_builtin),
@@ -5504,8 +5491,6 @@ mod run_id_tests {
                     resume_from_run_id: None,
                     args: Some(args.to_string()),
                     run_id: Some("wf_terminal-test".into()),
-                    parent_model: None,
-                    parent_model_profile: None,
                     invocation_mode: Some("named".into()),
                     workflow_source: Some("plugin".into()),
                     script_is_verbatim_builtin: Some(true),

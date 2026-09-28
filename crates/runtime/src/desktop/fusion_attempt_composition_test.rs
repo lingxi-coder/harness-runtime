@@ -190,7 +190,6 @@ fn submission(
         cross_provider: false,
         parent_profile: "anthropic".into(),
         parent_model: MODELS[0].into(),
-        workflow_run_id: None,
     };
     platform_api::FusionSubmission::new(
         request,
@@ -288,16 +287,7 @@ async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare(
         2,
         "factory must install this exact host in ApiService"
     );
-    let mut rollback = cfg.clone();
-    rollback.flag_settings = Some(fusion_settings(
-        serde_json::json!({"workflowConcurrency": 1}),
-    ));
-    assert_eq!(
-        executor(&rollback, host.clone(), pricing.clone()).workflow_batch_concurrency(),
-        1
-    );
     let executor = executor(&cfg, host.clone(), pricing);
-    assert_eq!(executor.workflow_batch_concurrency(), 2);
     assert_eq!(
         Arc::strong_count(&host),
         3,
@@ -348,17 +338,14 @@ async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare(
 /// ledger under a temporary home, so every attempt is registered and billed
 /// exactly as for a persistent host; what it does not get is a transcript on
 /// disk. Before the disposable ledger existed this host had no registrar at
-/// all, which both clamped it to one workflow batch and billed it as an
-/// unverifiable aggregate.
+/// all, which billed it as an unverifiable aggregate.
 #[tokio::test]
 async fn desktop_fusion_composition_ephemeral_still_meters_and_requires_pool_admission() {
     let (tmp, mut cfg) = tests::test_config(true);
     // No transcript, but the ledger below still lands under a real directory:
     // production roots it at a temporary `LINGXI_HOME` removed at shutdown.
     cfg.session_persistence = false;
-    cfg.flag_settings = Some(fusion_settings(
-        serde_json::json!({"workflowConcurrency": 2}),
-    ));
+    cfg.flag_settings = Some(fusion_settings(serde_json::json!({})));
     let session = protocol::SessionId::new();
     let lease = platform_api::live_sessions::LiveSessionDir::at_live(tmp.path().join("sessions"))
         .claim_session_id(&session.to_string(), std::process::id())
@@ -396,9 +383,6 @@ async fn desktop_fusion_composition_ephemeral_still_meters_and_requires_pool_adm
         outputs,
     );
     let executor = executor(&cfg, host, pricing);
-    // The clamp to one batch belonged to the unregistered path, not to the
-    // ephemeral host, so this now reads the configured value.
-    assert_eq!(executor.workflow_batch_concurrency(), 2);
     let prepared = executor
         .prepare(submission(session, budget.clone()))
         .unwrap();

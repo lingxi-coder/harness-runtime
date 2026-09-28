@@ -420,7 +420,6 @@ impl Fixture {
             cross_provider: false,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
-            workflow_run_id: None,
         };
         let inherit = FusionInheritance::new(
             SubagentInheritance {

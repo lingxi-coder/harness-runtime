@@ -1033,7 +1033,6 @@ fn dummy_request() -> FusionRequest {
         cross_provider: true,
         parent_profile: "openai".into(),
         parent_model: "gpt-5.4".into(),
-        workflow_run_id: None,
     }
 }
 

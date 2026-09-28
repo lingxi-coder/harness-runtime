@@ -2945,10 +2945,6 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             .await
             .map_err(|error| tool_workflow::WorkflowLaunchError(error.to_string()))?;
         let launch_result = async {
-            let default_selection = self
-                .default_model_selection_provider
-                .get()
-                .and_then(|provider| provider());
             // Persist the script so it is editable + re-runnable via `scriptPath`
             // (claude-code persists every invocation's script "under the session
             // directory"). A `scriptPath` input is already on disk → return it as-is;
@@ -3072,12 +3068,6 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                             .as_ref()
                             .map(|v| serde_json::to_string(v).unwrap_or_default()),
                         run_id: Some(run_id.clone()),
-                        parent_model: default_selection
-                            .as_ref()
-                            .map(|selection| selection.model.clone()),
-                        parent_model_profile: default_selection
-                            .as_ref()
-                            .and_then(|selection| selection.model_profile.clone()),
                         invocation_mode: Some(invocation_mode),
                         workflow_source: Some(workflow_source),
                         script_is_verbatim_builtin: Some(named_builtin),
@@ -5190,7 +5180,7 @@ impl fusion::FusionConfigSource for DesktopFusionConfigSource {
 /// boot-time-invalid `fusion.*` value does NOT pin `RejectedFusionExecutor`
 /// for the rest of the process. `preflight_error()` re-validates FRESH on
 /// every call — mirroring how `FusionOrchestrator::run` /
-/// `agent_surface` / `workflow_fusion_call_cap` already reload the config
+/// `agent_surface` already reload the config
 /// per call (F007) — instead of freezing the first boot-time error, so a
 /// user who fixes and saves the settings file recovers within the session
 /// exactly as the F007 doc comment promises ("takes effect on the NEXT run,
@@ -5228,14 +5218,6 @@ impl platform_api::FusionExecutor for DesktopFusionExecutor {
     ) -> Option<String> {
         self.inner
             .resolve_parent_profile(parent_model, explicit_profile)
-    }
-
-    fn workflow_fusion_call_cap(&self) -> u32 {
-        self.inner.workflow_fusion_call_cap()
-    }
-
-    fn workflow_batch_concurrency(&self) -> usize {
-        self.inner.workflow_batch_concurrency()
     }
 }
 
@@ -14297,9 +14279,6 @@ pub async fn build_with_credential_stack(
     .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
     .with_workspace_permission_leases(workspace_leases.clone(), cwd.clone())
     .with_worktree_manager(worktree_manager.clone())
-    .with_fusion(fusion_executor.clone())
-    .with_terminal_recorder_opt(Some(fusion_recorder.clone()))
-    .with_terminal_recorder_factory(fusion_recorder_factory.clone())
     .with_status_sink(local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>)
     .with_workflow_progress_sink(local_workflow_event_sink.clone()
         as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>)
@@ -15534,17 +15513,14 @@ pub async fn build_with_credential_stack(
     // task dispatches through — its own script's direct tool calls, every
     // `agent()` subagent (`local_workflow.rs:3391 self.tool_invoker.clone()`,
     // optionally wrapped by `WorkspaceLeaseToolInvoker`, a transparent
-    // delegate that does not touch this flag), and every workflow `fusion()`
-    // panel (`local_workflow.rs:2658-2663`'s `SubagentInheritance {
-    // tool_invoker: tool_invoker.clone(), .. }`, the SAME clone). No
+    // delegate that does not touch this flag). No
     // interactive turn ever owns a `LocalWorkflow` task (it is spawned as a
     // background task, mirroring `fusion_invoker` below), and this cell has
     // no other reader (`local_workflow_invoker` referenced only at its
     // creation, at `LocalWorkflowHandler::new`, and here) — so the
     // `fusion_invoker` comment's "cannot mislabel a foreground direct tool
     // call" justification holds verbatim for it too. Without this, a
-    // permission ask raised by a workflow's `fusion()` panel (or its
-    // `agent()` subagents) is wiped by Ctrl-C on an UNRELATED foreground
+    // permission ask raised by a workflow's `agent()` subagents is wiped by Ctrl-C on an UNRELATED foreground
     // turn, exactly the bug `with_background_owned` was introduced to close
     // for the `/fusion` slash entrypoint.
     local_workflow_invoker.set(Arc::new(
@@ -17241,8 +17217,8 @@ mod tests {
     /// class re-opened for two more cells): every `DeferredToolInvoker` that
     /// backs a task NEVER owned by an interactive turn must be bound with
     /// `.with_background_owned(true)` — `local_workflow_invoker`
-    /// (`LocalWorkflow` script + its `agent()` subagents + its `fusion()`
-    /// panels, `local_workflow.rs:3391` / `:2658-2663`), `fusion_invoker`
+    /// (`LocalWorkflow` script + its `agent()` subagents,
+    /// `local_workflow.rs:3391`), `fusion_invoker`
     /// (every `/fusion` background-task panel, `tasks::handlers::local_fusion`),
     /// `dream_invoker` (cron-spawned `TaskType::Dream` tasks — nothing
     /// interactive ever spawns a `Dream`), and `local_agent_invoker` (the

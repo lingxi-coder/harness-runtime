@@ -5459,8 +5459,6 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             resume_from_run_id,
             args,
             run_id,
-            parent_model: _,
-            parent_model_profile: _,
             invocation_mode: _,
             workflow_source: _,
             script_is_verbatim_builtin: _,
