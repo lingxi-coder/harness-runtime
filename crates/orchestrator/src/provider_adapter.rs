@@ -1737,7 +1737,8 @@ mod tests {
                     query_source_label: Some("fusion_panel".to_string()),
                 },
             )
-            .await.err();
+            .await
+            .err();
         let auto_seen = auto_transport.seen.lock().unwrap();
         let auto_request = auto_seen
             .last()
@@ -2295,6 +2296,88 @@ mod tests {
             assert_eq!(wire["tools"][0]["allowed_domains"][0], "rust-lang.org");
             assert_eq!(wire["model"], "claude-sonnet-4-20250514");
         }
+    }
+    #[tokio::test]
+    async fn hosted_search_openai_reports_one_call_not_one_per_citation() {
+        use llm_runtime::services::sdk;
+        use serde_json::json;
+        use tool_api::HostedWebSearchClient;
+        struct SearchTransport;
+        #[async_trait::async_trait]
+        impl llm_runtime::Transport for SearchTransport {
+            async fn send(
+                &self,
+                request: sdk::HttpRequest,
+            ) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
+                use futures::StreamExt;
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(body["model"], "gpt-search");
+                assert_eq!(body["tools"][0]["type"], "web_search");
+                let call = json!({"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"Rust"}});
+                let citation = json!({"type":"url_citation","url":"https://rust-lang.org","title":"Rust","start_index":0,"end_index":4});
+                let events = vec![
+                    json!({"type":"response.created","response":{"id":"resp_1","model":"gpt-search"}}),
+                    json!({"type":"response.output_item.added","output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"in_progress"}}),
+                    json!({"type":"response.output_item.done","output_index":0,"item":call}),
+                    json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"Rust"}),
+                    json!({"type":"response.output_text.annotation.added","output_index":1,"content_index":0,"annotation":citation}),
+                    json!({"type":"response.completed","response":{"id":"resp_1","model":"gpt-search","status":"completed","output":[call,{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Rust","annotations":[citation]}]}],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}),
+                ];
+                Ok(sdk::StreamResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: futures::stream::iter(
+                        events
+                            .into_iter()
+                            .map(|event| Ok(format!("data: {event}\n\n").into())),
+                    )
+                    .boxed(),
+                })
+            }
+        }
+        let mut profile: ProviderProfile = serde_json::from_value(json!({
+            "provider_id":"open_ai","profile_name":"search-openai","base_url":"https://api.openai.com/v1","protocol":"open_ai_responses","auth":"none","credential":{"type":"none"},
+            "models":[{"display_model":"gpt-search","request_model":"gpt-search","billing_model":"gpt-search","capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
+        })).unwrap();
+        profile.protocol = ProtocolFamily::OpenAiResponses;
+        let mut wire: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
+            "provider_id":"openai","profile_name":"search-openai","base_url":"https://api.openai.com/v1","protocol":"open_ai_responses","auth":"none","models":[],"extra":{"web_search":"openai_responses"}
+        })).unwrap();
+        wire.regions = sdk::protocol::Region::all();
+        profile.wire_profile = Some(wire);
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![profile],
+            })
+            .unwrap(),
+        );
+        let adapter = ProviderApiAdapter::new(Arc::new(ApiService::new(
+            client,
+            Arc::new(SearchTransport),
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        )));
+        let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
+        let request = tool_api::HostedSearchRequest {
+            model: "gpt-search".into(),
+            profile: Some("search-openai".into()),
+            query: "Rust".into(),
+            allowed_domains: vec![],
+            blocked_domains: vec![],
+        };
+        assert!(adapter.supports_request(&request));
+        let result = adapter.search(request, progress).await.unwrap();
+        assert_eq!(result.searches, 1);
+        assert!(updates.try_recv().is_ok());
+        assert!(
+            updates.try_recv().is_err(),
+            "duplicated final output counted twice"
+        );
+        assert_eq!((result.input_tokens, result.output_tokens), (7, 3));
+        assert!(result.results.iter().any(|entry|matches!(entry,tool_api::hosted_search::SearchResultEntry::Hit(value) if value.to_string().contains("rust-lang.org"))));
     }
 }
 

@@ -15,7 +15,8 @@ mod monitor_websocket;
 pub fn provider_transport(
 ) -> Result<lingxi_llm_client::HttpTransport, lingxi_llm_client::protocol::LlmError> {
     let tls = tls_config::TlsSettings::from_env();
-    lingxi_llm_client::HttpTransport::with_client_configurator(|builder| {
+    // ApiService owns first-byte and idle watchdogs, including disabling them.
+    lingxi_llm_client::HttpTransport::with_read_timeout_and_client_configurator(None, |builder| {
         tls.apply_to_builder(builder.connect_timeout(std::time::Duration::from_secs(10)))
     })
 }

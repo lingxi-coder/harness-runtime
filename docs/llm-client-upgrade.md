@@ -1,7 +1,7 @@
 # llm-client 能力接入
 
 开发子模块与运行时固定 Git 依赖当前使用 `lingxi-llm-client` 0.3.0，提交
-`49ef751354c616368921be600b85a538fa5b815b`，已从 canonical 远端
+`9313326139cba4095faa08a4e71d78a9bb6beda4`，已从 canonical 远端
 `https://github.com/lingxi-coder/llm-client` 获取。该版本统一模型 HTTP/WebSocket 传输、鉴权策略、模型目录与托管搜索接口。
 该提交包含会话隔离、文件操作期限及流式上传修复，并已推送。后续子模块修改仍须先独立提交并推送，再更新父仓库记录。
 
@@ -128,6 +128,11 @@ SDK `HttpTransport` 传递，保持一次性流及原始二进制响应。宿主
 
 Responses WebSocket 和 Realtime 使用同一个 SDK `HttpTransport` 的网络配置。
 HTTP、文件上传、Responses 和 Realtime 共用 CA、mTLS 与代理配置；
+runtime 将 SDK 的 HTTP/Responses 空闲读取期限设为 `None`，由宿主的首响应与
+流 watchdog 控制等待，避免 SDK 默认 60 秒抢先截断长推理。SDK 独立使用时仍默认
+60 秒；`with_read_timeout_and_client_configurator` 可同时配置 HTTP/Responses 期限
+和 TLS/代理。Pong 写入仍有独立期限，并监听连接取消。
+
 `responses-websocket` 启用 Responses，`realtime-websocket` 另外启用双向接口。
 `HttpTransport` 同时实现 `Transport` 和 `realtime::RealtimeTransport`，旧
 `RustlsWebSocketTransport` 已删除。Realtime 仍使用独立会话和双向流，设备录放音由宿主负责。
@@ -184,3 +189,13 @@ HTTP/TLS/OAuth 测试需要允许绑定本机端口。为避免生成大量增�
 - SDK 启用 Realtime 的 iOS arm64、Android arm64、Windows GNU x64 交叉编译通过；未执行跨平台设备测试。
 - 移除本地 SDK patch 的独立源码副本从 canonical Git 获取固定提交，runtime 全特性编译通过。
 - 架构检查自测和全仓扫描通过。未使用真实 provider 凭据，未验证真实账户、录放音或移动设备行为。
+
+
+审查后补充回归：HTTP/Responses 在虚拟时间超过 5 分钟后仍可读取，显式 SDK
+短期限仍生效；阻塞 Pong 写入可取消或超时；OpenAI hosted search 的原生调用
+产生一次进度与计数，引用及最终输出重复不重复计数。Responses 在 SDK 首次
+提供完整搜索调用时发出该次进度，不伪造 provider 尚未给出的搜索次数。
+
+审查修复的 SDK 相关测试 201 项、HTTP/TLS/上传回归 38 项、Anthropic/OpenAI
+搜索集成 2 项通过；移除本地
+patch 的独立源码副本使用远端固定 SDK 提交完成 runtime 全特性编译。
