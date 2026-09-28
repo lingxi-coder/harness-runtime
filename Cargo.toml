@@ -163,13 +163,13 @@ repository = "https://github.com/lingxi-coder/harness-runtime"
 
 [workspace.dependencies]
 # Temporary local assembly; replaced by one immutable SDK Git revision before delivery.
-mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "46a294d80112bd33b96b5face26f51d261df07ba" }
-mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "46a294d80112bd33b96b5face26f51d261df07ba" }
-mobile-linux-android = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "46a294d80112bd33b96b5face26f51d261df07ba" }
-mobile-linux-ios = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "46a294d80112bd33b96b5face26f51d261df07ba" }
-platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "46a294d80112bd33b96b5face26f51d261df07ba" }
-platform-android-libcap = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "46a294d80112bd33b96b5face26f51d261df07ba" }
-platform-android-minijail = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "46a294d80112bd33b96b5face26f51d261df07ba" }
+mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
+mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
+mobile-linux-android = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
+mobile-linux-ios = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
+platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
+platform-android-libcap = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
+platform-android-minijail = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
 
 # Single source of truth for the product namespace (paths, filenames, env
 # prefix, brand name). Path is workspace-root-relative so every member uses

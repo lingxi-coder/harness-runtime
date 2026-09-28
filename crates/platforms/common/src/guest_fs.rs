@@ -63,7 +63,7 @@ impl GuestPathFileSystem {
     /// space / refused writes.
     fn resolve_translation(&self, path: &str, write: bool) -> Result<Option<String>, FsError> {
         let mounts = self.runtime.current_mounts();
-        mobile_linux_core::guest_path::resolve_guest_path(
+        mobile_linux_core::resolve_guest_path(
             path,
             &mounts,
             &guest_paths::writable_roots(),
@@ -71,12 +71,12 @@ impl GuestPathFileSystem {
         )
         .map(|host| host.map(|value| value.to_string_lossy().into_owned()))
         .map_err(|error| match error {
-            mobile_linux_core::guest_path::GuestPathError::ReadOnly { guest_path } => {
+            mobile_linux_core::GuestPathError::ReadOnly { guest_path } => {
                 FsError::PermissionDenied(format!(
                     "guest path is on a read-only mount ({guest_path}): {path}"
                 ))
             }
-            mobile_linux_core::guest_path::GuestPathError::NotHostBacked => {
+            mobile_linux_core::GuestPathError::NotHostBacked => {
                 FsError::PermissionDenied(format!(
                     "guest path is not host-backed (emulated-filesystem area); file tools can only \
                      reach bind-mounted guest paths — use the shell for: {path}"
