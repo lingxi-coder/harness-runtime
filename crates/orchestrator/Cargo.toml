@@ -71,6 +71,7 @@ sha2 = "0.10"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 
 [dev-dependencies]
+llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 # Reuse the existing tool-api test context for actual native Monitor dispatch fixtures.
 tool-api = { path = "../tool-api", features = ["test-support"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }

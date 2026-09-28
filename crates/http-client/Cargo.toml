@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 platform-api = { path = "../platform-api" }
 protocol = { path = "../protocol" }
-lingxi-llm-client.workspace = true
+lingxi-llm-client = { workspace = true, features = ["responses-websocket"] }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
@@ -34,6 +34,7 @@ url = "2"
 http = "1"
 
 [dev-dependencies]
+lingxi-llm-client = { workspace = true, features = ["realtime-websocket"] }
 axum = "0.7"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 futures-util = { workspace = true }

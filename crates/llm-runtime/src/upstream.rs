@@ -617,17 +617,19 @@ pub(crate) fn request(
                 if let Some(existing) = result
                     .prompt_cache
                     .breakpoints
-                    .iter()
+                    .iter_mut()
                     .find(|b| b.position == position)
                 {
+                    existing.scope = cache(control).scope.or(existing.scope);
                     if existing.ttl != ttl {
                         return Err(invalid("conflicting legacy and typed system cache TTL"));
                     }
                 } else {
-                    result
-                        .prompt_cache
-                        .breakpoints
-                        .push(wire::CacheBreakpoint { position, ttl });
+                    result.prompt_cache.breakpoints.push(wire::CacheBreakpoint {
+                        scope: cache(control).scope,
+                        position,
+                        ttl,
+                    });
                 }
             }
         }
@@ -694,6 +696,7 @@ pub(crate) fn request(
     }
     result.controls.anthropic.context_hint = req.context_hint.clone();
     result.controls.responses = wire::ResponsesControls {
+        previous_response_id: req.openai_responses.previous_response_id.clone(),
         parallel_tool_calls: req
             .openai_responses
             .parallel_tool_calls
@@ -763,43 +766,6 @@ pub(crate) fn request(
 
 /// Restore host legacy controls that are intentionally outside the SDK's typed
 /// request contract. Scoped continuations still pass through SDK validation.
-pub(crate) fn apply_request_compatibility(
-    req: &LlmRequest,
-    protocol: wire::ProtocolFamily,
-    result: &mut ProviderRequest,
-) -> Result<(), LlmError> {
-    if let Some(previous) = &req.openai_responses.previous_response_id {
-        if protocol != wire::ProtocolFamily::OpenAiResponses {
-            return Err(invalid("previous_response_id requires OpenAI Responses"));
-        }
-        if let Some(scoped) = &req.continuation {
-            if scoped.response_id.as_str() != previous {
-                return Err(invalid(
-                    "conflicting legacy and scoped response continuation",
-                ));
-            }
-        }
-        result.body_json["previous_response_id"] = json!(previous);
-    }
-    if native_family(protocol) == wire::ProtocolFamily::AnthropicMessages {
-        for (index, block) in req.system.iter().enumerate() {
-            if let Some(control) = &block.cache_control {
-                if let Some(system) = result
-                    .body_json
-                    .get_mut("system")
-                    .and_then(Value::as_array_mut)
-                {
-                    if let Some(block) = system.get_mut(index) {
-                        // The typed policy carries TTL; preserve the host's optional
-                        // global scope marker as well.
-                        block["cache_control"] = cache(control).wire_value();
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
 
 fn upstream_metadata(metadata: &mut Value) -> &mut serde_json::Map<String, Value> {
     if !metadata.is_object() {
@@ -1061,7 +1027,6 @@ impl Codec {
         if self.profile.protocol == wire::ProtocolFamily::BedrockClaude {
             result.stream_framing = StreamFraming::AwsEventStream;
         }
-        apply_request_compatibility(req, self.profile.protocol, &mut result)?;
         result.json_string_overrides = message_string_overrides(req, self.profile.protocol)?;
         Ok(result)
     }
@@ -1263,7 +1228,7 @@ impl WireCodec for Codec {
             replay: BTreeMap::new(),
             arguments: BTreeMap::new(),
             pending_tools: BTreeSet::new(),
-            legacy_connectors: BTreeMap::new(),
+            legacy_connectors: Default::default(),
         })
     }
     fn clone_box(&self) -> Box<dyn WireCodec> {
@@ -1290,7 +1255,7 @@ pub(crate) struct Decoder {
     replay: BTreeMap<u32, wire::ContentBlock>,
     arguments: BTreeMap<u32, String>,
     pending_tools: BTreeSet<u32>,
-    legacy_connectors: BTreeMap<u32, Value>,
+    legacy_connectors: client::providers::anthropic::ConnectorTextAccumulator,
 }
 impl std::fmt::Debug for Decoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1333,60 +1298,6 @@ impl Decoder {
             if self.closed.contains(&(index & 0x7fff_ffff)) && self.closed.insert(index) {
                 out.push(LlmEvent::ContentBlockStop { index });
             }
-        }
-        Ok(())
-    }
-
-    // The SDK deliberately exposes unrecognized native deltas as observations.
-    // Connector text is an established host contract, so assemble only its
-    // recognized deltas and publish it after the provider closes the block.
-    fn legacy_connector_event(
-        &mut self,
-        payload: &Value,
-        out: &mut Vec<LlmEvent>,
-    ) -> Result<(), LlmError> {
-        let Some(index) = payload["index"].as_u64() else {
-            return Ok(());
-        };
-        let index = u32::try_from(index)
-            .ok()
-            .filter(|index| *index < 0x8000_0000)
-            .ok_or_else(|| invalid("provider output block index exceeds the host range"))?;
-        match payload["type"].as_str() {
-            Some("content_block_start") if payload["content_block"]["type"] == "connector_text" => {
-                self.legacy_connectors
-                    .insert(index, payload["content_block"].clone());
-            }
-            Some("content_block_delta") => {
-                if let Some(block) = self.legacy_connectors.get_mut(&index) {
-                    let delta = &payload["delta"];
-                    if delta["type"] == "connector_text_delta"
-                        && delta["connector_text"].is_string()
-                    {
-                        let text = format!(
-                            "{}{}",
-                            block["connector_text"].as_str().unwrap_or_default(),
-                            delta["connector_text"].as_str().unwrap()
-                        );
-                        block["connector_text"] = Value::String(text);
-                    } else {
-                        self.legacy_connectors.remove(&index);
-                    }
-                }
-            }
-            Some("content_block_stop") => {
-                if let Some(value) = self.legacy_connectors.remove(&index) {
-                    self.start(
-                        index | 0x8000_0000,
-                        host_block(wire::ContentBlock::ProviderContent {
-                            protocol: wire::ProtocolFamily::AnthropicMessages,
-                            value,
-                        })?,
-                        out,
-                    );
-                }
-            }
-            _ => {}
         }
         Ok(())
     }
@@ -1680,7 +1591,10 @@ impl Decoder {
                 }
                 wire::StreamEvent::ProviderEvent { protocol, payload } => {
                     if protocol == wire::ProtocolFamily::AnthropicMessages {
-                        self.legacy_connector_event(&payload, &mut out)?;
+                        if let Some((index, block)) = self.legacy_connectors.push(&payload) {
+                            let index = wire_block_index(usize::try_from(index).map_err(invalid)?)?;
+                            self.start(index | 0x8000_0000, host_block(block)?, &mut out);
+                        }
                     }
                     append_observation(
                         &mut self.metadata,
@@ -1830,7 +1744,7 @@ impl Decoder {
             replay: BTreeMap::new(),
             arguments: BTreeMap::new(),
             pending_tools: BTreeSet::new(),
-            legacy_connectors: BTreeMap::new(),
+            legacy_connectors: Default::default(),
         }
     }
     pub(crate) fn project_batch(
@@ -2240,6 +2154,7 @@ mod upgrade_tests {
             ],
         });
         req.prompt_cache.breakpoints.push(wire::CacheBreakpoint {
+            scope: None,
             position: wire::CachePosition::Message { index: 1, block: 2 },
             ttl: wire::CacheTtl::FiveMinutes,
         });

@@ -23,7 +23,7 @@ impl llm_runtime::ModelAttemptHooks for RetirementProbe {
 }
 
 struct Offline;
-impl llm_runtime::Transport for Offline {
+impl llm_runtime::test_support::FixtureTransport for Offline {
     fn execute<'a>(
         &'a self,
         _: &'a llm_runtime::ProviderRequest,
@@ -38,11 +38,12 @@ impl llm_runtime::Transport for Offline {
         _: &'a llm_runtime::ProviderRequest,
     ) -> llm_runtime::transport::BoxFuture<
         'a,
-        Result<llm_runtime::transport::StreamingResponse, llm_runtime::LlmError>,
+        Result<llm_runtime::test_support::StreamingResponse, llm_runtime::LlmError>,
     > {
         Box::pin(async { panic!("composition tests must not stream provider traffic") })
     }
 }
+llm_runtime::impl_fixture_transport!(Offline);
 #[async_trait]
 impl SubagentSpawner for Offline {
     async fn spawn(

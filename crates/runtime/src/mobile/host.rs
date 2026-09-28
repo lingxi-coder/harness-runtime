@@ -81,7 +81,6 @@ use llm_runtime::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use llm_runtime::oauth::anthropic::handle::OAuthHandle;
 use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
 use llm_runtime::oauth::openai as openai_oauth;
-use llm_runtime::LlmTransportBridge;
 use llm_runtime::{
     Credential, CredentialConfig, CredentialProvider, CredentialScope, DefaultLlmClient,
     ProviderId, Transport,
@@ -99,10 +98,9 @@ use platform_api::audio::{
     AudioError, AudioErrorKind, AudioOperation, AudioOperationContext, AudioOperationId,
     AudioOperationSuccess, AudioOwner, AudioService,
 };
-use platform_api::http::{
-    HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta,
-    WebSocketConnectionWithMeta, WebSocketMessageStreamWithMeta,
-};
+use platform_api::http::HttpError;
+#[cfg(test)]
+use platform_api::http::{RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta};
 use platform_api::{
     AuthHandle, Clock, FileSystem, HttpTransport, MobileLinuxCapability, MobileLinuxRuntime,
     MobileLinuxRuntimeMode, OrchestratorHandle, OutputStream, Platform, RootfsState, RootfsStatus,
@@ -112,7 +110,6 @@ use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig}
 use secret::CredentialManager;
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
-use tool_api::AnthropicRequestBuilder;
 use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use tool_workflow::WorkflowLauncher as _;
@@ -182,104 +179,6 @@ use crate::mobile::{
 
 /// A sized newtype over the platform's `Arc<dyn HttpTransport>`.
 ///
-/// [`LlmTransportBridge`] requires a `Sized` `HttpTransport` implementor.
-/// Mobile reads its transport from the aggregate `Platform` as an
-/// `Arc<dyn HttpTransport>` (unsized), so we wrap it in this thin delegating
-/// newtype to satisfy the bound WITHOUT bypassing the device's HTTP backend —
-/// every call forwards verbatim to the platform transport.
-struct DynHttp(Arc<dyn HttpTransport>);
-
-#[async_trait::async_trait]
-impl HttpTransport for DynHttp {
-    async fn send_stream(
-        &self,
-        req: platform_api::http::HttpStreamRequest,
-    ) -> Result<RawByteStreamWithMeta, HttpError> {
-        self.0.send_stream(req).await
-    }
-
-    async fn stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(
-        &self,
-        req: protocol::HttpRequest,
-        resolved: Option<platform_api::ResolvedAddressOverride>,
-    ) -> Result<RawByteStreamWithMeta, HttpError> {
-        self.0
-            .stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(req, resolved)
-            .await
-    }
-
-    async fn request(
-        &self,
-        req: protocol::HttpRequest,
-    ) -> Result<protocol::HttpResponse, HttpError> {
-        self.0.request(req).await
-    }
-    async fn request_with_resolved_addrs(
-        &self,
-        req: protocol::HttpRequest,
-        resolved: Option<platform_api::ResolvedAddressOverride>,
-    ) -> Result<protocol::HttpResponse, HttpError> {
-        self.0.request_with_resolved_addrs(req, resolved).await
-    }
-    async fn stream_sse(&self, req: protocol::HttpRequest) -> Result<SseStream, HttpError> {
-        self.0.stream_sse(req).await
-    }
-    /// Forward to the inner transport so the device backend's real headers are
-    /// preserved (the default would silently drop them via the `stream_sse` path).
-    async fn stream_sse_with_meta(
-        &self,
-        req: protocol::HttpRequest,
-    ) -> Result<SseStreamWithMeta, HttpError> {
-        self.0.stream_sse_with_meta(req).await
-    }
-    async fn stream_raw_bytes(
-        &self,
-        req: protocol::HttpRequest,
-    ) -> Result<RawByteStream, HttpError> {
-        self.0.stream_raw_bytes(req).await
-    }
-    /// Forward to the inner transport so the device backend's real status and
-    /// headers are preserved on binary (AWS event-stream) responses.
-    async fn stream_raw_bytes_with_meta(
-        &self,
-        req: protocol::HttpRequest,
-    ) -> Result<RawByteStreamWithMeta, HttpError> {
-        self.0.stream_raw_bytes_with_meta(req).await
-    }
-    /// Forward WebSocket streaming so device transports that support Responses
-    /// WebSocket are not hidden behind this sized wrapper.
-    async fn stream_websocket_messages_with_meta(
-        &self,
-        req: protocol::HttpRequest,
-    ) -> Result<WebSocketMessageStreamWithMeta, HttpError> {
-        self.0.stream_websocket_messages_with_meta(req).await
-    }
-    /// Forward reusable WebSocket connections so Responses sessions can reuse
-    /// the device backend connection inside a turn.
-    async fn open_websocket_connection_with_meta(
-        &self,
-        req: protocol::HttpRequest,
-    ) -> Result<WebSocketConnectionWithMeta, HttpError> {
-        self.0.open_websocket_connection_with_meta(req).await
-    }
-}
-
-/// Deterministic, env/argv-free recipe for building a mobile runtime.
-///
-/// The mobile analog of [`harness_runtime::desktop::DesktopConfig`]: every value the host
-/// would otherwise read from the process environment becomes an explicit field,
-/// so the FFI entry point (and the off-device host test) can build an identical
-/// runtime without touching `std::env`. The OS handles themselves arrive
-/// separately, through the `Arc<dyn Platform>` passed to [`build_mobile`].
-///
-/// Mobile deliberately omits the desktop-only `mcp_paths` and
-/// `use_noop_permission_gate` knobs: MCP discovery uses the app-private
-/// settings path plus the active project's `.mcp.json`, and a mobile client
-/// ALWAYS binds the connection-scoped
-/// [`AdapterPermissionGate`] (a phone has no always-allow CLI mode).
-// P0.2: `Clone` only — `Debug` is implemented manually below because the new
-// `memory_provider` field (`Arc<dyn MemoryHierarchyProvider>`) is not `Debug`.
-// Mirrors the `DesktopConfig` pattern (harness-runtime::desktop/src/lib.rs:799-846).
 #[derive(Clone)]
 pub struct MobileConfig {
     /// Host package identity used by `/version` (never part of the FFI DTO).
@@ -1669,10 +1568,10 @@ impl MobileOAuthManager {
                 }
             }
         };
-        let endpoint = match provider {
+        use llm_runtime::services::sdk::directory::probe::{ProbeCredential, ProbeProtocol};
+        let (base, kind) = match provider {
             MobileOAuthProvider::Anthropic => {
-                let configured_base = api_base.trim().trim_end_matches('/');
-                if configured_base != ANTHROPIC_OAUTH_API_BASE {
+                if api_base.trim().trim_end_matches('/') != ANTHROPIC_OAUTH_API_BASE {
                     return provider_connection_failure(
                         "Anthropic OAuth 仅支持官方 HTTPS API 地址",
                         false,
@@ -1682,46 +1581,24 @@ impl MobileOAuthManager {
                         true,
                     );
                 }
-                provider_models_endpoint(ANTHROPIC_OAUTH_API_BASE, "anthropic")
-            }
-            MobileOAuthProvider::OpenAi => Ok("https://chatgpt.com/backend-api/models".to_string()),
-        };
-        let endpoint = match endpoint {
-            Ok(endpoint) => endpoint,
-            Err(message) => {
-                return provider_connection_failure(message, false, false, None, 0, true);
-            }
-        };
-        let mut headers = vec![
-            ("accept".to_string(), "application/json".to_string()),
-            ("authorization".to_string(), format!("Bearer {token}")),
-        ];
-        match provider {
-            MobileOAuthProvider::Anthropic => {
-                headers.push(("anthropic-version".to_string(), "2023-06-01".to_string()));
-                headers.push(("anthropic-beta".to_string(), "oauth-2025-04-20".to_string()));
+                (ANTHROPIC_OAUTH_API_BASE, ProbeProtocol::Anthropic)
             }
             MobileOAuthProvider::OpenAi => {
-                if let Some(account_id) = account_id {
-                    headers.push(("ChatGPT-Account-ID".to_string(), account_id));
-                }
-                if fedramp {
-                    headers.push(("X-OpenAI-Fedramp".to_string(), "true".to_string()));
-                }
+                ("https://chatgpt.com/backend-api", ProbeProtocol::ChatGpt)
             }
-        }
+        };
         let started = std::time::Instant::now();
-        let response = self
-            .http
-            .request(protocol::HttpRequest {
-                method: protocol::HttpMethod::Get,
-                url: endpoint,
-                headers,
-                body: None,
-                body_bytes: None,
-                timeout: Some(PROVIDER_CONNECTION_TIMEOUT),
-            })
-            .await;
+        let response = probe_provider(
+            base,
+            kind,
+            ProbeCredential {
+                token: token.into(),
+                bearer: true,
+                account_id,
+                fedramp,
+            },
+        )
+        .await;
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         classify_provider_connection_response(response, model.trim(), latency_ms, true)
     }
@@ -2544,7 +2421,7 @@ fn apply_mobile_profile_allowlist(
 // `builtin_anthropic_config` / `apply_settings_providers` /
 // `parse_routing_overrides` helpers from `platform_common::llm_config` are no
 // longer wired here; they remain in `platform_common` (the desktop e2e tests
-// still reach them via fully-qualified paths). `LlmTransportBridge` is still
+// still reach them via fully-qualified paths). SDK transport is still
 // imported at the top of the module.
 
 fn mobile_skill_listing_provider(
@@ -3346,7 +3223,7 @@ async fn build_mobile_inner_with_ask(
     // the ApiService got `None`. Mirrors the desktop root's single logEvent sink.
     let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
 
-    // (2a) Task 10: DefaultLlmClient over LlmTransportBridge.
+    // Model networking is owned by the shared SDK.
     //      Mobile uses the platform's `Arc<dyn HttpTransport>` wrapped in `DynHttp`
     //      so the device backend is preserved; no desktop-only deps are pulled.
     //
@@ -3357,8 +3234,10 @@ async fn build_mobile_inner_with_ask(
     //      through the provider credential ids below. Anthropic's API-key flag
     //      intentionally remains true when both credentials exist because the
     //      shared assembler gives API Key precedence over OAuth.
-    let llm_transport: Arc<dyn Transport> =
-        Arc::new(LlmTransportBridge::new(DynHttp(http.clone())));
+    let llm_transport: Arc<dyn Transport> = Arc::new(
+        platform_common::provider_transport()
+            .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
+    );
     let stored_anthropic_key = credentials.get_anthropic_api_key().await.ok().flatten();
     let has_api_key = !cfg.api_key.trim().is_empty() || stored_anthropic_key.is_some();
     let has_anthropic_oauth = anthropic_oauth_state.is_some();
@@ -3608,10 +3487,6 @@ async fn build_mobile_inner_with_ask(
         streaming_override.unwrap_or(provider_adapter.clone() as Arc<dyn StreamingApiClient>);
     // WebSearch builds Anthropic `POST /v1/messages` requests via its own
     // provider (server-side web search is Anthropic-only in v1).
-    let tool_provider = Arc::new(
-        AnthropicRequestBuilder::new(cfg.api_key.clone(), Some(cfg.api_base.clone()))
-            .with_mcp_token_counter(provider_adapter.clone()),
-    );
 
     // `/login` remains the Anthropic trait-shaped command. Provider settings
     // use `oauth` above so ChatGPT's account-shaped identity stays separate.
@@ -4696,7 +4571,8 @@ async fn build_mobile_inner_with_ask(
             SandboxPlatform::Linux
         },
         http: http.clone(),
-        provider: tool_provider,
+        hosted_search: Some(provider_adapter.clone()),
+        mcp_token_counter: Some(provider_adapter.clone()),
         default_model: orch_cfg.model.clone(),
         // Mobile has no settings.json-backed WebSearch config provider (desktop
         // injects `DesktopWebSearchConfigProvider`); WebSearch falls back to its
@@ -5138,7 +5014,7 @@ async fn build_mobile_inner_with_ask(
         Some(orchestrator::prompt::build_memdir_prefetch_from_anthropic(
             cfg.api_key.clone(),
             Some(cfg.api_base.clone()),
-            http.clone(),
+            api_service.transport(),
             Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
                 as Arc<dyn platform_api::RuntimeSpawner>,
             &home,
@@ -11167,29 +11043,24 @@ impl MobileEngineHandle {
             );
         }
 
-        let endpoint = match provider_models_endpoint(&api_base, &provider_preset) {
-            Ok(endpoint) => endpoint,
-            Err(message) => {
-                return provider_connection_failure(
-                    message,
-                    false,
-                    false,
-                    None,
-                    0,
-                    used_stored_credential,
-                );
-            }
-        };
-        let request = protocol::HttpRequest {
-            method: protocol::HttpMethod::Get,
-            url: endpoint,
-            headers: provider_connection_headers(&provider_preset, &credential),
-            body: None,
-            body_bytes: None,
-            timeout: Some(PROVIDER_CONNECTION_TIMEOUT),
+        use llm_runtime::services::sdk::directory::probe::{ProbeCredential, ProbeProtocol};
+        let kind = match provider_preset.as_str() {
+            "anthropic" => ProbeProtocol::Anthropic,
+            "google" => ProbeProtocol::Google,
+            _ => ProbeProtocol::OpenAi,
         };
         let started = std::time::Instant::now();
-        let response = self.firer_platform.http().request(request).await;
+        let response = probe_provider(
+            &api_base,
+            kind,
+            ProbeCredential {
+                token: credential.into(),
+                bearer: false,
+                account_id: None,
+                fedramp: false,
+            },
+        )
+        .await;
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         classify_provider_connection_response(
             response,
@@ -12253,56 +12124,6 @@ const PROVIDER_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::fr
 // caller to retry and duplicate the expensive work.
 pub(crate) const LOCAL_APPS_MCP_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
 
-fn provider_models_endpoint(api_base: &str, provider_preset: &str) -> Result<String, &'static str> {
-    let base = api_base.trim().trim_end_matches('/');
-    if base.is_empty() {
-        return Err("请填写 API 地址");
-    }
-    if !(base.starts_with("https://") || base.starts_with("http://")) {
-        return Err("API 地址必须以 https:// 或 http:// 开头");
-    }
-    if base
-        .chars()
-        .any(|ch| ch.is_whitespace() || matches!(ch, '#' | '?'))
-        || base.split_once("://").is_some_and(|(_, authority)| {
-            authority
-                .split('/')
-                .next()
-                .is_some_and(|host| host.contains('@'))
-        })
-    {
-        return Err("API 地址格式无效");
-    }
-
-    if base.ends_with("/models") {
-        return Ok(base.to_string());
-    }
-    if let Some(prefix) = base.strip_suffix("/chat/completions") {
-        return Ok(format!("{prefix}/models"));
-    }
-    if provider_preset == "anthropic" && !base.ends_with("/v1") {
-        return Ok(format!("{base}/v1/models"));
-    }
-    Ok(format!("{base}/models"))
-}
-
-fn provider_connection_headers(provider_preset: &str, credential: &str) -> Vec<(String, String)> {
-    let mut headers = vec![("accept".to_string(), "application/json".to_string())];
-    match provider_preset {
-        "anthropic" => {
-            headers.push(("x-api-key".to_string(), credential.to_string()));
-            headers.push(("anthropic-version".to_string(), "2023-06-01".to_string()));
-        }
-        "google" => {
-            headers.push(("x-goog-api-key".to_string(), credential.to_string()));
-        }
-        _ => {
-            headers.push(("authorization".to_string(), format!("Bearer {credential}")));
-        }
-    }
-    headers
-}
-
 fn provider_connection_failure(
     message: impl Into<String>,
     reachable: bool,
@@ -12323,35 +12144,44 @@ fn provider_connection_failure(
     }
 }
 
-fn provider_model_ids(body: &str) -> Option<Vec<String>> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    let entries = value
-        .get("data")
-        .or_else(|| value.get("models"))?
-        .as_array()?;
-    Some(
-        entries
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .get("id")
-                    .or_else(|| entry.get("name"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(|id| id.strip_prefix("models/").unwrap_or(id).to_string())
-            })
-            .collect(),
+async fn probe_provider(
+    base: &str,
+    kind: llm_runtime::services::sdk::directory::probe::ProbeProtocol,
+    credential: llm_runtime::services::sdk::directory::probe::ProbeCredential,
+) -> Result<llm_runtime::services::sdk::directory::probe::ProbeResult, HttpError> {
+    use llm_runtime::services::sdk;
+    fn map(error: sdk::protocol::LlmError) -> HttpError {
+        match error {
+            sdk::protocol::LlmError::InvalidRequest { message } => {
+                HttpError::InvalidRequest(message)
+            }
+            sdk::protocol::LlmError::TransportTimeout { .. } => {
+                HttpError::Timeout(PROVIDER_CONNECTION_TIMEOUT)
+            }
+            other => HttpError::Connection(other.to_string()),
+        }
+    }
+    let transport = platform_common::provider_transport().map_err(map)?;
+    sdk::directory::probe::probe(
+        &transport,
+        base,
+        kind,
+        &credential,
+        PROVIDER_CONNECTION_TIMEOUT,
     )
+    .await
+    .map_err(map)
 }
 
 fn classify_provider_connection_response(
-    response: Result<protocol::HttpResponse, HttpError>,
+    response: Result<llm_runtime::services::sdk::directory::probe::ProbeResult, HttpError>,
     model: &str,
     latency_ms: u64,
     used_stored_credential: bool,
 ) -> ProviderConnectionTestDto {
     match response {
         Ok(response) if (200..300).contains(&response.status) => {
-            let model_ids = provider_model_ids(&response.body);
+            let model_ids = response.model_ids;
             let model_available = model.is_empty()
                 || model_ids
                     .as_ref()
@@ -15236,10 +15066,10 @@ mod tests {
         mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight,
         mobile_mcp_record_reload_intent, mobile_mcp_reload_requires_replacement,
         mobile_mcp_run_reload_job, mobile_mcp_state_is_transitional, mobile_skill_listing_provider,
-        provider_models_endpoint, session_agent_conversation_is_visible,
-        session_agent_transcript_event, session_agent_transcript_revision, McpConfigScope,
-        McpRegistry, McpServerConfig, MobileConfig, MobileCronStoreHandle, MobileMcpReloadJob,
-        MobileRuntime, MobileSessionAgentObserver,
+        session_agent_conversation_is_visible, session_agent_transcript_event,
+        session_agent_transcript_revision, McpConfigScope, McpRegistry, McpServerConfig,
+        MobileConfig, MobileCronStoreHandle, MobileMcpReloadJob, MobileRuntime,
+        MobileSessionAgentObserver,
     };
 
     #[test]
@@ -15803,31 +15633,11 @@ mod tests {
     }
 
     #[test]
-    fn provider_connection_uses_provider_specific_model_endpoint() {
-        assert_eq!(
-            Ok("https://api.deepseek.com/models".to_string()),
-            provider_models_endpoint("https://api.deepseek.com/", "deepseek"),
-        );
-        assert_eq!(
-            Ok("https://api.openai.com/v1/models".to_string()),
-            provider_models_endpoint("https://api.openai.com/v1", "openai"),
-        );
-        assert_eq!(
-            Ok("https://api.anthropic.com/v1/models".to_string()),
-            provider_models_endpoint("https://api.anthropic.com", "anthropic"),
-        );
-        assert!(provider_models_endpoint("file:///tmp/provider", "custom").is_err());
-        assert!(provider_models_endpoint("https://key@example.com/v1", "custom").is_err());
-    }
-
-    #[test]
     fn provider_connection_requires_selected_model_in_recognized_catalog() {
         let connected = classify_provider_connection_response(
-            Ok(protocol::HttpResponse {
+            Ok(llm_runtime::services::sdk::directory::probe::ProbeResult {
                 status: 200,
-                headers: Vec::new(),
-                body: r#"{"object":"list","data":[{"id":"deepseek-flash"}]}"#.to_string(),
-                body_bytes: Vec::new(),
+                model_ids: Some(vec!["deepseek-flash".into()]),
             }),
             "deepseek-flash",
             42,
@@ -15840,11 +15650,9 @@ mod tests {
         assert!(connected.used_stored_credential);
 
         let missing = classify_provider_connection_response(
-            Ok(protocol::HttpResponse {
+            Ok(llm_runtime::services::sdk::directory::probe::ProbeResult {
                 status: 200,
-                headers: Vec::new(),
-                body: r#"{"models":[{"name":"models/gemini-2.5-flash"}]}"#.to_string(),
-                body_bytes: Vec::new(),
+                model_ids: Some(vec!["gemini-2.5-flash".into()]),
             }),
             "gemini-2.5-pro",
             9,

@@ -800,9 +800,8 @@ pub fn ctx_for_file_tools(
             Platform::Linux
         },
         http: make_stub_http(),
-        provider: Arc::new(crate::anthropic_request::AnthropicRequestBuilder::new(
-            "test-key", None,
-        )),
+        hosted_search: None,
+        mcp_token_counter: None,
         default_model: "claude-sonnet-4-20250514".to_string(),
         web_search_config: None,
         worktree: make_mock_worktree(),
@@ -871,9 +870,8 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
             Platform::Linux
         },
         http: make_stub_http(),
-        provider: Arc::new(crate::anthropic_request::AnthropicRequestBuilder::new(
-            "test-key", None,
-        )),
+        hosted_search: None,
+        mcp_token_counter: None,
         default_model: "claude-sonnet-4-20250514".to_string(),
         web_search_config: None,
         worktree: make_mock_worktree(),

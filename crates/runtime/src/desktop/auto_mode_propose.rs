@@ -483,7 +483,7 @@ mod tests {
                 self.0.store(true, Ordering::SeqCst);
             }
         }
-        impl Transport for Establishing {
+        impl llm_runtime::test_support::FixtureTransport for Establishing {
             fn execute<'a>(
                 &'a self,
                 _: &'a llm_runtime::ProviderRequest,
@@ -503,6 +503,7 @@ mod tests {
                 })
             }
         }
+        llm_runtime::impl_fixture_transport!(Establishing);
         let transport = Arc::new(Establishing {
             entered: tokio::sync::Notify::new(),
             dropped: Arc::new(AtomicBool::new(false)),

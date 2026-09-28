@@ -358,7 +358,7 @@ mod tests {
         }
     }
 
-    impl Transport for ScriptedTransport {
+    impl llm_runtime::test_support::FixtureTransport for ScriptedTransport {
         fn execute<'a>(
             &'a self,
             request: &'a ProviderRequest,
@@ -379,6 +379,7 @@ mod tests {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(ScriptedTransport);
 
     fn anthropic_client() -> DefaultLlmClient {
         std::env::set_var("LLM_COUNT_TOKENS_TEST_KEY", "ct-test-key");

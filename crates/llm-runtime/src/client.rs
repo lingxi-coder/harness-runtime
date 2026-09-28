@@ -16,6 +16,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 #[derive(Debug, Clone)]
 pub struct DefaultLlmClient {
+    cache: Arc<crate::execution::ClientCache>,
     registry: Arc<ModelRegistry>,
     routes: Arc<BTreeMap<String, RouteEntry>>,
     credentials: Option<Arc<dyn CredentialProvider>>,
@@ -44,9 +45,7 @@ impl lingxi_llm_client::Authenticator for ServiceAuthenticator {
         profile: &lingxi_llm_client::protocol::ProviderProfile,
         credential: Option<&lingxi_llm_client::protocol::Secret<String>>,
     ) -> Result<(), lingxi_llm_client::protocol::LlmError> {
-        use lingxi_llm_client::protocol::{
-            AuthStrategy as WireAuth, ProtocolFamily as WireProtocol,
-        };
+        use lingxi_llm_client::protocol::AuthStrategy as WireAuth;
 
         if let Some(credential) = credential {
             // Resource references inherit the operation's account scope. Never
@@ -72,19 +71,7 @@ impl lingxi_llm_client::Authenticator for ServiceAuthenticator {
             authenticator
                 .apply(request, profile, Some(credential))
                 .await?;
-            if profile.auth == WireAuth::OAuthBearer
-                && profile.protocol == WireProtocol::AnthropicMessages
-            {
-                let existing = request.headers.iter().find_map(|(name, value)| {
-                    name.eq_ignore_ascii_case("anthropic-beta")
-                        .then_some(value.as_str())
-                });
-                let beta = append_beta(existing, "oauth-2025-04-20");
-                request
-                    .headers
-                    .retain(|(name, _)| !name.eq_ignore_ascii_case("anthropic-beta"));
-                request.headers.push(("anthropic-beta".into(), beta));
-            }
+
             return Ok(());
         }
         self.0
@@ -161,6 +148,17 @@ impl std::fmt::Debug for ResponsesWebSocketSession {
 }
 
 impl DefaultLlmClient {
+    pub(crate) fn search_profile(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Option<&lingxi_llm_client::protocol::ProviderProfile> {
+        let route = self.registry.resolve_in(model, profile).ok()?;
+        self.routes
+            .get(&route.profile_name)
+            .map(|entry| &entry.profile)
+    }
+
     pub(crate) fn attempt_price_bounds(
         &self,
         route: &crate::ResolvedRoute,
@@ -206,6 +204,7 @@ impl DefaultLlmClient {
         }
 
         Ok(Self {
+            cache: Arc::new(Default::default()),
             registry: Arc::new(registry),
             routes: Arc::new(routes),
             credentials: None,
@@ -264,7 +263,7 @@ impl DefaultLlmClient {
         crate::services::ProviderServices::with_configured_transport(
             &profiles,
             region,
-            Arc::new(crate::execution::HostTransport(transport)),
+            transport,
             |builder| {
                 for profile in &profiles {
                     builder.register_authenticator(profile.auth, authenticator.clone());
@@ -426,6 +425,7 @@ impl DefaultLlmClient {
         profile.protocol = crate::upstream::family(&effective_protocol);
         let host_failure = Arc::new(Mutex::new(None));
         let (wire_draft, mut provider_request) = crate::execution::prepare(
+            &self.cache,
             profile,
             &resolved_route,
             encoding_request,
@@ -494,9 +494,9 @@ impl DefaultLlmClient {
             .await?;
         self.seal_prepared(&mut prepared).await?;
         let call = prepared.wire_call.take().expect("sealed");
-        let raw = crate::execution::HostTransport(transport.clone());
+        let raw = transport.clone();
         let collected = call
-            .dispatch_once_using(&raw, || Ok(()))
+            .dispatch_once_using(raw.as_ref(), || Ok(()))
             .await
             .map_err(crate::upstream::error)?
             .collect()
@@ -536,9 +536,7 @@ impl DefaultLlmClient {
         self.seal_prepared(&mut prepared).await?;
         let call = prepared.wire_call.take().expect("sealed");
         let received = call
-            .dispatch_once_using(&crate::execution::HostTransport(transport.clone()), || {
-                Ok(())
-            })
+            .dispatch_once_using(transport.as_ref(), || Ok(()))
             .await
             .map_err(crate::upstream::error)?;
         LlmEventStream::from_received(received, crate::upstream::family(&prepared.route.protocol))
@@ -575,12 +573,7 @@ impl DefaultLlmClient {
         let mut draft = prepared.wire_draft.take().expect("draft");
         session
             .shared
-            .prepare_using(
-                &mut draft,
-                false,
-                true,
-                Some(&crate::execution::HostTransport(transport.clone())),
-            )
+            .prepare_using(&mut draft, false, true, Some(transport.as_ref()))
             .await
             .map_err(|error| crate::execution::restore_error(error, &prepared.host_failure))
     }
@@ -678,7 +671,7 @@ impl DefaultLlmClient {
             prepared.provider_request.stream_transport,
             ProviderStreamTransport::ResponsesWebSocket
         );
-        let raw = crate::execution::HostTransport(transport.clone());
+        let raw = transport.clone();
         let mut draft = prepared.wire_draft.take().expect("draft");
         draft.request_mut().headers = prepared
             .provider_request
@@ -695,7 +688,7 @@ impl DefaultLlmClient {
         if websocket {
             session
                 .shared
-                .prepare_using(&mut draft, prewarm, !prewarm, Some(&raw))
+                .prepare_using(&mut draft, prewarm, !prewarm, Some(raw.as_ref()))
                 .await
                 .map_err(|error| crate::execution::restore_error(error, &prepared.host_failure))?;
         }
@@ -706,10 +699,10 @@ impl DefaultLlmClient {
         let received = if websocket {
             session
                 .shared
-                .dispatch_using(call, || Ok(()), Some(&raw))
+                .dispatch_using(call, || Ok(()), Some(raw.as_ref()))
                 .await
         } else {
-            call.dispatch_once_using(&raw, || Ok(())).await
+            call.dispatch_once_using(raw.as_ref(), || Ok(())).await
         }
         .map_err(crate::upstream::error)?;
         Ok((prepared, received))
@@ -767,6 +760,7 @@ impl DefaultLlmClient {
             failure: failure.clone(),
         });
         let (draft, mut host) = crate::execution::prepare(
+            &self.cache,
             entry.profile.clone(),
             &route,
             request,
@@ -811,9 +805,7 @@ impl DefaultLlmClient {
                     .unwrap_or(error)
             })?;
         let collected = call
-            .dispatch_once_using(&crate::execution::HostTransport(transport.clone()), || {
-                Ok(())
-            })
+            .dispatch_once_using(transport.as_ref(), || Ok(()))
             .await
             .map_err(crate::upstream::error)?
             .collect()
@@ -872,10 +864,11 @@ impl DefaultLlmClient {
             now: None,
             failure: failure.clone(),
         };
-        let http = crate::execution::HostTransport(transport.clone());
+        let http = transport.clone();
         let mut profile = entry.profile.clone();
         profile.auth = lingxi_llm_client::protocol::AuthStrategy::Bearer;
-        let service = lingxi_llm_client::FileService::new(&http, &profile, Some(&auth), None, None);
+        let service =
+            lingxi_llm_client::FileService::new(http.as_ref(), &profile, Some(&auth), None, None);
         service
             .upload_gemini_unpolled(&lingxi_llm_client::UploadFile {
                 filename: display_name.into(),
@@ -905,10 +898,11 @@ impl DefaultLlmClient {
             now: None,
             failure: failure.clone(),
         };
-        let http = crate::execution::HostTransport(transport.clone());
+        let http = transport.clone();
         let mut profile = entry.profile.clone();
         profile.auth = lingxi_llm_client::protocol::AuthStrategy::Bearer;
-        let service = lingxi_llm_client::FileService::new(&http, &profile, Some(&auth), None, None);
+        let service =
+            lingxi_llm_client::FileService::new(http.as_ref(), &profile, Some(&auth), None, None);
         service
             .poll_gemini_active(file_name, poll.interval, poll.max_wait)
             .await
@@ -1071,14 +1065,7 @@ impl DefaultLlmClient {
                 // Codex subscription requests use the Responses backend's
                 // restricted shape (OpenCode's Codex plugin also omits its
                 // maxOutputTokens parameter). Keep API-key profiles unchanged.
-                if let Some(body) = request.body_json.as_object_mut() {
-                    body.remove("max_output_tokens");
-                    body.remove("temperature");
-                    body.remove("top_p");
-                    body.insert("store".into(), serde_json::Value::Bool(false));
-                    body.entry("instructions")
-                        .or_insert_with(|| serde_json::Value::String(String::new()));
-                }
+                lingxi_llm_client::auth::header_policy::chatgpt_body(&mut request.body_json);
                 let authenticator = ChatGptAuthenticator::new(access_token, account_id, fedramp);
                 request = authenticator.apply(request)?;
             }
@@ -1128,9 +1115,7 @@ impl DefaultLlmClient {
         if matches!(entry.auth, AuthStrategy::OAuthBearer)
             && matches!(entry.protocol, ProtocolFamily::AnthropicMessages)
         {
-            let existing = request.headers.get("anthropic-beta").map(String::as_str);
-            let value = append_beta(existing, "oauth-2025-04-20");
-            request.headers.insert("anthropic-beta".to_string(), value);
+            lingxi_llm_client::auth::header_policy::anthropic_oauth(&mut request.headers);
         }
         Ok(request)
     }
@@ -1755,5 +1740,36 @@ impl PreparedLlmCall {
                 )
                 .ok()
             })
+    }
+}
+
+#[cfg(test)]
+mod shared_client_regression {
+    use super::*;
+    #[tokio::test]
+    async fn configuration_cache_is_reused_without_caching_request_credentials() {
+        let config: ClientConfig = serde_json::from_value(serde_json::json!({"providers":[{
+            "provider_id":"anthropic_first_party", "profile_name":"test", "base_url":"https://api.anthropic.com", "protocol":"anthropic_messages", "auth":"api_key", "credential":{"type":"host_managed","id":"key"},
+            "models":[{"display_model":"claude-test","request_model":"claude-test","billing_model":"claude-test","capabilities":{"streaming":true,"tools":false,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
+        }]})).unwrap();
+        let client = DefaultLlmClient::from_config(config).unwrap();
+        for secret in ["account-a", "account-b", "account-a"] {
+            let client = client.clone().with_credential_provider(Arc::new(
+                crate::StaticCredentialProvider::new(crate::Credential::ApiKey(secret.into())),
+            ));
+            let prepared = client
+                .prepare(&LlmRequest::new("claude-test"))
+                .await
+                .unwrap();
+            assert_eq!(
+                prepared
+                    .provider_request
+                    .headers
+                    .get("x-api-key")
+                    .map(String::as_str),
+                Some(secret)
+            );
+        }
+        assert_eq!(client.cache.len(), 1);
     }
 }

@@ -23,7 +23,7 @@ impl FakeTransport {
     }
 }
 
-impl Transport for FakeTransport {
+impl llm_runtime::test_support::FixtureTransport for FakeTransport {
     fn execute<'a>(
         &'a self,
         request: &'a ProviderRequest,
@@ -44,6 +44,7 @@ impl Transport for FakeTransport {
         })
     }
 }
+llm_runtime::impl_fixture_transport!(FakeTransport);
 
 fn anthropic_client() -> DefaultLlmClient {
     std::env::set_var("LLM_CLIENT_TRANSPORT_TEST_KEY", "transport-key");
@@ -160,7 +161,7 @@ async fn execute_routes_provider_errors_through_taxonomy() {
 async fn execute_propagates_transport_failures() {
     #[derive(Debug)]
     struct FailingTransport;
-    impl Transport for FailingTransport {
+    impl llm_runtime::test_support::FixtureTransport for FailingTransport {
         fn execute<'a>(
             &'a self,
             _request: &'a ProviderRequest,
@@ -182,6 +183,7 @@ async fn execute_propagates_transport_failures() {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(FailingTransport);
 
     let client = anthropic_client();
 

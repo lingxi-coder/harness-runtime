@@ -53,7 +53,7 @@ impl StreamTransport {
     }
 }
 
-impl Transport for StreamTransport {
+impl llm_runtime::test_support::FixtureTransport for StreamTransport {
     fn execute<'a>(
         &'a self,
         _request: &'a ProviderRequest,
@@ -88,6 +88,7 @@ impl Transport for StreamTransport {
         })
     }
 }
+llm_runtime::impl_fixture_transport!(StreamTransport);
 
 // Result-wrapped to match the scripted frame vec's element type.
 #[allow(clippy::unnecessary_wraps)]
@@ -308,7 +309,7 @@ impl ResponsesWsTransport {
     }
 }
 
-impl Transport for ResponsesWsTransport {
+impl llm_runtime::test_support::FixtureTransport for ResponsesWsTransport {
     fn execute<'a>(
         &'a self,
         _request: &'a ProviderRequest,
@@ -363,6 +364,7 @@ impl Transport for ResponsesWsTransport {
         })
     }
 }
+llm_runtime::impl_fixture_transport!(ResponsesWsTransport);
 
 fn responses_completed(id: &str) -> Vec<Result<RawStreamFrame, LlmError>> {
     vec![

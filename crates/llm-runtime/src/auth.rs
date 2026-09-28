@@ -35,9 +35,11 @@ impl ApiKeyAuthenticator {
 
 impl Authenticator for ApiKeyAuthenticator {
     fn apply(&self, mut request: ProviderRequest) -> Result<ProviderRequest, LlmError> {
-        request
-            .headers
-            .insert(self.header_name.clone(), self.api_key.clone());
+        lingxi_llm_client::auth::header_policy::api_key(
+            &mut request.headers,
+            &self.header_name,
+            &self.api_key,
+        );
         Ok(request)
     }
 }
@@ -60,10 +62,7 @@ impl BearerAuthenticator {
 
 impl Authenticator for BearerAuthenticator {
     fn apply(&self, mut request: ProviderRequest) -> Result<ProviderRequest, LlmError> {
-        request.headers.insert(
-            "Authorization".to_string(),
-            format!("Bearer {}", self.token),
-        );
+        lingxi_llm_client::auth::header_policy::bearer(&mut request.headers, &self.token);
         Ok(request)
     }
 }
@@ -104,30 +103,12 @@ impl ChatGptAuthenticator {
 
 impl Authenticator for ChatGptAuthenticator {
     fn apply(&self, mut request: ProviderRequest) -> Result<ProviderRequest, LlmError> {
-        let headers = &mut request.headers;
-        // ProviderRequest uses string keys, while HTTP header names are
-        // case-insensitive. Remove stale credentials before installing OAuth.
-        headers.retain(|name, _| {
-            ![
-                "authorization",
-                "x-api-key",
-                "api-key",
-                "chatgpt-account-id",
-                "x-openai-fedramp",
-            ]
-            .iter()
-            .any(|header| name.eq_ignore_ascii_case(header))
-        });
-        headers.insert(
-            "Authorization".to_string(),
-            format!("Bearer {}", self.token),
+        lingxi_llm_client::auth::header_policy::chatgpt(
+            &mut request.headers,
+            &self.token,
+            self.account_id.as_deref(),
+            self.fedramp,
         );
-        if let Some(acc) = &self.account_id {
-            headers.insert("ChatGPT-Account-ID".to_string(), acc.clone());
-        }
-        if self.fedramp {
-            headers.insert("X-OpenAI-Fedramp".to_string(), "true".to_string());
-        }
         Ok(request)
     }
 }

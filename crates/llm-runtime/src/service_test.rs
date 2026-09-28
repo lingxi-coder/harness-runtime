@@ -164,7 +164,7 @@ mod tests {
         }
     }
 
-    impl Transport for FakeTransport {
+    impl llm_runtime::test_support::FixtureTransport for FakeTransport {
         fn execute<'a>(
             &'a self,
             request: &'a ProviderRequest,
@@ -198,6 +198,7 @@ mod tests {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(FakeTransport);
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -327,7 +328,7 @@ mod tests {
         ws_calls: std::sync::atomic::AtomicUsize,
     }
 
-    impl Transport for HttpOnlyProbeTransport {
+    impl llm_runtime::test_support::FixtureTransport for HttpOnlyProbeTransport {
         fn execute<'a>(
             &'a self,
             _: &'a ProviderRequest,
@@ -367,6 +368,7 @@ mod tests {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(HttpOnlyProbeTransport);
 
     struct ProbeWsSession {
         frames: Vec<Vec<u8>>,
@@ -3412,7 +3414,7 @@ mod tests {
         attempts: Mutex<Vec<Option<String>>>,
     }
 
-    impl Transport for BodyPhaseDropThenOk {
+    impl llm_runtime::test_support::FixtureTransport for BodyPhaseDropThenOk {
         fn execute<'a>(
             &'a self,
             _request: &'a ProviderRequest,
@@ -3454,6 +3456,7 @@ mod tests {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(BodyPhaseDropThenOk);
 
     /// End-to-end arm 2: the drive loop's one-frame lookahead must strip the
     /// header, emit `tengu_dispatch_header_fallback{reason:"body_phase",
@@ -5552,7 +5555,7 @@ mod tests {
         }
     }
 
-    impl Transport for FakeStreamTransport {
+    impl llm_runtime::test_support::FixtureTransport for FakeStreamTransport {
         fn execute<'a>(
             &'a self,
             _request: &'a ProviderRequest,
@@ -5596,6 +5599,7 @@ mod tests {
             Box::pin(async move { resp })
         }
     }
+    llm_runtime::impl_fixture_transport!(FakeStreamTransport);
 
     /// A transport whose connect/header phase never resolves.
     struct HangingOpenTransport {
@@ -5614,7 +5618,7 @@ mod tests {
         }
     }
 
-    impl Transport for HangingOpenTransport {
+    impl llm_runtime::test_support::FixtureTransport for HangingOpenTransport {
         fn execute<'a>(
             &'a self,
             _request: &'a ProviderRequest,
@@ -5634,6 +5638,7 @@ mod tests {
             Box::pin(std::future::pending())
         }
     }
+    llm_runtime::impl_fixture_transport!(HangingOpenTransport);
 
     /// 2.1.245/246 first-byte parity: a request that never receives response
     /// headers retries once, then terminates with the exact user-facing copy.
@@ -5926,7 +5931,7 @@ mod tests {
 
     /// Transport that opens a 200 stream whose frames hang forever.
     struct HangingStreamTransport;
-    impl Transport for HangingStreamTransport {
+    impl llm_runtime::test_support::FixtureTransport for HangingStreamTransport {
         fn execute<'a>(
             &'a self,
             _request: &'a ProviderRequest,
@@ -5950,6 +5955,7 @@ mod tests {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(HangingStreamTransport);
 
     /// The watchdog is ON by default and aborts a stream that produces no
     /// event within the idle timeout, surfacing a detectable idle-timeout
@@ -6913,7 +6919,7 @@ mod tests {
         }
     }
 
-    impl Transport for ScriptedStreamTransport {
+    impl llm_runtime::test_support::FixtureTransport for ScriptedStreamTransport {
         fn execute<'a>(
             &'a self,
             _request: &'a ProviderRequest,
@@ -6941,6 +6947,7 @@ mod tests {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(ScriptedStreamTransport);
 
     /// Build a streaming adapter with an attached analytics bus.
     async fn make_stream_adapter_with_bus(

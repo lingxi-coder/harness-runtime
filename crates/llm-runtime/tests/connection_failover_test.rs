@@ -71,7 +71,7 @@ fn ok_body() -> serde_json::Value {
     })
 }
 
-impl Transport for ScriptedTransport {
+impl llm_runtime::test_support::FixtureTransport for ScriptedTransport {
     fn execute<'a>(
         &'a self,
         request: &'a ProviderRequest,
@@ -113,6 +113,7 @@ impl Transport for ScriptedTransport {
         })
     }
 }
+llm_runtime::impl_fixture_transport!(ScriptedTransport);
 
 fn connection(conn_id: &str, base_url: &str, order: u32) -> ProviderProfile {
     ProviderProfile {

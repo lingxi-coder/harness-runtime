@@ -340,7 +340,7 @@ async fn api_service_override_prices_omitted_and_explicit_zero_reasoning() {
     use std::sync::{atomic::AtomicUsize, atomic::Ordering, Arc};
 
     struct ResponseTransport(AtomicUsize);
-    impl Transport for ResponseTransport {
+    impl llm_runtime::test_support::FixtureTransport for ResponseTransport {
         fn execute<'a>(
             &'a self,
             _: &'a ProviderRequest,
@@ -375,6 +375,7 @@ async fn api_service_override_prices_omitted_and_explicit_zero_reasoning() {
             unreachable!("nonstream pricing test")
         }
     }
+    llm_runtime::impl_fixture_transport!(ResponseTransport);
 
     std::env::set_var("LLM_REASONING_OVERRIDE_TEST_KEY", "test-key");
     for (reasoning, expected) in [(None, 0.32), (Some(0.0), 0.08), (Some(3.0), 0.17)] {

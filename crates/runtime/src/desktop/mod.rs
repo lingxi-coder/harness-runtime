@@ -80,7 +80,6 @@ use llm_runtime::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use llm_runtime::oauth::anthropic::handle::OAuthHandle;
 use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
 use llm_runtime::oauth::openai as openai_oauth;
-use llm_runtime::LlmTransportBridge;
 use llm_runtime::{DefaultLlmClient, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
@@ -106,7 +105,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::RwLock;
-use tool_api::AnthropicRequestBuilder;
 use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 pub use tool_cron as loop_tools;
@@ -5310,7 +5308,7 @@ mod desktop_fusion_executor_boot_test {
     /// carries an attempt registrar, so build a real one over an unreachable
     /// service rather than reintroducing an unregistered executor shape.
     struct UnreachableTransport;
-    impl llm_runtime::Transport for UnreachableTransport {
+    impl llm_runtime::test_support::FixtureTransport for UnreachableTransport {
         fn execute<'a>(
             &'a self,
             _: &'a llm_runtime::ProviderRequest,
@@ -5325,11 +5323,12 @@ mod desktop_fusion_executor_boot_test {
             _: &'a llm_runtime::ProviderRequest,
         ) -> llm_runtime::transport::BoxFuture<
             'a,
-            Result<llm_runtime::transport::StreamingResponse, llm_runtime::LlmError>,
+            Result<llm_runtime::test_support::StreamingResponse, llm_runtime::LlmError>,
         > {
             Box::pin(async { panic!("preflight_error() must not stream") })
         }
     }
+    llm_runtime::impl_fixture_transport!(UnreachableTransport);
 
     fn unreachable_attempts() -> Arc<fusion_attempts::DesktopFusionAttempts> {
         let pricing = Arc::new(cost::PricingCatalog::builtin_reference());
@@ -10493,11 +10492,13 @@ async fn resolve_llm_stack_with_credentials(
         }
     }
 
-    // (2a) Task 10: LlmTransportBridge wraps the PosixHttp transport for
+    // The shared SDK transport owns provider networking for
     //      `DefaultLlmClient`. A second `PosixHttp` instance is used so the
     //      bridge owns its own (stateless) handle; the original `http` Arc
     //      continues to serve MCP / hooks / side-query.
-    let llm_transport: Arc<dyn Transport> = Arc::new(LlmTransportBridge::new(PosixHttp::new()));
+    let llm_transport: Arc<dyn Transport> = Arc::new(
+        platform_common::provider_transport().map_err(|e| BuildError::ApiBase(e.to_string()))?,
+    );
     // Defer client construction to step 3.1 where we know whether OAuth is
     // active (determines auth strategy + credential config). Placeholder: the
     // resolved OAuth `AuthState` (`Some` only for an OAuth-effective subscriber
@@ -12065,13 +12066,7 @@ pub async fn build_with_credential_stack(
     );
     // WebSearch uses the resolved Anthropic key, while MCP large-result
     // confirmation reuses the fully routed/OAuth-aware main session provider.
-    let tool_provider = Arc::new(
-        AnthropicRequestBuilder::new(
-            resolved_anthropic_api_key.clone().unwrap_or_default(),
-            Some(cfg.api_base.clone()),
-        )
-        .with_mcp_token_counter(provider_adapter.clone()),
-    );
+
     let provider_adapter_handle = provider_adapter.clone();
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     // The SAME `ProviderApiAdapter` drives the streaming turn path: it impls both
@@ -12080,7 +12075,7 @@ pub async fn build_with_credential_stack(
     // Without this the orchestrator falls back to `NoStreamingApiClient` and every
     // streaming turn fails with "no streaming client configured".
     let streaming_api: Arc<dyn orchestrator::StreamingApiClient> = provider_adapter.clone();
-    let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
+    let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter.clone();
 
     // (4) Orchestrator config from `cfg` (was `argv.model`).
     // The bridge persists the structured effort choice in the same user
@@ -13814,7 +13809,7 @@ pub async fn build_with_credential_stack(
         Arc::new(sidequery::ProviderSideQueryClient::new(
             cfg.api_key.clone(),
             Some(cfg.api_base.clone()),
-            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            api_service.transport(),
         ));
     let compaction_side_query: Arc<dyn sidequery::SideQueryClient> = Arc::new(
         sidequery::ProviderSideQueryClient::from_service(api_service.clone()),
@@ -14941,7 +14936,8 @@ pub async fn build_with_credential_stack(
         worktree_session: worktree_session_cell,
         platform: sandbox_platform,
         http: http.clone(),
-        provider: tool_provider,
+        hosted_search: Some(provider_adapter.clone()),
+        mcp_token_counter: Some(provider_adapter.clone()),
         default_model: orch_cfg.model.clone(),
         web_search_config: Some(Arc::new(DesktopWebSearchConfigProvider {
             lingxi_home: cfg.lingxi_home.clone(),

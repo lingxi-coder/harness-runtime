@@ -43,6 +43,7 @@ hyper-util = { version = "0.1", features = ["server", "tokio"] }
 http-body-util = "0.1"
 
 [dev-dependencies]
+llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 proptest.workspace = true
 platform-posix-minimal = { path = "../platforms/posix-minimal" }
 # Used by parity_force_compact_50_messages: manual `/compact` hard-fails

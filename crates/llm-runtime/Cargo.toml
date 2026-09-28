@@ -7,6 +7,7 @@ license.workspace = true
 
 [features]
 default = []
+test-support = []
 # Independent duplex realtime sessions; Responses WebSockets still use the host transport.
 realtime-websocket = ["lingxi-llm-client/realtime-websocket"]
 
@@ -38,6 +39,7 @@ urlencoding = "2"
 tracing.workspace = true
 
 [dev-dependencies]
+llm-runtime = { path = ".", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

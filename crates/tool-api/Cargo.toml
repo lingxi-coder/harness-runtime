@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+lingxi-llm-client.workspace = true
 unicode-width = "=0.1.14"
 unicode-segmentation = "=1.12.0"
 protocol = { path = "../protocol" }
@@ -53,7 +54,8 @@ test-support = ["dep:futures"]
 once_cell = "1"
 tempfile = "3"
 # test_support.rs (compiled under cfg(test)) uses `futures::Stream` for the
-# mock FileSystem event stream; the [dependencies] entry is feature-gated
+# mock FileSystem event stream; the [dependencies]
+# entry is feature-gated
 # (test-support), so the crate's own tests need it here too.
 futures = { workspace = true }
 
