@@ -7186,6 +7186,15 @@ fn no_host_error_copy_tells_the_model_to_call_an_operation_with_no_tool_row() {
     let verbs = ["use ", "run ", "call ", "retry ", "invoke "];
     let sources = [
         ("local_apps_host.rs", include_str!("../../local_apps_host.rs")),
+        ("local_apps_host/approvals.rs", include_str!("../approvals.rs")),
+        ("local_apps_host/bridge_operations.rs", include_str!("../bridge_operations.rs")),
+        ("local_apps_host/data_operations.rs", include_str!("../data_operations.rs")),
+        ("local_apps_host/dependency_install.rs", include_str!("../dependency_install.rs")),
+        ("local_apps_host/dependency_integrity.rs", include_str!("../dependency_integrity.rs")),
+        ("local_apps_host/dependency_recovery.rs", include_str!("../dependency_recovery.rs")),
+        ("local_apps_host/mcp_publication.rs", include_str!("../mcp_publication.rs")),
+        ("local_apps_host/runtime_lifecycle.rs", include_str!("../runtime_lifecycle.rs")),
+        ("local_apps_host/static_server.rs", include_str!("../static_server.rs")),
         ("local_apps_build.rs", include_str!("../../local_apps_build.rs")),
     ];
     let mut hits: Vec<String> = Vec::new();
