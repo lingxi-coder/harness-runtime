@@ -123,7 +123,7 @@
     /// stay green with `build()` gutted.
     #[test]
     fn build_wires_one_plugin_workflow_registry_into_every_participant() {
-        const SRC: &str = include_str!("../mod.rs");
+        const SRC: &str = concat!(include_str!("../mod.rs"), "\n", include_str!("../assembly.rs"));
         let build_src = SRC
             .split_once("\n#[cfg(test)]\nmod tests")
             .map_or(SRC, |(production, _)| production);
@@ -184,7 +184,7 @@
     /// `build()` cannot silently miss the flag.
     #[test]
     fn background_task_invokers_are_wired_background_owned() {
-        const SRC: &str = include_str!("../mod.rs");
+        const SRC: &str = concat!(include_str!("../mod.rs"), "\n", include_str!("../assembly.rs"));
         let build_src = SRC
             .split_once("\n#[cfg(test)]\nmod tests")
             .map_or(SRC, |(production, _)| production);
@@ -329,7 +329,7 @@
     /// match themselves inside `include_str!`.
     #[test]
     fn build_gates_the_memory_prefetch_on_the_auto_memory_gate() {
-        const SRC: &str = include_str!("../mod.rs");
+        const SRC: &str = concat!(include_str!("../mod.rs"), "\n", include_str!("../assembly.rs"));
         let build_src = SRC
             .split_once("\n#[cfg(test)]\nmod tests")
             .map_or(SRC, |(production, _)| production);
@@ -355,7 +355,7 @@
 
     #[test]
     fn session_memory_composition_uses_token_gate_defaults() {
-        const SRC: &str = include_str!("../mod.rs");
+        const SRC: &str = concat!(include_str!("../mod.rs"), "\n", include_str!("../assembly.rs"));
         // Keep the needle assembled so this source-level guard cannot match
         // its own assertion while still pinning the production composition
         // root to the memory crate's 10k/5k/3 defaults.
