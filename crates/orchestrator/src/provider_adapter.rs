@@ -2302,7 +2302,10 @@ mod tests {
         use llm_runtime::services::sdk;
         use serde_json::json;
         use tool_api::HostedWebSearchClient;
-        struct SearchTransport;
+        struct SearchTransport {
+            partial: bool,
+            sends: std::sync::atomic::AtomicUsize,
+        }
         #[async_trait::async_trait]
         impl llm_runtime::Transport for SearchTransport {
             async fn send(
@@ -2310,12 +2313,14 @@ mod tests {
                 request: sdk::HttpRequest,
             ) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
                 use futures::StreamExt;
+                self.sends
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
                 assert_eq!(body["model"], "gpt-search");
                 assert_eq!(body["tools"][0]["type"], "web_search");
                 let call = json!({"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"Rust"}});
                 let citation = json!({"type":"url_citation","url":"https://rust-lang.org","title":"Rust","start_index":0,"end_index":4});
-                let events = vec![
+                let mut events = vec![
                     json!({"type":"response.created","response":{"id":"resp_1","model":"gpt-search"}}),
                     json!({"type":"response.output_item.added","output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"in_progress"}}),
                     json!({"type":"response.output_item.done","output_index":0,"item":call}),
@@ -2323,61 +2328,100 @@ mod tests {
                     json!({"type":"response.output_text.annotation.added","output_index":1,"content_index":0,"annotation":citation}),
                     json!({"type":"response.completed","response":{"id":"resp_1","model":"gpt-search","status":"completed","output":[call,{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Rust","annotations":[citation]}]}],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}),
                 ];
+                if self.partial {
+                    events.pop(); // No response.completed snapshot arrives.
+                    events.push(json!({"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Rust","annotations":[citation]}]}}));
+                }
+                let mut chunks = events
+                    .into_iter()
+                    .map(|event| Ok(format!("data: {event}\n\n").into()))
+                    .collect::<Vec<_>>();
+                if self.partial {
+                    chunks.push(Err(sdk::protocol::LlmError::StreamInterrupted {
+                        message: "connection lost after citation".into(),
+                    }));
+                }
                 Ok(sdk::StreamResponse {
                     status: 200,
                     headers: vec![],
-                    body: futures::stream::iter(
-                        events
-                            .into_iter()
-                            .map(|event| Ok(format!("data: {event}\n\n").into())),
-                    )
-                    .boxed(),
+                    body: futures::stream::iter(chunks).boxed(),
                 })
             }
         }
-        let mut profile: ProviderProfile = serde_json::from_value(json!({
+        for partial in [false, true] {
+            let mut profile: ProviderProfile = serde_json::from_value(json!({
             "provider_id":"open_ai","profile_name":"search-openai","base_url":"https://api.openai.com/v1","protocol":"open_ai_responses","auth":"none","credential":{"type":"none"},
             "models":[{"display_model":"gpt-search","request_model":"gpt-search","billing_model":"gpt-search","capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
         })).unwrap();
-        profile.protocol = ProtocolFamily::OpenAiResponses;
-        let mut wire: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
+            profile.protocol = ProtocolFamily::OpenAiResponses;
+            let mut wire: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
             "provider_id":"openai","profile_name":"search-openai","base_url":"https://api.openai.com/v1","protocol":"open_ai_responses","auth":"none","models":[],"extra":{"web_search":"openai_responses"}
         })).unwrap();
-        wire.regions = sdk::protocol::Region::all();
-        profile.wire_profile = Some(wire);
-        let client = Arc::new(
-            DefaultLlmClient::from_config(ClientConfig {
-                providers: vec![profile],
-            })
-            .unwrap(),
-        );
-        let adapter = ProviderApiAdapter::new(Arc::new(ApiService::new(
-            client,
-            Arc::new(SearchTransport),
-            SubscriberState::default(),
-            UserAgentEnv::default(),
-            "test",
-            None,
-            None,
-        )));
-        let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
-        let request = tool_api::HostedSearchRequest {
-            model: "gpt-search".into(),
-            profile: Some("search-openai".into()),
-            query: "Rust".into(),
-            allowed_domains: vec![],
-            blocked_domains: vec![],
-        };
-        assert!(adapter.supports_request(&request));
-        let result = adapter.search(request, progress).await.unwrap();
-        assert_eq!(result.searches, 1);
-        assert!(updates.try_recv().is_ok());
-        assert!(
-            updates.try_recv().is_err(),
-            "duplicated final output counted twice"
-        );
-        assert_eq!((result.input_tokens, result.output_tokens), (7, 3));
-        assert!(result.results.iter().any(|entry|matches!(entry,tool_api::hosted_search::SearchResultEntry::Hit(value) if value.to_string().contains("rust-lang.org"))));
+            wire.regions = sdk::protocol::Region::all();
+            profile.wire_profile = Some(wire);
+            let client = Arc::new(
+                DefaultLlmClient::from_config(ClientConfig {
+                    providers: vec![profile],
+                })
+                .unwrap(),
+            );
+            let transport = Arc::new(SearchTransport {
+                partial,
+                sends: Default::default(),
+            });
+            let adapter = ProviderApiAdapter::new(Arc::new(ApiService::new(
+                client,
+                transport.clone(),
+                SubscriberState::default(),
+                UserAgentEnv::default(),
+                "test",
+                None,
+                None,
+            )));
+            let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
+            let request = tool_api::HostedSearchRequest {
+                model: "gpt-search".into(),
+                profile: Some("search-openai".into()),
+                query: "Rust".into(),
+                allowed_domains: vec![],
+                blocked_domains: vec![],
+            };
+            assert!(adapter.supports_request(&request));
+            let result = adapter.search(request, progress).await.unwrap();
+            assert_eq!(result.searches, 1);
+            assert!(updates.try_recv().is_ok());
+            assert!(
+                updates.try_recv().is_err(),
+                "duplicated final output counted twice"
+            );
+            assert_eq!(
+                transport.sends.load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "interrupted search must not be resent"
+            );
+            if !partial {
+                assert_eq!((result.input_tokens, result.output_tokens), (7, 3));
+            }
+            let hits = result
+                .results
+                .iter()
+                .filter_map(|entry| match entry {
+                    tool_api::hosted_search::SearchResultEntry::Hit(value) => {
+                        value["content"].as_array()
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                hits.len(),
+                1,
+                "stream and terminal citations must be deduplicated"
+            );
+            assert_eq!(hits[0]["url"], "https://rust-lang.org");
+            assert!(result.results.iter().any(|entry| matches!(entry, tool_api::hosted_search::SearchResultEntry::Text(text) if text == "Rust")));
+            assert_eq!(result.results.iter().any(|entry| matches!(entry, tool_api::hosted_search::SearchResultEntry::Text(text) if text.contains("incomplete"))), partial);
+        }
     }
     #[tokio::test]
     async fn hosted_search_gemini_reports_queries_once_per_grounding_snapshot() {
@@ -2511,6 +2555,12 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
         )];
         let usage = Arc::new(std::sync::Mutex::new(llm_runtime::Usage::default()));
         let searches = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // A failed stream may never deliver its terminal metadata snapshot.
+        // Retain normalized citations independently of completed text blocks.
+        let citations = Arc::new(std::sync::Mutex::new(
+            sdk::protocol::WebSearchResult::default(),
+        ));
+        let observed_citations = citations.clone();
         let u = usage.clone();
         let n = searches.clone();
         let mut search_progress = sdk::hosted_search::SearchProgress::default();
@@ -2521,6 +2571,11 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
             .map_err(hosted_search_error)?
             .inspect(move |event| match event {
                 Ok(LlmEvent::WebSearch { result }) => {
+                    observed_citations
+                        .lock()
+                        .expect("search citations")
+                        .citations
+                        .extend(result.citations.iter().cloned());
                     let added = search_progress.observe(result);
                     n.fetch_add(added, std::sync::atomic::Ordering::Relaxed);
                     for _ in 0..added {
@@ -2559,9 +2614,20 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
             .map(|block| serde_json::to_value(block).unwrap_or_default())
             .collect::<Vec<_>>();
         let mut results = sdk::hosted_search::parse_response_content(&native);
+        let mut observations = metadata
+            .get("llm_client")
+            .and_then(|v| v.get("web_search"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let captured = std::mem::take(&mut *citations.lock().expect("search citations"));
+        if !captured.citations.is_empty() {
+            observations.push(serde_json::to_value(captured).expect("normalized search citations"));
+        }
+        // The SDK projects both sources together and deduplicates their URLs.
         sdk::hosted_search::append_citations(
             &mut results,
-            metadata.get("llm_client").and_then(|v| v.get("web_search")),
+            Some(&serde_json::Value::Array(observations)),
         );
         if partial.is_some() {
             results.push(sdk::hosted_search::SearchResultEntry::Text(
