@@ -2593,10 +2593,10 @@ pub trait OrchestratorHandle: Send + Sync {
     /// it is parity with what the desktop's own sibling slash commands
     /// currently scan: `SkillsHandler` (`/skills`) is constructed with
     /// `additional_skill_dirs: Vec::new()` HARDCODED
-    /// (`harness-runtime/src/desktop/mod.rs:3351-3354`), and its
+    /// (`runtime/src/desktop/mod.rs:3351-3354`), and its
     /// `ReloadSkillsHandler` counterpart (`/reload-skills`) is wired to
     /// `DesktopRepoRootReloader.registered_roots`
-    /// (`harness-runtime/src/desktop/mod.rs:4919`, `:4964-4977`), which starts
+    /// (`runtime/src/desktop/mod.rs:4919`, `:4964-4977`), which starts
     /// empty and has no desktop-side call site that ever grows it. If either
     /// of those two construction sites starts supplying real roots, this
     /// method's tiers must be revisited alongside them — until then, do NOT

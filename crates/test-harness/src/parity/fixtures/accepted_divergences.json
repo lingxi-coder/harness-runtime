@@ -66,7 +66,7 @@
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "crates/harness-runtime/src/lib.rs", "text": "pub mod mobile;" }
+        { "kind": "present", "path": "crates/runtime/src/lib.rs", "text": "pub mod mobile;" }
       ]
     },
     {

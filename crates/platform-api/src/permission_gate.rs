@@ -295,7 +295,7 @@ pub struct PermissionCheckContext {
     /// EXCLUSIVELY for a background task with no owning interactive turn — as
     /// of writing this is set only for the `/fusion` background task's
     /// invoker (`RegistryToolInvoker::with_background_owned`,
-    /// `harness-runtime/src/desktop/mod.rs`'s `fusion_invoker` wiring), never for
+    /// `runtime/src/desktop/mod.rs`'s `fusion_invoker` wiring), never for
     /// the interactive turn's own direct tool call. It exists so a transport
     /// that queues/serializes interactive prompts (the TUI) can distinguish
     /// "this ask belongs to the turn a user is cancelling" from "this ask

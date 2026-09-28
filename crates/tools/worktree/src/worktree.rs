@@ -153,7 +153,7 @@ fn branch_suffix(branch_name: &str) -> String {
 /// satisfies the same contract: a fresh, valid, human-scannable slug.
 ///
 /// `pub` (not `pub(crate)`) so the `--worktree`/`--tmux` boot-launch path
-/// (`harness-runtime/src/desktop/mod.rs::build`, worktree-tmux-launch plan Task 3)
+/// (`runtime/src/desktop/mod.rs::build`, worktree-tmux-launch plan Task 3)
 /// can mint the SAME bare-`-w` random-name behavior as this tool's `name`-less
 /// `EnterWorktree` call, instead of duplicating the derivation.
 #[must_use]

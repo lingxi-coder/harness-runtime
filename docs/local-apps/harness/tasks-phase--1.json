@@ -18,7 +18,7 @@
       "exclusive": false,
       "repeatRuns": 1,
       "plantedFailure": {
-        "edit": "plant the namespaced FQN `lingxi-local-app:local-app-build` (NOT the basename) into harness-runtime/src/mobile/local_apps_host.rs",
+        "edit": "plant the namespaced FQN `lingxi-local-app:local-app-build` (NOT the basename) into runtime/src/mobile/local_apps_host.rs",
         "mustNameInOutput": [
           "local_apps_host.rs",
           "lingxi-local-app:local-app-build"
@@ -31,15 +31,15 @@
         "allowlist_entry_count_matches_the_committed_baseline"
       ],
       "deps": [],
-      "notes": "§19.3's literal wording — `tasks/src` and `tools/workflow/src` contain no Local App workflow basename — CANNOT be green on landing, because Phase -1 step 1 explicitly KEEPS both existing registrations (tools/workflow/src/builtins.rs plus three .js files in that directory). Ship the allowlist explicit and counted, reaching 0 only at Phase 9. Without the count, the obvious way to make the red gate green is to exempt the directory, which silently disables the scanner for all of tools/workflow/. The count is the thing that makes that visible.\n\nSCOPED AT lap/baseline. §19.3's reverse case (a) as written needs a verified Plugin inventory, which does not exist until Phase 0a/2. §18 step 7 is explicit that Phase -1 derives needles from the EXISTING live registries and Phase 2 switches to Plugin inventory. At Phase -1 the live source is mobile_skill_registry() (harness-runtime/src/mobile/mod.rs:383 -> skill_api::register_mobile), so case (a) becomes: add a skill to the live registry, confirm the needle set GROWS, then plant that new name in local_apps_host.rs and require red. That is why this is a Rust test and not a python grep gate — a python scanner cannot call into the registry, and a needle list it kept itself would be the static array the gate exists to forbid.\n\nKNOWN COUPLING, adjudicated after the write stage. The scanner's WORKFLOW needles are derived from `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` (tools/workflow/src/lib.rs:310) — which is the array P-1.9 DELETES. This is an ordering defect in the decomposition, not in the writer's judgment: P-1.0 was sequenced first and pointed at P-1.9's deletion target. The alternative live source, `BUILTIN_WORKFLOWS` (tools/workflow/src/builtins.rs:93), does survive Phase -1 — Phase -1 step 1 keeps both registrations — but it also contains `deep-research`, and no property distinguishing a Local App workflow from it exists until P-1.6 introduces LocalAppWorkflowTaskScope. So the bootstrap is real. Resolution: keep this source, and make P-1.9 responsible for re-pointing the scanner. When P-1.9 deletes the array this test FAILS TO COMPILE, which is loud and correct. The only wrong resolution is hardcoding the two names here — that turns the gate into the static array it exists to forbid."
+      "notes": "§19.3's literal wording — `tasks/src` and `tools/workflow/src` contain no Local App workflow basename — CANNOT be green on landing, because Phase -1 step 1 explicitly KEEPS both existing registrations (tools/workflow/src/builtins.rs plus three .js files in that directory). Ship the allowlist explicit and counted, reaching 0 only at Phase 9. Without the count, the obvious way to make the red gate green is to exempt the directory, which silently disables the scanner for all of tools/workflow/. The count is the thing that makes that visible.\n\nSCOPED AT lap/baseline. §19.3's reverse case (a) as written needs a verified Plugin inventory, which does not exist until Phase 0a/2. §18 step 7 is explicit that Phase -1 derives needles from the EXISTING live registries and Phase 2 switches to Plugin inventory. At Phase -1 the live source is mobile_skill_registry() (runtime/src/mobile/mod.rs:383 -> skill_api::register_mobile), so case (a) becomes: add a skill to the live registry, confirm the needle set GROWS, then plant that new name in local_apps_host.rs and require red. That is why this is a Rust test and not a python grep gate — a python scanner cannot call into the registry, and a needle list it kept itself would be the static array the gate exists to forbid.\n\nKNOWN COUPLING, adjudicated after the write stage. The scanner's WORKFLOW needles are derived from `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` (tools/workflow/src/lib.rs:310) — which is the array P-1.9 DELETES. This is an ordering defect in the decomposition, not in the writer's judgment: P-1.0 was sequenced first and pointed at P-1.9's deletion target. The alternative live source, `BUILTIN_WORKFLOWS` (tools/workflow/src/builtins.rs:93), does survive Phase -1 — Phase -1 step 1 keeps both registrations — but it also contains `deep-research`, and no property distinguishing a Local App workflow from it exists until P-1.6 introduces LocalAppWorkflowTaskScope. So the bootstrap is real. Resolution: keep this source, and make P-1.9 responsible for re-pointing the scanner. When P-1.9 deletes the array this test FAILS TO COMPILE, which is loud and correct. The only wrong resolution is hardcoding the two names here — that turns the gate into the static array it exists to forbid."
     },
     {
       "id": "P-1.1",
       "title": "Add the LocalAppPluginBinding composition adapter",
       "gate": "§19.3 Host contract carries no workflow/skill/agent names",
       "owns": [
-        "crates/harness-runtime/src/mobile/local_app_plugin_binding.rs",
-        "crates/harness-runtime/src/mobile/mod.rs"
+        "crates/runtime/src/mobile/local_app_plugin_binding.rs",
+        "crates/runtime/src/mobile/mod.rs"
       ],
       "crates": [
         "harness-runtime"
@@ -68,8 +68,8 @@
       "title": "Bind Host launch-context injection to the resolved handle",
       "gate": "§19.3 workflow context is injected only by the Host; caller-supplied host_context/profile/template/renderer/surface is rejected or overridden",
       "owns": [
-        "crates/harness-runtime/src/mobile/workflow_support.rs",
-        "crates/harness-runtime/src/mobile/local_app_plugin_binding.rs"
+        "crates/runtime/src/mobile/workflow_support.rs",
+        "crates/runtime/src/mobile/local_app_plugin_binding.rs"
       ],
       "crates": [
         "harness-runtime"
@@ -102,7 +102,7 @@
       "title": "Delete the Profile -> workflow-name map in workflow_support",
       "gate": "§19.3 no Local App workflow basename derives authority",
       "owns": [
-        "crates/harness-runtime/src/mobile/workflow_support.rs"
+        "crates/runtime/src/mobile/workflow_support.rs"
       ],
       "crates": [
         "harness-runtime"
@@ -132,7 +132,7 @@
       "title": "Make LINGXI.md contract prose prompt-layer neutral",
       "gate": "§19.3 Host contract carries no workflow names",
       "owns": [
-        "crates/harness-runtime/src/mobile/local_apps_host.rs"
+        "crates/runtime/src/mobile/local_apps_host.rs"
       ],
       "crates": [
         "harness-runtime"
@@ -162,7 +162,7 @@
       "title": "Mobile Local App skill registration iterates mobile_skill_registry() instead of a second hardcoded list",
       "gate": "§19.3 skill listing / Skill invocation / slash invocation share one registry",
       "owns": [
-        "crates/harness-runtime/src/mobile/mod.rs"
+        "crates/runtime/src/mobile/mod.rs"
       ],
       "crates": [
         "harness-runtime"
@@ -289,8 +289,8 @@
       "gate": "§19.3 a custom workflow with the same name gets no model default",
       "owns": [
         "crates/apps/engine-desktop/src/lib.rs",
-        "crates/harness-runtime/src/mobile/local_apps_build.rs",
-        "crates/harness-runtime/src/mobile/workflow_support.rs",
+        "crates/runtime/src/mobile/local_apps_build.rs",
+        "crates/runtime/src/mobile/workflow_support.rs",
         "crates/apps/engine-mobile/tests/component_literal_scan.rs",
         "crates/tools/workflow/src/lib.rs"
       ],
@@ -317,7 +317,7 @@
       "deps": [
         "P-1.8"
       ],
-      "notes": "apps/engine-desktop/src/lib.rs:1853 is the ONLY Local App reference in the entire desktop product and it calls apply_local_app_build_default_model, the function this task deletes. That one call site is the whole desktop blast radius for Phase -1.\n\nINHERITED OBLIGATION from P-1.0. Deleting LOCAL_APP_BUILD_WORKFLOWS breaks the compile of apps/engine-mobile/tests/component_literal_scan.rs, which derives its workflow needles from that array. That is intended: the failure is loud rather than silent. This task must re-point those needles at a source that survives — the typed scope from P-1.6, or BUILTIN_WORKFLOWS filtered by that typed property. ⛔ Do NOT resolve it by writing the two names into the test. A hardcoded needle list is precisely the static array this gate exists to forbid, it would stop covering any workflow added later, and it would stay green forever while doing so.\n\n🚨 SCOPE CORRECTED — measured, not estimated. Deleting `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` is not a one-file change. Production readers, counted above each file's first `#[cfg(test)]`:\n    harness-runtime/src/mobile/workflow_support.rs   11  (ALL production, zero in test regions)\n    harness-runtime/src/mobile/local_apps_build.rs    1\n    harness-runtime/src/mobile/local_apps_host.rs     3  (all in the test region, which starts at 8874)\n    apps/engine-mobile/tests/component_literal_scan.rs 3  (P-1.0's needle source — the known coupling)\nThe original descriptor owned only tools/workflow/src/lib.rs and engine-desktop, which would have made this task impossible to complete inside its own ownership. workflow_support.rs and local_apps_build.rs are now owned.\n⚠️ Those 11 sites are the REAL work of this task: each one currently asks 'is this workflow name in the list', and each must instead ask the typed scope from P-1.6. A change that deletes the array but leaves the 11 questions name-shaped has moved the problem, not removed it."
+      "notes": "apps/engine-desktop/src/lib.rs:1853 is the ONLY Local App reference in the entire desktop product and it calls apply_local_app_build_default_model, the function this task deletes. That one call site is the whole desktop blast radius for Phase -1.\n\nINHERITED OBLIGATION from P-1.0. Deleting LOCAL_APP_BUILD_WORKFLOWS breaks the compile of apps/engine-mobile/tests/component_literal_scan.rs, which derives its workflow needles from that array. That is intended: the failure is loud rather than silent. This task must re-point those needles at a source that survives — the typed scope from P-1.6, or BUILTIN_WORKFLOWS filtered by that typed property. ⛔ Do NOT resolve it by writing the two names into the test. A hardcoded needle list is precisely the static array this gate exists to forbid, it would stop covering any workflow added later, and it would stay green forever while doing so.\n\n🚨 SCOPE CORRECTED — measured, not estimated. Deleting `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` is not a one-file change. Production readers, counted above each file's first `#[cfg(test)]`:\n    runtime/src/mobile/workflow_support.rs   11  (ALL production, zero in test regions)\n    runtime/src/mobile/local_apps_build.rs    1\n    runtime/src/mobile/local_apps_host.rs     3  (all in the test region, which starts at 8874)\n    apps/engine-mobile/tests/component_literal_scan.rs 3  (P-1.0's needle source — the known coupling)\nThe original descriptor owned only tools/workflow/src/lib.rs and engine-desktop, which would have made this task impossible to complete inside its own ownership. workflow_support.rs and local_apps_build.rs are now owned.\n⚠️ Those 11 sites are the REAL work of this task: each one currently asks 'is this workflow name in the list', and each must instead ask the typed scope from P-1.6. A change that deletes the array but leaves the 11 questions name-shaped has moved the problem, not removed it."
     },
     {
       "id": "P-1.10",
@@ -391,8 +391,8 @@
       "owns": [
         "crates/tasks/src/registry.rs",
         "crates/tasks/src/task_trait.rs",
-        "crates/harness-runtime/src/mobile/workflow_support.rs",
-        "crates/harness-runtime/src/mobile/host.rs"
+        "crates/runtime/src/mobile/workflow_support.rs",
+        "crates/runtime/src/mobile/host.rs"
       ],
       "crates": [
         "tasks",

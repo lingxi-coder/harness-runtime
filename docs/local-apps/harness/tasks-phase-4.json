@@ -7,10 +7,10 @@
       "gate": "§7.1 / §8.3 / §11.1: namespaced local-app-build accepts only operation/app_id/spec/revision_prompt/quality_level and Host injects authoritative app, scaffold, profile, template, dependency, collections, and catalog context",
       "owns": [
         "crates/plugins/lingxi-local-app/workflows/local-app-build.js",
-        "crates/harness-runtime/src/mobile/workflow_support.rs",
-        "crates/harness-runtime/src/mobile/local_app_plugin_binding.rs",
-        "crates/harness-runtime/src/mobile/local_app_template_catalog.rs",
-        "crates/harness-runtime/src/mobile/host.rs"
+        "crates/runtime/src/mobile/workflow_support.rs",
+        "crates/runtime/src/mobile/local_app_plugin_binding.rs",
+        "crates/runtime/src/mobile/local_app_template_catalog.rs",
+        "crates/runtime/src/mobile/host.rs"
       ],
       "crates": [
         "harness-runtime",
@@ -49,8 +49,8 @@
         "crates/plugins/lingxi-local-app/workflows/local-app-use-test.js",
         "crates/plugins/lingxi-local-app/skills/create-local-app/SKILL.md",
         "crates/plugins/lingxi-local-app/skills/local-app-test/SKILL.md",
-        "crates/harness-runtime/src/mobile/workflow_support.rs",
-        "crates/harness-runtime/src/mobile/host.rs"
+        "crates/runtime/src/mobile/workflow_support.rs",
+        "crates/runtime/src/mobile/host.rs"
       ],
       "crates": [
         "harness-runtime",
@@ -88,8 +88,8 @@
         "crates/plugins/lingxi-local-app/workflows/local-app-use-test.js",
         "crates/plugins/lingxi-local-app/schemas/use-test-report.schema.json",
         "crates/plugins/lingxi-local-app/schemas/qa-report.schema.json",
-        "crates/harness-runtime/src/mobile/workflow_support.rs",
-        "crates/harness-runtime/src/mobile/host.rs"
+        "crates/runtime/src/mobile/workflow_support.rs",
+        "crates/runtime/src/mobile/host.rs"
       ],
       "crates": [
         "harness-runtime",
@@ -132,7 +132,7 @@
         "crates/plugins/lingxi-local-app/agents/operator.md",
         "crates/plugins/lingxi-local-app/agents/tester.md",
         "crates/plugins/lingxi-local-app/agents/verifier.md",
-        "crates/harness-runtime/src/mobile/workflow_support.rs"
+        "crates/runtime/src/mobile/workflow_support.rs"
       ],
       "crates": [
         "harness-runtime",
@@ -169,8 +169,8 @@
       "title": "Specialist routing matrix across five runtime profiles",
       "gate": "§9.3 / §11.1 / §18 Phase 4: Host-derived profile family routes to the correct specialist for all five profiles and never makes Babylon available without the catalog gate",
       "owns": [
-        "crates/harness-runtime/src/mobile/local_app_plugin_binding.rs",
-        "crates/harness-runtime/src/mobile/host.rs",
+        "crates/runtime/src/mobile/local_app_plugin_binding.rs",
+        "crates/runtime/src/mobile/host.rs",
         "crates/plugins/lingxi-local-app/agents",
         "crates/plugins/lingxi-local-app/skills"
       ],

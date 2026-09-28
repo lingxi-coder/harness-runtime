@@ -7,7 +7,7 @@
 # `literal`. No globs, no directory entries, no prefixes.
 #
 # Scan surface (component_literal_scan.rs's SCAN_ROOTS):
-#   harness-runtime/src/mobile, tasks/src, tools/workflow/src, workflow/src
+#   runtime/src/mobile, tasks/src, tools/workflow/src, workflow/src
 # — the latter two because design doc §19.3's last bullet and P-1.9's
 # completion condition are stated over exactly those directories, so a scanner
 # rooted only at the mobile host could never gate them.
@@ -59,7 +59,7 @@
 # `tasks/src/registry_test.rs` and `tasks/src/handlers/local_workflow_test.rs`
 # — are skipped by the scanner and therefore appear nowhere below.
 
-# --- harness-runtime/src/mobile ------------------------------------------------
+# --- runtime/src/mobile ------------------------------------------------
 
 # lib.rs — P-1.5 removed the second hardcoded ten-name array
 # `register_mobile_skill_commands` used to loop over. It now iterates
@@ -94,13 +94,13 @@
 # `skill_loader.rs::resolve_agent_skill_name` serves agent-frontmatter
 # preloading, NOT the tool). Host prose naming the bare form would send the
 # model to `Unknown skill: create-local-app`.
-harness-runtime/src/mobile/local_apps_host.rs:lingxi-local-app:create-local-app:2
+runtime/src/mobile/local_apps_host.rs:lingxi-local-app:create-local-app:2
 #
 # The on-demand testing hand-off prose names the two plugin test SKILLS so the
 # model can invoke them: testing is never host-initiated, so the only way to
 # reach the app's on-device use-test path is by name.
-harness-runtime/src/mobile/local_apps_host.rs:frontend-qa:1
-harness-runtime/src/mobile/local_apps_host.rs:local-app-test:1
+runtime/src/mobile/local_apps_host.rs:frontend-qa:1
+runtime/src/mobile/local_apps_host.rs:local-app-test:1
 
 # host.rs — the ONE place the three plugin-owned entry routers are kept visible
 # in a global/project conversation. Every other `lingxi-local-app:` skill is
@@ -111,9 +111,9 @@ harness-runtime/src/mobile/local_apps_host.rs:local-app-test:1
 # below: `CommandRegistry` keys plugin skills as `<plugin>:<skill>` with no
 # bare-name fallback, so a bare literal here would match nothing and silently
 # hide all three routers instead of showing them.
-harness-runtime/src/mobile/host.rs:lingxi-local-app:create-local-app:1
-harness-runtime/src/mobile/host.rs:lingxi-local-app:expose-as-mcp:1
-harness-runtime/src/mobile/host.rs:lingxi-local-app:local-app-use:1
+runtime/src/mobile/host.rs:lingxi-local-app:create-local-app:1
+runtime/src/mobile/host.rs:lingxi-local-app:expose-as-mcp:1
+runtime/src/mobile/host.rs:lingxi-local-app:local-app-use:1
 
 # local_app_plugin_binding.rs — the one place a build target maps to a
 # plugin-owned workflow id. The Host never reads these literals itself:
@@ -126,9 +126,9 @@ harness-runtime/src/mobile/host.rs:lingxi-local-app:local-app-use:1
 # (`apply_materialized_local_app_collections_with_identity` +
 # `persisted_workflow_script_path`), so the const and its binding stay in
 # production.
-harness-runtime/src/mobile/local_app_plugin_binding.rs:lingxi-local-app:local-app-build:1
-harness-runtime/src/mobile/local_app_plugin_binding.rs:lingxi-local-app:local-app-mcp-authoring:1
-harness-runtime/src/mobile/local_app_plugin_binding.rs:lingxi-local-app:local-app-use-test:1
+runtime/src/mobile/local_app_plugin_binding.rs:lingxi-local-app:local-app-build:1
+runtime/src/mobile/local_app_plugin_binding.rs:lingxi-local-app:local-app-mcp-authoring:1
+runtime/src/mobile/local_app_plugin_binding.rs:lingxi-local-app:local-app-use-test:1
 
 # local_apps_mcp.rs — same WP8 exception as local_apps_host.rs above, on the
 # two model-visible error copies that tell an agent stuck on an unscaffolded
@@ -141,7 +141,7 @@ harness-runtime/src/mobile/local_app_plugin_binding.rs:lingxi-local-app:local-ap
 # reason the gate cannot live at transport level (the local-apps MCP server is
 # connected unconditionally with `disabled: false, always_load: true`). Naming
 # the component the gate protects is the point of the comment; 2 -> 3.
-harness-runtime/src/mobile/local_apps_mcp.rs:lingxi-local-app:create-local-app:3
+runtime/src/mobile/local_apps_mcp.rs:lingxi-local-app:create-local-app:3
 
 # local_apps_build.rs — the same WP8 exception, on the one refusal an agent
 # meets when it tries to build an app that is still an empty shell. It used to
@@ -151,7 +151,7 @@ harness-runtime/src/mobile/local_apps_mcp.rs:lingxi-local-app:create-local-app:3
 # the two entries above: the bare `create-local-app` does not resolve, so the
 # copy has to carry the qualified form or it sends the reader to
 # `Unknown skill: create-local-app`.
-harness-runtime/src/mobile/local_apps_build.rs:lingxi-local-app:create-local-app:1
+runtime/src/mobile/local_apps_build.rs:lingxi-local-app:create-local-app:1
 
 # --- tasks/src -------------------------------------------------------------
 
@@ -191,7 +191,7 @@ harness-runtime/src/mobile/local_apps_build.rs:lingxi-local-app:create-local-app
 # call this tool", so without a clause naming the flow, every create is a call
 # the model is told not to make. The clause has to name the skill the Host
 # contract hands off to, and it has to name the PLUGIN-QUALIFIED form for the
-# same reason as the `harness-runtime/src/mobile` entries above.
+# same reason as the `runtime/src/mobile` entries above.
 #
 # The third is the bare basename inside the repository PATH
 # `skills/create-local-app/SKILL.md`, cited in that same `reason`. `reason` is

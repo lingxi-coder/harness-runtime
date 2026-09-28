@@ -2,7 +2,7 @@
 exclude = ["third_party/git2-rs/git2", "third_party/git2-rs/libgit2-sys", "third_party/libssh2-sys", "third_party/mbedtls-sys"]
 resolver = "2"
 members = [
-    "crates/harness-runtime",
+    "crates/runtime",
     "crates/branding",
     "crates/protocol",
     "crates/client-protocol",
@@ -84,7 +84,7 @@ members = [
 # they MUST NOT be part of the default build set — CI release jobs should
 # build only the real crates, not the integration-test fixtures.
 default-members = [
-    "crates/harness-runtime",
+    "crates/runtime",
     "crates/branding",
     "crates/protocol",
     "crates/client-protocol",

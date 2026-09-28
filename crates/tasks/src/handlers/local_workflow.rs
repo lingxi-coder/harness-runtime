@@ -3413,11 +3413,11 @@ async fn emit_phase_completed(
 /// launched the run BY NAME through the plugin registry. Two production paths
 /// lose that qualification and hand this function the script's bare
 /// `meta.name` instead:
-///   * resume — `harness-runtime/src/mobile/host.rs` relaunches a paused/adopted
+///   * resume — `runtime/src/mobile/host.rs` relaunches a paused/adopted
 ///     run with `WorkflowLaunchSpec { script_path: Some(..), name: None, .. }`,
 ///     so `workflow_support.rs`'s `namespaced_plugin_workflow` is `None` and
 ///     the id falls back to `meta.name`;
-///   * desktop — `harness-runtime/src/desktop/mod.rs` derives `workflow_id` from
+///   * desktop — `runtime/src/desktop/mod.rs` derives `workflow_id` from
 ///     `meta.name` FIRST and only falls back to `spec.name`.
 /// In both cases the id carries no `:`, so recover the namespace from the
 /// plugin workflow registry itself: a bare id that exactly one plugin

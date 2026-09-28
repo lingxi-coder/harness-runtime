@@ -85,7 +85,7 @@
 //! ## Scan surface
 //!
 //! Deny-by-default directory enumeration over THREE roots, not one:
-//! `harness-runtime/src/mobile`, `tasks/src` and `tools/workflow/src`. §19.3's
+//! `runtime/src/mobile`, `tasks/src` and `tools/workflow/src`. §19.3's
 //! last bullet ("`tasks/src` 与 `tools/workflow/src` 不含 Local App workflow
 //! basename/list") and P-1.9's completion condition are stated over the latter
 //! two, so a scanner rooted only at `harness-runtime::mobile/src` could never gate them.
@@ -207,7 +207,7 @@ const ALLOWLIST_BASELINE_COUNT: usize = 13;
 /// enumeration: every source file under each of these is scanned unless it is
 /// an out-of-line `#[cfg(test)]` module.
 const SCAN_ROOTS: &[&str] = &[
-    "harness-runtime/src/mobile",
+    "runtime/src/mobile",
     "tasks/src",
     "tools/workflow/src",
     // 2026-09-10: the Workflow tool's two model-facing oracle texts and their
@@ -1703,7 +1703,7 @@ fn scanner_workflow_needles_survive_the_name_list_deletion() {
 // parsing, so a bundled SKILL.md's own frontmatter cannot be a second source
 // for it — `bundled.rs` is the only construction path for a bundled skill's
 // triggers). That file lives OUTSIDE every root in [`SCAN_ROOTS`]
-// (`skill-api/src`, not `harness-runtime/src/mobile` / `tasks/src` /
+// (`skill-api/src`, not `runtime/src/mobile` / `tasks/src` /
 // `tools/workflow/src`), so the literal-scan gate above has no reach into it
 // at all — the trigger array is a blind spot the file-literal scan was never
 // going to cover, which is why this defect needed its own narrower check
@@ -2004,7 +2004,7 @@ fn allowlist_entry_count_matches_the_committed_baseline() {
 // compiled-in mobile plugin, whose `(id, manifest, install_dir)` triple never
 // passed through untrusted input. Its whole safety argument rests on there
 // being exactly one, auditable caller, in the composition module
-// (`harness-runtime/src/mobile/mod.rs`'s `register_mobile_builtin_plugin`). A
+// (`runtime/src/mobile/mod.rs`'s `register_mobile_builtin_plugin`). A
 // second call site anywhere is an unaudited second door, and nothing before
 // this gate would have noticed one.
 //
@@ -2045,7 +2045,7 @@ fn allowlist_entry_count_matches_the_committed_baseline() {
 // verified_builtin` is called exactly once in `harness-runtime::mobile`, from the
 // composition module") — not over `tasks/src` or `tools/workflow/src`,
 // neither of which depends on the `plugin` crate at all. Scanning only
-// `harness-runtime/src/mobile` also means the function's own DEFINITION
+// `runtime/src/mobile` also means the function's own DEFINITION
 // (`plugin/src/manager.rs`, `pub async fn register_verified_builtin(`) can
 // never enter this scan, so `0`-vs-`1` here can never be explained by having
 // walked into the definition instead of a caller. The `fn`-keyword guard in
@@ -2060,7 +2060,7 @@ const REGISTER_VERIFIED_BUILTIN_SYMBOL: &str = "register_verified_builtin";
 
 /// Scan root for the call-site gate, relative to the workspace root. See the
 /// section doc comment above for why this is narrower than [`SCAN_ROOTS`].
-const REGISTER_VERIFIED_BUILTIN_SCAN_ROOT: &str = "harness-runtime/src/mobile";
+const REGISTER_VERIFIED_BUILTIN_SCAN_ROOT: &str = "runtime/src/mobile";
 
 /// One call site of [`REGISTER_VERIFIED_BUILTIN_SYMBOL`] found in production
 /// source — as opposed to a doc-comment or string-literal MENTION of the same
@@ -2084,7 +2084,7 @@ impl std::fmt::Display for CallSite {
 /// True for an ASCII Rust identifier character (`[A-Za-z0-9_]`). Used for
 /// word-boundary checks so a match against [`REGISTER_VERIFIED_BUILTIN_SYMBOL`]
 /// cannot be fooled by being a strict substring of a longer identifier —
-/// concretely, `harness-runtime/src/mobile/mod.rs`'s own doc comment names
+/// concretely, `runtime/src/mobile/mod.rs`'s own doc comment names
 /// `plugin::manager::register_verified_builtin_tests`, the module in
 /// `plugin/src/manager.rs` that holds that function's OWN tests, which
 /// contains this symbol as a prefix followed immediately by `_tests`. Without
@@ -2307,7 +2307,7 @@ fn register_verified_builtin_has_exactly_one_call_site() {
     let sites = production_register_verified_builtin_call_sites();
     assert_exactly_one_register_verified_builtin_call_site(&sites);
     assert_eq!(
-        sites[0].rel_path, "harness-runtime/src/mobile/mod.rs",
+        sites[0].rel_path, "runtime/src/mobile/mod.rs",
         "the one call site of `register_verified_builtin` must be in the \
          composition module (lib.rs's `register_mobile_builtin_plugin`), got \
          {sites:?} — a call from anywhere else is an unaudited second door \
@@ -2478,7 +2478,7 @@ fn whole_word_occurrences(line: &str, symbol: &str) -> usize {
 /// tree instead of only against planted fixtures.
 #[test]
 fn verify_mention_shapes_in_lib_rs_are_what_this_gate_assumes() {
-    let rel = "harness-runtime/src/mobile/mod.rs";
+    let rel = "runtime/src/mobile/mod.rs";
     let path = workspace_root().join(rel);
     let src =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {} failed: {e}", path.display()));
@@ -2717,7 +2717,7 @@ fn find_call_sites_rejects_a_definition_and_still_counts_a_call_in_the_same_file
 // scoped to one crate: `PluginManager::register_verified_builtin` is `pub`,
 // so any crate in this workspace can open a second door, and the
 // harness-runtime::mobile-scoped gate would stay green while it did.
-// `harness-runtime/src/desktop/mod.rs` already NAMES the symbol in a doc comment
+// `runtime/src/desktop/mod.rs` already NAMES the symbol in a doc comment
 // today, which is how close the neighbouring crate already is to it.
 //
 // Two things this wider walk buys beyond coverage, both of which the narrow
@@ -2825,8 +2825,8 @@ fn register_verified_builtin_has_exactly_one_call_site_in_the_whole_workspace() 
     // this test would be a slower copy of the narrow one.
     for required in [
         "plugin/src/manager.rs",
-        "harness-runtime/src/desktop/mod.rs",
-        "harness-runtime/src/mobile/mod.rs",
+        "runtime/src/desktop/mod.rs",
+        "runtime/src/mobile/mod.rs",
     ] {
         assert!(
             candidate_rels.contains(required),
@@ -2852,7 +2852,7 @@ fn register_verified_builtin_has_exactly_one_call_site_in_the_whole_workspace() 
 
     assert_exactly_one_register_verified_builtin_call_site(&sites);
     assert_eq!(
-        sites[0].rel_path, "harness-runtime/src/mobile/mod.rs",
+        sites[0].rel_path, "runtime/src/mobile/mod.rs",
         "the workspace's only production call site of \
          `register_verified_builtin` must be the mobile composition module, \
          got {sites:?}"
@@ -3124,10 +3124,10 @@ fn also_production() {}
     #[test]
     fn allowlist_parsing_keeps_a_colon_bearing_literal_intact() {
         let entries = parse_allowlist(
-            "# comment\n\nharness-runtime/src/mobile/mod.rs:lingxi-local-app:local-app-build:3\n",
+            "# comment\n\nruntime/src/mobile/mod.rs:lingxi-local-app:local-app-build:3\n",
         );
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].rel_path, "harness-runtime/src/mobile/mod.rs");
+        assert_eq!(entries[0].rel_path, "runtime/src/mobile/mod.rs");
         assert_eq!(entries[0].literal, "lingxi-local-app:local-app-build");
         assert_eq!(entries[0].expected, 3);
     }

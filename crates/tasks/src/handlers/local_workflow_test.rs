@@ -2205,7 +2205,7 @@ fn nested_with_plugin_workflows(names: &[&str]) -> NestedConfig {
 }
 
 /// P0-2, RESUME path. The Host relaunches a paused/adopted local-app build by
-/// `script_path` with `name: None` (`harness-runtime/src/mobile/host.rs`), so the
+/// `script_path` with `name: None` (`runtime/src/mobile/host.rs`), so the
 /// run's `workflow_id` degrades to the script's BARE `meta.name`
 /// (`"local-app-build"`, no `:`) -- the desktop host does the same by
 /// preferring `meta.name` over `spec.name`. Splitting the id alone therefore

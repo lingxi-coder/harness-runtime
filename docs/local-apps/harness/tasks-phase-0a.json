@@ -4,7 +4,7 @@
     {
       "id": "P0a.0",
       "title": "Extend the brand gate with the Claude-side plugin needles, and make it report line numbers",
-      "gate": "§19.3 brand scanner planted-positive: a `.claude-plugin` literal under harness-runtime/src/mobile/ must go red and NAME FILE AND LINE",
+      "gate": "§19.3 brand scanner planted-positive: a `.claude-plugin` literal under runtime/src/mobile/ must go red and NAME FILE AND LINE",
       "owns": [
         "scripts/check_brand_leaks.py",
         "scripts/brand_leak_baseline.txt"
@@ -18,9 +18,9 @@
       "exclusive": false,
       "repeatRuns": 1,
       "plantedFailure": {
-        "edit": "plant `.claude-plugin` into harness-runtime/src/mobile/mod.rs",
+        "edit": "plant `.claude-plugin` into runtime/src/mobile/mod.rs",
         "mustNameInOutput": [
-          "harness-runtime/src/mobile/mod.rs",
+          "runtime/src/mobile/mod.rs",
           ".claude-plugin"
         ]
       },

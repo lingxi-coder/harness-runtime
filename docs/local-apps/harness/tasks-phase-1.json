@@ -129,7 +129,7 @@
       "title": "Mobile atomic materialization with digest verification",
       "gate": "§19.2 a single-byte tamper fails the digest; an interrupted materialization does not replace a previous verified root",
       "owns": [
-        "crates/harness-runtime/src/mobile/builtin_bundle.rs"
+        "crates/runtime/src/mobile/builtin_bundle.rs"
       ],
       "crates": [
         "harness-runtime"
@@ -160,7 +160,7 @@
       "title": "Idempotent short-circuit: an unchanged digest does not unpack or re-verify file by file",
       "gate": "§19.2 marker field, missing manifest/inventory/component entry, and symlink root each have a reverse case",
       "owns": [
-        "crates/harness-runtime/src/mobile/builtin_bundle.rs"
+        "crates/runtime/src/mobile/builtin_bundle.rs"
       ],
       "crates": [
         "harness-runtime"
@@ -194,8 +194,8 @@
       "gate": "§19.2 mobile discovers exactly one plugin, name=lingxi-local-app, source=BuiltIn",
       "owns": [
         "crates/apps/engine-mobile/Cargo.toml",
-        "crates/harness-runtime/src/mobile/mod.rs",
-        "crates/harness-runtime/src/mobile/local_app_plugin_binding.rs"
+        "crates/runtime/src/mobile/mod.rs",
+        "crates/runtime/src/mobile/local_app_plugin_binding.rs"
       ],
       "crates": [
         "harness-runtime"
@@ -226,7 +226,7 @@
       "title": "register_verified_builtin is called exactly once, from the composition module",
       "gate": "§19.3 planting a second call site must go red and print file:line",
       "owns": [
-        "crates/harness-runtime/src/mobile/mod.rs",
+        "crates/runtime/src/mobile/mod.rs",
         "scripts/check_component_literals.py"
       ],
       "crates": [
@@ -256,8 +256,8 @@
       "title": "Wire the command/skill/agent/workflow registries to the live plugin inventory",
       "gate": "§19.2 one live registry drives both listing and invocation",
       "owns": [
-        "crates/harness-runtime/src/mobile/mod.rs",
-        "crates/harness-runtime/src/mobile/local_apps_host.rs"
+        "crates/runtime/src/mobile/mod.rs",
+        "crates/runtime/src/mobile/local_apps_host.rs"
       ],
       "crates": [
         "harness-runtime"
@@ -286,7 +286,7 @@
       "title": "Single-plugin enable/disable/status protocol, including the bare enabledPlugins key",
       "gate": "§19.2 three-way behaviour of a bare enabledPlugins[\"lingxi-local-app\"]: explicit true + default false => Loaded; explicit false => PluginState::Disabled and PRESENT in the registry; key missing => manifest default",
       "owns": [
-        "crates/harness-runtime/src/mobile/mod.rs",
+        "crates/runtime/src/mobile/mod.rs",
         "crates/client-protocol/src/commands.rs"
       ],
       "crates": [
@@ -323,8 +323,8 @@
       "title": "Wire the bundle chain: packer -> materializer -> PluginManager",
       "gate": "clean-sweep review finding, severity high",
       "owns": [
-        "crates/harness-runtime/src/mobile/host.rs",
-        "crates/harness-runtime/src/mobile/builtin_bundle.rs",
+        "crates/runtime/src/mobile/host.rs",
+        "crates/runtime/src/mobile/builtin_bundle.rs",
         "crates/local-apps/src/packer.rs"
       ],
       "crates": [
@@ -354,8 +354,8 @@
       "title": "Route ClientCommand::PluginCommand and emit PluginStatusChanged",
       "gate": "clean-sweep review finding, severity high",
       "owns": [
-        "crates/harness-runtime/src/mobile/host.rs",
-        "crates/harness-runtime/src/mobile/mod.rs"
+        "crates/runtime/src/mobile/host.rs",
+        "crates/runtime/src/mobile/mod.rs"
       ],
       "crates": [
         "harness-runtime"

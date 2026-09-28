@@ -27606,7 +27606,7 @@ must be filtered out: got {after:?}"
     ///    binding a real user types.
     ///
     /// None of the above is a reason this test is weaker than it should be —
-    /// each is a hop this task's owned files (`harness-runtime/src/desktop/mod.rs`,
+    /// each is a hop this task's owned files (`runtime/src/desktop/mod.rs`,
     /// `test-harness`) cannot reach, and machine-gating them would require
     /// either a real MCP/LSP server binary, a real marketplace fetch, or an
     /// actual interactive session — exactly the boundary §19.11 says only a

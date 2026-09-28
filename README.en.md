@@ -2,7 +2,7 @@
 
 The multi-platform Rust runtime extracted from LingXi: agent execution, model host services, sessions, permissions, tools, plugins, platform implementations, and desktop/mobile composition. Existing LingXi namespace defaults and persisted data formats are retained.
 
-The main package is `harness-runtime`. Its `api`, `models`, `desktop`, and `mobile` modules remain available. The default feature is `core`; use `desktop` for desktop composition or `mobile` with optional `uniffi` for native bindings. Hosts inject product build information through Rust configuration; `runtime_build_info()` identifies the runtime separately.
+The main package is `harness-runtime`, located in `crates/runtime`. Its `api`, `models`, `desktop`, and `mobile` modules remain available. The default feature is `core`; use `desktop` for desktop composition or `mobile` with optional `uniffi` for native bindings. Hosts inject product build information through Rust configuration; `runtime_build_info()` identifies the runtime separately.
 
 Consumers must pin every shared package to the same Git URL and full commit SHA. The independent `llm-client` dependency remains pinned. Rust 1.94 is selected by `rust-toolchain.toml`.
 

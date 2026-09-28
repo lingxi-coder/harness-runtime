@@ -38,7 +38,7 @@
 //! ## Internal-write marking
 //!
 //! `settings_bridge::apply_patch` calls `permission::mark_internal_write`
-//! before writing because `harness-runtime/src/desktop/settings_watch.rs` watches
+//! before writing because `runtime/src/desktop/settings_watch.rs` watches
 //! `<lingxi_home>/settings.json` / `<project>/.lingxi/settings.json` /
 //! `settings.local.json` and would otherwise mistake the desktop's own save
 //! for an external edit. **Neither `~/.lingxi.json` nor `<project>/.mcp.json`

@@ -48,8 +48,8 @@
       "owns": [
         "docs/local-apps/LOCAL-APP-PLUGIN-DESIGN-V2.md",
         "crates/local-apps/src",
-        "crates/harness-runtime/src/mobile/local_apps_mcp.rs",
-        "crates/harness-runtime/src/mobile/local_apps_host_llm.rs"
+        "crates/runtime/src/mobile/local_apps_mcp.rs",
+        "crates/runtime/src/mobile/local_apps_host_llm.rs"
       ],
       "crates": [
         "local-apps",

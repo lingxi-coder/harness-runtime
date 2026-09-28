@@ -12,9 +12,9 @@
         "crates/plugins/lingxi-local-app/workflows",
         "crates/plugins/lingxi-local-app/schemas",
         "crates/skill-api/src/builtin",
-        "crates/harness-runtime/src/mobile/builtin_bundle.rs",
-        "crates/harness-runtime/src/mobile/host.rs",
-        "crates/harness-runtime/src/mobile/mod.rs"
+        "crates/runtime/src/mobile/builtin_bundle.rs",
+        "crates/runtime/src/mobile/host.rs",
+        "crates/runtime/src/mobile/mod.rs"
       ],
       "crates": [
         "harness-runtime",
@@ -52,8 +52,8 @@
         "docs/local-apps/harness/template-migration-manifest.json",
         "crates/plugins/lingxi-local-app/assets/templates",
         "crates/local-apps/templates/runtime-profiles",
-        "crates/harness-runtime/src/mobile/local_app_runtime_profiles.rs",
-        "crates/harness-runtime/src/mobile/local_apps_build.rs",
+        "crates/runtime/src/mobile/local_app_runtime_profiles.rs",
+        "crates/runtime/src/mobile/local_apps_build.rs",
         "scripts/check-phase2-plugin.py",
         "scripts/check-phase2-plugin.sh"
       ],
@@ -86,9 +86,9 @@
       "title": "Build-time Plugin archive and cross-checked package inventory",
       "gate": "§7.1 / §7.2 / §19.2: build-time packing includes the manifest, 27 skills, 7 agents, 3 workflows, schemas, and all template inventories/assets; undeclared or missing package files fail closed",
       "owns": [
-        "crates/harness-runtime/build.rs",
-        "crates/harness-runtime/builtin-plugin-inventory.txt",
-        "crates/harness-runtime/src/mobile/builtin_bundle.rs",
+        "crates/runtime/build.rs",
+        "crates/runtime/builtin-plugin-inventory.txt",
+        "crates/runtime/src/mobile/builtin_bundle.rs",
         "crates/plugins/lingxi-local-app/assets/templates/catalog.json",
         "scripts/check-phase2-plugin.py"
       ],
