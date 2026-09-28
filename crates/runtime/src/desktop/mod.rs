@@ -51,6 +51,7 @@ mod fusion_pool_admission_test;
 pub mod fusion_recorder;
 pub mod ide;
 mod pane_teammate;
+mod sandbox_runner;
 pub mod session_agents;
 pub mod session_state;
 pub mod settings_watch;
@@ -61,15 +62,15 @@ mod watcher_test_support;
 use crate::desktop::ide::DesktopIdeHandle;
 use async_trait::async_trait;
 use client::adapter::{AdapterPermissionGate, PermissionRequestSink};
+/// Rust-only host identity and separately compiled runtime identity.
+pub use command_api::builtins::{runtime_build_info, BuildInfo};
 use command_api::model::BuiltinCommandHandler;
 use command_api::{
     parse_slash_command, CommandRegistry, CommandResult, ParsedSlashCommand,
     RegistrySlashDispatcher,
 };
-/// Rust-only host identity and separately compiled runtime identity.
-pub use command_core::{runtime_build_info, BuildInfo};
 
-use command_core::{
+use command_api::builtins::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
 };
@@ -4296,16 +4297,16 @@ async fn note_fusion_catalog_credential_route(
 /// route can use the new credential. An incompatible protocol is persisted but
 /// reported as restart-required instead of falsely connected.
 struct FusionCatalogRefreshingCredentialWriter {
-    inner: Arc<dyn command_core::ConnectCredentialWriter>,
+    inner: Arc<dyn command_api::builtins::ConnectCredentialWriter>,
     refresher: FusionCatalogRefresher,
 }
 
 #[async_trait::async_trait]
-impl command_core::ConnectCredentialWriter for FusionCatalogRefreshingCredentialWriter {
+impl command_api::builtins::ConnectCredentialWriter for FusionCatalogRefreshingCredentialWriter {
     async fn prompt_and_store_key(
         &self,
         credential_id: &str,
-    ) -> Result<(), command_core::ConnectError> {
+    ) -> Result<(), command_api::builtins::ConnectError> {
         self.inner.prompt_and_store_key(credential_id).await?;
         let mutation_id = if credential_id == "anthropic" {
             "anthropic-api-key"
@@ -4317,7 +4318,7 @@ impl command_core::ConnectCredentialWriter for FusionCatalogRefreshingCredential
             .mark_credential_established(mutation_id)
             .await
         {
-            return Err(command_core::ConnectError::Network(
+            return Err(command_api::builtins::ConnectError::Network(
                 fusion_credential_restart_required_message(mutation_id),
             ));
         }
@@ -4332,23 +4333,24 @@ impl command_core::ConnectCredentialWriter for FusionCatalogRefreshingCredential
 /// (`EngineCopilotConnect::poll_to_completion`, `connect.rs`) — the exact
 /// path the finding [8] scenario names.
 struct FusionCatalogRefreshingCopilotConnect {
-    inner: Arc<dyn command_core::CopilotConnectDriver>,
+    inner: Arc<dyn command_api::builtins::CopilotConnectDriver>,
     refresher: FusionCatalogRefresher,
 }
 
 #[async_trait::async_trait]
-impl command_core::CopilotConnectDriver for FusionCatalogRefreshingCopilotConnect {
+impl command_api::builtins::CopilotConnectDriver for FusionCatalogRefreshingCopilotConnect {
     async fn begin(
         &self,
         domain: Option<&str>,
-    ) -> Result<command_core::CopilotConnectStep, command_core::ConnectError> {
+    ) -> Result<command_api::builtins::CopilotConnectStep, command_api::builtins::ConnectError>
+    {
         self.inner.begin(domain).await
     }
 
     async fn poll_to_completion(
         &self,
-        step: &command_core::CopilotConnectStep,
-    ) -> Result<(), command_core::ConnectError> {
+        step: &command_api::builtins::CopilotConnectStep,
+    ) -> Result<(), command_api::builtins::ConnectError> {
         self.inner.poll_to_completion(step).await?;
         // The Copilot device flow persists under the `github-copilot`
         // credential id (`EngineCopilotConnect::poll_to_completion`); naming
@@ -4359,7 +4361,7 @@ impl command_core::CopilotConnectDriver for FusionCatalogRefreshingCopilotConnec
             .mark_credential_established("github-copilot")
             .await
         {
-            return Err(command_core::ConnectError::Network(
+            return Err(command_api::builtins::ConnectError::Network(
                 fusion_credential_restart_required_message("github-copilot"),
             ));
         }
@@ -4376,20 +4378,20 @@ impl command_core::CopilotConnectDriver for FusionCatalogRefreshingCopilotConnec
 /// unwrapped, so a ChatGPT sign-in stayed invisible to Fusion for the rest of
 /// the process.
 struct FusionCatalogRefreshingChatGptConnect {
-    inner: Arc<dyn command_core::ChatGptConnectDriver>,
+    inner: Arc<dyn command_api::builtins::ChatGptConnectDriver>,
     refresher: FusionCatalogRefresher,
 }
 
 #[async_trait::async_trait]
-impl command_core::ChatGptConnectDriver for FusionCatalogRefreshingChatGptConnect {
-    async fn connect(&self) -> Result<String, command_core::ConnectError> {
+impl command_api::builtins::ChatGptConnectDriver for FusionCatalogRefreshingChatGptConnect {
+    async fn connect(&self) -> Result<String, command_api::builtins::ConnectError> {
         let message = self.inner.connect().await?;
         if !self
             .refresher
             .mark_credential_established("openai-chatgpt")
             .await
         {
-            return Err(command_core::ConnectError::Network(
+            return Err(command_api::builtins::ConnectError::Network(
                 fusion_credential_restart_required_message("openai-chatgpt"),
             ));
         }
@@ -4404,7 +4406,7 @@ impl command_core::ChatGptConnectDriver for FusionCatalogRefreshingChatGptConnec
 /// Every sign-IN seam refreshes Fusion's availability map, and
 /// `FusionCatalogRefresher`'s merge rule can never lower a `true` (see
 /// [`FusionCatalogRefresher::refresh_inner`]) — so once a process published
-/// `anthropic: true`, `/logout` (`command_core::LogoutHandler`, the TUI) and
+/// `anthropic: true`, `/logout` (`command_api::builtins::LogoutHandler`, the TUI) and
 /// the bridge-server's `ClientCommand::Logout` both left Fusion offering
 /// Anthropic models the session could no longer authenticate, for the rest of
 /// the process. Wrapping the ONE `Arc<dyn AuthHandle>` the whole desktop
@@ -4413,7 +4415,7 @@ impl command_core::ChatGptConnectDriver for FusionCatalogRefreshingChatGptConnec
 ///
 /// `login` notes the OAUTH route it just established (round-12 rework) and
 /// otherwise delegates untouched. `FusionCatalogRefreshingOAuthConnect` only
-/// covers the `/connect` picker; `/login` (`command_core::LoginHandler`) and
+/// covers the `/connect` picker; `/login` (`command_api::builtins::LoginHandler`) and
 /// the bridge-server's `ClientCommand::Login` drive this handle directly, and
 /// if their sign-in went unrecorded a later "delete the Anthropic API key"
 /// would fall back to a stale `anthropic_has_oauth == false` and clear a
@@ -4456,13 +4458,16 @@ impl AuthHandle for FusionCatalogClearingAuth {
 /// OAuth sign-in persists a credential exactly like an API-key write does,
 /// and `EngineOAuthConnect` was not one of the wrapped drivers.
 struct FusionCatalogRefreshingOAuthConnect {
-    inner: Arc<dyn command_core::OAuthConnectDriver>,
+    inner: Arc<dyn command_api::builtins::OAuthConnectDriver>,
     refresher: FusionCatalogRefresher,
 }
 
 #[async_trait::async_trait]
-impl command_core::OAuthConnectDriver for FusionCatalogRefreshingOAuthConnect {
-    async fn login(&self, provider_id: &str) -> Result<String, command_core::ConnectError> {
+impl command_api::builtins::OAuthConnectDriver for FusionCatalogRefreshingOAuthConnect {
+    async fn login(
+        &self,
+        provider_id: &str,
+    ) -> Result<String, command_api::builtins::ConnectError> {
         let message = self.inner.login(provider_id).await?;
         // Round-12 rework: this is the ONE seam where a bare `"anthropic"`
         // means the OAUTH route — `EngineOAuthConnect::login` maps it to
@@ -4484,7 +4489,7 @@ impl command_core::OAuthConnectDriver for FusionCatalogRefreshingOAuthConnect {
             .mark_credential_established(credential_id)
             .await
         {
-            return Err(command_core::ConnectError::Network(
+            return Err(command_api::builtins::ConnectError::Network(
                 fusion_credential_restart_required_message(credential_id),
             ));
         }
@@ -5879,7 +5884,7 @@ impl std::fmt::Debug for DesktopAudio {
 #[derive(Clone)]
 pub struct DesktopConfig {
     /// Host package identity used by `/version`.
-    pub build_info: command_core::BuildInfo,
+    pub build_info: command_api::builtins::BuildInfo,
     /// Whether this runtime owns versioned automation dispatch. CLI defaults to
     /// true; desktop hosts enable it only for their persistent scope controller.
     pub enable_automation_scheduler: bool,
@@ -6619,7 +6624,7 @@ impl std::fmt::Debug for DesktopConfig {
 impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
-            build_info: command_core::BuildInfo::default(),
+            build_info: command_api::builtins::BuildInfo::default(),
             enable_automation_scheduler: true,
             host_workspace_trusted: None,
             api_base: "https://api.anthropic.com".to_string(),
@@ -6826,9 +6831,9 @@ pub async fn desktop_command_registry(
     auth: Arc<dyn AuthHandle>,
     cwd: &std::path::Path,
     lingxi_home: &std::path::Path,
-    connect_writer: Arc<dyn command_core::ConnectCredentialWriter>,
-    connect_copilot: Arc<dyn command_core::CopilotConnectDriver>,
-    connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver>,
+    connect_writer: Arc<dyn command_api::builtins::ConnectCredentialWriter>,
+    connect_copilot: Arc<dyn command_api::builtins::CopilotConnectDriver>,
+    connect_chatgpt: Arc<dyn command_api::builtins::ChatGptConnectDriver>,
     gates: CustomizationGates,
     strict_plugin_only_skills: bool,
     // `--add-dir` roots. Each contributes `<root>/<DOT_DIR>/skills` to skill
@@ -6852,7 +6857,7 @@ pub async fn desktop_command_registry(
     // shadow conflict.
     let cron_enabled =
         cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref());
-    command_core::register_bundled_skills(&mut reg, cron_enabled);
+    command_api::builtins::register_bundled_skills(&mut reg, cron_enabled);
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle.clone(), auth.clone());
     // (H-BIN-09) Override the generic `/login` handler with one that enforces the
@@ -6861,14 +6866,14 @@ pub async fn desktop_command_registry(
     // wins over the plain handler `register_core_batch_2` just registered. Hosts
     // without a managed policy tier (mobile) keep the plain, unrestricted handler.
     reg.register_builtin_handler(Arc::new(
-        command_core::LoginHandler::new(auth)
+        command_api::builtins::LoginHandler::new(auth)
             .with_org_policy(Arc::new(crate::desktop::connect::DesktopLoginOrgPolicy)),
     ));
     register_core_batch_4(&mut reg, handle.clone());
     register_core_batch_5(&mut reg, handle.clone());
     // Plan 3c: wire `/connect` over the engine-supplied credential-writer +
     // Copilot device-flow + ChatGPT OAuth seams.
-    command_core::register::register_core_connect(
+    command_api::builtins::register::register_core_connect(
         &mut reg,
         connect_writer,
         connect_copilot,
@@ -6895,7 +6900,7 @@ pub async fn desktop_command_registry(
     // `/recap`, `/reload-skills`, `/skill-doctor`, `/stop`). Wired here (after
     // the skill-discovery roots are known, before the `disables_skills` early
     // return) so the builtins register regardless of the customization gate.
-    command_core::register_core_batch_8(
+    command_api::builtins::register_core_batch_8(
         &mut reg,
         handle.clone(),
         shared_registry,
@@ -6917,12 +6922,17 @@ pub async fn desktop_command_registry(
     }
     let (registered, registered_skills) = if strict_plugin_only_skills {
         (
-            command_core::load_and_register_managed_custom_commands(&mut reg, &managed_dir).await,
-            command_core::load_and_register_managed_skill_commands(&mut reg, &managed_dir).await,
+            command_api::builtins::load_and_register_managed_custom_commands(
+                &mut reg,
+                &managed_dir,
+            )
+            .await,
+            command_api::builtins::load_and_register_managed_skill_commands(&mut reg, &managed_dir)
+                .await,
         )
     } else {
         (
-            command_core::load_and_register_custom_commands(
+            command_api::builtins::load_and_register_custom_commands(
                 &mut reg,
                 cwd,
                 lingxi_home,
@@ -6930,7 +6940,7 @@ pub async fn desktop_command_registry(
                 &home,
             )
             .await,
-            command_core::load_and_register_skill_commands_with_roots(
+            command_api::builtins::load_and_register_skill_commands_with_roots(
                 &mut reg,
                 cwd,
                 lingxi_home,
@@ -6941,12 +6951,14 @@ pub async fn desktop_command_registry(
             .await,
         )
     };
-    reg.register_builtin_handler(Arc::new(command_core::SkillsHandler::with_all_roots(
-        cwd.to_path_buf(),
-        lingxi_home.to_path_buf(),
-        Some(managed_dir),
-        additional_skill_dirs,
-    )));
+    reg.register_builtin_handler(Arc::new(
+        command_api::builtins::SkillsHandler::with_all_roots(
+            cwd.to_path_buf(),
+            lingxi_home.to_path_buf(),
+            Some(managed_dir),
+            additional_skill_dirs,
+        ),
+    ));
     tracing::debug!(
         custom_commands = registered,
         skill_commands = registered_skills,
@@ -7741,11 +7753,11 @@ pub struct DesktopRuntime {
     /// GitHub Copilot in `/connect` runs the real web sign-in (browser open +
     /// device-code poll + token store) instead of an inert key field. Also
     /// registered in the engine `/connect` command group (same Arc).
-    pub connect_copilot: Arc<dyn command_core::CopilotConnectDriver>,
+    pub connect_copilot: Arc<dyn command_api::builtins::CopilotConnectDriver>,
     /// (T2b) Unified OAuth sign-in driver for the TUI `/connect` picker. Drives
     /// the browser flow for the first-party OAuth providers (Anthropic Pro/Max,
     /// OpenAI ChatGPT) — replacing the honest-but-inert `Unavailable` screen.
-    pub oauth_connect_driver: Arc<dyn command_core::OAuthConnectDriver>,
+    pub oauth_connect_driver: Arc<dyn command_api::builtins::OAuthConnectDriver>,
     /// (P1-08 runtime `/add-dir`) The SAME `Arc<SessionCwd>` the file tools gate
     /// on. The CLI `/add-dir` effect calls `add_trusted_dir(...)` on it so a
     /// directory added mid-session is immediately accessible to
@@ -7875,10 +7887,10 @@ impl tasks::handlers::local_workflow::WorkflowProgressSink for DesktopWorkflowEv
 ///
 /// Standalone CLI workflows such as `plugin eval --scaffold` use this factory
 /// so they receive the same runtime-backed filesystem and network enforcement
-/// as model-invoked shell tools without depending on the concrete runner crate.
+/// as model-invoked shell tools without depending on the concrete runner implementation.
 #[must_use]
 pub fn new_live_sandbox_runner() -> Arc<dyn tool_api::SandboxRunner> {
-    Arc::new(sandbox_runtime_runner::SandboxRuntimeRunner::new())
+    Arc::new(sandbox_runner::SandboxRuntimeRunner::new())
 }
 
 /// `XV` — the name upstream's `mUe` puts on the synthetic tool call it hands
@@ -7891,9 +7903,7 @@ pub fn new_live_sandbox_runner() -> Arc<dyn tool_api::SandboxRunner> {
 /// classifier to match a rule against a name the rule never mentions.
 const SANDBOX_NETWORK_TOOL: &str = "SandboxNetworkAccess";
 
-fn sandbox_network_ask_callback(
-    permission_gate: Arc<dyn PermissionGate>,
-) -> sandbox_runtime_runner::AskFn {
+fn sandbox_network_ask_callback(permission_gate: Arc<dyn PermissionGate>) -> sandbox_runner::AskFn {
     // `ive` — upstream memoises the verdict per `host:port`. Its ALLOW arm is
     // keyed on a transcript watermark (`CLe`: message count + last uuid) and
     // expires when the conversation moves on; its BLOCK arm is `reuse:"always"`
@@ -7943,11 +7953,9 @@ fn sandbox_network_ask_callback(
 fn new_live_sandbox_runner_with_permission_gate(
     permission_gate: Arc<dyn PermissionGate>,
 ) -> Arc<dyn tool_api::SandboxRunner> {
-    Arc::new(
-        sandbox_runtime_runner::SandboxRuntimeRunner::with_ask_callback(
-            sandbox_network_ask_callback(permission_gate),
-        ),
-    )
+    Arc::new(sandbox_runner::SandboxRuntimeRunner::with_ask_callback(
+        sandbox_network_ask_callback(permission_gate),
+    ))
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -8745,7 +8753,7 @@ fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
 /// `lingxi_core::settings::Settings::load` seam). When `true`, the agent-view
 /// fork/subtask surface is disabled exactly like `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`
 /// (binary `I2i()` — `settings.disableAgentView === true`), threaded into
-/// [`command_core::register_core_batch_8`] via
+/// [`command_api::builtins::register_core_batch_8`] via
 /// [`platform_api::agent_view::is_enabled_with_setting`] (M-03). Returns `false` on any
 /// load failure or when the key is unset — the frozen default (agent view
 /// enabled; the env half still applies independently).
@@ -9531,7 +9539,7 @@ impl platform_api::RepoRootReloader for DesktopRepoRootReloader {
                 .iter()
                 .map(|root| root.join(branding::DOT_DIR).join("skills"))
                 .collect();
-            let handler = command_core::ReloadSkillsHandler::with_all_roots(
+            let handler = command_api::builtins::ReloadSkillsHandler::with_all_roots(
                 self.registry.clone(),
                 self.cwd.clone(),
                 self.lingxi_home.clone(),
@@ -10352,8 +10360,7 @@ pub async fn build_shared_credential_stack_with_policy(
     credential_storage_policy: CredentialStoragePolicy,
 ) -> Result<SharedCredentialStack, BuildError> {
     let http = Arc::new(
-        PosixHttp::new()
-            .with_monitor_proxy(Arc::new(sandbox_runtime_runner::MonitorProxyConnector)),
+        PosixHttp::new().with_monitor_proxy(Arc::new(sandbox_runner::MonitorProxyConnector)),
     );
     let clock = Arc::new(PosixClock::new());
     let credentials_path = lingxi_home.join(".credentials.json");
@@ -12080,7 +12087,7 @@ pub async fn build_with_credential_stack(
     // settings file used by `/effort`. Seed it before the first turn; an
     // explicit CLI effort remains higher priority and is left untouched.
     let persisted_reasoning_selection = if cfg.initial_effort.is_none() {
-        command_core::effort::load_reasoning_default_selection_at(
+        command_api::builtins::effort::load_reasoning_default_selection_at(
             &cfg.lingxi_home.join("settings.json"),
         )
     } else {
@@ -16169,14 +16176,14 @@ pub async fn build_with_credential_stack(
     // here too, and the TUI key view (which bypasses all four and writes
     // straight through `secret::CredentialManager`) reaches the same
     // refresher through `refresh_fusion_catalog_after_credential_write`.
-    let connect_copilot: Arc<dyn command_core::CopilotConnectDriver> =
+    let connect_copilot: Arc<dyn command_api::builtins::CopilotConnectDriver> =
         Arc::new(FusionCatalogRefreshingCopilotConnect {
             inner: Arc::new(crate::desktop::connect::EngineCopilotConnect::new(
                 credentials.clone(),
             )),
             refresher: fusion_catalog_refresher.clone(),
         });
-    let connect_writer: Arc<dyn command_core::ConnectCredentialWriter> =
+    let connect_writer: Arc<dyn command_api::builtins::ConnectCredentialWriter> =
         Arc::new(FusionCatalogRefreshingCredentialWriter {
             inner: Arc::new(crate::desktop::connect::EngineCredentialWriter::new(
                 credentials.clone(),
@@ -16187,7 +16194,7 @@ pub async fn build_with_credential_stack(
             )),
             refresher: fusion_catalog_refresher.clone(),
         });
-    let connect_chatgpt_inner: Arc<dyn command_core::ChatGptConnectDriver> =
+    let connect_chatgpt_inner: Arc<dyn command_api::builtins::ChatGptConnectDriver> =
         Arc::new(crate::desktop::connect::EngineChatGptConnect::new(
             openai_oauth_client,
             credentials.clone(),
@@ -16197,7 +16204,7 @@ pub async fn build_with_credential_stack(
     // round 4 wrapped. The OAuth driver below is built over the UNWRAPPED
     // ChatGPT driver so a ChatGPT sign-in through the picker refreshes once,
     // not twice.
-    let connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver> =
+    let connect_chatgpt: Arc<dyn command_api::builtins::ChatGptConnectDriver> =
         Arc::new(FusionCatalogRefreshingChatGptConnect {
             inner: connect_chatgpt_inner.clone(),
             refresher: fusion_catalog_refresher.clone(),
@@ -16207,7 +16214,7 @@ pub async fn build_with_credential_stack(
     // `/login` (the Anthropic `auth` handle) and `/connect chatgpt`
     // (`connect_chatgpt`); built here while both are still owned (the registry
     // call below moves `connect_chatgpt`).
-    let oauth_connect_driver: Arc<dyn command_core::OAuthConnectDriver> =
+    let oauth_connect_driver: Arc<dyn command_api::builtins::OAuthConnectDriver> =
         Arc::new(FusionCatalogRefreshingOAuthConnect {
             inner: Arc::new(crate::desktop::connect::EngineOAuthConnect::new(
                 auth.clone(),
@@ -16229,14 +16236,16 @@ pub async fn build_with_credential_stack(
         shared_command_registry.clone(),
     )
     .await;
-    reg.register_builtin_handler(Arc::new(command_core::VersionHandler::with_build_info(
-        cfg.build_info,
-    )));
+    reg.register_builtin_handler(Arc::new(
+        command_api::builtins::VersionHandler::with_build_info(cfg.build_info),
+    ));
     // The TUI intercepts `/workflows` to open its interactive picker. Bind the
     // same registry-backed text projection for headless/bridge dispatch paths.
-    reg.register_builtin_handler(Arc::new(command_core::WorkflowsHandler::with_registry(
-        task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
-    )));
+    reg.register_builtin_handler(Arc::new(
+        command_api::builtins::WorkflowsHandler::with_registry(
+            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+        ),
+    ));
     reg.register_builtin_handler(worktree_command_handler);
     if cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref()) {
         // `/cron` is an explicit management action. Keep it out of the model
@@ -16296,14 +16305,14 @@ pub async fn build_with_credential_stack(
             task_registry.clone(),
         ));
         let apply = std::sync::Arc::new(auto_mode_propose::DesktopApplyRunner::new(
-            command_core::auto_mode_setup::apply_file_roots(&cfg.lingxi_home),
+            command_api::builtins::auto_mode_setup::apply_file_roots(&cfg.lingxi_home),
             permission::PermissionPaths {
                 lingxi_home: cfg.lingxi_home.clone(),
                 cwd: cfg.cwd.clone(),
             },
         ));
         reg.register_builtin_handler(std::sync::Arc::new(
-            command_core::AutoModeSetupHandler::new()
+            command_api::builtins::AutoModeSetupHandler::new()
                 .with_propose(propose)
                 .with_apply(apply),
         ));
@@ -16819,7 +16828,7 @@ pub async fn build_with_credential_stack(
     if session_start.reload_skills {
         let home = dirs::home_dir().unwrap_or_else(|| cfg.lingxi_home.clone());
         let managed_dir = crate::desktop::settings_watch::managed_settings_dir();
-        let handler = command_core::reload_skills::ReloadSkillsHandler::with_all_roots(
+        let handler = command_api::builtins::reload_skills::ReloadSkillsHandler::with_all_roots(
             shared_command_registry.clone(),
             cfg.cwd.clone(),
             cfg.lingxi_home.clone(),
@@ -17610,7 +17619,7 @@ mod tests {
     #[tokio::test]
     async fn desktop_registry_exposes_connect() {
         use async_trait::async_trait;
-        use command_core::{
+        use command_api::builtins::{
             ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
             CopilotConnectStep,
         };
@@ -17697,7 +17706,7 @@ mod tests {
     #[tokio::test]
     async fn safe_mode_and_bare_skip_custom_command_discovery() {
         use async_trait::async_trait;
-        use command_core::{
+        use command_api::builtins::{
             ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
             CopilotConnectStep,
         };
@@ -17820,7 +17829,7 @@ mod tests {
     #[tokio::test]
     async fn an_add_dir_root_contributes_its_skills() {
         use async_trait::async_trait;
-        use command_core::{
+        use command_api::builtins::{
             ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
             CopilotConnectStep,
         };
@@ -17919,7 +17928,7 @@ mod tests {
     async fn engine_credential_writer_roundtrips_through_keychain() {
         use super::connect::{EngineCredentialWriter, SecureKeyPrompt};
         use async_trait::async_trait;
-        use command_core::ConnectCredentialWriter;
+        use command_api::builtins::ConnectCredentialWriter;
         use platform_api::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
@@ -18021,7 +18030,7 @@ mod tests {
     async fn connect_writer_wrapper_refreshes_fusion_catalog_availability_after_a_real_write() {
         use super::connect::{EngineCredentialWriter, SecureKeyPrompt};
         use async_trait::async_trait;
-        use command_core::ConnectCredentialWriter;
+        use command_api::builtins::ConnectCredentialWriter;
         use platform_api::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
@@ -18158,7 +18167,7 @@ with no restart and no ModelSource reconstruction"
     #[tokio::test]
     async fn oauth_connect_publishes_before_return_and_starts_one_detached_refresh() {
         use async_trait::async_trait;
-        use command_core::OAuthConnectDriver;
+        use command_api::builtins::OAuthConnectDriver;
         use platform_api::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
@@ -18166,7 +18175,10 @@ with no restart and no ModelSource reconstruction"
         struct SuccessfulOAuth;
         #[async_trait]
         impl OAuthConnectDriver for SuccessfulOAuth {
-            async fn login(&self, provider_id: &str) -> Result<String, command_core::ConnectError> {
+            async fn login(
+                &self,
+                provider_id: &str,
+            ) -> Result<String, command_api::builtins::ConnectError> {
                 assert_eq!(provider_id, "anthropic");
                 Ok("connected".to_string())
             }
@@ -18303,7 +18315,7 @@ with no restart and no ModelSource reconstruction"
     #[tokio::test]
     async fn oauth_connect_on_a_cold_api_key_route_requires_restart_without_false_readiness() {
         use async_trait::async_trait;
-        use command_core::OAuthConnectDriver;
+        use command_api::builtins::OAuthConnectDriver;
 
         struct SuccessfulOAuth;
         #[async_trait]
@@ -18311,7 +18323,7 @@ with no restart and no ModelSource reconstruction"
             async fn login(
                 &self,
                 _provider_id: &str,
-            ) -> Result<String, command_core::ConnectError> {
+            ) -> Result<String, command_api::builtins::ConnectError> {
                 // The browser flow persisted a valid credential. Only adopting
                 // it into this process's already-built route is unsupported.
                 Ok("connected".to_string())
@@ -20496,7 +20508,7 @@ still flip to available"
         let cwd = tmp.path().to_path_buf();
         let lingxi_home = cwd.join(".lingxi");
         let cfg = DesktopConfig {
-            build_info: command_core::BuildInfo::default(),
+            build_info: command_api::builtins::BuildInfo::default(),
             enable_automation_scheduler: true,
             host_workspace_trusted: None,
             isolated_credential_storage: false,

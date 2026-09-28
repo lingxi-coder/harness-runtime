@@ -167,7 +167,7 @@ fn posix_resolve(base: &str, p: &str) -> String {
 }
 
 /// POSIX equivalent of Node's `path.dirname`.
-fn posix_dirname(p: &str) -> String {
+pub(crate) fn posix_dirname(p: &str) -> String {
     let normalized = p.trim_end_matches('/');
     match normalized.rfind('/') {
         None => ".".to_string(),

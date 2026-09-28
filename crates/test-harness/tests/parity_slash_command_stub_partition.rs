@@ -35,8 +35,8 @@ use command_api::builtin_support::names::{
     INTENTIONALLY_DISABLED_COMMANDS,
 };
 use command_api::builtin_support::unimplemented::UnimplementedCommandHandler;
+use command_api::builtins::register_all_builtin_commands;
 use command_api::{CommandRegistry, RegistrySlashDispatcher};
-use command_core::register_all_builtin_commands;
 use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 use tokio::sync::RwLock;
 

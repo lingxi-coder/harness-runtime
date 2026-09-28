@@ -21,9 +21,9 @@
 //! typed error so unit tests can assert on the failure mode.
 
 use crate::definition::{
-    parse_effort_value, AgentCacheTtl, AgentDefinition, AgentEffort, AgentIsolation,
-    AgentMcpServerSpec, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
-    ObserverSpec, EFFORT_LEVELS,
+    parse_effort_value, parse_int_radix10, AgentCacheTtl, AgentDefinition, AgentEffort,
+    AgentIsolation, AgentMcpServerSpec, AgentModel, AgentPermissionMode, AgentSource,
+    AgentToolPolicy, ObserverSpec, EFFORT_LEVELS,
 };
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -677,34 +677,6 @@ fn parse_positive_int_from_frontmatter(value: &serde_yaml::Value) -> Option<u32>
         // booleans: String(true)='true' -> parseInt NaN -> None
         _ => None,
     }
-}
-
-/// JS-`parseInt(str, 10)`: leading sign + leading digits, ignore trailing
-/// garbage; `None` (NaN) when no digits.
-fn parse_int_radix10(s: &str) -> Option<i64> {
-    let t = s.trim_start();
-    let mut chars = t.chars().peekable();
-    let mut out = String::new();
-    if let Some(&c) = chars.peek() {
-        if c == '+' || c == '-' {
-            out.push(c);
-            chars.next();
-        }
-    }
-    let mut saw_digit = false;
-    while let Some(&c) = chars.peek() {
-        if c.is_ascii_digit() {
-            out.push(c);
-            saw_digit = true;
-            chars.next();
-        } else {
-            break;
-        }
-    }
-    if !saw_digit {
-        return None;
-    }
-    out.parse::<i64>().ok()
 }
 
 /// claude background coercion: `true` only for literal `true`/`"true"`; log on

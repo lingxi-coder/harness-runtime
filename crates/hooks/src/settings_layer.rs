@@ -3,6 +3,7 @@ use crate::events::HookEventType;
 use crate::loader::{
     build_condition, build_executor, event_type_name, parse_event_type, HookEntry, MatcherGroup,
 };
+use crate::matcher::comma_mode_for;
 use permission::PermissionRuleValue;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -380,30 +381,6 @@ fn validate_matcher(matcher: &str, event_type: &HookEventType) -> Result<(), Str
     Regex::new(matcher)
         .map(|_| ())
         .map_err(|error| format!("matcher is not a valid regex: {error}"))
-}
-
-fn comma_mode_for(event_type: &HookEventType) -> bool {
-    matches!(
-        event_type,
-        HookEventType::PreToolUse
-            | HookEventType::PostToolUse
-            | HookEventType::PostToolUseFailure
-            | HookEventType::PermissionRequest
-            | HookEventType::PermissionDenied
-            | HookEventType::UserPromptExpansion
-            | HookEventType::SessionStart
-            | HookEventType::SessionEnd
-            | HookEventType::Setup
-            | HookEventType::PreCompact
-            | HookEventType::PostCompact
-            | HookEventType::Notification
-            | HookEventType::SubagentStart
-            | HookEventType::SubagentStop
-            | HookEventType::Elicitation
-            | HookEventType::ElicitationResult
-            | HookEventType::ConfigChange
-            | HookEventType::InstructionsLoaded
-    )
 }
 
 fn is_simple_pattern(value: &str, comma_mode: bool) -> bool {

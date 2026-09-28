@@ -99,8 +99,7 @@ regex = "1"
 # Used by the M5-09 parity driver (parity_slash_commands) to exercise the
 # 99-name CommandRegistry + RegistrySlashDispatcher end-to-end against the
 # locked fixture. Dev-only.
-command-api = { path = "../command-api" }
-command-core = { path = "../commands/core" }
+command-api = { path = "../command-api", features = ["builtin-handlers"] }
 # Used by the M5-10 parity driver (parity_init_template) to assert the
 # OLD_INIT_PROMPT sha256/length/lines lock against the fixture. Dev-only.
 sha2 = "0.10"

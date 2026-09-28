@@ -1151,12 +1151,6 @@
       "source_blob": "3f069d7c2a545afd0b52a7d73d9f9f337a469f0f"
     },
     {
-      "from": "lingxi-code/client-adapter/Cargo.toml",
-      "to": "crates/client/Cargo.toml",
-      "source_sha256": "4d5960c40ae2061ab0a1bc6bb467602086b483961b70d0ca0d700f4fd4fa30db",
-      "source_blob": "4fd05b47e6f759e15f06bf0a46830aab4eec339f"
-    },
-    {
       "from": "lingxi-code/client-adapter/src/ask_user_question_broker.rs",
       "to": "crates/client/src/adapter/ask_user_question_broker.rs",
       "source_sha256": "cce4f154ed9b1b4b300c4ed03ffe0e0b69c147f7638b2d9f793430cbfdc2d651",
@@ -1239,12 +1233,6 @@
       "to": "crates/client/tests/parity_test.rs",
       "source_sha256": "1bc603020cefc93eb3fc44946140ffd48881d64fcdc132ea02aa03445a149bfb",
       "source_blob": "8046ad8b5bcc1a90b7c87190a6c7c0763f370613"
-    },
-    {
-      "from": "lingxi-code/client-presentation/Cargo.toml",
-      "to": "crates/client/Cargo.toml",
-      "source_sha256": "a075f7c93a47c8de147832f2340b7c188ad02760c7c543794abd63db20b77242",
-      "source_blob": "e6bf3978ab67fee9056c8d5d5640940029a807cd"
     },
     {
       "from": "lingxi-code/client-presentation/src/classify.rs",
@@ -1479,12 +1467,6 @@
       "to": "crates/client/src/presentation/tool_display/result.rs",
       "source_sha256": "53fcc7bfcc3c1b6455180886540960303f19fcc62f7ab2ab8edd4281ac63acde",
       "source_blob": "efe8d449745449c7e2e1c73677d37836a70863e6"
-    },
-    {
-      "from": "lingxi-code/client-protocol/Cargo.toml",
-      "to": "crates/client/Cargo.toml",
-      "source_sha256": "6f1cad6901983c2aaf30006c4a44e564d443fb91c4557b3192c1f972337fe607",
-      "source_blob": "9452bdf01cf9042fac841b64be5cb0745deff98d"
     },
     {
       "from": "lingxi-code/client-protocol/snapshots/blessed_major.txt",
@@ -3011,770 +2993,764 @@
       "source_blob": "5acb8da7381f4986e8d02fe82632755ddcde36bb"
     },
     {
-      "from": "lingxi-code/commands/core/Cargo.toml",
-      "to": "crates/commands/core/Cargo.toml",
-      "source_sha256": "762363cdf307efbb843d31c05e79a0d1725b962b4a7c2cdf120a61452b0dcf6f",
-      "source_blob": "2dcd6339c94ef1e25987e961d880693de1b0c691"
-    },
-    {
       "from": "lingxi-code/commands/core/build.rs",
-      "to": "crates/commands/core/build.rs",
+      "to": "crates/command-api/build.rs",
       "source_sha256": "8f32ca14523c4e59f5d9dda745553ceaf01ca25aabe7d0cd937099937f10926a",
       "source_blob": "852b613880511d33740088cc8c95114b964d2fb9"
     },
     {
       "from": "lingxi-code/commands/core/src/agents.rs",
-      "to": "crates/commands/core/src/agents.rs",
+      "to": "crates/command-api/src/builtins/agents.rs",
       "source_sha256": "c0236040ade1309022e66f5ffceac78fb9f0af5aca63d94ea3aa2c00148bf8d7",
       "source_blob": "6e12cd5ec62c3b9b61062fb571e19cdaab5287a2"
     },
     {
       "from": "lingxi-code/commands/core/src/auto_mode_setup.rs",
-      "to": "crates/commands/core/src/auto_mode_setup.rs",
+      "to": "crates/command-api/src/builtins/auto_mode_setup.rs",
       "source_sha256": "7fbf410cb3de0faad93b692fe26ef01140899b1f1c9644ae8d7fd2396979d0b4",
       "source_blob": "865538716aaa01d9e20bb59b1bb9e5a893607337"
     },
     {
       "from": "lingxi-code/commands/core/src/autocompact.rs",
-      "to": "crates/commands/core/src/autocompact.rs",
+      "to": "crates/command-api/src/builtins/autocompact.rs",
       "source_sha256": "c23aa58cc2d38e394e03f37ff79178688a9ebf3e0d8206f08cf8e7ec3593e3d4",
       "source_blob": "d3a9de8c0a3d091ed9d513371425d0dcdfde2d42"
     },
     {
       "from": "lingxi-code/commands/core/src/brief.rs",
-      "to": "crates/commands/core/src/brief.rs",
+      "to": "crates/command-api/src/builtins/brief.rs",
       "source_sha256": "f6c69672cafbefffd8338a3d0f79f2feba6eff24b82cc7d922552a5b426258ab",
       "source_blob": "925d828a0e9fa65afd72c325438e1b6a2524d639"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/batch_body.md",
-      "to": "crates/commands/core/src/bundled/batch_body.md",
+      "to": "crates/command-api/src/builtins/bundled/batch_body.md",
       "source_sha256": "790e27e76f31420ed794ec71c8228e4c18b4497ea747d95a4e68c2ca1f909257",
       "source_blob": "e87d1a0f5259183d8ab563ef4062ff4eaa1597ff"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/batch_skill.rs",
-      "to": "crates/commands/core/src/bundled/batch_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/batch_skill.rs",
       "source_sha256": "9b1a6f5e73235331c6d8cd4b29f6bec6dd75cbb5d0c0f668536d9d9723dddcef",
       "source_blob": "a836f2ef6a1e62e490472cecdeb92d6137468389"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/checkup_body.md",
-      "to": "crates/commands/core/src/bundled/checkup_body.md",
+      "to": "crates/command-api/src/builtins/bundled/checkup_body.md",
       "source_sha256": "f5e471b86b1bdc9e58adbed871be64d3b64aa596d91bf46dd7dda87172a071e6",
       "source_blob": "29d198bd9348c5cd9d420b7b9f54cf67950469fd"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/checkup_skill.rs",
-      "to": "crates/commands/core/src/bundled/checkup_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/checkup_skill.rs",
       "source_sha256": "41526f1dad992908bc2a448bea21278791c02ea77c66cead345271b205c009cf",
       "source_blob": "7f3bbceec2006c7b2fbe344a4b4f5239fb7e8b07"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/code_review_body_high.md",
-      "to": "crates/commands/core/src/bundled/code_review_body_high.md",
+      "to": "crates/command-api/src/builtins/bundled/code_review_body_high.md",
       "source_sha256": "8a15ba3ede398f335c9623be110ab507dbc2d819cb927009242b6948ceba8aa0",
       "source_blob": "d5ca6f3e0098b1d7f16065ef6467b3dc55d8f28b"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/code_review_body_low.md",
-      "to": "crates/commands/core/src/bundled/code_review_body_low.md",
+      "to": "crates/command-api/src/builtins/bundled/code_review_body_low.md",
       "source_sha256": "27251fe41cbc8c20e95c89d99916bb23f2274779e367fe4bc6d077e0d063d177",
       "source_blob": "919614b66053dfe648f738276bf53aa5ca92e6aa"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/code_review_body_max.md",
-      "to": "crates/commands/core/src/bundled/code_review_body_max.md",
+      "to": "crates/command-api/src/builtins/bundled/code_review_body_max.md",
       "source_sha256": "93f24028551b97c62c14b2045738daa7c0a28777437def4c399ad14136059185",
       "source_blob": "9e7024e365494927a6c2e87bb8b4fbe750a800f4"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/code_review_body_medium.md",
-      "to": "crates/commands/core/src/bundled/code_review_body_medium.md",
+      "to": "crates/command-api/src/builtins/bundled/code_review_body_medium.md",
       "source_sha256": "a510ac1a0bd84f92c7942e9503ef0c386571ca0775ccfdb6ae90090fb08a7a53",
       "source_blob": "4a762e8d22e05538905f279edefb6d3b1cd15f88"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/code_review_body_xhigh.md",
-      "to": "crates/commands/core/src/bundled/code_review_body_xhigh.md",
+      "to": "crates/command-api/src/builtins/bundled/code_review_body_xhigh.md",
       "source_sha256": "a32be6e207c351f9d8f49dd289ecec2b0ca97cab690fa8aa3506f87bc8c030be",
       "source_blob": "23e95f482bac5bf0f79f69d8fbf31ecd9f6d8bef"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/code_review_comment.md",
-      "to": "crates/commands/core/src/bundled/code_review_comment.md",
+      "to": "crates/command-api/src/builtins/bundled/code_review_comment.md",
       "source_sha256": "6d320b713f429ea2be13ac4fd602fe294d5aafaeeb27b562fb974aa4f535ae36",
       "source_blob": "902b3ca8e97e575727c0b25aa13b25a264a71c21"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/code_review_fix.md",
-      "to": "crates/commands/core/src/bundled/code_review_fix.md",
+      "to": "crates/command-api/src/builtins/bundled/code_review_fix.md",
       "source_sha256": "f3c88697f4b1aff8b07f528cb105befa4330f1c782070cad4e5f76fb909fb1da",
       "source_blob": "4b3627ef03510d4d58fbd16a339c7bffe46bc819"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/code_review_skill.rs",
-      "to": "crates/commands/core/src/bundled/code_review_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/code_review_skill.rs",
       "source_sha256": "042460ebd7c25b689b2c51e6f77e60f3b3dd298f63873749ebdf447c79849926",
       "source_blob": "956ad94132b29758050a9e1f847401541e937aca"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/cron_skill.rs",
-      "to": "crates/commands/core/src/bundled/cron_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/cron_skill.rs",
       "source_sha256": "5d3a3988395b1ab3707c6883d599d02f01411c8181ff116cc17e57ac7df8abe8",
       "source_blob": "422ed368302850718a25da562206c625af26a531"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/dataviz_assets/interaction.md",
-      "to": "crates/commands/core/src/bundled/dataviz_assets/interaction.md",
+      "to": "crates/command-api/src/builtins/bundled/dataviz_assets/interaction.md",
       "source_sha256": "bfc0cd432bfd8f550d9c18cb2ce16d75b84fc2c07dbe53426315fd953c142cfd",
       "source_blob": "5ecc874e236d7fae73a2bd91b1e896eb954a142c"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/dataviz_assets/marks-and-anatomy.md",
-      "to": "crates/commands/core/src/bundled/dataviz_assets/marks-and-anatomy.md",
+      "to": "crates/command-api/src/builtins/bundled/dataviz_assets/marks-and-anatomy.md",
       "source_sha256": "fdffc82bac8be607b91ac81ca52f4f62f3a742f0a83e7c37172a647de6880890",
       "source_blob": "191c0ac610190faad9650cc78476c6c43069b6c4"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/dataviz_assets/palette.md",
-      "to": "crates/commands/core/src/bundled/dataviz_assets/palette.md",
+      "to": "crates/command-api/src/builtins/bundled/dataviz_assets/palette.md",
       "source_sha256": "1bbfd91f4244f946632a40e3fad65742d411b71bcc9791b6863f5f1d36de3114",
       "source_blob": "1e3f162cda01c43a29817f3704cbf62c27c4163d"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/dataviz_body.md",
-      "to": "crates/commands/core/src/bundled/dataviz_body.md",
+      "to": "crates/command-api/src/builtins/bundled/dataviz_body.md",
       "source_sha256": "8fd13286998a94d8eec3e03631543da1b2f7548f7a61fad265d154dbb3a09cc4",
       "source_blob": "58d0e4a4fef70d9b748d017ef64d600d13d7597e"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/dataviz_skill.rs",
-      "to": "crates/commands/core/src/bundled/dataviz_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/dataviz_skill.rs",
       "source_sha256": "39ff45c9bc2df8684ef97b7936611ba52744b373c81044e548c21c7e6e100948",
       "source_blob": "46fbb78c494f57f8c08c5d77186ee8a79612f087"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/debug_skill.rs",
-      "to": "crates/commands/core/src/bundled/debug_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/debug_skill.rs",
       "source_sha256": "b47e043e8865a2659df6d441bbda98f1c92f6e0429143c067093065202675227",
       "source_blob": "154db2ee40ce3f7a5c18a71155fe1645bf1e5913"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/deep_research_skill.rs",
-      "to": "crates/commands/core/src/bundled/deep_research_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/deep_research_skill.rs",
       "source_sha256": "d118930fa37f4026e813e9546199ccf4f02950219883de3e0e774fa39783eecf",
       "source_blob": "c1fd1195d647fa17d3f882967e9cdb54d893db68"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/explain_usage_body.md",
-      "to": "crates/commands/core/src/bundled/explain_usage_body.md",
+      "to": "crates/command-api/src/builtins/bundled/explain_usage_body.md",
       "source_sha256": "b86e25390f07a0a2d9f76a0453ae3511f53d8c32746a45e2151dd115bdaedffc",
       "source_blob": "6f302e377cdc599c06dbdf50b66f030769f16a61"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/explain_usage_skill.rs",
-      "to": "crates/commands/core/src/bundled/explain_usage_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/explain_usage_skill.rs",
       "source_sha256": "c2738d595e0c8061d2331fabb3cc73e11aa4e6aa1fbd6d1c9cbd1922f7005cc2",
       "source_blob": "87f4da2fa2f2f0d1af9d691a2add02219949ab2d"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/fewer_permission_prompts_body.md",
-      "to": "crates/commands/core/src/bundled/fewer_permission_prompts_body.md",
+      "to": "crates/command-api/src/builtins/bundled/fewer_permission_prompts_body.md",
       "source_sha256": "a40b14e48d1bc64c97619e714722eae4d32b4fb3f729b3f7a9c4603053da6024",
       "source_blob": "a55f42b08772b26139dd76faaabd387b96e8109e"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/fewer_permission_prompts_skill.rs",
-      "to": "crates/commands/core/src/bundled/fewer_permission_prompts_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/fewer_permission_prompts_skill.rs",
       "source_sha256": "839801822bd71c9ade21a180771ad4bb085da0d86e5a43cf288153dbfaa1ea5b",
       "source_blob": "ae1dd0be22836973a57f617d624f52ad01020d5b"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/keybindings_help_body.md",
-      "to": "crates/commands/core/src/bundled/keybindings_help_body.md",
+      "to": "crates/command-api/src/builtins/bundled/keybindings_help_body.md",
       "source_sha256": "1271728ffde071eec26a2f3819eb1acec25ee8a1b8432622286536065e292cca",
       "source_blob": "43ba56067f9ca4b3c3bf215a18bbacb0c0ec6a0b"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/keybindings_help_skill.rs",
-      "to": "crates/commands/core/src/bundled/keybindings_help_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/keybindings_help_skill.rs",
       "source_sha256": "1f884bb794301877d1e6bbe46ef021d96670c9fbaead6869dcec7fed1146940c",
       "source_blob": "a52129d6b04f21849f374843804eb43e2680ca07"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/loop_skill.rs",
-      "to": "crates/commands/core/src/bundled/loop_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/loop_skill.rs",
       "source_sha256": "76f10d662de37874cfa18227f259b98f321de1fa8f8ca27da559fc4e418010c3",
       "source_blob": "b5227dcb69eec3e1d869501d12855048dd2d9006"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/mod.rs",
-      "to": "crates/commands/core/src/bundled/mod.rs",
+      "to": "crates/command-api/src/builtins/bundled/mod.rs",
       "source_sha256": "35a67360a8a837ef25c6e2a289684770b7f43914aa17a292005b33015e72f646",
       "source_blob": "323e7b53ed17c42e9ce187546a780260c920d508"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/run_body.md",
-      "to": "crates/commands/core/src/bundled/run_body.md",
+      "to": "crates/command-api/src/builtins/bundled/run_body.md",
       "source_sha256": "251d8fd4225410e29b258723db3ff91a264203d0df32686ca3247f033f49e208",
       "source_blob": "2496cb5f47d567f8cc726abf63d8b156e0ee8521"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/run_skill.rs",
-      "to": "crates/commands/core/src/bundled/run_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/run_skill.rs",
       "source_sha256": "42dfc442f6787cb2e432f5517ee343f428aa3f774ffc317ed0e3725e96690e0e",
       "source_blob": "d96f108d091a2d078bc9d9bbcbb1e4b310b06627"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/run_skill_generator_body.md",
-      "to": "crates/commands/core/src/bundled/run_skill_generator_body.md",
+      "to": "crates/command-api/src/builtins/bundled/run_skill_generator_body.md",
       "source_sha256": "5d4fdaea5d993248946783cb1e56ec51db00ab33c1fffff4e54b07e99bcb6ae4",
       "source_blob": "4c0df6c4560b91d26e090b737b348b91e533e72a"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/run_skill_generator_skill.rs",
-      "to": "crates/commands/core/src/bundled/run_skill_generator_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/run_skill_generator_skill.rs",
       "source_sha256": "2e5dad2c2c95afa9014659175cc1df56a5d843fa5c61db954b0b001db805f4af",
       "source_blob": "8f23c83b888894207899bc3eb040c99891afb864"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/simplify_body.md",
-      "to": "crates/commands/core/src/bundled/simplify_body.md",
+      "to": "crates/command-api/src/builtins/bundled/simplify_body.md",
       "source_sha256": "17eaf8bdc9f80e5f75660a6b6e96691d1f650b3fa9728bac7f73faa405fd0ebf",
       "source_blob": "257e2ede09a1809866442016af9225a8035ff7f2"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/simplify_skill.rs",
-      "to": "crates/commands/core/src/bundled/simplify_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/simplify_skill.rs",
       "source_sha256": "7ff52a55bacfd8c56d8f9b05bfc674eb6e93f219a946f6f4f61985b37731a150",
       "source_blob": "1ff4d49cb55ff751d06afab121bd8faa29497656"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/update_config_body.md",
-      "to": "crates/commands/core/src/bundled/update_config_body.md",
+      "to": "crates/command-api/src/builtins/bundled/update_config_body.md",
       "source_sha256": "97ce9edada83829625d782c45684118895ad07b8a506009056a61303291437c9",
       "source_blob": "eb42e7387afab55f7859b918b87f46e0cb93241d"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/update_config_hook_construction.md",
-      "to": "crates/commands/core/src/bundled/update_config_hook_construction.md",
+      "to": "crates/command-api/src/builtins/bundled/update_config_hook_construction.md",
       "source_sha256": "3125023592256ad1ac72e7a83c5e060808248f8fe46082285ca424c0f01d919c",
       "source_blob": "645482a44789c3a7fec177ecc9a21a6200e69421"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/update_config_hooks_reference.md",
-      "to": "crates/commands/core/src/bundled/update_config_hooks_reference.md",
+      "to": "crates/command-api/src/builtins/bundled/update_config_hooks_reference.md",
       "source_sha256": "99e7739016662ea18c5e04d3b55b20d842bac65ebb87f5fdbae9fe048ab71004",
       "source_blob": "a1137839984af844b75402b6611cca47043cd7e9"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/update_config_skill.rs",
-      "to": "crates/commands/core/src/bundled/update_config_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/update_config_skill.rs",
       "source_sha256": "527bc44d1ac2fbb993bb5ff75b1af762cc7353b5aa3cad7755e9f7dc5f2b5453",
       "source_blob": "1154f1326eb639eba5f1023735df5f762b854113"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/verify_body.md",
-      "to": "crates/commands/core/src/bundled/verify_body.md",
+      "to": "crates/command-api/src/builtins/bundled/verify_body.md",
       "source_sha256": "99920adf77befa04a516b66a26078d61f7656be598cd1fb2029d452f934a8593",
       "source_blob": "8b021e6b7e2e98345cb62a27ff5c6f05e90b6493"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/verify_skill.rs",
-      "to": "crates/commands/core/src/bundled/verify_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/verify_skill.rs",
       "source_sha256": "e404322e08f03d3ece6ab664d14e42b121f14548c6361ecbe76b7caa110ca8f5",
       "source_blob": "d31c51d2bcfd8fb248c5a09abca999574febb965"
     },
     {
       "from": "lingxi-code/commands/core/src/bundled/workflow_authoring_skill.rs",
-      "to": "crates/commands/core/src/bundled/workflow_authoring_skill.rs",
+      "to": "crates/command-api/src/builtins/bundled/workflow_authoring_skill.rs",
       "source_sha256": "b0bc807a905aeefd018213c92fc5a5470c6bb664f83abd73dc6ba63d7b8bedfb",
       "source_blob": "c56ef0d72d0a26bca8bb6fe6a7b15542cf54f97b"
     },
     {
       "from": "lingxi-code/commands/core/src/cd.rs",
-      "to": "crates/commands/core/src/cd.rs",
+      "to": "crates/command-api/src/builtins/cd.rs",
       "source_sha256": "94f29a41ac9081c407818fb6b0f2d4e95d26fb316a5ff54a6b8e834edc2c02b6",
       "source_blob": "6324b218ea0190374b46b127e753a2468e8b929c"
     },
     {
       "from": "lingxi-code/commands/core/src/clear.rs",
-      "to": "crates/commands/core/src/clear.rs",
+      "to": "crates/command-api/src/builtins/clear.rs",
       "source_sha256": "e6720d512b1d410bdfdb3860d473129eb8375abe29179e7067f9147784277ce7",
       "source_blob": "1d54dec97f0cfb2eb6ba9b6cef062062603808c2"
     },
     {
       "from": "lingxi-code/commands/core/src/commit.rs",
-      "to": "crates/commands/core/src/commit.rs",
+      "to": "crates/command-api/src/builtins/commit.rs",
       "source_sha256": "ad0e117abad6f7e1b058709c5732398b63372540dd90598ce2df614b8e2c0858",
       "source_blob": "a1fa1dcd379ad37cab46bd4394ecb3fb92c85977"
     },
     {
       "from": "lingxi-code/commands/core/src/commit_push_pr.rs",
-      "to": "crates/commands/core/src/commit_push_pr.rs",
+      "to": "crates/command-api/src/builtins/commit_push_pr.rs",
       "source_sha256": "fd2d7b4b0e767dad289cbc3b1f4dccc5909a997fc82017e0e5d0e6f0c8c3373a",
       "source_blob": "2a224c6f8f8166ab62cc308427a956708844f686"
     },
     {
       "from": "lingxi-code/commands/core/src/compact.rs",
-      "to": "crates/commands/core/src/compact.rs",
+      "to": "crates/command-api/src/builtins/compact.rs",
       "source_sha256": "e67070739877cb0b26b8a35739d24fc351c6c6fac2da15257e44c95ad3a29b98",
       "source_blob": "1406519916fa77025bc4223b54b230bc8eed0ea7"
     },
     {
       "from": "lingxi-code/commands/core/src/config.rs",
-      "to": "crates/commands/core/src/config.rs",
+      "to": "crates/command-api/src/builtins/config.rs",
       "source_sha256": "231b45eb6cc26ee4277d06423394a41abef383bd87afdee540b6f2c7575d6e6c",
       "source_blob": "19582d16173f2aee887e8dc1e43c239896462429"
     },
     {
       "from": "lingxi-code/commands/core/src/connect.rs",
-      "to": "crates/commands/core/src/connect.rs",
+      "to": "crates/command-api/src/builtins/connect.rs",
       "source_sha256": "fbd095a95160b2e227f127be95e202a9ed55de7ebd6baee5c478fdae2ea48da9",
       "source_blob": "5284415ab63d6008d95ada9c87fc3e6a4440eb95"
     },
     {
       "from": "lingxi-code/commands/core/src/context.rs",
-      "to": "crates/commands/core/src/context.rs",
+      "to": "crates/command-api/src/builtins/context.rs",
       "source_sha256": "455599f218e7c7adeded591feb84e640e7f2e9559b3fc716fcd5dcae93553d16",
       "source_blob": "1851d5be1dd96411e456082963423df79db699d5"
     },
     {
       "from": "lingxi-code/commands/core/src/core_placeholders.rs",
-      "to": "crates/commands/core/src/core_placeholders.rs",
+      "to": "crates/command-api/src/builtins/core_placeholders.rs",
       "source_sha256": "54794ea4cf493979b234ca603c690b1e26587a0dd80d5131c5514ae394b0d0f7",
       "source_blob": "b99dfdab95178160b982d52410012aec032e26cd"
     },
     {
       "from": "lingxi-code/commands/core/src/custom_commands.rs",
-      "to": "crates/commands/core/src/custom_commands.rs",
+      "to": "crates/command-api/src/builtins/custom_commands.rs",
       "source_sha256": "505b8047ffd716c08f07eef7d70c5f784c4ebe0a7318601a93b523045a5cfe21",
       "source_blob": "8e0fb108461b018abe2b9ac2e61899b47709eda0"
     },
     {
       "from": "lingxi-code/commands/core/src/doctor.rs",
-      "to": "crates/commands/core/src/doctor.rs",
+      "to": "crates/command-api/src/builtins/doctor.rs",
       "source_sha256": "0541e4ab9b7c2c527896e53c74ca3072985be343c798d8db7657f487a359a19d",
       "source_blob": "8a76da8f1d72a7770a781eabc912f1dd00592b6f"
     },
     {
       "from": "lingxi-code/commands/core/src/effort.rs",
-      "to": "crates/commands/core/src/effort.rs",
+      "to": "crates/command-api/src/builtins/effort.rs",
       "source_sha256": "c0a0c4dc8dc2e9d21c96b9f0a8f42a26ebb737eafc32e9669bdb5ccd6a5b01d8",
       "source_blob": "d819bfdb0b03cee67f55b5caa6f1eb5ed52e50db"
     },
     {
       "from": "lingxi-code/commands/core/src/exit.rs",
-      "to": "crates/commands/core/src/exit.rs",
+      "to": "crates/command-api/src/builtins/exit.rs",
       "source_sha256": "05732a8cd837e98754c5da649b6b852141c1352e459fb5cb531691e0d243814c",
       "source_blob": "cfa5c2dcccd3a772963cb20a84107a6b90fdd0e6"
     },
     {
       "from": "lingxi-code/commands/core/src/export.rs",
-      "to": "crates/commands/core/src/export.rs",
+      "to": "crates/command-api/src/builtins/export.rs",
       "source_sha256": "8de280720e6b322e8158de448328fae8852815b43b1227265ac6390bce433669",
       "source_blob": "3303a16baf4f1b2586e202ac2e695c475854f041"
     },
     {
       "from": "lingxi-code/commands/core/src/files.rs",
-      "to": "crates/commands/core/src/files.rs",
+      "to": "crates/command-api/src/builtins/files.rs",
       "source_sha256": "02d54b9d193130825502cf7f821c6f172ae9997d5e529a8f405b93a00fce0e20",
       "source_blob": "1119a0fb57e0092f4c2db4f496bfe5baa96ce21c"
     },
     {
       "from": "lingxi-code/commands/core/src/fork.rs",
-      "to": "crates/commands/core/src/fork.rs",
+      "to": "crates/command-api/src/builtins/fork.rs",
       "source_sha256": "23fa65979ab6968f3989f1d80a23e627a95b728f24831a08cdd8956adeaa7339",
       "source_blob": "d3b3a26e4b87f8ee2f1bb6f230bf8405085b0757"
     },
     {
       "from": "lingxi-code/commands/core/src/fusion.rs",
-      "to": "crates/commands/core/src/fusion.rs",
+      "to": "crates/command-api/src/builtins/fusion.rs",
       "source_sha256": "22639326c2e0b267020b0fc2bb4aba7c43d5c259c6c34f3e8bbe3a4034b09685",
       "source_blob": "3755bff90862a5b999818adea026aad734c79ddb"
     },
     {
       "from": "lingxi-code/commands/core/src/goal.rs",
-      "to": "crates/commands/core/src/goal.rs",
+      "to": "crates/command-api/src/builtins/goal.rs",
       "source_sha256": "66fdef07b8ffc40f57cbfcb5a1bef33722d772bda83abfbb4d0b02b0d0f0f64b",
       "source_blob": "a28c690a98de494ba4fa139df2a026008297188e"
     },
     {
       "from": "lingxi-code/commands/core/src/help.rs",
-      "to": "crates/commands/core/src/help.rs",
+      "to": "crates/command-api/src/builtins/help.rs",
       "source_sha256": "a80733a929c22546527a86657219b0e2a2b6ffdba59837400223677f459520e7",
       "source_blob": "97eced7b990216e6f0b9d1e38a3466de87bd0327"
     },
     {
       "from": "lingxi-code/commands/core/src/hooks.rs",
-      "to": "crates/commands/core/src/hooks.rs",
+      "to": "crates/command-api/src/builtins/hooks.rs",
       "source_sha256": "f63d3b94fcb1cd0462753e3f9dfc6476b89141075bb0da059ad8f6379ba3ac8f",
       "source_blob": "d576ba55479514cbe3873627518cce45882307da"
     },
     {
       "from": "lingxi-code/commands/core/src/ide.rs",
-      "to": "crates/commands/core/src/ide.rs",
+      "to": "crates/command-api/src/builtins/ide.rs",
       "source_sha256": "52d791764db78a146d045daab855793937435994e67a5b8c945264444080eef5",
       "source_blob": "e313b86ebf9c9b5160193d637aa68a175819be24"
     },
     {
       "from": "lingxi-code/commands/core/src/init.rs",
-      "to": "crates/commands/core/src/init.rs",
+      "to": "crates/command-api/src/builtins/init.rs",
       "source_sha256": "2c59ac69c65fcc5afc619beb3e4a5897e3ed6017e0fb2bce2f9d5ff801916bb5",
       "source_blob": "0ae806e3be1241e4d232308db90c791e0391a783"
     },
     {
       "from": "lingxi-code/commands/core/src/init_verifiers.rs",
-      "to": "crates/commands/core/src/init_verifiers.rs",
+      "to": "crates/command-api/src/builtins/init_verifiers.rs",
       "source_sha256": "9d7820c202840745a5e13d9ff9652bcc81bdfb0290177016e74eb5a9a130cc9d",
       "source_blob": "8a6cbf0092d1c0a482bd9933adb856cddfd08fd3"
     },
     {
       "from": "lingxi-code/commands/core/src/insights.rs",
-      "to": "crates/commands/core/src/insights.rs",
+      "to": "crates/command-api/src/builtins/insights.rs",
       "source_sha256": "a20f7bee264feae6097a66f0716a614d018c7d8641b21ef153b734583567ff91",
       "source_blob": "b46ad0152cdb26e5f2bcaf59f8f4d8ca98192ee4"
     },
     {
       "from": "lingxi-code/commands/core/src/interactive_only.rs",
-      "to": "crates/commands/core/src/interactive_only.rs",
+      "to": "crates/command-api/src/builtins/interactive_only.rs",
       "source_sha256": "9faf453543a1e107fa2df4955e8d0413febf9194dae03b75fbe44a1881e4a08a",
       "source_blob": "93dbf67b66cc006cbf8255ffa5eb20412595b80b"
     },
     {
       "from": "lingxi-code/commands/core/src/keybindings/default_bindings.rs",
-      "to": "crates/commands/core/src/keybindings/default_bindings.rs",
+      "to": "crates/command-api/src/builtins/keybindings/default_bindings.rs",
       "source_sha256": "f4d3c8e5705a87356889a2dc292d45f940ffd9e1b108d7c42df7362b17b74631",
       "source_blob": "e9ea57e9c231c8ad8f6bdf500365549145856c42"
     },
     {
       "from": "lingxi-code/commands/core/src/keybindings/keybindings_template.json",
-      "to": "crates/commands/core/src/keybindings/keybindings_template.json",
+      "to": "crates/command-api/src/builtins/keybindings/keybindings_template.json",
       "source_sha256": "eaad7a1758430fc35db63854bdc87e03e5e05d053548dec52a8e20047b5a655d",
       "source_blob": "51511b47f0cd217dfabba5d0c3b0c60752af9d83"
     },
     {
       "from": "lingxi-code/commands/core/src/keybindings/keymap.rs",
-      "to": "crates/commands/core/src/keybindings/keymap.rs",
+      "to": "crates/command-api/src/builtins/keybindings/keymap.rs",
       "source_sha256": "7da6c3a28fea2ace9fb4277074f239bd7b5a7425d9adc38e12bd6a942d8be316",
       "source_blob": "ad85d5de80ca505eb214be02bfbd9891c7509c06"
     },
     {
       "from": "lingxi-code/commands/core/src/keybindings/loader.rs",
-      "to": "crates/commands/core/src/keybindings/loader.rs",
+      "to": "crates/command-api/src/builtins/keybindings/loader.rs",
       "source_sha256": "c0f9fef231b6a93b7ccd5bc330f447b18b7e0e09e1e953521d586763a7f8f761",
       "source_blob": "0ebb4549a0eb7eddaf369c46e5c1f33ff4718e70"
     },
     {
       "from": "lingxi-code/commands/core/src/keybindings/matcher.rs",
-      "to": "crates/commands/core/src/keybindings/matcher.rs",
+      "to": "crates/command-api/src/builtins/keybindings/matcher.rs",
       "source_sha256": "e6aad19cf6711101bf64c1e887911f77d913c89e88f917ee00271aa58031c352",
       "source_blob": "a3b117b8a24c97d2a12990d6329482f3f44e4501"
     },
     {
       "from": "lingxi-code/commands/core/src/keybindings/mod.rs",
-      "to": "crates/commands/core/src/keybindings/mod.rs",
+      "to": "crates/command-api/src/builtins/keybindings/mod.rs",
       "source_sha256": "04c7fb658794722f155755602068ef9aab2b25384d1e7b48a30828504ecf9954",
       "source_blob": "8569e07783d43bfa6fb3e947b03b9d9fd8ea9fdc"
     },
     {
       "from": "lingxi-code/commands/core/src/keybindings/parser.rs",
-      "to": "crates/commands/core/src/keybindings/parser.rs",
+      "to": "crates/command-api/src/builtins/keybindings/parser.rs",
       "source_sha256": "0fe9cf89423c0db977940eac2cda0f0e528010990d413dcae108e0a005abe3a3",
       "source_blob": "3b3aadb388c930a9c2248be54f0ebd87c2027720"
     },
     {
       "from": "lingxi-code/commands/core/src/keybindings/reserved.rs",
-      "to": "crates/commands/core/src/keybindings/reserved.rs",
+      "to": "crates/command-api/src/builtins/keybindings/reserved.rs",
       "source_sha256": "c7a0722128911a35870624edfc4c1748b631e45c3df4c93fb635bc4f442bac84",
       "source_blob": "a2e2633b9852ab8e23f8b891bd2064215f85d492"
     },
     {
       "from": "lingxi-code/commands/core/src/keybindings/resolver.rs",
-      "to": "crates/commands/core/src/keybindings/resolver.rs",
+      "to": "crates/command-api/src/builtins/keybindings/resolver.rs",
       "source_sha256": "1a66109bedcfd629f2759a56650e88a0d164fb3848ec9e62606494cf9f74e65e",
       "source_blob": "30f97e266b3516bf3f4565936e6cae51e903aa3f"
     },
     {
       "from": "lingxi-code/commands/core/src/keybindings/schema.rs",
-      "to": "crates/commands/core/src/keybindings/schema.rs",
+      "to": "crates/command-api/src/builtins/keybindings/schema.rs",
       "source_sha256": "16972d0ab9f77025c45386ae5c88f2f3dd673ed16d0f8ef65b33b149919bf294",
       "source_blob": "78af64abe348bce551b79bceb5c5f00d1dec00be"
     },
     {
       "from": "lingxi-code/commands/core/src/keybindings/types.rs",
-      "to": "crates/commands/core/src/keybindings/types.rs",
+      "to": "crates/command-api/src/builtins/keybindings/types.rs",
       "source_sha256": "1fdaae3a7eee3063e4721fbbe3f956b201875319c1e6f2bf39c310a455c59a1c",
       "source_blob": "4e4c8fbc88bdb7813f7313b1ea37fac3c82bb4ff"
     },
     {
       "from": "lingxi-code/commands/core/src/keybindings/validate.rs",
-      "to": "crates/commands/core/src/keybindings/validate.rs",
+      "to": "crates/command-api/src/builtins/keybindings/validate.rs",
       "source_sha256": "143a26e006a7983466ead9c28186e452c225ed592899f8ab9b53c89fbf508405",
       "source_blob": "bdb009b27ebcbb696da8fa690aa8a6363fbf6822"
     },
     {
       "from": "lingxi-code/commands/core/src/lib.rs",
-      "to": "crates/commands/core/src/lib.rs",
+      "to": "crates/command-api/src/builtins/mod.rs",
       "source_sha256": "616698136e1fb5c5c2dd1c4709e33ad3026776c8d695529fa282783132f1c256",
       "source_blob": "f8903edbf4ade270cca82177f6470d4e141de3f9"
     },
     {
       "from": "lingxi-code/commands/core/src/login.rs",
-      "to": "crates/commands/core/src/login.rs",
+      "to": "crates/command-api/src/builtins/login.rs",
       "source_sha256": "cd3a4446f9eaadd4612292b47c4542ae6d1f4e6011a472fab14d83caf75a09b9",
       "source_blob": "6a8aad3f8020cef0597814b6c1d083a42bba811c"
     },
     {
       "from": "lingxi-code/commands/core/src/logout.rs",
-      "to": "crates/commands/core/src/logout.rs",
+      "to": "crates/command-api/src/builtins/logout.rs",
       "source_sha256": "6f25e27d14cad3806095b3e432d09b3bda07feb7f901ec2391f57a08b48dcd07",
       "source_blob": "d519d85fec5eea7811b4e23f7bb5625f3944a4ee"
     },
     {
       "from": "lingxi-code/commands/core/src/mcp.rs",
-      "to": "crates/commands/core/src/mcp.rs",
+      "to": "crates/command-api/src/builtins/mcp.rs",
       "source_sha256": "e76f6e22d0f088f06cc7fdca61bd6981eed9e70f44dd21f14000c07a38a0314b",
       "source_blob": "282ef0c1d61e977dbe25c0fef6c2c8d6beeb469c"
     },
     {
       "from": "lingxi-code/commands/core/src/memory.rs",
-      "to": "crates/commands/core/src/memory.rs",
+      "to": "crates/command-api/src/builtins/memory.rs",
       "source_sha256": "5c2dbccc64b797b4bf7120800ff7e13210e69b432cd8d265524ca9aca1003dfb",
       "source_blob": "7f8c84cd15a7e5e173b9f256bce8ee951cb38535"
     },
     {
       "from": "lingxi-code/commands/core/src/model.rs",
-      "to": "crates/commands/core/src/model.rs",
+      "to": "crates/command-api/src/builtins/model.rs",
       "source_sha256": "037d6c0e429fa9335e1c341501845e7674cb09502f3d411d4de85c82dfb7b573",
       "source_blob": "318a7aaee53b3946cfa1266b8f0ed88581b1acee"
     },
     {
       "from": "lingxi-code/commands/core/src/output_style.rs",
-      "to": "crates/commands/core/src/output_style.rs",
+      "to": "crates/command-api/src/builtins/output_style.rs",
       "source_sha256": "c4e91473d831d476fb63ac4ff52316dd6cc5ea5ce6d712d028b59e8b6da085bd",
       "source_blob": "0ecd5b36d85980b441406171223610d511fb7bc3"
     },
     {
       "from": "lingxi-code/commands/core/src/permissions.rs",
-      "to": "crates/commands/core/src/permissions.rs",
+      "to": "crates/command-api/src/builtins/permissions.rs",
       "source_sha256": "8dd09f0492049f9078dcea403511064bb900b1f2aaf93250f6335278984bc957",
       "source_blob": "86f303110483412e55dbda6380f118a99f3077ce"
     },
     {
       "from": "lingxi-code/commands/core/src/powerup.rs",
-      "to": "crates/commands/core/src/powerup.rs",
+      "to": "crates/command-api/src/builtins/powerup.rs",
       "source_sha256": "848d4d16cceee6efa692ddbe163e9798e2b74c7e5714a660c75f1145ee48d2b9",
       "source_blob": "3ca1936339ecf80035e777fd205f7d50014251be"
     },
     {
       "from": "lingxi-code/commands/core/src/recap.rs",
-      "to": "crates/commands/core/src/recap.rs",
+      "to": "crates/command-api/src/builtins/recap.rs",
       "source_sha256": "8b1c0ee9991bc4d7d1446c25d3700806e0555cd06b3ca5db4626189f98a42097",
       "source_blob": "0ef7613c8478c7df422bd7de6862c695c020c40f"
     },
     {
       "from": "lingxi-code/commands/core/src/register.rs",
-      "to": "crates/commands/core/src/register.rs",
+      "to": "crates/command-api/src/builtins/register.rs",
       "source_sha256": "3836d897d10b902100e786e8cb1ea544f992aedf02c55a62871744fc299e704c",
       "source_blob": "30f3d4e3ee03504212958fea4fda3c6302c71387"
     },
     {
       "from": "lingxi-code/commands/core/src/release_notes.rs",
-      "to": "crates/commands/core/src/release_notes.rs",
+      "to": "crates/command-api/src/builtins/release_notes.rs",
       "source_sha256": "ce41a9ccd5916a4aefbb37a5224da63ec6d9170823b46a0d29aa1646a7003970",
       "source_blob": "d95886209032700795945f8829919914db73351f"
     },
     {
       "from": "lingxi-code/commands/core/src/reload_skills.rs",
-      "to": "crates/commands/core/src/reload_skills.rs",
+      "to": "crates/command-api/src/builtins/reload_skills.rs",
       "source_sha256": "b143136879e70f5442b07655fcf62b13cf3d7e5b1b83180eea1c95e8b39ea714",
       "source_blob": "8b9050880db8a09a1f69410f547d6b06e46f0e3e"
     },
     {
       "from": "lingxi-code/commands/core/src/resume.rs",
-      "to": "crates/commands/core/src/resume.rs",
+      "to": "crates/command-api/src/builtins/resume.rs",
       "source_sha256": "c94329a5026e7acd272bb55022c17bfa01c51e046eae1d2af881a8b7bc8aeed8",
       "source_blob": "e4c71041b3e709b2834a6df07ca635e5cb14e184"
     },
     {
       "from": "lingxi-code/commands/core/src/review.rs",
-      "to": "crates/commands/core/src/review.rs",
+      "to": "crates/command-api/src/builtins/review.rs",
       "source_sha256": "2a22b1f81c08ac8144823554a9a62bd37462e6c007f7c147a69b0bbbbd81ea6e",
       "source_blob": "ed256c460ba43205f3bea31ea349cc9b7894387b"
     },
     {
       "from": "lingxi-code/commands/core/src/security_review.rs",
-      "to": "crates/commands/core/src/security_review.rs",
+      "to": "crates/command-api/src/builtins/security_review.rs",
       "source_sha256": "4ec659f2e0c9b6a204e068c32eb0ede0c2da7670c3ea58bb7de789b78d60b876",
       "source_blob": "6e9840201eb0a21d3e315ba36139219c0cbc18a2"
     },
     {
       "from": "lingxi-code/commands/core/src/side_question.rs",
-      "to": "crates/commands/core/src/side_question.rs",
+      "to": "crates/command-api/src/builtins/side_question.rs",
       "source_sha256": "62dc7daac504e3451b061b5ac20e27a91d6e049c8b80b3d81e6381e14c989313",
       "source_blob": "a9867de4ddf392432b8f8da8fddc7b7d44d1da0b"
     },
     {
       "from": "lingxi-code/commands/core/src/skill_doctor.rs",
-      "to": "crates/commands/core/src/skill_doctor.rs",
+      "to": "crates/command-api/src/builtins/skill_doctor.rs",
       "source_sha256": "5dbdd87073fd237a8a50a70027f7fa128adb0add40414dfa5717964ba550634f",
       "source_blob": "60993dafd090b55e404796ece7eb7f4ad8225875"
     },
     {
       "from": "lingxi-code/commands/core/src/skills.rs",
-      "to": "crates/commands/core/src/skills.rs",
+      "to": "crates/command-api/src/builtins/skills.rs",
       "source_sha256": "887d98a821ae04443fb04dff67521c7342b7fbf774c9450f5317113167f6ea92",
       "source_blob": "4a034cfa972de598e5de37568243f7915ceddf72"
     },
     {
       "from": "lingxi-code/commands/core/src/status.rs",
-      "to": "crates/commands/core/src/status.rs",
+      "to": "crates/command-api/src/builtins/status.rs",
       "source_sha256": "7958612b54b705ddba7334f64e76c03cd78220fb44c135c06a7802a964b6844b",
       "source_blob": "b22ba2ca536832dead58cc3c2fa4b127879e7893"
     },
     {
       "from": "lingxi-code/commands/core/src/statusline.rs",
-      "to": "crates/commands/core/src/statusline.rs",
+      "to": "crates/command-api/src/builtins/statusline.rs",
       "source_sha256": "197b428826f18961a948b7920b54b395f12203145401173c9fda2bb976918d13",
       "source_blob": "2e92ecec64887ef955aa593e65c4d08f7c7e616f"
     },
     {
       "from": "lingxi-code/commands/core/src/stickers.rs",
-      "to": "crates/commands/core/src/stickers.rs",
+      "to": "crates/command-api/src/builtins/stickers.rs",
       "source_sha256": "756918415b5dfd85ce33f31b6827fc2dd7b5d3f0c628b54884a017477cfef7c1",
       "source_blob": "5082a2d0ccc10aa4257b0b83ea704becb4f0935a"
     },
     {
       "from": "lingxi-code/commands/core/src/stop.rs",
-      "to": "crates/commands/core/src/stop.rs",
+      "to": "crates/command-api/src/builtins/stop.rs",
       "source_sha256": "e76be6166b8a1aeedc4260825acd0cd6fc4b0fd9dc425aecf0b47eed9d8bab1f",
       "source_blob": "585ed0ae66c67dc9f66455a861dacd8e74003d84"
     },
     {
       "from": "lingxi-code/commands/core/src/subtask.rs",
-      "to": "crates/commands/core/src/subtask.rs",
+      "to": "crates/command-api/src/builtins/subtask.rs",
       "source_sha256": "25f16d00964e7dc68bc3b0197444f619c57f690347566b7d395130517de17389",
       "source_blob": "40db73938d264153d7b622a457293cf409b4e073"
     },
     {
       "from": "lingxi-code/commands/core/src/templates.rs",
-      "to": "crates/commands/core/src/templates.rs",
+      "to": "crates/command-api/src/builtins/templates.rs",
       "source_sha256": "b6d0b0db8183f2826e4c8ed99913a09765a7ac2eba77883351256c745533d3dc",
       "source_blob": "8ae6af82f455f70b18e27c9fda8a72a7e50b3ed7"
     },
     {
       "from": "lingxi-code/commands/core/src/usage.rs",
-      "to": "crates/commands/core/src/usage.rs",
+      "to": "crates/command-api/src/builtins/usage.rs",
       "source_sha256": "c4b12432b216df114b98d2538d3b9c3ee6a82703eb313846aa79e28a982215ee",
       "source_blob": "eb04f859b116ca8497de766030e3cc8963f651f2"
     },
     {
       "from": "lingxi-code/commands/core/src/version.rs",
-      "to": "crates/commands/core/src/version.rs",
+      "to": "crates/command-api/src/builtins/version.rs",
       "source_sha256": "d814c3cf4ed2e5f703731771c08b778d9999c289b4dd031c5f473eab37c64aa9",
       "source_blob": "91fcede31651d726be5c1430e45a32ea82012562"
     },
     {
       "from": "lingxi-code/commands/core/src/workflows.rs",
-      "to": "crates/commands/core/src/workflows.rs",
+      "to": "crates/command-api/src/builtins/workflows.rs",
       "source_sha256": "87992dffc93322e3cea89be27e346d108f8df64c32728060081e781a0ed0f403",
       "source_blob": "c17adebe4987ef787c536b201eed11905f1df9d6"
     },
     {
       "from": "lingxi-code/commands/core/tests/batch_1_e2e.rs",
-      "to": "crates/commands/core/tests/batch_1_e2e.rs",
+      "to": "crates/command-api/tests/batch_1_e2e.rs",
       "source_sha256": "45231edce30084cea0d6b0f64fd749789ac0b25bb1f710565e09739c5c8f87ff",
       "source_blob": "d7fda98aa350455eece03bf6b2e11462867ce6cb"
     },
     {
       "from": "lingxi-code/commands/core/tests/batch_2_e2e.rs",
-      "to": "crates/commands/core/tests/batch_2_e2e.rs",
+      "to": "crates/command-api/tests/batch_2_e2e.rs",
       "source_sha256": "6b4a26cf8061af5e95deb1a4b2ec9dd692fc7b6186fb6e82441ee93db882b8f7",
       "source_blob": "53a71864df810c1c61ae219f4f2f83fa66a954fe"
     },
     {
       "from": "lingxi-code/commands/core/tests/batch_8_e2e.rs",
-      "to": "crates/commands/core/tests/batch_8_e2e.rs",
+      "to": "crates/command-api/tests/batch_8_e2e.rs",
       "source_sha256": "13cd6b26a2b536dc5e8f9a0d8fb8088e1c5873b2e5059d75defb5773be302c00",
       "source_blob": "9286c311a91aa1e3cc1992b92455dba4435a22ee"
     },
     {
       "from": "lingxi-code/commands/core/tests/dispatch_e2e.rs",
-      "to": "crates/commands/core/tests/dispatch_e2e.rs",
+      "to": "crates/command-api/tests/dispatch_e2e.rs",
       "source_sha256": "d9756fd0463fc625dd6281b4eeba4eee1a9f4f01951e2a2d116813d8d9e35fc7",
       "source_blob": "d4189585ded98dbb903f0565687ce658be89db14"
     },
     {
       "from": "lingxi-code/commands/core/tests/dump_help_golden.rs",
-      "to": "crates/commands/core/tests/dump_help_golden.rs",
+      "to": "crates/command-api/tests/dump_help_golden.rs",
       "source_sha256": "369331f3af182fbb0b5a265d1b790f0ea44a5700481d11f1cbff50bc7b506b3d",
       "source_blob": "a101d7ddf15c664f1241162818c0f1924440661e"
     },
     {
       "from": "lingxi-code/commands/core/tests/fixtures/goal_2_1_270.json",
-      "to": "crates/commands/core/tests/fixtures/goal_2_1_270.json",
+      "to": "crates/command-api/tests/fixtures/goal_2_1_270.json",
       "source_sha256": "721ef29931b172840b7ac81c06c0341246a636d21fb15362a561cec878e42985",
       "source_blob": "0ecb15d92e477d8c8953f4795e33a4e6444ead2e"
     },
     {
       "from": "lingxi-code/commands/core/tests/fixtures/loop_2_1_270/README.md",
-      "to": "crates/commands/core/tests/fixtures/loop_2_1_270/README.md",
+      "to": "crates/command-api/tests/fixtures/loop_2_1_270/README.md",
       "source_sha256": "e4fd93670781dc56958370825a0821369bfb6f9c39e9bd50667371b9d9a4d31a",
       "source_blob": "ac99355bbb2366e2ee13aeaa4820112672f944f0"
     },
     {
       "from": "lingxi-code/commands/core/tests/fixtures/loop_2_1_270/commands.json",
-      "to": "crates/commands/core/tests/fixtures/loop_2_1_270/commands.json",
+      "to": "crates/command-api/tests/fixtures/loop_2_1_270/commands.json",
       "source_sha256": "3a7614856ebc6a4b6a8c167e95d53b9781f189c5deadf0bad60a5a1cd7bff154",
       "source_blob": "2b876444917a4c75ad40af192b78b69ef8a33cda"
     },
     {
       "from": "lingxi-code/commands/core/tests/fixtures/loop_2_1_270/generate.mjs",
-      "to": "crates/commands/core/tests/fixtures/loop_2_1_270/generate.mjs",
+      "to": "crates/command-api/tests/fixtures/loop_2_1_270/generate.mjs",
       "source_sha256": "1db303f7da56dcbddb0fa32015dfabecc8a5513228d265c40263f0c461c643d9",
       "source_blob": "9b726585f848e03dc1c216a8c0df6d6946a022f8"
     },
     {
       "from": "lingxi-code/commands/core/tests/fixtures/loop_2_1_270/provenance.json",
-      "to": "crates/commands/core/tests/fixtures/loop_2_1_270/provenance.json",
+      "to": "crates/command-api/tests/fixtures/loop_2_1_270/provenance.json",
       "source_sha256": "36aa3cbf3043bc4134bc4eed3c1935295dde9a27410b2805f8d9619a33dd3ca6",
       "source_blob": "8dad8e5aa3b2f2165347d3488b9d4f64ff969215"
     },
     {
       "from": "lingxi-code/commands/core/tests/fixtures/loop_autonomous/a_auto_cron.txt",
-      "to": "crates/commands/core/tests/fixtures/loop_autonomous/a_auto_cron.txt",
+      "to": "crates/command-api/tests/fixtures/loop_autonomous/a_auto_cron.txt",
       "source_sha256": "2c010855f180df91703709fed9e7c79ce3f879b54c2b6bb05998c8851e498e11",
       "source_blob": "7b58139835a079f021c7b986a1639347af370385"
     },
     {
       "from": "lingxi-code/commands/core/tests/fixtures/loop_autonomous/a_auto_dynamic.txt",
-      "to": "crates/commands/core/tests/fixtures/loop_autonomous/a_auto_dynamic.txt",
+      "to": "crates/command-api/tests/fixtures/loop_autonomous/a_auto_dynamic.txt",
       "source_sha256": "1c529ae1d42a40c807eaab6a46a2370ecdc24138386b3c6eecf2c4040c2d8d8a",
       "source_blob": "f2b5f87835edabc14acf128d218e0b4599938551"
     },
     {
       "from": "lingxi-code/commands/core/tests/fixtures/loop_autonomous/a_loopfile_cron.txt",
-      "to": "crates/commands/core/tests/fixtures/loop_autonomous/a_loopfile_cron.txt",
+      "to": "crates/command-api/tests/fixtures/loop_autonomous/a_loopfile_cron.txt",
       "source_sha256": "e1778a83f9b29f7f48f4bc22d05ea0a44404be66fb2533e4b012749e5564f928",
       "source_blob": "bb676c9c8c359eb6285d3c0a10b82c1043f9b8f1"
     },
     {
       "from": "lingxi-code/commands/core/tests/fixtures/loop_autonomous/a_loopfile_dynamic.txt",
-      "to": "crates/commands/core/tests/fixtures/loop_autonomous/a_loopfile_dynamic.txt",
+      "to": "crates/command-api/tests/fixtures/loop_autonomous/a_loopfile_dynamic.txt",
       "source_sha256": "7303ed4456121b1e86284e8dd7f7e44025281f199320d84443b5932f3f3e744e",
       "source_blob": "e222d81664b3ae8eca137a6a814457662899b0f6"
     },
     {
       "from": "lingxi-code/commands/core/tests/fixtures/loop_autonomous/gZm.txt",
-      "to": "crates/commands/core/tests/fixtures/loop_autonomous/gZm.txt",
+      "to": "crates/command-api/tests/fixtures/loop_autonomous/gZm.txt",
       "source_sha256": "f45bb0253eec7504c0ee1d0e450420613cb265b8d164a3485d32e1af6af67baa",
       "source_blob": "58046fcbc85dbe330960ccc0ca3ab05e5dd45cd5"
     },
     {
       "from": "lingxi-code/commands/core/tests/git_build_metadata.rs",
-      "to": "crates/commands/core/tests/git_build_metadata.rs",
+      "to": "crates/command-api/tests/git_build_metadata.rs",
       "source_sha256": "1159cef258c78b0deffc05fa4df116f1a40f89b09868edc553f3fe0d16a8ae7f",
       "source_blob": "00c73103a5b114b748e330697f42f37831417dcd"
     },
@@ -13937,20 +13913,14 @@
       "source_blob": "6c6f5ebbde466c5f0994fe9dee7b62f6ac445aac"
     },
     {
-      "from": "lingxi-code/sandbox-runtime-runner/Cargo.toml",
-      "to": "crates/sandbox-runtime-runner/Cargo.toml",
-      "source_sha256": "ac05b7bf9a0c787f8d0636abecace4f3f6db4483297498142d22ac9341b34ba4",
-      "source_blob": "67d26ba095b16cb761878737fb76d47437264fe3"
-    },
-    {
       "from": "lingxi-code/sandbox-runtime-runner/src/convert.rs",
-      "to": "crates/sandbox-runtime-runner/src/convert.rs",
+      "to": "crates/runtime/src/desktop/sandbox_runner/convert.rs",
       "source_sha256": "f7ba92253d7a6c35e86fb69d0f1292f89e82d9a0b34e13a0655275169fdc8222",
       "source_blob": "faa41127c910362d4ec6b471cbf5335277b29659"
     },
     {
       "from": "lingxi-code/sandbox-runtime-runner/src/lib.rs",
-      "to": "crates/sandbox-runtime-runner/src/lib.rs",
+      "to": "crates/runtime/src/desktop/sandbox_runner/mod.rs",
       "source_sha256": "534579fafe3ef8d0e3c30be3e4c2ad9ecfd0dff6e2cdeff8149464252806056e",
       "source_blob": "9659ddc391300baee8b5f25e38d5537b6eb9d9aa"
     },

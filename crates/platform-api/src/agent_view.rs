@@ -24,7 +24,7 @@
 //! The `settings.disableAgentView === true` half is a documented seam — the
 //! schema key round-trips via the engine settings model; composition roots
 //! that resolve it at boot pass the combined result to
-//! `command_core::register_core_batch_8` (mirroring the `enableArtifact`
+//! `command_api::builtins::register_core_batch_8` (mirroring the `enableArtifact`
 //! Stage-2 settings seam in `tool-api::artifact_gate`).
 
 use crate::env::is_env_truthy;

@@ -4,9 +4,9 @@
 //! is explicit per-run and works even when `fusion.enabled` is false.
 
 use async_trait::async_trait;
+use command_api::builtins::{fusion_request_from_slash, parse_fusion_slash};
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
-use command_core::{fusion_request_from_slash, parse_fusion_slash};
 use platform_api::{
     FusionCompletionSink, FusionExecutor, FusionPublicationReceipt, FusionResult, FusionRunId,
     FusionStatus, OrchestratorHandle,

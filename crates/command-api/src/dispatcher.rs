@@ -913,11 +913,8 @@ mod tests {
         }
     }
 
-    // M8-P9: seed directly from the api-side scaffolding (the real
-    // `register_all_builtin_commands` lives in `command-core`, which depends on
-    // this crate — using it here would cycle). Registering every name as an
-    // unimplemented stub is behaviourally identical for dispatch tests: the 18
-    // core placeholders return the same locked literal as the stub.
+    // Seed from API scaffolding so these dispatch tests also run without
+    // the optional builtin handlers. The stubs preserve the locked responses.
     fn seeded_dispatcher() -> RegistrySlashDispatcher {
         let mut reg = CommandRegistry::new();
         for &name in BUILTIN_COMMAND_NAMES {
@@ -930,8 +927,7 @@ mod tests {
     }
 
     /// Like [`seeded_dispatcher`] but also wires the `continue` → `resume` alias
-    /// (registered by `register_core_batch_4` in `command-core`, which can't be
-    /// used here without a dependency cycle). Used to prove the alias survives
+    /// normally registered by the optional builtin handlers. Proves the alias survives
     /// the real dispatch path end-to-end.
     fn seeded_dispatcher_with_resume_alias() -> RegistrySlashDispatcher {
         let mut reg = CommandRegistry::new();

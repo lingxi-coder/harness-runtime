@@ -2,7 +2,7 @@
 //!
 //! M5-10 Task 10.
 
-use command_core::OLD_INIT_PROMPT;
+use command_api::builtins::OLD_INIT_PROMPT;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 

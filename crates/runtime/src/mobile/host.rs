@@ -283,7 +283,7 @@ impl HttpTransport for DynHttp {
 #[derive(Clone)]
 pub struct MobileConfig {
     /// Host package identity used by `/version` (never part of the FFI DTO).
-    pub build_info: command_core::BuildInfo,
+    pub build_info: command_api::builtins::BuildInfo,
     /// API base URL (default `https://api.anthropic.com`).
     pub api_base: String,
     /// Anthropic API key. Empty string is valid — the orchestrator builds and
@@ -397,7 +397,7 @@ impl std::fmt::Debug for MobileConfig {
 impl Default for MobileConfig {
     fn default() -> Self {
         Self {
-            build_info: command_core::BuildInfo::default(),
+            build_info: command_api::builtins::BuildInfo::default(),
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             cwd: std::path::PathBuf::from("."),
@@ -2695,8 +2695,8 @@ fn mobile_reload_skills_handler(
     cwd: std::path::PathBuf,
     lingxi_home: std::path::PathBuf,
     home: std::path::PathBuf,
-) -> command_core::reload_skills::ReloadSkillsHandler {
-    command_core::reload_skills::ReloadSkillsHandler::with_all_roots(
+) -> command_api::builtins::reload_skills::ReloadSkillsHandler {
+    command_api::builtins::reload_skills::ReloadSkillsHandler::with_all_roots(
         registry,
         cwd,
         lingxi_home,
@@ -3618,9 +3618,10 @@ async fn build_mobile_inner_with_ask(
     let auth: Arc<dyn AuthHandle> = anthropic_oauth_handle.clone();
 
     // (4) Orchestrator config from `cfg` (was a host env/arg read).
-    let persisted_reasoning_selection = command_core::effort::load_reasoning_default_selection_at(
-        &cfg.lingxi_home.join("settings.json"),
-    );
+    let persisted_reasoning_selection =
+        command_api::builtins::effort::load_reasoning_default_selection_at(
+            &cfg.lingxi_home.join("settings.json"),
+        );
     let mut orch_cfg = OrchestratorConfig::default();
     orch_cfg.output_style = provider_settings.output_style.clone();
     orch_cfg.output_style_dirs = vec![
@@ -5411,9 +5412,9 @@ async fn build_mobile_inner_with_ask(
     // Fill the shared registry slot so batch-8, the slash dispatcher, the
     // per-turn skill listing, and the Skill tool all observe ONE command set.
     let mut reg = mobile_command_registry(handle.clone(), auth.clone());
-    reg.register_builtin_handler(Arc::new(command_core::VersionHandler::with_build_info(
-        cfg.build_info,
-    )));
+    reg.register_builtin_handler(Arc::new(
+        command_api::builtins::VersionHandler::with_build_info(cfg.build_info),
+    ));
     crate::mobile::skill_loader::load_mobile_disk_commands_into_registry(
         &mut reg,
         &cwd,
@@ -5425,15 +5426,17 @@ async fn build_mobile_inner_with_ask(
     // `/workflows`: mobile cannot open the TUI picker, so bind the shared
     // command handler to the same live registry that powers workflow tools and
     // return the picker's snapshot as a structured command-output result.
-    reg.register_builtin_handler(Arc::new(command_core::WorkflowsHandler::with_registry(
-        task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
-    )));
+    reg.register_builtin_handler(Arc::new(
+        command_api::builtins::WorkflowsHandler::with_registry(
+            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+        ),
+    ));
     // Batch 8 (`/fork`, `/goal`, `/recap`, `/reload-skills`, `/skill-doctor`,
     // `/stop`): wired here in the uniffi composition root because it needs the
     // shared `Arc<tokio::sync::RwLock<CommandRegistry>>` (tokio is uniffi-only in
     // this crate's default lib build). Mobile has no on-disk custom-skill
     // discovery layer, so no managed dir / no additional dirs / safe-mode off.
-    command_core::register_core_batch_8(
+    command_api::builtins::register_core_batch_8(
         &mut reg,
         handle.clone(),
         shared_command_registry.clone(),
@@ -7566,7 +7569,7 @@ impl MobileEngineHandle {
 
     async fn restore_preferred_reasoning_selection(&self) {
         let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
-        let saved = command_core::effort::load_reasoning_default_selection_at(
+        let saved = command_api::builtins::effort::load_reasoning_default_selection_at(
             &self.lingxi_home.join("settings.json"),
         );
         if let Some(selection) = saved {
@@ -8316,7 +8319,8 @@ impl MobileEngineHandle {
                 .await;
             if let Err(err) = &result {
                 message_output.reset_message_buffer().await;
-                sink.emit(client::adapter::map_orchestrator_error(err)).await;
+                sink.emit(client::adapter::map_orchestrator_error(err))
+                    .await;
             }
 
             #[cfg(debug_assertions)]
@@ -9771,10 +9775,12 @@ impl MobileEngineHandle {
                 } else {
                     platform_api::ReasoningSelection::Automatic
                 };
-                if let Err(error) = command_core::effort::persist_reasoning_default_selection_at(
-                    &settings_path,
-                    Some(&persisted_default),
-                ) {
+                if let Err(error) =
+                    command_api::builtins::effort::persist_reasoning_default_selection_at(
+                        &settings_path,
+                        Some(&persisted_default),
+                    )
+                {
                     let rollback = previous
                         .as_ref()
                         .map(|(requested, _, _)| requested.clone())
@@ -9788,7 +9794,7 @@ impl MobileEngineHandle {
                                 .unwrap_or(platform_api::ReasoningSelection::Automatic)
                         },
                     );
-                    let _ = command_core::effort::persist_reasoning_default_selection_at(
+                    let _ = command_api::builtins::effort::persist_reasoning_default_selection_at(
                         &settings_path,
                         Some(&previous_default),
                     );
@@ -11533,7 +11539,9 @@ impl MobileEngineHandle {
         (session_id, dir)
     }
 
-    fn agent_summary_activity(messages: &[client::protocol::message::MessageDto]) -> Option<String> {
+    fn agent_summary_activity(
+        messages: &[client::protocol::message::MessageDto],
+    ) -> Option<String> {
         let text = messages
             .iter()
             .rev()

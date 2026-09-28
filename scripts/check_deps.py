@@ -98,7 +98,16 @@ def main():
                 violations.append("%s depends on the Harness composition root" % n)
                 continue
             # API-crate purity: tool-api / skill-api / command-api stay abstract.
-            if n in API_CRATES and (
+            optional_builtin_skill = (
+                n == "command-api"
+                and d == "skill-api"
+                and "dep:skill-api" in pkgs[n].get("features", {}).get("builtin-handlers", [])
+                and any(
+                    dep["name"] == d and dep.get("optional", False)
+                    for dep in pkgs[n]["dependencies"]
+                )
+            )
+            if n in API_CRATES and not optional_builtin_skill and (
                 d in API_CRATES or dc in {"tool", "skill", "command", "platform", "app", "example", "monolith"}
             ):
                 violations.append(

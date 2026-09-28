@@ -31,7 +31,7 @@ core = [
 desktop = [
     "core",
     "dep:branding",
-    "dep:command-core",
+    "command-api/builtin-handlers",
     "dep:cron",
     "dep:core",
     "dep:memory",
@@ -41,7 +41,7 @@ desktop = [
     "dep:secret",
     "permission/bash-ast",
     "dep:sandbox",
-    "dep:sandbox-runtime-runner",
+    "dep:sandbox-runtime",
     "dep:telemetry",
     "dep:bridge",
     "dep:plugin",
@@ -140,7 +140,7 @@ mobile = [
     "dep:tool-mobile",
     "dep:tool-shell-mobile",
     "dep:tool-git-mobile",
-    "dep:command-core",
+    "command-api/builtin-handlers",
     "dep:platform-ios",
     "dep:platform-android",
 ]
@@ -177,7 +177,6 @@ branding = { workspace = true, optional = true }
 bridge = { path = "../bridge", optional = true }
 client = { path = "../client", optional = true, features = ["adapter"] }
 command-api = { path = "../command-api", optional = true }
-command-core = { path = "../commands/core", optional = true }
 compaction = { path = "../compaction", optional = true }
 configuration-admin = { path = "../configuration-admin", optional = true }
 coordinator = { path = "../coordinator", optional = true }
@@ -212,7 +211,7 @@ protocol = { path = "../protocol", optional = true }
 provider-config = { path = "../provider-config", optional = true }
 reqwest = { version = "=0.12.28", default-features = false, optional = true }
 sandbox = { path = "../sandbox", optional = true }
-sandbox-runtime-runner = { path = "../sandbox-runtime-runner", optional = true }
+sandbox-runtime = { path = "../sandbox-runtime", optional = true }
 secret = { path = "../secret", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

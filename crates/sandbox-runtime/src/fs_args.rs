@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::path_utils::{
     get_dangerous_directories, is_symlink_outside_boundary, normalize_case_for_comparison,
-    normalize_path_for_sandbox, DANGEROUS_FILES,
+    normalize_path_for_sandbox, posix_dirname, DANGEROUS_FILES,
 };
 
 /// Default max depth for searching dangerous files.
@@ -207,16 +207,6 @@ fn posix_resolve(base: &str, p: &str) -> String {
         ".".to_string()
     } else {
         joined
-    }
-}
-
-/// POSIX `path.dirname`.
-fn posix_dirname(p: &str) -> String {
-    let normalized = p.trim_end_matches('/');
-    match normalized.rfind('/') {
-        None => ".".to_string(),
-        Some(0) => "/".to_string(),
-        Some(idx) => normalized[..idx].to_string(),
     }
 }
 

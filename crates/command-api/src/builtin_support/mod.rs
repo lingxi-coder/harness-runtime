@@ -1,4 +1,4 @@
-//! Shared builtin command scaffolding used by the impl crate `command-core`
+//! Shared builtin command scaffolding used by the optional `builtins` module
 //! (and any platform command handlers registered directly in the composition
 //! roots):
 //!

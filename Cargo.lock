@@ -952,28 +952,11 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "branding",
- "hooks",
- "platform-api",
- "protocol",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "command-core"
-version = "0.12.0"
-dependencies = [
- "async-trait",
- "branding",
- "command-api",
  "compaction",
  "core",
  "cost",
  "cron",
+ "hooks",
  "indexmap 2.7.1",
  "llm-runtime",
  "orchestrator",
@@ -2182,7 +2165,6 @@ dependencies = [
  "bridge",
  "client",
  "command-api",
- "command-core",
  "compaction",
  "configuration-admin",
  "coordinator",
@@ -2222,7 +2204,7 @@ dependencies = [
  "provider-config",
  "reqwest",
  "sandbox",
- "sandbox-runtime-runner",
+ "sandbox-runtime",
  "secret",
  "serde",
  "serde_json",
@@ -5709,19 +5691,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sandbox-runtime-runner"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "sandbox",
- "sandbox-runtime",
- "serde_json",
- "tokio",
- "tool-api",
-]
-
-[[package]]
 name = "schannel"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6457,7 +6426,6 @@ dependencies = [
  "branding",
  "bytes",
  "command-api",
- "command-core",
  "compaction",
  "coordinator",
  "core",

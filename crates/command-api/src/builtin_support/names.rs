@@ -17,11 +17,11 @@
 //! implemented commands (`fork`, `goal`, `recap`, `reload-skills`,
 //! `skill-doctor`, `stop`), re-locking the total from 94 to **100**. The 18
 //! core count is unchanged (the new commands are wired via
-//! `command_core::register_core_batch_8`, not the core placeholder path).
+//! `command_api::builtins::register_core_batch_8`, not the core placeholder path).
 //!
 //! The follow-on batch-8 tail pass added the net-new headless `autocompact`
 //! command (the real `type:"local",supportsNonInteractive:!0` auto-compact
-//! window reporter — see `command_core::autocompact`), re-locking the total
+//! window reporter — see `command_api::builtins::autocompact`), re-locking the total
 //! from 100 to **101**. Its stub-bucket siblings from the same triage
 //! (`powerup`, `scroll-speed` = interactive-only net-new; `install`,
 //! `sandbox-toggle` = interactive/host-bound already-in-surface stubs) were
@@ -59,7 +59,7 @@
 //! surface moved into the bundled `code-review` skill), and `subtask`
 //! (`{type:"local-jsx",name:"subtask",description:"Send a subagent off with
 //! your full context; its result comes back here",argumentHint:"<task>"}`
-//! @ 2.1.238 296247354) — long implemented by `command_core::subtask` but
+//! @ 2.1.238 296247354) — long implemented by `command_api::builtins::subtask` but
 //! never listed here, so never advertised in `/help` or the palette — takes
 //! its slot.
 //!
@@ -632,7 +632,7 @@ pub fn core_description(name: &str) -> &'static str {
         "add-dir" => "Add a new working directory",
         "advisor" => "Let Claude consult a stronger model at key moments",
         // Net-new headless auto-compact-window reporter (see
-        // `command_core::autocompact`). Verbatim from the 2.1.198 binary's
+        // `command_api::builtins::autocompact`). Verbatim from the 2.1.198 binary's
         // headless `type:"local"` autocompact command object.
         "autocompact" => "Configure the auto-compact window size",
         // (H-BIN-11 cc2.1.207) `local-jsx` command objects, descriptions

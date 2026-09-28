@@ -275,13 +275,15 @@ impl OutputStream for AgentOutputStream {
             return;
         };
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        self.emit_frame(client::protocol::local_apps::AppBridgeStreamFrameDto::Data {
-            app_id: self.app_id.clone(),
-            request_id: self.request_id.clone(),
-            stream_id: stream_id.clone(),
-            seq,
-            data_json: serde_json::json!({"text": text}).to_string(),
-        })
+        self.emit_frame(
+            client::protocol::local_apps::AppBridgeStreamFrameDto::Data {
+                app_id: self.app_id.clone(),
+                request_id: self.request_id.clone(),
+                stream_id: stream_id.clone(),
+                seq,
+                data_json: serde_json::json!({"text": text}).to_string(),
+            },
+        )
         .await;
     }
 
