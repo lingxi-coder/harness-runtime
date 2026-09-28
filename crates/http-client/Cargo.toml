@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 platform-api = { path = "../platform-api" }
 protocol = { path = "../protocol" }
+lingxi-llm-client.workspace = true
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }

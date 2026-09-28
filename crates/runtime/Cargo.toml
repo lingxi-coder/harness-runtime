@@ -7,6 +7,7 @@ license.workspace = true
 autotests = false
 
 [features]
+realtime-websocket = ["llm-runtime/realtime-websocket"]
 default = [
     "core",
 ]

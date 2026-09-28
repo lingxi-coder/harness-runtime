@@ -1,6 +1,5 @@
 //! Shared `reqwest`-backed [`HttpTransport`] for native hosts.
 //!
-//! This is the single source of truth for the production HTTP/SSE client.
 //! `platforms/posix` (desktop) re-exports [`ReqwestHttp`] as `PosixHttp`, and
 //! the mobile device platforms (`platforms/ios`, `platforms/android`) use it
 //! directly so a keyed conversation streams against the real provider.
@@ -16,8 +15,8 @@ use futures_core::stream::Stream;
 use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
 use platform_api::http::{
-    RawByteStream, RawByteStreamWithMeta, ResolvedAddressOverride, SseStream, SseStreamWithMeta,
-    WebSocketConnection, WebSocketConnectionWithMeta, WebSocketMessageStream,
+    HttpStreamRequest, RawByteStream, RawByteStreamWithMeta, ResolvedAddressOverride, SseStream,
+    SseStreamWithMeta, WebSocketConnection, WebSocketConnectionWithMeta, WebSocketMessageStream,
     WebSocketMessageStreamWithMeta,
 };
 use platform_api::{HttpError, HttpTransport};
@@ -42,6 +41,9 @@ const MAX_HTTP_RESPONSE_BODY: usize = 16 * 1024 * 1024;
 /// cross-compiles to `aarch64-apple-ios` and Android targets. Shared by all
 /// native platforms.
 pub struct ReqwestHttp {
+    /// Provider uploads use the SDK's streaming, redaction and replay policies,
+    /// with the same host TLS material as the general-purpose clients below.
+    provider_http: lingxi_llm_client::HttpTransport,
     /// Default client — follows redirects (reqwest's default policy). Backs
     /// [`HttpTransport::request`] / `stream_sse` / `stream_raw_bytes`.
     client: reqwest::Client,
@@ -93,6 +95,10 @@ impl ReqwestHttp {
         let tls = crate::tls_config::TlsSettings::from_env();
         let websocket_tls = tls.websocket_client_config();
         Self {
+            provider_http: lingxi_llm_client::HttpTransport::with_client_configurator(|builder| {
+                tls.apply_to_builder(builder.connect_timeout(DEFAULT_CONNECT_TIMEOUT))
+            })
+            .expect("provider HTTP client init"),
             client: tls
                 .apply_to_builder(
                     reqwest::Client::builder().connect_timeout(DEFAULT_CONNECT_TIMEOUT),
@@ -276,6 +282,17 @@ fn map_reqwest_connection_error(error: reqwest::Error, detailed: bool) -> HttpEr
         error.to_string()
     };
     HttpError::Connection(message)
+}
+
+fn map_provider_http_error(error: lingxi_llm_client::protocol::LlmError) -> HttpError {
+    use lingxi_llm_client::protocol::LlmError;
+    match error {
+        LlmError::InvalidRequest { message } => HttpError::InvalidRequest(message),
+        LlmError::StreamInterrupted { message } => HttpError::InvalidResponse(message),
+        // The SDK already removes URL credentials and nested proxy errors.
+        // Preserve its safe description rather than recreating reqwest errors.
+        other => HttpError::Connection(other.to_string()),
+    }
 }
 
 fn websocket_url_for(url: &str) -> Result<Url, HttpError> {
@@ -502,6 +519,46 @@ impl HttpTransport for ReqwestHttp {
         self.send_request(req, None, false).await
     }
 
+    async fn send_stream(
+        &self,
+        req: HttpStreamRequest,
+    ) -> Result<RawByteStreamWithMeta, HttpError> {
+        use lingxi_llm_client::Transport as _;
+        let response = self
+            .provider_http
+            .send_stream(lingxi_llm_client::HttpStreamRequest {
+                method: to_reqwest_method(req.method).to_string(),
+                url: req.url,
+                headers: req.headers,
+                body: req
+                    .body
+                    .map(|chunk| {
+                        chunk.map(bytes::Bytes::from).map_err(|_| {
+                            lingxi_llm_client::protocol::LlmError::Transport {
+                                message: "upload body source failed".into(),
+                            }
+                        })
+                    })
+                    .boxed(),
+                content_length: req.content_length,
+                timeout: req.timeout,
+            })
+            .await
+            .map_err(map_provider_http_error)?;
+        Ok(RawByteStreamWithMeta {
+            status: response.status,
+            headers: response.headers,
+            stream: response
+                .body
+                .map(|chunk| {
+                    chunk
+                        .map(|bytes| bytes.to_vec())
+                        .map_err(map_provider_http_error)
+                })
+                .boxed(),
+        })
+    }
+
     async fn request_with_resolved_addrs(
         &self,
         req: HttpRequest,
@@ -726,18 +783,8 @@ impl HttpTransport for ReqwestHttp {
             })
             .collect();
 
-        if status >= 400 {
-            let body_bytes = resp.bytes().await.unwrap_or_default().to_vec();
-            let stream: RawByteStream = Box::pin(futures_util::stream::once(async move {
-                Ok::<Vec<u8>, HttpError>(body_bytes)
-            }));
-            return Ok(RawByteStreamWithMeta {
-                status,
-                headers,
-                stream,
-            });
-        }
-
+        // The shared SDK bounds error-body collection itself. Preserve this
+        // stream for every status instead of eagerly collecting error bodies.
         let detailed = self.detailed_connection_errors;
         let byte_stream = resp.bytes_stream().map(move |r| {
             r.map(|b| b.to_vec())

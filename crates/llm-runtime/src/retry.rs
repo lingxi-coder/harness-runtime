@@ -37,6 +37,7 @@ impl RetryPolicy {
             | LlmError::StreamInterrupted { .. }
             | LlmError::MalformedToolInput { .. }
             | LlmError::CostUnavailable { .. }
+            | LlmError::FileUploadOutcomeUnknown { .. }
             | LlmError::UnsupportedCapability { .. }
             | LlmError::MediaDelegationUnavailable { .. }
             | LlmError::MediaDelegationPartial { .. } => RetryDecision::DoNotRetry,

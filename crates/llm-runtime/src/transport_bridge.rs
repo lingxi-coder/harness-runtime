@@ -288,6 +288,16 @@ async fn open_responses_websocket_stream<T: HttpTransport>(
 }
 
 impl<T: HttpTransport + 'static> crate::Transport for LlmTransportBridge<T> {
+    fn send_stream_raw(
+        &self,
+        request: lingxi_llm_client::HttpStreamRequest,
+    ) -> BoxFuture<
+        '_,
+        Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>,
+    > {
+        Box::pin(lingxi_llm_client::Transport::send_stream(self, request))
+    }
+
     fn connect_raw(
         &self,
         request: lingxi_llm_client::HttpRequest,
@@ -503,6 +513,9 @@ fn upstream_http_request(
 
 fn upstream_http_error(error: HttpError) -> lingxi_llm_client::protocol::LlmError {
     use lingxi_llm_client::protocol::LlmError as E;
+    if let HttpError::InvalidRequest(message) = error {
+        return E::InvalidRequest { message };
+    }
     match map_http_error(&error) {
         LlmError::TransportTimeout { message } => E::TransportTimeout { message },
         LlmError::TlsCert { message, .. } => E::TlsCert { message },
@@ -514,6 +527,53 @@ fn upstream_http_error(error: HttpError) -> lingxi_llm_client::protocol::LlmErro
 
 #[async_trait::async_trait]
 impl<T: HttpTransport + 'static> lingxi_llm_client::Transport for LlmTransportBridge<T> {
+    async fn send_stream(
+        &self,
+        request: lingxi_llm_client::HttpStreamRequest,
+    ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError> {
+        use futures_util::StreamExt;
+        let method =
+            serde_json::from_value(serde_json::Value::String(request.method)).map_err(|_| {
+                lingxi_llm_client::protocol::LlmError::InvalidRequest {
+                    message: "unsupported HTTP method".into(),
+                }
+            })?;
+        let request = platform_api::http::HttpStreamRequest {
+            method,
+            url: request.url,
+            headers: request.headers,
+            body: request
+                .body
+                .map(|item| {
+                    item.map(|bytes| bytes.to_vec())
+                        .map_err(|error| HttpError::InvalidRequest(error.to_string()))
+                })
+                .boxed(),
+            content_length: request.content_length,
+            timeout: request.timeout,
+        };
+        let response = match self.inner.send_stream(request).await {
+            Ok(response) => response,
+            Err(HttpError::Status { status, body }) => {
+                return Ok(lingxi_llm_client::StreamResponse {
+                    status,
+                    headers: Vec::new(),
+                    body: futures_util::stream::once(async move { Ok(body.into_bytes().into()) })
+                        .boxed(),
+                });
+            }
+            Err(error) => return Err(upstream_http_error(error)),
+        };
+        Ok(lingxi_llm_client::StreamResponse {
+            status: response.status,
+            headers: response.headers,
+            body: response
+                .stream
+                .map(|item| item.map(Into::into).map_err(upstream_http_error))
+                .boxed(),
+        })
+    }
+
     async fn send(
         &self,
         request: lingxi_llm_client::HttpRequest,

@@ -714,6 +714,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
             // `invalid_request` category as the context-window branch; the
             // handler passes no `apiErrorStatus` on this `su` call → omit.
             LlmError::RequestTooLarge => (Some("invalid_request"), None),
+            LlmError::FileUploadOutcomeUnknown { .. } => (Some("file_upload_outcome_unknown"), None),
             // 400 invalid-request family → "invalid_request" (status 400).
             LlmError::InvalidRequest { .. } => (Some("invalid_request"), Some(400)),
             // 404 / bedrock model-id → "model_not_found".

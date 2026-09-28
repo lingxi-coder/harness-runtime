@@ -34,6 +34,66 @@ pub(crate) struct RouteEntry {
     websocket_connect_timeout_ms: Option<u64>,
 }
 
+struct ServiceAuthenticator(DefaultLlmClient);
+
+#[async_trait::async_trait]
+impl lingxi_llm_client::Authenticator for ServiceAuthenticator {
+    async fn apply(
+        &self,
+        request: &mut lingxi_llm_client::HttpRequest,
+        profile: &lingxi_llm_client::protocol::ProviderProfile,
+        credential: Option<&lingxi_llm_client::protocol::Secret<String>>,
+    ) -> Result<(), lingxi_llm_client::protocol::LlmError> {
+        use lingxi_llm_client::protocol::{
+            AuthStrategy as WireAuth, ProtocolFamily as WireProtocol,
+        };
+
+        if let Some(credential) = credential {
+            // Resource references inherit the operation's account scope. Never
+            // authenticate them with a different account from the host store.
+            let authenticator: &dyn lingxi_llm_client::Authenticator = match profile.auth {
+                WireAuth::ApiKey => &lingxi_llm_client::ApiKeyAuthenticator,
+                WireAuth::Bearer | WireAuth::OAuthBearer | WireAuth::GcpToken => {
+                    &lingxi_llm_client::BearerAuthenticator
+                }
+                WireAuth::CopilotBearer
+                | WireAuth::ChatGptOAuth
+                | WireAuth::AwsSigV4
+                | WireAuth::AzureToken
+                | WireAuth::None => {
+                    return Err(lingxi_llm_client::protocol::LlmError::UnsupportedCapability {
+                        message: format!(
+                            "explicit service credentials are unsupported for {:?} authentication on profile {:?}",
+                            profile.auth, profile.profile_name
+                        ),
+                    });
+                }
+            };
+            authenticator
+                .apply(request, profile, Some(credential))
+                .await?;
+            if profile.auth == WireAuth::OAuthBearer
+                && profile.protocol == WireProtocol::AnthropicMessages
+            {
+                let existing = request.headers.iter().find_map(|(name, value)| {
+                    name.eq_ignore_ascii_case("anthropic-beta")
+                        .then_some(value.as_str())
+                });
+                let beta = append_beta(existing, "oauth-2025-04-20");
+                request
+                    .headers
+                    .retain(|(name, _)| !name.eq_ignore_ascii_case("anthropic-beta"));
+                request.headers.push(("anthropic-beta".into(), beta));
+            }
+            return Ok(());
+        }
+        self.0
+            .authenticate_wire(&profile.profile_name, request, std::time::SystemTime::now())
+            .await
+            .map_err(crate::execution::wire_error)
+    }
+}
+
 /// Polling knobs for [`DefaultLlmClient::wait_for_file_active`]. The defaults
 /// (2s interval, 300s budget) are this crate's own convenience choice — there
 /// is no claude-code/codex counterpart to pin against; tune per call site.
@@ -160,6 +220,59 @@ impl DefaultLlmClient {
         self
     }
 
+    /// Reuse configured provider profiles and the host transport for independent
+    /// SDK services. Create this once per configuration/transport lifetime.
+    ///
+    /// SDK operations using the registered authenticator honor an explicit
+    /// `RequestOptions::credential` for API-key, bearer, OAuth-bearer and GCP-token
+    /// profiles. Other authenticated strategies reject explicit overrides rather
+    /// than silently using a different account. Without an explicit credential,
+    /// these operations reuse this client's host-managed authentication.
+    /// Audio and remote Skills may use their dedicated credential handling.
+    /// Supply resource account scopes on every operation; independent services
+    /// do not participate in [`crate::ApiService`] turn accounting.
+    pub fn provider_services(
+        &self,
+        region: lingxi_llm_client::protocol::Region,
+        transport: Arc<dyn Transport>,
+    ) -> Result<crate::services::ProviderServices, lingxi_llm_client::BuildError> {
+        let profiles = self
+            .routes
+            .values()
+            .map(|entry| {
+                let mut profile = entry.profile.clone();
+                // Conversation preparation disables SDK auth until host sealing.
+                // Independent SDK calls must select the host authenticator, and
+                // file services still need the original explicit-key strategy.
+                use lingxi_llm_client::protocol::AuthStrategy as WireAuth;
+                profile.auth = match entry.auth {
+                    AuthStrategy::ApiKey => WireAuth::ApiKey,
+                    AuthStrategy::Bearer => WireAuth::Bearer,
+                    AuthStrategy::OAuthBearer => WireAuth::OAuthBearer,
+                    AuthStrategy::CopilotBearer => WireAuth::CopilotBearer,
+                    AuthStrategy::ChatGptOAuth => WireAuth::ChatGptOAuth,
+                    AuthStrategy::AwsSigV4 => WireAuth::AwsSigV4,
+                    AuthStrategy::GcpToken => WireAuth::GcpToken,
+                    AuthStrategy::AzureToken => WireAuth::AzureToken,
+                    AuthStrategy::None => WireAuth::None,
+                };
+                profile
+            })
+            .collect::<Vec<_>>();
+        let authenticator: Arc<dyn lingxi_llm_client::Authenticator> =
+            Arc::new(ServiceAuthenticator(self.clone()));
+        crate::services::ProviderServices::with_configured_transport(
+            &profiles,
+            region,
+            Arc::new(crate::execution::HostTransport(transport)),
+            |builder| {
+                for profile in &profiles {
+                    builder.register_authenticator(profile.auth, authenticator.clone());
+                }
+            },
+        )
+    }
+
     #[must_use]
     pub fn available_models(&self) -> Vec<ModelListing> {
         self.registry.available_models()
@@ -200,16 +313,28 @@ impl DefaultLlmClient {
         request: &LlmRequest,
         transport: Arc<dyn Transport>,
     ) -> Result<PreparedLlmCall, LlmError> {
-        Box::pin(self.prepare_internal(
+        self.prepare_internal(
             request,
             std::time::SystemTime::now(),
             Some(transport),
             false,
-        ))
+        )
         .await
     }
 
-    async fn prepare_internal(
+    // Preparation owns SDK request, attachment and authentication state. Box it
+    // once here so all execution entry points retain a bounded stack footprint.
+    fn prepare_internal<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+        now: std::time::SystemTime,
+        transport: Option<Arc<dyn Transport>>,
+        authenticate: bool,
+    ) -> crate::BoxFuture<'a, Result<PreparedLlmCall, LlmError>> {
+        Box::pin(self.prepare_internal_impl(request, now, transport, authenticate))
+    }
+
+    async fn prepare_internal_impl(
         &self,
         request: &LlmRequest,
         now: std::time::SystemTime,
@@ -354,17 +479,22 @@ impl DefaultLlmClient {
     pub async fn execute(
         &self,
         request: &LlmRequest,
-        transport: &dyn Transport,
+        transport: Arc<dyn Transport>,
     ) -> Result<LlmResponse, LlmError> {
         if request.model_attempt.is_some() {
             return Err(crate::model_attempt::missing_hooks_error());
         }
         let mut prepared = self
-            .prepare_internal(request, std::time::SystemTime::now(), None, false)
+            .prepare_internal(
+                request,
+                std::time::SystemTime::now(),
+                Some(transport.clone()),
+                false,
+            )
             .await?;
         self.seal_prepared(&mut prepared).await?;
         let call = prepared.wire_call.take().expect("sealed");
-        let raw = crate::execution::BorrowedHostTransport(transport);
+        let raw = crate::execution::HostTransport(transport.clone());
         let collected = call
             .dispatch_once_using(&raw, || Ok(()))
             .await
@@ -385,7 +515,7 @@ impl DefaultLlmClient {
     pub async fn execute_stream(
         &self,
         request: &LlmRequest,
-        transport: &dyn Transport,
+        transport: Arc<dyn Transport>,
     ) -> Result<LlmEventStream, LlmError> {
         if request.model_attempt.is_some() {
             return Err(crate::model_attempt::missing_hooks_error());
@@ -396,12 +526,17 @@ impl DefaultLlmClient {
             });
         }
         let mut prepared = self
-            .prepare_internal(request, std::time::SystemTime::now(), None, false)
+            .prepare_internal(
+                request,
+                std::time::SystemTime::now(),
+                Some(transport.clone()),
+                false,
+            )
             .await?;
         self.seal_prepared(&mut prepared).await?;
         let call = prepared.wire_call.take().expect("sealed");
         let received = call
-            .dispatch_once_using(&crate::execution::BorrowedHostTransport(transport), || {
+            .dispatch_once_using(&crate::execution::HostTransport(transport.clone()), || {
                 Ok(())
             })
             .await
@@ -412,7 +547,7 @@ impl DefaultLlmClient {
     pub async fn preconnect_websocket(
         &self,
         request: &LlmRequest,
-        transport: &dyn Transport,
+        transport: Arc<dyn Transport>,
         session: &mut ResponsesWebSocketSession,
     ) -> Result<(), LlmError> {
         if request.model_attempt.is_some() {
@@ -424,7 +559,12 @@ impl DefaultLlmClient {
         let mut req = request.clone();
         req.stream = true;
         let mut prepared = self
-            .prepare_internal(&req, std::time::SystemTime::now(), None, false)
+            .prepare_internal(
+                &req,
+                std::time::SystemTime::now(),
+                Some(transport.clone()),
+                false,
+            )
             .await?;
         if !matches!(
             prepared.provider_request.stream_transport,
@@ -439,7 +579,7 @@ impl DefaultLlmClient {
                 &mut draft,
                 false,
                 true,
-                Some(&crate::execution::BorrowedHostTransport(transport)),
+                Some(&crate::execution::HostTransport(transport.clone())),
             )
             .await
             .map_err(|error| crate::execution::restore_error(error, &prepared.host_failure))
@@ -447,7 +587,7 @@ impl DefaultLlmClient {
     pub async fn prewarm_websocket(
         &self,
         request: &LlmRequest,
-        transport: &dyn Transport,
+        transport: Arc<dyn Transport>,
         session: &mut ResponsesWebSocketSession,
     ) -> Result<(), LlmError> {
         if request.model_attempt.is_some() {
@@ -456,7 +596,12 @@ impl DefaultLlmClient {
         let mut req = request.clone();
         req.stream = true;
         let prepared = self
-            .prepare_internal(&req, std::time::SystemTime::now(), None, false)
+            .prepare_internal(
+                &req,
+                std::time::SystemTime::now(),
+                Some(transport.clone()),
+                false,
+            )
             .await?;
         self.prewarm_prepared_websocket(prepared, transport, session)
             .await
@@ -464,7 +609,7 @@ impl DefaultLlmClient {
     pub async fn prewarm_prepared_websocket(
         &self,
         prepared: PreparedLlmCall,
-        transport: &dyn Transport,
+        transport: Arc<dyn Transport>,
         session: &mut ResponsesWebSocketSession,
     ) -> Result<(), LlmError> {
         if prepared.registered_attempt {
@@ -497,7 +642,7 @@ impl DefaultLlmClient {
     pub async fn execute_stream_with_session(
         &self,
         request: &LlmRequest,
-        transport: &dyn Transport,
+        transport: Arc<dyn Transport>,
         session: &mut ResponsesWebSocketSession,
     ) -> Result<LlmEventStream, LlmError> {
         if request.model_attempt.is_some() {
@@ -509,7 +654,12 @@ impl DefaultLlmClient {
             });
         }
         let prepared = self
-            .prepare_internal(request, std::time::SystemTime::now(), None, false)
+            .prepare_internal(
+                request,
+                std::time::SystemTime::now(),
+                Some(transport.clone()),
+                false,
+            )
             .await?;
         let (prepared, received) = self
             .dispatch_unregistered_stream(prepared, transport, session, false)
@@ -520,7 +670,7 @@ impl DefaultLlmClient {
     async fn dispatch_unregistered_stream(
         &self,
         mut prepared: PreparedLlmCall,
-        transport: &dyn Transport,
+        transport: Arc<dyn Transport>,
         session: &mut ResponsesWebSocketSession,
         prewarm: bool,
     ) -> Result<(PreparedLlmCall, lingxi_llm_client::ReceivedCall), LlmError> {
@@ -528,7 +678,7 @@ impl DefaultLlmClient {
             prepared.provider_request.stream_transport,
             ProviderStreamTransport::ResponsesWebSocket
         );
-        let raw = crate::execution::BorrowedHostTransport(transport);
+        let raw = crate::execution::HostTransport(transport.clone());
         let mut draft = prepared.wire_draft.take().expect("draft");
         draft.request_mut().headers = prepared
             .provider_request
@@ -571,7 +721,7 @@ impl DefaultLlmClient {
         &self,
         request: &LlmRequest,
     ) -> Result<ProviderRequest, LlmError> {
-        let (draft, mut host, failure) = self.count_draft(request).await?;
+        let (draft, mut host, failure) = self.count_draft(request, None).await?;
         let call = crate::execution::seal(draft, &host)
             .await
             .map_err(|error| {
@@ -588,6 +738,7 @@ impl DefaultLlmClient {
     async fn count_draft(
         &self,
         request: &LlmRequest,
+        transport: Option<Arc<dyn Transport>>,
     ) -> Result<
         (
             lingxi_llm_client::RequestDraft,
@@ -619,7 +770,7 @@ impl DefaultLlmClient {
             entry.profile.clone(),
             &route,
             request,
-            None,
+            transport,
             auth,
             lingxi_llm_client::RequestMode::CountTokens,
         )
@@ -635,7 +786,7 @@ impl DefaultLlmClient {
     pub(crate) async fn count_tokens_exact(
         &self,
         request: &LlmRequest,
-        transport: &dyn Transport,
+        transport: Arc<dyn Transport>,
     ) -> Result<Option<u64>, LlmError> {
         let route = self
             .registry
@@ -649,7 +800,7 @@ impl DefaultLlmClient {
         ) {
             return Ok(None);
         }
-        let (draft, host, failure) = self.count_draft(request).await?;
+        let (draft, host, failure) = self.count_draft(request, Some(transport.clone())).await?;
         let call = crate::execution::seal(draft, &host)
             .await
             .map_err(|error| {
@@ -660,7 +811,7 @@ impl DefaultLlmClient {
                     .unwrap_or(error)
             })?;
         let collected = call
-            .dispatch_once_using(&crate::execution::BorrowedHostTransport(transport), || {
+            .dispatch_once_using(&crate::execution::HostTransport(transport.clone()), || {
                 Ok(())
             })
             .await
@@ -708,7 +859,7 @@ impl DefaultLlmClient {
         bytes: Vec<u8>,
         mime_type: &str,
         display_name: &str,
-        transport: &dyn Transport,
+        transport: Arc<dyn Transport>,
     ) -> Result<crate::GeminiFile, LlmError> {
         let route = self.registry.resolve(model_or_alias)?;
         let entry = self
@@ -721,7 +872,7 @@ impl DefaultLlmClient {
             now: None,
             failure: failure.clone(),
         };
-        let http = crate::execution::BorrowedHostTransport(transport);
+        let http = crate::execution::HostTransport(transport.clone());
         let mut profile = entry.profile.clone();
         profile.auth = lingxi_llm_client::protocol::AuthStrategy::Bearer;
         let service = lingxi_llm_client::FileService::new(&http, &profile, Some(&auth), None, None);
@@ -740,7 +891,7 @@ impl DefaultLlmClient {
         &self,
         model_or_alias: &str,
         file_name: &str,
-        transport: &dyn Transport,
+        transport: Arc<dyn Transport>,
         poll: FileActivationPoll,
     ) -> Result<crate::GeminiFile, LlmError> {
         let route = self.registry.resolve(model_or_alias)?;
@@ -754,7 +905,7 @@ impl DefaultLlmClient {
             now: None,
             failure: failure.clone(),
         };
-        let http = crate::execution::BorrowedHostTransport(transport);
+        let http = crate::execution::HostTransport(transport.clone());
         let mut profile = entry.profile.clone();
         profile.auth = lingxi_llm_client::protocol::AuthStrategy::Bearer;
         let service = lingxi_llm_client::FileService::new(&http, &profile, Some(&auth), None, None);
@@ -1176,6 +1327,12 @@ pub struct LlmEventStream {
     finished: bool,
 }
 impl LlmEventStream {
+    /// Scoped continuation state from a successfully completed Responses stream.
+    /// Interrupted or still-running streams do not yield a reusable reference.
+    pub fn continuation(&self) -> Option<&lingxi_llm_client::protocol::ContinuationRef> {
+        self.stream.continuation()
+    }
+
     async fn from_received(
         received: lingxi_llm_client::ReceivedCall,
         protocol: lingxi_llm_client::protocol::ProtocolFamily,

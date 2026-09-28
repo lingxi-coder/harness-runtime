@@ -20,7 +20,9 @@ pub(crate) fn provider_name(provider: &ProviderId) -> &str {
     match provider {
         ProviderId::AnthropicFirstParty => "anthropic",
         ProviderId::OpenAI => "openai",
-        ProviderId::Gemini => "gemini",
+        // The host enum uses the product name; the SDK catalog and service
+        // authorization scopes use Google's canonical provider identity.
+        ProviderId::Gemini => "google",
         ProviderId::VertexGemini => "vertex-gemini",
         ProviderId::VertexClaude => "vertex-claude",
         ProviderId::BedrockClaude => "bedrock-claude",
@@ -68,10 +70,6 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
         None
     };
     if let Some(original) = profile.wire_profile.as_ref().or(builtin.as_ref()) {
-        projected.inference = original.inference.clone();
-        projected.info = original.info.clone();
-        projected.extra = original.extra.clone();
-        projected.pricing = original.pricing.clone();
         for model in &mut projected.models {
             if let Some(source) = original.models.iter().find(|source| {
                 source.display_model == model.display_model
@@ -80,7 +78,43 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
                 model.info = source.info.clone();
                 model.pricing = source.pricing.clone();
                 model.billing_mode = source.billing_mode;
+                // The host owns its six conversation capability switches. Keep
+                // newer SDK capability flags instead of resetting them to unknown.
+                if let Some(host) = &mut model.capability_support {
+                    if let Some(source) = &source.capability_support {
+                        host.signed_reasoning = source.signed_reasoning;
+                    }
+                }
             }
+        }
+        if original.provider_id == projected.provider_id
+            && original.protocol == projected.protocol
+            && original.base_url.trim_end_matches('/') == projected.base_url.trim_end_matches('/')
+        {
+            // Preserve the SDK's independent services only for the same
+            // provider identity and endpoint. A custom proxy
+            // must not acquire official service endpoints and send its secret there.
+            let mut merged = original.clone();
+            merged.provider_id = projected.provider_id;
+            merged.profile_name = projected.profile_name;
+            merged.base_url = projected.base_url;
+            merged.protocol = projected.protocol;
+            merged.auth = projected.auth;
+            merged.regions = projected.regions;
+            merged.connection = projected.connection;
+            merged.supports_websockets = projected.supports_websockets;
+            merged.websocket_connect_timeout_ms = projected.websocket_connect_timeout_ms;
+            merged.azure = projected.azure;
+            merged.signing = projected.signing;
+            merged.models = projected.models;
+            projected = merged;
+        } else {
+            // These conversation defaults were already inherited before the
+            // service upgrade. Dedicated service routing remains empty.
+            projected.inference = original.inference.clone();
+            projected.info = original.info.clone();
+            projected.extra = original.extra.clone();
+            projected.pricing = original.pricing.clone();
         }
     }
     projected.pricing.billing_mode = match profile.pricing.billing_mode {
@@ -107,7 +141,7 @@ fn cache(cache: &CacheControl) -> wire::CacheControl {
         CacheControl::Ephemeral => wire::CacheControl::default(),
         CacheControl::EphemeralScoped { scope, ttl_1h } => wire::CacheControl {
             scope: scope.map(|_| wire::CacheScope::Global),
-            ttl: ttl_1h.then_some(wire::CacheTtl::OneHour),
+            ttl: ttl_1h.then(|| serde_json::from_value(json!("1h")).expect("legacy cache TTL")),
         },
     }
 }
@@ -139,7 +173,9 @@ fn skip_replay_block(
     family: wire::ProtocolFamily,
     skip_unsigned_reasoning: bool,
 ) -> Result<bool, LlmError> {
-    if replay_companion(block).is_some() {
+    if replay_companion(block).is_some()
+        || matches!(block, ContentBlock::ProviderContent { value, .. } if value["type"] == "lingxi_observation")
+    {
         return Ok(true);
     }
     match block {
@@ -240,6 +276,8 @@ fn block(
             name: name.clone(),
             input: input.clone(),
             provider_id: None,
+            caller: None,
+            toolset_name: None,
             thought_signature: None,
         },
         ContentBlock::ToolResult {
@@ -274,6 +312,7 @@ fn block(
                         .unwrap_or_else(|| output.to_string()),
                     is_error: *is_error,
                     blocks: output.as_array().cloned(),
+                    toolset_name: None,
                 }
             }
         }
@@ -318,16 +357,29 @@ fn replay_companion(block: &ContentBlock) -> Option<(wire::ProtocolFamily, wire:
         return None;
     };
     let family = serde_json::from_value(json!(protocol)).ok()?;
-    if !gemini_family(family) {
-        return None;
-    }
     if value.get("type").and_then(Value::as_str) != Some("lingxi_replay_metadata") {
         return None;
     }
     let block: wire::ContentBlock = serde_json::from_value(value.get("block")?.clone()).ok()?;
     has_replay_metadata(&block).then_some((family, block))
 }
+fn native_cited_text(block: &wire::ContentBlock) -> Option<&str> {
+    let wire::ContentBlock::ProviderContent { protocol, value } = block else {
+        return None;
+    };
+    (native_family(*protocol) == wire::ProtocolFamily::AnthropicMessages
+        && value["type"] == "text"
+        && value["citations"]
+            .as_array()
+            .is_some_and(|citations| !citations.is_empty()))
+    .then(|| value["text"].as_str())
+    .flatten()
+}
+
 fn has_replay_metadata(block: &wire::ContentBlock) -> bool {
+    if native_cited_text(block).is_some() {
+        return true;
+    }
     match block {
         wire::ContentBlock::Text {
             thought_signature, ..
@@ -335,8 +387,15 @@ fn has_replay_metadata(block: &wire::ContentBlock) -> bool {
         wire::ContentBlock::ToolUse {
             thought_signature,
             provider_id,
+            caller,
+            toolset_name,
             ..
-        } => thought_signature.is_some() || provider_id.is_some(),
+        } => {
+            thought_signature.is_some()
+                || provider_id.is_some()
+                || caller.is_some()
+                || toolset_name.is_some()
+        }
         _ => false,
     }
 }
@@ -361,30 +420,41 @@ fn message_content(
     let mut metadata: Vec<_> = message
         .content
         .iter()
-        .filter_map(replay_companion)
-        .filter(|(protocol, _)| *protocol == family)
-        .map(|(_, block)| block)
+        .enumerate()
+        .filter_map(|(index, block)| {
+            replay_companion(block).map(|(protocol, block)| (index, protocol, block))
+        })
+        .filter(|(_, protocol, _)| native_family(*protocol) == native_family(family))
+        .map(|(index, _, block)| (index, block))
         .collect();
     let mut content = Vec::new();
-    for item in &message.content {
+    for (item_index, item) in message.content.iter().enumerate() {
         if skip_replay_block(item, family, skip_unsigned_reasoning)? {
             continue;
         }
-        let position = metadata.iter().position(|native| match (item, native) {
-            (
-                ContentBlock::ToolCall { id, .. },
-                wire::ContentBlock::ToolUse { id: native_id, .. },
-            ) => id == native_id.as_str(),
-            (
-                ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. },
-                wire::ContentBlock::Text {
-                    text: native_text, ..
-                },
-            ) => text == native_text,
-            _ => false,
-        });
+        let position = metadata
+            .iter()
+            .position(|(native_index, native)| match (item, native) {
+                (
+                    ContentBlock::ToolCall { id, .. },
+                    wire::ContentBlock::ToolUse { id: native_id, .. },
+                ) => id == native_id.as_str(),
+                (
+                    ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. },
+                    wire::ContentBlock::Text {
+                        text: native_text, ..
+                    },
+                ) => text == native_text,
+                (
+                    ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. },
+                    native,
+                ) if *native_index == item_index + 1 => {
+                    native_cited_text(native) == Some(text.as_str())
+                }
+                _ => false,
+            });
         if let Some(position) = position {
-            let mut native = metadata.remove(position);
+            let (_, mut native) = metadata.remove(position);
             if let (
                 ContentBlock::ToolCall { name, input, .. },
                 wire::ContentBlock::ToolUse {
@@ -448,31 +518,120 @@ pub(crate) fn message_string_overrides(
 pub(crate) fn request(
     req: &LlmRequest,
     protocol: wire::ProtocolFamily,
-) -> Result<wire::CompletionRequest, LlmError> {
-    let mut result: wire::CompletionRequest =
+) -> Result<wire::ChatRequest, LlmError> {
+    let mut result: wire::ChatRequest =
         serde_json::from_value(json!({"model":req.model,"messages":[]})).map_err(invalid)?;
-    result.messages = req
+    let mut message_positions = BTreeMap::new();
+    for (message_index, message) in req.messages.iter().enumerate() {
+        let content = message_content(message, protocol)?;
+        if content.is_empty() {
+            continue;
+        }
+        let skip_unsigned = skip_unsigned_reasoning(message, protocol);
+        let mut projected_block = 0;
+        for (block_index, block) in message.content.iter().enumerate() {
+            if !skip_replay_block(block, protocol, skip_unsigned)? {
+                message_positions.insert(
+                    (message_index, block_index),
+                    (result.messages.len(), projected_block),
+                );
+                projected_block += 1;
+            }
+        }
+        result.messages.push(wire::ConversationMessage {
+            role: serde_json::from_value(json!(message.role)).map_err(invalid)?,
+            content,
+            native_options: Vec::new(),
+        });
+    }
+    let toolsets: BTreeMap<_, _> = req
         .messages
         .iter()
-        .map(|message| {
-            Ok(wire::ConversationMessage {
-                role: serde_json::from_value(json!(message.role)).map_err(invalid)?,
-                content: message_content(message, protocol)?,
-            })
+        .flat_map(|message| &message.content)
+        .filter_map(replay_companion)
+        .filter(|(source, _)| native_family(*source) == native_family(protocol))
+        .filter_map(|(_, block)| match block {
+            wire::ContentBlock::ToolUse {
+                id,
+                toolset_name: Some(toolset),
+                ..
+            } => Some((id, toolset)),
+            _ => None,
         })
-        .collect::<Result<Vec<_>, LlmError>>()?
-        .into_iter()
-        .filter(|message| !message.content.is_empty())
         .collect();
+    for message in &mut result.messages {
+        for block in &mut message.content {
+            match block {
+                wire::ContentBlock::ToolResult {
+                    tool_use_id,
+                    toolset_name,
+                    ..
+                } => {
+                    *toolset_name = toolsets.get(tool_use_id).cloned();
+                }
+                wire::ContentBlock::ProviderContent {
+                    protocol: wire::ProtocolFamily::AnthropicMessages,
+                    value,
+                } if value["type"] == "tool_result" => {
+                    if let Some(name) = value["tool_use_id"]
+                        .as_str()
+                        .and_then(|id| toolsets.get(&wire::ToolUseId::new(id)))
+                    {
+                        value["toolset_name"] = json!(name);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     result.system = req
         .system
         .iter()
         .map(|b| wire::SystemBlock {
             text: b.text.clone(),
-            cacheable: b.cache_control.is_some(),
-            cache_control: b.cache_control.as_ref().map(cache),
         })
         .collect();
+    result.hosted_tools = req.hosted_tools.clone();
+    result.native_options = req.native_options.clone();
+    result.prompt_cache = req.prompt_cache.clone();
+    for breakpoint in &mut result.prompt_cache.breakpoints {
+        if let wire::CachePosition::Message { index, block } = breakpoint.position {
+            let Some(&(index, block)) = message_positions.get(&(index, block)) else {
+                return Err(invalid(
+                    "prompt-cache breakpoint targets content removed during protocol projection",
+                ));
+            };
+            breakpoint.position = wire::CachePosition::Message { index, block };
+        }
+    }
+    result.continuation = req.continuation.clone();
+    // Legacy system markers now use the SDK's positional cache policy.
+    if native_family(protocol) == wire::ProtocolFamily::AnthropicMessages {
+        for (index, block) in req.system.iter().enumerate() {
+            if let Some(control) = &block.cache_control {
+                let ttl = match control {
+                    CacheControl::EphemeralScoped { ttl_1h: true, .. } => wire::CacheTtl::OneHour,
+                    _ => wire::CacheTtl::FiveMinutes,
+                };
+                let position = wire::CachePosition::System { index };
+                if let Some(existing) = result
+                    .prompt_cache
+                    .breakpoints
+                    .iter()
+                    .find(|b| b.position == position)
+                {
+                    if existing.ttl != ttl {
+                        return Err(invalid("conflicting legacy and typed system cache TTL"));
+                    }
+                } else {
+                    result
+                        .prompt_cache
+                        .breakpoints
+                        .push(wire::CacheBreakpoint { position, ttl });
+                }
+            }
+        }
+    }
     result.tools = req
         .tools
         .iter()
@@ -482,11 +641,19 @@ pub(crate) fn request(
             input_schema: t.input_schema.clone(),
             strict: t.strict,
             tool_type: t.tool_type.clone(),
-            defer_loading: t.defer_loading.then_some(true),
+            defer_loading: t.defer_loading,
+            native_options: Vec::new(),
             extra: Value::Object(t.extra.clone()),
         })
         .collect();
     for tool in &mut result.tools {
+        if let Some(extra) = tool.extra.as_object_mut() {
+            if let Some(callers) = extra.remove("allowed_callers") {
+                tool.set_anthropic_allowed_callers(
+                    serde_json::from_value(callers).map_err(invalid)?,
+                );
+            }
+        }
         if tool.strict {
             match crate::strict_schema::to_strict_schema(&tool.input_schema) {
                 Ok(schema) => tool.input_schema = schema,
@@ -509,14 +676,22 @@ pub(crate) fn request(
         .map(|m| json!({"user_id":m.user_id}))
         .unwrap_or(Value::Null);
     result.controls.top_p = req.top_p;
-    result.controls.response_format = req.response_format.as_ref().map(|format| match format {
-        ResponseFormat::JsonObject => wire::ResponseFormat::JsonObject,
-        ResponseFormat::JsonSchema { schema } => wire::ResponseFormat::JsonSchema {
+    let legacy_format = req.response_format.as_ref().map(|format| match format {
+        ResponseFormat::JsonObject => wire::OutputFormat::JsonObject,
+        ResponseFormat::JsonSchema { schema } => wire::OutputFormat::JsonSchema {
             name: "response".into(),
             schema: schema.clone(),
             strict: true,
         },
     });
+    result.output_format = req.output_format.clone();
+    if let Some(legacy_format) = legacy_format {
+        if result.output_format != wire::OutputFormat::Text && result.output_format != legacy_format
+        {
+            return Err(invalid("conflicting legacy and typed output formats"));
+        }
+        result.output_format = legacy_format;
+    }
     result.controls.anthropic.context_hint = req.context_hint.clone();
     result.controls.responses = wire::ResponsesControls {
         parallel_tool_calls: req
@@ -532,11 +707,6 @@ pub(crate) fn request(
             .or((protocol == wire::ProtocolFamily::OpenAiResponses).then_some(false)),
         generate: req.openai_responses.generate,
     };
-    result.previous_response_id = req
-        .openai_responses
-        .previous_response_id
-        .as_deref()
-        .map(wire::ResponseId::new);
     if req.reasoning.is_some() || req.effort.is_some() {
         let mut thinking = wire::ThinkingConfig::default();
         match req.reasoning {
@@ -591,6 +761,75 @@ pub(crate) fn request(
     Ok(result)
 }
 
+/// Restore host legacy controls that are intentionally outside the SDK's typed
+/// request contract. Scoped continuations still pass through SDK validation.
+pub(crate) fn apply_request_compatibility(
+    req: &LlmRequest,
+    protocol: wire::ProtocolFamily,
+    result: &mut ProviderRequest,
+) -> Result<(), LlmError> {
+    if let Some(previous) = &req.openai_responses.previous_response_id {
+        if protocol != wire::ProtocolFamily::OpenAiResponses {
+            return Err(invalid("previous_response_id requires OpenAI Responses"));
+        }
+        if let Some(scoped) = &req.continuation {
+            if scoped.response_id.as_str() != previous {
+                return Err(invalid(
+                    "conflicting legacy and scoped response continuation",
+                ));
+            }
+        }
+        result.body_json["previous_response_id"] = json!(previous);
+    }
+    if native_family(protocol) == wire::ProtocolFamily::AnthropicMessages {
+        for (index, block) in req.system.iter().enumerate() {
+            if let Some(control) = &block.cache_control {
+                if let Some(system) = result
+                    .body_json
+                    .get_mut("system")
+                    .and_then(Value::as_array_mut)
+                {
+                    if let Some(block) = system.get_mut(index) {
+                        // The typed policy carries TTL; preserve the host's optional
+                        // global scope marker as well.
+                        block["cache_control"] = cache(control).wire_value();
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn upstream_metadata(metadata: &mut Value) -> &mut serde_json::Map<String, Value> {
+    if !metadata.is_object() {
+        *metadata = if metadata.is_null() {
+            json!({})
+        } else {
+            json!({"native": metadata.take()})
+        };
+    }
+    let namespace = metadata
+        .as_object_mut()
+        .expect("metadata object")
+        .entry("llm_client")
+        .or_insert_with(|| json!({}));
+    if !namespace.is_object() {
+        *namespace = json!({"native": namespace.take()});
+    }
+    namespace.as_object_mut().expect("upstream metadata object")
+}
+
+fn append_observation(metadata: &mut Value, key: &str, value: Value) {
+    let entries = upstream_metadata(metadata)
+        .entry(key)
+        .or_insert_with(|| json!([]));
+    entries
+        .as_array_mut()
+        .expect("observation array")
+        .push(value);
+}
+
 pub(crate) fn error(error: wire::LlmError) -> LlmError {
     use wire::LlmError as E;
     match error {
@@ -613,6 +852,7 @@ pub(crate) fn error(error: wire::LlmError) -> LlmError {
             LlmError::Transport { message }
         }
         E::TransportTimeout { message } => LlmError::TransportTimeout { message },
+        E::FileUploadOutcomeUnknown { message } => LlmError::FileUploadOutcomeUnknown { message },
         E::TlsCert { message } => LlmError::tls_cert(message),
         E::StreamInterrupted { message } => LlmError::StreamInterrupted { message },
         E::CostUnavailable { message } => LlmError::CostUnavailable { message },
@@ -644,6 +884,10 @@ pub(crate) fn usage(
     if report.state == wire::UsageState::Complete || counts.cache_write_1h_tokens > 0 {
         metadata["cache_creation"] =
             json!({"ephemeral_1h_input_tokens":counts.cache_write_1h_tokens});
+    }
+    if let Some(server_tools) = counts.server_tool_usage {
+        metadata["server_tool_use"] =
+            serde_json::to_value(server_tools).expect("server usage serializes");
     }
     Some((
         Usage {
@@ -693,6 +937,21 @@ fn host_block(block: wire::ContentBlock) -> Result<ContentBlock, LlmError> {
                     value["type"].as_str(),
                     Some("server_tool_use" | "connector_text" | "advisor_tool_result")
                 )
+                && value.as_object().is_some_and(|object| {
+                    object.keys().all(|key| match value["type"].as_str() {
+                        Some("server_tool_use") => {
+                            matches!(key.as_str(), "type" | "id" | "name" | "input")
+                        }
+                        Some("connector_text") => {
+                            matches!(key.as_str(), "type" | "connector_text" | "signature")
+                        }
+                        Some("advisor_tool_result") => matches!(
+                            key.as_str(),
+                            "type" | "tool_use_id" | "content" | "is_error"
+                        ),
+                        _ => false,
+                    })
+                })
             {
                 serde_json::from_value(value).map_err(invalid)?
             } else {
@@ -784,7 +1043,10 @@ impl Codec {
         req: &LlmRequest,
         mode: client::RequestMode,
     ) -> Result<ProviderRequest, LlmError> {
-        let context = self.context(&req.model, mode);
+        let context = self
+            .context(&req.model, mode)
+            .with_account_scope(req.account_scope.as_deref())
+            .with_file_scope(req.file_account_scope.as_deref());
         let input = request(req, self.profile.protocol)?;
         let output = self
             .inner
@@ -799,6 +1061,7 @@ impl Codec {
         if self.profile.protocol == wire::ProtocolFamily::BedrockClaude {
             result.stream_framing = StreamFraming::AwsEventStream;
         }
+        apply_request_compatibility(req, self.profile.protocol, &mut result)?;
         result.json_string_overrides = message_string_overrides(req, self.profile.protocol)?;
         Ok(result)
     }
@@ -1000,6 +1263,7 @@ impl WireCodec for Codec {
             replay: BTreeMap::new(),
             arguments: BTreeMap::new(),
             pending_tools: BTreeSet::new(),
+            legacy_connectors: BTreeMap::new(),
         })
     }
     fn clone_box(&self) -> Box<dyn WireCodec> {
@@ -1026,6 +1290,7 @@ pub(crate) struct Decoder {
     replay: BTreeMap<u32, wire::ContentBlock>,
     arguments: BTreeMap<u32, String>,
     pending_tools: BTreeSet<u32>,
+    legacy_connectors: BTreeMap<u32, Value>,
 }
 impl std::fmt::Debug for Decoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1038,6 +1303,9 @@ impl Decoder {
     fn flush_replay(&mut self, out: &mut Vec<LlmEvent>) -> Result<(), LlmError> {
         let mut ready = Vec::new();
         for (index, block) in &self.replay {
+            if !gemini_family(self.family) && !self.closed.contains(index) {
+                continue;
+            }
             if !has_replay_metadata(block) {
                 continue;
             }
@@ -1046,15 +1314,79 @@ impl Decoder {
                 let Some(arguments) = self.arguments.get(index) else {
                     continue;
                 };
-                let Ok(value) = serde_json::from_str(arguments) else {
-                    continue;
+                *input = if arguments.is_empty() && self.closed.contains(index) {
+                    // A provider may close a zero-argument call without emitting
+                    // input deltas. Match the visible host call's empty object
+                    // only after that explicit completion boundary.
+                    json!({})
+                } else {
+                    let Ok(value) = serde_json::from_str(arguments) else {
+                        continue;
+                    };
+                    value
                 };
-                *input = value;
             }
             ready.push((*index | 0x8000_0000, companion(&block, self.family)?));
         }
         for (index, block) in ready {
             self.start(index, block, out);
+            if self.closed.contains(&(index & 0x7fff_ffff)) && self.closed.insert(index) {
+                out.push(LlmEvent::ContentBlockStop { index });
+            }
+        }
+        Ok(())
+    }
+
+    // The SDK deliberately exposes unrecognized native deltas as observations.
+    // Connector text is an established host contract, so assemble only its
+    // recognized deltas and publish it after the provider closes the block.
+    fn legacy_connector_event(
+        &mut self,
+        payload: &Value,
+        out: &mut Vec<LlmEvent>,
+    ) -> Result<(), LlmError> {
+        let Some(index) = payload["index"].as_u64() else {
+            return Ok(());
+        };
+        let index = u32::try_from(index)
+            .ok()
+            .filter(|index| *index < 0x8000_0000)
+            .ok_or_else(|| invalid("provider output block index exceeds the host range"))?;
+        match payload["type"].as_str() {
+            Some("content_block_start") if payload["content_block"]["type"] == "connector_text" => {
+                self.legacy_connectors
+                    .insert(index, payload["content_block"].clone());
+            }
+            Some("content_block_delta") => {
+                if let Some(block) = self.legacy_connectors.get_mut(&index) {
+                    let delta = &payload["delta"];
+                    if delta["type"] == "connector_text_delta"
+                        && delta["connector_text"].is_string()
+                    {
+                        let text = format!(
+                            "{}{}",
+                            block["connector_text"].as_str().unwrap_or_default(),
+                            delta["connector_text"].as_str().unwrap()
+                        );
+                        block["connector_text"] = Value::String(text);
+                    } else {
+                        self.legacy_connectors.remove(&index);
+                    }
+                }
+            }
+            Some("content_block_stop") => {
+                if let Some(value) = self.legacy_connectors.remove(&index) {
+                    self.start(
+                        index | 0x8000_0000,
+                        host_block(wire::ContentBlock::ProviderContent {
+                            protocol: wire::ProtocolFamily::AnthropicMessages,
+                            value,
+                        })?,
+                        out,
+                    );
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -1228,9 +1560,15 @@ impl Decoder {
                     name,
                     arguments_fragment,
                     provider_id,
+                    caller,
+                    toolset_name,
                 } => {
                     let index = wire_block_index(block)?;
-                    if gemini_family(self.family) {
+                    if gemini_family(self.family)
+                        || caller.is_some()
+                        || toolset_name.is_some()
+                        || provider_id.is_some()
+                    {
                         self.replay
                             .entry(index)
                             .or_insert_with(|| wire::ContentBlock::ToolUse {
@@ -1238,13 +1576,17 @@ impl Decoder {
                                 name: name.clone(),
                                 input: Value::Null,
                                 provider_id,
+                                caller,
+                                toolset_name,
                                 thought_signature: None,
                             });
                         self.arguments
                             .entry(index)
                             .or_default()
                             .push_str(&arguments_fragment);
-                        self.pending_tools.insert(index);
+                        if gemini_family(self.family) {
+                            self.pending_tools.insert(index);
+                        }
                     }
                     self.start(
                         index,
@@ -1269,13 +1611,31 @@ impl Decoder {
                     protocol,
                     value,
                 } => {
-                    self.start(
-                        (wire_block_index(block)?)
-                            .checked_add(1 << 31)
-                            .ok_or_else(|| invalid("native content index overflow"))?,
-                        host_block(wire::ContentBlock::ProviderContent { protocol, value })?,
-                        &mut out,
-                    );
+                    let index = wire_block_index(block)?;
+                    let native = wire::ContentBlock::ProviderContent { protocol, value };
+                    let projected = if let Some(text) = native_cited_text(&native) {
+                        // The SDK emits both display deltas and complete cited
+                        // replay data for this same provider block. Keep the
+                        // native payload as metadata for the visible text.
+                        if !self.blocks.contains(&index) {
+                            self.start(
+                                index,
+                                ContentBlock::Text {
+                                    text: String::new(),
+                                    cache_control: None,
+                                },
+                                &mut out,
+                            );
+                            out.push(LlmEvent::ContentBlockDelta {
+                                index,
+                                delta: ContentDelta::TextDelta { text: text.into() },
+                            });
+                        }
+                        companion(&native, protocol)?
+                    } else {
+                        host_block(native)?
+                    };
+                    self.start(index | 0x8000_0000, projected, &mut out);
                 }
                 wire::StreamEvent::End {
                     stop_reason,
@@ -1284,6 +1644,21 @@ impl Decoder {
                 } => {
                     if !self.done {
                         self.flush_replay(&mut out)?;
+                        if usage(&report, &inference).is_none() && !self.metadata.is_null() {
+                            // Observations can exist without billable token measurements.
+                            // Preserve them in a host-only transcript companion rather
+                            // than fabricating a zero-usage report. Replay filters this tag.
+                            let index = (0..=u32::MAX)
+                                .rev()
+                                .find(|index| !self.blocks.contains(index))
+                                .ok_or_else(|| {
+                                    invalid("no stream index available for provider observations")
+                                })?;
+                            self.start(index, ContentBlock::ProviderContent {
+                                protocol: serde_json::to_value(self.family).map_err(invalid)?.as_str().unwrap().into(),
+                                value: json!({"type":"lingxi_observation", "metadata": self.metadata}),
+                            }, &mut out);
+                        }
                         self.done = true;
                         for index in self.blocks.difference(&self.closed) {
                             out.push(LlmEvent::ContentBlockStop { index: *index });
@@ -1303,9 +1678,31 @@ impl Decoder {
                         out.push(LlmEvent::MessageStop);
                     }
                 }
-                wire::StreamEvent::Inference { .. }
-                | wire::StreamEvent::WebSearch { .. }
-                | wire::StreamEvent::FileSearch { .. } => {}
+                wire::StreamEvent::ProviderEvent { protocol, payload } => {
+                    if protocol == wire::ProtocolFamily::AnthropicMessages {
+                        self.legacy_connector_event(&payload, &mut out)?;
+                    }
+                    append_observation(
+                        &mut self.metadata,
+                        "provider_events",
+                        json!({"protocol": protocol, "payload": payload}),
+                    );
+                }
+                wire::StreamEvent::WebSearch { result } => {
+                    append_observation(
+                        &mut self.metadata,
+                        "web_search",
+                        serde_json::to_value(result).map_err(invalid)?,
+                    );
+                }
+                wire::StreamEvent::FileSearch { result } => {
+                    append_observation(
+                        &mut self.metadata,
+                        "file_search",
+                        serde_json::to_value(result).map_err(invalid)?,
+                    );
+                }
+                wire::StreamEvent::Inference { .. } => {}
             }
         }
         if !self.done {
@@ -1353,41 +1750,69 @@ impl StreamDecoder for Decoder {
 }
 
 pub(crate) fn project_response(
-    decoded: wire::CompletionResponse,
+    decoded: wire::ChatResponse,
     response: ProviderResponse,
     protocol: wire::ProtocolFamily,
 ) -> Result<LlmResponse, LlmError> {
+    crate::execution::validate_response_content(&decoded, &response.body_json, protocol)?;
     let normalized = usage(&decoded.usage, &decoded.inference)
         .map(|(u, _)| u)
         .unwrap_or_default();
     let mut content = Vec::new();
     for block in decoded.message.content {
-        let replay = if gemini_family(protocol) && has_replay_metadata(&block) {
+        let replay = if has_replay_metadata(&block) {
             Some(companion(&block, protocol)?)
         } else {
             None
         };
-        content.push(host_block(block)?);
+        if let Some(text) = native_cited_text(&block) {
+            content.push(ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            });
+        } else {
+            content.push(host_block(block)?);
+        }
         content.extend(replay);
+    }
+    let mut metadata = response.body_json;
+    for (key, value) in [
+        ("web_search", serde_json::to_value(&decoded.web_search)),
+        ("file_search", serde_json::to_value(&decoded.file_search)),
+        (
+            "native_metadata",
+            serde_json::to_value(
+                (!decoded.native_metadata.is_empty()).then_some(&decoded.native_metadata),
+            ),
+        ),
+        (
+            "response_cache",
+            serde_json::to_value(&decoded.response_cache),
+        ),
+        ("continuation", serde_json::to_value(&decoded.continuation)),
+    ] {
+        let value = value.map_err(invalid)?;
+        if !value.is_null() {
+            upstream_metadata(&mut metadata).insert(key.into(), value);
+        }
     }
     Ok(LlmResponse {
         id: decoded
             .response_id
             .map(|id| id.as_str().to_owned())
             .or(response.request_id)
-            .unwrap_or_else(|| response.body_json["id"].as_str().unwrap_or_default().into()),
+            .unwrap_or_else(|| metadata["id"].as_str().unwrap_or_default().into()),
         model: decoded.model,
         content,
         stop_reason: Some(stop(decoded.stop_reason)),
-        stop_details: response
-            .body_json
+        stop_details: metadata
             .get("stop_details")
             .filter(|v| !v.is_null())
             .map(|v| serde_json::from_value(v.clone()).map_err(invalid))
             .transpose()?,
         usage: normalized,
         cost: None,
-        provider_metadata: response.body_json,
+        provider_metadata: metadata,
     })
 }
 
@@ -1405,6 +1830,7 @@ impl Decoder {
             replay: BTreeMap::new(),
             arguments: BTreeMap::new(),
             pending_tools: BTreeSet::new(),
+            legacy_connectors: BTreeMap::new(),
         }
     }
     pub(crate) fn project_batch(
@@ -1413,5 +1839,531 @@ impl Decoder {
     ) -> Result<Vec<LlmEvent>, LlmError> {
         self.observation = (batch.usage, batch.inference);
         self.events(batch.events)
+    }
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+    use lingxi_llm_client::providers::anthropic::{
+        native::AnthropicHostedTool,
+        types::{
+            AnthropicCodeExecutionConfig, AnthropicSkillRef, AnthropicSkillScope,
+            AnthropicWebFetchConfig,
+        },
+    };
+
+    fn anthropic_codec() -> Codec {
+        Codec::new(
+            serde_json::from_value(json!({
+                "provider_id": "anthropic", "profile_name": "anthropic",
+                "base_url": "https://api.anthropic.com", "protocol": "anthropic_messages",
+                "auth": "none", "models": [], "extra": {"web_search": "anthropic"}
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn provider_native_request_options_are_projected_losslessly() {
+        let extension = wire::NativeExtension::new(
+            "anthropic.request_options.v1",
+            json!({"client_toolsets": [], "future_policy": {"preserve": true}}),
+        )
+        .unwrap();
+        let mut req = LlmRequest::new("claude-sonnet-4-6").with_user_text("Hello");
+        req.native_options.push(extension.clone());
+        let projected = request(&req, wire::ProtocolFamily::AnthropicMessages).unwrap();
+        assert_eq!(projected.native_options, vec![extension]);
+        assert_eq!(
+            projected.native_options[0].data()["future_policy"]["preserve"],
+            true
+        );
+    }
+
+    #[test]
+    fn legacy_tool_caller_policy_uses_the_provider_native_options_contract() {
+        use lingxi_llm_client::providers::anthropic::types::AnthropicToolCaller;
+        let mut req = LlmRequest::new("claude-sonnet-4-6");
+        req.tools.push(ToolDeclaration {
+            name: "lookup".into(),
+            input_schema: json!({"type":"object"}),
+            extra: serde_json::from_value(json!({"allowed_callers":["direct"]})).unwrap(),
+            ..Default::default()
+        });
+        let projected = request(&req, wire::ProtocolFamily::AnthropicMessages).unwrap();
+        assert_eq!(
+            projected.tools[0].anthropic_allowed_callers(),
+            &[AnthropicToolCaller::Direct]
+        );
+        assert_eq!(
+            projected.tools[0].native_options[0].format(),
+            "anthropic.tool_options.v1"
+        );
+        assert!(projected.tools[0].extra.get("allowed_callers").is_none());
+    }
+
+    #[test]
+    fn response_native_metadata_keeps_its_format_and_unknown_fields() {
+        let extension = wire::NativeExtension::new(
+            "vendor.response_metadata.v1",
+            json!({
+                "resource": "resource-1", "future": {"opaque": [1, 2, 3]}
+            }),
+        )
+        .unwrap();
+        let decoded: wire::ChatResponse = serde_json::from_value(json!({
+            "message":{"role":"assistant","content":[]}, "model":"m", "stop_reason":"end_turn",
+            "usage":wire::UsageReport::default(), "native_metadata":[extension]
+        }))
+        .unwrap();
+        let response = project_response(
+            decoded,
+            ProviderResponse::json(200, json!({"content":[]})),
+            wire::ProtocolFamily::AnthropicMessages,
+        )
+        .unwrap();
+        assert_eq!(
+            response.provider_metadata["llm_client"]["native_metadata"],
+            serde_json::to_value(vec![extension]).unwrap()
+        );
+    }
+
+    #[test]
+    fn hosted_search_fetch_and_remote_skills_reach_the_native_encoder() {
+        let mut req =
+            LlmRequest::new("claude-sonnet-4-6").with_user_text("Read the source and make a PDF");
+        req.max_tokens = Some(1024);
+        req.hosted_tools = vec![
+            wire::HostedTool::WebSearch(wire::WebSearchConfig::default()),
+            AnthropicHostedTool::WebFetch(AnthropicWebFetchConfig::default()).into(),
+            AnthropicHostedTool::CodeExecution(AnthropicCodeExecutionConfig {
+                skills: vec![AnthropicSkillRef::anthropic("pdf")],
+                ..Default::default()
+            })
+            .into(),
+        ];
+        let encoded = anthropic_codec().encode_request(&req).unwrap();
+        let tools = encoded.body_json["tools"].as_array().unwrap();
+        for name in ["web_search", "web_fetch", "code_execution"] {
+            assert!(tools.iter().any(|tool| tool["name"] == name), "{encoded:?}");
+        }
+        assert_eq!(
+            encoded.body_json["container"]["skills"][0]["skill_id"],
+            "pdf"
+        );
+        assert!(encoded.body_json.get("hosted_tools").is_none());
+    }
+
+    #[test]
+    fn custom_remote_skill_requires_the_matching_host_account_scope() {
+        let scope =
+            AnthropicSkillScope::new("anthropic", "https://api.anthropic.com", "workspace-a")
+                .unwrap();
+        let mut req = LlmRequest::new("claude-sonnet-4-6").with_user_text("Run the skill");
+        req.max_tokens = Some(1024);
+        req.hosted_tools.push(
+            AnthropicHostedTool::CodeExecution(AnthropicCodeExecutionConfig {
+                skills: vec![AnthropicSkillRef::custom("skill_example", scope)],
+                ..Default::default()
+            })
+            .into(),
+        );
+        req.account_scope = Some("workspace-b".into());
+        assert!(anthropic_codec().encode_request(&req).is_err());
+        req.account_scope = Some("workspace-a".into());
+        assert!(anthropic_codec().encode_request(&req).is_ok());
+        let roundtrip: LlmRequest =
+            serde_json::from_value(serde_json::to_value(req).unwrap()).unwrap();
+        assert!(roundtrip.account_scope.is_none());
+    }
+
+    #[test]
+    fn legacy_system_cache_scope_and_ttl_survive_typed_cache_projection() {
+        let mut req = LlmRequest::new("claude-sonnet-4-6").with_user_text("Hello");
+        req.max_tokens = Some(1024);
+        req.system.push(SystemBlock {
+            text: "System".into(),
+            cache_control: Some(CacheControl::EphemeralScoped {
+                scope: Some(CacheScope::Global),
+                ttl_1h: true,
+            }),
+        });
+        let encoded = anthropic_codec().encode_request(&req).unwrap();
+        assert_eq!(
+            encoded.body_json["system"][0]["cache_control"],
+            json!({"type":"ephemeral", "ttl":"1h", "scope":"global"})
+        );
+    }
+
+    #[test]
+    fn native_programmatic_caller_metadata_survives_transcript_replay() {
+        let native = wire::ContentBlock::ToolUse {
+            id: wire::ToolUseId::new("tool-1"),
+            name: "lookup".into(),
+            input: json!({"key":"value"}),
+            provider_id: None,
+            caller: Some(json!({"type":"code_execution_20260120","tool_id":"server-1"})),
+            toolset_name: None,
+            thought_signature: None,
+        };
+        let message = Message {
+            role: "assistant".into(),
+            content: vec![
+                host_block(native.clone()).unwrap(),
+                companion(&native, wire::ProtocolFamily::AnthropicMessages).unwrap(),
+            ],
+        };
+        let restored = message_content(&message, wire::ProtocolFamily::AnthropicMessages).unwrap();
+        assert_eq!(restored, vec![native]);
+        let foreign = message_content(&message, wire::ProtocolFamily::OpenAiChat).unwrap();
+        assert!(matches!(
+            &foreign[0],
+            wire::ContentBlock::ToolUse { caller: None, .. }
+        ));
+    }
+
+    #[test]
+    fn search_observations_and_server_usage_survive_stream_projection() {
+        let mut decoder = Decoder::projection(wire::ProtocolFamily::AnthropicMessages, Value::Null);
+        let usage = wire::UsageReport::measured(
+            wire::Usage {
+                server_tool_usage: Some(wire::ServerToolUsage {
+                    web_fetch_requests: Some(2),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            wire::UsageState::Complete,
+        );
+        let events = decoder.events(vec![
+            Ok(wire::StreamEvent::Start { model: "m".into(), response_id: None }),
+            Ok(wire::StreamEvent::WebSearch { result: wire::WebSearchResult {
+                citations: vec![wire::WebCitation { url: "https://example.com".into(), title: Some("Source".into()) }],
+                metadata: json!({"citations":[{"start":0,"end":10}]}),
+            }}),
+            Ok(wire::StreamEvent::ProviderEvent { protocol: wire::ProtocolFamily::AnthropicMessages, payload: json!({"type":"message_delta","container":{"id":"container-1"}}) }),
+            Ok(wire::StreamEvent::ProviderContent { block: 0, protocol: wire::ProtocolFamily::AnthropicMessages, value: json!({"type":"server_tool_use","id":"search-1","name":"web_search","input":{"query":"test"}}) }),
+            Ok(wire::StreamEvent::End { stop_reason: wire::StopReason::EndTurn, usage, inference: Default::default() }),
+        ]).unwrap();
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            LlmEvent::ContentBlockStart {
+                content_block: ContentBlock::ToolCall { .. },
+                ..
+            }
+        )));
+        let usage = events
+            .iter()
+            .find_map(|event| match event {
+                LlmEvent::MessageDelta { usage, .. } => usage.as_ref(),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            usage.provider_metadata["server_tool_use"]["web_fetch_requests"],
+            2
+        );
+        let metadata = &usage.provider_metadata["stream"]["llm_client"];
+        assert_eq!(
+            metadata["web_search"][0]["citations"][0]["url"],
+            "https://example.com"
+        );
+        assert_eq!(
+            metadata["provider_events"][0]["payload"]["container"]["id"],
+            "container-1"
+        );
+    }
+
+    #[test]
+    fn native_hosted_extensions_are_not_lost_to_legacy_server_tool_types() {
+        let value = json!({"type":"server_tool_use","id":"server-1","name":"web_fetch","input":{},"caller":{"type":"code_execution_20260120","tool_id":"exec-1"}});
+        let projected = host_block(wire::ContentBlock::ProviderContent {
+            protocol: wire::ProtocolFamily::AnthropicMessages,
+            value: value.clone(),
+        })
+        .unwrap();
+        assert!(matches!(&projected, ContentBlock::ProviderContent { .. }));
+        let restored = block(&projected, wire::ProtocolFamily::AnthropicMessages).unwrap();
+        assert_eq!(
+            restored,
+            wire::ContentBlock::ProviderContent {
+                protocol: wire::ProtocolFamily::AnthropicMessages,
+                value,
+            }
+        );
+    }
+
+    #[test]
+    fn caller_metadata_does_not_finish_anthropic_tools_before_block_end() {
+        let mut decoder = Decoder::projection(wire::ProtocolFamily::AnthropicMessages, Value::Null);
+        let delta = |fragment: &str| {
+            Ok(wire::StreamEvent::ToolCallDelta {
+                block: 0,
+                id: wire::ToolUseId::new("call-1"),
+                name: "lookup".into(),
+                provider_id: None,
+                caller: Some(json!({"type":"code_execution_20260120","tool_id":"exec-1"})),
+                toolset_name: None,
+                arguments_fragment: fragment.into(),
+            })
+        };
+        for fragment in ["", "{\"key\":", "\"value\"}"] {
+            let events = decoder.events(vec![delta(fragment)]).unwrap();
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, LlmEvent::ContentBlockStop { .. })),
+                "{events:?}"
+            );
+        }
+        let events = decoder
+            .events(vec![Ok(wire::StreamEvent::BlockEnd { block: 0 })])
+            .unwrap();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, LlmEvent::ContentBlockStop { index: 0 })));
+        let companion = events
+            .iter()
+            .find_map(|event| match event {
+                LlmEvent::ContentBlockStart { content_block, .. } => {
+                    replay_companion(content_block).map(|(_, block)| block)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            matches!(companion, wire::ContentBlock::ToolUse { input, caller: Some(_), .. } if input == json!({"key":"value"}))
+        );
+    }
+
+    #[test]
+    fn closed_zero_argument_tools_keep_caller_and_toolset_metadata() {
+        for arguments in ["", "{"] {
+            let mut decoder =
+                Decoder::projection(wire::ProtocolFamily::AnthropicMessages, Value::Null);
+            let opening = decoder
+                .events(vec![Ok(wire::StreamEvent::ToolCallDelta {
+                    block: 0,
+                    id: wire::ToolUseId::new("call-empty"),
+                    name: "inspect".into(),
+                    provider_id: None,
+                    caller: Some(json!({"type":"direct"})),
+                    toolset_name: Some("browser".into()),
+                    arguments_fragment: arguments.into(),
+                })])
+                .unwrap();
+            assert!(!opening.iter().any(|event| matches!(event,
+                LlmEvent::ContentBlockStart { content_block, .. } if replay_companion(content_block).is_some())));
+            let closed = decoder
+                .events(vec![Ok(wire::StreamEvent::BlockEnd { block: 0 })])
+                .unwrap();
+            let replay = closed.iter().find_map(|event| match event {
+                LlmEvent::ContentBlockStart { content_block, .. } => {
+                    replay_companion(content_block).map(|(_, block)| block)
+                }
+                _ => None,
+            });
+            if arguments.is_empty() {
+                assert!(matches!(replay, Some(wire::ContentBlock::ToolUse {
+                    input, caller: Some(caller), toolset_name: Some(toolset), ..
+                }) if input == json!({}) && caller == json!({"type":"direct"}) && toolset == "browser"));
+            } else {
+                assert!(
+                    replay.is_none(),
+                    "malformed nonempty input must not become an empty object"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn toolset_identity_is_echoed_on_the_matching_host_tool_result() {
+        let native = wire::ContentBlock::ToolUse {
+            id: wire::ToolUseId::new("call-1"),
+            name: "click".into(),
+            input: json!({}),
+            provider_id: None,
+            caller: None,
+            toolset_name: Some("browser".into()),
+            thought_signature: None,
+        };
+        let mut req = LlmRequest::new("claude-sonnet-4-6");
+        req.messages.push(Message {
+            role: "assistant".into(),
+            content: vec![
+                host_block(native.clone()).unwrap(),
+                companion(&native, wire::ProtocolFamily::AnthropicMessages).unwrap(),
+            ],
+        });
+        req.messages.push(Message {
+            role: "user".into(),
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: "call-1".into(),
+                output: json!("clicked"),
+                is_error: false,
+                cache_control: None,
+                cache_reference: None,
+            }],
+        });
+        let projected = request(&req, wire::ProtocolFamily::AnthropicMessages).unwrap();
+        assert!(
+            matches!(&projected.messages[1].content[0], wire::ContentBlock::ToolResult { toolset_name: Some(name), .. } if name == "browser")
+        );
+    }
+
+    #[test]
+    fn cache_breakpoints_follow_projection_and_reject_removed_metadata() {
+        let native = wire::ContentBlock::ToolUse {
+            id: wire::ToolUseId::new("call-1"),
+            name: "lookup".into(),
+            input: json!({}),
+            provider_id: None,
+            caller: Some(json!({"type":"direct"})),
+            toolset_name: None,
+            thought_signature: None,
+        };
+        let mut req = LlmRequest::new("claude-sonnet-4-6");
+        req.messages.push(Message {
+            role: "assistant".into(),
+            content: vec![],
+        });
+        req.messages.push(Message {
+            role: "assistant".into(),
+            content: vec![
+                host_block(native.clone()).unwrap(),
+                companion(&native, wire::ProtocolFamily::AnthropicMessages).unwrap(),
+                ContentBlock::Text {
+                    text: "retained".into(),
+                    cache_control: None,
+                },
+            ],
+        });
+        req.prompt_cache.breakpoints.push(wire::CacheBreakpoint {
+            position: wire::CachePosition::Message { index: 1, block: 2 },
+            ttl: wire::CacheTtl::FiveMinutes,
+        });
+        let projected = request(&req, wire::ProtocolFamily::AnthropicMessages).unwrap();
+        assert_eq!(
+            projected.prompt_cache.breakpoints[0].position,
+            wire::CachePosition::Message { index: 0, block: 1 }
+        );
+        req.prompt_cache.breakpoints[0].position =
+            wire::CachePosition::Message { index: 1, block: 1 };
+        assert!(request(&req, wire::ProtocolFamily::AnthropicMessages).is_err());
+    }
+
+    #[test]
+    fn search_observations_without_usage_are_retained_but_never_replayed() {
+        let mut decoder = Decoder::projection(wire::ProtocolFamily::OpenAiResponses, Value::Null);
+        let events = decoder
+            .events(vec![
+                Ok(wire::StreamEvent::WebSearch {
+                    result: wire::WebSearchResult {
+                        citations: vec![wire::WebCitation {
+                            url: "https://example.com".into(),
+                            title: None,
+                        }],
+                        metadata: Value::Null,
+                    },
+                }),
+                Ok(wire::StreamEvent::End {
+                    stop_reason: wire::StopReason::EndTurn,
+                    usage: wire::UsageReport::default(),
+                    inference: Default::default(),
+                }),
+            ])
+            .unwrap();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, LlmEvent::MessageDelta { usage: None, .. })));
+        let observation = events
+            .iter()
+            .find_map(|event| match event {
+                LlmEvent::ContentBlockStart {
+                    content_block: block @ ContentBlock::ProviderContent { value, .. },
+                    ..
+                } if value["type"] == "lingxi_observation" => Some(block.clone()),
+                _ => None,
+            })
+            .unwrap();
+        if let ContentBlock::ProviderContent { value, .. } = &observation {
+            assert_eq!(
+                value["metadata"]["llm_client"]["web_search"][0]["citations"][0]["url"],
+                "https://example.com"
+            );
+        }
+        let replay = message_content(
+            &Message {
+                role: "assistant".into(),
+                content: vec![observation],
+            },
+            wire::ProtocolFamily::OpenAiResponses,
+        )
+        .unwrap();
+        assert!(replay.is_empty());
+    }
+
+    #[test]
+    fn gemini_keeps_google_identity_and_services_only_on_the_official_endpoint() {
+        let mut host = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "gemini")
+            .unwrap();
+        let source = host.wire_profile.as_ref().unwrap();
+        assert_eq!(source.provider_id.as_str(), "google");
+        let expected_embeddings = serde_json::to_value(&source.embeddings).unwrap();
+        let expected_interactions = serde_json::to_value(&source.interactions).unwrap();
+        let expected_file_search = serde_json::to_value(&source.gemini_file_search).unwrap();
+        for explicit_source in [true, false] {
+            if !explicit_source {
+                host.wire_profile = None;
+            }
+            let projected = profile(&host).unwrap();
+            assert_eq!(projected.provider_id.as_str(), "google");
+            assert_eq!(
+                serde_json::to_value(&projected.embeddings).unwrap(),
+                expected_embeddings
+            );
+            assert_eq!(
+                serde_json::to_value(&projected.interactions).unwrap(),
+                expected_interactions
+            );
+            assert_eq!(
+                serde_json::to_value(&projected.gemini_file_search).unwrap(),
+                expected_file_search
+            );
+            let mut proxy = host.clone();
+            proxy.base_url = "https://gemini-proxy.example/v1beta".into();
+            let projected = profile(&proxy).unwrap();
+            assert_eq!(projected.embeddings, Default::default());
+            assert_eq!(projected.interactions, Default::default());
+            assert_eq!(projected.gemini_file_search, Default::default());
+        }
+    }
+
+    #[test]
+    fn independent_service_routes_survive_only_trusted_profile_projection() {
+        let mut host = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|p| p.provider_id == ProviderId::OpenAI)
+            .unwrap();
+        let source = host.wire_profile.clone().unwrap();
+        let projected = profile(&host).unwrap();
+        assert_eq!(
+            serde_json::to_value(&projected.audio).unwrap(),
+            serde_json::to_value(&source.audio).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&projected.embeddings).unwrap(),
+            serde_json::to_value(&source.embeddings).unwrap()
+        );
+        host.wire_profile = None;
+        host.base_url = "https://proxy.example/v1".into();
+        let proxy = profile(&host).unwrap();
+        assert_eq!(proxy.audio, Default::default());
+        assert_eq!(proxy.embeddings, Default::default());
     }
 }

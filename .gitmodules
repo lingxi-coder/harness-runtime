@@ -1,0 +1,3 @@
+[submodule "deps/llm-client"]
+	path = deps/llm-client
+	url = https://github.com/lingxi-coder/llm-client

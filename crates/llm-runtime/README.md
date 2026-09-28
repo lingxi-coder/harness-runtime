@@ -4,7 +4,26 @@ This crate owns LingXi's application policy around model calls: account/OAuth
 lifecycle, credentials, routing, retries, prompt-cache policy, Fusion admission,
 and durable physical-attempt accounting. Provider wire encoding/decoding,
 native replay content, usage normalization and built-in catalog facts come from
-`lingxi-llm-client`, pinned in Cargo.toml and Cargo.lock.
+`lingxi-llm-client`, pinned in root `[workspace.dependencies]` and inherited by
+this crate. Development from the repository root applies a Cargo patch to the `deps/llm-client` Git submodule,
+so SDK changes are compiled directly. Initialize it with
+`git submodule update --init --recursive`; its own tests run with
+`cargo test --manifest-path deps/llm-client/Cargo.toml --locked`.
+The submodule is excluded from the runtime workspace and retains its own lockfile.
+Downstream consumers keep the pinned Git dependency because Cargo patches apply
+only at the consuming workspace root.
+
+The 0.3 client integration provides typed hosted tools, prompt caching, output
+contracts and scoped continuation to `LlmRequest`. `services::ProviderServices`
+shares the host transport and configuration; `services::sdk` exposes the exact
+upstream types. Bind a provider through
+`services.client().provider::<services::providers::OpenAiClient>(profile_name)`
+and use its `audio()`, `files()` or other provider resources directly. Anthropic
+Skills are available through `providers::AnthropicClient::skills`; operation
+credentials and deadlines arrive through `RequestOptions`. Realtime audio uses
+a separate duplex transport, with an optional `realtime-websocket` feature.
+See [the migration guide](../../docs/llm-client-upgrade.md) for the scope,
+`Arc<dyn Transport>` call-site migration and submodule contribution workflow.
 
 `upstream.rs` projects host request/events into the independent client's typed
 contracts. It uses the client's low-level codec interface so host authentication,

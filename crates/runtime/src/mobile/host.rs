@@ -191,6 +191,23 @@ struct DynHttp(Arc<dyn HttpTransport>);
 
 #[async_trait::async_trait]
 impl HttpTransport for DynHttp {
+    async fn send_stream(
+        &self,
+        req: platform_api::http::HttpStreamRequest,
+    ) -> Result<RawByteStreamWithMeta, HttpError> {
+        self.0.send_stream(req).await
+    }
+
+    async fn stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(
+        &self,
+        req: protocol::HttpRequest,
+        resolved: Option<platform_api::ResolvedAddressOverride>,
+    ) -> Result<RawByteStreamWithMeta, HttpError> {
+        self.0
+            .stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(req, resolved)
+            .await
+    }
+
     async fn request(
         &self,
         req: protocol::HttpRequest,

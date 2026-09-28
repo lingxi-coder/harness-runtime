@@ -579,7 +579,7 @@ mod tests {
         assert!(adapter.stream_request(request.clone()).await.is_err());
         assert!(adapter
             .client
-            .execute(&request, transport.as_ref())
+            .execute(&request, transport.clone())
             .await
             .is_err());
         assert_eq!(transport.seen_count(), 0);

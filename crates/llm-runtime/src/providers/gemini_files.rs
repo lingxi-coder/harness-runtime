@@ -1,6 +1,6 @@
 //! Host envelope projection for the upstream Gemini file protocol.
 use crate::{LlmError, ProviderRequest, ProviderResponse};
-use lingxi_llm_client::files::gemini_wire as wire;
+use lingxi_llm_client::providers::google::files_wire as wire;
 pub use wire::GeminiFile;
 fn project(request: lingxi_llm_client::HttpRequest) -> ProviderRequest {
     let mut host = ProviderRequest::post_json(request.url, serde_json::Value::Null);

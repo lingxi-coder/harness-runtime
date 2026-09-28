@@ -82,6 +82,13 @@ pub enum LlmError {
     /// bytes, so it is never retried and never triggers the PTL recovery loop.
     #[error("request too large")]
     RequestTooLarge,
+    /// A provider upload was dispatched but its outcome cannot be established.
+    /// Retrying the model request could create another provider resource.
+    #[error("file upload outcome unknown: {message}")]
+    FileUploadOutcomeUnknown {
+        /// Safe diagnostic from the shared client's upload lifecycle.
+        message: String,
+    },
     /// Requested model is unavailable.
     #[error("model unavailable")]
     ModelUnavailable,
@@ -308,6 +315,7 @@ impl LlmError {
             | LlmError::TransportTimeout { message }
             | LlmError::StreamInterrupted { message }
             | LlmError::CostUnavailable { message }
+            | LlmError::FileUploadOutcomeUnknown { message }
             | LlmError::MediaDelegationUnavailable { message }
             | LlmError::MediaDelegationPartial { message, .. } => Some(message),
             _ => None,

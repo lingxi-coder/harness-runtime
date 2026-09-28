@@ -68,6 +68,30 @@ pub struct LlmRequest {
     pub system: Vec<SystemBlock>,
     /// Tool declarations available to the model.
     pub tools: Vec<ToolDeclaration>,
+    /// Provider-executed search, fetch, code execution, and remote connector tools.
+    /// These declarations never become host-side tool invocations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosted_tools: Vec<lingxi_llm_client::protocol::HostedTool>,
+    /// Format-tagged request options owned by the selected provider.
+    /// Construct typed values through the SDK's `providers` namespaces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_options: Vec<lingxi_llm_client::protocol::NativeExtension>,
+    /// Explicit upstream prompt-cache controls, independent of response caching.
+    #[serde(default)]
+    pub prompt_cache: lingxi_llm_client::protocol::PromptCachePolicy,
+    /// Typed output contract. Legacy `response_format` remains supported.
+    #[serde(default)]
+    pub output_format: lingxi_llm_client::protocol::OutputFormat,
+    /// Provider response state bound to the original account and route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<lingxi_llm_client::protocol::ContinuationRef>,
+    /// Trusted host account identity for scoped Skills, containers, and continuation.
+    /// Conversation JSON cannot supply execution identity.
+    #[serde(skip)]
+    pub account_scope: Option<String>,
+    /// Trusted host account identity for provider-owned file references.
+    #[serde(skip)]
+    pub file_account_scope: Option<String>,
     /// Optional tool-choice policy.
     pub tool_choice: Option<ToolChoice>,
     /// Optional structured-output request.
@@ -947,7 +971,10 @@ pub fn validate_capabilities(
         });
     }
 
-    if request.response_format.is_some() && !capabilities.structured_output {
+    if (request.response_format.is_some()
+        || request.output_format != lingxi_llm_client::protocol::OutputFormat::Text)
+        && !capabilities.structured_output
+    {
         return Err(LlmError::UnsupportedCapability {
             capability: "structured_output".to_string(),
         });

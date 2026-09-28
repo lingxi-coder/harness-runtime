@@ -47,6 +47,12 @@ fn openai_encodes_stream_true() {
 
 #[test]
 fn openai_encodes_response_format_variants() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": false,
+    });
     let cases = [
         (
             ResponseFormat::JsonObject,
@@ -54,9 +60,9 @@ fn openai_encodes_response_format_variants() {
         ),
         (
             ResponseFormat::JsonSchema {
-                schema: serde_json::json!({"type": "object", "properties": {"answer": {"type": "string"}}}),
+                schema: schema.clone(),
             },
-            serde_json::json!({"type": "json_schema", "json_schema": {"name": "response", "strict": true, "schema": {"type": "object", "properties": {"answer": {"type": "string"}}}}}),
+            serde_json::json!({"type": "json_schema", "json_schema": {"name": "response", "strict": true, "schema": schema}}),
         ),
     ];
 
@@ -72,22 +78,52 @@ fn openai_encodes_response_format_variants() {
 
 #[test]
 fn gemini_encodes_response_format_requests() {
+    let schema = serde_json::json!({
+        "type": "object", "properties": {"answer": {"type": "string"}}
+    });
     let cases = [
-        ResponseFormat::JsonObject,
-        ResponseFormat::JsonSchema {
-            schema: serde_json::json!({"type": "object"}),
-        },
+        (
+            ResponseFormat::JsonObject,
+            serde_json::json!({"text": {"mimeType": "application/json"}}),
+        ),
+        (
+            ResponseFormat::JsonSchema {
+                schema: schema.clone(),
+            },
+            serde_json::json!({"text": {"mimeType": "application/json", "schema": schema}}),
+        ),
     ];
 
-    for response_format in cases {
+    for (response_format, expected) in cases {
         let mut request = LlmRequest::new("gemini-2.0-flash");
         request.response_format = Some(response_format);
 
         let encoded = gemini_codec().encode_request(&request).unwrap();
         assert_eq!(
-            encoded.body_json["generationConfig"]["responseMimeType"],
-            "application/json"
+            encoded.body_json["generationConfig"]["responseFormat"],
+            expected
         );
+    }
+}
+
+#[test]
+fn openai_rejects_response_schemas_that_are_not_valid_for_strict_output() {
+    for schema in [
+        serde_json::json!({
+            "type": "object", "properties": {"answer": {"type": "string"}},
+            "required": ["answer"]
+        }),
+        serde_json::json!({
+            "type": "object", "properties": {"answer": {"type": "string"}},
+            "additionalProperties": false
+        }),
+    ] {
+        let mut request = LlmRequest::new("gpt-4o");
+        request.response_format = Some(ResponseFormat::JsonSchema { schema });
+        assert!(matches!(
+            openai_codec().encode_request(&request),
+            Err(LlmError::InvalidRequest { .. })
+        ));
     }
 }
 

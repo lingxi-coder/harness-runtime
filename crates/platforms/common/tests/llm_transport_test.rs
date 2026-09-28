@@ -392,7 +392,7 @@ async fn bridge_drives_llm_runtime_event_stream_end_to_end() {
     request.stream = true;
 
     let mut events = client
-        .execute_stream(&request, &bridge)
+        .execute_stream(&request, Arc::new(bridge))
         .await
         .expect("stream");
     let mut texts = String::new();

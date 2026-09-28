@@ -22,6 +22,36 @@ pub type SseStream = Pin<Box<dyn Stream<Item = Result<SseEvent, HttpError>> + Se
 /// interprets the bytes.
 pub type RawByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, HttpError>> + Send>>;
 
+/// One-shot streaming upload. Transports must consume the body incrementally,
+/// set its declared content length, and never replay it or follow redirects.
+/// A single matching Content-Length is normalized; conflicting/duplicate lengths
+/// and Transfer-Encoding are rejected before the body is consumed.
+pub struct HttpStreamRequest {
+    /// HTTP method.
+    pub method: protocol::HttpMethod,
+    /// Destination URL.
+    pub url: String,
+    /// Request headers; an optional Content-Length must match `content_length`.
+    pub headers: Vec<(String, String)>,
+    /// Raw upload chunks. Dropping the request cancels the source stream.
+    pub body: RawByteStream,
+    /// Exact byte count of the body.
+    pub content_length: u64,
+    /// Optional deadline covering the upload and response body.
+    pub timeout: Option<std::time::Duration>,
+}
+
+impl std::fmt::Debug for HttpStreamRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpStreamRequest")
+            .field("method", &self.method)
+            .field("url", &"<redacted>")
+            .field("content_length", &self.content_length)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
 /// A pinned, boxed stream of WebSocket text-message payloads as raw bytes.
 ///
 /// Returned by [`HttpTransport::stream_websocket_messages_with_meta`] for
@@ -224,6 +254,18 @@ impl Stream for OnceBytes {
 pub trait HttpTransport: Send + Sync {
     /// Send a request and await the full response.
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError>;
+
+    /// Upload a one-shot body and expose raw response bytes with metadata.
+    /// The default fails without polling the body; it never silently buffers
+    /// uploads. Production transports override this for files/audio/skills.
+    async fn send_stream(
+        &self,
+        _req: HttpStreamRequest,
+    ) -> Result<RawByteStreamWithMeta, HttpError> {
+        Err(HttpError::InvalidRequest(
+            "streaming request bodies are not supported by this transport".into(),
+        ))
+    }
 
     /// Send a request using pre-vetted DNS answers for the logical hostname.
     ///

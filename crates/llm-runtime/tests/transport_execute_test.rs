@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use llm_runtime::client::DefaultLlmClient;
@@ -87,7 +87,7 @@ fn anthropic_client() -> DefaultLlmClient {
 
 #[tokio::test]
 async fn execute_sends_authenticated_request_and_decodes_response() {
-    let transport = FakeTransport::returning(ProviderResponse::json(
+    let transport = Arc::new(FakeTransport::returning(ProviderResponse::json(
         200,
         serde_json::json!({
             "id": "msg_1",
@@ -96,13 +96,13 @@ async fn execute_sends_authenticated_request_and_decodes_response() {
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 9, "output_tokens": 3}
         }),
-    ));
+    )));
     let client = anthropic_client();
 
     let response = client
         .execute(
             &LlmRequest::new("claude").with_user_text("hello"),
-            &transport,
+            transport.clone(),
         )
         .await
         .expect("response");
@@ -139,13 +139,13 @@ async fn execute_routes_provider_errors_through_taxonomy() {
     error_response
         .headers
         .insert("retry-after".to_string(), "7".to_string());
-    let transport = FakeTransport::returning(error_response);
+    let transport = Arc::new(FakeTransport::returning(error_response));
     let client = anthropic_client();
 
     let error = client
         .execute(
             &LlmRequest::new("claude").with_user_text("hello"),
-            &transport,
+            transport.clone(),
         )
         .await
         .expect_err("must map to taxonomy");
@@ -188,10 +188,48 @@ async fn execute_propagates_transport_failures() {
     let error = client
         .execute(
             &LlmRequest::new("claude").with_user_text("hello"),
-            &FailingTransport,
+            Arc::new(FailingTransport),
         )
         .await
         .expect_err("transport failure");
 
     assert!(matches!(error, LlmError::Transport { message } if message.contains("refused")));
+}
+
+#[tokio::test]
+async fn provider_services_reuses_configured_model_routes_and_host_credentials() {
+    use llm_runtime::services::sdk;
+
+    let transport = Arc::new(FakeTransport::returning(ProviderResponse::json(
+        200,
+        serde_json::json!({
+            "id": "msg_service",
+            "model": "claude-sonnet-4-20250514",
+            "content": [{"type":"text","text":"hi"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 9, "output_tokens": 3}
+        }),
+    )));
+    let client = anthropic_client();
+    let services = client
+        .provider_services(sdk::protocol::Region::International, transport.clone())
+        .expect("services");
+    let request: sdk::protocol::ChatRequest = serde_json::from_value(serde_json::json!({
+        "model": "claude",
+        "messages": [{"role":"user", "content":[{"type":"text", "text":"hello"}]}]
+    }))
+    .expect("request");
+    services
+        .client()
+        .chat()
+        .complete(&request, &sdk::RequestOptions::default())
+        .await
+        .expect("service model response");
+    let seen = transport.seen.lock().unwrap();
+    let seen = seen.as_ref().expect("authenticated request");
+    assert_eq!(
+        seen.headers.get("x-api-key").map(String::as_str),
+        Some("transport-key")
+    );
+    assert_eq!(seen.body_json["model"], "claude-sonnet-4-20250514");
 }
