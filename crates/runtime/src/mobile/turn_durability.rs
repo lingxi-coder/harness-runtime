@@ -6,8 +6,8 @@
 //! `safe_to_resume` is true; permission-bound or side-effectful work must park
 //! as `WaitingForUser`.
 
-use client_protocol::commands::{ImageRefDto, PromptModeDto};
-use client_protocol::events::{TurnRecoverySnapshotDto, TurnRecoveryStateDto};
+use client::protocol::commands::{ImageRefDto, PromptModeDto};
+use client::protocol::events::{TurnRecoverySnapshotDto, TurnRecoveryStateDto};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions;

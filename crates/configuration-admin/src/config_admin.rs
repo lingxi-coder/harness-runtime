@@ -1,6 +1,6 @@
-use client_adapter::ClientEventSink;
-use client_protocol::events::{ClientEvent, ErrorKindDto};
-use client_protocol::listings::{
+use client::adapter::ClientEventSink;
+use client::protocol::events::{ClientEvent, ErrorKindDto};
+use client::protocol::listings::{
     ConfigurationDomainDto, ConfigurationEffectDto, ConfigurationOperationStatusDto,
 };
 use serde_json::{Map, Value};

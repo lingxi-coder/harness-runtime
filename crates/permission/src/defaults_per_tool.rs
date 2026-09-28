@@ -200,7 +200,7 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppScaffold", AllowByDefault);
     // The library's create sheet does NOT come through this gate: it sends
     // `ClientCommand::CreateApp` and creates the app outright, before any
-    // conversation exists (see `client_protocol::version`). So the ONLY caller
+    // conversation exists (see `client::protocol::version`). So the ONLY caller
     // this row governs is an agent reaching `LocalAppCreate` from a global or
     // project chat — which is exactly the case the deny exists for, and the
     // user is right there in that chat to answer.

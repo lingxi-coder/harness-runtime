@@ -9,9 +9,9 @@ use crate::mobile::local_app_runtime_profiles::{toolchain_for_binding, RuntimeTo
 use crate::mobile::local_apps_mcp::LocalAppsMcpHost;
 use crate::mobile::plan_approval::CreateApprovalAuthority;
 use async_trait::async_trait;
-use client_adapter::ClientEventSink;
-use client_protocol::events::ClientEvent;
-use client_protocol::local_apps::{
+use client::adapter::ClientEventSink;
+use client::protocol::events::ClientEvent;
+use client::protocol::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppBridgeResponseDto,
     AppCapabilityKindDto, AppCapabilityRequestDto, AppDependencyChangeConfirmationRequestDto,
     AppDependencyChangeDto, AppDependencyChangeKindDto, AppEventDto, AppRuntimeProfileDto,
@@ -14066,7 +14066,7 @@ mod tests {
         );
     }
     use async_trait::async_trait;
-    use client_adapter::{ClientEventSink, MockSink};
+    use client::adapter::{ClientEventSink, MockSink};
     use futures_util::stream;
     use local_apps::test_support::FixedClock;
     use local_apps::{storage, AppState, NoopAppEventObserver};
@@ -17076,7 +17076,7 @@ mod tests {
         // back" is checked on the wire content, not on a count alone.
         let event = |request_id: &str| AppEventDto::LocalAppOperationFailed {
             app_id: Some("app-reattach".into()),
-            code: client_protocol::local_apps::LocalAppPluginErrorCodeDto::PluginDisabled,
+            code: client::protocol::local_apps::LocalAppPluginErrorCodeDto::PluginDisabled,
             message: "r3-failure-paths-02 fixture event; only its request_id is under test".into(),
             request_id: Some(request_id.to_string()),
         };
@@ -20796,7 +20796,7 @@ mod tests {
     fn dummy_native_approval_event() -> AppEventDto {
         AppEventDto::LocalAppOperationFailed {
             app_id: None,
-            code: client_protocol::local_apps::LocalAppPluginErrorCodeDto::PluginDisabled,
+            code: client::protocol::local_apps::LocalAppPluginErrorCodeDto::PluginDisabled,
             message: "r4-tests-honesty-05 fixture event; content is not under test".into(),
             request_id: None,
         }

@@ -121,7 +121,7 @@ def target_to_package(repo):
 
     cargo 的输出里,一个测试二进制是按 **target** 命名的
     (`commands_test|tests/commands_test.rs`),而任务的范围是按 **package** 划的
-    (`-p client-protocol`)。两者不是一回事:client-protocol 的集成测试 target 叫
+    (`-p client`)。两者不是一回事:client 的集成测试 target 叫
     `commands_test`、`events_test`……名字里没有 package 的影子。拿 package 名去
     子串匹配 binary key,只会匹配到 lib unittests,把同一个 package 的十几个集成
     测试二进制判成「范围外」。所以这张表必须问 cargo 要,不能猜。"""

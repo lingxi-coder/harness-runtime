@@ -3,8 +3,8 @@
 //! This is the mobile sibling of `harness_runtime::desktop::build` (F2-01): the single
 //! place that wires an off-device-buildable [`ConversationOrchestrator`] from a
 //! deterministic [`MobileConfig`] + an `Arc<dyn Platform>`, binding the
-//! transport-agnostic [`client_adapter::AdapterOutputStream`] and the id-keyed
-//! [`client_adapter::AdapterPermissionGate`] as its sinks. The same lowering
+//! transport-agnostic [`client::adapter::AdapterOutputStream`] and the id-keyed
+//! [`client::adapter::AdapterPermissionGate`] as its sinks. The same lowering
 //! pipeline therefore feeds the mobile [`ClientEventListener`] exactly as it
 //! feeds the bridge-server WebSocket — governing decision §0.1 / §0.2.
 //!
@@ -44,28 +44,28 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use client_adapter::controls::{decode_reasoning_selection, lower_conversation_controls};
-use client_adapter::lowering::lower_status_snapshot;
-use client_adapter::{
+use client::adapter::controls::{decode_reasoning_selection, lower_conversation_controls};
+use client::adapter::lowering::lower_status_snapshot;
+use client::adapter::{
     AdapterOutputStream, AdapterPermissionGate, ClientEventListener, ListenerSink,
-    PermissionRequestSink, TurnWrapper,
+    PermissionRequestSink, TurnEventEmitter,
 };
-use client_protocol::commands::{
+use client::protocol::commands::{
     AppCreateModeDto, ClientCommand, ImageRefDto, ListingKindDto as ProtocolListingKind,
     PromptModeDto, ProviderCredentialSecretDto,
 };
-use client_protocol::controls::{ConversationControlsDto, ReasoningSelectionDto};
-use client_protocol::error::ClientError;
-use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto, TurnRecoveryStateDto};
-use client_protocol::listings::{
+use client::protocol::controls::{ConversationControlsDto, ReasoningSelectionDto};
+use client::protocol::error::ClientError;
+use client::protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto, TurnRecoveryStateDto};
+use client::protocol::listings::{
     ModelDetailsDto, ProviderModelCatalogEntryDto, SessionAgentSummaryDto, SessionModeDto,
     SlashCommandDto,
 };
-use client_protocol::local_apps::{
+use client::protocol::local_apps::{
     AppCreateOriginDto, AppEventDto, AppSurfaceDto, LocalAppPluginComponentCountsDto,
     LocalAppPluginInventoryDto, PluginActivationStateDto, PluginCommandDto, PluginStatusDto,
 };
-use client_protocol::permission::{
+use client::protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
 use command_api::model::BuiltinCommandHandler;
@@ -590,12 +590,12 @@ pub struct MobileRuntime {
     /// The registered foreign event listener. Held so F3-04's handle can own /
     /// re-surface it; the adapter already feeds it via a [`ListenerSink`].
     pub listener: Arc<dyn ClientEventListener>,
-    /// The connection's [`client_adapter::ClientEventSink`] (a [`ListenerSink`]
+    /// The connection's [`client::adapter::ClientEventSink`] (a [`ListenerSink`]
     /// over `listener`). The orchestrator's [`AdapterOutputStream`] already pushes
     /// streamed turn events here; F3-05's `submit` reuses the SAME sink to
     /// synthesize boundary events (`TurnStarted` / `MessageComplete`) and emit
     /// listing replies, so everything rides one outbound channel.
-    pub event_sink: Arc<dyn client_adapter::ClientEventSink>,
+    pub event_sink: Arc<dyn client::adapter::ClientEventSink>,
     /// Cloneable handle to the response accumulator behind `output`, retained
     /// so hard turn failures cannot leak partial message blocks into a later
     /// prompt on this long-lived mobile connection.
@@ -928,7 +928,7 @@ struct SlashAuthoritySnapshot {
     session_id: String,
     model: String,
     permission_mode: String,
-    auth: client_protocol::listings::AuthStateDto,
+    auth: client::protocol::listings::AuthStateDto,
     catalog: Vec<SlashCommandDto>,
 }
 
@@ -947,7 +947,7 @@ fn lower_controls(
 }
 
 fn lower_model_details(listing: &platform_api::ModelListing) -> ModelDetailsDto {
-    client_adapter::lowering::lower_model_details(listing)
+    client::adapter::lowering::lower_model_details(listing)
 }
 
 /// Non-secret result of testing one provider endpoint from the mobile engine.
@@ -1075,7 +1075,7 @@ fn provider_model_catalog_from_listings(
 ) -> Vec<ProviderModelCatalogEntryDto> {
     platform_api::provider_model_catalog(listings)
         .iter()
-        .map(client_adapter::lowering::lower_provider_model_catalog_entry)
+        .map(client::adapter::lowering::lower_provider_model_catalog_entry)
         .collect()
 }
 
@@ -2966,8 +2966,8 @@ fn mobile_mcp_oauth_authorization_callback(
 /// (filesystem / http / clock / process / sandbox / worktree) and the device
 /// capabilities (camera / audio / share) are read from `platform`; everything
 /// else arrives via `cfg`. The `listener` becomes the adapter's
-/// [`client_adapter::ClientEventSink`] (wrapped in a [`ListenerSink`]) so every
-/// translated [`client_protocol::events::ClientEvent`] is delivered to the
+/// [`client::adapter::ClientEventSink`] (wrapped in a [`ListenerSink`]) so every
+/// translated [`client::protocol::events::ClientEvent`] is delivered to the
 /// foreign host; `permission_sink` is where the [`AdapterPermissionGate`]'s
 /// outbound permission requests go.
 ///
@@ -5714,7 +5714,7 @@ pub enum MobileEngineError {
 ///   [`AdapterPermissionGate`], the slash dispatcher, the auth handle;
 /// - the registered foreign [`ClientEventListener`] (re-surfaced via
 ///   [`MobileRuntime::listener`]) that the adapter feeds every translated
-///   [`client_protocol::events::ClientEvent`].
+///   [`client::protocol::events::ClientEvent`].
 ///
 /// Both FFI packager crates (`ios-framework` / `android-aar`) RE-EXPORT this
 /// shared host rather than each re-deriving it — that is what keeps iOS and
@@ -5743,7 +5743,7 @@ pub struct MobileEngineHandle {
     /// listener). Held so [`Self::submit`] can synthesize boundary events
     /// (`TurnStarted` / `MessageComplete`) and push listing replies to the SAME
     /// outbound channel the streamed turn events ride.
-    event_sink: Arc<dyn client_adapter::ClientEventSink>,
+    event_sink: Arc<dyn client::adapter::ClientEventSink>,
     /// The same outbound channel as [`Self::event_sink`], taken BEFORE the
     /// [`TurnLifecycleListener`] wrap.
     ///
@@ -5763,7 +5763,7 @@ pub struct MobileEngineHandle {
     /// Use ONLY for events that belong to the connection rather than to a turn;
     /// anything a turn produces must keep going through [`Self::event_sink`] so
     /// it stays gated, sequenced and journaled.
-    connection_sink: Arc<dyn client_adapter::ClientEventSink>,
+    connection_sink: Arc<dyn client::adapter::ClientEventSink>,
     /// The cancellation token for the IN-FLIGHT turn, armed by
     /// `submit(SendPrompt)` and fired by `submit(Cancel)`. `None` when no turn is
     /// active. One connection ⇒ one in-flight turn (§0.5), so a single slot.
@@ -5774,7 +5774,7 @@ pub struct MobileEngineHandle {
     loop_transition: Arc<Mutex<()>>,
     cancel_reason: orchestrator::prompt::mid_turn_input::CancelReasonFlag,
     /// Correlates interactive `AskUserQuestion` events with inbound answers.
-    ask_user_question_broker: Arc<client_adapter::BridgeAskUserQuestionBroker>,
+    ask_user_question_broker: Arc<client::adapter::AskUserQuestionBroker>,
     /// Crash-safe input, event cursor, and recovery policy for client-addressed
     /// turns. This is deliberately independent from Activity/View ownership.
     durable_turns: Arc<DurableTurnStore>,
@@ -5996,7 +5996,7 @@ fn session_agent_transcript_event(
     requested_session_id: protocol::SessionId,
     current_session_id: protocol::SessionId,
     agent_id: String,
-    messages: Vec<client_protocol::message::MessageDto>,
+    messages: Vec<client::protocol::message::MessageDto>,
     revision: u64,
 ) -> Option<ClientEvent> {
     if requested_session_id != current_session_id {
@@ -6085,8 +6085,8 @@ fn session_agent_conversation_is_visible(message: &protocol::ConversationMessage
 /// explicit transcript-load command. This is intentionally prefix-scoped: a
 /// compact-summary mutation can trigger a replacement snapshot before later
 /// visible live rows in the same filesystem read are emitted.
-fn lower_session_agent_snapshot(raw: &[u8]) -> Vec<client_protocol::message::MessageDto> {
-    client_adapter::lowering::lower_transcript(&parse_session_agent_messages(raw))
+fn lower_session_agent_snapshot(raw: &[u8]) -> Vec<client::protocol::message::MessageDto> {
+    client::adapter::lowering::lower_transcript(&parse_session_agent_messages(raw))
 }
 
 fn unix_time_ms() -> u64 {
@@ -6338,16 +6338,16 @@ struct BoundSessionAgentMeta {
 }
 
 struct MobileSessionAgentObserver {
-    event_sink: Arc<dyn client_adapter::ClientEventSink>,
+    event_sink: Arc<dyn client::adapter::ClientEventSink>,
     session_uuid: Arc<std::sync::Mutex<String>>,
     bound_agents: tokio::sync::Mutex<HashMap<String, BoundSessionAgentMeta>>,
-    tool_indexes: tokio::sync::Mutex<HashMap<String, client_adapter::turn::ToolUseIndex>>,
+    tool_indexes: tokio::sync::Mutex<HashMap<String, client::adapter::turn::ToolUseIndex>>,
     message_indexes: tokio::sync::Mutex<HashMap<String, u64>>,
 }
 
 impl MobileSessionAgentObserver {
     fn new(
-        event_sink: Arc<dyn client_adapter::ClientEventSink>,
+        event_sink: Arc<dyn client::adapter::ClientEventSink>,
         session_uuid: Arc<std::sync::Mutex<String>>,
     ) -> Self {
         Self {
@@ -6472,7 +6472,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                 let dto = {
                     let mut indexes = self.tool_indexes.lock().await;
                     let index = indexes.entry(agent_key.clone()).or_default();
-                    client_adapter::lowering::lower_conversation_message_with(&message, index)
+                    client::adapter::lowering::lower_conversation_message_with(&message, index)
                 };
                 let message_index = {
                     let mut indexes = self.message_indexes.lock().await;
@@ -6695,7 +6695,7 @@ struct MobileWakeupDelivery {
     transition: Arc<Mutex<()>>,
     queue: Arc<msgqueue::MessageQueueManager>,
     orchestrator: std::sync::Weak<ConversationOrchestrator>,
-    events: Arc<dyn client_adapter::ClientEventSink>,
+    events: Arc<dyn client::adapter::ClientEventSink>,
     state: Arc<tool_cron::LoopRuntime>,
 }
 
@@ -7251,7 +7251,7 @@ impl ClientEventListener for TurnLifecycleListener {
         origin_session_id: String,
         task_id: String,
         run_id: String,
-        progress: client_protocol::listings::WorkflowProgressDto,
+        progress: client::protocol::listings::WorkflowProgressDto,
     ) {
         self.inner
             .on_workflow_progress(origin_session_id, task_id, run_id, progress)
@@ -7813,7 +7813,7 @@ impl MobileEngineHandle {
                         &self.inner.workflow_launcher.app_data_root,
                     )
                     .await;
-                let messages = client_adapter::lowering::lower_transcript_with_tool_results(
+                let messages = client::adapter::lowering::lower_transcript_with_tool_results(
                     &replayed.display_history,
                     &replayed.client_state_tool_results,
                 );
@@ -7826,7 +7826,7 @@ impl MobileEngineHandle {
                     .await;
                 if let Some(usage) = replayed.runtime_metadata.current_usage {
                     self.event_sink
-                        .emit(client_adapter::lowering::lower_current_usage(usage))
+                        .emit(client::adapter::lowering::lower_current_usage(usage))
                         .await;
                 }
                 self.event_sink
@@ -8280,7 +8280,7 @@ impl MobileEngineHandle {
             turn_id.map_or_else(|| "none".to_string(), |id| id.to_string())
         );
 
-        let wrapper = TurnWrapper::new(self.event_sink.clone());
+        let wrapper = TurnEventEmitter::new(self.event_sink.clone());
         self.inner.message_output.reset_message_buffer().await;
         wrapper.emit_turn_started(turn_id).await;
 
@@ -8299,7 +8299,7 @@ impl MobileEngineHandle {
                 .await;
             if let Err(err) = &result {
                 message_output.reset_message_buffer().await;
-                sink.emit(client_adapter::map_orchestrator_error(err)).await;
+                sink.emit(client::adapter::map_orchestrator_error(err)).await;
             }
 
             #[cfg(debug_assertions)]
@@ -8995,18 +8995,18 @@ impl MobileEngineHandle {
         };
         let has_more = rows.len() > offset.saturating_add(limit);
         let init = record.init_session_id.clone();
-        let sessions: Vec<client_protocol::local_apps::AppSessionRowDto> = rows
+        let sessions: Vec<client::protocol::local_apps::AppSessionRowDto> = rows
             .into_iter()
             .skip(offset)
             .take(limit)
             .map(|meta| {
-                let lowered = client_adapter::lowering::lower_session_metadata(&meta);
+                let lowered = client::adapter::lowering::lower_session_metadata(&meta);
                 let kind = if init.as_deref() == Some(lowered.uuid.as_str()) {
-                    client_protocol::local_apps::AppSessionKindDto::Init
+                    client::protocol::local_apps::AppSessionKindDto::Init
                 } else {
-                    client_protocol::local_apps::AppSessionKindDto::Conversation
+                    client::protocol::local_apps::AppSessionKindDto::Conversation
                 };
-                client_protocol::local_apps::AppSessionRowDto {
+                client::protocol::local_apps::AppSessionRowDto {
                     uuid: lowered.uuid,
                     title: lowered.title,
                     modified_rfc3339: lowered.modified_rfc3339,
@@ -9332,13 +9332,13 @@ impl MobileEngineHandle {
     /// - `RunSlashCommand` → the mobile slash dispatcher; local results use
     ///   `SlashCommandResult`, while prompt commands enter the normal turn stream.
     /// - `RefreshListings` / `ListModels` → the `list_*` handle reads, lowered to
-    ///   their listing events through the shared `client_adapter::lowering` fns.
+    ///   their listing events through the shared `client::adapter::lowering` fns.
     /// - `ForceCompact` / `ClearSession` / `RequestExit` / `Login` / `Logout` →
     ///   their `OrchestratorHandle` / `AuthHandle` entries.
     ///
     /// - `ListSessions` → enumerate the on-disk JSONL catalog via
     ///   `session::jsonl::list_recent_sessions`, lower each row through the shared
-    ///   `client_adapter::lower_session_metadata`, reply with `SessionList`.
+    ///   `client::adapter::lower_session_metadata`, reply with `SessionList`.
     /// - `NewSession` → `clear_session` (mints a fresh `SessionId`) + optional
     ///   `switch_model`, confirmed by `SessionStarted` (SESSIONS/HISTORY).
     /// - `ResumeSession` → LIVE hot-restore (SESSIONS/HISTORY): reject mid-turn,
@@ -9346,7 +9346,7 @@ impl MobileEngineHandle {
     ///   `orchestrator::replay_session_state`, adopt it into the running
     ///   orchestrator with `OrchestratorHandle::resume_session`, and confirm with a
     ///   `SessionResumed { session_id, messages }` carrying the full restored
-    ///   transcript (lowered via `client_adapter::lowering::lower_transcript`).
+    ///   transcript (lowered via `client::adapter::lowering::lower_transcript`).
     ///   An explicitly anchored mobile zero-message session restores with an empty
     ///   transcript and the same UUID. Other missing, corrupt, or malformed
     ///   sessions are honestly `Rejected` — we never emit a false
@@ -10157,7 +10157,7 @@ impl MobileEngineHandle {
                 if !self.inner.oauth_supported {
                     self.event_sink
                         .emit(ClientEvent::Error {
-                            kind: client_protocol::events::ErrorKindDto::Internal,
+                            kind: client::protocol::events::ErrorKindDto::Internal,
                             message: "OAuth login is not yet supported on this platform \
                                       (no secure credential store); configure an API key instead."
                                 .to_string(),
@@ -10175,7 +10175,7 @@ impl MobileEngineHandle {
                     Err(e) => {
                         self.event_sink
                             .emit(ClientEvent::Error {
-                                kind: client_protocol::events::ErrorKindDto::Internal,
+                                kind: client::protocol::events::ErrorKindDto::Internal,
                                 message: format!("login failed: {e}"),
                             })
                             .await;
@@ -10189,7 +10189,7 @@ impl MobileEngineHandle {
                 if let Err(e) = self.inner.auth.logout().await {
                     self.event_sink
                         .emit(ClientEvent::Error {
-                            kind: client_protocol::events::ErrorKindDto::Internal,
+                            kind: client::protocol::events::ErrorKindDto::Internal,
                             message: format!("logout failed: {e}"),
                         })
                         .await;
@@ -10266,7 +10266,7 @@ impl MobileEngineHandle {
             // `ListSessions` enumerates the on-disk JSONL catalog
             // (`<lingxi_home>/projects/<sanitized cwd>/*.jsonl`) via the shared
             // `session::jsonl::list_recent_sessions`, lowers each row through the
-            // shared `client_adapter::lower_session_metadata`, and replies with a
+            // shared `client::adapter::lower_session_metadata`, and replies with a
             // `SessionList` event — the same listing surface the bridge-server
             // router uses (decision §0.2). An empty / missing catalog replies with
             // an empty list (the loader's `EmptyDirectory` is not an error here —
@@ -10859,11 +10859,11 @@ impl MobileEngineHandle {
                 let filter = platform_api::task_registry::TaskListFilter {
                     status: status_filter.map(|s| {
                         match s {
-                            client_protocol::listings::TaskStatusDto::Pending => "pending",
-                            client_protocol::listings::TaskStatusDto::Running => "running",
-                            client_protocol::listings::TaskStatusDto::Paused => "paused",
-                            client_protocol::listings::TaskStatusDto::Completed => "completed",
-                            client_protocol::listings::TaskStatusDto::Failed => "failed",
+                            client::protocol::listings::TaskStatusDto::Pending => "pending",
+                            client::protocol::listings::TaskStatusDto::Running => "running",
+                            client::protocol::listings::TaskStatusDto::Paused => "paused",
+                            client::protocol::listings::TaskStatusDto::Completed => "completed",
+                            client::protocol::listings::TaskStatusDto::Failed => "failed",
                             // The DTO's user-stop variant maps back to the
                             // engine's terminal "killed" wire status (the same
                             // reconciliation as `lower_task_status`).
@@ -10881,7 +10881,7 @@ impl MobileEngineHandle {
                         message: format!("task list failed: {e}"),
                     })?;
                 for record in &records {
-                    let task = client_adapter::lowering::lower_task_record(record);
+                    let task = client::adapter::lowering::lower_task_record(record);
                     self.event_sink.emit(ClientEvent::TaskRow { task }).await;
                 }
                 Ok(())
@@ -10895,7 +10895,7 @@ impl MobileEngineHandle {
                     }
                 })?;
                 let (task_id, content, total_lines, truncated) =
-                    client_adapter::lowering::lower_task_output_chunk(&chunk);
+                    client::adapter::lowering::lower_task_output_chunk(&chunk);
                 self.event_sink
                     .emit(ClientEvent::TaskOutputChunk {
                         task_id,
@@ -10943,7 +10943,7 @@ impl MobileEngineHandle {
                     self.event_sink
                         .emit(ClientEvent::TaskStatusChanged {
                             task_id: record.task_id.clone(),
-                            status: client_adapter::lowering::lower_task_status(&record.status),
+                            status: client::adapter::lowering::lower_task_status(&record.status),
                             origin_session_id: None,
                             // A user stop is `killed`, never `failed`.
                             error: None,
@@ -11060,7 +11060,7 @@ impl MobileEngineHandle {
                 self.event_sink
                     .emit(ClientEvent::WorkflowResumed {
                         previous_task_id: task_id,
-                        task: client_adapter::lowering::lower_task_record(&new_record),
+                        task: client::adapter::lowering::lower_task_record(&new_record),
                         run_id,
                         origin_session_id: Some(resume_session),
                     })
@@ -11348,7 +11348,7 @@ impl MobileEngineHandle {
     /// `session::jsonl::list_recent_sessions` (the SAME enumerator the CLI
     /// `/resume` picker uses), capped at `limit`, then lowers each
     /// `SessionMetadata` row through the shared
-    /// `client_adapter::lower_session_metadata` (decision §0.2). A missing /
+    /// `client::adapter::lower_session_metadata` (decision §0.2). A missing /
     /// empty catalog (`LoaderError::EmptyDirectory`) is NOT an error here — it
     /// replies with an empty list ("no resumable sessions yet"); a real I/O
     /// failure is logged and also yields an empty list so the client always gets
@@ -11365,7 +11365,7 @@ impl MobileEngineHandle {
         {
             Ok(rows) => rows
                 .iter()
-                .map(client_adapter::lowering::lower_session_metadata)
+                .map(client::adapter::lowering::lower_session_metadata)
                 .collect(),
             Err(session::jsonl::LoaderError::EmptyDirectory) => Vec::new(),
             Err(e) => {
@@ -11516,14 +11516,14 @@ impl MobileEngineHandle {
         (session_id, dir)
     }
 
-    fn agent_summary_activity(messages: &[client_protocol::message::MessageDto]) -> Option<String> {
+    fn agent_summary_activity(messages: &[client::protocol::message::MessageDto]) -> Option<String> {
         let text = messages
             .iter()
             .rev()
             .flat_map(|message| message.blocks.iter())
             .find_map(|block| match block {
-                client_protocol::message::MessageBlockDto::Text { text }
-                | client_protocol::message::MessageBlockDto::Thinking { thinking: text, .. } => {
+                client::protocol::message::MessageBlockDto::Text { text }
+                | client::protocol::message::MessageBlockDto::Thinking { thinking: text, .. } => {
                     let line = text.lines().find(|line| !line.trim().is_empty())?.trim();
                     // Terminal lifecycle records are persisted as synthetic
                     // system messages (for resumability) and should not mask
@@ -11576,7 +11576,7 @@ impl MobileEngineHandle {
         let mut metadata_model: Option<String> = None;
         let mut metadata_model_profile: Option<String> = None;
         let mut latest_activity =
-            Self::agent_summary_activity(&client_adapter::lowering::lower_transcript(&messages));
+            Self::agent_summary_activity(&client::adapter::lowering::lower_transcript(&messages));
         if let Some(raw) = raw {
             for line in raw.lines().rev().filter(|line| !line.trim().is_empty()) {
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -11726,7 +11726,7 @@ impl MobileEngineHandle {
         session_id: protocol::SessionId,
         dir: &std::path::Path,
         agent_id: &str,
-    ) -> Result<(Vec<client_protocol::message::MessageDto>, u64), ClientError> {
+    ) -> Result<(Vec<client::protocol::message::MessageDto>, u64), ClientError> {
         let (messages, revision) = if agent_id == "main" {
             let uuid = session_id.as_uuid();
             let replayed = orchestrator::replay_session_state(
@@ -11770,7 +11770,7 @@ impl MobileEngineHandle {
             )
         };
         Ok((
-            client_adapter::lowering::lower_transcript(&messages),
+            client::adapter::lowering::lower_transcript(&messages),
             revision,
         ))
     }
@@ -11893,12 +11893,12 @@ impl MobileEngineHandle {
     }
 
     /// Pull a single listing kind and emit its listing event through the
-    /// connection's event sink, reusing the shared `client_adapter::lowering`
+    /// connection's event sink, reusing the shared `client::adapter::lowering`
     /// parity fns (decision §0.2). Listing kinds with no engine handle on mobile
     /// (`Sessions` / `Memory` / `Settings` / `Tasks`) are skipped. Slash
     /// commands are the engine's authoritative skill catalog on mobile.
     async fn emit_listing(&self, kind: ProtocolListingKind) {
-        use client_adapter::lowering::{
+        use client::adapter::lowering::{
             lower_agent_info, lower_doctor_report, lower_hook_info, lower_mcp_server_info,
             lower_status_snapshot,
         };
@@ -12201,13 +12201,13 @@ fn command_source_string(source: command_api::model::CommandSource) -> &'static 
 /// Android cannot drift).
 fn lower_auth_state(
     info: Option<platform_api::auth::LoginInfo>,
-) -> client_protocol::listings::AuthStateDto {
+) -> client::protocol::listings::AuthStateDto {
     match info {
-        Some(li) => client_protocol::listings::AuthStateDto::SignedIn {
+        Some(li) => client::protocol::listings::AuthStateDto::SignedIn {
             email: li.email,
             org_id: li.org_id,
         },
-        None => client_protocol::listings::AuthStateDto::SignedOut,
+        None => client::protocol::listings::AuthStateDto::SignedOut,
     }
 }
 
@@ -14668,7 +14668,7 @@ pub fn build_mobile_engine_inner(
     });
 
     let event_sink = inner.event_sink.clone();
-    let ask_user_question_broker = Arc::new(client_adapter::BridgeAskUserQuestionBroker::new(
+    let ask_user_question_broker = Arc::new(client::adapter::AskUserQuestionBroker::new(
         event_sink.clone(),
     ));
     {
@@ -15087,7 +15087,7 @@ pub fn build_mobile_engine_inner(
                         };
                         if let Err(error) = result {
                             message_output.reset_message_buffer().await;
-                            sink.emit(client_adapter::map_orchestrator_error(&error))
+                            sink.emit(client::adapter::map_orchestrator_error(&error))
                                 .await;
                         }
                         settle_mobile_loop_turn(
@@ -15196,9 +15196,9 @@ mod tests {
 
     use crate::mobile::local_apps_mcp::LocalAppsMcpTransport;
     use async_trait::async_trait;
-    use client_adapter::{ClientEventListener, ListenerSink, MockSink, PermissionRequestSink};
-    use client_protocol::events::ClientEvent;
-    use client_protocol::listings::SessionModeDto;
+    use client::adapter::{ClientEventListener, ListenerSink, MockSink, PermissionRequestSink};
+    use client::protocol::events::ClientEvent;
+    use client::protocol::listings::SessionModeDto;
     use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
     use platform_api::{OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult};
     use tokio::sync::Notify;
@@ -17424,7 +17424,7 @@ mod tests {
         assert!(
             gate.resolve(
                 1,
-                client_protocol::permission::PermissionResponseDto::Deny,
+                client::protocol::permission::PermissionResponseDto::Deny,
                 "Bash"
             )
             .await
@@ -17596,7 +17596,7 @@ mod tests {
                 event,
                 ClientEvent::TaskStatusChanged { task_id, status, .. }
                     if task_id == &launched.task_id
-                        && *status == client_protocol::listings::TaskStatusDto::Completed
+                        && *status == client::protocol::listings::TaskStatusDto::Completed
             )),
             "workflow completion must be pushed to the mobile client"
         );
@@ -17898,10 +17898,10 @@ mod tests {
 
     use super::{build_mobile_engine, MobileEngineHandle};
     use crate::mobile::local_apps_llm::test_support::ScriptedModel;
-    use client_protocol::commands::ClientCommand;
-    use client_protocol::error::ClientError;
-    use client_protocol::events::{ClientEvent as Ev, TurnRecoveryStateDto};
-    use client_protocol::permission::PermissionResponseDto;
+    use client::protocol::commands::ClientCommand;
+    use client::protocol::error::ClientError;
+    use client::protocol::events::{ClientEvent as Ev, TurnRecoveryStateDto};
+    use client::protocol::permission::PermissionResponseDto;
     use platform_api::audio::{
         AudioCapabilitySnapshot, AudioError, AudioOperation, AudioOperationContext,
         AudioOperationId, AudioOperationKind, AudioOperationSuccess, AudioOwner,
@@ -18069,7 +18069,7 @@ mod tests {
         handle.runtime().block_on(async {
             handle
                 .submit(ClientCommand::PluginCommand {
-                    command: client_protocol::local_apps::PluginCommandDto::GetStatus {
+                    command: client::protocol::local_apps::PluginCommandDto::GetStatus {
                         plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                     },
                 })
@@ -18081,13 +18081,13 @@ mod tests {
                     matches!(
                         event,
                         Ev::AppEvent {
-                            event: client_protocol::local_apps::AppEventDto::PluginStatusChanged {
+                            event: client::protocol::local_apps::AppEventDto::PluginStatusChanged {
                                 status,
                             },
                         } if status.plugin_id == crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
                             && matches!(
                                 status.state,
-                                client_protocol::local_apps::PluginActivationStateDto::Loaded
+                                client::protocol::local_apps::PluginActivationStateDto::Loaded
                             )
                     )
                 }),
@@ -18184,7 +18184,7 @@ mod tests {
 
         handle.runtime().block_on(async {
             let command = |enabled| ClientCommand::PluginCommand {
-                command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                     plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                     enabled,
                 },
@@ -18199,13 +18199,13 @@ mod tests {
                     matches!(
                         event,
                         Ev::AppEvent {
-                            event: client_protocol::local_apps::AppEventDto::PluginStatusChanged {
+                            event: client::protocol::local_apps::AppEventDto::PluginStatusChanged {
                                 status,
                             },
                         } if status.plugin_id == crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
                             && matches!(
                                 status.state,
-                                client_protocol::local_apps::PluginActivationStateDto::Disabled
+                                client::protocol::local_apps::PluginActivationStateDto::Disabled
                             )
                     )
                 }),
@@ -18267,13 +18267,13 @@ mod tests {
                     matches!(
                         event,
                         Ev::AppEvent {
-                            event: client_protocol::local_apps::AppEventDto::PluginStatusChanged {
+                            event: client::protocol::local_apps::AppEventDto::PluginStatusChanged {
                                 status,
                             },
                         } if status.plugin_id == crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
                             && matches!(
                                 status.state,
-                                client_protocol::local_apps::PluginActivationStateDto::Loaded
+                                client::protocol::local_apps::PluginActivationStateDto::Loaded
                             )
                     )
                 }),
@@ -18330,7 +18330,7 @@ mod tests {
             handle.runtime().block_on(async {
                 handle
                     .submit(ClientCommand::PluginCommand {
-                        command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                        command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                             plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                             enabled: false,
                         },
@@ -18372,7 +18372,7 @@ mod tests {
                 .is_none());
             restarted
                 .submit(ClientCommand::PluginCommand {
-                    command: client_protocol::local_apps::PluginCommandDto::GetStatus {
+                    command: client::protocol::local_apps::PluginCommandDto::GetStatus {
                         plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                     },
                 })
@@ -18382,12 +18382,12 @@ mod tests {
                 matches!(
                     event,
                     Ev::AppEvent {
-                        event: client_protocol::local_apps::AppEventDto::PluginStatusChanged {
+                        event: client::protocol::local_apps::AppEventDto::PluginStatusChanged {
                             status,
                         },
                     } if matches!(
                         status.state,
-                        client_protocol::local_apps::PluginActivationStateDto::Disabled
+                        client::protocol::local_apps::PluginActivationStateDto::Disabled
                     )
                 )
             }));
@@ -18449,10 +18449,10 @@ mod tests {
                 "disabled boot should retain no materialized PluginManager state"
             );
             for command in [
-                client_protocol::local_apps::PluginCommandDto::GetStatus {
+                client::protocol::local_apps::PluginCommandDto::GetStatus {
                     plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                 },
-                client_protocol::local_apps::PluginCommandDto::GetInventory {
+                client::protocol::local_apps::PluginCommandDto::GetInventory {
                     plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                 },
             ] {
@@ -18477,28 +18477,28 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             Ev::AppEvent {
-                event: client_protocol::local_apps::AppEventDto::PluginStatusChanged { status }
+                event: client::protocol::local_apps::AppEventDto::PluginStatusChanged { status }
             } if matches!(
                 status.state,
-                client_protocol::local_apps::PluginActivationStateDto::Disabled
+                client::protocol::local_apps::PluginActivationStateDto::Disabled
             )
         )));
         assert!(events.iter().any(|event| matches!(
             event,
             Ev::AppEvent {
-                event: client_protocol::local_apps::AppEventDto::PluginInventoryChanged {
+                event: client::protocol::local_apps::AppEventDto::PluginInventoryChanged {
                     inventory
                 }
             } if matches!(
                 inventory.state,
-                client_protocol::local_apps::PluginActivationStateDto::Disabled
+                client::protocol::local_apps::PluginActivationStateDto::Disabled
             ) && inventory.counts.skills > 0
         )));
 
         handle.runtime().block_on(async {
             handle
                 .submit(ClientCommand::PluginCommand {
-                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                    command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                         plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                         enabled: true,
                     },
@@ -18523,13 +18523,13 @@ mod tests {
         handle.runtime().block_on(async {
             for _ in 0..4 {
                 let disable = handle.submit(ClientCommand::PluginCommand {
-                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                    command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                         plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                         enabled: false,
                     },
                 });
                 let enable = handle.submit(ClientCommand::PluginCommand {
-                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                    command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                         plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                         enabled: true,
                     },
@@ -18572,7 +18572,7 @@ mod tests {
         handle.runtime().block_on(async {
             let error = handle
                 .submit(ClientCommand::PluginCommand {
-                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                    command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                         plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                         enabled: false,
                     },
@@ -19836,7 +19836,7 @@ mod tests {
                         && messages.iter().any(|message| message.blocks.iter().any(|block| {
                             matches!(
                                 block,
-                                client_protocol::message::MessageBlockDto::Text { text }
+                                client::protocol::message::MessageBlockDto::Text { text }
                                     if text.contains("nested workflow child")
                             )
                         }))
@@ -20149,7 +20149,7 @@ mod tests {
             listener
                 .on_event(Ev::TaskStatusChanged {
                     task_id: task_id.clone(),
-                    status: client_protocol::listings::TaskStatusDto::Cancelled,
+                    status: client::protocol::listings::TaskStatusDto::Cancelled,
                     origin_session_id: None,
                     error: None,
                 })
@@ -20182,7 +20182,7 @@ mod tests {
 
     #[test]
     fn provider_credentials_round_trip_through_mobile_submit() {
-        use client_protocol::commands::ProviderCredentialSecretDto;
+        use client::protocol::commands::ProviderCredentialSecretDto;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle_with_secure_store(tmp.path());
@@ -20765,7 +20765,7 @@ mod tests {
             assert!(!events.iter().any(|event| matches!(
                 event,
                 Ev::TurnEnded {
-                    outcome: client_protocol::events::TurnOutcomeDto::Cancelled,
+                    outcome: client::protocol::events::TurnOutcomeDto::Cancelled,
                     ..
                 }
             )));
@@ -21185,9 +21185,9 @@ mod tests {
         turn.cancel.cancel();
         listener
             .on_event(Ev::TurnEnded {
-                outcome: client_protocol::events::TurnOutcomeDto::EndTurn,
+                outcome: client::protocol::events::TurnOutcomeDto::EndTurn,
                 stop_reason: Some("end_turn".to_string()),
-                cost: client_protocol::events::CostDto {
+                cost: client::protocol::events::CostDto {
                     total_usd: 0.0,
                     input_tokens: 0,
                     output_tokens: 0,
@@ -21222,7 +21222,7 @@ mod tests {
         assert!(matches!(
             events.first(),
             Some(Ev::TurnEnded {
-                outcome: client_protocol::events::TurnOutcomeDto::Cancelled,
+                outcome: client::protocol::events::TurnOutcomeDto::Cancelled,
                 stop_reason: Some(reason),
                 ..
             }) if reason == "cancelled"
@@ -21241,9 +21241,9 @@ mod tests {
 
         listener
             .on_event(Ev::TurnEnded {
-                outcome: client_protocol::events::TurnOutcomeDto::EndTurn,
+                outcome: client::protocol::events::TurnOutcomeDto::EndTurn,
                 stop_reason: Some("end_turn".to_string()),
-                cost: client_protocol::events::CostDto {
+                cost: client::protocol::events::CostDto {
                     total_usd: 0.0,
                     input_tokens: 0,
                     output_tokens: 0,
@@ -21260,7 +21260,7 @@ mod tests {
             .await;
         listener
             .on_event(Ev::Error {
-                kind: client_protocol::events::ErrorKindDto::Internal,
+                kind: client::protocol::events::ErrorKindDto::Internal,
                 message: "late error".to_string(),
             })
             .await;
@@ -21301,7 +21301,7 @@ mod tests {
             .await;
         listener
             .on_event(Ev::AskUserQuestion {
-                request: client_protocol::ask_user_question::AskUserQuestionRequestDto {
+                request: client::protocol::ask_user_question::AskUserQuestionRequestDto {
                     request_id: 7,
                     questions: Vec::new(),
                     timeout_secs: None,
@@ -21440,9 +21440,9 @@ mod tests {
 
         listener
             .on_event(Ev::TurnEnded {
-                outcome: client_protocol::events::TurnOutcomeDto::EndTurn,
+                outcome: client::protocol::events::TurnOutcomeDto::EndTurn,
                 stop_reason: Some("end_turn".to_string()),
-                cost: client_protocol::events::CostDto {
+                cost: client::protocol::events::CostDto {
                     total_usd: 0.0,
                     input_tokens: 0,
                     output_tokens: 0,
@@ -21577,7 +21577,7 @@ mod tests {
 
         listener
             .on_event(Ev::AskUserQuestion {
-                request: client_protocol::ask_user_question::AskUserQuestionRequestDto {
+                request: client::protocol::ask_user_question::AskUserQuestionRequestDto {
                     request_id: 5,
                     questions: Vec::new(),
                     timeout_secs: None,
@@ -23337,8 +23337,8 @@ mod tests {
     // ── LOCAL-APPS (phase 1): handler-level tests (command in → state +
     //    events out) over the real engine handle ─────────────────────────────
 
-    use client_protocol::commands::AppCreateModeDto;
-    use client_protocol::local_apps::{
+    use client::protocol::commands::AppCreateModeDto;
+    use client::protocol::local_apps::{
         AppCreateOriginDto, AppErrorCodeDto, AppEventDto, AppRuntimeStateDto,
     };
 
@@ -23358,7 +23358,7 @@ mod tests {
         std::mem::take(&mut *listener.received.lock().await)
     }
 
-    fn apps_changed_rows(events: &[Ev]) -> Option<Vec<client_protocol::local_apps::AppRecordDto>> {
+    fn apps_changed_rows(events: &[Ev]) -> Option<Vec<client::protocol::local_apps::AppRecordDto>> {
         events.iter().rev().find_map(|event| match event {
             Ev::AppsChanged { apps } => Some(apps.clone()),
             _ => None,
@@ -23444,7 +23444,7 @@ mod tests {
 
             handle
                 .submit(ClientCommand::PluginCommand {
-                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                    command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                         plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                         enabled: false,
                     },
@@ -23530,7 +23530,7 @@ mod tests {
 
             handle
                 .submit(ClientCommand::PluginCommand {
-                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                    command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
                         plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
                         enabled: false,
                     },
@@ -23673,7 +23673,7 @@ mod tests {
             assert_eq!(sessions[0].uuid, init_id);
             assert_eq!(
                 sessions[0].kind,
-                client_protocol::local_apps::AppSessionKindDto::Init
+                client::protocol::local_apps::AppSessionKindDto::Init
             );
             assert_eq!(sessions[0].message_count, 0, "an anchor is empty");
         });
@@ -24908,7 +24908,7 @@ mod tests {
         listener: &FakeListener,
         name: &str,
         brief: &str,
-        surface: Option<client_protocol::local_apps::AppSurfaceDto>,
+        surface: Option<client::protocol::local_apps::AppSurfaceDto>,
         mode: AppCreateModeDto,
         request_id: Option<&str>,
     ) -> Vec<Ev> {
@@ -24932,7 +24932,7 @@ mod tests {
     /// The `AppCreated` row (record + correlation key) from a create's events.
     fn created_row(
         events: &[Ev],
-    ) -> Option<(client_protocol::local_apps::AppRecordDto, Option<String>)> {
+    ) -> Option<(client::protocol::local_apps::AppRecordDto, Option<String>)> {
         events.iter().find_map(|event| match event {
             Ev::AppEvent {
                 event: AppEventDto::AppCreated { record, request_id },
@@ -25071,7 +25071,7 @@ mod tests {
                 &listener,
                 "",
                 "",
-                Some(client_protocol::local_apps::AppSurfaceDto::Dom),
+                Some(client::protocol::local_apps::AppSurfaceDto::Dom),
                 AppCreateModeDto::Shell,
                 Some("req-2"),
             )

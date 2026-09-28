@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use client_protocol::audio::{
+use client::protocol::audio::{
     AudioCapabilitySnapshotDto, AudioErrorDto, AudioErrorKindDto, AudioInitiatorDto,
     AudioOperationDto, AudioOperationIdDto, AudioOperationKindDto, AudioOperationRequestDto,
     AudioOperationResultDto, AudioOwnerDto, AudioReadinessStateDto, MAX_AUDIO_PAYLOAD_BYTES,
@@ -442,7 +442,7 @@ fn error_from_dto(value: AudioErrorDto) -> AudioError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use client_protocol::audio::{
+    use client::protocol::audio::{
         AudioErrorKindDto, AudioOperationReadinessDto, AudioOperationResultDto,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};

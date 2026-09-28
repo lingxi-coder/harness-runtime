@@ -6,9 +6,9 @@
 //! invent a second agent lifecycle.
 
 use async_trait::async_trait;
-use client_adapter::ClientEventSink;
-use client_protocol::events::ClientEvent;
-use client_protocol::listings::SessionAgentSummaryDto;
+use client::adapter::ClientEventSink;
+use client::protocol::events::ClientEvent;
+use client::protocol::listings::SessionAgentSummaryDto;
 use protocol::{ConversationMessage, SessionId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -290,7 +290,7 @@ pub struct DesktopSessionAgentObserver {
     event_sink: Arc<dyn ClientEventSink>,
     session_id: std::sync::RwLock<String>,
     bound_agents: tokio::sync::Mutex<HashMap<String, BoundAgent>>,
-    tool_indexes: tokio::sync::Mutex<HashMap<String, client_adapter::turn::ToolUseIndex>>,
+    tool_indexes: tokio::sync::Mutex<HashMap<String, client::adapter::turn::ToolUseIndex>>,
     message_indexes: tokio::sync::Mutex<HashMap<String, u64>>,
     // Process-owned facts, never restored from JSONL. Retain terminal summaries
     // so a concurrent disk read cannot resurrect an older running record.
@@ -549,7 +549,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgent
                 let dto = {
                     let mut indexes = self.tool_indexes.lock().await;
                     let index = indexes.entry(key.clone()).or_default();
-                    client_adapter::lowering::lower_conversation_message_with(&message, index)
+                    client::adapter::lowering::lower_conversation_message_with(&message, index)
                 };
                 let message_index = {
                     let mut indexes = self.message_indexes.lock().await;
@@ -723,8 +723,8 @@ impl DesktopSessionAgentObserver {
 
 /// Lower a complete transcript to the event's message DTO shape.
 #[must_use]
-pub fn lower_transcript(raw: &[u8]) -> Vec<client_protocol::message::MessageDto> {
-    client_adapter::lowering::lower_transcript(&parse_transcript_messages(raw))
+pub fn lower_transcript(raw: &[u8]) -> Vec<client::protocol::message::MessageDto> {
+    client::adapter::lowering::lower_transcript(&parse_transcript_messages(raw))
 }
 
 #[cfg(test)]
@@ -769,7 +769,7 @@ mod tests {
     #[tokio::test]
     async fn live_snapshot_is_process_scoped_and_allocation_precedes_async_delivery() {
         let observer =
-            DesktopSessionAgentObserver::new(client_adapter::MockSink::arc(), "session-a");
+            DesktopSessionAgentObserver::new(client::adapter::MockSink::arc(), "session-a");
         let agent_id = protocol::AgentId::new();
         let allocation = SubagentObservation::Allocated {
             agent_id,
@@ -790,7 +790,7 @@ mod tests {
         // Reconnect uses this same instance; restart owns a fresh empty instance.
         assert_eq!(observer.snapshot("session-a").len(), 1);
         let restarted =
-            DesktopSessionAgentObserver::new(client_adapter::MockSink::arc(), "session-a");
+            DesktopSessionAgentObserver::new(client::adapter::MockSink::arc(), "session-a");
         assert!(restarted.snapshot("session-a").is_empty());
         observer
             .on_event(SubagentObservation::Killed { agent_id })
@@ -808,7 +808,7 @@ mod tests {
     #[tokio::test]
     async fn session_switch_keeps_existing_receipts_and_moves_future_allocations() {
         let observer =
-            DesktopSessionAgentObserver::new(client_adapter::MockSink::arc(), "session-a");
+            DesktopSessionAgentObserver::new(client::adapter::MockSink::arc(), "session-a");
         let old_id = protocol::AgentId::new();
         let event = SubagentObservation::Allocated {
             agent_id: old_id,
@@ -838,7 +838,7 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_spawn_owner_survives_session_switch_and_delayed_delivery() {
-        let sink = client_adapter::MockSink::arc();
+        let sink = client::adapter::MockSink::arc();
         let session_a = protocol::SessionId::new();
         let session_b = protocol::SessionId::new();
         let owner_a = session_a.as_uuid().to_string();
@@ -887,7 +887,7 @@ mod tests {
 
     #[tokio::test]
     async fn progress_and_retry_are_live_activity_not_a_resurrection_signal() {
-        let sink = client_adapter::MockSink::arc();
+        let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
         let agent_id = protocol::AgentId::new();
         allocate(&observer, agent_id, true, 0).await;
@@ -942,7 +942,7 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_park_updates_liveness_without_losing_wake_binding() {
-        let sink = client_adapter::MockSink::arc();
+        let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
         let agent_id = protocol::AgentId::new();
         allocate(&observer, agent_id, false, 0).await;
@@ -993,7 +993,7 @@ mod tests {
 
     #[tokio::test]
     async fn hidden_notification_wakes_idle_without_exposing_internal_input() {
-        let sink = client_adapter::MockSink::arc();
+        let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
         let agent_id = protocol::AgentId::new();
         allocate(&observer, agent_id, true, 0).await;
@@ -1092,7 +1092,7 @@ mod tests {
 
     #[tokio::test]
     async fn allocation_origin_routes_updates_independently_of_boot_session() {
-        let sink = client_adapter::MockSink::arc();
+        let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "boot-session");
         for owner in [protocol::SessionId::new(), protocol::SessionId::new()] {
             let agent_id = protocol::AgentId::new();
@@ -1132,7 +1132,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_shot_completion_emits_completed_and_releases_all_observer_state() {
-        let sink = client_adapter::MockSink::arc();
+        let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
         let agent_id = protocol::AgentId::new();
         allocate(&observer, agent_id, false, 0).await;
@@ -1160,7 +1160,7 @@ mod tests {
     /// Hence the separate `terminal` flag, and hence this test.
     #[tokio::test]
     async fn a_parked_persistent_agent_can_be_reallocated() {
-        let sink = client_adapter::MockSink::arc();
+        let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
         let agent_id = protocol::AgentId::new();
         allocate(&observer, agent_id, true, 0).await;
@@ -1191,7 +1191,7 @@ mod tests {
     /// pinned — a flag that is always false would pass the test above on its own.
     #[tokio::test]
     async fn a_terminal_agent_is_never_reallocated() {
-        let sink = client_adapter::MockSink::arc();
+        let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
         let agent_id = protocol::AgentId::new();
         allocate(&observer, agent_id, false, 0).await;
@@ -1213,7 +1213,7 @@ mod tests {
 
     #[tokio::test]
     async fn persistent_completion_is_completed_and_keeps_restored_index_for_resume() {
-        let sink = client_adapter::MockSink::arc();
+        let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
         let agent_id = protocol::AgentId::new();
         allocate(&observer, agent_id, true, 4).await;

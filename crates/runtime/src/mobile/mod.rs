@@ -113,7 +113,7 @@ mod mobile_lsp;
 mod plan_approval;
 
 #[cfg(feature = "mobile")]
-pub use client_protocol::listings::{
+pub use client::protocol::listings::{
     ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
     ModelPricingTierDto, SessionModeDto,
 };
@@ -150,7 +150,7 @@ pub use audio_service::{
     from_native_audio_service, max_audio_payload_bytes, AudioFfiError, NativeAudioService,
 };
 #[cfg(feature = "mobile")]
-pub use client_adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
+pub use client::adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
 
 // ---------------------------------------------------------------------------
 // P1.6 (§19.2) — mobile composes `PluginManager` for the first time.

@@ -1,6 +1,6 @@
 mod reasoning_preference_tests {
     use super::*;
-    use client_protocol::controls::ReasoningSelectionDto;
+    use client::protocol::controls::ReasoningSelectionDto;
 
     #[test]
     fn reasoning_choice_survives_engine_restart_and_new_session() {

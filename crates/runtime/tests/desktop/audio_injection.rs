@@ -168,8 +168,8 @@ fn a_recognizer_alone_registers_speech_but_not_voice() {
 struct NoopPermissionSink;
 
 #[async_trait]
-impl client_adapter::PermissionRequestSink for NoopPermissionSink {
-    async fn emit_request(&self, _request: client_protocol::permission::PermissionRequest) {}
+impl client::adapter::PermissionRequestSink for NoopPermissionSink {
+    async fn emit_request(&self, _request: client::protocol::permission::PermissionRequest) {}
 }
 
 /// A deterministic, env-free config rooted at a temp dir. `isolated_credential_storage`
@@ -192,7 +192,7 @@ fn sandbox_config(audio: Option<DesktopAudio>) -> (tempfile::TempDir, DesktopCon
 async fn run_build(cfg: DesktopConfig) -> harness_runtime::desktop::DesktopRuntime {
     let output: Arc<dyn platform_api::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
-    let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> = Arc::new(NoopPermissionSink);
+    let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> = Arc::new(NoopPermissionSink);
     // `build` returns a large future; boxing it keeps this test off the stack
     // limit and quiet under `clippy::large_futures`.
     Box::pin(build(cfg, output, perm_sink))

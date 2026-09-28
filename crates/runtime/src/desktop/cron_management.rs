@@ -1,5 +1,5 @@
 //! Desktop management surface over the scheduler's authoritative task file.
-use client_protocol::{commands::CronRequestDto, events::CronJobDto};
+use client::protocol::{commands::CronRequestDto, events::CronJobDto};
 use cron::tasks_file::{CronTask, ScheduledTasks};
 use platform_api::task_registry::TaskRegistryHandle;
 use platform_api::{FileSystem, FsError};
@@ -537,7 +537,7 @@ mod tests {
             no_expiry: None,
         }
     }
-    fn automation() -> client_protocol::commands::CronAutomationDto {
+    fn automation() -> client::protocol::commands::CronAutomationDto {
         serde_json::from_value(serde_json::json!({"version":2,"status":"active","model":"openai/gpt-test","reasoning":{"type":"automatic"},"runMode":"new_session","notificationPolicy":"all"})).unwrap()
     }
     #[test]

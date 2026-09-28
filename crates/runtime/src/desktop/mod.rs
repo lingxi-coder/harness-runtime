@@ -60,7 +60,7 @@ mod watcher_test_support;
 
 use crate::desktop::ide::DesktopIdeHandle;
 use async_trait::async_trait;
-use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
+use client::adapter::{AdapterPermissionGate, PermissionRequestSink};
 use command_api::model::BuiltinCommandHandler;
 use command_api::{
     parse_slash_command, CommandRegistry, CommandResult, ParsedSlashCommand,
@@ -8029,7 +8029,7 @@ pub enum BuildError {
 ///
 /// - `output` is the [`platform_api::OutputStream`] the orchestrator pushes turn
 ///   events to. The CLI supplies its NDJSON/plain/TUI sink; the bridge-server
-///   supplies a `client_adapter::AdapterOutputStream`. The SAME `build` serves
+///   supplies a `client::adapter::AdapterOutputStream`. The SAME `build` serves
 ///   both.
 /// - `permission_sink` is the destination for the [`AdapterPermissionGate`]'s
 ///   outbound `PermissionRequest`s. It is wired ONLY when
@@ -19865,7 +19865,7 @@ still flip to available"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let permission_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let runtime = build(cfg, output, permission_sink)
             .await
@@ -20444,7 +20444,7 @@ still flip to available"
         assert_eq!(seed.subscription_type.as_deref(), Some("enterprise"));
     }
 
-    /// A [`client_adapter::PermissionRequestSink`] that records the requests the
+    /// A [`client::adapter::PermissionRequestSink`] that records the requests the
     /// gate emits, so a test can prove a turn's `check()` actually reached the
     /// adapter gate (and not the always-allow `NoOpPermissionGate`).
     #[derive(Default)]
@@ -20453,8 +20453,8 @@ still flip to available"
     }
 
     #[async_trait::async_trait]
-    impl client_adapter::PermissionRequestSink for RecordingPermissionSink {
-        async fn emit_request(&self, _request: client_protocol::permission::PermissionRequest) {
+    impl client::adapter::PermissionRequestSink for RecordingPermissionSink {
+        async fn emit_request(&self, _request: client::protocol::permission::PermissionRequest) {
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
@@ -21035,7 +21035,7 @@ still flip to available"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink)
@@ -21070,7 +21070,7 @@ still flip to available"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -21124,7 +21124,7 @@ still flip to available"
         let (_tmp, cfg) = test_config(true);
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -21238,7 +21238,7 @@ still flip to available"
         let (_tmp, cfg) = test_config(true);
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
         let registry = Arc::downgrade(&rt.task_registry);
@@ -21322,7 +21322,7 @@ still flip to available"
         let (_tmp, cfg) = test_config(true);
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
         let coordinator = rt.session_state.clone();
@@ -21439,7 +21439,7 @@ still flip to available"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
 
@@ -21487,7 +21487,7 @@ still flip to available"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
 
@@ -21520,7 +21520,7 @@ still flip to available"
         let (_tmp, cfg) = test_config(true);
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -21545,7 +21545,7 @@ still flip to available"
         let (_tmp, cfg) = test_config(true);
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -21574,7 +21574,7 @@ still flip to available"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -21608,7 +21608,7 @@ still flip to available"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -21643,7 +21643,7 @@ still flip to available"
         let (_tmp, cfg) = test_config(true);
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -21691,7 +21691,7 @@ still flip to available"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
 
@@ -21716,7 +21716,7 @@ still flip to available"
         let (_tmp, cfg) = test_config(true);
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         // Must not panic / error; no plugin commands present.
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -21733,7 +21733,7 @@ still flip to available"
         cfg.json_schema = Some(serde_json::json!({ "type": "object" }));
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
         assert!(
@@ -21747,7 +21747,7 @@ still flip to available"
         let (_tmp, cfg) = test_config(true);
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
         assert!(
@@ -21883,7 +21883,7 @@ still flip to available"
         let (_tmp, cfg) = test_config(true);
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
         // Anthropic always represented; with no key/oauth it is unavailable.
@@ -21936,7 +21936,7 @@ still flip to available"
         std::env::set_var("LINGXI_TEST_REROUTE_KEY", "k");
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
         std::env::remove_var("LINGXI_TEST_REROUTE_KEY");
@@ -21990,7 +21990,7 @@ still flip to available"
         std::env::set_var("LINGXI_TEST_REROUTE_KEY_EXPLICIT", "k");
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
         std::env::remove_var("LINGXI_TEST_REROUTE_KEY_EXPLICIT");
@@ -22027,7 +22027,7 @@ still flip to available"
         std::env::set_var("LINGXI_TEST_REROUTE_KEY_ENVPIN", "k");
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
         std::env::remove_var("LINGXI_TEST_REROUTE_KEY_ENVPIN");
@@ -22047,7 +22047,7 @@ still flip to available"
         let (_tmp, cfg) = test_config(true);
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
         let m = &rt.provider_auth_methods;
@@ -22100,7 +22100,7 @@ still flip to available"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg.clone(), output, perm_sink)
             .await
@@ -23444,7 +23444,7 @@ must be filtered out: got {after:?}"
         let (_tmp, cfg) = test_config(true);
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -23469,7 +23469,7 @@ must be filtered out: got {after:?}"
         .expect("write persisted reasoning default");
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink)
@@ -23504,7 +23504,7 @@ must be filtered out: got {after:?}"
         cfg.injected_permission_gate = Some(Arc::new(permission::DenyOnAskGate));
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink)
@@ -23527,7 +23527,7 @@ must be filtered out: got {after:?}"
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let sink = Arc::new(RecordingPermissionSink::default());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> = sink.clone();
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> = sink.clone();
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
 
@@ -23562,7 +23562,7 @@ must be filtered out: got {after:?}"
         assert!(
             gate.resolve(
                 1,
-                client_protocol::permission::PermissionResponseDto::Deny,
+                client::protocol::permission::PermissionResponseDto::Deny,
                 "Bash"
             )
             .await
@@ -23599,7 +23599,7 @@ must be filtered out: got {after:?}"
         let (_tmp, cfg) = test_config(true);
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -23646,7 +23646,7 @@ must be filtered out: got {after:?}"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         // The wired `fire_session_start("startup")` runs INSIDE build(): a
@@ -23692,7 +23692,7 @@ must be filtered out: got {after:?}"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink)
@@ -23732,7 +23732,7 @@ must be filtered out: got {after:?}"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink)
@@ -23765,7 +23765,7 @@ must be filtered out: got {after:?}"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink)
@@ -23803,7 +23803,7 @@ must be filtered out: got {after:?}"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink)
@@ -23842,7 +23842,7 @@ must be filtered out: got {after:?}"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink)
@@ -23891,7 +23891,7 @@ must be filtered out: got {after:?}"
         cfg.cli_agent = Some("tester".to_string());
         let output1: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm1: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm1: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt1 = build(cfg, output1, perm1)
             .await
@@ -23902,7 +23902,7 @@ must be filtered out: got {after:?}"
         // Resume boot: no `--agent`; `rVe` reads the persisted record and re-adopts.
         let output2: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm2: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm2: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt2 = build(resume_cfg, output2, perm2)
             .await
@@ -23940,7 +23940,7 @@ must be filtered out: got {after:?}"
 
         let output1: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm1: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm1: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt1 = build(cfg, output1, perm1)
             .await
@@ -23950,7 +23950,7 @@ must be filtered out: got {after:?}"
 
         let output2: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm2: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm2: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt2 = build(resume_cfg, output2, perm2)
             .await
@@ -23989,7 +23989,7 @@ must be filtered out: got {after:?}"
         cfg.cli_agent = Some("tester".to_string());
         let output1: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm1: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm1: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt1 = build(cfg, output1, perm1)
             .await
@@ -23999,7 +23999,7 @@ must be filtered out: got {after:?}"
 
         let output2: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm2: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm2: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt2 = build(resume_cfg, output2, perm2)
             .await
@@ -24037,7 +24037,7 @@ must be filtered out: got {after:?}"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let permission_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let runtime = build(cfg, output, permission_sink)
             .await
@@ -24223,7 +24223,7 @@ must be filtered out: got {after:?}"
 
             let output: Arc<dyn platform_api::OutputStream> =
                 Arc::new(orchestrator::test_support::MockOutputStream::new());
-            let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
                 Arc::new(RecordingPermissionSink::default());
             let rt = build(cfg, output, perm_sink).await.expect("build");
             let hooks = rt.orchestrator.list_hooks().await;
@@ -24245,7 +24245,7 @@ must be filtered out: got {after:?}"
             cfg.session_persistence = persist;
             let output: Arc<dyn platform_api::OutputStream> =
                 Arc::new(orchestrator::test_support::MockOutputStream::new());
-            let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
                 Arc::new(RecordingPermissionSink::default());
             let rt = build(cfg, output, perm_sink).await.expect("build");
             assert_eq!(
@@ -24332,7 +24332,7 @@ must be filtered out: got {after:?}"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         // The wired `fire_instructions_loaded()` runs INSIDE build(): a
@@ -24416,7 +24416,7 @@ must be filtered out: got {after:?}"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         // build() runs the wired `fire_instructions_loaded()` over the injected
@@ -24480,7 +24480,7 @@ must be filtered out: got {after:?}"
         );
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -24509,7 +24509,7 @@ must be filtered out: got {after:?}"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink)
@@ -24545,7 +24545,7 @@ must be filtered out: got {after:?}"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build failed");
@@ -24632,7 +24632,7 @@ must be filtered out: got {after:?}"
         cfg.session_started_as_coordinator = true;
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -24658,7 +24658,7 @@ must be filtered out: got {after:?}"
         cfg.restricted = true;
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -24692,7 +24692,7 @@ must be filtered out: got {after:?}"
         cfg.restricted_tools = Some(vec!["Bash".into(), "WebFetch".into()]);
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         let rt = build(cfg, output, perm_sink).await.expect("build() failed");
@@ -25951,7 +25951,7 @@ must be filtered out: got {after:?}"
 
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
         // The composition-root assertion: build() must not fail when
@@ -26027,7 +26027,7 @@ must be filtered out: got {after:?}"
         // Composition-root assertion: build() succeeds with routing-only settings.
         let output: Arc<dyn platform_api::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let rt = build(cfg, output, perm_sink)
             .await

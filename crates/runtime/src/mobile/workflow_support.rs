@@ -746,8 +746,8 @@ fn paths_equivalent(left: &std::path::Path, right: &std::path::Path) -> bool {
 /// event unless the user stopped it manually.
 pub(crate) struct MobileWorkflowStatusSink {
     registry: Arc<tasks::registry_status_sink::RegistryStatusSink>,
-    event_sink: Arc<dyn client_adapter::ClientEventSink>,
-    listener: Arc<dyn client_adapter::ClientEventListener>,
+    event_sink: Arc<dyn client::adapter::ClientEventSink>,
+    listener: Arc<dyn client::adapter::ClientEventListener>,
     checkpoints: Arc<MobileWorkflowCheckpointStore>,
     active_session_uuid: Arc<std::sync::Mutex<String>>,
     /// Host-owned broker used to validate verified Local App build/use-test
@@ -855,13 +855,13 @@ impl MobileWorkflowStatusSink {
     }
 
     pub(crate) fn new(
-        listener: Arc<dyn client_adapter::ClientEventListener>,
+        listener: Arc<dyn client::adapter::ClientEventListener>,
         checkpoints: Arc<MobileWorkflowCheckpointStore>,
         active_session_uuid: Arc<std::sync::Mutex<String>>,
     ) -> Self {
         Self {
             registry: Arc::new(tasks::registry_status_sink::RegistryStatusSink::new()),
-            event_sink: client_adapter::ListenerSink::arc(listener.clone()),
+            event_sink: client::adapter::ListenerSink::arc(listener.clone()),
             listener,
             checkpoints,
             active_session_uuid,
@@ -903,9 +903,9 @@ impl MobileWorkflowStatusSink {
             return;
         }
         self.event_sink
-            .emit(client_protocol::events::ClientEvent::TaskStatusChanged {
+            .emit(client::protocol::events::ClientEvent::TaskStatusChanged {
                 task_id: task_id.to_string(),
-                status: client_adapter::lowering::lower_task_status(match status {
+                status: client::adapter::lowering::lower_task_status(match status {
                     tasks::TaskStatus::Pending => "pending",
                     tasks::TaskStatus::Running => "running",
                     tasks::TaskStatus::Paused => "paused",
@@ -940,7 +940,7 @@ impl MobileWorkflowStatusSink {
                 origin_session_id,
                 task_id.to_string(),
                 run_id.to_string(),
-                client_protocol::listings::WorkflowProgressDto {
+                client::protocol::listings::WorkflowProgressDto {
                     kind: progress.kind,
                     index: progress.index,
                     title: progress.title,
@@ -5266,7 +5266,7 @@ mod run_id_tests {
         let statuses: Vec<(String, Option<String>)> = events
             .iter()
             .filter_map(|event| match event {
-                client_protocol::events::ClientEvent::TaskStatusChanged {
+                client::protocol::events::ClientEvent::TaskStatusChanged {
                     task_id, error, ..
                 } => Some((task_id.clone(), error.clone())),
                 _ => None,
@@ -5552,13 +5552,13 @@ mod run_id_tests {
     }
 
     fn terminal_events(
-        events: &[client_protocol::events::ClientEvent],
+        events: &[client::protocol::events::ClientEvent],
         task_id: &str,
     ) -> Vec<(String, Option<String>)> {
         events
             .iter()
             .filter_map(|event| match event {
-                client_protocol::events::ClientEvent::TaskStatusChanged {
+                client::protocol::events::ClientEvent::TaskStatusChanged {
                     task_id: seen,
                     status,
                     error,
@@ -5687,7 +5687,7 @@ mod run_id_tests {
         let sink = terminal_test_sink(root.path(), listener.clone(), registry.clone(), &task_id);
         let host = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
             root.path().to_path_buf(),
-            client_adapter::ListenerSink::arc(listener.clone()),
+            client::adapter::ListenerSink::arc(listener.clone()),
             None,
             false,
             None,
@@ -5740,7 +5740,7 @@ mod run_id_tests {
         let sink = terminal_test_sink(root.path(), listener.clone(), registry.clone(), &task_id);
         let host = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
             root.path().to_path_buf(),
-            client_adapter::ListenerSink::arc(listener.clone()),
+            client::adapter::ListenerSink::arc(listener.clone()),
             None,
             false,
             None,
@@ -6141,7 +6141,7 @@ mod run_id_tests {
         let launcher = scope_test_launcher(root.path(), registry.clone());
         let host = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
             root.path().to_path_buf(),
-            client_adapter::ListenerSink::arc(Arc::new(FakeListener::default())),
+            client::adapter::ListenerSink::arc(Arc::new(FakeListener::default())),
             None,
             false,
             None,

@@ -3878,7 +3878,7 @@ mod tests {
         // here would test the delegation away again.
         let broker = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
             root.path().to_path_buf(),
-            Arc::new(client_adapter::MockSink::new()),
+            Arc::new(client::adapter::MockSink::new()),
             None,
             false,
             None,
@@ -4906,7 +4906,7 @@ mod tests {
 
         let broker = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
             root.path().to_path_buf(),
-            client_adapter::MockSink::arc() as Arc<dyn client_adapter::ClientEventSink>,
+            client::adapter::MockSink::arc() as Arc<dyn client::adapter::ClientEventSink>,
             None,
             false,
             None,
@@ -6285,7 +6285,7 @@ mod tests {
     ) {
         let broker = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
             root.path().to_path_buf(),
-            client_adapter::MockSink::arc(),
+            client::adapter::MockSink::arc(),
             None,
             false,
             None,

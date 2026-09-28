@@ -4536,7 +4536,7 @@ mod tests {
 
         let broker = LocalAppsHostBroker::new(
             root.path().to_path_buf(),
-            client_adapter::MockSink::arc(),
+            client::adapter::MockSink::arc(),
             None,
             false,
             None,
@@ -4604,7 +4604,7 @@ mod tests {
 
         let broker = LocalAppsHostBroker::new(
             root.path().to_path_buf(),
-            client_adapter::MockSink::arc(),
+            client::adapter::MockSink::arc(),
             None,
             false,
             None,
@@ -4684,7 +4684,7 @@ mod tests {
 
         let broker = LocalAppsHostBroker::new(
             root.path().to_path_buf(),
-            client_adapter::MockSink::arc(),
+            client::adapter::MockSink::arc(),
             None,
             false,
             None,
@@ -4748,7 +4748,7 @@ mod tests {
 
         let broker = LocalAppsHostBroker::new(
             root.path().to_path_buf(),
-            client_adapter::MockSink::arc(),
+            client::adapter::MockSink::arc(),
             None,
             false,
             None,
@@ -4802,7 +4802,7 @@ mod tests {
             let runtime = RecordingIsolatedRuntime::new();
             let broker = LocalAppsHostBroker::new(
                 root.path().to_path_buf(),
-                client_adapter::MockSink::arc(),
+                client::adapter::MockSink::arc(),
                 Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
                 false,
                 None,
@@ -4907,7 +4907,7 @@ mod tests {
         let runtime = RecordingIsolatedRuntime::new();
         let broker = LocalAppsHostBroker::new(
             root.path().to_path_buf(),
-            client_adapter::MockSink::arc(),
+            client::adapter::MockSink::arc(),
             Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
             false,
             None,
@@ -4991,7 +4991,7 @@ mod tests {
             ));
         let broker = LocalAppsHostBroker::new(
             root.path().to_path_buf(),
-            client_adapter::MockSink::arc(),
+            client::adapter::MockSink::arc(),
             Some(runtime.clone()),
             false,
             None,

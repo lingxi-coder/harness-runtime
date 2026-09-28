@@ -4,8 +4,8 @@ use ::configuration_admin::settings_bridge::{
     apply_patch, build_snapshot, lower_snapshot, permission_destination, permission_paths,
     permission_rule_from_wire,
 };
-use client_adapter::ClientEventSink;
-use client_protocol::commands::{PermissionBehaviorDto, WritableScopeDto};
+use client::adapter::ClientEventSink;
+use client::protocol::commands::{PermissionBehaviorDto, WritableScopeDto};
 
 impl MobileEngineHandle {
     pub(super) async fn emit_settings_snapshot(&self, sink: &dyn ClientEventSink) {

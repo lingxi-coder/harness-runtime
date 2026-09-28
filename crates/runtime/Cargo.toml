@@ -50,8 +50,7 @@ desktop = [
     "collaboration",
     "dep:platform-posix",
     "dep:platform-macos-computer-control",
-    "dep:client-adapter",
-    "dep:client-protocol",
+    "dep:client",
     "dep:tracing",
     "dep:tokio",
     "tokio/rt-multi-thread",
@@ -91,8 +90,7 @@ mobile = [
     "dep:configuration-admin",
     "dep:migrations",
     "dep:branding",
-    "dep:client-adapter",
-    "dep:client-protocol",
+    "dep:client",
     "dep:msgqueue",
     "dep:platform-common",
     "dep:secret",
@@ -148,8 +146,7 @@ mobile = [
 uniffi = [
     "mobile",
     "dep:uniffi",
-    "client-adapter/uniffi",
-    "client-protocol/uniffi",
+    "client/uniffi",
 ]
 android-computer-use = [
     "mobile",
@@ -177,8 +174,7 @@ async-trait = { workspace = true }
 base64 = { version = "0.22", optional = true }
 branding = { workspace = true, optional = true }
 bridge = { path = "../bridge", optional = true }
-client-adapter = { path = "../client-adapter", optional = true }
-client-protocol = { path = "../client-protocol", optional = true }
+client = { path = "../client", optional = true, features = ["adapter"] }
 command-api = { path = "../command-api", optional = true }
 command-core = { path = "../commands/core", optional = true }
 compaction = { path = "../compaction", optional = true }
@@ -275,7 +271,7 @@ platform-android = { path = "../platforms/android", optional = true }
 toml = "0.8"
 async-trait = { workspace = true }
 base64 = { version = "0.22" }
-client-protocol = { path = "../client-protocol" }
+client = { path = "../client", features = ["test-support"] }
 insta = { version = "1.40", features = ["yaml"] }
 orchestrator = { path = "../orchestrator" }
 tempfile = { version = "3", features = [] }

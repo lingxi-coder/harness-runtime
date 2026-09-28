@@ -9,3 +9,5 @@ pub mod image_budget;
 pub mod image_sniff;
 pub mod output_truncation;
 pub mod path_validation;
+
+pub mod shell_classification;

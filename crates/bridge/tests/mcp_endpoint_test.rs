@@ -7,7 +7,7 @@
 
 use bridge::wire::Frame;
 use bridge::{FramePump, FrameSink, IdeBridge, IdeLockfile, McpEndpoint};
-use client_protocol::events::{ClientEvent, ErrorKindDto};
+use client::protocol::events::{ClientEvent, ErrorKindDto};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;

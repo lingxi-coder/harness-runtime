@@ -21,8 +21,8 @@ use sandbox::runtime_config::Platform;
 struct NoopPermissionSink;
 
 #[async_trait::async_trait]
-impl client_adapter::PermissionRequestSink for NoopPermissionSink {
-    async fn emit_request(&self, _request: client_protocol::permission::PermissionRequest) {}
+impl client::adapter::PermissionRequestSink for NoopPermissionSink {
+    async fn emit_request(&self, _request: client::protocol::permission::PermissionRequest) {}
 }
 
 /// Pure-unit: the `enabledPlatforms` gate. `None` (unset) ⇒ all supported
@@ -156,7 +156,7 @@ async fn run_build(
 ) -> Result<harness_runtime::desktop::DesktopRuntime, BuildError> {
     let output: Arc<dyn platform_api::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
-    let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> = Arc::new(NoopPermissionSink);
+    let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> = Arc::new(NoopPermissionSink);
     build(cfg, output, perm_sink).await
 }
 

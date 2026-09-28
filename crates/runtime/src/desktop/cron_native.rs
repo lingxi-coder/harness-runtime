@@ -22,14 +22,14 @@ pub(crate) fn should_start_native_scheduler(config: &DesktopConfig) -> bool {
 #[derive(Clone)]
 pub(crate) struct NativeCronFirer {
     pub config: DesktopConfig,
-    pub permissions: Arc<dyn client_adapter::PermissionRequestSink>,
+    pub permissions: Arc<dyn client::adapter::PermissionRequestSink>,
     pub current: std::sync::Weak<ConversationOrchestrator>,
     supervisor: Arc<NativeRunSupervisor>,
 }
 impl NativeCronFirer {
     pub(crate) fn new(
         config: DesktopConfig,
-        permissions: Arc<dyn client_adapter::PermissionRequestSink>,
+        permissions: Arc<dyn client::adapter::PermissionRequestSink>,
         current: std::sync::Weak<ConversationOrchestrator>,
     ) -> Self {
         Self {
@@ -317,23 +317,23 @@ impl NativeCronFirer {
             ),
             RunMode::TaskSession => automation.owned_session_id.as_deref(),
         };
-        let reasoning: client_protocol::controls::ReasoningSelectionDto =
+        let reasoning: client::protocol::controls::ReasoningSelectionDto =
             serde_json::from_value(automation.reasoning.clone())
                 .map_err(|e| format!("paused:Invalid reasoning: {e}"))?;
         let reasoning = match reasoning {
-            client_protocol::controls::ReasoningSelectionDto::Automatic => {
+            client::protocol::controls::ReasoningSelectionDto::Automatic => {
                 platform_api::ReasoningSelection::Automatic
             }
-            client_protocol::controls::ReasoningSelectionDto::Disabled => {
+            client::protocol::controls::ReasoningSelectionDto::Disabled => {
                 platform_api::ReasoningSelection::Disabled
             }
-            client_protocol::controls::ReasoningSelectionDto::Enabled => {
+            client::protocol::controls::ReasoningSelectionDto::Enabled => {
                 platform_api::ReasoningSelection::Enabled
             }
-            client_protocol::controls::ReasoningSelectionDto::Level { id } => {
+            client::protocol::controls::ReasoningSelectionDto::Level { id } => {
                 platform_api::ReasoningSelection::Level { id }
             }
-            client_protocol::controls::ReasoningSelectionDto::TokenBudget { tokens } => {
+            client::protocol::controls::ReasoningSelectionDto::TokenBudget { tokens } => {
                 platform_api::ReasoningSelection::TokenBudget { tokens }
             }
             _ => return Err("paused:Unsupported reasoning".into()),

@@ -66,8 +66,8 @@ impl LifecycleService for DesktopRuntime {
 struct UnusedPermissionSink;
 
 #[async_trait::async_trait]
-impl client_adapter::PermissionRequestSink for UnusedPermissionSink {
-    async fn emit_request(&self, _request: client_protocol::permission::PermissionRequest) {
+impl client::adapter::PermissionRequestSink for UnusedPermissionSink {
+    async fn emit_request(&self, _request: client::protocol::permission::PermissionRequest) {
         unreachable!("embedded hosts use their injected permission gate");
     }
 }

@@ -27,9 +27,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use client_adapter::{ClientEventListener, PermissionRequestSink};
-use client_protocol::events::ClientEvent;
-use client_protocol::permission::PermissionRequest as PermissionRequestDto;
+use client::adapter::{ClientEventListener, PermissionRequestSink};
+use client::protocol::events::ClientEvent;
+use client::protocol::permission::PermissionRequest as PermissionRequestDto;
 use orchestrator::StreamingApiClient;
 use platform_api::{
     CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
@@ -127,7 +127,7 @@ pub struct FakeListener {
             String,
             String,
             String,
-            client_protocol::listings::WorkflowProgressDto,
+            client::protocol::listings::WorkflowProgressDto,
         )>,
     >,
 }
@@ -143,7 +143,7 @@ impl ClientEventListener for FakeListener {
         origin_session_id: String,
         task_id: String,
         run_id: String,
-        progress: client_protocol::listings::WorkflowProgressDto,
+        progress: client::protocol::listings::WorkflowProgressDto,
     ) {
         self.workflow_progress
             .lock()

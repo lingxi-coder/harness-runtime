@@ -5,12 +5,12 @@ use super::MobileEngineHandle;
 use ::configuration_admin::{
     config_admin, hook_admin, mcp_admin, plugin_admin, settings_bridge, skills_admin,
 };
-use client_adapter::ClientEventSink;
-use client_protocol::commands::{
+use client::adapter::ClientEventSink;
+use client::protocol::commands::{
     HookAdminCommandDto, McpAdminCommandDto, PluginAdminCommandDto, SkillAdminCommandDto,
 };
-use client_protocol::events::{ClientEvent, ErrorKindDto};
-use client_protocol::listings::{
+use client::protocol::events::{ClientEvent, ErrorKindDto};
+use client::protocol::listings::{
     ConfigurationDomainDto as Domain, ConfigurationEffectDto as Effect,
     ConfigurationOperationStatusDto as Status,
 };

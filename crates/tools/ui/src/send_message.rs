@@ -78,7 +78,7 @@ const ROUTING_CONTENT_PREVIEW_CHARS: usize = 50;
 /// shared width primitive so CJK and multi-codepoint emoji follow the same
 /// display-width contract everywhere.
 pub fn truncate_preview(s: &str, max_width: usize) -> String {
-    client_presentation::render::truncate_to_width_ellipsis(s, max_width)
+    tool_api::util::output_truncation::truncate_to_width_ellipsis(s, max_width)
 }
 
 /// `isAgentSwarmsEnabled()` gate: Anthropic-internal runs are on by default,

@@ -22,8 +22,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use client_protocol::commands::ClientCommand;
-use client_protocol::events::{ClientEvent, TurnOutcomeDto};
+use client::protocol::commands::ClientCommand;
+use client::protocol::events::{ClientEvent, TurnOutcomeDto};
 use harness_runtime::mobile::test_support::{
     new_engine_with_streaming, CollectingPermissionSink, FakeListener, HostFakePlatform,
     MobileConfig,

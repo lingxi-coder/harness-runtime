@@ -5,9 +5,7 @@ members = [
     "crates/runtime",
     "crates/branding",
     "crates/protocol",
-    "crates/client-protocol",
-    "crates/client-adapter",
-    "crates/client-presentation",
+    "crates/client",
     "crates/configuration-admin",
     "crates/tool-api",
     "crates/tools/file",
@@ -87,9 +85,7 @@ default-members = [
     "crates/runtime",
     "crates/branding",
     "crates/protocol",
-    "crates/client-protocol",
-    "crates/client-adapter",
-    "crates/client-presentation",
+    "crates/client",
     "crates/tool-api",
     "crates/tools/file",
     "crates/tools/shell",
@@ -205,7 +201,7 @@ async-trait = "0.1"
 # feature). MSRV: 0.28.x declares no explicit `rust-version` and compiles under
 # the workspace toolchain `rust-version = "1.94"` (no bump required — verified by
 # a clean offline build). `tokio` enables the async foreign-executor scaffolding
-# needed by F3-07. `client-protocol` adds this as an OPTIONAL dep gated behind
+# needed by F3-07. `client` adds this as an OPTIONAL dep gated behind
 # its `uniffi` feature, so the default (bridge-server) build never pulls it.
 uniffi = { version = "0.28.3", default-features = false, features = ["tokio"] }
 futures-core = "0.3"
@@ -299,7 +295,7 @@ await_holding_lock = "allow"
 #   (`Option<Arc<dyn Trait>>`, boxed futures) because `platform_api` is trait
 #   objects all the way down.
 # large_enum_variant (24) / result_large_err (4): the wire and event enums
-#   mirror `client-protocol` DTOs one-for-one; boxing a variant to satisfy the
+#   mirror `client::protocol` DTOs one-for-one; boxing a variant to satisfy the
 #   lint would change the shape the version guard pins.
 # result_unit_err (14) / double_must_use (8): API-shape opinions, no bug behind
 #   either.

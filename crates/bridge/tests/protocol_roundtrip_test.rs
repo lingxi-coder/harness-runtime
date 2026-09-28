@@ -7,13 +7,13 @@ use bridge::{
     AuthChallenge, AuthResponse, BridgeRequest, BridgeResponse, BridgeWireError, Capabilities,
     ClientHello, Frame, ServerHello, BRIDGE_PROTOCOL_VERSION,
 };
-use client_protocol::commands::ClientCommand;
-use client_protocol::computer_access::{
+use client::protocol::commands::ClientCommand;
+use client::protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
 };
-use client_protocol::events::{ClientEvent, ErrorKindDto};
-use client_protocol::permission::{PermissionKindDto, PermissionRequest};
-use client_protocol::version::CLIENT_PROTOCOL_VERSION;
+use client::protocol::events::{ClientEvent, ErrorKindDto};
+use client::protocol::permission::{PermissionKindDto, PermissionRequest};
+use client::protocol::version::CLIENT_PROTOCOL_VERSION;
 
 fn roundtrip<T>(v: &T) -> T
 where
@@ -169,7 +169,7 @@ fn frame_event_carries_error_client_event() {
 #[test]
 fn frame_permission_request_round_trips() {
     // F2-06: `PermissionRequest` is NOT a `ClientEvent` variant (it is a
-    // standalone frozen DTO in `client_protocol::permission`), so it cannot ride
+    // standalone frozen DTO in `client::protocol::permission`), so it cannot ride
     // on `Frame::Event(ClientEvent)`. The bridge wire carries it on its OWN
     // additive `Frame::PermissionRequest` arm (the `Frame` enum is
     // `#[non_exhaustive]`, so this is additive — no `client-protocol` snapshot
