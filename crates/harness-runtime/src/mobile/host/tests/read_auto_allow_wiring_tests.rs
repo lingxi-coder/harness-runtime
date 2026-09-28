@@ -12,7 +12,7 @@
 /// this test green until the strip was added.
 #[test]
 fn this_root_publishes_the_read_auto_allow_probe() {
-    const SRC: &str = include_str!("../../host.rs");
+    const SRC: &str = include_str!("../assembly.rs");
     let code = code_only(SRC);
     let publish = "set_read_auto_allow_prob".to_string() + "e(";
     assert!(
