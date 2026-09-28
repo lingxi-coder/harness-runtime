@@ -68,11 +68,7 @@ impl Tool for SizedTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(
-        &self,
-        _input: &serde_json::Value,
-        _opts: &DescriptionOptions,
-    ) -> String {
+    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "sized".into()
     }
     async fn prompt(&self, _opts: &PromptOptions) -> String {
@@ -129,10 +125,7 @@ fn orch_with(tool: Arc<dyn Tool>, config_home: Option<PathBuf>) -> ConversationO
     }
 }
 
-fn use_of(
-    name: &str,
-    len: usize,
-) -> Vec<(ToolUseId, String, serde_json::Value, Option<String>)> {
+fn use_of(name: &str, len: usize) -> Vec<(ToolUseId, String, serde_json::Value, Option<String>)> {
     vec![(ToolUseId::new(), name.into(), json!({ "len": len }), None)]
 }
 
@@ -159,8 +152,7 @@ async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
         path.clone(),
         Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.path().into())),
     ));
-    let orch =
-        orch_with(Arc::new(SizedTool), Some(tmp.path().into())).with_jsonl_writer(writer);
+    let orch = orch_with(Arc::new(SizedTool), Some(tmp.path().into())).with_jsonl_writer(writer);
     let mut call = use_of("Sized", 4000).remove(0);
     call.2["split_surrogate"] = json!(true);
     let assistant = ConversationMessage::Assistant {
@@ -184,15 +176,13 @@ async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
     orch.persist_message_to_jsonl(&user).await;
     let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
     let history =
-        crate::resume::state_from_messages(uuid::Uuid::nil(), &loaded.messages_in_order)
-            .history;
+        crate::resume::state_from_messages(uuid::Uuid::nil(), &loaded.messages_in_order).history;
     let request = llm_runtime::LlmRequest {
         model: "claude-opus-4-7".into(),
         messages: llm_runtime::convert::to_llm_messages(history).unwrap(),
         ..Default::default()
     };
-    let codec =
-        llm_runtime::AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let codec = llm_runtime::AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     for encoded in [
         codec.encode_request(&request).unwrap(),
         codec.encode_count_tokens_request(&request).unwrap(),

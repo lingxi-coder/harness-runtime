@@ -79,11 +79,11 @@ async fn list_skills_reports_name_and_source_for_a_real_discovered_skill() {
 /// Fix round 1 got this backwards: it read `additional_skill_dirs` from
 /// `session_cwd.trusted_dirs()`, which is seeded at boot with `cwd` plus
 /// every settings-tier `permissions.additionalDirectories` entry plus
-/// `--add-dir` (`harness-runtime/src/desktop/mod.rs:7538-7568`, `:8666-8688`) —
+/// `--add-dir` (`runtime/src/desktop/mod.rs:7538-7568`, `:8666-8688`) —
 /// a materially WIDER set than what the sibling slash commands scan. The
 /// desktop's own `SkillsHandler` (`/skills`) is constructed with
 /// `additional_skill_dirs: Vec::new()` HARDCODED
-/// (`harness-runtime/src/desktop/mod.rs:3351-3354`), and its
+/// (`runtime/src/desktop/mod.rs:3351-3354`), and its
 /// `ReloadSkillsHandler` counterpart (`/reload-skills`) is wired to
 /// `DesktopRepoRootReloader.registered_roots`, which starts empty with no
 /// desktop-side call site that ever grows it — so on the desktop BOTH

@@ -1,7 +1,6 @@
 use crate::conversation::ConversationOrchestrator;
 use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-    StaticMemoryProvider,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use crate::turn_loop::dispatch_tool_uses_tracked;
 use crate::OrchestratorConfig;
@@ -242,9 +241,7 @@ impl platform_api::RuntimeSpawner for UnusedHookRuntime {
     }
 }
 
-fn permission_request_hook_executor(
-    response: hooks::HookResponse,
-) -> Arc<hooks::HookExecutorImpl> {
+fn permission_request_hook_executor(response: hooks::HookResponse) -> Arc<hooks::HookExecutorImpl> {
     let hook = hooks::HookDefinition {
         id: HookId::new(),
         name: "fixed-permission-request".into(),
@@ -364,11 +361,7 @@ impl Tool for SeamTool {
             shape_class: "timeout_ms".into(),
         })
     }
-    async fn validate_input(
-        &self,
-        _: &Value,
-        _: &ToolUseContext,
-    ) -> Result<(), ValidationError> {
+    async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
@@ -379,8 +372,7 @@ impl Tool for SeamTool {
         if self.ask {
             return permission::PermissionResult::Ask {
                 reason: permission::PermissionDecisionReason::SandboxOverride {
-                    reason:
-                        permission::result::SandboxOverrideReason::DangerouslyDisableSandbox,
+                    reason: permission::result::SandboxOverrideReason::DangerouslyDisableSandbox,
                 },
                 prompt: permission::result::PermissionPrompt {
                     title: "Seam".into(),

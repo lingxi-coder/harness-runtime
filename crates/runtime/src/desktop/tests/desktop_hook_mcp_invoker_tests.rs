@@ -1,13 +1,12 @@
 use super::{
-    hook_mcp_full_name, map_hook_mcp_tool_error, map_hook_mcp_tool_result,
-    DesktopHookMcpInvoker,
+    hook_mcp_full_name, map_hook_mcp_tool_error, map_hook_mcp_tool_result, DesktopHookMcpInvoker,
 };
 use hooks::HookMcpInvoker;
 use platform_api::{
-    ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
-    McpHeaders, McpNotificationStream, McpProtocolEra, McpRawConnection, McpResourceContentDto,
-    McpResourceDto, McpResourceTemplateDto, McpToolResultDto, McpTransport, McpTransportKind,
-    McpTransportSpec, ServerCapabilitiesDto,
+    ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError, McpHeaders,
+    McpNotificationStream, McpProtocolEra, McpRawConnection, McpResourceContentDto, McpResourceDto,
+    McpResourceTemplateDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
+    ServerCapabilitiesDto,
 };
 use protocol::McpConnectionId;
 use std::collections::HashMap;

@@ -3,9 +3,8 @@ use crate::connection::{ConfigScope, McpServerConfig};
 use async_trait::async_trait;
 use platform_api::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
-    McpRawConnection, McpResourceContentDto, McpResourceDto, McpServerInfo, McpStatus,
-    McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
-    ServerCapabilitiesDto,
+    McpRawConnection, McpResourceContentDto, McpResourceDto, McpServerInfo, McpStatus, McpToolDto,
+    McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
 use protocol::McpConnectionId as ConnId;
 use serde_json::Value;
@@ -20,19 +19,13 @@ impl McpTransport for StubTransport {
     async fn connect(&self, _s: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
         unreachable!()
     }
-    async fn initialize(
-        &self,
-        _c: &McpRawConnection,
-    ) -> Result<ServerCapabilitiesDto, McpError> {
+    async fn initialize(&self, _c: &McpRawConnection) -> Result<ServerCapabilitiesDto, McpError> {
         unreachable!()
     }
     async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
         unreachable!()
     }
-    async fn list_resources(
-        &self,
-        _c: &McpRawConnection,
-    ) -> Result<Vec<McpResourceDto>, McpError> {
+    async fn list_resources(&self, _c: &McpRawConnection) -> Result<Vec<McpResourceDto>, McpError> {
         unreachable!()
     }
     async fn list_prompts(&self, _c: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
@@ -180,8 +173,7 @@ async fn unconfigured_and_invalid_config_short_circuit_before_dialing() {
         headers_helper: None,
         oauth: None,
     };
-    broken.config_error =
-        Some("'url' \"${MISSING:-}\" expanded to an empty string.".to_string());
+    broken.config_error = Some("'url' \"${MISSING:-}\" expanded to an empty string.".to_string());
     assert!(
         !broken.is_unconfigured(),
         "`url_invalid` is INVALID_CONFIG, never UNCONFIGURED"

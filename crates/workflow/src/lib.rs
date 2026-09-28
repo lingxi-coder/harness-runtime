@@ -2904,13 +2904,13 @@ try {
             // `FusionRuntimeConfig::from_settings` rejects (fusion/src/config.rs).
             "invalid fusion configuration: fusion.minSuccessfulPanels (4) must not exceed min(fusion.qualityPanelCount, fusion.fastPanelCount) (2)",
             // A managed-policy / `--settings` tier, merged with no per-file
-            // `validate()` call at all (harness-runtime/src/desktop/mod.rs), so
+            // `validate()` call at all (runtime/src/desktop/mod.rs), so
             // `from_settings`'s own `settings.validate()` (fusion/src/config.rs)
             // rejects it — that inner error is `SettingsError::SchemaViolation`,
             // whose Display adds the second "schema validation failed: " layer.
             "invalid fusion configuration: schema validation failed: fusion.maxPanel must be in 2..=8",
             // The loader-level Err that `load_effective_settings_for_config`
-            // swallows with `.ok()` (harness-runtime/src/desktop/mod.rs).
+            // swallows with `.ok()` (runtime/src/desktop/mod.rs).
             "invalid fusion configuration: settings failed to load",
             // The quote-time shape from `fusion::budget` — also a preflight
             // variant (`fusion_error_is_preflight`, tools/agent/src/agent.rs),

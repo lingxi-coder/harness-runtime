@@ -5418,559 +5418,559 @@
     },
     {
       "from": "lingxi-code/harness-runtime/Cargo.toml",
-      "to": "crates/harness-runtime/Cargo.toml",
+      "to": "crates/runtime/Cargo.toml",
       "source_sha256": "fab31707e3f1c6674ad33bf80ec85d5a99a16c88629caf12f9f99f9c08ce14d0",
       "source_blob": "8ea61063c4f28c9c13b9844315aa675394712c06"
     },
     {
       "from": "lingxi-code/harness-runtime/build.rs",
-      "to": "crates/harness-runtime/build.rs",
+      "to": "crates/runtime/build.rs",
       "source_sha256": "75df53847992eb191fa28ddc3842135c1b08dab1bea9475bdac2bd42960b72d6",
       "source_blob": "0b729db2a80dc05872cdb435ccb2cca0897473ce"
     },
     {
       "from": "lingxi-code/harness-runtime/builtin-plugin-inventory.txt",
-      "to": "crates/harness-runtime/builtin-plugin-inventory.txt",
+      "to": "crates/runtime/builtin-plugin-inventory.txt",
       "source_sha256": "8950314a83e4542a60c4ff116f30165b04685e54293a594302cb011ef18e5728",
       "source_blob": "d89489106bf239e982da19a5e50012bb3e73612e"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/api.rs",
-      "to": "crates/harness-runtime/src/api.rs",
+      "from": "lingxi-code/runtime/src/api.rs",
+      "to": "crates/runtime/src/api.rs",
       "source_sha256": "c139c56082459514694bc4502004d3b32b17abd7e563a858efdc8faa452a85e6",
       "source_blob": "3dc89fa57e923c201ce22024e2271132460adccc"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/agent_restore.rs",
-      "to": "crates/harness-runtime/src/desktop/agent_restore.rs",
+      "from": "lingxi-code/runtime/src/desktop/agent_restore.rs",
+      "to": "crates/runtime/src/desktop/agent_restore.rs",
       "source_sha256": "83b3edd3af7e240ab64325ee1f08fd5e461356603ffea498aca25d773720e21a",
       "source_blob": "fd21eabc1072b7da388ad1a58becd751e09dab60"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/agent_skill_loader.rs",
-      "to": "crates/harness-runtime/src/desktop/agent_skill_loader.rs",
+      "from": "lingxi-code/runtime/src/desktop/agent_skill_loader.rs",
+      "to": "crates/runtime/src/desktop/agent_skill_loader.rs",
       "source_sha256": "ef662905ba19bc83ee2bc6c2bb279adc2bac108ae1a675ee20db651c0c93b4a5",
       "source_blob": "7f802b20c1c5448e72fb7b169c00f2eca353fbbf"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/auto_mode_propose.rs",
-      "to": "crates/harness-runtime/src/desktop/auto_mode_propose.rs",
+      "from": "lingxi-code/runtime/src/desktop/auto_mode_propose.rs",
+      "to": "crates/runtime/src/desktop/auto_mode_propose.rs",
       "source_sha256": "8973e48004d3cc8370ab1c12aa8d1ffbff6203864677da79112c672a6a97d910",
       "source_blob": "f5918f9f524dddcb0caadb1a930526da4a076049"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/background_agent.rs",
-      "to": "crates/harness-runtime/src/desktop/background_agent.rs",
+      "from": "lingxi-code/runtime/src/desktop/background_agent.rs",
+      "to": "crates/runtime/src/desktop/background_agent.rs",
       "source_sha256": "e2fb64fa6630e23e5fd6307c4abf2427270775ae267c0fe0dd5e8d55a0864624",
       "source_blob": "31f751e89054e0164abdf4b73322ee0e37752371"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/connect.rs",
-      "to": "crates/harness-runtime/src/desktop/connect.rs",
+      "from": "lingxi-code/runtime/src/desktop/connect.rs",
+      "to": "crates/runtime/src/desktop/connect.rs",
       "source_sha256": "50b7d8a2d18e05258a810b2ef5a705a49e552190707bb8e869e9279e683eec1a",
       "source_blob": "ad87263b1c5cda1297a04cf939dd16fbd1942026"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/cron_command.rs",
-      "to": "crates/harness-runtime/src/desktop/cron_command.rs",
+      "from": "lingxi-code/runtime/src/desktop/cron_command.rs",
+      "to": "crates/runtime/src/desktop/cron_command.rs",
       "source_sha256": "a999d792962fbd42e71734e8a10faf10c2c6931d2573f2fb883774592ca9e387",
       "source_blob": "ebd22d8043e587a5656c940102349a5b2ff47d15"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/cron_management.rs",
-      "to": "crates/harness-runtime/src/desktop/cron_management.rs",
+      "from": "lingxi-code/runtime/src/desktop/cron_management.rs",
+      "to": "crates/runtime/src/desktop/cron_management.rs",
       "source_sha256": "df0c0e25517d9762678e4e4549142fb11324d5ff362ea9cdb67c2289f7137976",
       "source_blob": "2ea2f661c2653da17560be9ced2734fba7de0c66"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/cron_native.rs",
-      "to": "crates/harness-runtime/src/desktop/cron_native.rs",
+      "from": "lingxi-code/runtime/src/desktop/cron_native.rs",
+      "to": "crates/runtime/src/desktop/cron_native.rs",
       "source_sha256": "e4cfc71a8ba5cfa533ba1d3fc4a17f6b428f9b1c0e15d040cff44ffd760f88e6",
       "source_blob": "19d2dfaf190401a4ec1a74606f7159b5b28604fe"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/file_changed_watch.rs",
-      "to": "crates/harness-runtime/src/desktop/file_changed_watch.rs",
+      "from": "lingxi-code/runtime/src/desktop/file_changed_watch.rs",
+      "to": "crates/runtime/src/desktop/file_changed_watch.rs",
       "source_sha256": "35e20efef91d50c3e68e10ee9f8cc0e614d26b0226c4ca2a004b812761620ed3",
       "source_blob": "29c04a4a99782ef145cb5dff3288db2e8d0bb106"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/fork_resume.rs",
-      "to": "crates/harness-runtime/src/desktop/fork_resume.rs",
+      "from": "lingxi-code/runtime/src/desktop/fork_resume.rs",
+      "to": "crates/runtime/src/desktop/fork_resume.rs",
       "source_sha256": "ee73b91efcbcbf285319edd903724bcf31825f72e0205b3eb5d35c1cd7a8b43b",
       "source_blob": "3e2392dfa34fc3c1e794417ba086c2e6dbb95b58"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/fusion_attempt_composition_test.rs",
-      "to": "crates/harness-runtime/src/desktop/fusion_attempt_composition_test.rs",
+      "from": "lingxi-code/runtime/src/desktop/fusion_attempt_composition_test.rs",
+      "to": "crates/runtime/src/desktop/fusion_attempt_composition_test.rs",
       "source_sha256": "b51b84a8cf1615d8fca7bcf6232aa43e069353f7240a069fccd032287308eac4",
       "source_blob": "c671bb6b06de8811b33ba6537cc7d0be0549ad67"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/fusion_attempts.rs",
-      "to": "crates/harness-runtime/src/desktop/fusion_attempts.rs",
+      "from": "lingxi-code/runtime/src/desktop/fusion_attempts.rs",
+      "to": "crates/runtime/src/desktop/fusion_attempts.rs",
       "source_sha256": "8f7a531fea3d3e4654ef357eff4d18b8a9d94b0bf9071da0eaa2c9cdb725d0cd",
       "source_blob": "2bec6b2a80fa5d7036282a920eabcce3faba81d6"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/fusion_attempts/pricing.rs",
-      "to": "crates/harness-runtime/src/desktop/fusion_attempts/pricing.rs",
+      "from": "lingxi-code/runtime/src/desktop/fusion_attempts/pricing.rs",
+      "to": "crates/runtime/src/desktop/fusion_attempts/pricing.rs",
       "source_sha256": "0b46de6dd5e12acec1791874ebeea5bb32db63eb9651be83e9f15dc4af38d574",
       "source_blob": "169e728be483d483962d4f64c56c3f9862d68202"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/fusion_attempts/tests.rs",
-      "to": "crates/harness-runtime/src/desktop/fusion_attempts/tests.rs",
+      "from": "lingxi-code/runtime/src/desktop/fusion_attempts/tests.rs",
+      "to": "crates/runtime/src/desktop/fusion_attempts/tests.rs",
       "source_sha256": "4a5d647709fdbe74c6012f25e36e8513e56f0cbd52f102175eb80c4e5ef61621",
       "source_blob": "b412a621ed4bcf3b05db8f23fed009cd27cb4835"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/fusion_command.rs",
-      "to": "crates/harness-runtime/src/desktop/fusion_command.rs",
+      "from": "lingxi-code/runtime/src/desktop/fusion_command.rs",
+      "to": "crates/runtime/src/desktop/fusion_command.rs",
       "source_sha256": "90562a7c97663e1bebdadd9c04ac6054988878d7d6594d74653c52b9423e44b5",
       "source_blob": "d53f3eb4a370a4976c41f094224a19d5cc62e754"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/fusion_pool_admission_test.rs",
-      "to": "crates/harness-runtime/src/desktop/fusion_pool_admission_test.rs",
+      "from": "lingxi-code/runtime/src/desktop/fusion_pool_admission_test.rs",
+      "to": "crates/runtime/src/desktop/fusion_pool_admission_test.rs",
       "source_sha256": "3ee5fbf46c6a6ec233558919417d3ca052563889ac366b6fbad8af033f472e07",
       "source_blob": "5907cf5047e4e6f7026d85ce48616a2e5c1565e6"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/fusion_recorder.rs",
-      "to": "crates/harness-runtime/src/desktop/fusion_recorder.rs",
+      "from": "lingxi-code/runtime/src/desktop/fusion_recorder.rs",
+      "to": "crates/runtime/src/desktop/fusion_recorder.rs",
       "source_sha256": "09f0909fd0c1d1c403250d1337aaa65b5d6124c9addf2ade6f654219a0545e2d",
       "source_blob": "8fd0b2b339d44decbc911e051b73de9aede9b8fd"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/ide.rs",
-      "to": "crates/harness-runtime/src/desktop/ide.rs",
+      "from": "lingxi-code/runtime/src/desktop/ide.rs",
+      "to": "crates/runtime/src/desktop/ide.rs",
       "source_sha256": "6f75c6e86e77162bb2e0b8ac8110bcdbd6f263256ab6e51c8107dc539154a73a",
       "source_blob": "3c22e3a2bb475ac79dcf2009474c0f18c44c9176"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/mod.rs",
-      "to": "crates/harness-runtime/src/desktop/mod.rs",
+      "from": "lingxi-code/runtime/src/desktop/mod.rs",
+      "to": "crates/runtime/src/desktop/mod.rs",
       "source_sha256": "16cb2ebe6c12b132cf6b683c97273192549e1c65f76885b0b7583abec3bb0279",
       "source_blob": "5bab1d10f372accf984ba8f1fe0994ced66d55ee"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/pane_teammate.rs",
-      "to": "crates/harness-runtime/src/desktop/pane_teammate.rs",
+      "from": "lingxi-code/runtime/src/desktop/pane_teammate.rs",
+      "to": "crates/runtime/src/desktop/pane_teammate.rs",
       "source_sha256": "81f39528ea95f73dd491239c8501a9e718558834ca2acb80586cfd6c1075d6cc",
       "source_blob": "b960db8cc22ee3d333d83092c2d975d9b332f350"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/sdk.rs",
-      "to": "crates/harness-runtime/src/desktop/sdk.rs",
+      "from": "lingxi-code/runtime/src/desktop/sdk.rs",
+      "to": "crates/runtime/src/desktop/sdk.rs",
       "source_sha256": "e0dc8c5d5395c7adcdf5b137bf8bbfaff1822ec37ccc5528f7eec0c4dfed20bf",
       "source_blob": "cb3be1e15960829c2e1ba27045b0c8318b521950"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/session_agents.rs",
-      "to": "crates/harness-runtime/src/desktop/session_agents.rs",
+      "from": "lingxi-code/runtime/src/desktop/session_agents.rs",
+      "to": "crates/runtime/src/desktop/session_agents.rs",
       "source_sha256": "60280a398d12202fce6a230f18ab40b44ccda9e96768c2e8ce80b4ad3e291a08",
       "source_blob": "ec63bc756448329133a9a9128d7a10c6ea9e6ecf"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/session_state.rs",
-      "to": "crates/harness-runtime/src/desktop/session_state.rs",
+      "from": "lingxi-code/runtime/src/desktop/session_state.rs",
+      "to": "crates/runtime/src/desktop/session_state.rs",
       "source_sha256": "31fc606c6e8e0bc099b9a75e75d3cda6745d594eef3c40c738172ce565345d68",
       "source_blob": "a97ca337b7ae5204971db0e1c0e2765139ded923"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/session_state/attempts.rs",
-      "to": "crates/harness-runtime/src/desktop/session_state/attempts.rs",
+      "from": "lingxi-code/runtime/src/desktop/session_state/attempts.rs",
+      "to": "crates/runtime/src/desktop/session_state/attempts.rs",
       "source_sha256": "aace8e456c2640e2793c12c89d1bc8d3d825f774bab579c00d3be114100bfe25",
       "source_blob": "2bbb748bbfda39c79c358f56994c6d862733d819"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/session_state/retention.rs",
-      "to": "crates/harness-runtime/src/desktop/session_state/retention.rs",
+      "from": "lingxi-code/runtime/src/desktop/session_state/retention.rs",
+      "to": "crates/runtime/src/desktop/session_state/retention.rs",
       "source_sha256": "b7f188e57353db56743660a0a7b632d1cff5f9b17a5b733efec4ee180674a937",
       "source_blob": "eb0fb93a0fbc2e3ded361d54db1bbed21b76e7da"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/settings_watch.rs",
-      "to": "crates/harness-runtime/src/desktop/settings_watch.rs",
+      "from": "lingxi-code/runtime/src/desktop/settings_watch.rs",
+      "to": "crates/runtime/src/desktop/settings_watch.rs",
       "source_sha256": "1ea8f6817b1846f5b4257c72d6c9a00ebcfb72eaee31c79d4c0a449b5bf32f7f",
       "source_blob": "080b22812e9b0e53c90e99a644bad4e3f2852826"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/skill_loader.rs",
-      "to": "crates/harness-runtime/src/desktop/skill_loader.rs",
+      "from": "lingxi-code/runtime/src/desktop/skill_loader.rs",
+      "to": "crates/runtime/src/desktop/skill_loader.rs",
       "source_sha256": "8e7845c62a7eb81c61f458ba94dd4b4394b647bb01a63f6d42613f53e67cf262",
       "source_blob": "302cac20ca132f264c712ea7b15a0d1c829b69cc"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/desktop/watcher_test_support.rs",
-      "to": "crates/harness-runtime/src/desktop/watcher_test_support.rs",
+      "from": "lingxi-code/runtime/src/desktop/watcher_test_support.rs",
+      "to": "crates/runtime/src/desktop/watcher_test_support.rs",
       "source_sha256": "4dd347be7a76fbb31d674a34859a1df1f0d36a2c819f7963c33b85c6111ce576",
       "source_blob": "984d7adfdf6a98c5450a8309f9d34a0914cce696"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/lib.rs",
-      "to": "crates/harness-runtime/src/lib.rs",
+      "from": "lingxi-code/runtime/src/lib.rs",
+      "to": "crates/runtime/src/lib.rs",
       "source_sha256": "db34417b38ff1008cb5fb58bf1a37254acd1c5177d67cb36cb4bfbca51fc1577",
       "source_blob": "e8e46ad919b27a5800bb474c13b01f51111ac7c9"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/agent_resume.rs",
-      "to": "crates/harness-runtime/src/mobile/agent_resume.rs",
+      "from": "lingxi-code/runtime/src/mobile/agent_resume.rs",
+      "to": "crates/runtime/src/mobile/agent_resume.rs",
       "source_sha256": "082eeab2b741d8bb608d6657b01c2d37fb6995a3ebbb7028ed7accbaf358ce5d",
       "source_blob": "87eebcc48a1869757d6d898914257f0cbb76fc24"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/audio_service.rs",
-      "to": "crates/harness-runtime/src/mobile/audio_service.rs",
+      "from": "lingxi-code/runtime/src/mobile/audio_service.rs",
+      "to": "crates/runtime/src/mobile/audio_service.rs",
       "source_sha256": "01f57db50b04d3baafe51c14f16c00e998f447fd22530b678e3935bae5294e8f",
       "source_blob": "4f087fe91b546fffb82cb9aea3cae255547a01da"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/builtin_bundle.rs",
-      "to": "crates/harness-runtime/src/mobile/builtin_bundle.rs",
+      "from": "lingxi-code/runtime/src/mobile/builtin_bundle.rs",
+      "to": "crates/runtime/src/mobile/builtin_bundle.rs",
       "source_sha256": "29fbe0768cf03a4e1a8bbdc7e6253d1e90edccb2b05aff58c5aaf60bfe046c24",
       "source_blob": "e4d12fd0c8ae18255d06a230c3a9643b17be5e93"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/host.rs",
-      "to": "crates/harness-runtime/src/mobile/host.rs",
+      "from": "lingxi-code/runtime/src/mobile/host.rs",
+      "to": "crates/runtime/src/mobile/host.rs",
       "source_sha256": "3e9a964b3f24f3c69c12e0e162cab5e87789f0b0d290b9a3a97b399436be3d3b",
       "source_blob": "4fd73656845e58a75f2263f58ec4d79efc9d42a3"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/host/configuration_admin.rs",
-      "to": "crates/harness-runtime/src/mobile/host/configuration_admin.rs",
+      "from": "lingxi-code/runtime/src/mobile/host/configuration_admin.rs",
+      "to": "crates/runtime/src/mobile/host/configuration_admin.rs",
       "source_sha256": "ae30c201c3e511d67f9d7125632eb7f3b24be31022afb5425b79fdd40f02363f",
       "source_blob": "6da630225f022a24ab20ba22a200b02325886947"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/host/fast_mode_preference.rs",
-      "to": "crates/harness-runtime/src/mobile/host/fast_mode_preference.rs",
+      "from": "lingxi-code/runtime/src/mobile/host/fast_mode_preference.rs",
+      "to": "crates/runtime/src/mobile/host/fast_mode_preference.rs",
       "source_sha256": "05587ed361ab6e1c46c2d632a416568f4aaea283e597bc347a05a74d8325d039",
       "source_blob": "4172aaf9dc314dca16d18fd0b8dcc94f9034dc92"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/host/fast_mode_preference_tests.rs",
-      "to": "crates/harness-runtime/src/mobile/host/fast_mode_preference_tests.rs",
+      "from": "lingxi-code/runtime/src/mobile/host/fast_mode_preference_tests.rs",
+      "to": "crates/runtime/src/mobile/host/fast_mode_preference_tests.rs",
       "source_sha256": "4c88ae9cba321803f7444a7ed515966ff8d7995e1740b4372db666af0c16395c",
       "source_blob": "367fb60e16cbd6ea7878127b4bf981ccba14de78"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/host/model_preference.rs",
-      "to": "crates/harness-runtime/src/mobile/host/model_preference.rs",
+      "from": "lingxi-code/runtime/src/mobile/host/model_preference.rs",
+      "to": "crates/runtime/src/mobile/host/model_preference.rs",
       "source_sha256": "d448ccb7ef07a76c09b833c77593920df95b5c22e668f6b3b372a05335b956d5",
       "source_blob": "1afc838268b4731708ac8cee6003fff196e3ea55"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/host/model_preference_tests.rs",
-      "to": "crates/harness-runtime/src/mobile/host/model_preference_tests.rs",
+      "from": "lingxi-code/runtime/src/mobile/host/model_preference_tests.rs",
+      "to": "crates/runtime/src/mobile/host/model_preference_tests.rs",
       "source_sha256": "e355ce72da43a8be03ee974737f9b22cd4c6c72228981fb9c5869d731fc97223",
       "source_blob": "1a5a005d9ae094406b227754fbfc9a1098e633ad"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/host/permission_preference.rs",
-      "to": "crates/harness-runtime/src/mobile/host/permission_preference.rs",
+      "from": "lingxi-code/runtime/src/mobile/host/permission_preference.rs",
+      "to": "crates/runtime/src/mobile/host/permission_preference.rs",
       "source_sha256": "4606135f26daf3fb24c52fc92d6d49cf3c2021592f0180d6f95ad2bc83fa5167",
       "source_blob": "62d3baa64c5b2bdb02c70e93997164bdd129b238"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/host/permission_preference_tests.rs",
-      "to": "crates/harness-runtime/src/mobile/host/permission_preference_tests.rs",
+      "from": "lingxi-code/runtime/src/mobile/host/permission_preference_tests.rs",
+      "to": "crates/runtime/src/mobile/host/permission_preference_tests.rs",
       "source_sha256": "33fe9097b9e5566dbe0851c245766472baee2d83a4aab3f84a7e6131fc0837bf",
       "source_blob": "0d8a3e7c6534bcb634d3885d8401c02435ee72c5"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/host/provider_region_tests.rs",
-      "to": "crates/harness-runtime/src/mobile/host/provider_region_tests.rs",
+      "from": "lingxi-code/runtime/src/mobile/host/provider_region_tests.rs",
+      "to": "crates/runtime/src/mobile/host/provider_region_tests.rs",
       "source_sha256": "662a9c16363b6e3e3f47b57ccf3ae3edb8ab05af8579c21139b73ee895dd1bd8",
       "source_blob": "60f00c0301b728155e406649b45e5cebc50bd120"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/host/reasoning_preference_tests.rs",
-      "to": "crates/harness-runtime/src/mobile/host/reasoning_preference_tests.rs",
+      "from": "lingxi-code/runtime/src/mobile/host/reasoning_preference_tests.rs",
+      "to": "crates/runtime/src/mobile/host/reasoning_preference_tests.rs",
       "source_sha256": "1221590c352f64c9b68b790f89a3014551c8ca35a49b5aab6d88a52802c5e1e0",
       "source_blob": "3b69386a912aa55230524404e26ec8778bd7f59b"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/host/settings_commands.rs",
-      "to": "crates/harness-runtime/src/mobile/host/settings_commands.rs",
+      "from": "lingxi-code/runtime/src/mobile/host/settings_commands.rs",
+      "to": "crates/runtime/src/mobile/host/settings_commands.rs",
       "source_sha256": "a6ce40fd5493513d65b07b2b979e9c3b782c58c154abcb294966173670a51e31",
       "source_blob": "cf40e44a29c30623c3d84ad1d02141f903655943"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_app_plugin_binding.rs",
-      "to": "crates/harness-runtime/src/mobile/local_app_plugin_binding.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_app_plugin_binding.rs",
+      "to": "crates/runtime/src/mobile/local_app_plugin_binding.rs",
       "source_sha256": "b595a7d3adc3c41131a10cb95c570d25e4be1d39cdcce09f1743c4e2a2063f9f",
       "source_blob": "ec4861f855577f080a505dc0f6e3afd1fa43a198"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_app_runtime_profiles.rs",
-      "to": "crates/harness-runtime/src/mobile/local_app_runtime_profiles.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_app_runtime_profiles.rs",
+      "to": "crates/runtime/src/mobile/local_app_runtime_profiles.rs",
       "source_sha256": "a805faa7c044736cf4f42056707b64d7f5f16e504d2d46f57e314df4f2bf744e",
       "source_blob": "f9237efb709bc4278482b237afcf3242d2e8466d"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_app_template_catalog.rs",
-      "to": "crates/harness-runtime/src/mobile/local_app_template_catalog.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_app_template_catalog.rs",
+      "to": "crates/runtime/src/mobile/local_app_template_catalog.rs",
       "source_sha256": "7d5909a6e19809e6b24b71515c480771620fd1856e70af35c697e391792f7ef8",
       "source_blob": "3128d2f8520d70ea4ebde42004eab2f9694cc20c"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_bridge.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_bridge.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_bridge.rs",
+      "to": "crates/runtime/src/mobile/local_apps_bridge.rs",
       "source_sha256": "2b7ec2bed29dd3047bea96cd9bb19f047a4e6aca80217d3ffa75dc66a924e0ba",
       "source_blob": "15a597b119d48594909224ab008ea87fe3293203"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_build.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_build.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_build.rs",
+      "to": "crates/runtime/src/mobile/local_apps_build.rs",
       "source_sha256": "ba6be1af331f8f2a0fd558437a70ffdb65df97cc98d5b3f6f3348a2bfdaa740c",
       "source_blob": "b8f1a0036bba77f5f99a8d29f61ea750bb5ac748"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_device.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_device.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_device.rs",
+      "to": "crates/runtime/src/mobile/local_apps_device.rs",
       "source_sha256": "d9365bfb3ce00f4d375f0ee971289d8f7c8276ae458991175cfbf92ddfd8cf17",
       "source_blob": "cd0e5fdb3c5e722350ab0502f350fa64a2740bb6"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_host.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_host.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_host.rs",
+      "to": "crates/runtime/src/mobile/local_apps_host.rs",
       "source_sha256": "1be9658f6fd2e6d6c3ade2afa9f66b911f6b07c259c6fe27b8c556497deda892",
       "source_blob": "12130c813a57e7f18c18c5804ce9f85f09505234"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_host/authoring.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_host/authoring.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_host/authoring.rs",
+      "to": "crates/runtime/src/mobile/local_apps_host/authoring.rs",
       "source_sha256": "30d6bbf2ed25261eb769c7305f931e886eeeef1a308830c91d6426008e319342",
       "source_blob": "8bed44b17721b7069298f99e7c632520225459b1"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_host_agent.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_host_agent.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_host_agent.rs",
+      "to": "crates/runtime/src/mobile/local_apps_host_agent.rs",
       "source_sha256": "274771151918ca8cf5a4f6f4bbcea19af24d1c32e39a88f32ee939532d5346e1",
       "source_blob": "df3244d08987bcc79dac901f82d8039f3c6fce02"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_host_background.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_host_background.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_host_background.rs",
+      "to": "crates/runtime/src/mobile/local_apps_host_background.rs",
       "source_sha256": "bdbde670a1e175d9a4c799768eb776818a05f67796c93d1e81e0613299d5c736",
       "source_blob": "8c7c0ba238a29d65053e8590014faed746adfd05"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_host_device.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_host_device.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_host_device.rs",
+      "to": "crates/runtime/src/mobile/local_apps_host_device.rs",
       "source_sha256": "70dfd8f53e8bae0cee2b1642d6bfb839fd9b753f985a9b31587687d61c41c2a9",
       "source_blob": "b965e81cea0ced468968b33dc95ec9e317f4dbd8"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_host_files.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_host_files.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_host_files.rs",
+      "to": "crates/runtime/src/mobile/local_apps_host_files.rs",
       "source_sha256": "8a8c7570e778eca24e036074d0847a8bbdfbc03c913a02ba8f6d34fffc416147",
       "source_blob": "34c673a1d494ef35eed12023c9f6f13c0727a170"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_host_llm.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_host_llm.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_host_llm.rs",
+      "to": "crates/runtime/src/mobile/local_apps_host_llm.rs",
       "source_sha256": "cad2edf787c0b08e89324a2a59fad566d20beca61776e71bcc357c7f816bbeae",
       "source_blob": "3ae6efaf96bf2813ed06d28e1d0e6c99b9aeb8a9"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_llm.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_llm.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_llm.rs",
+      "to": "crates/runtime/src/mobile/local_apps_llm.rs",
       "source_sha256": "2096f2823f6fe3ddb2552778d22f7a97f1586ba3955d3f9aa91ce07bc7a78d37",
       "source_blob": "139932633fcc14a1acfb801254509d652d4a6cbb"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_mcp.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_mcp.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_mcp.rs",
+      "to": "crates/runtime/src/mobile/local_apps_mcp.rs",
       "source_sha256": "6f63ff257972a93ca9b8b936eb93220f9e04a58fca962969bdd5b380d52fcf63",
       "source_blob": "2099ccf29f195706b3f887ab37c9134bfd1c0213"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_prepare.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_prepare.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_prepare.rs",
+      "to": "crates/runtime/src/mobile/local_apps_prepare.rs",
       "source_sha256": "58995396f50269772e977958e466d7444afbf899cb2e17cbf1674f7ccea53d0d",
       "source_blob": "5e35e803d2214ee9fc6347cc64e951adc53d2d0c"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_profile.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_profile.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_profile.rs",
+      "to": "crates/runtime/src/mobile/local_apps_profile.rs",
       "source_sha256": "1e26797210b3461abbf82822ee59e57c93d237e116cdd80cf88ff35c3ea6ad3f",
       "source_blob": "59b3d6a4736436944ace9a5667b6d05ec8ca6730"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/local_apps_tools.rs",
-      "to": "crates/harness-runtime/src/mobile/local_apps_tools.rs",
+      "from": "lingxi-code/runtime/src/mobile/local_apps_tools.rs",
+      "to": "crates/runtime/src/mobile/local_apps_tools.rs",
       "source_sha256": "02261d29019beb8722c85e002b7658b40dc5f6e68a8e7bf879985ed204ab0247",
       "source_blob": "91a97c106978697b1b14d6dd213634f5252d3a72"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/mcp_transport.rs",
-      "to": "crates/harness-runtime/src/mobile/mcp_transport.rs",
+      "from": "lingxi-code/runtime/src/mobile/mcp_transport.rs",
+      "to": "crates/runtime/src/mobile/mcp_transport.rs",
       "source_sha256": "73baa1d1d123f2b98d563a690e5a2b2c0bafcb03152dc4c0d92dd016dad05069",
       "source_blob": "6e3b7d9c78611354978b7ee07af717320a17256f"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/mobile_lsp.rs",
-      "to": "crates/harness-runtime/src/mobile/mobile_lsp.rs",
+      "from": "lingxi-code/runtime/src/mobile/mobile_lsp.rs",
+      "to": "crates/runtime/src/mobile/mobile_lsp.rs",
       "source_sha256": "52926df07e982ac686614b896b00004164459e62dadb3b32a698c59dd180c181",
       "source_blob": "d88091429741df41073ad51e44905a787ba313c9"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/mod.rs",
-      "to": "crates/harness-runtime/src/mobile/mod.rs",
+      "from": "lingxi-code/runtime/src/mobile/mod.rs",
+      "to": "crates/runtime/src/mobile/mod.rs",
       "source_sha256": "627ac189d4bc46d4108c76e75f97bf1db09ab75fa143ae895fc3ba87f46b99d6",
       "source_blob": "8a0877f07dbdfff611df21e866d730cbb4088980"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/plan_approval.rs",
-      "to": "crates/harness-runtime/src/mobile/plan_approval.rs",
+      "from": "lingxi-code/runtime/src/mobile/plan_approval.rs",
+      "to": "crates/runtime/src/mobile/plan_approval.rs",
       "source_sha256": "b3a4168f67bc46c4ef788959e3c4de9b5104f6f764a86a531a75b8fb8d8fcf50",
       "source_blob": "7935a788e4b2b01449bcc8a908bdd2364ec06d3f"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/skill_loader.rs",
-      "to": "crates/harness-runtime/src/mobile/skill_loader.rs",
+      "from": "lingxi-code/runtime/src/mobile/skill_loader.rs",
+      "to": "crates/runtime/src/mobile/skill_loader.rs",
       "source_sha256": "61c27f50434d6e6fbde5db3ac513c7d99cfaa13619ea5f5aaae5e2bdf3ba5bce",
       "source_blob": "fe356c4809c5ff26f0b6f6e14ef248912a8a5614"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/test_support.rs",
-      "to": "crates/harness-runtime/src/mobile/test_support.rs",
+      "from": "lingxi-code/runtime/src/mobile/test_support.rs",
+      "to": "crates/runtime/src/mobile/test_support.rs",
       "source_sha256": "5251fef32931b40901eca00acd5b34c53cb9763ca456f713d9e3674f6b44617e",
       "source_blob": "102a76c057b0fb8ca80ddb5b4b38aca5fbcf591b"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/turn_durability.rs",
-      "to": "crates/harness-runtime/src/mobile/turn_durability.rs",
+      "from": "lingxi-code/runtime/src/mobile/turn_durability.rs",
+      "to": "crates/runtime/src/mobile/turn_durability.rs",
       "source_sha256": "c1b4ec164332c1c11dd3c6f74eaaf8a87b0f2359d515726ef87f26e4ba72a880",
       "source_blob": "ab8be1dd245a98144f41cf3db7d1ad242acc0c08"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/mobile/workflow_support.rs",
-      "to": "crates/harness-runtime/src/mobile/workflow_support.rs",
+      "from": "lingxi-code/runtime/src/mobile/workflow_support.rs",
+      "to": "crates/runtime/src/mobile/workflow_support.rs",
       "source_sha256": "b48a696b80be81220799d9040a0b1b60b76abc7caaf784ba4559d85af491c97e",
       "source_blob": "9dc1e94a13118e8644e8aa0c3d290697fb1618be"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/models/decision.rs",
-      "to": "crates/harness-runtime/src/models/decision.rs",
+      "from": "lingxi-code/runtime/src/models/decision.rs",
+      "to": "crates/runtime/src/models/decision.rs",
       "source_sha256": "4a40f388c624ddf1794bc3da33c326bb429db83cb17651d0c52368e1ccc2c2da",
       "source_blob": "4c5fd4e932255d693e5685fb4fc057f6eee5ab48"
     },
     {
-      "from": "lingxi-code/harness-runtime/src/models/mod.rs",
-      "to": "crates/harness-runtime/src/models/mod.rs",
+      "from": "lingxi-code/runtime/src/models/mod.rs",
+      "to": "crates/runtime/src/models/mod.rs",
       "source_sha256": "2b7575d600613c11f63e839b00137d3ad210733c818813ddd3d798009cec5578",
       "source_blob": "ca733f32cfcc35b1533f2cdc46c72b78dab66ca6"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/decision_contract.rs",
-      "to": "crates/harness-runtime/tests/decision_contract.rs",
+      "to": "crates/runtime/tests/decision_contract.rs",
       "source_sha256": "31ce394b426f52519db20a8b1bc8ee5de6fb74616950f1b713b082ac95115004",
       "source_blob": "a832c26107f935fe472319d34b62f484f1a0882c"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/desktop/audio_injection.rs",
-      "to": "crates/harness-runtime/tests/desktop/audio_injection.rs",
+      "to": "crates/runtime/tests/desktop/audio_injection.rs",
       "source_sha256": "c57e16821fa99dc845091e21b173dd57b312989ff04d25d9210fb81b14bce677",
       "source_blob": "b3b7915d1f59a74bd634a2d605ae59e0ba1133f1"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/desktop/background_output_writer.rs",
-      "to": "crates/harness-runtime/tests/desktop/background_output_writer.rs",
+      "to": "crates/runtime/tests/desktop/background_output_writer.rs",
       "source_sha256": "183aba55fd73858082ff77e0b73ea7b9f2f957fdf821efd7e1189305fc5bbe82",
       "source_blob": "06d95b251a3b07157b92ed101a4a4342589ee51d"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/desktop/coordinator_activation.rs",
-      "to": "crates/harness-runtime/tests/desktop/coordinator_activation.rs",
+      "to": "crates/runtime/tests/desktop/coordinator_activation.rs",
       "source_sha256": "78dbf6784615707ad67f3821d913c3b26e3cdbcf92c21746856537088fd954a2",
       "source_blob": "9a0090901422f04080cd91994045078f222935b3"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/desktop/desktop_tool_list_snapshot.rs",
-      "to": "crates/harness-runtime/tests/desktop/desktop_tool_list_snapshot.rs",
+      "to": "crates/runtime/tests/desktop/desktop_tool_list_snapshot.rs",
       "source_sha256": "ced00c58909d966c9304492866959d89277c3a3e25e7fb72d2219aed5da2b468",
       "source_blob": "a2a16527586bb6cc012ebc3cf2abd565ee6cbe4c"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/desktop/pool_starvation.rs",
-      "to": "crates/harness-runtime/tests/desktop/pool_starvation.rs",
+      "to": "crates/runtime/tests/desktop/pool_starvation.rs",
       "source_sha256": "4cf6a930bd0bb6912a12814c5745e42a7953886a0a2f8f5cfbfddc65562bc322",
       "source_blob": "3f40d6f2ec2cc7f09bf1bca8050579aad00540bf"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/desktop/sandbox_startup_test.rs",
-      "to": "crates/harness-runtime/tests/desktop/sandbox_startup_test.rs",
+      "to": "crates/runtime/tests/desktop/sandbox_startup_test.rs",
       "source_sha256": "b37ee4a898a3f368ac5c88ff116caf44a74c8a5a554b96a26d8bb7c4e67474e7",
       "source_blob": "4866a807bd579bdcfc9c6044f74b84504fad1e6f"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/desktop/settings_watch_spawn.rs",
-      "to": "crates/harness-runtime/tests/desktop/settings_watch_spawn.rs",
+      "to": "crates/runtime/tests/desktop/settings_watch_spawn.rs",
       "source_sha256": "b584c78c4f78fb0b006d939e4e1f0ae5463de7fb15175cdfb7c4a3d8cdf791a7",
       "source_blob": "92f1e70089f018fd095ede4704b4a83615e26b67"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/desktop/snapshots/desktop_tool_list_snapshot__desktop_tool_list.snap",
-      "to": "crates/harness-runtime/tests/desktop/snapshots/desktop_tool_list_snapshot__desktop_tool_list.snap",
+      "to": "crates/runtime/tests/desktop/snapshots/desktop_tool_list_snapshot__desktop_tool_list.snap",
       "source_sha256": "e99a1378365b7037814104c01c90ac502c6dfb9d7e2218ed9cc56e95baace3eb",
       "source_blob": "39665195016057f7748367fefdfff9a8e40d3170"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/mobile/component_literal_allowlist.txt",
-      "to": "crates/harness-runtime/tests/mobile/component_literal_allowlist.txt",
+      "to": "crates/runtime/tests/mobile/component_literal_allowlist.txt",
       "source_sha256": "cf4faf4ad4dfc4cbba27e73a1de6ac791739ce13873fba375e65b9481de84f00",
       "source_blob": "d17ab270b2765e0366128f60313996dd6d4022fb"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/mobile/component_literal_scan.rs",
-      "to": "crates/harness-runtime/tests/mobile/component_literal_scan.rs",
+      "to": "crates/runtime/tests/mobile/component_literal_scan.rs",
       "source_sha256": "53490c6d094604a5ec70ef417936d5655d0594fe9e13f7129f8dc16ff0c746b7",
       "source_blob": "a766919d7bf9c5733e96a5bf4f0e965dc59dfc6c"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/mobile/local_app_image_read.rs",
-      "to": "crates/harness-runtime/tests/mobile/local_app_image_read.rs",
+      "to": "crates/runtime/tests/mobile/local_app_image_read.rs",
       "source_sha256": "b84a85170b5b87617725f1cb1bbf3c7435170822f7b1b1a3a407f3e299ec0da8",
       "source_blob": "2c6b9c92333a03bd21f9a3895b31b4e66401f324"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/mobile/mobile_git_gating.rs",
-      "to": "crates/harness-runtime/tests/mobile/mobile_git_gating.rs",
+      "to": "crates/runtime/tests/mobile/mobile_git_gating.rs",
       "source_sha256": "d70a83b327ba5ef8b2977557cb56ba1a4a0302e8e54a01e4d03e62bdd7dcbe74",
       "source_blob": "6975f135402616a65495d5dba794d6f43069cdea"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/mobile/mobile_shell_gating.rs",
-      "to": "crates/harness-runtime/tests/mobile/mobile_shell_gating.rs",
+      "to": "crates/runtime/tests/mobile/mobile_shell_gating.rs",
       "source_sha256": "3af2caeedbc83a60f0ac83a27b54b8617c60dc45eb6c3cbfdf831df62262fce7",
       "source_blob": "5300c0a9ba8a7aba97ce4963c0f74bc933c06bad"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/mobile/mobile_tool_list_snapshot.rs",
-      "to": "crates/harness-runtime/tests/mobile/mobile_tool_list_snapshot.rs",
+      "to": "crates/runtime/tests/mobile/mobile_tool_list_snapshot.rs",
       "source_sha256": "f8ca52f7a2977e87c1a99b169516afb34507b3c11e644362c6863f0d2d3cec2b",
       "source_blob": "8a78c5a5b979c53f97f972b373f809fe29a7e8a6"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/mobile/skeleton_test.rs",
-      "to": "crates/harness-runtime/tests/mobile/skeleton_test.rs",
+      "to": "crates/runtime/tests/mobile/skeleton_test.rs",
       "source_sha256": "5d57d7a46cd72c355598a105bc55160e2da4a56fde78b63713afff183621665b",
       "source_blob": "8062a32310c880dedc5c09ee364a4855492c8e7e"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/mobile/snapshots/mobile_tool_list_snapshot__mobile_tool_list.snap",
-      "to": "crates/harness-runtime/tests/mobile/snapshots/mobile_tool_list_snapshot__mobile_tool_list.snap",
+      "to": "crates/runtime/tests/mobile/snapshots/mobile_tool_list_snapshot__mobile_tool_list.snap",
       "source_sha256": "0e3b4b2a3e939776e0b68d4f180c95863862d3c8460bc8b53fd19f8bb455075b",
       "source_blob": "db215109340b0866d7acb05be8f0d1bd2910e502"
     },
     {
       "from": "lingxi-code/harness-runtime/tests/mobile/snapshots/mobile_tool_list_snapshot__mobile_tool_list_host_only.snap",
-      "to": "crates/harness-runtime/tests/mobile/snapshots/mobile_tool_list_snapshot__mobile_tool_list_host_only.snap",
+      "to": "crates/runtime/tests/mobile/snapshots/mobile_tool_list_snapshot__mobile_tool_list_host_only.snap",
       "source_sha256": "860fe3fd25640a7cd69e2068e311589e00562835b6eee36cf1c0e4ba791da38b",
       "source_blob": "c678939088a1849da12ea99bb462d48c7dc74b49"
     },

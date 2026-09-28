@@ -1,6 +1,6 @@
+use super::*;
 use mobile_linux_api::{MobileLinuxCapability, MobileLinuxRuntimeMode};
 use tool_api::SessionCwd;
-use super::*;
 
 fn unavailable_mobile_linux_capability() -> MobileLinuxCapability {
     MobileLinuxCapability {

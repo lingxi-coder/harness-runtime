@@ -115,7 +115,7 @@ fn escape_xml(s: &str) -> String {
 /// `host_context.invocation_capability` are host-minted authority tokens the
 /// `local-app-build`/`update`/`verify` workflow launch enriches `spec.args`
 /// with AFTER `sanitize_namespaced_local_app_args` strips the caller-supplied
-/// copies (`harness-runtime/src/mobile/workflow_support.rs`); they are read back
+/// copies (`runtime/src/mobile/workflow_support.rs`); they are read back
 /// only by the workflow script's own `context.selector_capability` /
 /// `context.invocation_capability`, never by the model. `n.workflow_args` is
 /// that fully-enriched `spec.args`, echoed here for a human to eyeball a

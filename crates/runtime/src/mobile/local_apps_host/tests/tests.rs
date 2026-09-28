@@ -475,9 +475,7 @@ impl MobileLinuxRuntime for MockMobileLinuxRuntime {
                 Some(lockfile) => lockfile,
                 None => {
                     let package = fs::read(host_cwd.join("package.json")).map_err(|error| {
-                        MobileLinuxError::Io(format!(
-                            "read fake resolution input package: {error}"
-                        ))
+                        MobileLinuxError::Io(format!("read fake resolution input package: {error}"))
                     })?;
                     mock_pnpm_lockfile(&package).map_err(MobileLinuxError::Io)?
                 }
@@ -510,9 +508,7 @@ impl MobileLinuxRuntime for MockMobileLinuxRuntime {
                     timed_out: false,
                     cancelled: false,
                     enforcement: mobile_linux_api::LinuxEnforcementReceipt {
-                        network_policy_enforced: self
-                            .enforcement_receipt
-                            .load(Ordering::SeqCst),
+                        network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                         memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                     },
                 });
@@ -521,9 +517,7 @@ impl MobileLinuxRuntime for MockMobileLinuxRuntime {
                 .args
                 .windows(2)
                 .find_map(|pair| (pair[0] == "--outDir").then_some(pair[1].as_str()))
-                .ok_or_else(|| {
-                    MobileLinuxError::InvalidRequest("missing Vite --outDir".into())
-                })?;
+                .ok_or_else(|| MobileLinuxError::InvalidRequest("missing Vite --outDir".into()))?;
             let output = host_cwd.join(output_rel);
             fs::create_dir_all(&output).map_err(|error| {
                 MobileLinuxError::Io(format!("create fake build output: {error}"))
@@ -532,9 +526,7 @@ impl MobileLinuxRuntime for MockMobileLinuxRuntime {
                 output.join("index.html"),
                 b"<!doctype html><title>built</title>",
             )
-            .map_err(|error| {
-                MobileLinuxError::Io(format!("write fake build output: {error}"))
-            })?;
+            .map_err(|error| MobileLinuxError::Io(format!("write fake build output: {error}")))?;
             return Ok(mobile_linux_api::LinuxCommandResult {
                 stdout: "built".into(),
                 stderr: String::new(),
@@ -562,9 +554,7 @@ impl MobileLinuxRuntime for MockMobileLinuxRuntime {
                 host_cwd.join("node_modules/vite/package.json"),
                 r#"{"name":"vite","version":"8.2.1","license":"MIT"}"#,
             )
-            .map_err(|error| {
-                MobileLinuxError::Io(format!("write fake vite manifest: {error}"))
-            })?;
+            .map_err(|error| MobileLinuxError::Io(format!("write fake vite manifest: {error}")))?;
         }
         fs::write(host_cwd.join("node_modules/react.js"), b"react")
             .map_err(|error| MobileLinuxError::Io(format!("write fake dependency: {error}")))?;
@@ -582,9 +572,9 @@ impl MobileLinuxRuntime for MockMobileLinuxRuntime {
         )
         .map_err(|error| MobileLinuxError::Io(format!("write fake react manifest: {error}")))?;
         let effective_package: Value =
-            serde_json::from_slice(&fs::read(host_cwd.join("package.json")).map_err(
-                |error| MobileLinuxError::Io(format!("read fake install package: {error}")),
-            )?)
+            serde_json::from_slice(&fs::read(host_cwd.join("package.json")).map_err(|error| {
+                MobileLinuxError::Io(format!("read fake install package: {error}"))
+            })?)
             .map_err(|error| {
                 MobileLinuxError::Io(format!("parse fake install package: {error}"))
             })?;
@@ -822,8 +812,8 @@ fn create_configured_runtime_root(root: &TempDir) -> PathBuf {
 fn create_configured_digest_runtime_root(root: &TempDir) -> PathBuf {
     let runtime_container = root.path().join("runtime-root");
     fs::create_dir_all(&runtime_container).expect("create runtime container");
-    let runtime_root = runtime_container
-        .join("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    let runtime_root =
+        runtime_container.join("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
     fs::create_dir_all(&runtime_root).expect("create digest runtime root");
     runtime_root
 }
@@ -1131,12 +1121,11 @@ async fn host_qa_fixture_with_mobile_linux(
         runtime_profile: manifest.runtime_profile.clone().expect("runtime profile"),
         spec,
     };
-    let authoring_sha256 = local_apps::save_authoring_contract(&layout, &contract)
-        .expect("save authoring contract");
+    let authoring_sha256 =
+        local_apps::save_authoring_contract(&layout, &contract).expect("save authoring contract");
     let build_path = root.path().join(layout.build_rel(false)).join("build.json");
-    let mut build: Value =
-        serde_json::from_slice(&fs::read(&build_path).expect("build receipt"))
-            .expect("parse build receipt");
+    let mut build: Value = serde_json::from_slice(&fs::read(&build_path).expect("build receipt"))
+        .expect("parse build receipt");
     build["runtimeContractSha256"] =
         Value::String(manifest.runtime_contract_hash().expect("runtime digest"));
     build["dependencySnapshotSha256"] = Value::String(
@@ -1225,16 +1214,12 @@ async fn host_qa_terminal_rejects_current_device_scope_changes_before_publicatio
     let fixture = host_qa_fixture().await;
     let candidate = finalize_passing_host_qa(&fixture).await;
     let original_contract_sha256 =
-        crate::mobile::local_apps_build::active_build_authoring_contract_sha256(
-            &fixture.layout,
-        )
-        .expect("active authoring selector")
-        .expect("active authoring contract");
-    let mut changed_contract = local_apps::authoring::load_authoring_contract(
-        &fixture.layout,
-        &original_contract_sha256,
-    )
-    .expect("load active authoring contract");
+        crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&fixture.layout)
+            .expect("active authoring selector")
+            .expect("active authoring contract");
+    let mut changed_contract =
+        local_apps::authoring::load_authoring_contract(&fixture.layout, &original_contract_sha256)
+            .expect("load active authoring contract");
     changed_contract.spec.targets[0].form_factor = "tablet".into();
     let mut current_target = changed_contract.spec.targets[0].clone();
     current_target.id = "current-device".into();
@@ -1258,9 +1243,8 @@ async fn host_qa_terminal_rejects_current_device_scope_changes_before_publicatio
         .root()
         .join(fixture.layout.build_rel(false))
         .join("build.json");
-    let mut build: Value =
-        serde_json::from_slice(&fs::read(&build_path).expect("build receipt"))
-            .expect("parse build receipt");
+    let mut build: Value = serde_json::from_slice(&fs::read(&build_path).expect("build receipt"))
+        .expect("parse build receipt");
     build["authoringContractSha256"] = Value::String(changed_contract_sha256);
     fs::write(
         &build_path,
@@ -1535,8 +1519,8 @@ async fn finalize_passing_host_qa(fixture: &HostQaFixture) -> Value {
         }))
         .await
         .expect("record second matching query evidence");
-    let session = local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle)
-        .expect("load QA session");
+    let session =
+        local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle).expect("load QA session");
     let evidence_ids = session
         .evidence
         .iter()
@@ -1602,8 +1586,8 @@ fn sync_fixture_dependency_roots(broker: &LocalAppsHostBroker, layout: &AppLayou
         workspace.join("pnpm-lock.yaml"),
     )
     .expect("restore fixture lockfile from its trusted snapshot");
-    let target = crate::mobile::local_apps_build::detect_build_target(layout)
-        .expect("fixture build target");
+    let target =
+        crate::mobile::local_apps_build::detect_build_target(layout).expect("fixture build target");
     crate::mobile::local_apps_build::restore_host_managed_files(&workspace, target)
         .expect("restore fixture host-managed dependency roots");
     assert!(
@@ -2804,8 +2788,8 @@ async fn qa_action_waits_for_a_page_write_issued_after_native_success() {
     assert_eq!(changed["records"][0]["recordId"], "late-row");
     assert_eq!(changed["records"][0]["revision"], 1);
 
-    let session = local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle)
-        .expect("load QA evidence");
+    let session =
+        local_apps::load_qa_session(&fixture.layout, &fixture.qa_handle).expect("load QA evidence");
     let bridge = session
         .evidence
         .iter()
@@ -2829,27 +2813,23 @@ async fn qa_action_waits_for_a_page_write_issued_after_native_success() {
         .find(|evidence| evidence.kind == local_apps::QaEvidenceKind::Query)
         .expect("actual query evidence");
     assert_eq!(query.caused_by.as_deref(), Some(bridge_event_id.as_str()));
-    let query_content = match local_apps::qa_read_evidence(
-        &fixture.layout,
-        &fixture.qa_handle,
-        &query.evidence_id,
-    )
-    .expect("read actual query artifact")
-    {
-        local_apps::QaEvidenceBlock::Json { content, .. } => content,
-        other => panic!("query evidence must be JSON, got {other:?}"),
-    };
+    let query_content =
+        match local_apps::qa_read_evidence(&fixture.layout, &fixture.qa_handle, &query.evidence_id)
+            .expect("read actual query artifact")
+        {
+            local_apps::QaEvidenceBlock::Json { content, .. } => content,
+            other => panic!("query evidence must be JSON, got {other:?}"),
+        };
     assert_eq!(query_content["records"][0]["recordId"], "late-row");
 }
 
 #[tokio::test]
 async fn authoring_candidate_run_and_base_are_rechecked_at_the_build_lock_boundary() {
     let fixture = host_qa_fixture().await;
-    let base = crate::mobile::local_apps_build::active_build_authoring_contract_sha256(
-        &fixture.layout,
-    )
-    .expect("active authoring selector")
-    .expect("active contract digest");
+    let base =
+        crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&fixture.layout)
+            .expect("active authoring selector")
+            .expect("active contract digest");
     let spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
         "../../../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
     ))
@@ -2883,8 +2863,8 @@ async fn authoring_candidate_run_and_base_are_rechecked_at_the_build_lock_bounda
         .root()
         .join(fixture.layout.build_rel(false))
         .join("build.json");
-    let mut build: Value = serde_json::from_slice(&fs::read(&build_path).expect("receipt"))
-        .expect("parse receipt");
+    let mut build: Value =
+        serde_json::from_slice(&fs::read(&build_path).expect("receipt")).expect("parse receipt");
     build["authoringContractSha256"] = Value::String("f".repeat(64));
     fs::write(
         &build_path,
@@ -3154,16 +3134,13 @@ async fn failed_native_qa_action_is_authenticated_and_persisted_without_roundtri
         .iter()
         .find(|evidence| evidence.kind == local_apps::QaEvidenceKind::UiAction)
         .expect("failed UI attempt is persisted");
-    let content = match local_apps::qa_read_evidence(
-        &fixture.layout,
-        &fixture.qa_handle,
-        &ui.evidence_id,
-    )
-    .expect("read failed UI evidence")
-    {
-        local_apps::QaEvidenceBlock::Json { content, .. } => content,
-        _ => panic!("UI evidence must be JSON"),
-    };
+    let content =
+        match local_apps::qa_read_evidence(&fixture.layout, &fixture.qa_handle, &ui.evidence_id)
+            .expect("read failed UI evidence")
+        {
+            local_apps::QaEvidenceBlock::Json { content, .. } => content,
+            _ => panic!("UI evidence must be JSON"),
+        };
     assert_eq!(content["ok"], false);
 }
 
@@ -3331,9 +3308,9 @@ async fn the_scanners_reject_a_dead_tool_name_planted_in_each_new_source() {
         std::panic::set_hook(Box::new(|_| {}));
         let outcome = std::panic::catch_unwind(scan);
         std::panic::set_hook(previous);
-        let payload = outcome.err().unwrap_or_else(|| {
-            panic!("the scanner accepted a planted dead tool name in {what}")
-        });
+        let payload = outcome
+            .err()
+            .unwrap_or_else(|| panic!("the scanner accepted a planted dead tool name in {what}"));
         payload
             .downcast_ref::<String>()
             .cloned()
@@ -3401,10 +3378,7 @@ async fn the_scanners_reject_a_dead_tool_name_planted_in_each_new_source() {
     );
     let message = rejection(
         move || {
-            assert_only_real_local_app_tool_tokens(
-                &planted_description,
-                "the planted description",
-            )
+            assert_only_real_local_app_tool_tokens(&planted_description, "the planted description")
         },
         "a host tool description",
     );
@@ -3486,8 +3460,7 @@ async fn execute_mcp_flow_runs_the_host_reloaded_typed_binding() {
     )
     .expect("write flow contexts");
 
-    let mut definition =
-        platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
+    let mut definition = platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
     definition.output_schema = Some(output_schema);
     let binding = json!({
         "flowId": "runtime-status-flow",
@@ -3601,8 +3574,7 @@ async fn published_rebuild_rebinds_the_active_mcp_catalog_to_the_new_build() {
     fs::create_dir_all(workspace.join(".lingxi")).expect("create context directory");
     fs::write(
         workspace.join(".lingxi/mcp-flow-contexts.json"),
-        serde_json::to_vec_pretty(&json!({"flow": flow_context}))
-            .expect("serialize flow contexts"),
+        serde_json::to_vec_pretty(&json!({"flow": flow_context})).expect("serialize flow contexts"),
     )
     .expect("write flow contexts");
 
@@ -3730,9 +3702,8 @@ fn seed_launchable_runtime_fixture(root: &Path, record: &local_apps::AppRecord, 
         local_apps::AppRuntimeProfile::ReactDom,
     )
     .expect("published react-dom runtime profile");
-    let artifacts =
-        scaffold_runtime_profile(Some(binding.clone()), local_apps::AppSurface::Dom)
-            .expect("react-dom scaffold artifacts");
+    let artifacts = scaffold_runtime_profile(Some(binding.clone()), local_apps::AppSurface::Dom)
+        .expect("react-dom scaffold artifacts");
     stamp_scaffold_identity(
         &layout,
         name,
@@ -3931,8 +3902,7 @@ async fn scaffold_writes_capability_neutral_lingxi_when_toolchain_is_available()
         "{lingxi}"
     );
     assert!(
-        lingxi
-            .contains("Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`"),
+        lingxi.contains("Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`"),
         "{lingxi}"
     );
     assert!(
@@ -4121,13 +4091,12 @@ async fn approved_create_receipt_with_design(
     let workflow_run_id = format!("wf_create_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            app_id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        app_id,
+        &workflow_run_id,
+    )
+    .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": app_id,
@@ -4285,27 +4254,21 @@ async fn confirmed_scaffold_input(
     // case; the (possibly invalid) `name`/`brief` args still reach the
     // returned scaffold input unchanged, so the validation under test
     // still sees exactly what the caller asked for.
-    let stage_name =
-        if !name.trim().is_empty() && name.len() <= local_apps::service::MAX_NAME_BYTES {
-            name
-        } else {
-            TEST_DEFAULT_APP_NAME
-        };
+    let stage_name = if !name.trim().is_empty() && name.len() <= local_apps::service::MAX_NAME_BYTES
+    {
+        name
+    } else {
+        TEST_DEFAULT_APP_NAME
+    };
     let stage_brief =
         if !brief.trim().is_empty() && brief.len() <= local_apps::service::MAX_BRIEF_BYTES {
             brief
         } else {
             TEST_DEFAULT_APP_BRIEF
         };
-    let (workflow_run_id, receipt_id) = approved_create_receipt_with_design(
-        broker,
-        app_id,
-        surface,
-        None,
-        stage_name,
-        stage_brief,
-    )
-    .await;
+    let (workflow_run_id, receipt_id) =
+        approved_create_receipt_with_design(broker, app_id, surface, None, stage_name, stage_brief)
+            .await;
     json!({
         "app_id": app_id,
         "name": name,
@@ -4350,10 +4313,7 @@ fn runtime_status_step_output_schema() -> Value {
     })
 }
 
-fn initial_mcp_proposal_model(
-    app_id: &str,
-    manifest_revision: u64,
-) -> local_apps::AppMcpProposal {
+fn initial_mcp_proposal_model(app_id: &str, manifest_revision: u64) -> local_apps::AppMcpProposal {
     local_apps::AppMcpProposal {
         app_id: app_id.to_string(),
         manifest_revision,
@@ -4402,11 +4362,9 @@ fn persist_initial_mcp_candidate_fixture(
         "additionalProperties": false,
     });
     let output_schema = runtime_record_output_schema();
-    let mut definition =
-        platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
+    let mut definition = platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
     definition.title = Some("Runtime status".into());
-    definition.description =
-        Some("Read the current runtime status from the staged flow.".into());
+    definition.description = Some("Read the current runtime status from the staged flow.".into());
     definition.output_schema = Some(output_schema);
     let flow = local_apps::AppMcpFlowBinding {
         flow_id: "runtime-status-flow".into(),
@@ -4682,13 +4640,12 @@ async fn staged_create_approval_does_not_author_or_enable_mcp() {
     let workflow_run_id = format!("wf_plain_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        &shell.id,
+        &workflow_run_id,
+    )
+    .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": shell.id.clone(),
@@ -4884,13 +4841,12 @@ async fn stage_create_after_approval_is_refused_and_cannot_rewrite_the_approved_
     let second_workflow_run_id = format!("wf_restage_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &second_workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        &shell.id,
+        &second_workflow_run_id,
+    )
+    .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": shell.id,
@@ -4945,8 +4901,8 @@ async fn staged_evidence_missing_name_or_brief_is_a_named_hard_fail() {
             "wf_evidence_gap_{drop_key}_{}",
             uuid::Uuid::new_v4().simple()
         );
-        let catalog = crate::mobile::local_app_template_catalog::catalog_view()
-            .expect("template catalog");
+        let catalog =
+            crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
         let selector_capability =
             crate::mobile::local_app_template_catalog::issue_selector_capability(
                 &broker.root,
@@ -5044,13 +5000,12 @@ async fn a_failed_stage_create_reclaims_its_partial_staging_tree() {
     let workflow_run_id = format!("wf_partial_stage_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        &shell.id,
+        &workflow_run_id,
+    )
+    .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": shell.id,
@@ -5115,13 +5070,12 @@ async fn a_committed_staging_tree_survives_a_later_failed_stage_create() {
     let workflow_run_id = format!("wf_committed_stage_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        &shell.id,
+        &workflow_run_id,
+    )
+    .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": shell.id,
@@ -5190,13 +5144,12 @@ async fn a_design_spec_that_does_not_match_its_recorded_digest_is_a_named_hard_f
     let workflow_run_id = format!("wf_design_digest_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        &shell.id,
+        &workflow_run_id,
+    )
+    .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": shell.id,
@@ -5304,13 +5257,12 @@ async fn approve_mcp_proposal_reuses_an_already_approved_create_journal_without_
     let workflow_run_id = format!("wf_reuse_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        &shell.id,
+        &workflow_run_id,
+    )
+    .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": shell.id.clone(),
@@ -5441,9 +5393,7 @@ async fn approve_mcp_proposal_reuses_an_already_approved_create_journal_without_
             &journal_after.proposal_sha256,
             now_ms(),
         )
-        .expect(
-            "the receipt handed back by the reuse arm must be claimable by LocalAppScaffold",
-        );
+        .expect("the receipt handed back by the reuse arm must be claimable by LocalAppScaffold");
 
     // With that claim now live (an in-flight scaffold), a THIRD call must
     // still fail fast with a named in-flight error rather than minting a
@@ -5481,8 +5431,7 @@ async fn invalid_workflow_model_releases_the_unified_create_receipt_claim() {
     let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
     let (_root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
-    let (workflow_run_id, receipt_id) =
-        approved_create_receipt(&broker, &shell.id, "dom").await;
+    let (workflow_run_id, receipt_id) = approved_create_receipt(&broker, &shell.id, "dom").await;
 
     let error = broker
         .scaffold_shell_app_value(json!({
@@ -5517,13 +5466,12 @@ async fn create_review_surface_binds_staged_design_spec_digest() {
     let workflow_run_id = format!("wf_design_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        &shell.id,
+        &workflow_run_id,
+    )
+    .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": shell.id,
@@ -5601,13 +5549,12 @@ async fn unscaffolded_create_scaffolds_builds_and_promotes_from_a_staged_candida
     let workflow_run_id = format!("wf_e2e_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        &shell.id,
+        &workflow_run_id,
+    )
+    .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": shell.id,
@@ -5748,12 +5695,11 @@ async fn unscaffolded_create_scaffolds_builds_and_promotes_from_a_staged_candida
         workspace_of(&root, &shell.id).join("app/app.jsx").is_file(),
         "staged template must be committed into the real workspace"
     );
-    let active_contexts: BTreeMap<String, local_apps::AppMcpFlowContext> =
-        serde_json::from_slice(
-            &fs::read(workspace_of(&root, &shell.id).join(".lingxi/mcp-flow-contexts.json"))
-                .expect("active MCP flow contexts"),
-        )
-        .expect("parse active MCP flow contexts");
+    let active_contexts: BTreeMap<String, local_apps::AppMcpFlowContext> = serde_json::from_slice(
+        &fs::read(workspace_of(&root, &shell.id).join(".lingxi/mcp-flow-contexts.json"))
+            .expect("active MCP flow contexts"),
+    )
+    .expect("parse active MCP flow contexts");
     assert_eq!(
         active_contexts
             .get("runtime-status-flow")
@@ -5866,13 +5812,12 @@ async fn staged_mcp_intent_survives_create_and_reaches_the_formal_contract() {
     let workflow_run_id = format!("wf_mcp_intent_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        &shell.id,
+        &workflow_run_id,
+    )
+    .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": shell.id,
@@ -6064,13 +6009,12 @@ async fn a_staged_declined_mcp_intent_survives_the_staging_seam() {
     let workflow_run_id = format!("wf_mcp_declined_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        &shell.id,
+        &workflow_run_id,
+    )
+    .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": shell.id,
@@ -6134,13 +6078,12 @@ async fn create_scaffold_seed_rejects_a_staged_template_file_tampered_after_stag
     let workflow_run_id = format!("wf_tamper_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        &shell.id,
+        &workflow_run_id,
+    )
+    .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": shell.id,
@@ -6208,8 +6151,7 @@ async fn qa_mcp_candidate_rejects_tampered_active_contexts() {
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let layout = broker.layout(&shell.id).expect("layout");
-    let (workflow_run_id, receipt_id) =
-        approved_create_receipt(&broker, &shell.id, "dom").await;
+    let (workflow_run_id, receipt_id) = approved_create_receipt(&broker, &shell.id, "dom").await;
     broker
         .scaffold_shell_app_value(json!({
             "app_id": shell.id,
@@ -6712,13 +6654,8 @@ async fn ensure_dependency_install_runs_the_install_its_worker_owns() {
 #[test]
 fn a_dropped_receipt_claim_guard_leaves_the_slot_re_issuable() {
     let digest = "0".repeat(64);
-    let claimed = local_apps::McpConfirmationReceipt::new(
-        "app",
-        "run-1",
-        digest.clone(),
-        digest.clone(),
-        0,
-    );
+    let claimed =
+        local_apps::McpConfirmationReceipt::new("app", "run-1", digest.clone(), digest.clone(), 0);
     let receipt_id = claimed.receipt_id.clone();
     let book = Arc::new(std::sync::Mutex::new(local_apps::McpReceiptBook::default()));
     book.lock().unwrap().issue(claimed).unwrap();
@@ -6830,13 +6767,12 @@ async fn a_refused_native_create_approval_cleans_up_the_candidate_state() {
     let workflow_run_id = format!("wf_drop_create_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        &shell.id,
+        &workflow_run_id,
+    )
+    .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": shell.id.clone(),
@@ -7015,8 +6951,7 @@ async fn wait_for_native_approval_timeout_arm_names_the_timeout_and_clears_the_p
 /// Some(...)` to distinguish the NEW retraction emit from that unrelated
 /// initial-request emit.
 #[tokio::test]
-async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_operation_failed()
-{
+async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_operation_failed() {
     let root = TempDir::new().expect("tempdir");
     let sink = MockSink::arc();
     let broker =
@@ -7156,11 +7091,10 @@ async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_op
 /// not.
 #[test]
 fn no_host_error_copy_tells_the_model_to_call_an_operation_with_no_tool_row() {
-    let wired: std::collections::HashSet<&str> =
-        crate::mobile::local_apps_tools::LOCAL_APP_TOOLS
-            .iter()
-            .map(|&(_, operation, _)| operation)
-            .collect();
+    let wired: std::collections::HashSet<&str> = crate::mobile::local_apps_tools::LOCAL_APP_TOOLS
+        .iter()
+        .map(|&(_, operation, _)| operation)
+        .collect();
     // Both spellings a model-facing sentence could plausibly use for an
     // operation that has no tool row: the provider-side operation name and
     // the `LocalApp*` name it WOULD have had.
@@ -7185,17 +7119,50 @@ fn no_host_error_copy_tells_the_model_to_call_an_operation_with_no_tool_row() {
     }
     let verbs = ["use ", "run ", "call ", "retry ", "invoke "];
     let sources = [
-        ("local_apps_host.rs", include_str!("../../local_apps_host.rs")),
-        ("local_apps_host/approvals.rs", include_str!("../approvals.rs")),
-        ("local_apps_host/bridge_operations.rs", include_str!("../bridge_operations.rs")),
-        ("local_apps_host/data_operations.rs", include_str!("../data_operations.rs")),
-        ("local_apps_host/dependency_install.rs", include_str!("../dependency_install.rs")),
-        ("local_apps_host/dependency_integrity.rs", include_str!("../dependency_integrity.rs")),
-        ("local_apps_host/dependency_recovery.rs", include_str!("../dependency_recovery.rs")),
-        ("local_apps_host/mcp_publication.rs", include_str!("../mcp_publication.rs")),
-        ("local_apps_host/runtime_lifecycle.rs", include_str!("../runtime_lifecycle.rs")),
-        ("local_apps_host/static_server.rs", include_str!("../static_server.rs")),
-        ("local_apps_build.rs", include_str!("../../local_apps_build.rs")),
+        (
+            "local_apps_host.rs",
+            include_str!("../../local_apps_host.rs"),
+        ),
+        (
+            "local_apps_host/approvals.rs",
+            include_str!("../approvals.rs"),
+        ),
+        (
+            "local_apps_host/bridge_operations.rs",
+            include_str!("../bridge_operations.rs"),
+        ),
+        (
+            "local_apps_host/data_operations.rs",
+            include_str!("../data_operations.rs"),
+        ),
+        (
+            "local_apps_host/dependency_install.rs",
+            include_str!("../dependency_install.rs"),
+        ),
+        (
+            "local_apps_host/dependency_integrity.rs",
+            include_str!("../dependency_integrity.rs"),
+        ),
+        (
+            "local_apps_host/dependency_recovery.rs",
+            include_str!("../dependency_recovery.rs"),
+        ),
+        (
+            "local_apps_host/mcp_publication.rs",
+            include_str!("../mcp_publication.rs"),
+        ),
+        (
+            "local_apps_host/runtime_lifecycle.rs",
+            include_str!("../runtime_lifecycle.rs"),
+        ),
+        (
+            "local_apps_host/static_server.rs",
+            include_str!("../static_server.rs"),
+        ),
+        (
+            "local_apps_build.rs",
+            include_str!("../../local_apps_build.rs"),
+        ),
     ];
     let mut hits: Vec<String> = Vec::new();
     for (name, src) in sources {
@@ -8729,8 +8696,7 @@ async fn scaffold_commits_all_four_fields_and_writes_the_formal_contract() {
     );
     assert!(
         contract.contains("informational mirror")
-            && contract
-                .contains("persisted manifest binding and host catalog are authoritative"),
+            && contract.contains("persisted manifest binding and host catalog are authoritative"),
         "LINGXI.md must not become the runtime profile authority: {contract}"
     );
     assert!(
@@ -8810,9 +8776,8 @@ async fn lingxi_md_contract_prose_names_no_workflow() {
         // would take the formal-contract half of the same test down with
         // it — a new gate hollowing out the older one behind it.
         let mut violations: Vec<String> = Vec::new();
-        let guided_contract =
-            fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
-                .expect("read the guided contract");
+        let guided_contract = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+            .expect("read the guided contract");
         for workflow in &workflows {
             if guided_contract.contains(workflow) {
                 violations.push(format!(
@@ -9010,14 +8975,9 @@ async fn workspace_contracts_name_no_local_app_tool_outside_local_app_tools() {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
         let (root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
-        let input = confirmed_scaffold_input(
-            &broker,
-            &shell.id,
-            "契约扫描",
-            "扫描正文的工具名",
-            surface,
-        )
-        .await;
+        let input =
+            confirmed_scaffold_input(&broker, &shell.id, "契约扫描", "扫描正文的工具名", surface)
+                .await;
         broker
             .scaffold_shell_app_value(input)
             .await
@@ -9122,9 +9082,9 @@ fn the_tool_name_scanner_actually_rejects_the_shapes_it_exists_to_catch() {
         let outcome =
             std::panic::catch_unwind(|| assert_only_real_tool_names(sample, "the sample"));
         std::panic::set_hook(previous);
-        let payload = outcome.err().unwrap_or_else(|| {
-            panic!("the scanner accepted a sample it must reject: {sample}")
-        });
+        let payload = outcome
+            .err()
+            .unwrap_or_else(|| panic!("the scanner accepted a sample it must reject: {sample}"));
         payload
             .downcast_ref::<String>()
             .cloned()
@@ -9562,13 +9522,12 @@ async fn scaffolding_a_formed_app_is_rejected() {
     let workflow_run_id = format!("wf_rescaffold_{}", uuid::Uuid::new_v4().simple());
     let catalog =
         crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
-    let selector_capability =
-        crate::mobile::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
+    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+        &broker.root,
+        &shell.id,
+        &workflow_run_id,
+    )
+    .expect("selector capability");
     let error = broker
         .validate_template_selection(json!({
             "app_id": shell.id,
@@ -9618,8 +9577,7 @@ async fn scaffold_rejects_an_empty_brief_and_an_unknown_surface() {
             "expected {expected:?} in {error:?}"
         );
     }
-    let mut surface_override =
-        confirmed_scaffold_input(&broker, &shell.id, "A", "b", "dom").await;
+    let mut surface_override = confirmed_scaffold_input(&broker, &shell.id, "A", "b", "dom").await;
     surface_override["surface"] = json!("webgl");
     let error = broker
         .scaffold_shell_app_value(surface_override)
@@ -9667,8 +9625,8 @@ async fn stage_create_rejects_an_over_long_name_or_brief() {
         brief: &str,
     ) -> Value {
         let workflow_run_id = format!("wf_bound_{}", uuid::Uuid::new_v4().simple());
-        let catalog = crate::mobile::local_app_template_catalog::catalog_view()
-            .expect("template catalog");
+        let catalog =
+            crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
         let selector_capability =
             crate::mobile::local_app_template_catalog::issue_selector_capability(
                 &broker.root,
@@ -10038,8 +9996,7 @@ fn dependency_snapshot_is_atomic_and_reusable() {
         PNPM_TOOLCHAIN_KEY
     )
     .expect("validate tree after invalid-cache rebuild"));
-    fs::write(source.join("react.js"), b"replacement source")
-        .expect("change later source tree");
+    fs::write(source.join("react.js"), b"replacement source").expect("change later source tree");
     LocalAppsHostBroker::publish_dependency_snapshot(
         &source,
         &snapshot,
@@ -10136,8 +10093,7 @@ fn dependency_snapshot_inventory_is_verified_and_reused_for_sbom() {
         Some((&snapshot, "lock-digest")),
     )
     .expect("the shared inventory can feed a second profile's fresh SBOM");
-    let canvas_document: Value =
-        serde_json::from_slice(&canvas_sbom).expect("canvas SBOM JSON");
+    let canvas_document: Value = serde_json::from_slice(&canvas_sbom).expect("canvas SBOM JSON");
     assert_ne!(
         document["documentNamespace"], canvas_document["documentNamespace"],
         "shared package inventory must not reuse another profile's document identity"
@@ -10148,9 +10104,8 @@ fn dependency_snapshot_inventory_is_verified_and_reused_for_sbom() {
     );
 
     let inventory_path = dependency_snapshot_inventory_path(&snapshot);
-    let mut unbound: Value =
-        serde_json::from_slice(&fs::read(&inventory_path).expect("inventory"))
-            .expect("inventory JSON");
+    let mut unbound: Value = serde_json::from_slice(&fs::read(&inventory_path).expect("inventory"))
+        .expect("inventory JSON");
     unbound["unbound_metadata"] = json!("must not be ignored");
     fs::remove_file(&inventory_path).expect("remove inventory for unknown-field probe");
     fs::write(
@@ -10571,14 +10526,8 @@ async fn dependency_staging_preserves_the_pinned_widget_importer() {
     let shell = shell_app_fixture(&broker, &service).await;
     broker
         .scaffold_shell_app_value(
-            confirmed_scaffold_input(
-                &broker,
-                &shell.id,
-                "Widget staging",
-                "widget test",
-                "dom",
-            )
-            .await,
+            confirmed_scaffold_input(&broker, &shell.id, "Widget staging", "widget test", "dom")
+                .await,
         )
         .await
         .expect("scaffold");
@@ -10724,8 +10673,7 @@ fn dependency_snapshot_accepts_internal_bin_shims() {
     fs::create_dir_all(source.join("vite/bin")).expect("source tree");
     fs::write(source.join("vite/bin/vite.js"), b"vite").expect("vite marker");
     fs::create_dir_all(source.join(".bin")).expect("bin dir");
-    std::os::unix::fs::symlink("../vite/bin/vite.js", source.join(".bin/vite"))
-        .expect("bin shim");
+    std::os::unix::fs::symlink("../vite/bin/vite.js", source.join(".bin/vite")).expect("bin shim");
 
     let snapshot = root.path().join("cache/snapshot");
     LocalAppsHostBroker::publish_dependency_snapshot(
@@ -10851,8 +10799,7 @@ fn dependency_sbom_spdx_ids_are_collision_free_for_punctuation_variants() {
         local_apps::AppRuntimeProfile::ReactDom,
     )
     .expect("binding");
-    let sbom =
-        installed_dependency_sbom(&node_modules, &binding, &"d".repeat(64)).expect("sbom");
+    let sbom = installed_dependency_sbom(&node_modules, &binding, &"d".repeat(64)).expect("sbom");
     let document: Value = serde_json::from_slice(&sbom).expect("sbom json");
     let packages = document
         .get("packages")
@@ -11219,9 +11166,7 @@ fn capture_treats_an_explicit_null_rect_as_a_whole_view_capture() {
 
 #[test]
 fn create_staging_quality_gate_rejects_fast_canvas_profiles() {
-    assert!(
-        validate_create_stage_quality("fast", local_apps::AppRuntimeProfile::ReactDom).is_ok()
-    );
+    assert!(validate_create_stage_quality("fast", local_apps::AppRuntimeProfile::ReactDom).is_ok());
     let error = validate_create_stage_quality("fast", local_apps::AppRuntimeProfile::Canvas2d)
         .expect_err("canvas create staging must reject fast quality");
     assert!(error.contains("balanced or thorough"));
@@ -11385,8 +11330,7 @@ async fn derived_app_ports_stay_below_every_shipped_platform_ephemeral_floor() {
             "app {app_id} was pinned to {port}, which the kernel can hand out ephemerally"
         );
         assert!(
-            (APP_PORT_WINDOW_FIRST..APP_PORT_WINDOW_FIRST + APP_PORT_WINDOW_LEN)
-                .contains(&port),
+            (APP_PORT_WINDOW_FIRST..APP_PORT_WINDOW_FIRST + APP_PORT_WINDOW_LEN).contains(&port),
             "app {app_id} port {port} is outside the derived window"
         );
         assert_eq!(listener.local_addr().expect("local addr").port(), port);
@@ -11674,10 +11618,9 @@ async fn an_unpersisted_lease_moves_the_next_allocation_off_that_port() {
     // With the sibling gone the derivation is deterministic again: an app
     // that moved port on restart would orphan its own WebView storage.
     drop(concurrent);
-    let (again, port_again, _lease) =
-        bind_stable_loopback(APP_ID, None, &[], &leases, &registry)
-            .await
-            .expect("the app derives its port");
+    let (again, port_again, _lease) = bind_stable_loopback(APP_ID, None, &[], &leases, &registry)
+        .await
+        .expect("the app derives its port");
     assert_eq!(
         port_again, first_choice,
         "the first choice must stay deterministic while the slot is free"
@@ -12459,9 +12402,7 @@ fn static_server_outlives_the_engine_runtime_that_started_it() {
         while !response.contains("<html>ok</html>") {
             let count = timeout(Duration::from_secs(5), stream.read(&mut buffer))
                 .await
-                .expect(
-                    "the surviving static server answers instead of stranding the connection",
-                )
+                .expect("the surviving static server answers instead of stranding the connection")
                 .expect("read response");
             assert_ne!(count, 0, "the connection closed mid-response: {response}");
             response.push_str(&String::from_utf8_lossy(&buffer[..count]));
@@ -12648,8 +12589,7 @@ impl PinnedShell {
 
     /// The title the session catalog would resolve for this session.
     fn title(&self) -> String {
-        let transcript =
-            fs::read_to_string(self.transcript()).expect("read the pinned transcript");
+        let transcript = fs::read_to_string(self.transcript()).expect("read the pinned transcript");
         latest_custom_title(&transcript, &self.init_session_id)
             .expect("the pinned session always carries a custom-title")
             .0
@@ -12676,8 +12616,7 @@ impl PinnedShell {
     /// append is what fires the poll. Both are ordinary public writer
     /// calls — no test-only hook.
     async fn trip_the_metadata_backstop(&self) {
-        let writer =
-            session::jsonl::writer::JsonlWriter::new(self.transcript(), self.fs.clone());
+        let writer = session::jsonl::writer::JsonlWriter::new(self.transcript(), self.fs.clone());
         writer
             .append_file_history_snapshot(&json!({
                 "type": "file-history-snapshot",
@@ -12704,8 +12643,7 @@ impl PinnedShell {
     /// `mobileEmptySession`. Only a probe: nothing in production may
     /// decide anything from the last record alone.
     fn latest_title_record_carries_the_marker(&self) -> bool {
-        let transcript =
-            fs::read_to_string(self.transcript()).expect("read the pinned transcript");
+        let transcript = fs::read_to_string(self.transcript()).expect("read the pinned transcript");
         let mut marked = false;
         for line in transcript.lines() {
             let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -12968,8 +12906,7 @@ async fn boot_sweep_repairs_a_missing_guided_workspace_contract() {
 async fn boot_sweep_repairs_a_truncated_guided_workspace_contract() {
     let shell = pinned_shell().await;
     let lingxi_md = workspace_of(&shell.root, &shell.app_id).join("LINGXI.md");
-    fs::write(&lingxi_md, "")
-        .expect("truncate the guided contract to simulate a partial write");
+    fs::write(&lingxi_md, "").expect("truncate the guided contract to simulate a partial write");
 
     shell.run_boot_backfill_sweep().await;
 
@@ -13057,9 +12994,8 @@ fn a_placeholder_is_told_from_a_user_rename_by_text_against_the_anchor() {
     );
     // What `plan_re_append` writes when the backstop fires: the anchor's
     // own text, rebuilt without the marker.
-    let backstop_echo = format!(
-        r#"{{"type":"custom-title","customTitle":"untitled","sessionId":"{session}"}}"#
-    );
+    let backstop_echo =
+        format!(r#"{{"type":"custom-title","customTitle":"untitled","sessionId":"{session}"}}"#);
     let user_rename = format!(
         r#"{{"type":"custom-title","customTitle":"我的宝贝项目","sessionId":"{session}"}}"#
     );

@@ -1,5 +1,5 @@
-use tokio::sync::mpsc;
 use super::*;
+use tokio::sync::mpsc;
 
 fn task(status: &str) -> cron::CronTask {
     serde_json::from_value(serde_json::json!({
@@ -191,14 +191,11 @@ async fn binding_cancelled_claim_returns_durable_cancellation_to_native_host() {
             move |request| async move {
                 {
                     let _guard = cron::lock_cron_file().await;
-                    let _file = cron::tasks_file::lock_automation_tasks(
-                        execute_fs.as_ref(),
-                        &execute_root,
-                    )
-                    .await
-                    .unwrap();
-                    let mut document =
-                        read_cron_tasks(execute_fs.as_ref(), &execute_root).await;
+                    let _file =
+                        cron::tasks_file::lock_automation_tasks(execute_fs.as_ref(), &execute_root)
+                            .await
+                            .unwrap();
+                    let mut document = read_cron_tasks(execute_fs.as_ref(), &execute_root).await;
                     if expired {
                         document.tasks[0].expires_at = Some(1);
                     } else {
@@ -250,10 +247,9 @@ async fn supervisor_does_not_surface_cancellation_from_a_reclaimed_generation() 
         std::future::ready(Some(request)),
         move |request| async move {
             let _guard = cron::lock_cron_file().await;
-            let _file =
-                cron::tasks_file::lock_automation_tasks(execute_fs.as_ref(), &execute_root)
-                    .await
-                    .unwrap();
+            let _file = cron::tasks_file::lock_automation_tasks(execute_fs.as_ref(), &execute_root)
+                .await
+                .unwrap();
             let mut document = read_cron_tasks(execute_fs.as_ref(), &execute_root).await;
             let run = &mut document.tasks[0].automation.as_mut().unwrap().runs[0];
             run.claim_generation = Some(request.claim_generation + 1);
@@ -460,9 +456,7 @@ async fn last_foreground_runtime_borrow_is_safely_dropped_before_and_during_canc
                 .unwrap()
                 .runs
                 .iter()
-                .any(|run| {
-                    run.id == run_id && run.status == cron::AutomationRunStatus::Cancelled
-                })
+                .any(|run| run.id == run_id && run.status == cron::AutomationRunStatus::Cancelled)
             {
                 break;
             }
@@ -760,8 +754,7 @@ async fn legacy_scope_migration_keeps_loop_sentinels_without_reviving_them() {
         if pending_marker {
             std::fs::write(
                 root.join(".lingxi/cron-v2-migration.json"),
-                serde_json::json!({"version":2,"completed":false,"source":snapshot})
-                    .to_string(),
+                serde_json::json!({"version":2,"completed":false,"source":snapshot}).to_string(),
             )
             .unwrap();
         }

@@ -67,7 +67,5 @@ fn non_image_and_malformed_results_map_to_none() {
     // `type:"image"` but missing/malformed file fields → None (text fallback).
     assert!(image_tool_result_blocks(&json!({"type":"image"})).is_none());
     assert!(image_tool_result_blocks(&json!({"type":"image","file":{}})).is_none());
-    assert!(
-        image_tool_result_blocks(&json!({"type":"image","file":{"base64":"QQ=="}})).is_none()
-    );
+    assert!(image_tool_result_blocks(&json!({"type":"image","file":{"base64":"QQ=="}})).is_none());
 }

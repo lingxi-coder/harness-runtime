@@ -2,7 +2,7 @@
 exclude = ["third_party/git2-rs/git2", "third_party/git2-rs/libgit2-sys", "third_party/libssh2-sys", "third_party/mbedtls-sys"]
 resolver = "2"
 members = [
-    "crates/harness-runtime",
+    "crates/runtime",
     "crates/branding",
     "crates/protocol",
     "crates/client-protocol",
@@ -84,7 +84,7 @@ members = [
 # they MUST NOT be part of the default build set — CI release jobs should
 # build only the real crates, not the integration-test fixtures.
 default-members = [
-    "crates/harness-runtime",
+    "crates/runtime",
     "crates/branding",
     "crates/protocol",
     "crates/client-protocol",
@@ -163,13 +163,13 @@ repository = "https://github.com/lingxi-coder/harness-runtime"
 
 [workspace.dependencies]
 # Temporary local assembly; replaced by one immutable SDK Git revision before delivery.
-mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
-mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
-mobile-linux-android = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
-mobile-linux-ios = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
-platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
-platform-android-libcap = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
-platform-android-minijail = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "3e282dba21c5c4cb61616f3f1660dfdfb8185e39" }
+mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b731a70cef8cfb9d570872d3ac33facaa984b334" }
+mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b731a70cef8cfb9d570872d3ac33facaa984b334" }
+mobile-linux-android = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b731a70cef8cfb9d570872d3ac33facaa984b334" }
+mobile-linux-ios = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b731a70cef8cfb9d570872d3ac33facaa984b334" }
+platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b731a70cef8cfb9d570872d3ac33facaa984b334" }
+platform-android-libcap = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b731a70cef8cfb9d570872d3ac33facaa984b334" }
+platform-android-minijail = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b731a70cef8cfb9d570872d3ac33facaa984b334" }
 
 # Single source of truth for the product namespace (paths, filenames, env
 # prefix, brand name). Path is workspace-root-relative so every member uses

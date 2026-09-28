@@ -4,7 +4,7 @@
 
 ## 使用
 
-主入口是 `harness-runtime`；现有 `api`、`models`、`desktop`、`mobile` 模块保持可用。默认启用 `core`；桌面使用 `desktop`，移动使用 `mobile`，原生绑定额外启用 `uniffi`。宿主通过 Rust 配置注入产品构建信息，`runtime_build_info()` 独立返回运行时身份。
+主入口是 `harness-runtime`（源码位于 `crates/runtime`）；现有 `api`、`models`、`desktop`、`mobile` 模块保持可用。默认启用 `core`；桌面使用 `desktop`，移动使用 `mobile`，原生绑定额外启用 `uniffi`。宿主通过 Rust 配置注入产品构建信息，`runtime_build_info()` 独立返回运行时身份。
 
 下游通过本仓库 Git URL 和完整 commit SHA 引用所需 package。所有共享协议、平台 trait 与运行时组件必须使用同一 URL 和提交，避免同名异类型。`llm-client` 保持独立 Git 依赖。
 

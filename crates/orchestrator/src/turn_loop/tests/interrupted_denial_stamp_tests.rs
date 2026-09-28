@@ -1,7 +1,6 @@
 use super::{dispatch_tool_uses_tracked, ConversationOrchestrator};
 use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-    StaticMemoryProvider,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use crate::OrchestratorConfig;
 use async_trait::async_trait;
@@ -66,11 +65,7 @@ impl Tool for FailingTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(
-        &self,
-        _input: &serde_json::Value,
-        _opts: &DescriptionOptions,
-    ) -> String {
+    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "failing-tool".into()
     }
     async fn prompt(&self, _opts: &PromptOptions) -> String {

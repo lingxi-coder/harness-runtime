@@ -104,8 +104,7 @@ fn an_unconfigured_install_is_off_even_in_auto_mode() {
             .is_none()
     );
     assert!(
-        resolve_bash_edit_diff_with(&cfg, effective(&cfg).as_ref(), &[], "s", None, true)
-            .is_some(),
+        resolve_bash_edit_diff_with(&cfg, effective(&cfg).as_ref(), &[], "s", None, true).is_some(),
         "…and it is the ROLLOUT that is missing, not the mode"
     );
 }
@@ -118,7 +117,11 @@ fn an_unconfigured_install_is_off_even_in_auto_mode() {
 /// cannot match the comment that explains them.
 #[test]
 fn build_fills_the_bash_edit_diff_context_field_from_the_resolver() {
-    const SRC: &str = concat!(include_str!("../mod.rs"), "\n", include_str!("../assembly.rs"));
+    const SRC: &str = concat!(
+        include_str!("../mod.rs"),
+        "\n",
+        include_str!("../assembly.rs")
+    );
     let production = SRC
         .split_once("\n#[cfg(test)]\nmod tests")
         .map_or(SRC, |(prod, _)| prod);

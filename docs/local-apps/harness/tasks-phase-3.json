@@ -6,9 +6,9 @@
       "title": "Host verified Local App template catalog read surface",
       "gate": "§9.4.1 / §18 Phase 3: the Host catalog returns only available semantic template fields plus catalog_digest and never exposes family, revision, path, or asset hashes",
       "owns": [
-        "crates/harness-runtime/src/mobile/local_app_template_catalog.rs",
-        "crates/harness-runtime/src/mobile/host.rs",
-        "crates/harness-runtime/src/mobile/local_app_runtime_profiles.rs",
+        "crates/runtime/src/mobile/local_app_template_catalog.rs",
+        "crates/runtime/src/mobile/host.rs",
+        "crates/runtime/src/mobile/local_app_runtime_profiles.rs",
         "crates/plugins/lingxi-local-app/assets/templates/catalog.json"
       ],
       "crates": [
@@ -41,10 +41,10 @@
       "title": "Template-selector-only validation and anti-stale selection",
       "gate": "§9.4.1 / §9.5: only template-selector can validate a proposal; Host re-reads catalog digest and returns a display-only rejected list plus an opaque validated_selection_handle",
       "owns": [
-        "crates/harness-runtime/src/mobile/local_app_template_catalog.rs",
-        "crates/harness-runtime/src/mobile/host.rs",
-        "crates/harness-runtime/src/mobile/local_app_plugin_binding.rs",
-        "crates/harness-runtime/src/mobile/local_apps_tools.rs",
+        "crates/runtime/src/mobile/local_app_template_catalog.rs",
+        "crates/runtime/src/mobile/host.rs",
+        "crates/runtime/src/mobile/local_app_plugin_binding.rs",
+        "crates/runtime/src/mobile/local_apps_tools.rs",
         "crates/plugins/lingxi-local-app/skills/template-selection"
       ],
       "crates": [
@@ -78,8 +78,8 @@
       "title": "Durable run-scoped candidate journal and handle binding",
       "gate": "§9.5 / §16.3 / §18 Phase 3: candidate journal records app_id + workflow_run_id + catalog identity and rejects forged, cross-app, cross-run, stale, and missing handles",
       "owns": [
-        "crates/harness-runtime/src/mobile/local_app_template_catalog.rs",
-        "crates/harness-runtime/src/mobile/local_apps_host.rs",
+        "crates/runtime/src/mobile/local_app_template_catalog.rs",
+        "crates/runtime/src/mobile/local_apps_host.rs",
         "crates/local-apps/src"
       ],
       "crates": [
@@ -115,9 +115,9 @@
       "title": "Create-only isolated staging and dependency input digest",
       "gate": "§9.5 / §10.1 / §18 Phase 3: create can stage from Host-issued selection before Manifest/Profile persistence, while update/verify require persisted Profile and dependency_input_sha256 covers requested/effective/base-lock inputs",
       "owns": [
-        "crates/harness-runtime/src/mobile/local_apps_host.rs",
-        "crates/harness-runtime/src/mobile/local_apps_build.rs",
-        "crates/harness-runtime/src/mobile/local_app_plugin_binding.rs",
+        "crates/runtime/src/mobile/local_apps_host.rs",
+        "crates/runtime/src/mobile/local_apps_build.rs",
+        "crates/runtime/src/mobile/local_app_plugin_binding.rs",
         "crates/local-apps/src"
       ],
       "crates": [

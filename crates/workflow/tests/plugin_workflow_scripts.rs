@@ -1185,8 +1185,8 @@ fn mcp_promotion_uses_a_dedicated_tools_only_agent() {
         !workflow.contains("agentType: 'verifier', label: 'mcp-promote'"),
         "verifier must not own MCP promotion"
     );
-    let inventory = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../harness-runtime/builtin-plugin-inventory.txt");
+    let inventory =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime/builtin-plugin-inventory.txt");
     let inventory = std::fs::read_to_string(inventory).expect("plugin inventory");
     assert!(
         inventory

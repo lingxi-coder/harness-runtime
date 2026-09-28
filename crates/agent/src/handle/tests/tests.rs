@@ -290,26 +290,25 @@ async fn restored_identity_is_reserved_before_mcp_build_and_cleanup_runs_once() 
     let cleanups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let seen = ids.clone();
     let cleaned = cleanups.clone();
-    let builder: crate::agent_mcp_tools::AgentMcpToolBuilder =
-        Arc::new(move |id, _, _lease| {
-            seen.lock().unwrap().push(id);
-            let cleaned = cleaned.clone();
-            Box::pin(async move {
-                crate::agent_mcp_tools::AgentMcpToolSet {
-                    tools: vec![],
-                    cleanups: vec![crate::agent_mcp_tools::AgentMcpCleanupHandle {
-                        server_name: "restore-probe".into(),
-                        run: Arc::new(move || {
-                            let cleaned = cleaned.clone();
-                            Box::pin(async move {
-                                cleaned.fetch_add(1, Ordering::SeqCst);
-                                Ok(())
-                            })
-                        }),
-                    }],
-                }
-            })
-        });
+    let builder: crate::agent_mcp_tools::AgentMcpToolBuilder = Arc::new(move |id, _, _lease| {
+        seen.lock().unwrap().push(id);
+        let cleaned = cleaned.clone();
+        Box::pin(async move {
+            crate::agent_mcp_tools::AgentMcpToolSet {
+                tools: vec![],
+                cleanups: vec![crate::agent_mcp_tools::AgentMcpCleanupHandle {
+                    server_name: "restore-probe".into(),
+                    run: Arc::new(move || {
+                        let cleaned = cleaned.clone();
+                        Box::pin(async move {
+                            cleaned.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        })
+                    }),
+                }],
+            }
+        })
+    });
     let pool = Arc::new(StateMachinePool::new(
         Arc::new(MockRuntimeSpawner::default()),
         2,
@@ -674,10 +673,7 @@ async fn rejected_startup_reports_failure_instead_of_killed_without_calling_mode
     struct RejectStartup;
     #[async_trait]
     impl SubagentSpawnObserver for RejectStartup {
-        async fn before_start(
-            &self,
-            _: &SubagentObservation,
-        ) -> Result<(), SubagentSpawnError> {
+        async fn before_start(&self, _: &SubagentObservation) -> Result<(), SubagentSpawnError> {
             Err(SubagentSpawnError::Internal(
                 "control binding failed".into(),
             ))
@@ -2167,9 +2163,8 @@ fn release_runtime_links_clears_all_four_links_idempotently() {
     assert!(skill_loader
         .set(Arc::new(NoopSkillLoader) as Arc<dyn platform_api::skill_loader::SkillLoader>)
         .is_ok());
-    let builder: crate::agent_mcp_tools::AgentMcpToolBuilder = Arc::new(|_, _, _| {
-        Box::pin(async { crate::agent_mcp_tools::AgentMcpToolSet::default() })
-    });
+    let builder: crate::agent_mcp_tools::AgentMcpToolBuilder =
+        Arc::new(|_, _, _| Box::pin(async { crate::agent_mcp_tools::AgentMcpToolSet::default() }));
     assert!(mcp_tool_builder.set(builder).is_ok());
 
     assert!(tool_registry.get().is_some());
@@ -2196,9 +2191,7 @@ fn release_runtime_links_clears_all_four_links_idempotently() {
         .set(Arc::new(NoopSkillLoader) as Arc<dyn platform_api::skill_loader::SkillLoader>)
         .is_err());
     let replacement_builder: crate::agent_mcp_tools::AgentMcpToolBuilder =
-        Arc::new(|_, _, _| {
-            Box::pin(async { crate::agent_mcp_tools::AgentMcpToolSet::default() })
-        });
+        Arc::new(|_, _, _| Box::pin(async { crate::agent_mcp_tools::AgentMcpToolSet::default() }));
     assert!(mcp_tool_builder.set(replacement_builder).is_err());
 }
 
@@ -2383,8 +2376,7 @@ async fn production_spawner_exact_policy_filters_generic_mcp_routing_only_for_co
 async fn production_spawner_retains_shared_comms_tools_outside_coordinator_mode() {
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
-    let spawner =
-        PoolSubagentSpawner::new(pool).with_tool_registry(registry_with_shared_comms());
+    let spawner = PoolSubagentSpawner::new(pool).with_tool_registry(registry_with_shared_comms());
     let inline_comms: Arc<dyn Tool> = Arc::new(StubTool {
         name: "mcp__inline__send",
         aliases: &[],
@@ -2468,8 +2460,8 @@ async fn resolve_tools_all_policy_advertises_full_set_and_allow_list() {
 async fn resolve_tools_explicit_policy_filters_advertised_and_allow_list() {
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
-    let spawner = PoolSubagentSpawner::new(pool)
-        .with_tool_registry(registry_with(&["Read", "Bash", "Edit"]));
+    let spawner =
+        PoolSubagentSpawner::new(pool).with_tool_registry(registry_with(&["Read", "Bash", "Edit"]));
 
     // Explicit allow-list: only "Read" survives — both the advertised set
     // AND the dispatch allow-list narrow together.
@@ -2590,8 +2582,8 @@ async fn resolve_tools_empty_deny_leaves_subagent_pool_unchanged() {
     // child pool byte-identical to before (no filtering).
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
-    let unfiltered = PoolSubagentSpawner::new(pool.clone())
-        .with_tool_registry(registry_with(&["Read", "Bash"]));
+    let unfiltered =
+        PoolSubagentSpawner::new(pool.clone()).with_tool_registry(registry_with(&["Read", "Bash"]));
     let (schemas_a, allowed_a) = unfiltered
         .resolve_tools(
             &agent_def(AgentToolPolicy::All {
@@ -2783,8 +2775,8 @@ async fn resolve_tools_plan_mode_keeps_only_readonly() {
 async fn resolve_tools_except_policy() {
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
-    let spawner = PoolSubagentSpawner::new(pool)
-        .with_tool_registry(registry_with(&["Read", "Bash", "Edit"]));
+    let spawner =
+        PoolSubagentSpawner::new(pool).with_tool_registry(registry_with(&["Read", "Bash", "Edit"]));
 
     // Except drops the named tools from BOTH the advertised set and the
     // allow-list.
@@ -3591,9 +3583,8 @@ fn make_subagent_context_seeds_task_prompt_as_user_msg_and_def_body_as_system() 
     // stays first, joined to the trailer by a blank line.
     let sys = ctx.rendered_system_prompt.as_deref().unwrap();
     assert!(sys.starts_with("AGENT SYSTEM PROMPT\n\n"));
-    assert!(sys.contains(
-        "Notes:\n- Agent threads always have their cwd reset between shell tool calls"
-    ));
+    assert!(sys
+        .contains("Notes:\n- Agent threads always have their cwd reset between shell tool calls"));
     // Task prompt -> first (and only) user message (NOT the system slot).
     assert_eq!(ctx.prompt_messages.len(), 1);
     assert!(matches!(
@@ -5102,8 +5093,7 @@ async fn spawn_persistent_cancellation_cleans_up_runner_started_during_allocate(
     };
 
     let spawner_for_task = spawner.clone();
-    let launch =
-        tokio::spawn(async move { spawner_for_task.spawn_persistent(req, inherit).await });
+    let launch = tokio::spawn(async move { spawner_for_task.spawn_persistent(req, inherit).await });
 
     for _ in 0..200 {
         if runtime.next_id.load(Ordering::SeqCst) > 1 {
@@ -5153,14 +5143,12 @@ async fn build_subagent_context_appends_env_block_nonfork_only() {
     // A renderer that echoes the resolved model id into a sentinel block.
     let spawner = PoolSubagentSpawner::new(pool)
         .with_default_model("claude-opus-4-8[1m]")
-        .with_subagent_env_renderer(Arc::new(
-            |model_id: &str, cwd: Option<&std::path::Path>| {
-                format!(
-                    "<env>\nMODEL: {model_id}\nCWD: {}\n</env>",
-                    cwd.map_or("<none>".to_string(), |p| p.display().to_string())
-                )
-            },
-        ));
+        .with_subagent_env_renderer(Arc::new(|model_id: &str, cwd: Option<&std::path::Path>| {
+            format!(
+                "<env>\nMODEL: {model_id}\nCWD: {}\n</env>",
+                cwd.map_or("<none>".to_string(), |p| p.display().to_string())
+            )
+        }));
     let mk_inherit = || SubagentInheritance {
         tool_invoker: Arc::new(DummyInvoker),
         budget: Arc::new(DummyBudget),

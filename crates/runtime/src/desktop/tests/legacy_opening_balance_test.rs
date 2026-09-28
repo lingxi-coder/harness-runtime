@@ -11,10 +11,7 @@ fn write(config: &Path, cwd: &Path, entries: serde_json::Map<String, serde_json:
     .unwrap();
 }
 
-fn entries(
-    session: &str,
-    cost: serde_json::Value,
-) -> serde_json::Map<String, serde_json::Value> {
+fn entries(session: &str, cost: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     let mut map = serde_json::Map::new();
     map.insert("lastSessionId".into(), serde_json::json!(session));
     map.insert("lastCost".into(), cost);

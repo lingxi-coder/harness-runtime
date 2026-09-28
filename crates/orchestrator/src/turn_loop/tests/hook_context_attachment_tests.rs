@@ -35,14 +35,13 @@ impl Tool for EchoTool {
     /// Declared so a PostToolUse `updatedToolOutput` can FAIL validation
     /// and exercise the `hook_error_during_execution` arm.
     fn output_schema(&self) -> Option<&serde_json::Value> {
-        static OUT: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| {
-                json!({
-                    "type": "object",
-                    "properties": { "out": { "type": "string" } },
-                    "required": ["out"]
-                })
-            });
+        static OUT: once_cell::sync::Lazy<serde_json::Value> = once_cell::sync::Lazy::new(|| {
+            json!({
+                "type": "object",
+                "properties": { "out": { "type": "string" } },
+                "required": ["out"]
+            })
+        });
         Some(&OUT)
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -78,11 +77,7 @@ impl Tool for EchoTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(
-        &self,
-        _input: &serde_json::Value,
-        _opts: &DescriptionOptions,
-    ) -> String {
+    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "echo".into()
     }
     async fn prompt(&self, _opts: &PromptOptions) -> String {
@@ -279,10 +274,9 @@ async fn post_tool_batch_prevent_continuation_stops_the_turn() {
         reason: Some("BATCH-STOP".into()),
         ..HookResponse::default()
     });
-    let (_results, prevent, _injected, _mods) =
-        dispatch_tool_uses_tracked(&orch, &uses(), None)
-            .await
-            .expect("dispatch");
+    let (_results, prevent, _injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+        .await
+        .expect("dispatch");
     assert!(
         prevent,
         "a PostToolBatch hook requesting preventContinuation must end the turn"
@@ -309,10 +303,9 @@ async fn post_tool_batch_stop_is_explained_to_the_model() {
         reason: Some("BATCH-STOP".into()),
         ..HookResponse::default()
     });
-    let (_results, _prevent, injected, _mods) =
-        dispatch_tool_uses_tracked(&orch, &uses(), None)
-            .await
-            .expect("dispatch");
+    let (_results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+        .await
+        .expect("dispatch");
     let stop_msg = injected
         .iter()
         .find(|(m, _)| m.text_content().contains("hook stopped continuation"))
@@ -400,10 +393,9 @@ async fn batch_additional_context_is_ordered_before_the_stop() {
 #[tokio::test]
 async fn a_quiet_post_tool_batch_hook_injects_no_message() {
     let orch = orch_with_batch_hook(HookResponse::default());
-    let (_results, _prevent, injected, _mods) =
-        dispatch_tool_uses_tracked(&orch, &uses(), None)
-            .await
-            .expect("dispatch");
+    let (_results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+        .await
+        .expect("dispatch");
     assert!(
         !injected
             .iter()
@@ -420,10 +412,9 @@ async fn post_tool_batch_blocking_error_also_stops_the_turn() {
         reason: Some("BATCH-BLOCK".into()),
         ..HookResponse::default()
     });
-    let (_results, prevent, _injected, _mods) =
-        dispatch_tool_uses_tracked(&orch, &uses(), None)
-            .await
-            .expect("dispatch");
+    let (_results, prevent, _injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+        .await
+        .expect("dispatch");
     assert!(
         prevent,
         "`if(Mn.blockingError)Mr=!0` — a batch blocking error stops the turn too"
@@ -435,10 +426,9 @@ async fn post_tool_batch_blocking_error_also_stops_the_turn() {
 #[tokio::test]
 async fn a_quiet_post_tool_batch_hook_does_not_stop_the_turn() {
     let orch = orch_with_batch_hook(HookResponse::default());
-    let (_results, prevent, _injected, _mods) =
-        dispatch_tool_uses_tracked(&orch, &uses(), None)
-            .await
-            .expect("dispatch");
+    let (_results, prevent, _injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+        .await
+        .expect("dispatch");
     assert!(!prevent, "a no-op PostToolBatch hook must not end the turn");
 }
 
@@ -647,9 +637,9 @@ async fn dispatched_tool_result_reaches_the_transcript_as_tool_use_result() {
     use protocol::MessageId;
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("session.jsonl");
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
-        platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
-    );
+    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        dir.path().to_path_buf(),
+    ));
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
     let mut tools = ToolRegistry::new();
     tools.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);

@@ -1,7 +1,6 @@
 use crate::conversation::ConversationOrchestrator;
 use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-    StaticMemoryProvider,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use crate::turn_loop::dispatch_tool_uses_tracked;
 use crate::OrchestratorConfig;
