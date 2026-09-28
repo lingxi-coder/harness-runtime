@@ -4,16 +4,23 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 enabled="${LINGXI_MOBILE_LINUX_ENABLED:-0}"
-sbom_dir="${repo_root}/docs/mobile-linux/sbom/current"
+sbom_dir="${MOBILE_LINUX_EVIDENCE_DIR:-}"
 auth_manifest="${repo_root}/docs/mobile-linux/authorization/AUTHORIZATION_MANIFEST.json"
-rootfs_manifest="${repo_root}/docs/mobile-linux/rootfs/current/rootfs-manifest.json"
-rootfs_lock="${repo_root}/docs/mobile-linux/rootfs/current/rootfs-build.lock.json"
+rootfs_manifest="${sbom_dir}/rootfs-manifest.json"
+rootfs_lock="${sbom_dir}/rootfs-build.lock.json"
 tool_path="${repo_root}/scripts/mobile-linux/rootfs_tool.py"
 
 if [[ "${enabled}" != "1" ]]; then
   echo "mobile-linux SBOM/license gate skipped (LINGXI_MOBILE_LINUX_ENABLED!=1)"
   exit 0
 fi
+
+if [[ -z "${sbom_dir}" || -z "${MOBILE_LINUX_ROOTFS_ARCHIVE:-}" ]]; then
+  echo "enabled release requires MOBILE_LINUX_EVIDENCE_DIR and MOBILE_LINUX_ROOTFS_ARCHIVE" >&2
+  exit 1
+fi
+python3 "${script_dir}/sdk_delegate.py" verify-evidence.py "$@" \
+  --evidence-dir "${sbom_dir}" --archive "${MOBILE_LINUX_ROOTFS_ARCHIVE}"
 
 for required in \
   "${sbom_dir}/rootfs.spdx.json" \
@@ -129,4 +136,4 @@ if (
 print("mobile-linux SBOM/license evidence verified")
 PY
 
-python3 "${tool_path}" validate-lock --lock "${rootfs_lock}" --manifest "${rootfs_manifest}"
+python3 "${tool_path}" "$@" validate-lock --lock "${rootfs_lock}" --manifest "${rootfs_manifest}"

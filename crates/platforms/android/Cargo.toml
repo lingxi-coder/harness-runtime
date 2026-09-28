@@ -18,7 +18,8 @@ license.workspace = true
 platform-api = { path = "../../platform-api" }
 platform-posix-minimal = { path = "../posix-minimal" }
 platform-common = { path = "../common" }
-platform-pty = { path = "../pty" }
+platform-pty.workspace = true
+mobile-linux-android.workspace = true
 http-client = { path = "../../http-client" }
 async-trait.workspace = true
 tracing.workspace = true
@@ -32,7 +33,7 @@ nix = { version = "0.27", default-features = false, features = ["signal", "proce
 # be host-tested. The FFI inside `platform-android-minijail` is itself
 # `cfg(target_os = "android")`, so its host build compiles a pure stub (P0a) —
 # `platform-android` stays `forbid(unsafe_code)` either way.
-platform-android-minijail = { path = "../android-minijail" }
+platform-android-minijail.workspace = true
 # Content-hash identity check for bundled helpers before execve (P5). Pure-safe
 # Rust — no unsafe needed; pinned to match sibling crates (android-minijail, etc.).
 sha2 = "0.10"

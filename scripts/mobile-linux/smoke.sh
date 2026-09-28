@@ -8,11 +8,12 @@ enabled="${LINGXI_MOBILE_LINUX_ENABLED:-0}"
 "${script_dir}/check-authorizations.sh"
 if [[ "${enabled}" == "1" ]]; then
   "${script_dir}/check-rootfs-manifest.sh" \
-    "${repo_root}/docs/mobile-linux/rootfs/current/rootfs-manifest.json"
+    "${MOBILE_LINUX_EVIDENCE_DIR:?enabled release requires external evidence}/rootfs-manifest.json" "$@"
 else
-  "${script_dir}/check-rootfs-manifest.sh"
+  sdk_root="$(python3 "${script_dir}/sdk_source.py" "$@")"
+  bash "${sdk_root}/scripts/check-resource-contracts.sh"
 fi
-"${script_dir}/check-sbom-and-licenses.sh"
+"${script_dir}/check-sbom-and-licenses.sh" "$@"
 if [[ "${enabled}" == "1" ]]; then
   apk_dir="${LINGXI_LOCAL_APP_APK_DIR:-}"
   if [[ -z "${apk_dir}" ]]; then
@@ -20,12 +21,12 @@ if [[ "${enabled}" == "1" ]]; then
     exit 1
   fi
   python3 "${script_dir}/verify-local-app-supply-chain.py" \
-    --repo-root "${repo_root}" \
+    --repo-root "${repo_root}" "$@" \
     --release \
     --apk-dir "${apk_dir}"
 else
   python3 "${script_dir}/verify-local-app-supply-chain.py" \
-    --repo-root "${repo_root}"
+    --repo-root "${repo_root}" "$@"
 fi
 
 echo "mobile-linux guardrail smoke checks passed"

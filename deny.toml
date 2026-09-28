@@ -100,5 +100,8 @@ private = { ignore = true }
 [sources]
 unknown-registry = "warn"
 unknown-git = "warn"
-allow-git = ["https://github.com/lingxi-coder/llm-client"]
+allow-git = [
+    "https://github.com/lingxi-coder/llm-client",
+    "https://github.com/lingxi-coder/mobile-linux-runtime",
+]
 required-git-spec = "rev"

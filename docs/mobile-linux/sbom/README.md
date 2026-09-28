@@ -9,17 +9,18 @@ Required outputs for each release candidate:
   OpenSSH client, Python 3, standard library, and CA certificates
 - executable allowlist snapshot aligned with `rootfs-manifest.json`
 - license inventory for all shipped runtime components
-- corresponding-source pins from `docs/mobile-linux/mobile-linux-pins.json`
-- the exact GPL/LGPL texts and `docs/mobile-linux/LICENSES/NOTICE.md`
+- corresponding-source pins from the Git-pinned SDK `docs/toolchains/runtime-pins.json`
+- the SDK-owned license texts and `docs/mobile-linux/LICENSES/NOTICE.md`
 - `local-app-runtime.spdx.json`, deterministically generated from the committed
   pnpm lockfile and pinned by its SHA-256 digest
 
-Suggested artifact layout once real release assets exist:
+Required external release evidence layout (`MOBILE_LINUX_EVIDENCE_DIR`), alongside
+the actual `MOBILE_LINUX_ROOTFS_ARCHIVE`:
 
-- `docs/mobile-linux/rootfs/current/rootfs-build.lock.json`
-- `docs/mobile-linux/sbom/current/rootfs.spdx.json`
-- `docs/mobile-linux/sbom/current/licenses.json`
-- `docs/mobile-linux/sbom/current/executable-allowlist.json`
+- `rootfs-build.lock.json` and `rootfs-manifest.json`
+- `rootfs.spdx.json`
+- `licenses.json` (product approval inventory)
+- `executable-allowlist.json`
 
 Evidence shape enforced by CI:
 
@@ -42,3 +43,7 @@ python3 scripts/mobile-linux/generate-local-app-sbom.py \
   --output docs/mobile-linux/sbom/local-app-runtime.spdx.json
 bash scripts/mobile-linux/test-local-app-supply-chain.sh
 ```
+
+Historical aggregate source records are preserved byte-for-byte in the SDK
+`docs/migration/legacy`; they are not active release evidence. The SDK archive
+verifier compares every immutable tar payload entry against the real manifest.

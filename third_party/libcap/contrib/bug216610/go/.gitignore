@@ -1,5 +1,0 @@
-fib
-*.syso
-main
-go.sum
-linkage.go

@@ -3294,6 +3294,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "mobile-linux-android"
+version = "0.1.0"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=26dc0648b540f764577600cc14f5b512d96b9782#26dc0648b540f764577600cc14f5b512d96b9782"
+dependencies = [
+ "async-trait",
+ "mobile-linux-api",
+ "mobile-linux-core",
+ "nix 0.27.1",
+ "platform-pty",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "mobile-linux-api"
+version = "0.1.0"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=26dc0648b540f764577600cc14f5b512d96b9782#26dc0648b540f764577600cc14f5b512d96b9782"
+dependencies = [
+ "async-trait",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "mobile-linux-core"
+version = "0.1.0"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=26dc0648b540f764577600cc14f5b512d96b9782#26dc0648b540f764577600cc14f5b512d96b9782"
+dependencies = [
+ "mobile-linux-api",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "mock_stdio_mcp"
 version = "0.12.0"
 dependencies = [
@@ -4329,6 +4365,7 @@ dependencies = [
  "async-trait",
  "hex",
  "http-client",
+ "mobile-linux-android",
  "nix 0.27.1",
  "platform-android-minijail",
  "platform-api",
@@ -4345,6 +4382,7 @@ dependencies = [
 [[package]]
 name = "platform-android-libcap"
 version = "0.1.0"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=26dc0648b540f764577600cc14f5b512d96b9782#26dc0648b540f764577600cc14f5b512d96b9782"
 dependencies = [
  "cc",
 ]
@@ -4352,6 +4390,7 @@ dependencies = [
 [[package]]
 name = "platform-android-minijail"
 version = "0.1.0"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=26dc0648b540f764577600cc14f5b512d96b9782#26dc0648b540f764577600cc14f5b512d96b9782"
 dependencies = [
  "cc",
  "hex",
@@ -4373,6 +4412,7 @@ dependencies = [
  "indexmap 2.7.1",
  "jsonrpc",
  "libc",
+ "mobile-linux-api",
  "protocol",
  "rustix 0.38.44",
  "serde",
@@ -4402,6 +4442,7 @@ dependencies = [
  "ignore",
  "jsonrpc",
  "llm-runtime",
+ "mobile-linux-core",
  "platform-api",
  "protocol",
  "reqwest",
@@ -4514,6 +4555,7 @@ dependencies = [
 [[package]]
 name = "platform-pty"
 version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=26dc0648b540f764577600cc14f5b512d96b9782#26dc0648b540f764577600cc14f5b512d96b9782"
 dependencies = [
  "anyhow",
  "filedescriptor",
@@ -4522,7 +4564,6 @@ dependencies = [
  "log",
  "portable-pty",
  "shared_library",
- "tempfile",
  "tokio",
  "winapi",
 ]

@@ -1,3 +1,13 @@
+> Shared rootfs schemas, licenses, toolchain pins and producers now belong to the
+> Git-pinned `mobile-linux-runtime` SDK. Resolve it with
+> `python3 scripts/mobile-linux/sdk_source.py`; compatibility scripts delegate there.
+> Release evidence is external: set `MOBILE_LINUX_EVIDENCE_DIR` and
+> `MOBILE_LINUX_ROOTFS_ARCHIVE`. The enabled gate requires the real archive,
+> complete inventory, SPDX licenses, and existing product authorization evidence.
+> The historical 3.21.3 source archive notes below are not the active 3.24.2
+> SDK release artifact contract. Product profiles and bundled skill validation
+> remain in Harness.
+
 # MobileLinux release contract
 
 LingXi's Android or iOS combined distribution is GPLv3 when it includes the

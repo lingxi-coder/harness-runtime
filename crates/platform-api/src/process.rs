@@ -13,23 +13,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use thiserror::Error;
 
-/// Consumer for a command whose output must be observed while it is running.
-///
-/// The process runner invokes stdout one complete logical line at a time and
-/// stderr in bounded byte chunks. Implementations should apply bounded
-/// backpressure; returning an error aborts the command and lets the platform
-/// runner tear down its process tree.
-#[async_trait]
-pub trait ProcessStreamSink: Send + Sync {
-    /// Consume one stdout line, without its trailing line ending.
-    async fn stdout_line(&self, line: String) -> Result<(), ProcessError>;
-
-    /// Consume a bounded stderr chunk. Stderr is not an event stream, but must
-    /// be drained concurrently so a noisy child cannot deadlock on a full pipe.
-    async fn stderr_chunk(&self, chunk: Vec<u8>) -> Result<(), ProcessError>;
-}
+pub use mobile_linux_api::ProcessStreamSink;
 
 /// SH-07 — live-output observer for a HOOK child, so the hook layer can emit
 /// claude-code's `system/hook_progress` stream-json frames while the hook is
@@ -296,20 +281,7 @@ pub enum HookRunOutcome {
     },
 }
 
-/// Collected output of a completed process.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProcessOutput {
-    /// Captured stdout (UTF-8 lossy decoded).
-    pub stdout: String,
-    /// Captured stderr (UTF-8 lossy decoded).
-    pub stderr: String,
-    /// Exit code (use `-1` to indicate "signalled" if the platform cannot
-    /// report a real status).
-    pub exit_code: i32,
-    /// True when the runner had to kill the process for exceeding its
-    /// timeout.
-    pub timed_out: bool,
-}
+pub use mobile_linux_api::ProcessOutput;
 
 /// A task identity a caller binds to a command it intends to background, so the
 /// engine's task registry and the process runner agree on ONE id and ONE output
@@ -470,31 +442,7 @@ pub struct ProcessHandle {
     pub pid: u32,
 }
 
-/// Failure modes shared by every [`ProcessRunner`] method.
-#[derive(Debug, Clone, Error)]
-pub enum ProcessError {
-    /// Platform does not implement process execution.
-    #[error("unsupported on this platform")]
-    Unsupported,
-    /// A requested policy guarantee cannot be enforced on this platform.
-    /// The payload names the guarantee (spec: "errors must name the
-    /// unenforceable guarantee").
-    #[error("policy unsupported: {0}")]
-    PolicyUnsupported(String),
-    /// The runner received a [`SandboxedCommand`] whose backend plan is
-    /// missing, malformed, or minted for a different backend.
-    #[error("malformed sandbox plan: {0}")]
-    MalformedSandboxPlan(String),
-    /// Jail setup failed at runtime (after prepare admitted the command).
-    #[error("sandbox enforcement failed: {0}")]
-    SandboxEnforcementFailed(String),
-    /// Underlying I/O failure.
-    #[error("io: {0}")]
-    Io(String),
-    /// Timeout fired before the command completed.
-    #[error("timeout")]
-    Timeout,
-}
+pub use mobile_linux_api::ProcessError;
 
 #[cfg(test)]
 mod tests {

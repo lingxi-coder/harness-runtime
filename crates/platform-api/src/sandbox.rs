@@ -51,28 +51,7 @@ pub trait Sandbox: Send + Sync {
     async fn probe_capability(&self) -> SandboxCapability;
 }
 
-/// Concrete sandbox implementation kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SandboxBackend {
-    /// Linux user / mount / network namespaces.
-    LinuxNamespaces,
-    /// Firejail-based wrapper on Linux.
-    LinuxFirejail,
-    /// macOS `sandbox-exec` profile.
-    MacOsSandboxExec,
-    /// Windows Job Object + restricted token.
-    WindowsJobObject,
-    /// Android in-engine Minijail (`no_new_privs` / rlimits / seccomp via
-    /// libminijail linked into the engine .so). Spec r3 D6.
-    AndroidMinijail,
-    /// Android Linux userspace runtime backed by PRoot, still wrapped by the
-    /// outer Minijail boundary.
-    AndroidProot,
-    /// iOS Linux userspace runtime backed by iSH userspace emulation.
-    IosIsh,
-    /// No sandbox enforcement (used for explicit bypass).
-    None,
-}
+pub use mobile_linux_api::SandboxBackend;
 
 /// Declarative sandbox policy applied by [`Sandbox::prepare`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,29 +68,7 @@ pub struct SandboxPolicy {
     pub limits: ResourceLimits,
 }
 
-/// Coarse network isolation level for a [`SandboxPolicy`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NetworkPolicy {
-    /// No outbound network at all.
-    Disabled,
-    /// Loopback (127.0.0.0/8, `::1`) only.
-    LoopbackOnly,
-    /// Full outbound network access.
-    Allowed,
-}
-
-/// Resource ceilings for a sandboxed process.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct ResourceLimits {
-    /// Maximum CPU time in seconds.
-    pub max_cpu_seconds: Option<u32>,
-    /// Maximum resident memory in megabytes.
-    pub max_memory_mb: Option<u32>,
-    /// Maximum number of child processes / threads.
-    pub max_processes: Option<u32>,
-    /// Maximum number of open file descriptors.
-    pub max_open_files: Option<u32>,
-}
+pub use mobile_linux_api::{NetworkPolicy, ResourceLimits};
 
 /// Live probe result from [`Sandbox::probe_capability`].
 #[derive(Debug, Clone)]

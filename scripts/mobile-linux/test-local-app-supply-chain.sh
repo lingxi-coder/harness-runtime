@@ -4,6 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TOOL="${SCRIPT_DIR}/verify-local-app-supply-chain.py"
+SDK_ARGS=()
+if [[ "${1:-}" == "--sdk-root" ]]; then SDK_ARGS=(--sdk-root "$2"); shift 2; fi
+SDK_ROOT="$(python3 "${SCRIPT_DIR}/sdk_source.py" "${SDK_ARGS[@]}")"
 # The runtime-profile templates live in TWO on-disk copies: this one, which
 # every supply-chain assertion below is written against, and
 # crates/plugins/lingxi-local-app/assets/templates/, which is what
@@ -51,12 +54,12 @@ expect_rejection() {
     exit 1
   fi
 }
-STAGED_OUTPUT="${HARNESS_RUNTIME_TEST_OUTPUT_DIR:-${REPO_ROOT}/build}/local-app-supply-chain-test-${RANDOM}"
-IOS_STAGED_OUTPUT="${HARNESS_RUNTIME_TEST_OUTPUT_DIR:-${REPO_ROOT}/build}/local-app-supply-chain-test-${RANDOM}"
+STAGED_OUTPUT="${HARNESS_RUNTIME_TEST_OUTPUT_DIR:-${TEMP_ROOT}}/local-app-supply-chain-test-${RANDOM}"
+IOS_STAGED_OUTPUT="${HARNESS_RUNTIME_TEST_OUTPUT_DIR:-${TEMP_ROOT}}/local-app-supply-chain-test-${RANDOM}"
 trap 'chmod -R u+w "${TEMP_ROOT}" "${STAGED_OUTPUT}" "${IOS_STAGED_OUTPUT}" 2>/dev/null || true; rm -rf "${TEMP_ROOT}" "${STAGED_OUTPUT}" "${IOS_STAGED_OUTPUT}"' EXIT
 
-python3 "${TOOL}" --repo-root "${REPO_ROOT}"
-python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile babylon-3d
+python3 "${TOOL}" --sdk-root "${SDK_ROOT}" --repo-root "${REPO_ROOT}"
+python3 "${TOOL}" --sdk-root "${SDK_ROOT}" --repo-root "${REPO_ROOT}" --profile babylon-3d
 
 # `validate_node_modules` must accept a rollup-FREE tree and must still pin the
 # `@rollup/*` native bindings at 4.44.0.
@@ -294,7 +297,7 @@ path.write_text(
 )
 PY
 expect_rejection "Vite compressed-size reporting to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  python3 "${TOOL}" --sdk-root "${SDK_ROOT}" --repo-root "${REPO_ROOT}" --profile react-dom \
   --template "${TEMP_ROOT}/react-dom-compressed-size"
 
 python3 "${SCRIPT_DIR}/generate-local-app-sbom.py" \
@@ -304,7 +307,7 @@ cmp "${TEMP_ROOT}/local-app-runtime.spdx.json" \
   "${REPO_ROOT}/docs/mobile-linux/sbom/local-app-runtime.spdx.json"
 
 expect_rejection "release validation to remain fail-closed" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --release
+  python3 "${TOOL}" --sdk-root "${SDK_ROOT}" --repo-root "${REPO_ROOT}" --release
 
 cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-dependency-drift"
 python3 - "${TEMP_ROOT}/react-dom-dependency-drift/package.json" <<'PY'
@@ -318,31 +321,31 @@ value["dependencies"]["vite"] = "8.2.2"
 path.write_text(json.dumps(value), encoding="utf-8")
 PY
 expect_rejection "dependency drift to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  python3 "${TOOL}" --sdk-root "${SDK_ROOT}" --repo-root "${REPO_ROOT}" --profile react-dom \
   --template "${TEMP_ROOT}/react-dom-dependency-drift"
 
 cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-network-bypass"
 printf '\nfetch("https://example.com");\n' >> "${TEMP_ROOT}/react-dom-network-bypass/app/main.jsx"
 expect_rejection "direct network access to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  python3 "${TOOL}" --sdk-root "${SDK_ROOT}" --repo-root "${REPO_ROOT}" --profile react-dom \
   --template "${TEMP_ROOT}/react-dom-network-bypass"
 
 cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-symlink"
 ln -s /tmp "${TEMP_ROOT}/react-dom-symlink/public/escape"
 expect_rejection "a template symlink to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  python3 "${TOOL}" --sdk-root "${SDK_ROOT}" --repo-root "${REPO_ROOT}" --profile react-dom \
   --template "${TEMP_ROOT}/react-dom-symlink"
 
 cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-path-escape"
 printf 'console.log("outside policy");\n' > "${TEMP_ROOT}/react-dom-path-escape/server.js"
 expect_rejection "a source file outside writable roots to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  python3 "${TOOL}" --sdk-root "${SDK_ROOT}" --repo-root "${REPO_ROOT}" --profile react-dom \
   --template "${TEMP_ROOT}/react-dom-path-escape"
 
 cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-lock-drift"
 printf '\n' >> "${TEMP_ROOT}/react-dom-lock-drift/pnpm-lock.yaml"
 expect_rejection "pnpm-lock byte drift to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  python3 "${TOOL}" --sdk-root "${SDK_ROOT}" --repo-root "${REPO_ROOT}" --profile react-dom \
   --template "${TEMP_ROOT}/react-dom-lock-drift"
 
 # Everything above validates the copy under
@@ -487,7 +490,7 @@ assert needle in text
 path.write_text(text.replace(needle, needle + "-drift", 1), encoding="utf-8")
 PY
 expect_rejection "a base seed lock containing engine/runtime drift to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  python3 "${TOOL}" --sdk-root "${SDK_ROOT}" --repo-root "${REPO_ROOT}" --profile react-dom \
   --template "${TEMP_ROOT}/react-dom-engine-lock-drift"
 
 cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-external-script"
@@ -505,7 +508,7 @@ path.write_text(
 )
 PY
 expect_rejection "an external script tag to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  python3 "${TOOL}" --sdk-root "${SDK_ROOT}" --repo-root "${REPO_ROOT}" --profile react-dom \
   --template "${TEMP_ROOT}/react-dom-external-script"
 
 cp -R "${CANVAS_PROFILE}" "${TEMP_ROOT}/canvas-missing-frame-loop"
@@ -522,7 +525,7 @@ value["host_managed_paths"] = [
 path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 PY
 expect_rejection "a canvas runtime profile missing frame-loop in source policy to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile canvas-2d \
+  python3 "${TOOL}" --sdk-root "${SDK_ROOT}" --repo-root "${REPO_ROOT}" --profile canvas-2d \
   --template "${TEMP_ROOT}/canvas-missing-frame-loop"
 
 NODE_MODULES="${TEMP_ROOT}/node_modules"
@@ -568,7 +571,7 @@ for name, version in packages.items():
 (root / "lightningcss-linux-arm64-musl/lightningcss.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 (root / "lightningcss-linux-x64-musl/lightningcss.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 PY
-python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
+python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" --sdk-root "${SDK_ROOT}" \
   --repo-root "${REPO_ROOT}" \
   --node-modules "${NODE_MODULES}" \
   --output "${STAGED_OUTPUT}" \
@@ -590,7 +593,7 @@ mkdir -p "${TAILWIND_NODE_MODULES}/@tailwindcss/oxide-linux-arm64-musl"
 printf '{"name":"@tailwindcss/oxide-linux-arm64-musl","version":"4.3.3"}\n' \
   > "${TAILWIND_NODE_MODULES}/@tailwindcss/oxide-linux-arm64-musl/package.json"
 expect_rejection "a stale Tailwind Oxide binding to fail staging" \
-  python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
+  python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" --sdk-root "${SDK_ROOT}" \
   --repo-root "${REPO_ROOT}" \
   --node-modules "${TAILWIND_NODE_MODULES}" \
   --output "${TEMP_ROOT}/staged-tailwind" \
@@ -619,7 +622,7 @@ assert manifest["resolved_lightningcss_bindings"] == [
 # would otherwise stage clean and ship dead native code to every device.
 assert "resolved_oxide_bindings" not in manifest, manifest
 PY
-python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
+python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" --sdk-root "${SDK_ROOT}" \
   --repo-root "${REPO_ROOT}" \
   --node-modules "${NODE_MODULES}" \
   --output "${STAGED_OUTPUT}" \
@@ -648,7 +651,7 @@ root = pathlib.Path(sys.argv[1])
 )
 PY
 expect_rejection "staged runtime to reject Next/SWC drift" \
-  python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
+  python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" --sdk-root "${SDK_ROOT}" \
   --repo-root "${REPO_ROOT}" \
   --node-modules "${NEXT_DRIFT_NODE_MODULES}" \
   --output "${TEMP_ROOT}/next-drift-output" \
@@ -662,7 +665,7 @@ printf '{"name":"left-pad","version":"1.3.0"}\n' \
   > "${ADDON_DRIFT_NODE_MODULES}/left-pad/package.json"
 printf '\177ELFfixture' > "${ADDON_DRIFT_NODE_MODULES}/left-pad/left-pad.node"
 expect_rejection "staged runtime to reject an arbitrary native addon" \
-  python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
+  python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" --sdk-root "${SDK_ROOT}" \
   --repo-root "${REPO_ROOT}" \
   --node-modules "${ADDON_DRIFT_NODE_MODULES}" \
   --output "${TEMP_ROOT}/addon-drift-output" \
@@ -675,7 +678,7 @@ rm -rf \
   "${IOS_NODE_MODULES}/@rolldown/binding-linux-x64-musl" \
   "${IOS_NODE_MODULES}/@rollup/rollup-linux-x64-musl" \
   "${IOS_NODE_MODULES}/lightningcss-linux-x64-musl"
-python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
+python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" --sdk-root "${SDK_ROOT}" \
   --repo-root "${REPO_ROOT}" \
   --node-modules "${IOS_NODE_MODULES}" \
   --output "${IOS_STAGED_OUTPUT}" \
@@ -724,68 +727,23 @@ digest = hashlib.sha256((root / "rootfs.tar.gz").read_bytes()).hexdigest()
 )
 PY
 expect_rejection "an uncommitted release rootfs digest to fail validation" \
-  python3 "${SCRIPT_DIR}/rootfs_tool.py" verify-release-archive \
+  python3 "${SCRIPT_DIR}/rootfs_tool.py" --sdk-root "${SDK_ROOT}" verify-release-archive \
   --pins "${ROOTFS_PINS}/source-only-pins.json" --abi arm64-v8a \
   --archive "${ROOTFS_PINS}/rootfs.tar.gz"
 expect_rejection "a release rootfs digest mismatch to fail validation" \
-  python3 "${SCRIPT_DIR}/rootfs_tool.py" verify-release-archive \
+  python3 "${SCRIPT_DIR}/rootfs_tool.py" --sdk-root "${SDK_ROOT}" verify-release-archive \
   --pins "${ROOTFS_PINS}/wrong-pins.json" --abi arm64-v8a \
   --archive "${ROOTFS_PINS}/rootfs.tar.gz"
-python3 "${SCRIPT_DIR}/rootfs_tool.py" verify-release-archive \
+python3 "${SCRIPT_DIR}/rootfs_tool.py" --sdk-root "${SDK_ROOT}" verify-release-archive \
   --pins "${ROOTFS_PINS}/pins.json" --abi arm64-v8a \
   --archive "${ROOTFS_PINS}/rootfs.tar.gz"
 
-# KNOWN-GAP ANCHOR. Everything above drives SYNTHETIC pin fixtures, so it proves
-# the comparator works, not that the shipped bytes are anchored to anything. They
-# are not: docs/mobile-linux/mobile-linux-pins.json commits no
-# `rootfs.release_archives` digest, because the package-augmented rootfs cannot be
-# reproducibly built while docs/mobile-linux/local-app-runtime-pins.json reports
-# closure_status "blocked" for both ABIs. See the "KNOWN UNANCHORED STEP" section
-# of docs/mobile-linux/README.md.
-#
-# This block asserts the ABSENCE of that anchor, by its exact reason, for every
-# ABI staging iterates over. It goes RED the moment a digest is committed — that
-# is deliberate: replace it with a positive match assertion and update the README
-# section named above in the same change.
-COMMITTED_PINS="${REPO_ROOT}/docs/mobile-linux/mobile-linux-pins.json"
-# The key must be absent, checked structurally. `verify-release-archive` reports
-# a MALFORMED digest with the same "no committed release rootfs digest" message
-# as an absent one, so the reason check below cannot tell the two apart on its
-# own — and a botched pin must not read as an untouched gap.
-COMMITTED_ABIS="$(python3 - "${COMMITTED_PINS}" <<'PY'
-import json
-import pathlib
-import sys
-
-rootfs = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["rootfs"]
-if "release_archives" in rootfs:
-    raise SystemExit(
-        "known-gap anchor is stale: mobile-linux-pins.json now carries "
-        "rootfs.release_archives. Replace the known-gap anchor in "
-        "test-local-app-supply-chain.sh with a real match assertion and update "
-        "the 'KNOWN UNANCHORED STEP' section of docs/mobile-linux/README.md."
-    )
-archives = rootfs["archives"]
-if not archives:
-    raise SystemExit("expected committed pins to list at least one rootfs ABI")
-print(" ".join(sorted(archives)))
-PY
-)"
-for abi in ${COMMITTED_ABIS}; do
-  gap_reason="$(python3 "${SCRIPT_DIR}/rootfs_tool.py" verify-release-archive \
-    --pins "${COMMITTED_PINS}" --abi "${abi}" \
-    --archive "${ROOTFS_PINS}/rootfs.tar.gz" 2>&1 || true)"
-  case "${gap_reason}" in
-    "no committed release rootfs digest for ${abi}: "*) ;;
-    *)
-      echo "known-gap anchor is stale for ${abi}: ${gap_reason}" >&2
-      echo "docs/mobile-linux/mobile-linux-pins.json appears to carry a release" >&2
-      echo "digest now. Replace this block with a real match assertion and update" >&2
-      echo "the 'KNOWN UNANCHORED STEP' section of docs/mobile-linux/README.md." >&2
-      exit 1
-      ;;
-  esac
-done
+# Real SDK candidate inventory replaces the inherited unanchored-source-pin
+# assertion. Release pipelines additionally require actual archive bytes; the
+# synthetic mismatch/missing-pin rejection probes above remain mandatory.
+EVIDENCE="${SDK_ROOT}/docs/mobile-linux/releases/3.24.2/arm64-v8a"
+bash "${SDK_ROOT}/scripts/mobile-linux/check-rootfs-manifest.sh" "${EVIDENCE}/rootfs-manifest.json"
+python3 "${SDK_ROOT}/scripts/mobile-linux/verify-evidence.py" --evidence-dir "${EVIDENCE}"
 
 # The plan-driven create gate must reject semantic regressions, not merely
 # match the current file on the happy path.
@@ -850,4 +808,4 @@ for label, (needle, replacement) in mutations.items():
     raise SystemExit(f"plan-driven create gate accepted regression: {label}")
 PY
 
-echo "local-app supply-chain tests passed (release rootfs digest: KNOWN GAP, unanchored)"
+echo "local-app supply-chain tests passed (actual SDK arm64 candidate inventory verified; release archive acceptance is separate)"

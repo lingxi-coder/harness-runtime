@@ -474,7 +474,6 @@ G1	crates/platforms/posix/tests/keychain_macos_service_name_test.rs	\.lingxi
 G1	crates/platforms/posix/tests/mcp_ws_test.rs	LingXi
 G1	crates/platforms/posix/tests/process_spawn_env_test.rs	LINGXI
 G1	crates/platforms/posix/tests/swarm_detection_test.rs	LingXi
-G1	crates/platforms/pty/Cargo.toml	LingXi
 G1	crates/platforms/windows/src/process/runner.rs	LINGXI
 G1	crates/platforms/windows/src/process/supervisor_gate.rs	LINGXI
 G1	crates/platforms/windows/src/secure_storage.rs	LingXi

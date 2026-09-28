@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+mobile-linux-api.workspace = true
 # The subagent output guard flags escalation attempts naming THIS build's
 # settings paths, so it reads their canonical spellings from one place rather
 # than repeating string literals that could drift from the rest of the tree.

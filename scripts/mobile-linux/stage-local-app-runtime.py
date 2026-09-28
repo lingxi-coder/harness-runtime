@@ -273,6 +273,7 @@ def assert_safe_output(repo: pathlib.Path, output: pathlib.Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", required=True)
+    parser.add_argument("--sdk-root")
     parser.add_argument("--node-modules", required=True)
     parser.add_argument("--output", "--output-dir", required=True)
     parser.add_argument("--platform", choices=("android", "ios"), required=True)
@@ -284,7 +285,7 @@ def main() -> None:
     output = pathlib.Path(args.output)
     assert_safe_output(repo, output)
 
-    pins = load_json(repo / "docs" / "mobile-linux" / "local-app-runtime-pins.json")
+    pins = _VERIFY.effective_pins(repo, args.sdk_root)
     template = repo / pins["local_app_runtime"]["template"]
     validate_apk_pins(pins, release=False, apk_dir=None)
     validate_runtime_profile_lock("react-dom", template, pins)
@@ -319,10 +320,7 @@ def main() -> None:
             repo / "docs" / "mobile-linux" / "local-app-runtime-policy.json",
             temporary / "runtime-policy.json",
         )
-        shutil.copy2(
-            repo / "docs" / "mobile-linux" / "local-app-runtime-pins.json",
-            temporary / "runtime-pins.json",
-        )
+        (temporary / "runtime-pins.json").write_text(json.dumps(pins, indent=2) + "\n")
         shutil.copy2(
             repo / "docs" / "mobile-linux" / "sbom" / "local-app-runtime.spdx.json",
             temporary / "runtime.spdx.json",

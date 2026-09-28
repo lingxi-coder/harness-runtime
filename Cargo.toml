@@ -72,12 +72,9 @@ members = [
     "crates/platforms/common",
     "crates/platforms/posix-minimal",
     "crates/platforms/posix",
-    "crates/platforms/pty",
     "crates/platforms/windows",
     "crates/platforms/ios",
     "crates/platforms/android",
-    "crates/platforms/android-libcap",
-    "crates/platforms/android-minijail",
     "crates/platforms/macos-computer-control",
     "crates/platforms/posix/tests/fixtures/mock_stdio_mcp",
 
@@ -153,7 +150,6 @@ default-members = [
     "crates/platforms/common",
     "crates/platforms/posix-minimal",
     "crates/platforms/posix",
-    "crates/platforms/pty",
     "crates/platforms/windows",
 
 ]
@@ -166,6 +162,15 @@ authors = ["LingXi Code Contributors"]
 repository = "https://github.com/lingxi-coder/harness-runtime"
 
 [workspace.dependencies]
+# Temporary local assembly; replaced by one immutable SDK Git revision before delivery.
+mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "26dc0648b540f764577600cc14f5b512d96b9782" }
+mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "26dc0648b540f764577600cc14f5b512d96b9782" }
+mobile-linux-android = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "26dc0648b540f764577600cc14f5b512d96b9782" }
+mobile-linux-ios = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "26dc0648b540f764577600cc14f5b512d96b9782" }
+platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "26dc0648b540f764577600cc14f5b512d96b9782" }
+platform-android-libcap = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "26dc0648b540f764577600cc14f5b512d96b9782" }
+platform-android-minijail = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "26dc0648b540f764577600cc14f5b512d96b9782" }
+
 # Single source of truth for the product namespace (paths, filenames, env
 # prefix, brand name). Path is workspace-root-relative so every member uses
 # `branding.workspace = true` regardless of its own depth.

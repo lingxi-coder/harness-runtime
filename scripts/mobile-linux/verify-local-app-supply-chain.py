@@ -9,6 +9,9 @@ import re
 import subprocess
 import sys
 import tempfile
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from sdk_source import effective_pins
 
 
 EXPECTED_DEPENDENCIES = {
@@ -326,26 +329,7 @@ def validate_typescript_native_pin(repo: pathlib.Path, pins: dict) -> None:
         if not valid_sha256(package.get("tsc_sha256")):
             fail(f"native TypeScript tsc needs a SHA-256 pin for {arch}")
 
-    source_pins = load_json(repo / "docs" / "mobile-linux" / "mobile-linux-pins.json")
-    source_component = source_pins.get("components", {}).get("typescript_native")
-    if not isinstance(source_component, dict):
-        fail("mobile-linux source pins must carry typescript_native")
-    if any(
-        source_component.get(field) != toolchain.get(field)
-        for field in ("version", "install_root", "license")
-    ):
-        fail("native TypeScript source pins diverged from local-app rootfs pins")
-    source_packages = source_component.get("platform_packages")
-    for arch, abi in (("aarch64", "arm64-v8a"), ("x86_64", "x86_64")):
-        package = packages[arch]
-        source_package = source_packages.get(abi) if isinstance(source_packages, dict) else None
-        if not isinstance(source_package, dict) or source_package != {
-            "name": package["name"],
-            "tarball": package["url"],
-            "integrity": f"sha512-{package['sha512']}",
-            "tsc_sha256": package["tsc_sha256"],
-        }:
-            fail(f"native TypeScript source/rootfs package pins diverged for {arch}")
+    # Shared TypeScript source and binary pins now have one SDK-owned authority.
 
 
 def expected_apk_packages(pins: dict) -> dict:
@@ -1433,6 +1417,7 @@ def validate_runtime_profiles(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", required=True)
+    parser.add_argument("--sdk-root")
     parser.add_argument("--release", action="store_true")
     parser.add_argument("--apk-dir")
     parser.add_argument("--profile", choices=sorted(RUNTIME_PROFILES), help="validate one runtime profile only")
@@ -1440,7 +1425,7 @@ def main() -> None:
     args = parser.parse_args()
 
     repo = pathlib.Path(args.repo_root).resolve()
-    pins = load_json(repo / "docs" / "mobile-linux" / "local-app-runtime-pins.json")
+    pins = effective_pins(repo, args.sdk_root)
     validate_typescript_native_pin(repo, pins)
     validate_apk_pins(
         pins,

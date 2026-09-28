@@ -62,44 +62,32 @@ impl GuestPathFileSystem {
     /// space / refused writes.
     fn resolve_translation(&self, path: &str, write: bool) -> Result<Option<String>, FsError> {
         let mounts = self.runtime.current_mounts();
-        if let Some((mount, host)) = platform_api::mobile_linux::find_guest_mount(path, &mounts) {
-            if write && mount.read_only {
-                return Err(FsError::PermissionDenied(format!(
-                    "guest path is on a read-only mount ({}): {path}",
-                    mount.guest_path
-                )));
+        mobile_linux_core::guest_path::resolve_guest_path(
+            path,
+            &mounts,
+            &guest_paths::writable_roots(),
+            write,
+        )
+        .map(|host| host.map(|value| value.to_string_lossy().into_owned()))
+        .map_err(|error| match error {
+            mobile_linux_core::guest_path::GuestPathError::ReadOnly { guest_path } => {
+                FsError::PermissionDenied(format!(
+                    "guest path is on a read-only mount ({guest_path}): {path}"
+                ))
             }
-            return Ok(Some(host.to_string_lossy().into_owned()));
-        }
-        // Not under any mount: refuse the rest of guest space (fakefs) before
-        // falling through to host passthrough. The raw textual check also
-        // catches paths that FAIL guest normalization (`/workspace/a/../b`),
-        // which must not leak through to the host as literal strings.
-        let in_guest_space = guest_paths::writable_roots()
-            .iter()
-            .any(|root| raw_path_has_prefix(path, root));
-        if in_guest_space {
-            return Err(FsError::PermissionDenied(format!(
-                "guest path is not host-backed (emulated-filesystem area); file tools can only \
-                 reach bind-mounted guest paths — use the shell for: {path}"
-            )));
-        }
-        Ok(None)
+            mobile_linux_core::guest_path::GuestPathError::NotHostBacked => {
+                FsError::PermissionDenied(format!(
+                    "guest path is not host-backed (emulated-filesystem area); file tools can only \
+                     reach bind-mounted guest paths — use the shell for: {path}"
+                ))
+            }
+        })
     }
 
     fn resolve_root(&self, root: &Path, write: bool) -> Result<PathBuf, FsError> {
         self.resolve(&root.to_string_lossy(), write)
             .map(PathBuf::from)
     }
-}
-
-/// `path == prefix` or `path` starts with `prefix/`, on raw bytes. Used only
-/// to decide fence membership, never to translate.
-fn raw_path_has_prefix(path: &str, prefix: &str) -> bool {
-    path == prefix
-        || path
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 #[async_trait]
