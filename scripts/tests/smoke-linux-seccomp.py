@@ -70,6 +70,7 @@ right.close()
         filtered = """
 import errno
 import socket
+from pathlib import Path
 
 for name, operation in (
     ("socket(AF_UNIX)", lambda: socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)),

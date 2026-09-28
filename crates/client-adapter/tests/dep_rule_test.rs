@@ -156,7 +156,7 @@ fn client_adapter_has_no_app_edge() {
 #[test]
 fn check_deps_sh_green() {
     let root = workspace_root();
-    let script = root.join("scripts").join("check-deps.sh");
+    let script = root.join("scripts/checks/check-deps.sh");
     assert!(
         script.is_file(),
         "the authoritative dep gate `{}` must exist",

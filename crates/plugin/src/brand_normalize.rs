@@ -217,6 +217,7 @@ fn workspace_root() -> PathBuf {
 pub fn load_frozen_identities() -> Vec<FrozenIdentity> {
     let path = workspace_root()
         .join("scripts")
+        .join("checks")
         .join("brand_frozen_identities.txt");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Vec::new();

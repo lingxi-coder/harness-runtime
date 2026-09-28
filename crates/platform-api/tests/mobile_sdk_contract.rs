@@ -39,7 +39,8 @@ fn sdk_types_preserve_wire_names() {
     }
     .into();
     let _: mobile_linux_api::LinuxCommandResult = result;
-    let _same_trait = sdk_stream;
+    let _: fn(Arc<dyn ProcessStreamSink>) -> Arc<dyn mobile_linux_api::ProcessStreamSink> =
+        sdk_stream;
 }
 
 #[test]

@@ -358,7 +358,7 @@ fn match_ci(c: &[char], pos: usize, lit: &str) -> Option<usize> {
         return None;
     }
     for (k, &lc) in lb.iter().enumerate() {
-        if c[pos + k].to_ascii_lowercase() != lc.to_ascii_lowercase() {
+        if !c[pos + k].eq_ignore_ascii_case(&lc) {
             return None;
         }
     }

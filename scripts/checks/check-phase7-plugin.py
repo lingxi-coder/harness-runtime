@@ -16,6 +16,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 REGISTRY = REPO / "crates" / "mcp" / "src" / "registry.rs"
+REGISTRY_LOCAL_APPS = REPO / "crates" / "mcp" / "src" / "registry" / "local_apps.rs"
 TRANSPORT = REPO / "crates" / "runtime" / "src" / "mobile" / "local_apps_mcp.rs"
 TASKS = REPO / "docs" / "local-apps" / "harness" / "tasks-phase-7.json"
 
@@ -44,7 +45,9 @@ def main() -> None:
     ]:
         fail("task contract must contain P7.0 through P7.3 in order")
 
-    registry = REGISTRY.read_text(encoding="utf-8")
+    registry_root = REGISTRY.read_text(encoding="utf-8")
+    require(registry_root, "mod local_apps;", "McpRegistry module wiring")
+    registry = registry_root + "\n" + REGISTRY_LOCAL_APPS.read_text(encoding="utf-8")
     for needle in [
         "pub struct ConversationExport",
         "local_apps:conversation-export:",
