@@ -1,7 +1,7 @@
 # llm-client 能力接入
 
 开发子模块与运行时固定 Git 依赖当前使用 `lingxi-llm-client` 0.3.0，提交
-`d7c926e412d436c3a82703b7a52d1749452b3e0a`，已从 canonical 远端
+`58740df6606d5eafa1b575fde2af940278f11d0b`，已从 canonical 远端
 `https://github.com/lingxi-coder/llm-client` 获取。该版本统一模型 HTTP/WebSocket 传输、鉴权策略、模型目录与托管搜索接口。
 该提交包含会话隔离、文件操作期限及流式上传修复，并已推送。后续子模块修改仍须先独立提交并推送，再更新父仓库记录。
 
@@ -207,3 +207,17 @@ patch 的独立源码副本使用远端固定 SDK 提交完成 runtime 全特性
 “未收到响应”推断模型没有执行。文件服务优先采用请求级 authenticator，且不把
 覆盖设置保留到后续调用；Responses 会话缓存 HTTP fallback 后仍遵守
 `allow_http=false`，重复预热不得绑定正式 HTTP 生成请求。
+
+
+普通非流式模型调用也有宿主期限：每次尝试默认 600 秒，可用正数
+`API_TIMEOUT_MS` 调整；准备与鉴权消耗同一预算，宿主准入等待不计入。
+超时仍经过未知执行结果结算。Responses 连接身份排除逐请求 `x-request-id`，
+继续保留账号、认证和连接配置校验。自动续传必须匹配上轮完整输入及最终输出；
+无法确认完整前缀时保留完整历史。搜索流中断时，独立收到的有效引用也可作为
+部分结果返回，并明确标记不完整。
+
+
+Responses 会话还保留所选 Transport 的所有权：更换 Transport 时关闭旧连接并清除
+续传及降级状态，共用同一个 Transport 的不同 client 可继续复用。
+`ResponsesSession::prepare_using` 的显式传输参数改为 `Option<Arc<dyn Transport>>`；
+准备之后再以其他 Transport 派发会在宿主准入之前被拒绝。

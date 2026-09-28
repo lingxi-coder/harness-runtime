@@ -2932,19 +2932,28 @@ impl ApiService {
             // Strip rejected thinking before encode so Gemini / OpenAI-compat
             // thinking models can prepare. DeepSeek / Kimi skip this.
             // prepare → inject headers → execute.
-            let mut prepared = match self.client.prepare_on(&req, self.transport.clone()).await {
-                Ok(p) => p,
-                Err(e) => {
-                    // prepare() errors (auth, capability, encoding) are always terminal.
+            let timeout = crate::execution::non_stream_timeout();
+            let preparing = tokio::time::Instant::now();
+            let prepared = crate::execution::non_stream_bound(timeout, async {
+                let mut prepared = self.client.prepare_on(&req, self.transport.clone()).await?;
+                Self::log_deepseek_prepared_request(&req.model, &prepared, false);
+                self.inject_headers(&mut prepared, &request_id, dispatch);
+                self.client.seal_prepared(&mut prepared).await?;
+                Ok(prepared)
+            })
+            .await;
+            let mut prepared = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
                     telemetry::emit_failed(
                         &self.analytics,
                         &req.model,
                         &request_id,
-                        Self::error_kind(&e),
-                        Self::status_of(&e),
+                        Self::error_kind(&error),
+                        Self::status_of(&error),
                     )
                     .await;
-                    return Err(e);
+                    return Err(error);
                 }
             };
             if !connections_captured {
@@ -2952,9 +2961,8 @@ impl ApiService {
                 connection_chain.clone_from(&prepared.route.resolved_route.connection_chain);
                 failover = prepared.route.resolved_route.failover;
             }
-            Self::log_deepseek_prepared_request(&req.model, &prepared, false);
-            self.inject_headers(&mut prepared, &request_id, dispatch);
-            self.client.seal_prepared(&mut prepared).await?;
+            // Pause the provider deadline while waiting for host admission.
+            let remaining = timeout.saturating_sub(preparing.elapsed());
             let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
             let call = prepared.wire_call.take().expect("sealed call");
             let pricing = (self.estimator.is_some() || req.model_attempt.is_some()).then(|| {
@@ -2969,17 +2977,18 @@ impl ApiService {
                     },
                 )
             });
-            let resp_result = match call
-                .dispatch_once_with(|| {
-                    attempt
-                        .mark_dispatched()
-                        .map_err(crate::execution::wire_error)
-                })
-                .await
-            {
-                Ok(received) => received.collect().await.map_err(crate::upstream::error),
-                Err(error) => Err(crate::upstream::error(error)),
-            };
+            let resp_result = crate::execution::non_stream_bound(remaining, async {
+                let received = call
+                    .dispatch_once_with(|| {
+                        attempt
+                            .mark_dispatched()
+                            .map_err(crate::execution::wire_error)
+                    })
+                    .await
+                    .map_err(crate::upstream::error)?;
+                received.collect().await.map_err(crate::upstream::error)
+            })
+            .await;
 
             match resp_result {
                 Err(transport_err) => {

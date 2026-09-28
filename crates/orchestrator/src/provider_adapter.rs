@@ -2428,7 +2428,10 @@ mod tests {
         use llm_runtime::services::sdk;
         use serde_json::json;
         use tool_api::HostedWebSearchClient;
-        struct SearchTransport;
+        struct SearchTransport {
+            interrupted: bool,
+            calls: std::sync::atomic::AtomicUsize,
+        }
         #[async_trait::async_trait]
         impl llm_runtime::Transport for SearchTransport {
             async fn send(
@@ -2436,70 +2439,88 @@ mod tests {
                 request: sdk::HttpRequest,
             ) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
                 use futures::StreamExt;
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
                 assert!(request.url.contains("gemini-search"));
                 assert!(body["tools"][0].get("googleSearch").is_some());
                 let grounding = json!({"webSearchQueries":["Rust","Rust docs"],"groundingChunks":[{"web":{"uri":"https://rust-lang.org","title":"Rust"}}]});
-                let events = vec![
+                let mut events = vec![
                     json!({"modelVersion":"gemini-search","candidates":[{"content":{"role":"model","parts":[{"text":"Rust"}]},"groundingMetadata":grounding}]}),
                     json!({"candidates":[{"content":{"role":"model","parts":[]},"groundingMetadata":grounding,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10}}),
                 ];
+                if self.interrupted {
+                    events.pop();
+                }
+                let mut chunks = events
+                    .into_iter()
+                    .map(|event| Ok(format!("data: {event}\n\n").into()))
+                    .collect::<Vec<_>>();
+                if self.interrupted {
+                    chunks.push(Err(sdk::protocol::LlmError::StreamInterrupted {
+                        message: "lost after grounding".into(),
+                    }));
+                }
                 Ok(sdk::StreamResponse {
                     status: 200,
                     headers: vec![],
-                    body: futures::stream::iter(
-                        events
-                            .into_iter()
-                            .map(|event| Ok(format!("data: {event}\n\n").into())),
-                    )
-                    .boxed(),
+                    body: futures::stream::iter(chunks).boxed(),
                 })
             }
         }
-        let mut profile: ProviderProfile = serde_json::from_value(json!({
+        for interrupted in [false, true] {
+            let mut profile: ProviderProfile = serde_json::from_value(json!({
             "provider_id":"gemini","profile_name":"search-google","base_url":"https://generativelanguage.googleapis.com/v1beta","protocol":"gemini_generate_content","auth":"none","credential":{"type":"none"},
             "models":[{"display_model":"gemini-search","request_model":"gemini-search","billing_model":"gemini-search","capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
         })).unwrap();
-        profile.protocol = ProtocolFamily::GeminiGenerateContent;
-        let mut wire: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
+            profile.protocol = ProtocolFamily::GeminiGenerateContent;
+            let mut wire: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
             "provider_id":"gemini","profile_name":"search-google","base_url":"https://generativelanguage.googleapis.com/v1beta","protocol":"gemini_generate_content","auth":"none","models":[],"extra":{"web_search":"gemini"}
         })).unwrap();
-        wire.regions = sdk::protocol::Region::all();
-        profile.wire_profile = Some(wire);
-        let client = Arc::new(
-            DefaultLlmClient::from_config(ClientConfig {
-                providers: vec![profile],
-            })
-            .unwrap(),
-        );
-        let adapter = ProviderApiAdapter::new(Arc::new(ApiService::new(
-            client,
-            Arc::new(SearchTransport),
-            SubscriberState::default(),
-            UserAgentEnv::default(),
-            "test",
-            None,
-            None,
-        )));
-        let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
-        let request = tool_api::HostedSearchRequest {
-            model: "gemini-search".into(),
-            profile: Some("search-google".into()),
-            query: "Rust".into(),
-            allowed_domains: vec![],
-            blocked_domains: vec![],
-        };
-        assert!(adapter.supports_request(&request));
-        let result = adapter.search(request, progress).await.unwrap();
-        assert_eq!(result.searches, 2);
-        assert!(updates.try_recv().is_ok());
-        assert!(updates.try_recv().is_ok());
-        assert!(
-            updates.try_recv().is_err(),
-            "duplicated final output counted twice"
-        );
-        assert_eq!((result.input_tokens, result.output_tokens), (7, 3));
-        assert!(result.results.iter().any(|entry|matches!(entry,tool_api::hosted_search::SearchResultEntry::Hit(value) if value.to_string().contains("rust-lang.org"))));
+            wire.regions = sdk::protocol::Region::all();
+            profile.wire_profile = Some(wire);
+            let client = Arc::new(
+                DefaultLlmClient::from_config(ClientConfig {
+                    providers: vec![profile],
+                })
+                .unwrap(),
+            );
+            let transport = Arc::new(SearchTransport {
+                interrupted,
+                calls: Default::default(),
+            });
+            let adapter = ProviderApiAdapter::new(Arc::new(ApiService::new(
+                client,
+                transport.clone(),
+                SubscriberState::default(),
+                UserAgentEnv::default(),
+                "test",
+                None,
+                None,
+            )));
+            let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
+            let request = tool_api::HostedSearchRequest {
+                model: "gemini-search".into(),
+                profile: Some("search-google".into()),
+                query: "Rust".into(),
+                allowed_domains: vec![],
+                blocked_domains: vec![],
+            };
+            assert!(adapter.supports_request(&request));
+            let result = adapter.search(request, progress).await.unwrap();
+            assert_eq!(result.searches, 2);
+            assert!(updates.try_recv().is_ok());
+            assert!(updates.try_recv().is_ok());
+            assert!(
+                updates.try_recv().is_err(),
+                "duplicated final output counted twice"
+            );
+            if !interrupted {
+                assert_eq!((result.input_tokens, result.output_tokens), (7, 3));
+            }
+            assert_eq!(transport.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(result.results.iter().any(|entry| matches!(entry, tool_api::hosted_search::SearchResultEntry::Text(text) if text.contains("incomplete"))), interrupted);
+            assert!(result.results.iter().any(|entry|matches!(entry,tool_api::hosted_search::SearchResultEntry::Hit(value) if value.to_string().contains("rust-lang.org"))));
+        }
     }
 }
 
@@ -2604,7 +2625,14 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
         let (blocks, metadata, partial) =
             match llm_runtime::stream_accumulator::accumulate_stream_salvaging(stream).await {
                 Ok(response) => (response.content, response.provider_metadata, None),
-                Err((partial, error)) if !partial.is_empty() => {
+                Err((partial, error))
+                    if !partial.is_empty()
+                        || !citations
+                            .lock()
+                            .expect("search citations")
+                            .citations
+                            .is_empty() =>
+                {
                     (partial, serde_json::Value::Null, Some(error.to_string()))
                 }
                 Err((_, error)) => return Err(hosted_search_error(error)),

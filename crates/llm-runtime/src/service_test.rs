@@ -207,6 +207,7 @@ mod tests {
         events: Mutex<Vec<&'static str>>,
         observations: Mutex<Vec<(crate::Usage, crate::ModelAttemptUsageCompleteness)>>,
         fail_settlement: bool,
+        admission_delay: Duration,
     }
 
     struct ProbeLease {
@@ -233,6 +234,9 @@ mod tests {
             prepared: &crate::PreparedLlmCall,
         ) -> Result<Box<dyn crate::ModelAttemptLease>, LlmError> {
             assert!(request.model_attempt.is_some());
+            if !self.admission_delay.is_zero() {
+                tokio::time::sleep(self.admission_delay).await;
+            }
             let _ = prepared;
             self.events.lock().unwrap().push("begin");
             Ok(Box::new(ProbeLease {
@@ -383,6 +387,73 @@ mod tests {
         }
     }
 
+    struct StalledNonStreamTransport {
+        body: bool,
+    }
+    #[async_trait::async_trait]
+    impl Transport for StalledNonStreamTransport {
+        async fn send(
+            &self,
+            _: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            use futures::StreamExt;
+            if !self.body {
+                return std::future::pending().await;
+            }
+            Ok(lingxi_llm_client::StreamResponse {
+                status: 200,
+                headers: vec![],
+                body: futures::stream::pending().boxed(),
+            })
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn nonstream_deadline_bounds_headers_and_body_and_settles_once() {
+        for body in [false, true] {
+            let service =
+                make_adapter_with_retries(Arc::new(StalledNonStreamTransport { body }), Some(0));
+            let probe = Arc::new(AttemptProbe::default());
+            service.set_model_attempt_hooks(Arc::new(probe.clone()));
+            let result = tokio::time::timeout(
+                crate::execution::non_stream_timeout() + Duration::from_secs(1),
+                service.execute_side_query_request(registered_request()),
+            )
+            .await;
+            assert!(
+                matches!(result, Ok(Err(LlmError::TransportTimeout { .. }))),
+                "{result:?}"
+            );
+            assert_eq!(
+                *probe.events.lock().unwrap(),
+                vec!["begin", "dispatch", "finish-owned", "settled"]
+            );
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn nonstream_deadline_excludes_host_admission() {
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 200,
+            headers: BTreeMap::new(),
+            body_json: ok_response_json(),
+            request_id: None,
+        });
+        let service = make_adapter_with_retries(transport, Some(0));
+        let probe = Arc::new(AttemptProbe {
+            admission_delay: crate::execution::non_stream_timeout() + Duration::from_secs(1),
+            ..Default::default()
+        });
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        service
+            .execute_side_query_request(registered_request())
+            .await
+            .unwrap();
+        assert_eq!(
+            *probe.events.lock().unwrap(),
+            vec!["begin", "dispatch", "finish-owned", "settled"]
+        );
+    }
+
     fn registered_request() -> LlmRequest {
         let mut request =
             LlmRequest::new("claude-sonnet-4-20250514").with_user_text("fake request");
@@ -503,9 +574,12 @@ mod tests {
         );
         let probe = Arc::new(AttemptProbe::default());
         service.set_model_attempt_hooks(Arc::new(probe.clone()));
-        let mut stream = service.stream_request(request).await.unwrap();
-        while let Some(event) = stream.next().await {
-            event.unwrap();
+        // Each drive has a fresh x-request-id, but still shares one connection.
+        for _ in 0..2 {
+            let mut stream = service.stream_request(request.clone()).await.unwrap();
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
         }
         assert_eq!(
             transport
@@ -520,7 +594,7 @@ mod tests {
         );
         assert_eq!(
             *probe.events.lock().unwrap(),
-            vec!["begin", "dispatch", "finish-owned", "settled"],
+            ["begin", "dispatch", "finish-owned", "settled"].repeat(2),
             "the WebSocket send is metered exactly like an HTTP one"
         );
         assert_eq!(

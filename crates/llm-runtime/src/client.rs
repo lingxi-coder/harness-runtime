@@ -573,7 +573,7 @@ impl DefaultLlmClient {
         let mut draft = prepared.wire_draft.take().expect("draft");
         session
             .shared
-            .prepare_using(&mut draft, false, true, Some(transport.as_ref()))
+            .prepare_using(&mut draft, false, true, Some(transport.clone()))
             .await
             .map_err(|error| crate::execution::restore_error(error, &prepared.host_failure))
     }
@@ -688,7 +688,7 @@ impl DefaultLlmClient {
         if websocket {
             session
                 .shared
-                .prepare_using(&mut draft, prewarm, !prewarm, Some(raw.as_ref()))
+                .prepare_using(&mut draft, prewarm, !prewarm, Some(raw.clone()))
                 .await
                 .map_err(|error| crate::execution::restore_error(error, &prepared.host_failure))?;
         }

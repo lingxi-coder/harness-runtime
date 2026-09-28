@@ -239,6 +239,35 @@ impl sdk::Authenticator for HostAuthenticator {
     }
 }
 
+/// Finite host deadline for non-stream model work, excluding budget admission.
+pub(crate) fn non_stream_timeout() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        std::env::var("API_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(crate::model::stream_watchdog::API_TIMEOUT_DEFAULT_MS),
+    )
+}
+
+pub(crate) fn non_stream_bound<'a, T: Send + 'a>(
+    timeout: std::time::Duration,
+    future: impl std::future::Future<Output = Result<T, LlmError>> + Send + 'a,
+) -> crate::BoxFuture<'a, Result<T, LlmError>> {
+    let future = Box::pin(future);
+    Box::pin(async move {
+        let expired = || LlmError::TransportTimeout {
+            message: "Non-stream model request deadline exceeded".into(),
+        };
+        if timeout.is_zero() {
+            return Err(expired());
+        }
+        tokio::time::timeout(timeout, future)
+            .await
+            .map_err(|_| expired())?
+    })
+}
+
 pub(crate) fn first_byte_bound<'a, T: Send + 'a>(
     timeout: Option<std::time::Duration>,
     future: impl std::future::Future<Output = Result<T, LlmError>> + Send + 'a,
