@@ -3366,7 +3366,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-android"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771#acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=999e28f813764cfcc527f14847954b84dc4d74f0#999e28f813764cfcc527f14847954b84dc4d74f0"
 dependencies = [
  "async-trait",
  "mobile-linux-api",
@@ -3380,7 +3380,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-api"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771#acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=999e28f813764cfcc527f14847954b84dc4d74f0#999e28f813764cfcc527f14847954b84dc4d74f0"
 dependencies = [
  "async-trait",
  "serde",
@@ -3390,7 +3390,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-core"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771#acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=999e28f813764cfcc527f14847954b84dc4d74f0#999e28f813764cfcc527f14847954b84dc4d74f0"
 dependencies = [
  "mobile-linux-api",
  "serde",
@@ -4480,42 +4480,14 @@ name = "platform-android"
 version = "0.12.0"
 dependencies = [
  "async-trait",
- "hex",
  "http-client",
  "mobile-linux-android",
  "mobile-linux-api",
- "nix 0.27.1",
- "platform-android-minijail",
  "platform-api",
  "platform-common",
  "platform-posix-minimal",
- "platform-pty",
- "serde_json",
- "sha2",
  "tempfile",
  "tokio",
- "tracing",
-]
-
-[[package]]
-name = "platform-android-libcap"
-version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771#acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771"
-dependencies = [
- "cc",
-]
-
-[[package]]
-name = "platform-android-minijail"
-version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771#acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771"
-dependencies = [
- "cc",
- "hex",
- "libc",
- "platform-android-libcap",
- "serde",
- "sha2",
 ]
 
 [[package]]
@@ -4677,7 +4649,7 @@ dependencies = [
 [[package]]
 name = "platform-pty"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771#acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=999e28f813764cfcc527f14847954b84dc4d74f0#999e28f813764cfcc527f14847954b84dc4d74f0"
 dependencies = [
  "anyhow",
  "filedescriptor",
