@@ -13,9 +13,9 @@ use platform_api::subagent_spawn::{
     SubagentSpawnRequest, SubagentSpawner, SubagentUsage, SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
 };
 use platform_api::{
-    validate_panel_report, FusionError, FusionInheritance, FusionProgress, FusionRunFactsRecorder,
-    FusionStage, FusionUsage, PanelReport, PanelRunStatus, WorkflowQueryWatchdog, FUSION_MIN_PANEL,
-    FUSION_PANEL_TYPE,
+    validate_panel_report, EvidenceCheckStatus, FusionError, FusionInheritance, FusionProgress,
+    FusionRunFactsRecorder, FusionStage, FusionUsage, PanelReport, PanelRunStatus,
+    WorkflowQueryWatchdog, FUSION_MIN_PANEL, FUSION_PANEL_TYPE,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -254,6 +254,7 @@ fn in_flight_panels(
             error_detail: None,
             usage: Some(estimate_in_flight_usage(generic_prompt)),
             spawn_prompt: generic_prompt.to_string(),
+            evidence_checks: Vec::new(),
         })
         .collect()
 }
@@ -484,6 +485,9 @@ pub struct PanelInternal {
     pub usage: Option<FusionUsage>,
     /// Prompt actually sent (tests assert mutual invisibility).
     pub spawn_prompt: String,
+    /// Host checks of `report.evidence`, index-aligned; empty until the
+    /// evidence stage runs. See [`crate::evidence`].
+    pub evidence_checks: Vec<EvidenceCheckStatus>,
 }
 
 /// Successful panels that produced a report.
@@ -538,8 +542,14 @@ pub fn panel_report_json_schema() -> Value {
                     "properties": {
                         "id": { "type": "string" },
                         "kind": { "type": "string", "enum": ["file", "url", "command"] },
-                        "locator": { "type": "string" },
-                        "excerpt": { "type": "string" }
+                        "locator": {
+                            "type": "string",
+                            "description": "file: workspace-relative path, optionally with :line or :start-end; url: the URL; command: the command"
+                        },
+                        "excerpt": {
+                            "type": "string",
+                            "description": "file: 1-10 lines copied verbatim from the file, without line numbers; the host checks them against the workspace"
+                        }
                     }
                 }
             },
@@ -1553,6 +1563,7 @@ fn finish_panel(
         error_detail: None,
         usage: None,
         spawn_prompt,
+        evidence_checks: Vec::new(),
     };
     match outcome {
         PanelFinish::TotalTimedOut => {

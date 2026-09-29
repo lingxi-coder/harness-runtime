@@ -263,9 +263,11 @@ pub(crate) fn analyst_user_message(
     let mut reports = Vec::new();
     for panel in sorted_reports(panels) {
         if let Some(report) = &panel.report {
+            let mut report_value = json!(report);
+            report_value["evidence"] = evidence_with_checks(panel, report);
             let entry = json!({
                 "panel_id": panel.anonymous_id,
-                "report": report,
+                "report": report_value,
             });
             reports.push(entry);
         }
@@ -388,6 +390,18 @@ the schema, with no other text."
     payload.to_string()
 }
 
+/// A report's evidence as the analyst sees it: each item carries the host's
+/// `check` once the evidence stage has run (see [`crate::evidence`]).
+fn evidence_with_checks(panel: &PanelInternal, report: &PanelReport) -> Value {
+    let mut evidence = json!(report.evidence);
+    if let Some(items) = evidence.as_array_mut() {
+        for (item, check) in items.iter_mut().zip(&panel.evidence_checks) {
+            item["check"] = json!(check.label());
+        }
+    }
+    evidence
+}
+
 fn sorted_reports(panels: &[PanelInternal]) -> Vec<&PanelInternal> {
     let mut sorted = panels
         .iter()
@@ -446,7 +460,11 @@ fn analyst_packed_sources(panels: &[PanelInternal]) -> Vec<PackedPanelSource> {
             let claims_evidence = if report.claims.is_empty() && report.evidence.is_empty() {
                 String::new()
             } else {
-                json!({ "claims": report.claims, "evidence": report.evidence }).to_string()
+                json!({
+                    "claims": report.claims,
+                    "evidence": evidence_with_checks(panel, report),
+                })
+                .to_string()
             };
             let noncritical_risks = report
                 .risks
@@ -710,6 +728,7 @@ mod tests {
             error_detail: None,
             usage: None,
             spawn_prompt: String::new(),
+            evidence_checks: Vec::new(),
         }
     }
 

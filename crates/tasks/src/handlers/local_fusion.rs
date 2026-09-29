@@ -932,7 +932,7 @@ mod tests {
             },
             analysis_failure: analysis.is_none().then(|| "timeout".to_string()),
             analysis,
-            responses: vec![PanelMaterial::from_report("P1", &report)],
+            responses: vec![PanelMaterial::from_report("P1", &report, &[])],
             panels: vec![platform_api::PanelOutcome {
                 panel_id: "P1".into(),
                 status: platform_api::PanelRunStatus::Completed,

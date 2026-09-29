@@ -1060,6 +1060,7 @@ fn fusion_stage_name(stage: &FusionStage) -> &'static str {
         FusionStage::ReservingBudget => "reserving_budget",
         FusionStage::RunningPanels { .. } => "running_panels",
         FusionStage::PanelsDispatched { .. } => "panels_dispatched",
+        FusionStage::CheckingEvidence => "checking_evidence",
         FusionStage::Analyzing => "analyzing",
         FusionStage::Completed => "completed",
         FusionStage::Failed => "failed",

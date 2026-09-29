@@ -843,7 +843,9 @@ Rules:
 - Do not mention provider names, model names, or that you are part of a multi-model ensemble.
 - Return your answer as a PanelReport through the StructuredOutput tool.
 
-The report must include a concise summary, a complete candidate_answer the parent could adopt, claims with evidence, explicit assumptions, risks, and unresolved questions."
+The report must include a concise summary, a complete candidate_answer the parent could adopt, claims with evidence, explicit assumptions, risks, and unresolved questions.
+
+For file evidence, set locator to the workspace-relative path (optionally with :line or :start-end) and excerpt to 1-10 lines copied verbatim from that file, without line numbers. The host checks every excerpt against the workspace and flags claims whose cited code is not there."
                 .to_string(),
         ),
         mcp_servers: vec![],

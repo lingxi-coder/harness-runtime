@@ -545,6 +545,8 @@ mod tests {
                 panel_id: "P1".into(),
                 summary: "summary".into(),
                 candidate_answer: "the secret panel answer".into(),
+                claims: vec![],
+                evidence_checks: Default::default(),
                 risks: vec![],
                 unresolved_questions: vec![],
             }],

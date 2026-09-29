@@ -756,7 +756,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             analysis_failure: (status == platform_api::FusionStatus::Unanalyzed)
                 .then(|| "timeout".to_string()),
             analysis: None,
-            responses: vec![platform_api::PanelMaterial::from_report("P1", &report)],
+            responses: vec![platform_api::PanelMaterial::from_report("P1", &report, &[])],
             // 3 panels (the quality preset count every fixture in this file
             // wires) — F008's spawn-quota release compares `panel_n` against
             // `result.panels.len()`, so a fixture with an EMPTY panel vec

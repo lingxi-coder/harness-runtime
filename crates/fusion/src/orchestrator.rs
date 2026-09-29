@@ -3,6 +3,7 @@
 use crate::analyst::{AnalystError, AnalystUsage};
 use crate::budget::{self, FusionPriceBook, FusionQuote, ReservationLease};
 use crate::config::{FusionConfigSource, FusionRuntimeConfig};
+use crate::evidence;
 use crate::model_resolver::{self, ModelSource, ResolvedPanel, ResolvedSet};
 use crate::panel::{self, successful, PanelInternal};
 use crate::progress;
@@ -10,11 +11,12 @@ use crate::snapshot::{CatalogSnapshot, FusionRuntimeSnapshot};
 use async_trait::async_trait;
 use platform_api::subagent_spawn::SubagentSpawner;
 use platform_api::{
-    normalize_dimensions, FusionActivation, FusionAgentSurface, FusionAnalysis, FusionError,
-    FusionExecutor, FusionInheritance, FusionOrigin, FusionPreparedSummary, FusionPreset,
-    FusionProgress, FusionRequest, FusionResult, FusionRunControl, FusionRunFactsRecorder,
-    FusionRunIdentity, FusionRunOutcome, FusionStage, FusionStatus, FusionSubmission, FusionTiming,
-    FusionUsage, PanelMaterial, PanelOutcome, PanelRunStatus, PreparedFusionRun, FUSION_MIN_PANEL,
+    normalize_dimensions, EvidenceCheckCounts, EvidenceCheckStatus, FusionActivation,
+    FusionAgentSurface, FusionAnalysis, FusionError, FusionExecutor, FusionInheritance,
+    FusionOrigin, FusionPreparedSummary, FusionPreset, FusionProgress, FusionRequest, FusionResult,
+    FusionRunControl, FusionRunFactsRecorder, FusionRunIdentity, FusionRunOutcome, FusionStage,
+    FusionStatus, FusionSubmission, FusionTiming, FusionUsage, PanelMaterial, PanelOutcome,
+    PanelRunStatus, PreparedFusionRun, FUSION_MIN_PANEL,
 };
 use sidequery::SideQueryClient;
 // Used only by the tests below. Kept at file scope behind `cfg(test)` so the
@@ -864,7 +866,7 @@ impl FusionOrchestrator {
             "panel",
         )?;
 
-        let (panels, panels_ms) = self
+        let (mut panels, panels_ms) = self
             .run_panel_stage(
                 config,
                 &request,
@@ -883,39 +885,27 @@ impl FusionOrchestrator {
                 &settlement,
             )
             .await?;
-        // [Round-5 review items 1/2/4] Every stage from here to
-        // `finalize_result` refreshes both survives-a-drop money cells
-        // through this one borrow — see `StageSettlement`'s stage table for
-        // what each boundary is required to leave behind.
-        let stage_settlement = StageSettlement {
-            realized_tokens: &realized_tokens,
-            settlement: &settlement,
-            catalog: self.catalog.as_ref(),
-            live_catalog: live_catalog.as_ref(),
-            catalog_snapshot: &runtime_snapshot.catalog,
-            prices: self.prices.as_ref(),
-            analyst: &resolved.analyst,
-            request_prompt: &request.prompt,
-            request: Some(&request),
-            config: Some(config),
-            side_query: Some(self.side_query.as_ref()),
-            panels: &panels,
-            operational_deadline,
-            cancel: inherit.cancel.clone(),
-            reserved_max_nano_usd: facts
-                .snapshot()
-                .usage
-                .map_or(0, |usage| usage.reserved_max_nano_usd),
-            facts: facts.clone(),
-            started,
-        };
         // Panels are the earliest point in `run_inner` where real,
         // already-billed provider spend exists. Record it now so a cancel
         // or outer-timeout that later drops this future's own stack still
         // leaves `run()` able to report it — see the field doc above and
         // `run()`'s outer `Err` arm. The analyst has not run yet, so its
         // contribution here is exactly $0 — not an estimate.
-        stage_settlement.refresh(None, false, false);
+        self.stage_settlement(
+            &realized_tokens,
+            &settlement,
+            live_catalog.as_ref(),
+            &runtime_snapshot,
+            &resolved,
+            &request,
+            config,
+            &panels,
+            operational_deadline,
+            &inherit.cancel,
+            &facts,
+            started,
+        )
+        .refresh(None, false, false);
         // [Round-3 review B2, reworked] Latch the DISPATCHED egress set
         // (panels that made a real provider call — see
         // `dispatched_egress_profiles`) now, right after dispatch is known,
@@ -996,6 +986,36 @@ impl FusionOrchestrator {
             return Err(error);
         }
 
+        tokio::select! {
+            biased;
+            () = inherit.cancel.cancelled() => return Err(FusionError::Cancelled),
+            () = self.check_evidence(
+                config,
+                &mut panels,
+                &inherit,
+                &progress,
+                operational_deadline,
+            ) => {}
+        }
+
+        // [Round-5 review items 1/2/4] Every stage from here to
+        // `finalize_result` refreshes both survives-a-drop money cells
+        // through this one borrow — see `StageSettlement`'s stage table for
+        // what each boundary is required to leave behind.
+        let stage_settlement = self.stage_settlement(
+            &realized_tokens,
+            &settlement,
+            live_catalog.as_ref(),
+            &runtime_snapshot,
+            &resolved,
+            &request,
+            config,
+            &panels,
+            operational_deadline,
+            &inherit.cancel,
+            &facts,
+            started,
+        );
         let outcome = tokio::select! {
             biased;
             () = inherit.cancel.cancelled() => return Err(FusionError::Cancelled),
@@ -1025,6 +1045,87 @@ impl FusionOrchestrator {
             &control,
         )
         .await
+    }
+
+    /// The settlement borrow every stage after the panels refreshes through.
+    /// Built once for the post-panel refresh and again once the evidence
+    /// stage has written its checks into `panels`.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_settlement<'a>(
+        &'a self,
+        realized_tokens: &'a Arc<Mutex<Option<u64>>>,
+        settlement: &'a Arc<Mutex<Option<(u64, bool)>>>,
+        live_catalog: &'a dyn ModelSource,
+        runtime_snapshot: &'a FusionRuntimeSnapshot,
+        resolved: &'a ResolvedSet,
+        request: &'a FusionRequest,
+        config: &'a FusionRuntimeConfig,
+        panels: &'a [PanelInternal],
+        operational_deadline: Instant,
+        cancel: &CancellationToken,
+        facts: &FusionRunFactsRecorder,
+        started: Instant,
+    ) -> StageSettlement<'a> {
+        StageSettlement {
+            realized_tokens,
+            settlement,
+            catalog: self.catalog.as_ref(),
+            live_catalog,
+            catalog_snapshot: &runtime_snapshot.catalog,
+            prices: self.prices.as_ref(),
+            analyst: &resolved.analyst,
+            request_prompt: &request.prompt,
+            request: Some(request),
+            config: Some(config),
+            side_query: Some(self.side_query.as_ref()),
+            panels,
+            operational_deadline,
+            cancel: cancel.clone(),
+            reserved_max_nano_usd: facts
+                .snapshot()
+                .usage
+                .map_or(0, |usage| usage.reserved_max_nano_usd),
+            facts: facts.clone(),
+            started,
+        }
+    }
+
+    /// Check the workspace evidence panels cite (see [`crate::evidence`])
+    /// through the parent's `Grep`. Capped at [`evidence::CHECK_TIME_CAP`]
+    /// and never allowed into the time the analyst still needs: with no time
+    /// to spare, every item stays `unverifiable`.
+    async fn check_evidence(
+        &self,
+        config: &FusionRuntimeConfig,
+        panels: &mut [PanelInternal],
+        inherit: &FusionInheritance,
+        progress: &Option<Sender<FusionProgress>>,
+        operational_deadline: Instant,
+    ) {
+        let analyst_reserve = Duration::from_millis(
+            config
+                .analyst_timeout_ms
+                .saturating_mul(1 + u64::from(config.analysis_protocol_retries)),
+        );
+        let now = Instant::now();
+        let deadline = operational_deadline
+            .checked_sub(analyst_reserve)
+            .map_or(now, |latest| latest.min(now + evidence::CHECK_TIME_CAP));
+        let has_evidence = panels.iter().any(|panel| {
+            panel
+                .report
+                .as_ref()
+                .is_some_and(|report| !report.evidence.is_empty())
+        });
+        if has_evidence && deadline > now {
+            progress::emit(
+                progress,
+                FusionStage::CheckingEvidence,
+                None,
+                FusionStage::CheckingEvidence.label(),
+            );
+        }
+        evidence::check_panels(panels, Arc::clone(&inherit.subagent.tool_invoker), deadline).await;
     }
 
     /// `run_inner`'s tail: emit the terminal progress stage, compute the
@@ -1161,10 +1262,13 @@ impl FusionOrchestrator {
             responses: successful(panels)
                 .into_iter()
                 .filter_map(|panel| {
-                    panel
-                        .report
-                        .as_ref()
-                        .map(|report| PanelMaterial::from_report(&panel.anonymous_id, report))
+                    panel.report.as_ref().map(|report| {
+                        PanelMaterial::from_report(
+                            &panel.anonymous_id,
+                            report,
+                            &panel.evidence_checks,
+                        )
+                    })
                 })
                 .collect(),
             panels: panels.iter().map(panel_outcome).collect(),
@@ -1183,6 +1287,7 @@ impl FusionOrchestrator {
                         .filter(|panel| panel.status != PanelRunStatus::Completed)
                         .count(),
                 ),
+                &result.responses,
                 &result.run_id,
                 &result.usage,
                 &result.egress_profiles,
@@ -1204,6 +1309,7 @@ impl FusionOrchestrator {
         &self,
         request: &FusionRequest,
         panel_counts: (usize, usize, usize),
+        responses: &[PanelMaterial],
         run_id: &str,
         usage: &FusionUsage,
         egress: &[String],
@@ -1223,6 +1329,16 @@ impl FusionOrchestrator {
             ("panel_failed_count", panel_counts.2),
         ] {
             completion_md.insert(key.into(), AnalyticsValue::Int(saturating_i64(count)));
+        }
+        let mut evidence_checks = EvidenceCheckCounts::default();
+        for material in responses {
+            evidence_checks.merge(&material.evidence_checks);
+        }
+        for status in EvidenceCheckStatus::ALL {
+            completion_md.insert(
+                format!("evidence_{}_count", status.label()),
+                AnalyticsValue::Int(i64::from(evidence_checks.get(status))),
+            );
         }
         add_usage_metadata(&mut completion_md, usage);
         add_egress_metadata(&mut completion_md, egress);
@@ -1838,6 +1954,7 @@ impl FusionOrchestrator {
                             completed,
                             result.panels.len() - completed,
                         ),
+                        &result.responses,
                         &result.run_id,
                         &result.usage,
                         &result.egress_profiles,
@@ -3206,6 +3323,7 @@ mod check_panel_bar_preflight_tests {
             error_detail: None,
             usage: None,
             spawn_prompt: String::new(),
+            evidence_checks: Vec::new(),
         }
     }
 

@@ -29,6 +29,7 @@ mod analyst;
 mod attempts;
 mod budget;
 mod config;
+mod evidence;
 mod model_resolver;
 mod orchestrator;
 mod packing;

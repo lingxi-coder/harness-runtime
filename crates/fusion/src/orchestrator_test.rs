@@ -3453,6 +3453,7 @@ fn three_ok_completed_panels() -> Vec<crate::panel::PanelInternal> {
             error_detail: None,
             usage: None,
             spawn_prompt: String::new(),
+            evidence_checks: Vec::new(),
         })
         .collect()
 }
@@ -6688,6 +6689,7 @@ fn make_panel_internal(
         error_detail: None,
         usage: None,
         spawn_prompt: String::new(),
+        evidence_checks: Vec::new(),
     }
 }
 
@@ -7049,6 +7051,7 @@ fn panel_with_cache_write(cache_write_tokens: u64) -> Vec<crate::panel::PanelInt
             provider_requests: 1,
         }),
         spawn_prompt: String::new(),
+        evidence_checks: Vec::new(),
     }]
 }
 
@@ -7143,4 +7146,118 @@ to the shipped default's behaviour"
         !estimated_no_cache_writes,
         "a run that spent no cache-write tokens has nothing to approximate"
     );
+}
+
+/// Answers the host's evidence `Grep` calls from a fixed workspace: only
+/// `src/lib.rs` exists.
+struct WorkspaceGrep {
+    calls: Mutex<Vec<(String, Value, bool, bool)>>,
+}
+
+#[async_trait]
+impl ToolInvoker for WorkspaceGrep {
+    async fn invoke(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: SubagentInvocationContext,
+    ) -> Result<Value, ToolInvokerError> {
+        self.calls.lock().unwrap().push((
+            name.to_string(),
+            input.clone(),
+            ctx.is_non_interactive_session,
+            ctx.can_show_permission_prompts,
+        ));
+        match input["path"].as_str() {
+            Some("src/lib.rs") => Ok(json!({ "mode": "count", "numMatches": 3 })),
+            Some(path) => Err(ToolInvokerError::InvalidInput(format!(
+                "Path does not exist: {path}."
+            ))),
+            None => Err(ToolInvokerError::InvalidInput("path is required".into())),
+        }
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn evidence_checks_reach_the_analyst_the_material_and_telemetry() {
+    let mut invented = report("ANSWER_B");
+    invented.evidence[0].locator = "src/invented.rs:40-52".into();
+    let map = HashMap::from([
+        (
+            "claude-sonnet-5".into(),
+            FakePanel::Report(report("ANSWER_A")),
+        ),
+        ("gpt-5.6-terra".into(), FakePanel::Report(invented)),
+        (
+            "deepseek-v4-pro".into(),
+            FakePanel::Report(report("ANSWER_C")),
+        ),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let (orch, sink) = orch_with_telemetry(spawner, side.clone(), test_config()).await;
+    let grep = Arc::new(WorkspaceGrep {
+        calls: Mutex::new(Vec::new()),
+    });
+    let inherit = FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: grep.clone(),
+            budget: Arc::new(InertBudget),
+        },
+        CancellationToken::new(),
+    );
+    let result = orch.run(request("task"), inherit, None).await.unwrap();
+
+    let calls = grep.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 3, "one existence check per panel: {calls:?}");
+    for (name, input, non_interactive, can_prompt) in &calls {
+        assert_eq!(name, "Grep", "the host never uses Read: {input}");
+        assert!(*non_interactive && !*can_prompt);
+        assert_eq!(input["output_mode"], "count");
+    }
+
+    let user = side.last_analyst_user.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        user.matches("\"check\":\"file_exists\"").count(),
+        2,
+        "{user}"
+    );
+    assert_eq!(
+        user.matches("\"check\":\"missing_file\"").count(),
+        1,
+        "{user}"
+    );
+
+    let checks: Vec<_> = result
+        .responses
+        .iter()
+        .map(|material| material.claims[0].evidence[0].check)
+        .collect();
+    assert_eq!(
+        checks
+            .iter()
+            .filter(|check| **check == platform_api::EvidenceCheckStatus::MissingFile)
+            .count(),
+        1
+    );
+    let material = platform_api::render_fusion_material(&result);
+    assert!(material.contains("check=\"missing_file\">src/invented.rs:40-52</evidence>"));
+    assert!(material.contains("evidence=\"1 missing_file\""));
+
+    let events = sink.events().await;
+    let completed = events
+        .iter()
+        .find(|event| event.name == telemetry::tengu::fusion::COMPLETED)
+        .expect("completion telemetry");
+    assert!(matches!(
+        completed.metadata.get("evidence_file_exists_count"),
+        Some(AnalyticsValue::Int(2))
+    ));
+    assert!(matches!(
+        completed.metadata.get("evidence_missing_file_count"),
+        Some(AnalyticsValue::Int(1))
+    ));
 }

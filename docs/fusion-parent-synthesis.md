@@ -1,6 +1,6 @@
 # Fusion 父模型综合设计
 
-状态：第 1 阶段（analysis 模式下的父模型综合）已实现；第 2–5 阶段为设计草案（2026-09-28）。
+状态：第 1 阶段（analysis 模式下的父模型综合）与第 2a 阶段（宿主证据核对）已实现；其余为设计草案（2026-09-28）。
 两种 panel 模式（analysis / implement）在各阶段的差异见"两种 panel 模式"一节。
 
 ## 背景与目标
@@ -119,7 +119,7 @@ analyst 失败（超时、解析失败、结构化输出不支持、provider 错
 `ConversationOrchestrator::run_task_notification_rewake`。desktop 主循环在 LingXi，
 若未接此调用，`/fusion` 完成后要等用户下一条消息，主模型才会拿到材料并综合。
 
-## 第 2 阶段设计：宿主证据核对
+## 第 2a 阶段：宿主证据核对（已实现）
 
 决策：先做宿主的确定性证据核对（本节），带工具的 analyst 子 agent 延后，作为 quality 预设的
 可选项。核对只针对工作区文件，不访问网络。
@@ -146,14 +146,19 @@ analyst 和主模型。它不核实推理本身是否成立。
   破坏 Edit 的安全前提。Grep 没有这个副作用。
 - 逐条 evidence：
   - `kind` 不是 `file`，或 locator 是 URL、命令、`lingxi-search:` 定位符 → `unverifiable`。
-  - 从 locator 解析路径，去掉 `:12`、`:12-20`、`#L12`、`#L12-L20` 这类行号后缀。
+  - 从 locator 解析路径，去掉 `:12`、`:12-20`、`:12:5`、`#L12`、`#L12-L20` 这类行号后缀；
+    去掉后路径里仍有空白（多半是"src/a.rs lines 3-9"这类描述）→ `unverifiable`，不误报缺文件。
   - 没有 excerpt → 用 count 模式 Grep 任意字符，文件存在记 `file_exists`。
-  - 有 excerpt → 取最多 6 行有区分度的行（去首尾空白，长度 ≥ 8，不是纯标点），每行做
-    正则转义后以 count 模式 Grep 该文件：全部命中 `verified`，部分命中 `partial`，都没命中
-    `not_found`。
-  - Grep 报路径不存在 → `missing_file`；权限拒绝 → `denied`；超时或其它错误 → `unverifiable`。
+  - 有 excerpt → 取最多 6 行有区分度的行：去首尾空白，去掉 Read 输出的行号前缀（`12\t`、`12→`），
+    长度 ≥ 8、含字母数字、不含省略号 `…`，单行最多取前 200 字节。每行按空白切词、逐词正则转义，
+    词间用 `[ \t]+` 连接（容忍空格与制表符差异），以 count 模式 Grep 该文件：全部命中 `verified`，
+    部分命中 `partial`，都没命中 `not_found`。
+  - Grep 报路径不存在（`InvalidInput`，"does not exist"）→ `missing_file`；权限拒绝或路径超出
+    可信目录（调用器以 `Internal` / `Abort` 返回）→ `denied`；其它错误 → `unverifiable`。
+    同一条 evidence 遇到第一个拒绝或缺文件就停止，不再查后面的行。
 - 上限：每次运行最多核对 32 条 evidence（优先被 claim 引用的，按 panel 轮流取，保证公平），
-  并发 8，总时长不超过 10 秒且不超过 analyst 截止时间的余量；未轮到或超时的记 `unverifiable`。
+  并发 8；截止时间取"现在 + 10 秒"与"运行截止时间 − analyst 超时 ×（1 + 重试次数）"中较早者，
+  没有余量时不做核对。未轮到或超时的记 `unverifiable`。
 - 新增进度阶段 `FusionStage::CheckingEvidence`（"Checking evidence"）。
 
 ### 类型（`platform-api`）
@@ -175,29 +180,41 @@ pub struct MaterialClaim {
     pub evidence: Vec<MaterialEvidence>,
 }
 
+pub struct EvidenceCheckCounts { /* 各状态计数，序列化为 {"verified": 3, ...} */ }
+
 // PanelMaterial 新增：
-pub claims: Vec<MaterialClaim>,   // 按字节上限与条数上限截断
+pub claims: Vec<MaterialClaim>,           // 最多 16 条，每条最多 8 个证据
+pub evidence_checks: EvidenceCheckCounts, // 该 panel 全部证据（含未被引用的）的核对计数
+
+// PanelMaterial::from_report(panel_id, report, checks)，checks 与 report.evidence 按下标对齐
 ```
+
+核对结果先写在编排器内部的 `PanelInternal.evidence_checks`（与 `report.evidence` 按下标对齐），
+analyst 打包和 `PanelMaterial` 都从这里读取。panel 输出里即使带了 `check` 字段也会在解析时被丢弃，
+不能伪造核对结果。
 
 ### 消费方
 
 - **analyst**：打包的 panel 输入里每条 evidence 带上 `check`。提示词说明：核对结果是宿主
   对工作区的事实；`not_found` / `missing_file` 表示引用的代码不存在，相关 claim 视为
   没有依据，不计入共识，并在分歧或盲点里指出。
-- **主模型材料**：每个 `<panel>` 增加 `<claims>`，每条 claim 列出证据及核对状态；
+- **主模型材料**：每个 `<panel>` 增加 `<claims>`，每条 claim 列出证据及核对状态
+  （`<evidence id kind check>locator</evidence>`），字节预算为该 panel answer 份额的四分之一，
+  放不下的 claim 整条省略并以 `<claims-omitted count>` 注明，不会截断到标签中间；
   `<panel>` 上附加核对计数（如 `evidence="3 verified, 1 not_found"`）。`<instructions>`
   补充：标为 `not_found` / `missing_file` 的说法没有依据。宿主只陈述事实，不自动降权或剔除
   panel。
 - **panel 提示词**：要求文件类证据的 locator 写工作区内的相对路径，并附上从文件中逐字复制的
   1–10 行摘录，否则只能核对到文件存在。
-- **遥测**：`COMPLETED` 事件增加各核对状态的计数。
+- **遥测**：`COMPLETED` 事件增加 `evidence_<状态>_count`（七种状态各一个）。
 
 ### 测试
 
-- locator 解析（各种行号后缀、URL、命令、`lingxi-search:`）与摘录行选取。
-- 用假的 `ToolInvoker` 覆盖每种状态的映射，包括权限拒绝和超时。
-- 编排器：核对结果进入 analyst 输入和主模型材料；32 条上限下按 panel 轮流取。
-- 材料渲染：状态计数、`<claims>` 的转义与截断，总字节上限仍然成立。
+- `fusion/src/evidence.rs`：locator 解析、摘录行选取与上限、七种状态的映射、首个拒绝即停、
+  32 条上限下的引用优先与 panel 轮流、截止时间到达后保持 `unverifiable`。
+- `orchestrator_test::evidence_checks_reach_the_analyst_the_material_and_telemetry`：只调用 Grep
+  且为非交互上下文；核对结果进入 analyst 输入、`responses`、渲染材料与 `COMPLETED` 遥测。
+- `platform-api` 材料测试：claims 与计数渲染、转义、整条省略、计数的序列化。
 
 ## 两种 panel 模式
 
@@ -441,7 +458,7 @@ Fusion 本身从不写用户工作区，主模型对用户工作区的写入全�
 
 | 需要 | 现状 | 差距 |
 |---|---|---|
-| analyst 用工具核实 panel 的说法 | analyst 无工具；宿主证据核对见第 2 阶段设计 | 带工具的 analyst 子 agent 延后，作为 quality 预设可选项 |
+| analyst 用工具核实 panel 的说法 | analyst 无工具；宿主证据核对已实现（第 2a 阶段） | 带工具的 analyst 子 agent 延后，作为 quality 预设可选项 |
 | panel 在隔离 worktree 中写代码 | worktree 由 `AgentTool` 在派发前创建（`tools/agent/src/agent.rs`，slug `agent-<id>`），经 `SubagentSpawnRequest.cwd` / `.worktree` 交给子 agent；fusion 直接调 `SubagentSpawner`，不经过 `AgentTool` | 编排器需注入 `WorktreeManager`，自己创建 worktree 并填这两个字段；新增 `fusion-implementer` 类型 |
 | worktree 基于用户当前状态 | `create_worktree` 从分支建，不含未提交改动 | 需 `snapshot_base()`，`base_branch` 接受提交 id |
 | implementer 不向用户冒泡权限 | `fusion-panel` 为 `AgentPermissionMode::Bubble` | 需"worktree 内自动批准、其余拒绝"的非交互权限模式，读取也限定在 worktree |
@@ -496,7 +513,7 @@ worktree。
 ## 分阶段实施
 
 1. **父模型综合（analysis 模式）**：已完成。
-2. **证据核对**：2a 宿主确定性证据核对（见上文设计）；2b 带只读工具的 analyst 子 agent，
+2. **证据核对**：2a 宿主确定性证据核对，已完成；2b 带只读工具的 analyst 子 agent，
    作为 quality 预设可选项，产出 `VerifiedClaim`，需要多轮预算、为 analyst 预留并发池槽位、
    analyst 阶段按轮计费，子 agent 请求需支持温度 0。
 3. **沙箱按 agent cwd 解析**：独立修复，implement 模式的前置条件。
