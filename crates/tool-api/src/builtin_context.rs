@@ -467,16 +467,37 @@ impl BuiltinToolContext {
     /// the frozen config until `/sandbox` actually flips the toggle.
     #[must_use]
     pub fn effective_sandbox_runtime(&self) -> SandboxRuntimeConfig {
-        let mut cfg = match &self.sandbox_enabled_override {
+        let mut cfg = self.toggled_sandbox_runtime();
+        sandbox::policy_convert::reconcile_deny_write_symlinks(&mut cfg);
+        cfg
+    }
+
+    /// [`Self::effective_sandbox_runtime`] for a command whose sandbox is
+    /// rooted at `root` — the agent's own directory (`isolation: "worktree"`
+    /// or an explicit `cwd`) or else the session workspace, never the host
+    /// process's cwd or the shell's current `cd`. Relative entries such as the
+    /// `.` seed resolve against `root`; see [`sandbox::root::rooted_at`].
+    /// Pass the same `root` as the `cwd` of [`crate::SandboxRunner::wrap`].
+    #[must_use]
+    pub fn sandbox_runtime_at(
+        &self,
+        root: &std::path::Path,
+        scope: sandbox::root::SandboxRootScope,
+    ) -> SandboxRuntimeConfig {
+        let mut cfg = sandbox::root::rooted_at(&self.toggled_sandbox_runtime(), root, scope);
+        sandbox::policy_convert::reconcile_deny_write_symlinks(&mut cfg);
+        cfg
+    }
+
+    fn toggled_sandbox_runtime(&self) -> SandboxRuntimeConfig {
+        match &self.sandbox_enabled_override {
             Some(cell) => {
                 let mut cfg = self.sandbox_runtime.clone();
                 cfg.enabled = cell.load(std::sync::atomic::Ordering::Relaxed);
                 cfg
             }
             None => self.sandbox_runtime.clone(),
-        };
-        sandbox::policy_convert::reconcile_deny_write_symlinks(&mut cfg);
-        cfg
+        }
     }
 
     /// Mobile shell carrier, independent of platform naming. The stable

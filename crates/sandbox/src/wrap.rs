@@ -49,9 +49,26 @@ pub fn wrap_with_sandbox(
     policy: &SandboxRuntimeConfig,
     platform: Platform,
 ) -> Result<String, SandboxWrapError> {
+    wrap_with_sandbox_at(command, policy, platform, None)
+}
+
+/// [`wrap_with_sandbox`] for a command whose sandbox is rooted at `cwd`: the
+/// macOS profile anchors its mandatory `.git`/dotfile denies and any relative
+/// entry there instead of at the host process's `current_dir()`. Callers
+/// resolve the policy's own relative entries first with
+/// [`crate::root::rooted_at`]; `None` keeps the process-cwd behavior.
+///
+/// # Errors
+/// Same as [`wrap_with_sandbox`].
+pub fn wrap_with_sandbox_at(
+    command: &str,
+    policy: &SandboxRuntimeConfig,
+    platform: Platform,
+    cwd: Option<&std::path::Path>,
+) -> Result<String, SandboxWrapError> {
     match platform {
         Platform::Linux | Platform::Wsl => Ok(wrap_linux_bwrap(command, policy)),
-        Platform::Mac => wrap_macos_sbpl(command, policy),
+        Platform::Mac => wrap_macos_sbpl(command, policy, cwd.and_then(std::path::Path::to_str)),
     }
 }
 
@@ -168,6 +185,7 @@ fn shell_escape_single(s: &str) -> String {
 fn wrap_macos_sbpl(
     command: &str,
     policy: &SandboxRuntimeConfig,
+    cwd: Option<&str>,
 ) -> Result<String, SandboxWrapError> {
     // Derive a per-command log tag (claude-code `R0d`/`generateLogTag`) so the
     // `log stream` violation monitor can correlate this run's denials — matching
@@ -175,7 +193,7 @@ fn wrap_macos_sbpl(
     // does). The profile content is now byte-identical to claude-code's k0d; only
     // the invocation form stays Generator-A-shaped (`sandbox-exec -f <tempfile>`).
     let log_tag = sandbox_runtime::macos::generate_log_tag(command);
-    let profile = generate_sbpl_profile_with(policy, &log_tag);
+    let profile = generate_sbpl_profile_at(policy, &log_tag, cwd);
     let profile_path = write_sbpl_tempfile(&profile)?;
     let quoted = shell_escape_single(command);
     Ok(format!(
@@ -193,7 +211,16 @@ fn wrap_macos_sbpl(
 /// `log_tag` is interpolated into `(deny default (with message "<tag>"))` and
 /// every rule's `(with message …)` (the builder's `m`). Callers without a real
 /// command-derived tag pass [`DEFAULT_SBPL_LOG_TAG`] (see [`generate_sbpl_profile`]).
+#[cfg(test)]
 pub(crate) fn generate_sbpl_profile_with(policy: &SandboxRuntimeConfig, log_tag: &str) -> String {
+    generate_sbpl_profile_at(policy, log_tag, None)
+}
+
+fn generate_sbpl_profile_at(
+    policy: &SandboxRuntimeConfig,
+    log_tag: &str,
+    cwd: Option<&str>,
+) -> String {
     let read_config = build_read_config(policy);
     let write_config = build_write_config(policy);
     generate_sandbox_profile(&ProfileParams {
@@ -211,6 +238,7 @@ pub(crate) fn generate_sbpl_profile_with(policy: &SandboxRuntimeConfig, log_tag:
         enable_weaker_network_isolation: policy.enable_weaker_network_isolation,
         allow_apple_events: policy.allow_apple_events,
         log_tag,
+        cwd,
     })
 }
 

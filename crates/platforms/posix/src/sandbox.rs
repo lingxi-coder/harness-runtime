@@ -21,7 +21,7 @@ use sandbox::dependency_check::{
 use sandbox::runtime_config::{
     FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, SandboxRuntimeConfig,
 };
-use sandbox::wrap::wrap_with_sandbox;
+use sandbox::wrap::wrap_with_sandbox_at;
 
 use crate::wsl_detect::{detect as detect_wsl, WslKind};
 
@@ -193,8 +193,14 @@ impl Sandbox for PosixSandbox {
             ));
         }
 
-        // Translate M1 `SandboxPolicy` → `SandboxRuntimeConfig`.
+        // Translate M1 `SandboxPolicy` → `SandboxRuntimeConfig`, rooted at the
+        // directory the command runs in: a relative policy path means that
+        // directory, not the host process's cwd.
         let mut runtime_cfg = runtime_config_from_policy(policy);
+        if let Some(cwd) = &cmd.cwd {
+            runtime_cfg =
+                sandbox::root::rooted_at(&runtime_cfg, cwd, sandbox::root::SandboxRootScope::Agent);
+        }
 
         // Deny-write by FS existence (finding 3). The bare-repo escape-defense
         // set + the existing generic denied paths re-mount read-only IN PLACE
@@ -225,7 +231,7 @@ impl Sandbox for PosixSandbox {
             cmd_string.push_str(arg);
         }
 
-        let wrapped = wrap_with_sandbox(&cmd_string, &runtime_cfg, platform)
+        let wrapped = wrap_with_sandbox_at(&cmd_string, &runtime_cfg, platform, cmd.cwd.as_deref())
             .map_err(|e| SandboxError::Unavailable(format!("wrap_with_sandbox failed: {e}")))?;
 
         let inner = ProcessCommand {

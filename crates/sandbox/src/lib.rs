@@ -32,6 +32,7 @@ pub mod dependency_check;
 pub mod path_pattern;
 pub mod policy;
 pub mod policy_convert;
+pub mod root;
 pub mod runtime_config;
 pub mod violation_store;
 pub mod wrap;

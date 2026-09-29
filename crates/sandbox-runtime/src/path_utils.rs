@@ -385,6 +385,29 @@ pub fn normalize_path_for_sandbox(path_pattern: &str) -> String {
     })
 }
 
+/// [`normalize_path_for_sandbox`] with the directory relative patterns
+/// resolve against made explicit. `Some(cwd)` anchors `.`, `./x` and bare
+/// relative globs at `cwd` — the command's sandbox root — instead of the host
+/// process's `current_dir()`, which in a multi-session host (or for an agent
+/// isolated in a worktree) is not the directory the command belongs to.
+/// `None` keeps the process-cwd behavior.
+#[must_use]
+pub fn normalize_path_for_sandbox_in(path_pattern: &str, cwd: Option<&str>) -> String {
+    // Resolution needs an absolute anchor; anything else keeps the old
+    // process-cwd behavior rather than producing a relative "normalized" path.
+    let Some(cwd) = cwd.filter(|cwd| cwd.starts_with('/')) else {
+        return normalize_path_for_sandbox(path_pattern);
+    };
+    let home_dir = dirs::home_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    normalize_path_for_sandbox_with(path_pattern, &home_dir, cwd, |p| {
+        std::fs::canonicalize(p)
+            .ok()
+            .map(|c| c.to_string_lossy().into_owned())
+    })
+}
+
 /// Pure core of [`get_default_write_paths`]: takes the home directory as a
 /// parameter.
 ///

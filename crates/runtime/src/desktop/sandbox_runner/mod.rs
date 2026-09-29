@@ -20,11 +20,16 @@
 //! - **domain-only change** (only `network.allowed_domains` /
 //!   `network.denied_domains` differ) → [`SandboxManager::update_config`], a
 //!   LIVE swap of the running proxies' allow/deny lists with no rebind.
-//! - **structural change** (anything else: ports, filesystem rules, weaker-mode
-//!   flags, …) → [`SandboxManager::reset`] + [`SandboxManager::initialize`],
-//!   because those are baked into the proxy bind / bwrap-seatbelt wrap and are
-//!   not live-swappable (faithful to the manager's own live-vs-structural
-//!   contract).
+//! - **structural change** (anything else: ports, weaker-mode flags, …) →
+//!   [`SandboxManager::reset`] + [`SandboxManager::initialize`], because those
+//!   are baked into the proxy bind and are not live-swappable (faithful to the
+//!   manager's own live-vs-structural contract).
+//!
+//! Filesystem paths are neither: each command's config arrives already rooted
+//! at that command's directory (an agent's worktree or the session workspace,
+//! see `sandbox::root`), so they differ between concurrent agents. They are
+//! handed to the manager per command as its custom config and never reset the
+//! proxies other commands are using.
 //!
 //! This module is **desktop-only** (it pulls hyper/rustls/tokio via
 //! `sandbox-runtime`); the mobile profile does not compile this adapter.
@@ -62,18 +67,25 @@ fn map_err(e: ManagerError) -> SandboxWrapError {
     SandboxWrapError::Unsupported(e.to_string())
 }
 
-/// Hash the structural (non-domain) shape of a runtime config.
+/// Hash the structural shape of a runtime config.
 ///
 /// The domain allow/deny lists are EXCLUDED because a change limited to those
-/// is live-swappable via [`SandboxManager::update_config`]; everything else
-/// (ports, filesystem rules, weaker-mode flags, MITM/TLS, paths, …) requires a
-/// reset + re-initialize. We hash the JSON serialization of the config with the
-/// two domain vectors blanked out — simplest-correct: any structural field
-/// flip changes the bytes, while a pure domain edit does not.
+/// is live-swappable via [`SandboxManager::update_config`]. The filesystem path
+/// lists are EXCLUDED because every wrap applies the command's own rooted lists
+/// as the manager's custom config. Everything else (ports, weaker-mode flags,
+/// MITM/TLS, …) requires a reset + re-initialize. We hash the
+/// JSON serialization of the config with those lists blanked out — any
+/// structural field flip changes the bytes, while a domain or path edit does
+/// not.
 fn structural_key(rt: &sandbox_runtime::SandboxRuntimeConfig) -> u64 {
     let mut scrubbed = rt.clone();
     scrubbed.network.allowed_domains.clear();
     scrubbed.network.denied_domains.clear();
+    // Per-command, per-root paths: applied through the wrap's custom config.
+    scrubbed.filesystem.allow_write.clear();
+    scrubbed.filesystem.deny_write.clear();
+    scrubbed.filesystem.deny_read.clear();
+    scrubbed.filesystem.allow_read = None;
     // `SandboxRuntimeConfig` is `Serialize`; JSON gives a stable, total byte
     // image of every remaining field. (It is not `Hash`, so we hash the bytes.)
     let json = serde_json::to_string(&scrubbed).unwrap_or_default();
@@ -196,6 +208,8 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
             state.active_net = Some(net.clone());
         }
 
+        // The sandbox root `rt` was resolved against. Without one the manager
+        // falls back to the host process's cwd, as before.
         let cwd_s = cwd.and_then(Path::to_str).unwrap_or(".");
         let m = state.manager.as_ref().expect("manager initialized above");
         // HP-6: drop `sandbox.credentials` variables before the command runs.
@@ -215,7 +229,7 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
             std::borrow::Cow::Owned(format!("{unset}{command}"))
         };
         let (wrapped, mounts) = m
-            .wrap_with_sandbox(&command, bin_shell, None, cwd_s)
+            .wrap_with_sandbox(&command, bin_shell, Some(&rt), cwd_s)
             .map_err(map_err)?;
         state.mount_points = mounts;
         Ok(wrapped)
@@ -512,10 +526,11 @@ mod tests {
         runner.reset().await;
     }
 
-    /// Structural keys: a domain-only edit keeps the same structural key, while
-    /// a filesystem (structural) edit changes it. Host-independent.
+    /// Structural keys: domain and filesystem-path edits keep the same key (the
+    /// paths differ per command root and ride the wrap's custom config), while a
+    /// structural flag still moves it. Host-independent.
     #[test]
-    fn structural_key_ignores_domains_but_tracks_fs() {
+    fn structural_key_ignores_domains_and_paths_but_tracks_flags() {
         let base = to_runtime_config(&cfg_with_domains(&["github.com"]));
         let domain_changed = to_runtime_config(&cfg_with_domains(&["github.com", "npmjs.org"]));
         assert_eq!(
@@ -524,13 +539,21 @@ mod tests {
             "domain-only change must not move the structural key"
         );
 
-        let mut fs_cfg = cfg_with_domains(&["github.com"]);
-        fs_cfg.filesystem.deny_read = vec!["/etc/secret".into()];
-        let fs_changed = to_runtime_config(&fs_cfg);
+        let mut rooted_elsewhere = cfg_with_domains(&["github.com"]);
+        rooted_elsewhere.filesystem.allow_write = vec!["/repo/worktrees/p1".into()];
+        rooted_elsewhere.filesystem.deny_read = vec!["/etc/secret".into()];
+        assert_eq!(
+            structural_key(&base),
+            structural_key(&to_runtime_config(&rooted_elsewhere)),
+            "a per-root path change must not reset the proxies other commands use"
+        );
+
+        let mut weaker = cfg_with_domains(&["github.com"]);
+        weaker.enable_weaker_nested_sandbox = !weaker.enable_weaker_nested_sandbox;
         assert_ne!(
             structural_key(&base),
-            structural_key(&fs_changed),
-            "a filesystem change must move the structural key"
+            structural_key(&to_runtime_config(&weaker)),
+            "a structural flag change must still move the key"
         );
     }
 

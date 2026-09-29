@@ -328,14 +328,18 @@ impl ShellRunner for PromptShellRunner {
             // string bash surfaces). See the struct doc.
             SandboxDecision::Sandbox { policy: _ } => {
                 // Wrap through the injected async `SandboxRunner` (same seam the
-                // Bash tool uses). The default `LegacyWrapRunner` forwards to the
-                // sync `wrap_with_sandbox` (ignoring `bin_shell`/`cwd`), so this
-                // is byte-identical to the previous direct call.
+                // Bash tool uses), rooted at the session workspace the prompt
+                // shell runs in.
+                let rooted_runtime = sandbox::root::rooted_at(
+                    &self.sandbox_runtime,
+                    &self.workspace,
+                    sandbox::root::SandboxRootScope::Session,
+                );
                 match self
                     .sandbox_runner
                     .wrap(
                         &spawn_cmd,
-                        &self.sandbox_runtime,
+                        &rooted_runtime,
                         self.platform,
                         Some(shell_path),
                         Some(self.workspace.as_path()),

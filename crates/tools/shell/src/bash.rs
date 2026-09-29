@@ -2891,20 +2891,25 @@ impl Tool for BashTool {
                 spawn_cmd
             ),
             SandboxDecision::Sandbox { policy: _ } => {
-                // Wrap through the injected async `SandboxRunner`. The default
-                // `LegacyWrapRunner` forwards straight to the sync
-                // `wrap_with_sandbox` (ignoring `bin_shell`/`cwd`), so this is
-                // byte-identical to the previous direct call; a live runner uses
-                // the shell + workspace cwd to scope the sandbox.
+                // The sandbox is rooted at the agent's own directory (a
+                // worktree-isolated or explicit-`cwd` agent) or else the session
+                // workspace — never the shell's current `cd`, which the model
+                // controls, and never the host process's cwd. A confined agent
+                // can then write only inside its own directory.
+                let (sandbox_root, scope) = match &agent_cwd {
+                    Some(dir) => (dir.clone(), sandbox::root::SandboxRootScope::Agent),
+                    None => (workspace.clone(), sandbox::root::SandboxRootScope::Session),
+                };
+                let rooted_runtime = self.ctx.sandbox_runtime_at(&sandbox_root, scope);
                 match self
                     .ctx
                     .sandbox_runner
                     .wrap(
                         &spawn_cmd,
-                        &sandbox_runtime,
+                        &rooted_runtime,
                         self.ctx.platform,
                         Some(&shell),
-                        Some(workspace.as_path()),
+                        Some(sandbox_root.as_path()),
                     )
                     .await
                 {
@@ -6941,6 +6946,7 @@ mod tests {
         command: String,
         bin_shell: Option<String>,
         cwd: Option<std::path::PathBuf>,
+        allow_write: Vec<String>,
     }
 
     #[derive(Default)]
@@ -6955,7 +6961,7 @@ mod tests {
         async fn wrap(
             &self,
             command: &str,
-            _cfg: &sandbox::runtime_config::SandboxRuntimeConfig,
+            cfg: &sandbox::runtime_config::SandboxRuntimeConfig,
             _platform: sandbox::runtime_config::Platform,
             bin_shell: Option<&str>,
             cwd: Option<&std::path::Path>,
@@ -6964,6 +6970,7 @@ mod tests {
                 command: command.to_string(),
                 bin_shell: bin_shell.map(ToString::to_string),
                 cwd: cwd.map(std::path::Path::to_path_buf),
+                allow_write: cfg.filesystem.allow_write.clone(),
             });
             Ok(format!("WRAPPED::{command}"))
         }
@@ -7029,6 +7036,44 @@ mod tests {
             1,
             "cleanup_after_command must be invoked once"
         );
+    }
+
+    /// The sandbox is rooted at the directory the command belongs to: the
+    /// session workspace for the main loop, the agent's own directory for a
+    /// worktree-isolated agent — never the host process's cwd.
+    #[tokio::test]
+    async fn sandbox_is_rooted_at_the_agent_dir_or_the_session_workspace() {
+        let agent_dir = tempfile::tempdir().unwrap();
+        let agent_dir = std::fs::canonicalize(agent_dir.path()).unwrap();
+        for (agent_cwd, expected_root) in [
+            (None, std::path::PathBuf::from("/tmp")),
+            (Some(agent_dir.clone()), agent_dir.clone()),
+        ] {
+            let runner = Arc::new(RecordingSandboxRunner::default());
+            let mut ctx = shell_test_ctx(ok_output());
+            ctx.sandbox_available = true;
+            ctx.sandbox_runtime.excluded_commands = vec![];
+            ctx.sandbox_runtime.filesystem.allow_write = vec![".".into(), "./build".into()];
+            ctx.session_cwd
+                .swap(std::path::PathBuf::from("/tmp"), ctx.trusted_dirs());
+            ctx.sandbox_runner = runner.clone();
+            let tool = BashTool::new(ctx);
+            let mut call_ctx = use_ctx();
+            call_ctx.cwd = agent_cwd.clone();
+            tool.call(json!({"command": "echo hi"}), call_ctx, fresh_tx())
+                .await
+                .expect("ok");
+
+            let calls = runner.wrap_calls.lock().unwrap();
+            assert_eq!(calls[0].cwd.as_deref(), Some(expected_root.as_path()));
+            let root = expected_root.to_string_lossy().into_owned();
+            assert_eq!(
+                &calls[0].allow_write[..2],
+                &[root.clone(), format!("{root}/build")],
+                "agent_cwd={agent_cwd:?}"
+            );
+            assert!(!calls[0].allow_write.iter().any(|p| p == "."));
+        }
     }
 
     #[tokio::test]

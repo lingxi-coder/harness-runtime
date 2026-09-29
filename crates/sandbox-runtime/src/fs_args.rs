@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::path_utils::{
     get_dangerous_directories, is_symlink_outside_boundary, normalize_case_for_comparison,
-    normalize_path_for_sandbox, posix_dirname, DANGEROUS_FILES,
+    normalize_path_for_sandbox_in, posix_dirname, DANGEROUS_FILES,
 };
 
 /// Default max depth for searching dangerous files.
@@ -474,7 +474,7 @@ pub fn generate_filesystem_args(
 
         // Allow writes to specific paths. (:541-575)
         for path_pattern in &write_config.allow_only {
-            let normalized_path = normalize_path_for_sandbox(path_pattern);
+            let normalized_path = normalize_path_for_sandbox_in(path_pattern, Some(cwd));
             // Skip /dev/* (handled by --dev /dev). (:545-548)
             if normalized_path.starts_with("/dev/") {
                 continue;
@@ -526,7 +526,7 @@ pub fn generate_filesystem_args(
         let mut mount_original: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for path_pattern in &deny_paths {
-            let i_path = normalize_path_for_sandbox(path_pattern);
+            let i_path = normalize_path_for_sandbox_in(path_pattern, Some(cwd));
             // Skip /dev/* BEFORE resolution. (:for x of b … I.startsWith("/dev/"))
             if i_path.starts_with("/dev/") {
                 continue;
@@ -640,7 +640,7 @@ pub fn generate_filesystem_args(
         .map(|c| {
             c.allow_within_deny
                 .iter()
-                .map(|p| normalize_path_for_sandbox(p))
+                .map(|p| normalize_path_for_sandbox_in(p, Some(cwd)))
                 .collect()
         })
         .unwrap_or_default();
@@ -652,7 +652,7 @@ pub fn generate_filesystem_args(
     let root_skip: HashSet<&str> = ["proc", "dev", "sys"].into_iter().collect();
     if let Some(read_config) = read_config {
         for p in &read_config.deny_only {
-            if normalize_path_for_sandbox(p) == "/" {
+            if normalize_path_for_sandbox_in(p, Some(cwd)) == "/" {
                 if let Ok(entries) = std::fs::read_dir("/") {
                     for entry in entries.flatten() {
                         let child = entry.file_name().to_string_lossy().into_owned();
@@ -675,7 +675,7 @@ pub fn generate_filesystem_args(
     // Normalize then sort shallow-first (by component count). (:705-707)
     let mut normalized_deny_paths: Vec<String> = read_deny_paths
         .iter()
-        .map(|p| normalize_path_for_sandbox(p))
+        .map(|p| normalize_path_for_sandbox_in(p, Some(cwd)))
         .collect();
     normalized_deny_paths.sort_by_key(|p| p.split('/').count());
 

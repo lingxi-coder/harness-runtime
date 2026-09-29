@@ -1,6 +1,6 @@
 # Fusion 父模型综合设计
 
-状态：第 1 阶段（analysis 模式下的父模型综合）与第 2a 阶段（宿主证据核对）已实现；其余为设计草案（2026-09-28）。
+状态：第 1 阶段（analysis 模式下的父模型综合）、第 2a 阶段（宿主证据核对）与第 3 阶段（沙箱按命令根目录解析）已实现；其余为设计草案（2026-09-28）。
 两种 panel 模式（analysis / implement）在各阶段的差异见"两种 panel 模式"一节。
 
 ## 背景与目标
@@ -254,7 +254,7 @@ analyst 打包和 `PanelMaterial` 都从这里读取。panel 输出里即使带�
 - 前置检查不满足时直接拒绝，**不静默降级为 analysis**（两者的成本和产出都不同），
   且检查在任何花费之前完成：
   - 不是 git 仓库，或 `WorktreeManager::is_supported()` 为 false；
-  - 沙箱不能把写范围限定到 agent cwd（第 3 阶段之前恒为此状态）；
+  - 沙箱不可用或被关闭（此时 Bash 写范围无法限定到 worktree；第 3 阶段已让可用的沙箱按 agent cwd 限定）；
   - 可用磁盘低于阈值（N 个 worktree 各自构建，Rust 项目单份 `target` 可达数 GB）。
 
 ### implement 模式流程
@@ -298,10 +298,10 @@ analyst 打包和 `PanelMaterial` 都从这里读取。panel 输出里即使带�
   - worktree 内的编辑自动批准；目标路径（解析符号链接后）不在本 worktree 内的编辑直接拒绝。
   - 读取范围也限定在本 worktree：读用户工作区或其它 panel 的 worktree 按拒绝处理，保证 panel
     互不可见。
-  - Bash 一律走沙箱：写范围 = 本 worktree（加上主仓库 `.git` 中 worktree 所需的锁文件），默认禁网。
+  - Bash 一律走沙箱：写范围 = 本 worktree 与临时目录，主仓库（含 `.git`）只读，默认禁网。
   - 其余需要确认的操作一律按拒绝处理。
-- 系统提示：在当前目录内完成任务，可以构建和跑测试，提交与否都可以（宿主按 base 采集），
-  不要改 git 配置。`candidate_answer` 写改动说明（做了什么、为什么、自己怎么验证过），不贴完整补丁。
+- 系统提示：在当前目录内完成任务，可以构建和跑测试；不要 `git add` / `git commit`（主仓库 `.git`
+  在沙箱内只读，改动由宿主按 base 采集）。`candidate_answer` 写改动说明（做了什么、为什么、自己怎么验证过），不贴完整补丁。
 - panel 自述的补丁文本与测试结果都不采信：补丁以宿主采集为准，自述的测试运行只是 `command`
   类证据（核对为 `unverifiable`），不算验证结果。
 - 轮次和输出上限单独设置，默认高于 analysis（建议 `maxTurns` 40）。
@@ -464,7 +464,7 @@ Fusion 本身从不写用户工作区，主模型对用户工作区的写入全�
 | implementer 不向用户冒泡权限 | `fusion-panel` 为 `AgentPermissionMode::Bubble` | 需"worktree 内自动批准、其余拒绝"的非交互权限模式，读取也限定在 worktree |
 | panel 的补丁 | `PanelReport.candidate_answer` 是文本；`WorktreeManager` 只有改动计数（`worktree_change_summary`） | 需宿主补丁采集（`PanelPatch`） |
 | 客观验证（编译/测试/lint） | 无 | 需宿主经 `Sandbox` + `ProcessRunner` 在 worktree 执行，不采信 panel 自述 |
-| 沙箱写入范围限定在 panel worktree | 沙箱 `allow_write` 以 `"."` 起始，而 `"."` 按**宿主进程** `current_dir()` 解析（`sandbox-runtime/src/path_utils.rs`，`fs_args.rs`） | **隔离缺口**：panel 的 Bash 可写主工作区；需按 agent cwd 解析 |
+| 沙箱写入范围限定在 panel worktree | 已实现（第 3 阶段）：沙箱按命令根目录解析，带 cwd 覆盖的 agent 只能写自己的目录 | Edit/Write 工具不走操作系统沙箱，仍需 implementer 的权限模式把它们限定在 worktree 内 |
 
 ## 后续设计
 
@@ -481,9 +481,7 @@ Fusion 模式 = 用户选定的主模型 + 开启 fusion 入口 + 一段何时�
 
 ### 隔离与安全（两种模式共同）
 
-- 沙箱：`allow_write` 中的 `"."` 必须按 agent 的 cwd（panel worktree）解析，而不是宿主进程的
-  `current_dir()`。worktree 需要的主仓库 `.git` 写权限（`index.lock`）已由
-  `worktree_main_repo_path` 处理（`sandbox/src/policy_convert.rs`）。
+- 沙箱：按命令的根目录解析（第 3 阶段，已实现），见下文"第 3 阶段"。
 - 验证命令来自用户或项目配置，由宿主执行；panel 无法指定。
 - panel 之间不可见，结果匿名化；analyst 与主模型都只看到匿名 ID。
 - 递归：panel、analyst 不能调用 fusion（沿用 `max_subagent_spawn_depth = 1`）。
@@ -504,6 +502,43 @@ pub struct VerifiedClaim {              // analyst 用只读工具核实的结�
 analyst 获得工具后，其工具轮次计入同一预算预留。implement 模式下它的只读范围包括各 panel 的
 worktree。
 
+## 第 3 阶段：沙箱按命令根目录解析（已实现）
+
+修复前，沙箱配置里的相对路径（最主要的是默认可写的 `"."`）没有明确的解析基准：macOS 的规则生成
+按**宿主进程**的 `current_dir()` 解析，旧的 Linux `bwrap` 包装原样交给 bwrap，按命令启动目录解析
+（会跟着模型的 `cd` 走）。结果是 worktree 隔离的子 agent 的 Bash 实际可写主工作区；在一个进程
+服务多个工作区的宿主里，`"."` 甚至不一定是会话的工作区。
+
+现在每条命令都有一个明确的**沙箱根目录**：
+
+| 调用方 | 根目录 | 范围 |
+|---|---|---|
+| 子 agent 带 cwd 覆盖（`isolation: "worktree"` 或显式 `cwd`） | 该目录 | `Agent`：只加根目录自己的设置/技能禁写；主仓库（含 `.git`）只读，沙箱内不能 `git commit` |
+| 主循环、技能提示 shell | 会话工作区（`SessionCwd`，跟随 EnterWorktree） | `Session`：若根目录是 linked worktree，按上游 `worktreeMainRepoPath` 放开主仓库，但禁写其 `.git/hooks` 与 `.git/config` |
+| 宿主 `Sandbox::prepare`（`platforms/posix`） | 命令的 `cwd` | `Agent` |
+
+实现：
+
+- `sandbox::root::rooted_at(cfg, root, scope)`：把 `allow_write`/`deny_write`/`allow_read`/`deny_read`
+  里的相对条目（`.`、`./x`、`../x`、相对 glob）按根目录解析成绝对路径，规则与后端一致（词法解析，
+  符号链接仍由后端处理）；追加根目录下 `.lingxi/settings.json`、`settings.local.json`、`skills`
+  的禁写。根目录不是绝对路径时原样返回。
+- `BuiltinToolContext::sandbox_runtime_at(root, scope)`：带 `/sandbox` 开关与禁写符号链接校正的
+  定根配置。Bash、PowerShell、技能提示 shell 在包装前取用，并把同一个根目录作为
+  `SandboxRunner::wrap` 的 `cwd` 传入。**不再使用 shell 当前 `cd` 的目录**。
+- `sandbox-runtime`：新增 `normalize_path_for_sandbox_in(path, cwd)`；macOS 的 `ProfileParams` /
+  `WrapParams` 增加 `cwd`，强制拒绝规则（`.git/hooks`、`.git/config`、危险 dotfile 及其 `**/` 形式）
+  锚定在根目录；Linux `generate_filesystem_args` 的路径归一化也改用传入的 `cwd`。`cwd` 为 `None`
+  或不是绝对路径时保持原来的进程 cwd 行为。
+- `sandbox::wrap::wrap_with_sandbox_at(command, cfg, platform, cwd)`；`LegacyWrapRunner` 使用它。
+- 桌面实时运行器：文件系统路径不再计入结构性配置键，而是每条命令作为 `SandboxManager` 的 custom
+  config 传入，避免不同根目录的 agent 交替执行时反复重启代理。
+- PowerShell 工具原先忽略 agent 的 cwd 覆盖，现在与 Bash 一致：在 agent 目录里运行并以之为沙箱根。
+
+测试：`sandbox::root` 单测（相对条目解析、禁写去重、相对根目录、linked worktree 的 Session/Agent
+差异）、`bash::tests::sandbox_is_rooted_at_the_agent_dir_or_the_session_workspace`、实时运行器的
+结构键测试。
+
 ## 兼容性
 
 不保留旧版本兼容：`FusionDecision`、`FusionNeedsParentReason`、`FusionRecommendation`、
@@ -516,7 +551,7 @@ worktree。
 2. **证据核对**：2a 宿主确定性证据核对，已完成；2b 带只读工具的 analyst 子 agent，
    作为 quality 预设可选项，产出 `VerifiedClaim`，需要多轮预算、为 analyst 预留并发池槽位、
    analyst 阶段按轮计费，子 agent 请求需支持温度 0。
-3. **沙箱按 agent cwd 解析**：独立修复，implement 模式的前置条件。
+3. **沙箱按命令根目录解析**：已完成，见上文"第 3 阶段"。
 4. **implement 模式**（见"两种 panel 模式"）：
    1. 快照与 worktree：`snapshot_base()`，编排器注入 `WorktreeManager`，创建 worktree 并填
       `SubagentSpawnRequest.cwd` / `.worktree`，生命周期与清理。
