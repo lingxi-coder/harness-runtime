@@ -256,7 +256,12 @@ impl crate::ModelAttemptLease for SettlementProbe {
         Ok(())
     }
 
-    fn observe_usage(&mut self, _: &crate::Usage, _: crate::ModelAttemptUsageCompleteness) {}
+    fn observe_usage(
+        &mut self,
+        _: &crate::ExecutionUsage,
+        _: crate::ModelAttemptUsageCompleteness,
+    ) {
+    }
 
     fn finish(self: Box<Self>) -> Box<dyn crate::ModelAttemptSettlement> {
         self.0.lock().unwrap().push("finish");

@@ -4942,7 +4942,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // them as `null` here too — null is the correct shape, NOT
                 // zero-faked numerics. Faithfully populating them (web-search /
                 // web-fetch request counts, service tier, 1h/5m cache split)
-                // is DEFERRED pending the deeper `llm_runtime::Usage` extension
+                // is DEFERRED pending the deeper `llm_runtime::ExecutionUsage` extension
                 // (see SubagentUsage doc); the key SHAPE matches now.
                 let mut data = json!({
                     "status": "completed",

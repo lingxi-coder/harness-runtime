@@ -11,12 +11,11 @@ use serde_json::{Map, Value};
 
 use crate::{
     AuthStrategy, AzureConfig, Capabilities, ConnectionSpec, CredentialConfig, FailoverTriggers,
-    LlmError, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
-    SigningConfig, TokenPricing,
+    LlmError, ModelProfile, PricingConfig, PricingOverride, ProtocolFamily, ProviderId,
+    ProviderProfile, SigningConfig,
 };
 
-const SUPPORTED_PROVIDER_TYPES: &str =
-    "openai, openai-responses, anthropic, gemini, azure-openai, bedrock-claude, vertex-claude, vertex-gemini, foundry-claude";
+const SUPPORTED_PROVIDER_TYPES: &str = "openai, openai-responses, anthropic, gemini, azure-openai, bedrock-claude, vertex-claude, vertex-gemini, foundry-claude";
 
 /// Provider kinds accepted in `settings.providers`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -962,7 +961,7 @@ fn parse_pricing_overrides(
 
         overrides.push((
             model_id.clone(),
-            TokenPricing {
+            PricingOverride {
                 input_per_million: input_per_million.unwrap_or(0.0),
                 output_per_million: output_per_million.unwrap_or(0.0),
                 cache_write_per_million: cache_write_per_million.unwrap_or(0.0),

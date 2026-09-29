@@ -946,12 +946,8 @@ impl LocalAgentHandler {
                                 }
                                 let body = serde_json::to_string_pretty(&result)
                                     .unwrap_or_else(|_| result.to_string());
-                                let bt = usage.billable_tokens;
-                                let total = bt
-                                    .input
-                                    .saturating_add(bt.cache_write)
-                                    .saturating_add(bt.cache_read)
-                                    .saturating_add(bt.output);
+                                let counts = usage.counts();
+                                let total = counts.total().saturating_sub(counts.reasoning_tokens);
                                 let body = format!(
                                     "{body}\n<usage><total_tokens>{total}</total_tokens></usage>\n"
                                 );
@@ -1910,12 +1906,12 @@ mod tests {
         SubagentEvent::Completed {
             agent_id: AgentId::new(),
             result: json!({ "marker": marker }),
-            usage: llm_runtime::Usage::default(),
+            usage: llm_runtime::ExecutionUsage::default(),
             total_tool_use_count: 0,
             total_duration_ms: 0,
             assistant_message_count: 0,
             last_request_id: None,
-            cumulative_usage: llm_runtime::Usage::default(),
+            cumulative_usage: llm_runtime::ExecutionUsage::default(),
             usage_complete: true,
         }
     }
@@ -2081,7 +2077,7 @@ mod tests {
                     }],
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
-                    usage: llm_runtime::Usage::default(),
+                    usage: llm_runtime::ExecutionUsage::default(),
                     cost: None,
                     provider_metadata: serde_json::Value::Null,
                 })
@@ -3541,12 +3537,12 @@ mod tests {
         tx.send(SubagentEvent::Completed {
             agent_id: AgentId::new(),
             result: json!({ "text": "rest answer" }),
-            usage: llm_runtime::Usage::default(),
+            usage: llm_runtime::ExecutionUsage::default(),
             total_tool_use_count: 3,
             total_duration_ms: 1500,
             assistant_message_count: 0,
             last_request_id: None,
-            cumulative_usage: llm_runtime::Usage::default(),
+            cumulative_usage: llm_runtime::ExecutionUsage::default(),
             usage_complete: true,
         })
         .await

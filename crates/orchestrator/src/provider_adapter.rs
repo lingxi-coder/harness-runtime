@@ -2569,7 +2569,7 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
                     .hosted_search_max_uses(&request.input.model, request.profile.as_deref()),
             },
         )];
-        let usage = Arc::new(std::sync::Mutex::new(llm_runtime::Usage::default()));
+        let usage = Arc::new(std::sync::Mutex::new(llm_runtime::ExecutionUsage::default()));
         let searches = Arc::new(std::sync::atomic::AtomicU64::new(0));
         // A failed stream may never deliver its terminal metadata snapshot.
         // Retain normalized citations independently of completed text blocks.
@@ -2662,12 +2662,14 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
         Ok(tool_api::HostedSearchOutput {
             results,
             searches: usage
-                .server_tool_use
-                .as_ref()
-                .map(|u| u.web_search_requests)
+                .server_tool_usage()
+                .and_then(|u| u.web_search_requests)
                 .unwrap_or_else(|| searches.load(std::sync::atomic::Ordering::Relaxed)),
-            input_tokens: usage.billable_tokens.input,
-            output_tokens: usage.billable_tokens.output,
+            input_tokens: usage.counts().input_tokens,
+            output_tokens: usage
+                .counts()
+                .output_tokens
+                .saturating_sub(usage.counts().reasoning_tokens),
         })
     }
 }

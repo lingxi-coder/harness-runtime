@@ -110,7 +110,7 @@ fn integer_rate(value: f64) -> Result<u64, String> {
 
 fn validate_override(
     price: &cost::ModelPricing,
-    declared: &llm_runtime::TokenPricing,
+    declared: &llm_runtime::PricingOverride,
 ) -> Result<(), String> {
     use cost::TokenClass as T;
     for (class, value) in [

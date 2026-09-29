@@ -57,12 +57,14 @@ impl lingxi_llm_client::Authenticator for ServiceAuthenticator {
                 | WireAuth::AwsSigV4
                 | WireAuth::AzureToken
                 | WireAuth::None => {
-                    return Err(lingxi_llm_client::protocol::LlmError::UnsupportedCapability {
-                        message: format!(
-                            "explicit service credentials are unsupported for {:?} authentication on profile {:?}",
-                            profile.auth, profile.profile_name
-                        ),
-                    });
+                    return Err(
+                        lingxi_llm_client::protocol::LlmError::UnsupportedCapability {
+                            message: format!(
+                                "explicit service credentials are unsupported for {:?} authentication on profile {:?}",
+                                profile.auth, profile.profile_name
+                            ),
+                        },
+                    );
                 }
             };
             authenticator
@@ -1299,9 +1301,9 @@ impl ModelRuntime {
             &sdk_profile,
             material,
             ClientIdentity {
-                user_agent: crate::copilot::auth::COPILOT_USER_AGENT,
-                editor_version: crate::copilot::auth::COPILOT_EDITOR_VERSION,
-                plugin_version: crate::copilot::auth::COPILOT_EDITOR_PLUGIN_VERSION,
+                user_agent: crate::copilot::COPILOT_USER_AGENT,
+                editor_version: crate::copilot::COPILOT_EDITOR_VERSION,
+                plugin_version: crate::copilot::COPILOT_EDITOR_PLUGIN_VERSION,
             },
             now,
         )

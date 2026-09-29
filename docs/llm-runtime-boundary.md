@@ -163,3 +163,50 @@ has not yet been published or validated with live provider credentials.
 
 The authentication follow-up pins SDK commit `a4a9880fa02737d95665b3215f6743dfc128f4a4`.
 Both repositories are committed locally; publish the SDK before the parent.
+
+## Canonical usage, pricing and authentication data
+
+Provider measurements remain SDK `UsageReport` and `InferenceReport` throughout
+execution. `ExecutionUsage` adds host presentation and frozen settlement data;
+it is not another token model. SDK `Usage.output_tokens` includes reasoning.
+Legacy UI/history adapters subtract reasoning only when projecting the old
+separate visible-output bucket. Missing or partial reports cannot establish a
+complete, zero-cost attempt. Frozen pricing is captured for the physical attempt,
+not recomputed from the active account or current configuration at settlement.
+
+The SDK owns interactive price bounds across token bands, dated rules, service
+tiers and peak schedules. The host validates the route identity and applies its
+budget/currency policy to those bounds. Settings price overrides are an explicit
+serialization adapter to SDK pricing, not a provider pricing implementation.
+
+SDK auth also interprets AWS exported credential JSON, Anthropic subscription
+identifiers, scope capabilities and quota headers. The host keeps account-scoped
+quota state, workspace trust for external credential commands, and product
+subscription gates. Provider OAuth config/PKCE/token/profile forwarding modules
+and the SigV4 forwarding module have been removed. Copilot's host module now
+contains only application selection and editor identity.
+
+`oauth::lifecycle` shares token hashing, refresh preflight, failure classification
+and telemetry helpers. Provider drivers retain their different storage slots,
+identity metadata and refresh policies. SDK operations do not start background
+refresh tasks or retry model execution.
+
+This follow-up pins SDK commit `92b6f24f10abfac02e4d7f9929eaf74c6d084a59`.
+Publish the SDK commit before publishing the parent commit. A local path patch
+build does not validate a fresh checkout of the published Git dependency.
+
+
+Validation for the canonical usage/auth-data follow-up (2026-09-29):
+
+- SDK all-feature library tests: 271 passed.
+- Runtime library and integration tests: 1,226 passed across 33 targets.
+- Desktop/runtime all-feature test compilation and minimal-feature compilation
+  passed; iOS and Android arm64 mobile/UniFFI compilation passed.
+- Focused pricing tests passed: 16 fixed-price cases and 6 host admission cases.
+- Focused downstream checks cover canonical reasoning subsets, cache TTL,
+  provider-metadata independence, complete/partial snapshot replacement and
+  durable usage round-trips. Formatting and the architecture gate passed.
+
+These are local submodule, mocked-provider and compile checks. Real provider
+accounts, physical mobile devices and a fresh published dependency checkout
+have not been validated for this follow-up.

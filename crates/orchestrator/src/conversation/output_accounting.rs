@@ -19,33 +19,28 @@ pub(crate) struct MainOutputObservation {
 }
 
 impl MainOutputObservation {
-    pub(crate) fn observe(&mut self, usage: &llm_runtime::Usage) {
-        // Provider-normalized cumulative buckets are disjoint. Partial frames
-        // may omit a bucket; never replace previously known counts with zero.
-        self.visible = self.visible.max(usage.billable_tokens.output);
-        self.reasoning = self.reasoning.max(usage.billable_tokens.reasoning_output);
-        self.observed = true;
+    pub(crate) fn observe(&mut self, usage: &llm_runtime::ExecutionUsage) {
+        // SDK partial reports are cumulative snapshots too: reclassification
+        // of output into reasoning must not charge both old and new buckets.
+        if let Some(counts) = usage.report.usage {
+            self.visible = counts.output_tokens.saturating_sub(counts.reasoning_tokens);
+            self.reasoning = counts.reasoning_tokens;
+            self.observed = true;
+        }
     }
 
-    fn observe_completed(&mut self, usage: &llm_runtime::Usage) {
+    fn observe_completed(&mut self, usage: &llm_runtime::ExecutionUsage) {
         // A completed output report replaces provisional bucket splits;
         // max-per-bucket would double count reclassified reasoning tokens.
         // An absent/default Completed usage must not erase retained partials.
         // Speed/context/diagnostic metadata alone is not an output report.
-        let has_output = usage.billable_tokens.output != 0
-            || usage.billable_tokens.reasoning_output != 0
-            || ["output_tokens", "completion_tokens", "candidatesTokenCount"]
-                .iter()
-                .any(|key| {
-                    usage
-                        .provider_metadata
-                        .get(key)
-                        .and_then(serde_json::Value::as_u64)
-                        .is_some()
-                });
+        let has_output = usage.report.complete().is_some();
         if has_output {
-            self.visible = usage.billable_tokens.output;
-            self.reasoning = usage.billable_tokens.reasoning_output;
+            self.visible = usage
+                .counts()
+                .output_tokens
+                .saturating_sub(usage.counts().reasoning_tokens);
+            self.reasoning = usage.counts().reasoning_tokens;
             self.observed = true;
         }
     }
@@ -396,13 +391,19 @@ mod tests {
             std::env::temp_dir(),
         )
     }
-    fn usage(visible: u64, reasoning: u64) -> llm_runtime::Usage {
-        llm_runtime::Usage {
-            billable_tokens: llm_runtime::TokenUsage {
-                output: visible,
-                reasoning_output: reasoning,
-                ..Default::default()
-            },
+    fn usage(visible: u64, reasoning: u64) -> llm_runtime::ExecutionUsage {
+        llm_runtime::ExecutionUsage {
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: 0,
+                    output_tokens: visible.saturating_add(reasoning),
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    reasoning_tokens: reasoning,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
             ..Default::default()
         }
     }
@@ -622,13 +623,18 @@ mod tests {
                 .unwrap();
             let mut observation = orch.capture_main_output().await.unwrap().unwrap();
             observation.observe(&usage(4, 6));
-            let mut completed = llm_runtime::Usage {
-                speed: Some("fast".into()),
+            let mut completed = llm_runtime::ExecutionUsage {
+                inference: llm_runtime::services::sdk::protocol::InferenceReport {
+                    service_tier: Some(llm_runtime::services::sdk::protocol::ServiceTier::Fast),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             if explicit_zero {
-                completed.provider_metadata =
-                    serde_json::json!({"input_tokens": 0, "output_tokens": 0});
+                completed.report = llm_runtime::UsageReport::measured(
+                    llm_runtime::Usage::default(),
+                    llm_runtime::services::sdk::protocol::UsageState::Complete,
+                );
             }
             observation.observe_completed(&completed);
             observation.finish().unwrap();
@@ -659,19 +665,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_output_missing_capture_and_overflow_fail_closed_within_the_turn() {
+    async fn main_output_missing_capture_and_maximum_canonical_counts() {
         let orch = orch(vec![]).with_workflow_output_scopes(Arc::new(Scopes::default()));
         assert!(orch.capture_main_output().await.is_err());
         orch.begin_output_turn(MessageId::new()).await.unwrap();
         let mut observation = orch.capture_main_output().await.unwrap().unwrap();
-        observation.observe(&usage(u64::MAX, 1));
-        assert!(observation.finish().is_err());
-        // The failure closes THIS turn: no further capture inside it.
-        assert!(orch.capture_main_output().await.is_err());
-        // It does not condemn the session. A new turn starts clean, and paid
-        // work on a broken ledger is stopped by the durability preflight.
-        assert!(orch.begin_output_turn(MessageId::new()).await.is_ok());
+        // Reasoning is a subset of SDK output, so even the largest canonical
+        // counter is representable without adding that subset a second time.
+        observation.observe(&usage(u64::MAX - 1, 1));
+        assert!(observation.finish().is_ok());
         assert!(orch.capture_main_output().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn partial_reclassification_uses_latest_canonical_snapshot() {
+        let scopes = Arc::new(Scopes::default());
+        let orch = orch(vec![]).with_workflow_output_scopes(scopes.clone());
+        orch.begin_output_turn(MessageId::new()).await.unwrap();
+        let scope = scopes
+            .capture(orch.session.lock().await.session_id)
+            .unwrap();
+        let mut observation = orch.capture_main_output().await.unwrap().unwrap();
+        observation.observe(&usage(10, 0));
+        let mut partial = usage(4, 6);
+        partial.report.state = llm_runtime::services::sdk::protocol::UsageState::Partial;
+        observation.observe(&partial);
+        observation.observe(&llm_runtime::ExecutionUsage::default());
+        observation.finish().unwrap();
+        assert_eq!(scope.spent(), 10);
     }
 
     #[tokio::test]

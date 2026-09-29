@@ -18,8 +18,8 @@ use crate::conversation::StreamingApiClient;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use llm_runtime::{
-    ContentBlock as LlmContentBlock, HistoryContentDelta, HistoryEvent, HistoryMessageDelta,
-    HistoryResponse, LlmError, Usage,
+    ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryContentDelta, HistoryEvent,
+    HistoryMessageDelta, HistoryResponse, LlmError,
 };
 use protocol::{ConversationMessage, ToolUseId};
 use serde_json::Value;

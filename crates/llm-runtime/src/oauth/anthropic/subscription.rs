@@ -22,39 +22,13 @@
 //! non-enterprise and non-subscriber.
 
 use crate::oauth::anthropic::limits::{ClaudeAiLimitsState, SubscriptionType};
-use crate::oauth::anthropic::profile::subscription_type;
-use crate::oauth::anthropic::profile::{
+use lingxi_llm_client::auth::oauth::anthropic::{
     fetch_profile_from_oauth_token, fetch_user_roles, OAuthProfileResponse,
 };
+use lingxi_llm_client::auth::oauth::anthropic::{has_profile_scope, subscription_from_scopes};
+use lingxi_llm_client::auth::oauth::anthropic::{paid_subscription_type, subscription_type};
 use lingxi_llm_client::transport::Transport;
 use std::sync::Arc;
-
-/// `CLAUDE_AI_INFERENCE_SCOPE` — `constants/oauth.ts:33`. Locked byte-for-byte.
-/// Presence of this scope is what distinguishes a real Claude.ai login token
-/// from an inference-only / API-key session.
-pub const CLAUDE_AI_INFERENCE_SCOPE: &str = "user:inference";
-
-/// `CLAUDE_AI_PROFILE_SCOPE` — `constants/oauth.ts:34`. Gates profile-scoped
-/// endpoint calls so service-key sessions don't 403-storm (`hasProfileScope`,
-/// `auth.ts:1580-1584`).
-pub const CLAUDE_AI_PROFILE_SCOPE: &str = "user:profile";
-
-/// Port of `shouldUseClaudeAIAuth(scopes)` (`client.ts:38-40`): the user is a
-/// Claude.ai subscriber iff the token's scopes include `user:inference`.
-///
-/// Mirrors `Boolean(scopes?.includes(CLAUDE_AI_INFERENCE_SCOPE))`. An empty
-/// scope vector → `false`.
-#[must_use]
-pub fn subscription_from_scopes(scopes: &[String]) -> bool {
-    scopes.iter().any(|s| s == CLAUDE_AI_INFERENCE_SCOPE)
-}
-
-/// Port of `hasProfileScope()` (`auth.ts:1580-1584`): whether the token carries
-/// the `user:profile` scope (required to hit `/api/oauth/profile`).
-#[must_use]
-pub fn has_profile_scope(scopes: &[String]) -> bool {
-    scopes.iter().any(|s| s == CLAUDE_AI_PROFILE_SCOPE)
-}
 
 /// Port of `isEnterpriseSubscriber()` (`auth.ts:1694`): the resolved tier is
 /// Enterprise.
@@ -98,22 +72,6 @@ pub fn apply_profile(state: &mut ClaudeAiLimitsState, profile: &OAuthProfileResp
     }
 }
 
-/// Map the resolved [`SubscriptionType`] to the claude-code `getSubscriptionType()`
-/// string union (`"pro" | "max" | "team" | "enterprise"`). `Free`/`Unknown` →
-/// `None` (no recognized paid tier — the predicates on
-/// [`platform_api::subscription::SubscriptionSnapshot`] all treat an absent tier as a
-/// conservative "not pro / not team / not enterprise").
-#[must_use]
-fn subscription_type_str(tier: SubscriptionType) -> Option<String> {
-    match tier {
-        SubscriptionType::Pro => Some("pro".into()),
-        SubscriptionType::Max => Some("max".into()),
-        SubscriptionType::Team => Some("team".into()),
-        SubscriptionType::Enterprise => Some("enterprise".into()),
-        SubscriptionType::Free | SubscriptionType::Unknown => None,
-    }
-}
-
 /// Resolve the signed-in user's full subscription snapshot from the OAuth
 /// profile + roles endpoints — the port's analog of claude-code's
 /// `getOauthAccountInfo()` (`auth.ts`, written at login from the profile + roles
@@ -137,7 +95,9 @@ pub async fn resolve_subscription_snapshot(
     Some(platform_api::subscription::SubscriptionSnapshot {
         // `isClaudeAISubscriber` ← the `user:inference` scope.
         is_subscriber: subscription_from_scopes(scopes),
-        subscription_type: subscription_type(&profile).and_then(subscription_type_str),
+        subscription_type: subscription_type(&profile)
+            .and_then(paid_subscription_type)
+            .map(str::to_owned),
         rate_limit_tier: org.and_then(|o| o.rate_limit_tier.clone()),
         has_extra_usage_enabled: org.and_then(|o| o.has_extra_usage_enabled).unwrap_or(false),
         billing_type: org.and_then(|o| o.billing_type.clone()),
@@ -261,10 +221,12 @@ mod tests {
     #[test]
     fn apply_profile_populates_tier() {
         let profile = OAuthProfileResponse {
-            organization: Some(crate::oauth::anthropic::profile::OAuthOrganization {
-                organization_type: Some("claude_team".into()),
-                ..Default::default()
-            }),
+            organization: Some(
+                lingxi_llm_client::auth::oauth::anthropic::OAuthOrganization {
+                    organization_type: Some("claude_team".into()),
+                    ..Default::default()
+                },
+            ),
             account: None,
         };
         let mut state = ClaudeAiLimitsState::default();
@@ -280,10 +242,12 @@ mod tests {
             ..Default::default()
         };
         let unknown = OAuthProfileResponse {
-            organization: Some(crate::oauth::anthropic::profile::OAuthOrganization {
-                organization_type: Some("claude_galaxy".into()),
-                ..Default::default()
-            }),
+            organization: Some(
+                lingxi_llm_client::auth::oauth::anthropic::OAuthOrganization {
+                    organization_type: Some("claude_galaxy".into()),
+                    ..Default::default()
+                },
+            ),
             account: None,
         };
         apply_profile(&mut state, &unknown);

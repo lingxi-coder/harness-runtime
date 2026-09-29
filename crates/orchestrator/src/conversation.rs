@@ -783,20 +783,20 @@ pub(crate) fn request_too_large_notice(interactive: bool) -> String {
 }
 
 /// Build the persisted assistant-envelope `usage` value from a normalized
-/// [`llm_runtime::Usage`]. Prefers the raw Anthropic usage object the codec
+/// [`llm_runtime::ExecutionUsage`]. Prefers the raw Anthropic usage object the codec
 /// retained on `provider_metadata` (byte-faithful to claude-code's persisted
 /// `BetaMessage.usage`); falls back to a reconstruction from the normalized
 /// billable buckets only when no raw object is present (unusual).
-fn assistant_usage_value(usage: &llm_runtime::Usage) -> serde_json::Value {
+fn assistant_usage_value(usage: &llm_runtime::ExecutionUsage) -> serde_json::Value {
     if usage.provider_metadata.is_object() {
         return usage.provider_metadata.clone();
     }
-    let b = &usage.billable_tokens;
+    let b = usage.counts();
     serde_json::json!({
-        "input_tokens": b.input,
-        "cache_creation_input_tokens": b.cache_write,
-        "cache_read_input_tokens": b.cache_read,
-        "output_tokens": b.output,
+        "input_tokens": b.input_tokens,
+        "cache_creation_input_tokens": b.cache_write_tokens,
+        "cache_read_input_tokens": b.cache_read_tokens,
+        "output_tokens": b.output_tokens,
     })
 }
 

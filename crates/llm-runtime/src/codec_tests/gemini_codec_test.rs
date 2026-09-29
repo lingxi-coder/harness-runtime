@@ -193,8 +193,8 @@ fn decode_text_and_function_call() {
         }),
     );
     let decoded = codec.decode_response(text).unwrap();
-    assert_eq!(decoded.usage.billable_tokens.input, 9);
-    assert_eq!(decoded.usage.billable_tokens.output, 3);
+    assert_eq!(decoded.usage.counts().input_tokens, 9);
+    assert_eq!(decoded.usage.counts().output_tokens, 3);
     assert!(matches!(decoded.content[0], ContentBlock::Text { .. }));
     assert_eq!(decoded.stop_reason.as_deref(), Some("end_turn"));
 
@@ -311,7 +311,7 @@ fn decode_cached_content_token_count_maps_to_cache_read_usage() {
 
     let decoded = codec.decode_response(response).unwrap();
 
-    assert_eq!(decoded.usage.billable_tokens.cache_read, 7);
+    assert_eq!(decoded.usage.counts().cache_read_tokens, 7);
 }
 
 #[test]
@@ -386,10 +386,10 @@ fn decode_usage_excludes_cached_tokens_from_input_and_maps_thoughts() {
 
     let decoded = codec.decode_response(response).unwrap();
 
-    assert_eq!(decoded.usage.billable_tokens.input, 60);
-    assert_eq!(decoded.usage.billable_tokens.cache_read, 40);
-    assert_eq!(decoded.usage.billable_tokens.output, 10);
-    assert_eq!(decoded.usage.billable_tokens.reasoning_output, 5);
+    assert_eq!(decoded.usage.counts().input_tokens, 60);
+    assert_eq!(decoded.usage.counts().cache_read_tokens, 40);
+    assert_eq!(decoded.usage.counts().output_tokens, 15);
+    assert_eq!(decoded.usage.counts().reasoning_tokens, 5);
     assert_eq!(decoded.usage.provider_reported_total_tokens, Some(115));
 }
 
@@ -421,8 +421,8 @@ fn stream_usage_only_final_frame_is_not_lost() {
         })
         .expect("terminal usage should survive a usage-only final frame");
 
-    assert_eq!(usage.billable_tokens.input, 5);
-    assert_eq!(usage.billable_tokens.output, 2);
+    assert_eq!(usage.counts().input_tokens, 5);
+    assert_eq!(usage.counts().output_tokens, 2);
 }
 
 #[test]

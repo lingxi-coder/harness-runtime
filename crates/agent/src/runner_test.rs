@@ -13,6 +13,21 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 
+#[test]
+fn cumulative_usage_keeps_reasoning_as_output_subset() {
+    let mut total = llm_runtime::ExecutionUsage::default();
+    for (output, reasoning) in [(12, 5), (20, 7)] {
+        let turn = llm_runtime::ExecutionUsage::from_counts(llm_runtime::Usage {
+            output_tokens: output,
+            reasoning_tokens: reasoning,
+            ..Default::default()
+        });
+        accumulate_usage(&mut total, &turn);
+    }
+    assert_eq!(total.counts().output_tokens, 32);
+    assert_eq!(total.counts().reasoning_tokens, 12);
+}
+
 // ---- Scripted loop-mode fixtures -------------------------------------
 
 /// `SubagentApiClient` that hands back a pre-scripted queue of responses,
@@ -228,7 +243,7 @@ fn ev_message_start() -> llm_runtime::HistoryEvent {
             content: vec![],
             stop_reason: None,
             stop_details: None,
-            usage: llm_runtime::Usage::default(),
+            usage: llm_runtime::ExecutionUsage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
         }),
@@ -421,7 +436,7 @@ fn text_response(text: &str, stop_reason: Option<&str>) -> llm_runtime::HistoryR
         }],
         stop_reason: stop_reason.map(str::to_string),
         stop_details: None,
-        usage: llm_runtime::Usage::default(),
+        usage: llm_runtime::ExecutionUsage::default(),
         cost: None,
         provider_metadata: serde_json::Value::Null,
     }
@@ -439,7 +454,7 @@ fn tool_use_response(name: &str, stop_reason: Option<&str>) -> llm_runtime::Hist
         }],
         stop_reason: stop_reason.map(str::to_string),
         stop_details: None,
-        usage: llm_runtime::Usage::default(),
+        usage: llm_runtime::ExecutionUsage::default(),
         cost: None,
         provider_metadata: serde_json::Value::Null,
     }
@@ -469,7 +484,7 @@ fn text_and_tool_response(
         ],
         stop_reason: stop_reason.map(str::to_string),
         stop_details: None,
-        usage: llm_runtime::Usage::default(),
+        usage: llm_runtime::ExecutionUsage::default(),
         cost: None,
         provider_metadata: serde_json::Value::Null,
     }
@@ -480,7 +495,7 @@ fn text_and_tool_response(
 fn tool_use_response_with_usage(
     name: &str,
     stop_reason: Option<&str>,
-    usage: llm_runtime::Usage,
+    usage: llm_runtime::ExecutionUsage,
 ) -> llm_runtime::HistoryResponse {
     llm_runtime::HistoryResponse {
         usage,
@@ -2309,24 +2324,18 @@ async fn loop_g1_completed_carries_final_turn_usage_and_tool_count() {
     // reads only the last message usage, not a cross-turn sum) plus the
     // run-wide tool-use count. Turn 1: tool_use with usage A (dispatched).
     // Turn 2: end_turn text with usage B → carried usage == B; tool_uses == 1.
-    let usage_a = llm_runtime::Usage {
-        billable_tokens: llm_runtime::TokenUsage {
-            input: 1000,
-            output: 1,
-            ..Default::default()
-        },
+    let usage_a = llm_runtime::ExecutionUsage::from_counts(llm_runtime::Usage {
+        input_tokens: 1000,
+        output_tokens: 1,
         ..Default::default()
-    };
-    let usage_b = llm_runtime::Usage {
-        billable_tokens: llm_runtime::TokenUsage {
-            input: 10,
-            output: 5,
-            cache_write: 3,
-            cache_read: 2,
-            ..Default::default()
-        },
+    });
+    let usage_b = llm_runtime::ExecutionUsage::from_counts(llm_runtime::Usage {
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_write_tokens: 3,
+        cache_read_tokens: 2,
         ..Default::default()
-    };
+    });
     let api = MockSubagentApiClient::new(vec![
         Ok(tool_use_response_with_usage(
             "Read",
@@ -2357,12 +2366,19 @@ async fn loop_g1_completed_carries_final_turn_usage_and_tool_count() {
         .expect("one Completed");
     // The carried usage is the FINAL turn's (B), NOT a sum with A.
     assert_eq!(
-        usage.billable_tokens.input, 10,
+        usage.counts().input_tokens,
+        10,
         "final-turn input, not summed"
     );
-    assert_eq!(usage.billable_tokens.output, 5);
-    assert_eq!(usage.billable_tokens.cache_write, 3);
-    assert_eq!(usage.billable_tokens.cache_read, 2);
+    assert_eq!(
+        usage
+            .counts()
+            .output_tokens
+            .saturating_sub(usage.counts().reasoning_tokens),
+        5
+    );
+    assert_eq!(usage.counts().cache_write_tokens, 3);
+    assert_eq!(usage.counts().cache_read_tokens, 2);
     // One tool_use across the run (turn 1).
     assert_eq!(tool_count, 1, "run-wide tool-use count");
 }
@@ -2375,24 +2391,18 @@ async fn loop_g1_completed_carries_final_turn_usage_and_tool_count() {
 /// (a provider can still overrun its own advertised ceiling).
 #[tokio::test]
 async fn loop_completed_cumulative_usage_sums_turns_and_reports_real_uncapped_output() {
-    let usage_a = llm_runtime::Usage {
-        billable_tokens: llm_runtime::TokenUsage {
-            input: 1000,
-            output: 40,
-            ..Default::default()
-        },
+    let usage_a = llm_runtime::ExecutionUsage::from_counts(llm_runtime::Usage {
+        input_tokens: 1000,
+        output_tokens: 40,
         ..Default::default()
-    };
-    let usage_b = llm_runtime::Usage {
-        billable_tokens: llm_runtime::TokenUsage {
-            input: 10,
-            output: 50,
-            cache_write: 3,
-            cache_read: 2,
-            ..Default::default()
-        },
+    });
+    let usage_b = llm_runtime::ExecutionUsage::from_counts(llm_runtime::Usage {
+        input_tokens: 10,
+        output_tokens: 50,
+        cache_write_tokens: 3,
+        cache_read_tokens: 2,
         ..Default::default()
-    };
+    });
     let api = MockSubagentApiClient::new(vec![
         Ok(tool_use_response_with_usage(
             "Read",
@@ -2431,17 +2441,26 @@ async fn loop_completed_cumulative_usage_sums_turns_and_reports_real_uncapped_ou
         })
         .expect("one Completed");
     assert_eq!(
-        usage.billable_tokens.output, 50,
+        usage
+            .counts()
+            .output_tokens
+            .saturating_sub(usage.counts().reasoning_tokens),
+        50,
         "final-turn output is the provider's REAL usage, not clamped to the \
          requested per-turn ceiling (8)"
     );
     assert_ne!(
-        usage.billable_tokens.input, cumulative.billable_tokens.input,
+        usage.counts().input_tokens,
+        cumulative.counts().input_tokens,
         "cumulative input must include earlier turns"
     );
-    assert_eq!(cumulative.billable_tokens.input, 1010);
+    assert_eq!(cumulative.counts().input_tokens, 1010);
     assert_eq!(
-        cumulative.billable_tokens.output, 90,
+        cumulative
+            .counts()
+            .output_tokens
+            .saturating_sub(cumulative.counts().reasoning_tokens),
+        90,
         "real 40 + real 50, uncapped by max_output_tokens_per_turn"
     );
     let progress_tokens: Vec<u64> = evs

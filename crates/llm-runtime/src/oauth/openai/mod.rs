@@ -9,25 +9,21 @@
 
 pub mod callback;
 pub mod client;
-pub mod config;
 pub mod credential_provider;
 pub mod device_code;
 pub mod external_tokens;
 pub mod handle;
 pub mod pat;
-pub mod pkce;
 pub mod refresh;
-pub mod token_data;
 
 #[cfg(test)]
 pub(crate) mod testsupport;
 
 pub use client::{init_refresh_driver, OAuthError, OpenAiOAuthClient};
-pub use config::OpenAiOAuthConfig;
 pub use credential_provider::OpenAiOAuthCredentialProvider;
 pub use device_code::{request_device_code, run_device_code_login, DeviceUserCode, PollOutcome};
 pub use external_tokens::ExternalTokensCredentialProvider;
 pub use handle::{BrowserOpener, OpenAiAuthError, OpenAiLoginInfo, OpenAiOAuthHandle};
+pub use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
 pub use pat::{whoami, PatCredentialProvider, PatMetadata};
 pub use refresh::{AuthState, RefreshDriver};
-pub use token_data::{parse_id_token, IdTokenClaims};

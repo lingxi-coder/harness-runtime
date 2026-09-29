@@ -170,6 +170,7 @@ collaboration = [
 ]
 
 [dependencies]
+lingxi-llm-client.workspace = true
 agent = { path = "../agent", optional = true }
 async-trait = { workspace = true }
 base64 = { version = "0.22", optional = true }

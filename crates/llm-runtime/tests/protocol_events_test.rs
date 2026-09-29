@@ -1,5 +1,6 @@
 use llm_runtime::{
-    ContentBlock, HistoryContentDelta, HistoryEvent, HistoryMessageDelta, HistoryResponse, Usage,
+    ContentBlock, ExecutionUsage, HistoryContentDelta, HistoryEvent, HistoryMessageDelta,
+    HistoryResponse,
 };
 
 fn sample_response() -> HistoryResponse {
@@ -9,7 +10,7 @@ fn sample_response() -> HistoryResponse {
         content: vec![],
         stop_reason: None,
         stop_details: None,
-        usage: Usage::default(),
+        usage: ExecutionUsage::default(),
         cost: None,
         provider_metadata: serde_json::json!({}),
     }
@@ -76,7 +77,7 @@ fn stream_event_json_has_expected_shape_and_round_trips() {
             stop_reason: Some("end_turn".to_string()),
             stop_details: None,
         },
-        usage: Some(Usage::default()),
+        usage: Some(ExecutionUsage::default()),
     };
 
     let start_json = serde_json::json!({
@@ -85,7 +86,7 @@ fn stream_event_json_has_expected_shape_and_round_trips() {
             "id": "resp_1",
             "model": "model-a",
             "content": [],
-            "usage": Usage::default(),
+            "usage": ExecutionUsage::default(),
             "cost": null,
             "provider_metadata": {},
         }
@@ -107,7 +108,7 @@ fn stream_event_json_has_expected_shape_and_round_trips() {
     let terminal_json = serde_json::json!({
         "type": "message_delta",
         "delta": {"stop_reason": "end_turn"},
-        "usage": Usage::default(),
+        "usage": ExecutionUsage::default(),
     });
 
     assert_eq!(serde_json::to_value(&start).unwrap(), start_json);

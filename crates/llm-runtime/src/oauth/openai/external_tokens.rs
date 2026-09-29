@@ -21,7 +21,7 @@ impl ExternalTokensCredentialProvider {
     #[must_use]
     pub fn from_supplied(access_token: impl Into<String>, account_id: Option<String>) -> Self {
         let access_token = access_token.into();
-        let fedramp = crate::oauth::openai::token_data::parse_id_token(&access_token)
+        let fedramp = lingxi_llm_client::auth::oauth::openai::parse_id_token(&access_token)
             .is_some_and(|c| c.fedramp);
         Self {
             access_token,

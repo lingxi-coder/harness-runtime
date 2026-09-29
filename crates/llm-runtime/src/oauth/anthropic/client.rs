@@ -1,8 +1,8 @@
 //! Host Anthropic login adapter: SDK authentication plus stored credentials and clock.
 
-use crate::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use crate::oauth::anthropic::refresh::{AuthState, RefreshDriver};
 use lingxi_llm_client::auth::oauth::anthropic as sdk;
+use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use lingxi_llm_client::auth::oauth::pkce::{generate_pkce, generate_state_token};
 use lingxi_llm_client::transport::Transport;
 use platform_api::Clock;
@@ -549,7 +549,7 @@ mod exchange_tests {
         assert!(tokens.refresh_token.is_none());
         assert_eq!(
             tokens.scopes,
-            crate::oauth::anthropic::config::CLAUDE_CODE_OAUTH_SCOPES
+            lingxi_llm_client::auth::oauth::anthropic::CLAUDE_CODE_OAUTH_SCOPES
                 .iter()
                 .map(|scope| (*scope).to_string())
                 .collect::<Vec<_>>()

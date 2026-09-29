@@ -36,7 +36,7 @@ pub trait PkceRunner: Send + Sync {
     /// `OAuthError` if the flow fails (e.g. user closed browser).
     async fn run_pkce(
         &self,
-        config: &crate::oauth::anthropic::config::ClaudeAiOAuthConfig,
+        config: &lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig,
         required_scopes: &[String],
     ) -> Result<PkceRunResult, OAuthError>;
 }
@@ -163,7 +163,7 @@ pub struct PkceFailingRunner;
 impl PkceRunner for PkceFailingRunner {
     async fn run_pkce(
         &self,
-        _config: &crate::oauth::anthropic::config::ClaudeAiOAuthConfig,
+        _config: &lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig,
         _required_scopes: &[String],
     ) -> Result<PkceRunResult, OAuthError> {
         Err(OAuthError::Callback("user closed browser".into()))
@@ -200,7 +200,7 @@ impl PkceFakeSuccessRunner {
 impl PkceRunner for PkceFakeSuccessRunner {
     async fn run_pkce(
         &self,
-        _config: &crate::oauth::anthropic::config::ClaudeAiOAuthConfig,
+        _config: &lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig,
         _required_scopes: &[String],
     ) -> Result<PkceRunResult, OAuthError> {
         Ok(PkceRunResult {

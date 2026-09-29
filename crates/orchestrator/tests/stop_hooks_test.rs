@@ -264,15 +264,19 @@ fn end_turn_with_usage(text: &str, input: u64, output: u64) -> llm_runtime::Hist
         }],
         stop_reason: Some("end_turn".to_string()),
         stop_details: None,
-        usage: llm_runtime::Usage {
-            billable_tokens: llm_runtime::TokenUsage {
-                input,
-                output,
-                cache_write: 0,
-                cache_read: 0,
-                reasoning_output: 0,
-            },
-            ..llm_runtime::Usage::default()
+        usage: llm_runtime::ExecutionUsage {
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    reasoning_tokens: 0,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
+            ..llm_runtime::ExecutionUsage::default()
         },
         cost: None,
         provider_metadata: serde_json::Value::Null,

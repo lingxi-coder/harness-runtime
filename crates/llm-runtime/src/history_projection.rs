@@ -112,7 +112,7 @@ fn host_block(block: wire::ContentBlock) -> Result<ContentBlock, LlmError> {
         _ => {
             return Err(LlmError::UnsupportedCapability {
                 capability: "non-conversation output block".into(),
-            })
+            });
         }
     })
 }
@@ -210,7 +210,7 @@ impl HistoryProjector {
                     content: vec![],
                     stop_reason: None,
                     stop_details: None,
-                    usage: Usage::default(),
+                    usage: ExecutionUsage::default(),
                     cost: None,
                     provider_metadata: self.metadata.clone(),
                 }),
@@ -640,7 +640,7 @@ impl HistoryProjector {
             self.metadata["stop_details"] = details.clone();
         }
     }
-    pub(crate) fn observed_usage(&self) -> Option<(Usage, ModelAttemptUsageCompleteness)> {
+    pub(crate) fn observed_usage(&self) -> Option<(ExecutionUsage, ModelAttemptUsageCompleteness)> {
         usage(&self.observation.0, &self.observation.1)
     }
     pub(crate) fn take_error(&mut self) -> Option<LlmError> {
@@ -907,7 +907,7 @@ mod tests {
         );
         assert!(projection.project_batch(report).unwrap().is_empty());
         let (usage, completeness) = projection.observed_usage().expect("usage");
-        assert_eq!(usage.billable_tokens.input, 9);
+        assert_eq!(usage.counts().input_tokens, 9);
         assert_eq!(completeness, ModelAttemptUsageCompleteness::Partial);
         assert_eq!(
             projection

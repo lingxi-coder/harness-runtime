@@ -26,7 +26,7 @@
 use crate::oauth::openai::callback::{CallbackError, CallbackListener};
 use crate::oauth::openai::client::OpenAiOAuthClient;
 use crate::oauth::openai::device_code;
-use crate::oauth::openai::token_data::parse_id_token;
+use lingxi_llm_client::auth::oauth::openai::parse_id_token;
 use platform_api::Clock;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -467,7 +467,7 @@ mod tests {
         let clock = TestClock::new(1_000);
         let storage = MemStorage::new();
         let cm = mem_credential_manager(storage.clone(), clock.clone());
-        let cfg = crate::oauth::openai::config::OpenAiOAuthConfig::default();
+        let cfg = lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig::default();
         let client = Arc::new(
             OpenAiOAuthClient::new(cfg, http as Arc<dyn lingxi_llm_client::Transport>)
                 .with_clock(clock),

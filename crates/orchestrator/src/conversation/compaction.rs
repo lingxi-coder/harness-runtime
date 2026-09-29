@@ -1708,12 +1708,12 @@ impl ConversationOrchestrator {
     /// overflow guard. Called by both turn drivers after every successful call.
     /// Mirrors claude-code's `Xtt` last-usage snapshot (see
     /// [`Self::last_response_input_tokens`]).
-    pub(crate) fn record_response_input_tokens(&self, usage: &llm_runtime::Usage) {
+    pub(crate) fn record_response_input_tokens(&self, usage: &llm_runtime::ExecutionUsage) {
         let total_input = usage
-            .billable_tokens
-            .input
-            .saturating_add(usage.billable_tokens.cache_read)
-            .saturating_add(usage.billable_tokens.cache_write);
+            .counts()
+            .input_tokens
+            .saturating_add(usage.counts().cache_read_tokens)
+            .saturating_add(usage.counts().cache_write_tokens);
         self.compaction_runtime
             .last_response_input_tokens
             .store(total_input, std::sync::atomic::Ordering::Relaxed);
@@ -1721,7 +1721,10 @@ impl ConversationOrchestrator {
         // INCLUDING output tokens; the `total_tokens_reminder` needs that total,
         // so cache the output half here at the same chokepoint.
         self.compaction_runtime.last_response_output_tokens.store(
-            usage.billable_tokens.output,
+            usage
+                .counts()
+                .output_tokens
+                .saturating_sub(usage.counts().reasoning_tokens),
             std::sync::atomic::Ordering::Relaxed,
         );
         // Feed the shared workflow `budget.spent()` pool: this is the single
@@ -1731,7 +1734,10 @@ impl ConversationOrchestrator {
         // same `Arc`, so `budget.spent()` reads main loop + all workflows.
         if self.model_runtime.output_scopes.is_none() {
             self.compaction_runtime.output_token_pool.fetch_add(
-                usage.billable_tokens.output,
+                usage
+                    .counts()
+                    .output_tokens
+                    .saturating_sub(usage.counts().reasoning_tokens),
                 std::sync::atomic::Ordering::Relaxed,
             );
         }

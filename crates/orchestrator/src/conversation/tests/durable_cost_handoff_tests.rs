@@ -6,8 +6,8 @@ use cost::{
     TokenUsage as CostTokenUsage, Usage as CostUsage,
 };
 use llm_runtime::{
-    Capabilities, ContentBlock as LlmContentBlock, LlmError, MediaRoute, ProviderId as LlmProvider,
-    ResolvedRoute, TokenUsage as LlmTokenUsage, Usage as LlmUsage,
+    Capabilities, ContentBlock as LlmContentBlock, ExecutionUsage as LlmUsage, LlmError,
+    MediaRoute, ProviderId as LlmProvider, ResolvedRoute,
 };
 use platform_api::live_sessions::{SessionWriterLease, SharedSessionWriterLease};
 use platform_api::{CostSnapshot, OutputStream};
@@ -496,13 +496,17 @@ fn durable_tracker(
 
 fn llm_usage(input: u64, output: u64, cache_write: u64, cache_read: u64) -> LlmUsage {
     LlmUsage {
-        billable_tokens: LlmTokenUsage {
-            input,
-            output,
-            cache_write,
-            cache_read,
-            reasoning_output: 0,
-        },
+        report: llm_runtime::UsageReport::measured(
+            llm_runtime::Usage {
+                input_tokens: input,
+                output_tokens: output,
+                cache_write_tokens: cache_write,
+                cache_read_tokens: cache_read,
+                reasoning_tokens: 0,
+                ..Default::default()
+            },
+            llm_runtime::services::sdk::protocol::UsageState::Complete,
+        ),
         ..LlmUsage::default()
     }
 }

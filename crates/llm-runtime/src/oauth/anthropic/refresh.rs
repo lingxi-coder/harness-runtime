@@ -6,69 +6,25 @@
 //! The single-flight invariant is enforced via [`AuthState::refresh_lock`]
 //! with double-check-after-acquire (v3 §16.3).
 //!
-//! ## api-client decoupling (Plan 3a Task 9, finalised 3b)
-//!
-//! `BearerToken`, `OAuthHookError`, and `TokenHash` are owned locally in
-//! this module (re-typed from the former api-client shapes). The
-//! `OAuthRefreshHook` trait impl and `current_hook()` seam have been deleted;
-//! `RefreshDriver::refresh` is now an inherent `pub async fn`. The credential
-//! seam handles token refresh proactively via `OAuthCredentialProvider`.
+//! Host refresh errors and token coordination are shared by both OAuth providers.
+//! The credential seam handles token refresh via `OAuthCredentialProvider`.
 
 // Task 2 lands the data model; Task 4+ consumes these fields via the
 // inherent `refresh` + `spawn_proactive`. Allow until then.
 #![allow(dead_code)]
 
 use crate::oauth::anthropic::client::OAuthError;
-use crate::oauth::anthropic::config::ClaudeAiOAuthConfig;
+use crate::oauth::lifecycle::{
+    self, BearerToken, OAuthHookError, Preflight, RefreshableToken, TokenHash,
+};
 use async_trait::async_trait;
+use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use lingxi_llm_client::auth::oauth::anthropic::{self as sdk, RefreshResponse, TokenError};
 use lingxi_llm_client::transport::Transport;
 use protocol::Secret;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
-
-// ---------------------------------------------------------------------------
-// Local OAuth types (re-typed from the former api-client oauth_hook shapes)
-// ---------------------------------------------------------------------------
-
-/// Bearer token wrapper.
-///
-/// Owned locally (re-typed from the former `api_client::oauth_hook::BearerToken`).
-///
-/// Note: does not implement `Clone` because `Secret<T>` intentionally does not.
-/// Callers that need shared ownership must wrap in `Arc`.
-#[derive(Debug)]
-pub struct BearerToken(pub Secret<String>);
-
-/// SHA-256 of the in-use access token.
-///
-/// Passed to [`RefreshDriver::refresh`] so the single-flight double-check can
-/// detect whether another task already rotated the token.
-/// Re-typed from the former `api_client::oauth_hook::TokenHash`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TokenHash(pub [u8; 32]);
-
-/// Errors returned by [`RefreshDriver::refresh`].
-///
-/// Re-typed from the former `api_client::oauth_hook::OAuthHookError`; variant
-/// names kept identical so callers (`credential_provider.rs`) match unchanged.
-#[derive(Debug, Clone, Error)]
-pub enum OAuthHookError {
-    /// Refresh attempted but the `IdP` rejected the `refresh_token`.
-    #[error("refresh failed: {0}")]
-    RefreshFailed(String),
-    /// The token hash passed to `refresh` is older than what the driver has
-    /// stored; another caller already rotated. Caller should retry with the
-    /// fresh token.
-    #[error("token stale; reload from store")]
-    TokenStale,
-    /// Network or transport failure reaching the `IdP`.
-    #[error("provider unreachable: {0}")]
-    ProviderUnreachable(String),
-}
 
 /// Timeout for the refresh-token POST. Matches claude-code's
 /// `refreshOAuthToken` deadline of `timeout: 15000` (15s)
@@ -94,10 +50,16 @@ impl TokenInfo {
     /// M3-03 declared (`pub [u8; 32]`).
     #[must_use]
     pub fn token_hash(&self) -> TokenHash {
-        let mut h = Sha256::new();
-        h.update(self.access_token.expose_secret().as_bytes());
-        let digest: [u8; 32] = h.finalize().into();
-        TokenHash(digest)
+        lifecycle::token_hash(&self.access_token)
+    }
+}
+
+impl RefreshableToken for TokenInfo {
+    fn access_token(&self) -> &Secret<String> {
+        &self.access_token
+    }
+    fn refresh_token(&self) -> Option<&Secret<String>> {
+        self.refresh_token.as_ref()
     }
 }
 
@@ -347,32 +309,11 @@ impl RefreshDriver {
     /// the token under the lock, returns the current token without making an
     /// HTTP call.
     pub async fn refresh(&self, prev_token_hash: TokenHash) -> Result<BearerToken, OAuthHookError> {
-        // 1. Acquire the single-flight lock (v3 §16.3).
+        // Keep this guard through the network request and state rotation.
         let _guard = self.state.refresh_lock.lock().await;
-
-        // 2. Double-check after acquire — another caller may have already
-        //    refreshed under the lock we just got. Compare the current
-        //    token_hash against prev; if different, return the current token.
-        {
-            let token = self.state.token.read().await;
-            let current_hash = token.token_hash();
-            if current_hash != prev_token_hash {
-                // Another task refreshed; return the now-current token without
-                // making an HTTP call.
-                return Ok(BearerToken(Secret::new(
-                    token.access_token.expose_secret().clone(),
-                )));
-            }
-        }
-
-        // 3. Hash still matches → we own the refresh. Read the refresh_token.
-        let refresh_token = {
-            let token = self.state.token.read().await;
-            token
-                .refresh_token
-                .as_ref()
-                .map(|s| Secret::new(s.expose_secret().clone()))
-                .ok_or_else(|| OAuthHookError::RefreshFailed("no refresh_token in state".into()))?
+        let refresh_token = match lifecycle::preflight(&self.state.token, prev_token_hash).await? {
+            Preflight::AlreadyRotated(bearer) => return Ok(bearer),
+            Preflight::RefreshWith(token) => token,
         };
 
         let started = std::time::Instant::now();
@@ -450,19 +391,9 @@ impl RefreshDriver {
     }
 }
 
-// Telemetry helpers — emit `tengu_oauth_*` events when a bus is attached.
+// Provider event names stay distinct; metadata construction is shared.
 async fn emit_refresh_started(bus: &Option<Arc<telemetry::AnalyticsBus>>, trigger: &str) {
-    let Some(bus) = bus else { return };
-    let mut m = telemetry::sink::LogEventMetadata::new();
-    m.insert(
-        "trigger".into(),
-        telemetry::sink::AnalyticsValue::String(
-            telemetry::Verified::assert_safe(trigger.to_string())
-                .as_str()
-                .to_string(),
-        ),
-    );
-    bus.log_event("tengu_oauth_refresh_started", m).await;
+    lifecycle::emit_refresh_started(bus, "tengu_oauth_refresh_started", trigger).await;
 }
 
 async fn emit_refresh_succeeded(
@@ -471,25 +402,14 @@ async fn emit_refresh_succeeded(
     new_expiry_unix: i64,
     duration_ms: u64,
 ) {
-    let Some(bus) = bus else { return };
-    let mut m = telemetry::sink::LogEventMetadata::new();
-    m.insert(
-        "trigger".into(),
-        telemetry::sink::AnalyticsValue::String(
-            telemetry::Verified::assert_safe(trigger.to_string())
-                .as_str()
-                .to_string(),
-        ),
-    );
-    m.insert(
-        "new_expiry_unix".into(),
-        telemetry::sink::AnalyticsValue::Int(new_expiry_unix),
-    );
-    m.insert(
-        "duration_ms".into(),
-        telemetry::sink::AnalyticsValue::Int(i64::try_from(duration_ms).unwrap_or(i64::MAX)),
-    );
-    bus.log_event("tengu_oauth_refresh_succeeded", m).await;
+    lifecycle::emit_refresh_succeeded(
+        bus,
+        "tengu_oauth_refresh_succeeded",
+        trigger,
+        new_expiry_unix,
+        duration_ms,
+    )
+    .await;
 }
 
 async fn emit_refresh_failed(
@@ -497,39 +417,11 @@ async fn emit_refresh_failed(
     trigger: &str,
     error_kind: &str,
 ) {
-    let Some(bus) = bus else { return };
-    let mut m = telemetry::sink::LogEventMetadata::new();
-    m.insert(
-        "trigger".into(),
-        telemetry::sink::AnalyticsValue::String(
-            telemetry::Verified::assert_safe(trigger.to_string())
-                .as_str()
-                .to_string(),
-        ),
-    );
-    m.insert(
-        "error_kind".into(),
-        telemetry::sink::AnalyticsValue::String(
-            telemetry::Verified::assert_safe(error_kind.to_string())
-                .as_str()
-                .to_string(),
-        ),
-    );
-    bus.log_event("tengu_oauth_refresh_failed", m).await;
+    lifecycle::emit_refresh_failed(bus, "tengu_oauth_refresh_failed", trigger, error_kind).await;
 }
 
 async fn emit_proactive_canceled(bus: &Option<Arc<telemetry::AnalyticsBus>>, reason: &str) {
-    let Some(bus) = bus else { return };
-    let mut m = telemetry::sink::LogEventMetadata::new();
-    m.insert(
-        "reason".into(),
-        telemetry::sink::AnalyticsValue::String(
-            telemetry::Verified::assert_safe(reason.to_string())
-                .as_str()
-                .to_string(),
-        ),
-    );
-    bus.log_event("tengu_oauth_proactive_canceled", m).await;
+    lifecycle::emit_proactive_canceled(bus, "tengu_oauth_proactive_canceled", reason).await;
 }
 
 /// Maximum lead time before token expiry that the proactive refresh task wakes.
@@ -548,12 +440,7 @@ pub const PROACTIVE_LEAD_CAP: Duration = Duration::from_secs(5 * 60);
 /// `Math.floor(remaining / 2)` semantics.
 #[must_use]
 pub fn proactive_lead(remaining: Duration) -> Duration {
-    let half = Duration::from_secs(remaining.as_secs() / 2);
-    if half < PROACTIVE_LEAD_CAP {
-        half
-    } else {
-        PROACTIVE_LEAD_CAP
-    }
+    lifecycle::proactive_lead(remaining, PROACTIVE_LEAD_CAP)
 }
 
 impl RefreshDriver {
@@ -702,7 +589,7 @@ mod wire_and_persist_tests {
         assert_eq!(sent["client_id"], "9d1c250a-e61b-44d9-88ed-5944d1962f5e");
         assert_eq!(
             sent["scope"],
-            crate::oauth::anthropic::config::CLAUDE_CODE_OAUTH_SCOPES.join(" ")
+            lingxi_llm_client::auth::oauth::anthropic::CLAUDE_CODE_OAUTH_SCOPES.join(" ")
         );
 
         // Persisted: rotated tokens written, identity preserved.
@@ -860,7 +747,7 @@ mod wire_and_persist_tests {
         // Canonical default (config.scopes), NOT the narrow "read:user" held.
         assert_eq!(
             sent["scope"],
-            crate::oauth::anthropic::config::CLAUDE_CODE_OAUTH_SCOPES.join(" ")
+            lingxi_llm_client::auth::oauth::anthropic::CLAUDE_CODE_OAUTH_SCOPES.join(" ")
         );
     }
 

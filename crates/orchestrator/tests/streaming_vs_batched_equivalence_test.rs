@@ -3,7 +3,7 @@
 //! Asserts:
 //!   - both paths produce `ConversationOutcome::EndTurn { turn_count: 1, .. }`
 //!   - both paths append identical assistant message bodies to the session.
-use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, Usage};
+use llm_runtime::{ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,

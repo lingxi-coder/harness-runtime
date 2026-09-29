@@ -133,7 +133,7 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
                 || name == &model.request_model
                 || name == &model.billing_model
         }) {
-            model.pricing = Some(price.to_wire("override"));
+            model.pricing = Some(price.to_sdk().with_fixed_standard_override());
             model.billing_mode = Some(wire::BillingMode::PerToken);
         }
     }
@@ -263,7 +263,7 @@ pub(crate) fn error(error: wire::LlmError) -> LlmError {
 pub(crate) fn usage(
     report: &wire::UsageReport,
     inference: &wire::InferenceReport,
-) -> Option<(Usage, ModelAttemptUsageCompleteness)> {
+) -> Option<(ExecutionUsage, ModelAttemptUsageCompleteness)> {
     let counts = report.usage?;
     let completeness = if report.state == wire::UsageState::Complete {
         ModelAttemptUsageCompleteness::Complete
@@ -288,24 +288,12 @@ pub(crate) fn usage(
             serde_json::to_value(server_tools).expect("server usage serializes");
     }
     Some((
-        Usage {
-            billable_tokens: TokenUsage {
-                input: counts.input_tokens,
-                output: counts.output_tokens.saturating_sub(counts.reasoning_tokens),
-                cache_write: counts.cache_write_tokens,
-                cache_read: counts.cache_read_tokens,
-                reasoning_output: counts.reasoning_tokens,
-            },
+        ExecutionUsage {
+            report: report.clone(),
+            inference: inference.clone(),
             context_tokens: Some(counts.total()),
             provider_reported_total_tokens: Some(counts.total()),
-            server_tool_use: counts.server_tool_usage.and_then(|u| {
-                u.web_search_requests
-                    .map(|web_search_requests| ServerToolUsage {
-                        web_search_requests,
-                    })
-            }),
             provider_metadata: metadata,
-            speed: (inference.service_tier == Some(wire::ServiceTier::Fast)).then(|| "fast".into()),
             cost_estimate: None,
         },
         completeness,

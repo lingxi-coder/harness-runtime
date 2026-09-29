@@ -1,7 +1,7 @@
 //! Host lifecycle adapter for OpenAI OAuth. Wire operations live in llm-client.
-use crate::oauth::openai::config::OpenAiOAuthConfig;
 use crate::oauth::openai::refresh::{AuthState, RefreshDriver};
 use lingxi_llm_client::auth::oauth::openai as sdk;
+use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
 use lingxi_llm_client::Transport;
 use platform_api::Clock;
 use protocol::Secret;

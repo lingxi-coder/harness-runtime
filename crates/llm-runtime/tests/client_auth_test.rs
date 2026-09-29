@@ -673,7 +673,7 @@ async fn prepare_count_tokens_rejects_non_anthropic_routes() {
 /// sent "null" → signature mismatch → 403.
 #[tokio::test]
 async fn sigv4_null_body_signs_as_null_string() {
-    use llm_runtime::sigv4;
+    use lingxi_llm_client::auth::sigv4;
     use std::collections::BTreeMap;
 
     // SHA-256("null") — the 4-byte ASCII string.
@@ -807,7 +807,7 @@ async fn sigv4_null_body_content_sha256_via_client() {
         })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let re_signed = llm_runtime::sigv4::sign_request(
+    let re_signed = lingxi_llm_client::auth::sigv4::sign_request(
         method,
         url,
         &pre_sign_headers,
@@ -966,7 +966,7 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    let expected = llm_runtime::sigv4::sign_request(
+    let expected = lingxi_llm_client::auth::sigv4::sign_request(
         method,
         url,
         &pre_sign_headers,

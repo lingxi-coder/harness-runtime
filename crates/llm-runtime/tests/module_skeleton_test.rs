@@ -15,8 +15,8 @@ fn scope_upgrade_module_exports_parser() {
 
 #[test]
 fn config_default_uses_current_claude_code_endpoints() {
-    use llm_runtime::oauth::anthropic::config::CLAUDE_CODE_OAUTH_SCOPES;
     use llm_runtime::oauth::anthropic::ClaudeAiOAuthConfig;
+    use llm_runtime::oauth::anthropic::CLAUDE_CODE_OAUTH_SCOPES;
     let c = ClaudeAiOAuthConfig::default_with_port(0);
     assert_eq!(
         c.authorization_endpoint,

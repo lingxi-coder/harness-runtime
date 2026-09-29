@@ -2,6 +2,7 @@
 use futures::StreamExt;
 use lingxi_llm_client as sdk;
 use llm_runtime::*;
+use sdk::auth::sigv4;
 use std::sync::{Arc, Mutex};
 
 struct RawOnly {
@@ -138,7 +139,7 @@ async fn service_signs_the_final_policy_request_and_uses_only_shared_raw_executi
     let mut request = LlmRequest::new("display").with_user_text("hello");
     request.input.max_tokens = Some(100);
     let response = service.execute_side_query_request(request).await.unwrap();
-    assert_eq!(response.usage.billable_tokens.input, 2);
+    assert_eq!(response.usage.counts().input_tokens, 2);
     let requests = transport.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     let sent = &requests[0];

@@ -9,12 +9,12 @@ pub(crate) trait FixtureCodec {
     fn response_usage(
         &self,
         response: &ProviderResponse,
-    ) -> Option<(Usage, ModelAttemptUsageCompleteness)>;
+    ) -> Option<(ExecutionUsage, ModelAttemptUsageCompleteness)>;
     fn decode_response(&self, response: ProviderResponse) -> Result<HistoryResponse, LlmError>;
     fn stream_decoder(&self) -> Box<dyn FixtureDecoder>;
 }
 pub(crate) trait FixtureDecoder {
-    fn observed_usage(&self) -> Option<(Usage, ModelAttemptUsageCompleteness)>;
+    fn observed_usage(&self) -> Option<(ExecutionUsage, ModelAttemptUsageCompleteness)>;
     fn set_provider_metadata(&mut self, metadata: Value);
     fn decode_frame(&mut self, frame: RawStreamFrame) -> Result<Vec<HistoryEvent>, LlmError>;
     fn finish(&mut self) -> Result<Vec<HistoryEvent>, LlmError>;
@@ -134,7 +134,7 @@ macro_rules! named_codec {
             fn response_usage(
                 &self,
                 response: &ProviderResponse,
-            ) -> Option<(Usage, ModelAttemptUsageCompleteness)> {
+            ) -> Option<(ExecutionUsage, ModelAttemptUsageCompleteness)> {
                 self.0.response_usage(response)
             }
             fn decode_response(
@@ -194,7 +194,7 @@ impl FixtureCodec for AnthropicMessagesCodec {
     fn response_usage(
         &self,
         response: &ProviderResponse,
-    ) -> Option<(Usage, ModelAttemptUsageCompleteness)> {
+    ) -> Option<(ExecutionUsage, ModelAttemptUsageCompleteness)> {
         self.0.response_usage(response)
     }
     fn decode_response(&self, response: ProviderResponse) -> Result<HistoryResponse, LlmError> {
@@ -223,7 +223,7 @@ impl FixtureCodec for AzureOpenAiCodec {
     fn response_usage(
         &self,
         response: &ProviderResponse,
-    ) -> Option<(Usage, ModelAttemptUsageCompleteness)> {
+    ) -> Option<(ExecutionUsage, ModelAttemptUsageCompleteness)> {
         self.0.response_usage(response)
     }
     fn decode_response(&self, response: ProviderResponse) -> Result<HistoryResponse, LlmError> {
@@ -247,7 +247,7 @@ impl FixtureCodec for Codec {
     fn response_usage(
         &self,
         response: &ProviderResponse,
-    ) -> Option<(Usage, ModelAttemptUsageCompleteness)> {
+    ) -> Option<(ExecutionUsage, ModelAttemptUsageCompleteness)> {
         let context = self.context("", client::RequestMode::Complete);
         let response = Self::raw_response(response);
         usage(
@@ -282,7 +282,7 @@ impl FixtureCodec for Codec {
 }
 
 impl FixtureDecoder for FixtureStream {
-    fn observed_usage(&self) -> Option<(Usage, ModelAttemptUsageCompleteness)> {
+    fn observed_usage(&self) -> Option<(ExecutionUsage, ModelAttemptUsageCompleteness)> {
         usage(
             &self.projection.observation.0,
             &self.projection.observation.1,

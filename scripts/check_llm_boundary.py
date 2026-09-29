@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reject production model/provider networking outside the shared SDK.
 
-General HTTP (web downloads, public search engines, OAuth, MCP and telemetry)
+General HTTP (web downloads, public search engines, MCP OAuth and telemetry)
 remains host-owned. This gate scans endpoint construction and removed adapter
 symbols, with test-only Rust items excluded. It complements runtime call-path tests.
 """
@@ -87,12 +87,24 @@ def production(source):
     return tokens.sub(lambda m: re.sub(r'[^\n]', ' ', m.group()) if m.group().startswith(('//', '/*')) else m.group(), source)
 
 RULES = {
+    "provider quota headers belong in llm-client": re.compile(r'"x-claudeai-window-(?:count|limit)"'),
+
     "provider authentication endpoint belongs in llm-client": re.compile(r'"[^"\n]*(?:/oauth/token|/oauth/authorize|/api/oauth/(?:profile|roles)|/login/device/code|/login/oauth/access_token|/api/accounts/deviceauth/|/copilot_internal/v2/token|/user-auth-credential/whoami)[^"\n]*"'),
     "model endpoint belongs in llm-client": re.compile(r'"[^"\n]*(?:/v1/messages|/chat/completions|/backend-api/models|/responses|/embeddings|/audio/(?:speech|transcriptions|translations)|/images/(?:generations|edits)|/v1/models|:generateContent|:streamGenerateContent)[^"\n]*"'),
     "provider stream parsing belongs in llm-client": re.compile(r'"(?:content_block_(?:start|delta|stop)|response\.(?:output_text|output_item|function_call_arguments)\.[^"\n]+)"'),
     "WebSocket implementation requires an explicit non-model exception": re.compile(r'\btokio_tungstenite\s*::'),
     "removed model adapter must not return": re.compile(r'\b(?:struct\s+AnthropicRequestBuilder|struct\s+LlmTransportBridge|trait\s+ResponsesWebSocketTransportSession|struct\s+StreamReassembler|struct\s+DefaultLlmClient|struct\s+ResponsesWebSocketSession|trait\s+CopilotHttp|struct\s+PosixCopilotHttp|trait\s+WireCodec|trait\s+StreamDecoder|struct\s+LlmResponse|enum\s+LlmEvent)\b'),
 }
+
+RUNTIME_RULES = {
+    "canonical usage and pricing types belong in llm-client": re.compile(r'\bstruct\s+(?:Usage|TokenUsage|ServerToolUsage|TokenPricing)\b'),
+    "provider usage normalization belongs in llm-client": re.compile(r'\bfn\s+normalize_anthropic_usage\b'),
+    "provider credential parsing belongs in llm-client": re.compile(r'\bfn\s+parse_sts_output\b'),
+}
+
+def runtime_findings(source):
+    text = production(source)
+    return [(text.count('\n', 0, match.start()) + 1, reason) for reason, rule in RUNTIME_RULES.items() for match in rule.finditer(text)]
 
 def findings(source):
     text = production(source)
@@ -117,14 +129,31 @@ def main():
         assert not findings('#[cfg(test)] mod tests { fn mock() { let url="/v1/messages"; } }')
         assert findings('#[cfg(test)] mod tests {}\nfn later(){let x="/chat/completions";}')
         assert not findings('fn web() { let url="https://example.test/page"; }')
+        assert runtime_findings('pub struct Usage { input: u64 }')
+        assert runtime_findings('pub fn normalize_anthropic_usage() {}')
+        assert runtime_findings('pub fn parse_sts_output() {}')
+        assert not runtime_findings('pub struct ExecutionUsage { report: sdk::UsageReport }')
+        assert not runtime_findings('pub use sdk::protocol::Usage;')
+        assert findings('fn parse() { headers.get("x-claudeai-window-limit"); }')
         print('llm-boundary selftest: OK')
         return 0
     errors = []
+    removed_modules = [
+        "anthropic.rs", "sigv4.rs", "copilot/auth.rs", "copilot/login.rs",
+        "oauth/anthropic/config.rs", "oauth/anthropic/pkce.rs", "oauth/anthropic/profile.rs",
+        "oauth/openai/config.rs", "oauth/openai/pkce.rs", "oauth/openai/token_data.rs",
+    ]
+    for relative in removed_modules:
+        if (ROOT / "crates/llm-runtime/src" / relative).exists():
+            errors.append(f"crates/llm-runtime/src/{relative}: removed SDK forwarding module must not return")
     for path in sorted((ROOT / 'crates').rglob('*.rs')):
         relative = path.relative_to(ROOT).as_posix()
         if relative in FIXTURES or '/tests/' in relative or path.stem.endswith(('_test', '_tests')):
             continue
-        errors.extend(f'{relative}:{line}: {reason}' for line, reason in findings(path.read_text())
+        source = path.read_text()
+        if relative.startswith("crates/llm-runtime/src/"):
+            errors.extend(f'{relative}:{line}: {reason}' for line, reason in runtime_findings(source))
+        errors.extend(f'{relative}:{line}: {reason}' for line, reason in findings(source)
                       if not (relative in STREAM_EXCEPTIONS and reason == 'provider stream parsing belongs in llm-client')
                       and not (relative in NETWORK_EXCEPTIONS and reason.startswith('WebSocket implementation')))
     if errors:

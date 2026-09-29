@@ -118,7 +118,7 @@ pub fn select_preserved_tail(messages: &[ConversationMessage]) -> Option<Preserv
 /// the replayed assistant turn is not re-billed. The Rust
 /// [`protocol::ConversationMessage::Assistant`] variant carries
 /// `{ id, content, stop_reason }` and has **no** per-message `usage` field — token
-/// usage lives on `llm_runtime::Usage`, accumulated outside the in-history message,
+/// usage lives on `llm_runtime::ExecutionUsage`, accumulated outside the in-history message,
 /// never stored on the `ConversationMessage`. So there is no token field to zero:
 /// preserving the message verbatim already cannot double-count (the counts the TS
 /// version zeroes simply do not exist on the Rust message). This function is

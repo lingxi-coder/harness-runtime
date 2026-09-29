@@ -142,8 +142,8 @@ impl StreamingTurnDriver<'_> {
                 usage: cost_usage,
                 duration,
                 retries: orch.streaming_api.last_retry_count(),
-                cache_read_input_tokens: usage.billable_tokens.cache_read,
-                cache_creation_input_tokens: usage.billable_tokens.cache_write,
+                cache_read_input_tokens: usage.counts().cache_read_tokens,
+                cache_creation_input_tokens: usage.counts().cache_write_tokens,
                 is_batch_request: false,
                 bus: orch.model_runtime.analytics_bus.clone(),
             },
@@ -1163,8 +1163,8 @@ impl StreamingTurnDriver<'_> {
             orch.record_response_input_tokens(usage);
         }
         if let (Some(usage), Some(cost_receipt)) = (pumped.usage.as_ref(), cost_receipt) {
-            let cache_read = usage.billable_tokens.cache_read;
-            let cache_create = usage.billable_tokens.cache_write;
+            let cache_read = usage.counts().cache_read_tokens;
+            let cache_create = usage.counts().cache_write_tokens;
             let model_ref =
                 crate::cost_wiring::model_ref_from_string(&model, model_profile.as_deref());
             let elapsed = api_call_started.elapsed();
@@ -1198,8 +1198,11 @@ impl StreamingTurnDriver<'_> {
                     bus,
                     &cost::ApiSuccessFields {
                         model: model.clone(),
-                        input_tokens: usage.billable_tokens.input,
-                        output_tokens: usage.billable_tokens.output,
+                        input_tokens: usage.counts().input_tokens,
+                        output_tokens: usage
+                            .counts()
+                            .output_tokens
+                            .saturating_sub(usage.counts().reasoning_tokens),
                         cached_input_tokens: cache_read,
                         uncached_input_tokens: cache_create,
                         duration_ms: dur_ms,
@@ -1226,7 +1229,8 @@ impl StreamingTurnDriver<'_> {
                         }
                         .to_string(),
                         ttft_ms: None,
-                        fast_mode: usage.speed.as_deref() == Some("fast"),
+                        fast_mode: usage.inference.service_tier
+                            == Some(llm_runtime::services::sdk::protocol::ServiceTier::Fast),
                         time_since_last_api_call_ms: orch.record_api_call_gap_ms(),
                     },
                 )

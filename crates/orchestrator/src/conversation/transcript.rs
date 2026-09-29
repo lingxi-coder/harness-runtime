@@ -1938,7 +1938,7 @@ impl ConversationOrchestrator {
         msg: &ConversationMessage,
         // Typed response usage → the Anthropic `usage` JSON (via
         // `assistant_usage_value`). `None` writes `usage: null`.
-        usage: Option<&llm_runtime::Usage>,
+        usage: Option<&llm_runtime::ExecutionUsage>,
         request_id: Option<&str>,
     ) {
         self.note_assistant_commit(msg).await;

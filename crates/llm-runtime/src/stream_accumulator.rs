@@ -17,8 +17,8 @@
 #![forbid(unsafe_code)]
 
 use crate::{
-    ContentBlock, HistoryContentDelta, HistoryEvent, HistoryMessageDelta, HistoryResponse,
-    LlmError, Usage,
+    ContentBlock, ExecutionUsage, HistoryContentDelta, HistoryEvent, HistoryMessageDelta,
+    HistoryResponse, LlmError, UsageState,
 };
 use futures::stream::{BoxStream, StreamExt};
 use serde_json::Value;
@@ -251,58 +251,38 @@ fn block_kind_of(block: &ContentBlock) -> BlockKind {
     }
 }
 
-/// Merge a `message_delta` usage snapshot into the `message_start` seed.
-///
-/// On the wire, `message_start.usage` carries `input_tokens` + cache counts
-/// with `output_tokens` still `0`, and `message_delta.usage` carries the final
-/// `output_tokens` (Anthropic omits the input/cache counts there). So
-/// `output_tokens` always takes the delta value, while the input/cache counts
-/// keep the seed unless the delta reports a non-zero override. This makes the
-/// [`response_to_stream_events`] round-trip exact (the seed already equals the
-/// final usage) and stays correct against a real provider stream.
-///
-/// Mapping from the old `UsageApi` flat fields:
-///   - `input_tokens` → `billable_tokens.input`
-///   - `output_tokens` → `billable_tokens.output`
-///   - `cache_creation_input_tokens` → `billable_tokens.cache_write`
-///   - `cache_read_input_tokens` → `billable_tokens.cache_read`
-///   - `server_tool_use` → `server_tool_use`
-///   - `speed` → `speed`
-pub(crate) fn merge_usage(seed: &Usage, delta: &Usage) -> Usage {
-    let bt_seed = &seed.billable_tokens;
-    let bt_delta = &delta.billable_tokens;
-    Usage {
-        billable_tokens: crate::TokenUsage {
-            input: if bt_delta.input > 0 {
-                bt_delta.input
-            } else {
-                bt_seed.input
-            },
-            output: bt_delta.output,
-            cache_write: if bt_delta.cache_write > 0 {
-                bt_delta.cache_write
-            } else {
-                bt_seed.cache_write
-            },
-            cache_read: if bt_delta.cache_read > 0 {
-                bt_delta.cache_read
-            } else {
-                bt_seed.cache_read
-            },
-            reasoning_output: if bt_delta.reasoning_output > 0 {
-                bt_delta.reasoning_output
-            } else {
-                bt_seed.reasoning_output
-            },
+/// Keep the most recent canonical SDK usage report. Its state distinguishes a
+/// partial observation from a complete one; the host never infers omitted
+/// provider fields from zero counters.
+pub(crate) fn merge_usage(seed: &ExecutionUsage, delta: &ExecutionUsage) -> ExecutionUsage {
+    let has_new_report = delta.report.usage.is_some() || delta.report.state != UsageState::Missing;
+    let report = if has_new_report {
+        delta.report.clone()
+    } else {
+        seed.report.clone()
+    };
+    let replacement_total = has_new_report
+        .then(|| report.usage.map(|counts| counts.total()))
+        .flatten();
+    ExecutionUsage {
+        report,
+        inference: if delta.inference == Default::default() {
+            seed.inference.clone()
+        } else {
+            delta.inference.clone()
         },
-        server_tool_use: delta.server_tool_use.or(seed.server_tool_use),
-        speed: delta.speed.clone().or_else(|| seed.speed.clone()),
-        // Preserve context_tokens / provider_reported_total / provider_metadata
-        // from the delta if present, else keep the seed.
-        context_tokens: delta.context_tokens.or(seed.context_tokens),
-        provider_reported_total_tokens: delta
-            .provider_reported_total_tokens
-            .or(seed.provider_reported_total_tokens),
+        context_tokens: if has_new_report {
+            delta.context_tokens.or(replacement_total)
+        } else {
+            delta.context_tokens.or(seed.context_tokens)
+        },
+        provider_reported_total_tokens: if has_new_report {
+            delta.provider_reported_total_tokens.or(replacement_total)
+        } else {
+            delta
+                .provider_reported_total_tokens
+                .or(seed.provider_reported_total_tokens)
+        },
         provider_metadata: if delta.provider_metadata.is_null() {
             seed.provider_metadata.clone()
         } else {
@@ -361,7 +341,7 @@ pub async fn accumulate_stream_salvaging(
     let mut content_indices: Vec<(u32, bool)> = Vec::new();
     let mut id = String::new();
     let mut model = String::new();
-    let mut usage = Usage::default();
+    let mut usage = ExecutionUsage::default();
     let mut stop_reason: Option<String> = None;
     let mut stop_details = None;
     let mut cost = None;
@@ -644,8 +624,8 @@ pub fn response_to_stream_events(resp: HistoryResponse) -> Vec<HistoryEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TokenUsage;
     use futures::stream;
+    use lingxi_llm_client::protocol as wire;
 
     fn boxed(events: Vec<HistoryEvent>) -> BoxStream<'static, Result<HistoryEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
@@ -659,11 +639,50 @@ mod tests {
                 content: Vec::new(),
                 stop_reason: None,
                 stop_details: None,
-                usage: Usage::default(),
+                usage: ExecutionUsage::default(),
                 cost: None,
                 provider_metadata: Value::Null,
             }),
         }
+    }
+
+    #[test]
+    fn canonical_zero_snapshots_replace_prior_counters_without_protocol_merging() {
+        let seed = ExecutionUsage::from_counts(wire::Usage {
+            input_tokens: 42,
+            output_tokens: 99,
+            cache_read_tokens: 3,
+            ..Default::default()
+        });
+        for state in [
+            wire::UsageState::Partial,
+            wire::UsageState::Complete,
+            wire::UsageState::Invalid,
+        ] {
+            let next = ExecutionUsage {
+                report: wire::UsageReport::measured(wire::Usage::default(), state),
+                ..Default::default()
+            };
+            let merged = merge_usage(&seed, &next);
+            assert_eq!(
+                merged.report, next.report,
+                "SDK state {state:?} remains authoritative"
+            );
+            assert_eq!(merged.counts().input_tokens, 0);
+            assert_eq!(merged.counts().output_tokens, 0);
+        }
+        let invalid = ExecutionUsage {
+            report: wire::UsageReport {
+                usage: None,
+                state: wire::UsageState::Invalid,
+            },
+            ..Default::default()
+        };
+        assert_eq!(merge_usage(&seed, &invalid).report, invalid.report);
+        assert_eq!(
+            merge_usage(&seed, &ExecutionUsage::default()).report,
+            seed.report
+        );
     }
 
     #[tokio::test]
@@ -691,7 +710,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.provider_metadata, metadata);
-        assert_eq!(response.usage, Usage::default());
+        assert_eq!(response.usage, ExecutionUsage::default());
         assert!(response.content.is_empty());
     }
 
@@ -707,7 +726,7 @@ mod tests {
         });
         quote.estimated = true;
         quote.total_cost_usd = Some(0.00075);
-        let mut usage = Usage::default();
+        let mut usage = ExecutionUsage::default();
         usage.cost_estimate = Some(quote);
         let response = accumulate_stream(boxed(vec![
             message_start("m", "deepseek-flash"),
@@ -857,7 +876,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn final_usage_merges_start_seed_and_delta() {
+    async fn terminal_usage_uses_sdk_cumulative_snapshot() {
         let evs = vec![
             HistoryEvent::MessageStart {
                 response: Box::new(HistoryResponse {
@@ -866,15 +885,20 @@ mod tests {
                     content: Vec::new(),
                     stop_reason: None,
                     stop_details: None,
-                    usage: Usage {
-                        billable_tokens: TokenUsage {
-                            input: 42,
-                            output: 0,
-                            cache_write: 7,
-                            cache_read: 3,
-                            reasoning_output: 0,
-                        },
-                        ..Usage::default()
+                    usage: ExecutionUsage {
+                        report: wire::UsageReport::measured(
+                            wire::Usage {
+                                input_tokens: 42,
+                                output_tokens: 0,
+                                cache_write_tokens: 7,
+                                cache_read_tokens: 3,
+                                reasoning_tokens: 0,
+
+                                ..Default::default()
+                            },
+                            wire::UsageState::Partial,
+                        ),
+                        ..ExecutionUsage::default()
                     },
                     cost: None,
                     provider_metadata: Value::Null,
@@ -885,25 +909,30 @@ mod tests {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
-                usage: Some(Usage {
-                    billable_tokens: TokenUsage {
-                        input: 0,
-                        output: 99,
-                        cache_write: 0,
-                        cache_read: 0,
-                        reasoning_output: 0,
-                    },
-                    ..Usage::default()
+                usage: Some(ExecutionUsage {
+                    report: wire::UsageReport::measured(
+                        wire::Usage {
+                            input_tokens: 42,
+                            output_tokens: 99,
+                            cache_write_tokens: 7,
+                            cache_read_tokens: 3,
+                            reasoning_tokens: 0,
+
+                            ..Default::default()
+                        },
+                        wire::UsageState::Complete,
+                    ),
+                    ..ExecutionUsage::default()
                 }),
             },
             HistoryEvent::MessageStop,
         ];
         let resp = accumulate_stream(boxed(evs)).await.expect("accumulate");
-        // output from the delta; input/cache kept from the start seed.
-        assert_eq!(resp.usage.billable_tokens.input, 42);
-        assert_eq!(resp.usage.billable_tokens.output, 99);
-        assert_eq!(resp.usage.billable_tokens.cache_write, 7);
-        assert_eq!(resp.usage.billable_tokens.cache_read, 3);
+        // The SDK supplies cumulative counters; runtime consumes the complete snapshot.
+        assert_eq!(resp.usage.counts().input_tokens, 42);
+        assert_eq!(resp.usage.counts().output_tokens, 99);
+        assert_eq!(resp.usage.counts().cache_write_tokens, 7);
+        assert_eq!(resp.usage.counts().cache_read_tokens, 3);
     }
 
     #[tokio::test]
@@ -1202,7 +1231,7 @@ mod tests {
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
-            usage: Usage::default(),
+            usage: ExecutionUsage::default(),
             cost: None,
             provider_metadata: Value::Null,
         };
@@ -1241,7 +1270,7 @@ mod tests {
             ],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
-            usage: Usage::default(),
+            usage: ExecutionUsage::default(),
             cost: None,
             provider_metadata: Value::Null,
         };
@@ -1271,20 +1300,20 @@ mod tests {
             serde_json::to_value(&resp.content).unwrap()
         );
         assert_eq!(
-            round.usage.billable_tokens.input,
-            resp.usage.billable_tokens.input
+            round.usage.counts().input_tokens,
+            resp.usage.counts().input_tokens
         );
         assert_eq!(
-            round.usage.billable_tokens.output,
-            resp.usage.billable_tokens.output
+            round.usage.counts().output_tokens,
+            resp.usage.counts().output_tokens
         );
         assert_eq!(
-            round.usage.billable_tokens.cache_write,
-            resp.usage.billable_tokens.cache_write
+            round.usage.counts().cache_write_tokens,
+            resp.usage.counts().cache_write_tokens
         );
         assert_eq!(
-            round.usage.billable_tokens.cache_read,
-            resp.usage.billable_tokens.cache_read
+            round.usage.counts().cache_read_tokens,
+            resp.usage.counts().cache_read_tokens
         );
     }
 
@@ -1310,15 +1339,20 @@ mod tests {
             ],
             stop_reason: Some("tool_use".into()),
             stop_details: None,
-            usage: Usage {
-                billable_tokens: TokenUsage {
-                    input: 11,
-                    output: 22,
-                    cache_write: 1,
-                    cache_read: 2,
-                    reasoning_output: 0,
-                },
-                ..Usage::default()
+            usage: ExecutionUsage {
+                report: wire::UsageReport::measured(
+                    wire::Usage {
+                        input_tokens: 11,
+                        output_tokens: 22,
+                        cache_write_tokens: 1,
+                        cache_read_tokens: 2,
+                        reasoning_tokens: 0,
+
+                        ..Default::default()
+                    },
+                    wire::UsageState::Partial,
+                ),
+                ..ExecutionUsage::default()
             },
             cost: None,
             provider_metadata: Value::Null,
@@ -1337,7 +1371,7 @@ mod tests {
                 category: Some("category".into()),
                 explanation: Some("explanation".into()),
             }),
-            usage: Usage::default(),
+            usage: ExecutionUsage::default(),
             cost: None,
             provider_metadata: Value::Null,
         };
@@ -1364,7 +1398,7 @@ mod tests {
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
-            usage: Usage::default(),
+            usage: ExecutionUsage::default(),
             cost: None,
             provider_metadata: Value::Null,
         })

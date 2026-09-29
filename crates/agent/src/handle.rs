@@ -179,22 +179,20 @@ impl<T: ?Sized> RuntimeLink<Arc<T>> {
     }
 }
 
-pub(crate) fn subagent_usage_from_llm_usage(usage: &llm_runtime::Usage) -> SubagentUsage {
-    let bt = usage.billable_tokens;
+pub(crate) fn subagent_usage_from_llm_usage(usage: &llm_runtime::ExecutionUsage) -> SubagentUsage {
+    let counts = usage.counts();
+    let visible_output = counts.output_tokens.saturating_sub(counts.reasoning_tokens);
     SubagentUsage {
-        total_tokens: bt
-            .input
-            .saturating_add(bt.cache_write)
-            .saturating_add(bt.cache_read)
-            .saturating_add(bt.output),
-        input_tokens: bt.input,
-        output_tokens: bt.output,
-        cache_creation_input_tokens: bt.cache_write,
-        cache_read_input_tokens: bt.cache_read,
-        // Finding [1]: without this, a subagent's (including a Fusion
-        // panel's) reasoning tokens were dropped at this seam — the caller
-        // never saw them, no matter how the provider billed them.
-        reasoning_output_tokens: bt.reasoning_output,
+        total_tokens: counts
+            .input_tokens
+            .saturating_add(counts.cache_write_tokens)
+            .saturating_add(counts.cache_read_tokens)
+            .saturating_add(visible_output),
+        input_tokens: counts.input_tokens,
+        output_tokens: visible_output,
+        cache_creation_input_tokens: counts.cache_write_tokens,
+        cache_read_input_tokens: counts.cache_read_tokens,
+        reasoning_output_tokens: counts.reasoning_tokens,
     }
 }
 
@@ -4254,7 +4252,7 @@ mod tests {
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
-            usage: llm_runtime::Usage::default(),
+            usage: llm_runtime::ExecutionUsage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
         }
@@ -4262,16 +4260,14 @@ mod tests {
 
     #[test]
     fn llm_usage_rollup_maps_only_billable_subagent_fields() {
-        let usage = llm_runtime::Usage {
-            billable_tokens: llm_runtime::TokenUsage {
-                input: 11,
-                output: 7,
-                cache_write: 5,
-                cache_read: 3,
-                reasoning_output: 55,
-            },
-            ..llm_runtime::Usage::default()
-        };
+        let usage = llm_runtime::ExecutionUsage::from_counts(llm_runtime::Usage {
+            input_tokens: 11,
+            output_tokens: 62,
+            cache_write_tokens: 5,
+            cache_read_tokens: 3,
+            reasoning_tokens: 55,
+            ..Default::default()
+        });
 
         assert_eq!(
             super::subagent_usage_from_llm_usage(&usage),
@@ -4281,10 +4277,8 @@ mod tests {
                 output_tokens: 7,
                 cache_creation_input_tokens: 5,
                 cache_read_input_tokens: 3,
-                // Finding [1]: before this field existed, the source usage's
-                // `reasoning_output: 55` above was silently dropped at this
-                // seam — a subagent's (including a Fusion panel's)
-                // reasoning spend never reached the caller at all.
+                // Reasoning is a subset of the SDK's output count; the
+                // projection keeps it visible to the subagent caller.
                 reasoning_output_tokens: 55,
             }
         );
@@ -5054,8 +5048,8 @@ mod tests {
         ));
         let observer = Arc::new(RecordingLifecycleObserver::default());
         let mut response = text_response("done");
-        response.usage.billable_tokens.input = 7;
-        response.usage.billable_tokens.output = 11;
+        response.usage.counts_mut().input_tokens = 7;
+        response.usage.counts_mut().output_tokens = 11;
         let spawner = PoolSubagentSpawner::new(pool)
             .with_api_client(Arc::new(QueueApi {
                 responses: Mutex::new(VecDeque::from([response])),

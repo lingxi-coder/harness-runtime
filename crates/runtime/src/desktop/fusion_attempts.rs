@@ -68,7 +68,7 @@ struct Entry {
     intent: cost::AttemptIntent,
     contribution: Option<cost::AttemptContribution>,
     dispatched: bool,
-    last_raw: Option<llm_runtime::Usage>,
+    last_raw: Option<llm_runtime::ExecutionUsage>,
     last_known: Option<cost::Usage>,
 }
 
@@ -668,7 +668,7 @@ impl llm_runtime::ModelAttemptLease for HostLease {
     }
     fn observe_usage(
         &mut self,
-        usage: &llm_runtime::Usage,
+        usage: &llm_runtime::ExecutionUsage,
         completeness: ModelAttemptUsageCompleteness,
     ) {
         if let Some(entry) = self
@@ -730,8 +730,8 @@ impl llm_runtime::ModelAttemptLease for HostLease {
                     },
                     usage: converted,
                     token_quote_nano_usd: if exact { token_quote_nano_usd } else { None },
-                    cache_read_input_tokens: usage.billable_tokens.cache_read,
-                    cache_creation_input_tokens: usage.billable_tokens.cache_write,
+                    cache_read_input_tokens: usage.counts().cache_read_tokens,
+                    cache_creation_input_tokens: usage.counts().cache_write_tokens,
                     api_duration_ms: duration,
                     api_duration_without_retries_ms: duration,
                 });
@@ -749,16 +749,19 @@ impl llm_runtime::ModelAttemptLease for HostLease {
                     token_quote_nano_usd: None,
                     usage: cost::Usage {
                         tokens: cost::TokenUsage {
-                            input: usage.billable_tokens.input,
-                            output: usage.billable_tokens.output,
-                            reasoning_output: usage.billable_tokens.reasoning_output,
-                            cache_read: usage.billable_tokens.cache_read,
+                            input: usage.counts().input_tokens,
+                            output: usage
+                                .counts()
+                                .output_tokens
+                                .saturating_sub(usage.counts().reasoning_tokens),
+                            reasoning_output: usage.counts().reasoning_tokens,
+                            cache_read: usage.counts().cache_read_tokens,
                             ..Default::default()
                         },
                         ..Default::default()
                     },
-                    cache_read_input_tokens: usage.billable_tokens.cache_read,
-                    cache_creation_input_tokens: usage.billable_tokens.cache_write,
+                    cache_read_input_tokens: usage.counts().cache_read_tokens,
+                    cache_creation_input_tokens: usage.counts().cache_write_tokens,
                     api_duration_ms: 0,
                     api_duration_without_retries_ms: 0,
                 });
@@ -921,16 +924,18 @@ impl RunAuthority {
                 }
             } else {
                 if let Some(raw) = &entry.last_raw {
-                    add(&mut usage.input_tokens, raw.billable_tokens.input);
-                    add(&mut usage.output_tokens, raw.billable_tokens.output);
+                    add(&mut usage.input_tokens, raw.counts().input_tokens);
                     add(
-                        &mut usage.reasoning_tokens,
-                        raw.billable_tokens.reasoning_output,
+                        &mut usage.output_tokens,
+                        raw.counts()
+                            .output_tokens
+                            .saturating_sub(raw.counts().reasoning_tokens),
                     );
-                    add(&mut usage.cache_read_tokens, raw.billable_tokens.cache_read);
+                    add(&mut usage.reasoning_tokens, raw.counts().reasoning_tokens);
+                    add(&mut usage.cache_read_tokens, raw.counts().cache_read_tokens);
                     add(
                         &mut usage.cache_write_tokens,
-                        raw.billable_tokens.cache_write,
+                        raw.counts().cache_write_tokens,
                     );
                 }
                 let known_money =

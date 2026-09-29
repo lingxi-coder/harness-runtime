@@ -890,7 +890,7 @@ fn desktop_attempt_explicit_reasoning_zero_and_fast_override_stay_pinned() {
     let config = llm_runtime::PricingConfig {
         overrides: vec![(
             "test".into(),
-            llm_runtime::TokenPricing {
+            llm_runtime::PricingOverride {
                 input_per_million: 0.002,
                 output_per_million: 0.002,
                 cache_read_per_million: 0.002,
@@ -911,7 +911,7 @@ fn desktop_attempt_explicit_reasoning_zero_and_fast_override_stay_pinned() {
     let stale = llm_runtime::PricingConfig {
         overrides: vec![(
             "test".into(),
-            llm_runtime::TokenPricing::input_output(1.0, 1.0),
+            llm_runtime::PricingOverride::input_output(1.0, 1.0),
         )],
         ..Default::default()
     };
