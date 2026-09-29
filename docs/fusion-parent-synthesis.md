@@ -1,6 +1,6 @@
 # Fusion 父模型综合设计
 
-状态：第 1 阶段（analysis 模式下的父模型综合）、第 2a 阶段（宿主证据核对）与第 3 阶段（沙箱按命令根目录解析）已实现；其余为设计草案（2026-09-28）。
+状态：第 1 阶段（analysis 模式下的父模型综合）、第 2a 阶段（宿主证据核对）、第 3 阶段（沙箱按命令根目录解析）、第 4 阶段（implement 模式）与第 5 阶段（Fusion 模式入口、空闲唤醒契约）已实现；2b（带工具的 analyst）仍为设计草案（2026-09-29）。
 两种 panel 模式（analysis / implement）在各阶段的差异见"两种 panel 模式"一节。
 
 ## 背景与目标
@@ -115,9 +115,18 @@ analyst 失败（超时、解析失败、结构化输出不支持、provider 错
 | Agent 工具 | 工具结果的 `model_content` 即材料 | 工具调用结果 |
 | `/fusion` | 材料写入任务 `final_text`，经 `<task-notification>` 的 `<result>` 进入主模型上下文（Fusion 专用上限 80K UTF-16 字符）；空闲时由宿主唤醒一轮 | 紧凑 `<fusion-result>` 摘要（run-id、status、各 panel 状态、egress、usage），排除出模型上下文；完成提示说明材料已交给主模型 |
 
-**已知缺口**：本仓库内只有移动端主循环在任务完成时调用
-`ConversationOrchestrator::run_task_notification_rewake`。desktop 主循环在 LingXi，
-若未接此调用，`/fusion` 完成后要等用户下一条消息，主模型才会拿到材料并综合。
+**空闲唤醒（宿主契约，第 5 阶段确认）**：`/fusion` 完成后，任务注册表把终态写入并递增
+通知修订号（`finish_fusion_terminal` 现在也会递增；此前缺这一步，订阅修订号的宿主不会醒）。
+拥有主循环的宿主（移动端已接；LingXi desktop 需接）按以下顺序处理：
+`subscribe_task_notifications()` 订阅 → 检查 `has_pending_task_notifications_for(None)` →
+安装自己的取消与权限生命周期 → `ConversationOrchestrator::run_task_notification_rewake`。
+它在回合闸门内复查，主模型正忙时不会打断，通知已被当前回合消耗时不会多开一轮。
+`DesktopRuntime` 公开 `orchestrator` 与 `task_registry`，LingXi 直接使用即可。
+本仓库的 desktop 运行时不自行驱动这一轮：那会绕过宿主的 UI 与权限生命周期，
+并且对 bash、agent 等所有后台任务生效。契约由
+`registry_test::a_finished_fusion_run_wakes_an_idle_host_with_the_material_as_result`
+（完成 → 修订号变化 → 待处理通知的 `<result>` 为材料 → 消耗一次）和
+`task_notifications_provider` 的 `idle_wake_*` 测试共同覆盖。
 
 ## 第 2a 阶段：宿主证据核对（已实现）
 
@@ -485,14 +494,22 @@ Fusion 本身从不写用户工作区，主模型对用户工作区的写入全�
 
 ## 后续设计
 
-### Fusion 模式
+### Fusion 模式（第 5 阶段，已实现）
 
 Fusion 模式 = 用户选定的主模型 + 开启 fusion 入口 + 一段何时发起的系统提示。不改模型调用层，
 不触碰 llm-boundary 门禁。触发方式：
 
-- 用户显式：`/fusion`，或模式开关"下一条任务并行处理"。
+- 用户显式：`/fusion`。
+- 模式开关：设置 `fusion.proactive`（默认 false，需 `fusion.enabled`）。开启后 Agent 工具列表里
+  `fusion` 条目的说明前置一段指令：非平凡的编码、调试、评审、设计、规划请求先发起 Fusion，
+  简单问题、单行修改、查询与无需比较的追问跳过，已有一次未完成运行时不再发起。
+  "下一条任务并行处理"之类的界面开关由宿主读写这个键，本仓库不放界面。
+  链路：`FusionSettingsJson.proactive` → `FusionRuntimeConfig.proactive` →
+  `FusionAgentSurface.proactive` → `append_fusion_listing`。每次调用重新加载配置，
+  改设置立即生效。
 - 主模型发起：Agent 工具 `subagent_type: "fusion"`。默认由用户确认后执行，避免成本失控；
   implement 模式可按 `autoApproveMaxUsd` 在报价以内自动执行（见"两种 panel 模式 → 选择模式"）。
+  Fusion 模式只改变主模型的倾向，不放宽任何确认、预算或隔离要求。
 
 两种 panel 模式的完整设计见上文"两种 panel 模式"。
 
@@ -575,7 +592,8 @@ worktree。
    2. `fusion-implementer` 与非冒泡的 worktree 限定权限模式。
    3. 补丁采集与宿主验证。
    4. analyst 输入、材料渲染、`/fusion --implement` 与 Agent 工具 `fusion_mode`。
-5. **Fusion 模式入口**：模式开关、主模型发起提示词、确认交互；确认 LingXi desktop 的空闲唤醒。
+5. **Fusion 模式入口**：已完成。`fusion.proactive` 模式开关与主模型发起提示词；确认交互沿用第 4 阶段；
+   空闲唤醒的宿主契约已写明，并修复了 `/fusion` 完成时不递增通知修订号的缺口（LingXi desktop 需按契约接线）。
 
 ## 待决问题
 

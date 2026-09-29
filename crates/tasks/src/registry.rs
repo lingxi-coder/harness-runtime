@@ -3511,6 +3511,11 @@ impl TaskRegistry {
             entry.clone()
         };
 
+        // The terminal flip is what makes the notification drainable, so it
+        // must move the revision like every other terminal path: an idle host
+        // waits on this to start the turn where the parent model synthesizes
+        // from the material.
+        self.bump_notification_revision();
         self.fire_task_completed_hook(&task_id, status, &updated)
             .await;
         Ok(updated)

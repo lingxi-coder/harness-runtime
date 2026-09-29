@@ -1877,6 +1877,85 @@ async fn a_fusion_row_survives_the_sweep_until_its_publication_settles() {
     );
 }
 
+/// The host contract behind the `/fusion` hand-off: a finished run must make
+/// the registry announce a pending notification (so an idle host wakes a turn)
+/// and that notification's `<result>` must carry the material the parent model
+/// synthesizes from. Hosts that own the main loop (LingXi desktop, mobile)
+/// subscribe, see the revision move, then call
+/// `ConversationOrchestrator::run_task_notification_rewake`.
+#[tokio::test]
+async fn a_finished_fusion_run_wakes_an_idle_host_with_the_material_as_result() {
+    let (_d, mut registry) = make_registry();
+    registry.register_handler(
+        TaskType::LocalFusion,
+        RecordingHandler::new(TaskType::LocalFusion, "fwake1"),
+    );
+    let request = platform_api::FusionRequest {
+        schema_version: 1,
+        origin: platform_api::FusionOrigin::Slash,
+        prompt: "review this".into(),
+        preset: platform_api::FusionPreset::Quality,
+        models: None,
+        dimensions: vec!["coverage".into()],
+        partial_ok: true,
+        max_panel: None,
+        cross_provider: false,
+        parent_profile: "openai".into(),
+        parent_model: "gpt-5.4".into(),
+        mode: Default::default(),
+        verify_commands: Vec::new(),
+    };
+    let id = registry
+        .spawn(
+            TaskType::LocalFusion,
+            TaskSpawnInput::LocalFusion {
+                request,
+                conversation_id: "11111111-2222-4333-8444-555555555555".into(),
+            },
+            "Fusion quality same-provider: review this".into(),
+        )
+        .await
+        .expect("spawn");
+
+    // Subscribe before checking pending, as the trait documents.
+    let mut revisions = registry.subscribe_task_notifications();
+    revisions.mark_unchanged();
+    assert!(
+        !registry.has_pending_task_notifications_for(None).await,
+        "a running fusion run has nothing to deliver yet"
+    );
+
+    registry
+        .finish_fusion_terminal(
+            &id,
+            "fu_wake".into(),
+            "<fusion-material>P1 says X</fusion-material>".into(),
+            TaskStatus::Completed,
+        )
+        .await
+        .expect("terminal");
+
+    assert!(
+        revisions.has_changed().unwrap_or(false),
+        "completion must move the notification revision so an idle host wakes"
+    );
+    assert!(registry.has_pending_task_notifications_for(None).await);
+
+    let pending = registry.take_pending_task_notifications().await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].task_type, "local_fusion");
+    assert_eq!(pending[0].status, "completed");
+    assert_eq!(
+        pending[0].result.as_deref(),
+        Some("<fusion-material>P1 says X</fusion-material>"),
+        "the model-facing result is the material, not a user-facing summary"
+    );
+    assert!(
+        !registry.has_pending_task_notifications_for(None).await,
+        "consume-once: the wake turn drains the notification"
+    );
+}
+
 #[tokio::test]
 async fn spawn_publishes_the_handlers_captured_fusion_timeout_on_the_task_state() {
     const TIMEOUT_MS: u64 = 3_600_250;

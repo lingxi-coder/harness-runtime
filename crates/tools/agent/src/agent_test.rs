@@ -1205,6 +1205,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// implement-mode questions the Agent tool asks.
     struct ImplementFusion {
         available: bool,
+        proactive: bool,
         confirmation: platform_api::ImplementConfirmation,
         requests: std::sync::Mutex<Vec<platform_api::FusionRequest>>,
     }
@@ -1213,6 +1214,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         fn new(available: bool, required: bool) -> Arc<Self> {
             Arc::new(Self {
                 available,
+                proactive: false,
                 confirmation: platform_api::ImplementConfirmation {
                     required,
                     quote_nano_usd: Some(2_500_000_000),
@@ -1247,6 +1249,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             platform_api::FusionAgentSurface {
                 enabled: true,
                 implement_available: self.available,
+                proactive: self.proactive,
                 ..platform_api::FusionAgentSurface::default()
             }
         }
@@ -1263,6 +1266,26 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         ) -> platform_api::ImplementConfirmation {
             self.confirmation
         }
+    }
+
+    #[test]
+    fn fusion_mode_changes_only_the_listing_text() {
+        let listing_text = |proactive: bool| {
+            let mut fusion = ImplementFusion::new(false, false);
+            Arc::get_mut(&mut fusion).unwrap().proactive = proactive;
+            let mut agents = Vec::new();
+            implement_tool(fusion).append_fusion_listing(&mut agents);
+            assert_eq!(agents.len(), 1, "the fusion entry is listed either way");
+            agents.remove(0).when_to_use
+        };
+        let plain = listing_text(false);
+        let proactive = listing_text(true);
+        assert!(!plain.contains("Fusion mode is ON"));
+        assert!(proactive.contains("Fusion mode is ON"));
+        assert!(
+            proactive.ends_with(&plain),
+            "the mode prepends its directive and keeps the normal description"
+        );
     }
 
     fn implement_tool(fusion: Arc<ImplementFusion>) -> AgentTool {

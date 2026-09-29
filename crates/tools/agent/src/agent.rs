@@ -104,6 +104,11 @@ const FUSION_AGENT_TYPE: &str = "fusion";
 
 const FUSION_WHEN_TO_USE: &str = "Parallel multi-model deliberation for complex code, task, plan, or review work. Returns the panels' anonymized answers plus an analysis of their consensus, contradictions, partial coverage, unique insights and blind spots — you then write the final answer yourself. About 4–5× the cost of a single agent.";
 
+/// Prepended to the listing text in Fusion mode (`fusion.proactive`). The user
+/// turned the mode on, so the cost trade-off is theirs; the guard against
+/// trivial requests is what keeps the mode from spending on one-line answers.
+const FUSION_PROACTIVE_WHEN_TO_USE: &str = "Fusion mode is ON: the user wants substantial work compared across models. Start with this agent, before answering or editing yourself, for any non-trivial coding, debugging, review, design or planning request. Skip it for simple questions, one-line edits, lookups and follow-ups that need no comparison, and never start a second run while one is pending.";
+
 /// Appended to [`FUSION_WHEN_TO_USE`] only on hosts that can run implement
 /// mode (`FusionAgentSurface::implement_available`).
 const FUSION_IMPLEMENT_WHEN_TO_USE: &str = "Pass fusion_mode \"implement\" when the panels should each make the change themselves, in their own git worktree, with the host running the user's verification commands on every result; you then write the final change in the user's workspace, using the panels' patches as references. Several times the cost of analysis, so use it for changes worth comparing, and expect the user to be asked to confirm it unless they allow it automatically.";
@@ -1829,6 +1834,11 @@ impl AgentTool {
                 FUSION_WHEN_TO_USE.to_string(),
                 "Fusion deliberation (read-only panel)",
             )
+        };
+        let when_to_use = if surface.proactive {
+            format!("{FUSION_PROACTIVE_WHEN_TO_USE} {when_to_use}")
+        } else {
+            when_to_use
         };
         agents.push(SubagentListingEntry {
             agent_type: FUSION_AGENT_TYPE.to_string(),

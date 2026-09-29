@@ -2375,6 +2375,7 @@ impl FusionExecutor for FusionOrchestrator {
             max_panel: config.max_panel,
             slash_cross_provider_default: config.slash_cross_provider_default,
             implement_available: self.implement_host.is_some(),
+            proactive: config.proactive,
         }
     }
 

@@ -124,6 +124,8 @@ pub struct FusionRuntimeConfig {
     pub slash_cross_provider_default: bool,
     /// Agent may request cross-provider.
     pub allow_cross_provider_for_agent: bool,
+    /// Fusion mode: the main model starts Fusion by default for substantial work.
+    pub proactive: bool,
     /// Hard allowlist of profile names. Empty = unrestricted.
     pub allowed_profiles: Vec<String>,
     /// Configured panel roster in the operator's priority order. A preset takes
@@ -172,6 +174,7 @@ impl FusionRuntimeConfig {
             analysis_protocol_retries: 1,
             slash_cross_provider_default: true,
             allow_cross_provider_for_agent: false,
+            proactive: false,
             allowed_profiles: Vec::new(),
             // Deliberately empty: there is no default model roster. Fusion
             // spends real money on every panel, and a default would mean the
@@ -283,6 +286,9 @@ impl FusionRuntimeConfig {
         }
         if let Some(v) = settings.allow_cross_provider_for_agent {
             cfg.allow_cross_provider_for_agent = v;
+        }
+        if let Some(v) = settings.proactive {
+            cfg.proactive = v;
         }
         if let Some(ref names) = settings.allowed_profiles {
             cfg.allowed_profiles.clone_from(names);
@@ -474,6 +480,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fusion_mode_is_off_by_default_and_read_from_settings() {
+        assert!(!FusionRuntimeConfig::defaults().proactive);
+        let on = FusionSettingsJson {
+            proactive: Some(true),
+            ..FusionSettingsJson::default()
+        };
+        assert!(FusionRuntimeConfig::from_settings(&on).unwrap().proactive);
+    }
 
     #[test]
     fn completion_policy_defaults_and_merged_partial_rejection() {

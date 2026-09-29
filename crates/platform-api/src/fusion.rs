@@ -3582,6 +3582,9 @@ pub struct FusionAgentSurface {
     /// The host can run implement-mode panels (see [`FusionImplementHost`]).
     /// The Agent tool offers `fusion_mode: "implement"` only when this is set.
     pub implement_available: bool,
+    /// Fusion mode: the listing tells the main model to start Fusion by
+    /// default for substantial work (`fusion.proactive`).
+    pub proactive: bool,
 }
 
 impl Default for FusionAgentSurface {
@@ -3596,6 +3599,7 @@ impl Default for FusionAgentSurface {
             max_panel: FUSION_MAX_PANEL,
             slash_cross_provider_default: true,
             implement_available: false,
+            proactive: false,
         }
     }
 }

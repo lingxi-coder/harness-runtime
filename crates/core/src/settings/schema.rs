@@ -1014,6 +1014,12 @@ pub struct FusionSettingsJson {
     /// Agent may request cross-provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_cross_provider_for_agent: Option<bool>,
+    /// Fusion mode: the main model starts a Fusion run by default for
+    /// substantial coding, review and planning work instead of only when it
+    /// judges the extra cost worthwhile. Needs `enabled`. Default false. A host
+    /// mode switch ("handle the next task in parallel") writes this key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proactive: Option<bool>,
     /// Hard allowlist of profile names. Empty = no extra restriction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_profiles: Option<Vec<String>>,
