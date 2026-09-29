@@ -13,7 +13,9 @@
 
 use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use super::StreamingError;
-use llm_runtime::{ContentBlock as LlmContentBlock, HistoryContentDelta, HistoryEvent, Usage};
+use llm_runtime::{
+    ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryContentDelta, HistoryEvent,
+};
 use platform_api::OutputStream;
 use protocol::{ContentBlock, ToolUseId};
 use serde_json::{json, Value};
@@ -108,10 +110,10 @@ pub async fn dispatch_event(
             // --include-partial-messages BEFORE the normal handling.
             if output.wants_partial_stream_events() {
                 let usage_val = json!({
-                    "input_tokens": response.usage.billable_tokens.input,
-                    "cache_creation_input_tokens": response.usage.billable_tokens.cache_write,
-                    "cache_read_input_tokens": response.usage.billable_tokens.cache_read,
-                    "output_tokens": response.usage.billable_tokens.output,
+                    "input_tokens": response.usage.counts().input_tokens,
+                    "cache_creation_input_tokens": response.usage.counts().cache_write_tokens,
+                    "cache_read_input_tokens": response.usage.counts().cache_read_tokens,
+                    "output_tokens": response.usage.counts().output_tokens.saturating_sub(response.usage.counts().reasoning_tokens),
                     "service_tier": "standard"
                 });
                 let event_json = serde_json::to_string(&json!({
@@ -309,7 +311,7 @@ pub async fn dispatch_event(
             if output.wants_partial_stream_events() {
                 let usage_val = usage.as_ref().map(|u| {
                     json!({
-                        "output_tokens": u.billable_tokens.output
+                        "output_tokens": u.counts().output_tokens.saturating_sub(u.counts().reasoning_tokens)
                     })
                 });
                 let mut delta_obj = serde_json::Map::new();
@@ -337,7 +339,11 @@ pub async fn dispatch_event(
             // caller (pump_stream → try_run_turn_streaming) can record it in
             // CostTracker. The `message_delta` usage is the authoritative
             // final snapshot (includes both input and output tokens).
-            let output_tokens = usage.as_ref().map_or(0, |u| u.billable_tokens.output);
+            let output_tokens = usage.as_ref().map_or(0, |u| {
+                u.counts()
+                    .output_tokens
+                    .saturating_sub(u.counts().reasoning_tokens)
+            });
             let usage_for_billing = usage.clone();
             if let Some(usage) = usage {
                 emit_usage_if_present(output, &usage).await;
@@ -440,18 +446,19 @@ fn reconstruct_delta_json(delta: &HistoryContentDelta) -> Value {
 /// Surface an SSE `usage` snapshot to the output sink as a live usage
 /// update (§0.7 "light up thinking/usage").
 ///
-/// Maps `llm_runtime::Usage` onto the four bare `u64` arguments of
+/// Maps `llm_runtime::ExecutionUsage` onto the four bare `u64` arguments of
 /// [`OutputStream::emit_usage`] with the same field mapping the cost
-/// pipeline uses: `input` ← `billable_tokens.input`, `output` ←
-/// `billable_tokens.output`, `cache_read` ← `billable_tokens.cache_read`,
-/// `cache_write` ← `billable_tokens.cache_write`.
+/// pipeline uses, with visible output excluding the SDK reasoning subset.
 async fn emit_usage_if_present(output: &Arc<dyn OutputStream>, usage: &Usage) {
     output
         .emit_usage(
-            usage.billable_tokens.input,
-            usage.billable_tokens.output,
-            usage.billable_tokens.cache_read,
-            usage.billable_tokens.cache_write,
+            usage.counts().input_tokens,
+            usage
+                .counts()
+                .output_tokens
+                .saturating_sub(usage.counts().reasoning_tokens),
+            usage.counts().cache_read_tokens,
+            usage.counts().cache_write_tokens,
         )
         .await;
 }
@@ -539,7 +546,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_event_ends_stream() {
-        use llm_runtime::{HistoryResponse, Usage};
+        use llm_runtime::{ExecutionUsage as Usage, HistoryResponse};
         let mut acc = BlockAccumulator::new();
         let mock = Arc::new(MockOutputStream::new());
         let out: Arc<dyn OutputStream> = mock.clone();

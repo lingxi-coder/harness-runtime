@@ -477,7 +477,7 @@ fn bound_hook_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_runtime::{HistoryResponse, Usage};
+    use llm_runtime::{ExecutionUsage as Usage, HistoryResponse};
     use std::sync::Mutex;
 
     /// One recorded `messages_create` call: `(model, profile, system, messages)`.

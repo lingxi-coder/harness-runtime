@@ -1021,13 +1021,13 @@ fn decode_response_usage_subset_normalization() {
             "total_tokens": 150,
         },
     }));
-    assert_eq!(decoded.usage.billable_tokens.input, 70);
-    assert_eq!(decoded.usage.billable_tokens.cache_read, 30);
-    assert_eq!(decoded.usage.billable_tokens.output, 30);
-    assert_eq!(decoded.usage.billable_tokens.reasoning_output, 20);
-    assert_eq!(decoded.usage.billable_tokens.cache_write, 0);
+    assert_eq!(decoded.usage.counts().input_tokens, 70);
+    assert_eq!(decoded.usage.counts().cache_read_tokens, 30);
+    assert_eq!(decoded.usage.counts().output_tokens, 50);
+    assert_eq!(decoded.usage.counts().reasoning_tokens, 20);
+    assert_eq!(decoded.usage.counts().cache_write_tokens, 0);
     assert_eq!(decoded.usage.provider_reported_total_tokens, Some(150));
-    assert_eq!(decoded.usage.context_tokens, Some(150));
+    assert_eq!(decoded.usage.context_tokens(), Some(150));
 }
 
 #[test]
@@ -1045,10 +1045,10 @@ fn decode_response_usage_subtraction_saturates() {
             "total_tokens": 15,
         },
     }));
-    assert_eq!(decoded.usage.billable_tokens.input, 0);
-    assert_eq!(decoded.usage.billable_tokens.output, 0);
-    assert_eq!(decoded.usage.billable_tokens.cache_read, 30);
-    assert_eq!(decoded.usage.billable_tokens.reasoning_output, 20);
+    assert_eq!(decoded.usage.counts().input_tokens, 0);
+    assert_eq!(decoded.usage.counts().output_tokens, 5);
+    assert_eq!(decoded.usage.counts().cache_read_tokens, 30);
+    assert_eq!(decoded.usage.counts().reasoning_tokens, 20);
 }
 
 #[test]
@@ -1064,16 +1064,16 @@ fn decode_response_usage_missing_details_objects_zero_tolerantly() {
             "total_tokens": 150,
         },
     }));
-    assert_eq!(decoded.usage.billable_tokens.input, 100);
-    assert_eq!(decoded.usage.billable_tokens.cache_read, 0);
-    assert_eq!(decoded.usage.billable_tokens.output, 50);
-    assert_eq!(decoded.usage.billable_tokens.reasoning_output, 0);
+    assert_eq!(decoded.usage.counts().input_tokens, 100);
+    assert_eq!(decoded.usage.counts().cache_read_tokens, 0);
+    assert_eq!(decoded.usage.counts().output_tokens, 50);
+    assert_eq!(decoded.usage.counts().reasoning_tokens, 0);
 }
 
 #[test]
 fn decode_response_missing_usage_defaults_to_zero() {
     let decoded = decode(completed_body(&serde_json::json!([])));
-    assert_eq!(decoded.usage, llm_runtime::Usage::default());
+    assert_eq!(decoded.usage, llm_runtime::ExecutionUsage::default());
 }
 
 #[test]
@@ -1150,8 +1150,8 @@ fn decode_response_http_400_maps_invalid_request_with_message() {
 // ── stream decoder ────────────────────────────────────────────────────────────
 
 use llm_runtime::{
-    HistoryContentDelta, HistoryEvent, HistoryMessageDelta, HistoryResponse, RawStreamFrame,
-    TokenUsage, Usage,
+    ExecutionUsage, HistoryContentDelta, HistoryEvent, HistoryMessageDelta, HistoryResponse,
+    RawStreamFrame,
 };
 
 /// Feed SSE data payloads (already de-framed) through a fresh stream decoder.
@@ -1229,7 +1229,7 @@ fn stream_provider_metadata_is_retained_on_start_and_terminal_usage() {
     assert!(matches!(
         &events[1],
         HistoryEvent::MessageDelta { usage: Some(usage), .. }
-            if usage.provider_metadata["stream"] == metadata && usage.billable_tokens.input == 2 && usage.billable_tokens.output == 3
+            if usage.provider_metadata["stream"] == metadata && usage.counts().input_tokens == 2 && usage.counts().output_tokens == 3
     ));
 }
 
@@ -1246,7 +1246,7 @@ fn stream_created_emits_message_start_snapshot() {
                 content: Vec::new(),
                 stop_reason: None,
                 stop_details: None,
-                usage: Usage::default(),
+                usage: ExecutionUsage::default(),
                 cost: None,
                 provider_metadata: serde_json::Value::Null,
             }),
@@ -1550,14 +1550,18 @@ fn stream_completed_closes_open_blocks_then_message_delta_and_stop() {
                     stop_reason: Some("end_turn".to_string()),
                     stop_details: None,
                 },
-                usage: Some(Usage {
-                    billable_tokens: TokenUsage {
-                        input: 60,
-                        output: 20,
-                        cache_read: 40,
-                        reasoning_output: 30,
-                        ..Default::default()
-                    },
+                usage: Some(ExecutionUsage {
+                    report: lingxi_llm_client::protocol::UsageReport::measured(
+                        lingxi_llm_client::protocol::Usage {
+                            input_tokens: 60,
+                            output_tokens: 50,
+                            cache_read_tokens: 40,
+                            reasoning_tokens: 30,
+                            ..Default::default()
+                        },
+                        lingxi_llm_client::protocol::UsageState::Complete
+                    ),
+
                     context_tokens: Some(150),
                     provider_reported_total_tokens: Some(150),
                     provider_metadata: serde_json::json!({"upstreamUsageState":"complete","input_tokens":60,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":40,"cache_creation":{"ephemeral_1h_input_tokens":0}}),
@@ -1903,7 +1907,7 @@ fn stream_content_delta_before_created_emits_synthetic_message_start() {
                     content: Vec::new(),
                     stop_reason: None,
                     stop_details: None,
-                    usage: Usage::default(),
+                    usage: ExecutionUsage::default(),
                     cost: None,
                     provider_metadata: serde_json::Value::Null,
                 }),
@@ -2046,7 +2050,7 @@ fn stream_happy_path_exact_event_sequence() {
                     content: Vec::new(),
                     stop_reason: None,
                     stop_details: None,
-                    usage: Usage::default(),
+                    usage: ExecutionUsage::default(),
                     cost: None,
                     provider_metadata: serde_json::Value::Null,
                 }),
@@ -2097,14 +2101,18 @@ fn stream_happy_path_exact_event_sequence() {
                     stop_reason: Some("tool_use".to_string()),
                     stop_details: None,
                 },
-                usage: Some(Usage {
-                    billable_tokens: TokenUsage {
-                        input: 60,
-                        output: 20,
-                        cache_read: 40,
-                        reasoning_output: 30,
-                        ..Default::default()
-                    },
+                usage: Some(ExecutionUsage {
+                    report: lingxi_llm_client::protocol::UsageReport::measured(
+                        lingxi_llm_client::protocol::Usage {
+                            input_tokens: 60,
+                            output_tokens: 50,
+                            cache_read_tokens: 40,
+                            reasoning_tokens: 30,
+                            ..Default::default()
+                        },
+                        lingxi_llm_client::protocol::UsageState::Complete
+                    ),
+
                     context_tokens: Some(150),
                     provider_reported_total_tokens: Some(150),
                     provider_metadata: serde_json::json!({"upstreamUsageState":"complete","input_tokens":60,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":40,"cache_creation":{"ephemeral_1h_input_tokens":0}}),

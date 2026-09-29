@@ -80,33 +80,11 @@ pub fn builtin_presets() -> BuiltinCatalog {
                         ..Default::default()
                     });
                     if let Some(rates) = rates.filter(|_| usd) {
-                        if let (Some(input), Some(output), Some(cache_read), Some(cache_write)) = (
-                            rates.input_per_million,
-                            rates.output_per_million,
-                            rates.cache_read_per_million,
-                            rates.cache_write_per_million.or_else(|| {
-                                matches!(
-                                    profile.protocol,
-                                    wire::ProtocolFamily::GeminiGenerateContent
-                                        | wire::ProtocolFamily::VertexGemini
-                                )
-                                .then_some(0.0)
-                            }),
-                        ) {
-                            pricing = std::mem::take(&mut pricing).with_price(
-                                provider_id.clone(),
-                                &model.billing_model,
-                                crate::TokenPricing {
-                                    input_per_million: input,
-                                    output_per_million: output,
-                                    cache_read_per_million: cache_read,
-                                    cache_write_per_million: cache_write,
-                                    reasoning_per_million: rates
-                                        .reasoning_per_million
-                                        .unwrap_or(output),
-                                },
-                            );
-                        }
+                        pricing = std::mem::take(&mut pricing).with_price(
+                            provider_id.clone(),
+                            &model.billing_model,
+                            rates.clone(),
+                        );
                     }
                     if let (Some(context_window), Some(max_output)) =
                         (metadata.context_window_tokens, metadata.max_output_tokens)

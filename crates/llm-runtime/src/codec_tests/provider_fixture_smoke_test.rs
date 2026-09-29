@@ -189,6 +189,6 @@ fn provider_fixtures_smoke_test() {
         decoded.provider_metadata["stop_reason"],
         serde_json::json!("end_turn")
     );
-    assert_eq!(decoded.usage.billable_tokens.input, 9);
-    assert_eq!(decoded.usage.billable_tokens.output, 3);
+    assert_eq!(decoded.usage.counts().input_tokens, 9);
+    assert_eq!(decoded.usage.counts().output_tokens, 3);
 }

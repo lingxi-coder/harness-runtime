@@ -110,7 +110,7 @@ impl agent::SubagentApiClient for HumanApi {
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
-            usage: llm_runtime::Usage::default(),
+            usage: llm_runtime::ExecutionUsage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
         })

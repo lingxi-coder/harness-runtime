@@ -16,10 +16,10 @@
 
 use crate::oauth::anthropic::callback::{CallbackError, CallbackListener};
 use crate::oauth::anthropic::client::{AuthorizeOptions, ClaudeAiOAuthClient, ExchangedTokens};
-use crate::oauth::anthropic::config::{
+use async_trait::async_trait;
+use lingxi_llm_client::auth::oauth::anthropic::{
     CLAUDE_CODE_INFERENCE_SCOPE, LONG_LIVED_OAUTH_TOKEN_TTL_SECONDS,
 };
-use async_trait::async_trait;
 use platform_api::{AuthError, AuthHandle, LoginInfo};
 use std::sync::Arc;
 use std::time::Duration;
@@ -465,10 +465,10 @@ fn real_browser_open(url: &str) -> Result<(), AuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth::anthropic::config::ClaudeAiOAuthConfig;
     use crate::oauth::anthropic::testsupport::{
         mem_credential_manager, Canned, MemStorage, MockHttp, TestClock,
     };
+    use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
     use lingxi_llm_client::transport::Transport;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

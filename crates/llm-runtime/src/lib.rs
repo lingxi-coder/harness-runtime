@@ -37,7 +37,6 @@ mod attempt_pricing;
 mod codec_tests;
 pub use attempt_pricing::{AttemptPriceBounds, AttemptTokenRates};
 
-pub mod anthropic;
 pub mod aws_auth;
 pub mod catalog;
 #[allow(missing_docs)]
@@ -55,6 +54,7 @@ pub use execution_context::ExecutionContext;
 pub mod fusion_hints;
 pub mod history;
 mod history_projection;
+mod history_usage;
 pub mod model;
 pub mod model_attempt;
 pub mod oauth;
@@ -70,7 +70,6 @@ pub mod route;
 #[allow(missing_docs)]
 pub mod service;
 pub mod services;
-pub mod sigv4;
 pub mod ssl;
 pub mod stream_accumulator;
 pub mod thinking_scope;
@@ -79,7 +78,6 @@ pub mod types;
 pub mod unicode_repair;
 mod upstream;
 
-pub use anthropic::normalize_anthropic_usage;
 pub use aws_auth::{
     AwsAuthProcess, AwsAuthRefresh, AwsAuthRefresher, AwsAuthSettings, AwsExportedCredentials,
     ShellAwsAuthProcess,
@@ -101,8 +99,7 @@ pub use config::{
     AuthStrategy, AzureConfig, Capabilities, ClientConfig, ConnectionSpec, CredentialConfig,
     FailoverTriggers, ModelProfile, PricingConfig, ProtocolFamily, ProviderProfile, SigningConfig,
 };
-pub use copilot::{CopilotLogin, CopilotSecret, DeviceCodeResponse, PollOutcome};
-pub use cost::{CostEstimator, PricingCatalog, PricingPolicy, TokenPricing};
+pub use cost::{CostEstimator, PricingCatalog, PricingOverride, PricingPolicy};
 pub use credentials::{
     CopilotExchangeCredentialProvider, Credential, CredentialProvider, CredentialScope,
     EnvCredentialProvider, StaticCredentialProvider,
@@ -112,10 +109,12 @@ pub use error::{
 };
 pub use fusion_hints::hints_for;
 pub use lingxi_llm_client::framing::eventstream::{crc32, EventStreamMessage, EventStreamSplitter};
+pub use lingxi_llm_client::protocol::TokenPricing;
 pub use lingxi_llm_client::protocol::{
     ContinuationRef, HostedTool, NativeExtension, NativeType, OutputFormat, PromptCachePolicy,
     WebSearchConfig,
 };
+pub use lingxi_llm_client::protocol::{ServerToolUsage, Usage, UsageReport, UsageState};
 pub use lingxi_llm_client::providers::google::files_wire::GeminiFile;
 pub use lingxi_llm_client::SseFrameSplitter;
 pub use model_attempt::{
@@ -143,7 +142,7 @@ pub use service::{ApiService, RetryInfo, RetryReporter, SubscriberState};
 pub use services::{ProviderServiceSnapshot, ProviderServices};
 pub use ssl::{detect_ssl_code, is_ssl_code, ssl_hint};
 pub use transport::{BoxFuture, Transport};
-pub use types::{CostEstimate, PricingModelRef, ProviderId, ServerToolUsage, TokenUsage, Usage};
+pub use types::{CostEstimate, ExecutionUsage, PricingModelRef, ProviderId};
 
 tokio::task_local! {
     /// The running agent's `experimental.cacheTtl`, scoped by the agent runner

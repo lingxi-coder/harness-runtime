@@ -162,7 +162,7 @@ impl LlmRequest {
             Some(other) => {
                 return Err(LlmError::InvalidRequest {
                     message: format!("unsupported service tier: {other}"),
-                })
+                });
             }
         };
         Ok(())

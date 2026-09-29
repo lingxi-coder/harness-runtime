@@ -2180,6 +2180,7 @@ dependencies = [
  "hooks",
  "insta",
  "jsonrpc",
+ "lingxi-llm-client",
  "llm-runtime",
  "local-apps",
  "lsp",

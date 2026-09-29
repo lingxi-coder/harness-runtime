@@ -24,51 +24,39 @@ fn nano_per_token(usd_per_million: f64) -> u64 {
 }
 
 /// Build a real `cost::ModelPricing` from the models.dev [`TokenPricing`].
-fn model_pricing_from_token_pricing(mr: &ModelRef, tp: &TokenPricing) -> ModelPricing {
+fn model_pricing_from_token_pricing(mr: &ModelRef, tp: &TokenPricing) -> Option<ModelPricing> {
+    if tp.currency.as_deref().unwrap_or("USD") != "USD" {
+        return None;
+    }
     let mut rates: HashMap<TokenClass, MoneyPerToken> = HashMap::new();
-    rates.insert(
-        TokenClass::Input,
-        MoneyPerToken {
-            nano_usd_per_token: nano_per_token(tp.input_per_million),
-        },
-    );
-    rates.insert(
-        TokenClass::Output,
-        MoneyPerToken {
-            nano_usd_per_token: nano_per_token(tp.output_per_million),
-        },
-    );
-    rates.insert(
-        TokenClass::CacheWrite,
-        MoneyPerToken {
-            nano_usd_per_token: nano_per_token(tp.cache_write_per_million),
-        },
-    );
-    rates.insert(
-        TokenClass::CacheRead,
-        MoneyPerToken {
-            nano_usd_per_token: nano_per_token(tp.cache_read_per_million),
-        },
-    );
-    // TokenPricing resolves an absent reasoning rate to the output rate when
-    // constructed. Zero here is an explicit free rate and must stay zero in
-    // both the host ledger and Fusion's captured prices.
-    rates.insert(
-        TokenClass::ReasoningOutput,
-        MoneyPerToken {
-            nano_usd_per_token: nano_per_token(tp.reasoning_per_million),
-        },
-    );
-    ModelPricing {
+    for (class, value) in [
+        (TokenClass::Input, tp.input_per_million),
+        (TokenClass::Output, tp.output_per_million),
+        (TokenClass::CacheWrite, tp.cache_write_per_million),
+        (TokenClass::CacheRead, tp.cache_read_per_million),
+        (
+            TokenClass::ReasoningOutput,
+            tp.reasoning_per_million.or(tp.output_per_million),
+        ),
+    ] {
+        if let Some(value) = value.filter(|value| value.is_finite() && *value >= 0.0) {
+            rates.insert(
+                class,
+                MoneyPerToken {
+                    nano_usd_per_token: nano_per_token(value),
+                },
+            );
+        }
+    }
+    (!rates.is_empty()).then(|| ModelPricing {
         model_ref: mr.clone(),
         token_rates: rates,
-        // models.dev non-Anthropic models bill only tokens; no per-request units.
         non_token_rates_nano_usd: HashMap::<NonTokenBillableUnit, u64>::new(),
         effective_from: None,
         source: PricingSource::BuiltInReference {
             provider: mr.provider.clone(),
         },
-    }
+    })
 }
 
 /// Preserve published USD buckets when the provider has not published every
@@ -165,7 +153,10 @@ pub fn pricing_for(providers: &[ProviderProfile]) -> PricingCatalog {
                     || id == &model.request_model
                     || id == &model.billing_model
             }) {
-                catalog = catalog.with_entry(model_pricing_from_token_pricing(&mr, override_price));
+                if let Some(price) = model_pricing_from_token_pricing(&mr, &override_price.to_sdk())
+                {
+                    catalog = catalog.with_entry(price);
+                }
                 continue;
             }
             // A subscription must never inherit a token price from a
@@ -205,8 +196,10 @@ pub fn pricing_for(providers: &[ProviderProfile]) -> PricingCatalog {
                 continue;
             }
             // Prefer the model's real models.dev price over the $5/$25 default.
-            if let Some(tp) = preset_pricing.get(&profile.provider_id, &model.billing_model) {
-                let mut price = model_pricing_from_token_pricing(&mr, &tp);
+            if let Some(mut price) = preset_pricing
+                .get(&profile.provider_id, &model.billing_model)
+                .and_then(|tp| model_pricing_from_token_pricing(&mr, &tp))
+            {
                 if conditional {
                     price.source = PricingSource::PublishedPartial {
                         provider: mr.provider.clone(),
@@ -240,8 +233,8 @@ pub fn pricing_for(providers: &[ProviderProfile]) -> PricingCatalog {
 mod tests {
     use super::*;
     use llm_runtime::{
-        AuthStrategy, Capabilities, CredentialConfig, ModelProfile, PricingConfig, ProtocolFamily,
-        TokenPricing,
+        AuthStrategy, Capabilities, CredentialConfig, ModelProfile, PricingConfig, PricingOverride,
+        ProtocolFamily,
     };
 
     fn user_profile(name: &str, model: &str) -> ProviderProfile {
@@ -384,7 +377,7 @@ mod tests {
         profile
             .pricing
             .overrides
-            .push((model.display_model, TokenPricing::input_output(1.0, 8.0)));
+            .push((model.display_model, PricingOverride::input_output(1.0, 8.0)));
         let model_ref = ModelRef {
             provider: cost_provider_id(&profile.profile_name, &profile.provider_id),
             model: model.billing_model,
@@ -728,7 +721,7 @@ mod tests {
         let mut profile = user_profile("openrouter", "sonar-deep-research");
         profile.pricing.overrides.push((
             "sonar-deep-research".to_string(),
-            TokenPricing {
+            PricingOverride {
                 input_per_million: 2.0,
                 output_per_million: 8.0,
                 cache_write_per_million: 0.0,
@@ -836,7 +829,7 @@ mod tests {
         profile.pricing.billing_mode = ModelBillingMode::Subscription;
         profile.pricing.overrides.push((
             "claude-opus-4.6".to_string(),
-            TokenPricing::input_output(1.0, 2.0),
+            PricingOverride::input_output(1.0, 2.0),
         ));
         let cat = pricing_for(&[profile]);
         let mr = ModelRef {

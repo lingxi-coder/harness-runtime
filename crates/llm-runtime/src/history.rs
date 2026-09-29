@@ -1,7 +1,7 @@
 //! Host history and presentation DTOs. Provider execution uses SDK protocol types.
 //! These serialized shapes remain stable for transcript and UI consumers.
 
-use crate::{CostEstimate, Usage};
+use crate::{CostEstimate, ExecutionUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -23,7 +23,7 @@ pub struct HistoryResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_details: Option<HistoryStopDetails>,
     /// Normalized usage.
-    pub usage: Usage,
+    pub usage: ExecutionUsage,
     /// Optional per-call cost estimate.
     pub cost: Option<CostEstimate>,
     /// Redacted provider metadata.
@@ -69,7 +69,7 @@ pub enum HistoryEvent {
         /// Terminal response delta payload.
         delta: HistoryMessageDelta,
         /// Normalized usage at the terminal boundary.
-        usage: Option<Usage>,
+        usage: Option<ExecutionUsage>,
     },
     /// Terminal response stop marker.
     MessageStop,

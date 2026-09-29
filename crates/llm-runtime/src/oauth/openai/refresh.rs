@@ -9,9 +9,12 @@
 
 #![allow(dead_code)]
 
+use crate::oauth::lifecycle::{
+    self, BearerToken, OAuthHookError, Preflight, RefreshableToken, TokenHash,
+};
 use crate::oauth::openai::client::OAuthError;
-use crate::oauth::openai::config::OpenAiOAuthConfig;
 use async_trait::async_trait;
+use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
 use lingxi_llm_client::auth::oauth::openai::{
     refresh_token, ExchangedTokens as TokenEndpointResponse, OAuthProtocolError,
 };
@@ -20,38 +23,9 @@ use lingxi_llm_client::{
     Transport,
 };
 use protocol::Secret;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
-
-// ---------------------------------------------------------------------------
-// Local OAuth types
-// ---------------------------------------------------------------------------
-
-/// Bearer token wrapper.
-#[derive(Debug)]
-pub struct BearerToken(pub Secret<String>);
-
-/// SHA-256 of the in-use access token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TokenHash(pub [u8; 32]);
-
-/// Errors returned by [`RefreshDriver::refresh`].
-#[derive(Debug, Clone, Error)]
-pub enum OAuthHookError {
-    /// Refresh attempted but the `IdP` rejected the `refresh_token`.
-    #[error("refresh failed: {0}")]
-    RefreshFailed(String),
-    /// The token hash passed to `refresh` is older than what the driver has
-    /// stored; another caller already rotated. Caller should retry.
-    #[error("token stale; reload from store")]
-    TokenStale,
-    /// Network or transport failure reaching the `IdP`.
-    #[error("provider unreachable: {0}")]
-    ProviderUnreachable(String),
-}
 
 /// Threshold: refresh proactively when expiry is within 5 minutes.
 pub const PROACTIVE_LEAD_CAP: Duration = Duration::from_secs(5 * 60);
@@ -83,10 +57,16 @@ impl TokenInfo {
     /// SHA-256 of the `access_token` bytes.
     #[must_use]
     pub fn token_hash(&self) -> TokenHash {
-        let mut h = Sha256::new();
-        h.update(self.access_token.expose_secret().as_bytes());
-        let digest: [u8; 32] = h.finalize().into();
-        TokenHash(digest)
+        lifecycle::token_hash(&self.access_token)
+    }
+}
+
+impl RefreshableToken for TokenInfo {
+    fn access_token(&self) -> &Secret<String> {
+        &self.access_token
+    }
+    fn refresh_token(&self) -> Option<&Secret<String>> {
+        self.refresh_token.as_ref()
     }
 }
 
@@ -300,28 +280,11 @@ impl RefreshDriver {
     /// `prev_token_hash`. If another task already rotated the token under the
     /// lock, returns the current token without making an HTTP call.
     pub async fn refresh(&self, prev_token_hash: TokenHash) -> Result<BearerToken, OAuthHookError> {
-        // 1. Acquire the single-flight lock.
+        // Keep this guard through the network request and state rotation.
         let _guard = self.state.refresh_lock.lock().await;
-
-        // 2. Double-check after acquire.
-        {
-            let token = self.state.token.read().await;
-            let current_hash = token.token_hash();
-            if current_hash != prev_token_hash {
-                return Ok(BearerToken(Secret::new(
-                    token.access_token.expose_secret().clone(),
-                )));
-            }
-        }
-
-        // 3. Hash still matches → we own the refresh. Read the refresh_token.
-        let refresh_token = {
-            let token = self.state.token.read().await;
-            token
-                .refresh_token
-                .as_ref()
-                .map(|s| Secret::new(s.expose_secret().clone()))
-                .ok_or_else(|| OAuthHookError::RefreshFailed("no refresh_token in state".into()))?
+        let refresh_token = match lifecycle::preflight(&self.state.token, prev_token_hash).await? {
+            Preflight::AlreadyRotated(bearer) => return Ok(bearer),
+            Preflight::RefreshWith(token) => token,
         };
 
         let started = std::time::Instant::now();
@@ -353,7 +316,7 @@ impl RefreshDriver {
 
         // Update account_id/fedramp/email from id_token if present.
         let (new_account_id, new_fedramp, new_email) = if let Some(ref id_token) = body.id_token {
-            if let Some(claims) = crate::oauth::openai::token_data::parse_id_token(id_token) {
+            if let Some(claims) = lingxi_llm_client::auth::oauth::openai::parse_id_token(id_token) {
                 // An id_token that omits `email` must not erase the identity
                 // captured at login: the claim is stable for a given account,
                 // and the refresh response sometimes drops it.
@@ -420,19 +383,9 @@ impl RefreshDriver {
     }
 }
 
-// Telemetry helpers
+// Provider event names stay distinct; metadata construction is shared.
 async fn emit_refresh_started(bus: &Option<Arc<telemetry::AnalyticsBus>>, trigger: &str) {
-    let Some(bus) = bus else { return };
-    let mut m = telemetry::sink::LogEventMetadata::new();
-    m.insert(
-        "trigger".into(),
-        telemetry::sink::AnalyticsValue::String(
-            telemetry::Verified::assert_safe(trigger.to_string())
-                .as_str()
-                .to_string(),
-        ),
-    );
-    bus.log_event("tengu_openai_oauth_refresh_started", m).await;
+    lifecycle::emit_refresh_started(bus, "tengu_openai_oauth_refresh_started", trigger).await;
 }
 
 async fn emit_refresh_succeeded(
@@ -441,26 +394,14 @@ async fn emit_refresh_succeeded(
     new_expiry_unix: i64,
     duration_ms: u64,
 ) {
-    let Some(bus) = bus else { return };
-    let mut m = telemetry::sink::LogEventMetadata::new();
-    m.insert(
-        "trigger".into(),
-        telemetry::sink::AnalyticsValue::String(
-            telemetry::Verified::assert_safe(trigger.to_string())
-                .as_str()
-                .to_string(),
-        ),
-    );
-    m.insert(
-        "new_expiry_unix".into(),
-        telemetry::sink::AnalyticsValue::Int(new_expiry_unix),
-    );
-    m.insert(
-        "duration_ms".into(),
-        telemetry::sink::AnalyticsValue::Int(i64::try_from(duration_ms).unwrap_or(i64::MAX)),
-    );
-    bus.log_event("tengu_openai_oauth_refresh_succeeded", m)
-        .await;
+    lifecycle::emit_refresh_succeeded(
+        bus,
+        "tengu_openai_oauth_refresh_succeeded",
+        trigger,
+        new_expiry_unix,
+        duration_ms,
+    )
+    .await;
 }
 
 async fn emit_refresh_failed(
@@ -468,40 +409,17 @@ async fn emit_refresh_failed(
     trigger: &str,
     error_kind: &str,
 ) {
-    let Some(bus) = bus else { return };
-    let mut m = telemetry::sink::LogEventMetadata::new();
-    m.insert(
-        "trigger".into(),
-        telemetry::sink::AnalyticsValue::String(
-            telemetry::Verified::assert_safe(trigger.to_string())
-                .as_str()
-                .to_string(),
-        ),
-    );
-    m.insert(
-        "error_kind".into(),
-        telemetry::sink::AnalyticsValue::String(
-            telemetry::Verified::assert_safe(error_kind.to_string())
-                .as_str()
-                .to_string(),
-        ),
-    );
-    bus.log_event("tengu_openai_oauth_refresh_failed", m).await;
+    lifecycle::emit_refresh_failed(
+        bus,
+        "tengu_openai_oauth_refresh_failed",
+        trigger,
+        error_kind,
+    )
+    .await;
 }
 
 async fn emit_proactive_canceled(bus: &Option<Arc<telemetry::AnalyticsBus>>, reason: &str) {
-    let Some(bus) = bus else { return };
-    let mut m = telemetry::sink::LogEventMetadata::new();
-    m.insert(
-        "reason".into(),
-        telemetry::sink::AnalyticsValue::String(
-            telemetry::Verified::assert_safe(reason.to_string())
-                .as_str()
-                .to_string(),
-        ),
-    );
-    bus.log_event("tengu_openai_oauth_proactive_canceled", m)
-        .await;
+    lifecycle::emit_proactive_canceled(bus, "tengu_openai_oauth_proactive_canceled", reason).await;
 }
 
 /// Compute the proactive refresh lead for a token with `remaining` lifetime.
@@ -509,12 +427,7 @@ async fn emit_proactive_canceled(bus: &Option<Arc<telemetry::AnalyticsBus>>, rea
 /// Returns `min(remaining / 2, PROACTIVE_LEAD_CAP)` in whole seconds.
 #[must_use]
 pub fn proactive_lead(remaining: Duration) -> Duration {
-    let half = Duration::from_secs(remaining.as_secs() / 2);
-    if half < PROACTIVE_LEAD_CAP {
-        half
-    } else {
-        PROACTIVE_LEAD_CAP
-    }
+    lifecycle::proactive_lead(remaining, PROACTIVE_LEAD_CAP)
 }
 
 impl RefreshDriver {

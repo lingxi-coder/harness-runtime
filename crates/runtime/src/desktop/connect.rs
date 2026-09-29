@@ -67,10 +67,10 @@ use command_api::builtins::{
 use lingxi_core::settings::enterprise::{
     check_org_membership, ForceLoginOrgPin, OrgMembershipCheck,
 };
-use llm_runtime::copilot::{CopilotLogin, DeviceCodeResponse, PollOutcome};
 use llm_runtime::oauth::openai as openai_oauth;
 use llm_runtime::services::sdk;
 use platform_api::AuthHandle;
+use sdk::auth::oauth::copilot::{CopilotLogin, DeviceCodeResponse, PollOutcome};
 use sdk::transport::Transport;
 use std::sync::Mutex as StdMutex;
 
@@ -150,7 +150,7 @@ impl EngineCopilotConnect {
             credentials,
             CopilotLogin::new(
                 transport,
-                llm_runtime::copilot::login::copilot_client_id(),
+                llm_runtime::copilot::copilot_client_id(),
                 llm_runtime::copilot::COPILOT_USER_AGENT,
             ),
             Arc::new(TokioSleeper),
@@ -190,7 +190,7 @@ impl CopilotConnectDriver for EngineCopilotConnect {
     async fn begin(&self, domain: Option<&str>) -> Result<CopilotConnectStep, ConnectError> {
         let dc = self
             .login
-            .begin(domain.unwrap_or(llm_runtime::copilot::DEFAULT_GITHUB_DOMAIN))
+            .begin(domain.unwrap_or(sdk::auth::oauth::copilot::DEFAULT_GITHUB_DOMAIN))
             .await
             .map_err(|e| ConnectError::Network(e.to_string()))?;
         let step = CopilotConnectStep {
@@ -711,7 +711,7 @@ mod tests {
     }
 
     use command_api::builtins::CopilotConnectDriver;
-    use llm_runtime::copilot::{CopilotLogin, COPILOT_CLIENT_ID};
+    use sdk::auth::oauth::copilot::{CopilotLogin, COPILOT_CLIENT_ID};
     use sdk::transport::{
         HttpRequest as SdkHttpRequest, HttpResponse as SdkHttpResponse, StreamResponse, Transport,
     };

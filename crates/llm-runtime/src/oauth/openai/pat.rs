@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 
 use crate::oauth::openai::client::OAuthError;
-use crate::oauth::openai::config::OpenAiOAuthConfig;
+use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
 
 pub use lingxi_llm_client::auth::oauth::openai::PatMetadata;
 

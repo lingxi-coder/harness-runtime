@@ -17,7 +17,7 @@
 //! step, say) silently reports every turn as having produced nothing, and no
 //! test that only counts messages would notice.
 
-use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, Usage};
+use llm_runtime::{ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     noop_hook_executor, text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient,

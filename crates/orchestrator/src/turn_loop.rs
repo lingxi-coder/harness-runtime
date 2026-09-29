@@ -581,8 +581,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // supervisor before any tool/cache/progress/telemetry await below.
     let owned_cost_response = orch.model_runtime.cost_tracker.as_ref().map(|_| {
         let usage = crate::cost_wiring::llm_usage_to_cost_usage(&response.usage);
-        let cache_read = response.usage.billable_tokens.cache_read;
-        let cache_create = response.usage.billable_tokens.cache_write;
+        let cache_read = response.usage.counts().cache_read_tokens;
+        let cache_create = response.usage.counts().cache_write_tokens;
         let quote = response
             .cost
             .as_ref()
@@ -627,9 +627,9 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         let mut ledger = orch.model_runtime.prompt_cache_ledger.lock().await;
         ledger.record(cost::prompt_cache_ledger::RequestFacts {
             at_ms: now_ms,
-            input_tokens: response.usage.billable_tokens.input,
-            cache_read_tokens: response.usage.billable_tokens.cache_read,
-            cache_creation_tokens: response.usage.billable_tokens.cache_write,
+            input_tokens: response.usage.counts().input_tokens,
+            cache_read_tokens: response.usage.counts().cache_read_tokens,
+            cache_creation_tokens: response.usage.counts().cache_write_tokens,
             // The port asks for the 5m TTL; a 1h request would set this from
             // the cache-control it sent.
             ttl: cost::prompt_cache_ledger::CacheTtl::FiveMinutes,
@@ -646,7 +646,11 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
 
     // A3: this call's output-token count, returned to the budget loop so it can
     // accumulate `global_turn_tokens` (TS `getTurnOutputTokens()`).
-    let output_tokens = response.usage.billable_tokens.output;
+    let output_tokens = response
+        .usage
+        .counts()
+        .output_tokens
+        .saturating_sub(response.usage.counts().reasoning_tokens);
 
     // #55: cache this response's total input tokens (the `Xtt` last-usage
     // snapshot) so the proactive fixed-prefix overflow guard can compute the
@@ -702,8 +706,12 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 bus,
                 &cost::ApiSuccessFields {
                     model: model.clone(),
-                    input_tokens: response.usage.billable_tokens.input,
-                    output_tokens: response.usage.billable_tokens.output,
+                    input_tokens: response.usage.counts().input_tokens,
+                    output_tokens: response
+                        .usage
+                        .counts()
+                        .output_tokens
+                        .saturating_sub(response.usage.counts().reasoning_tokens),
                     cached_input_tokens: cache_read,
                     uncached_input_tokens: cache_create,
                     duration_ms: dur_ms,
@@ -728,7 +736,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                     }
                     .to_string(),
                     ttft_ms: None,
-                    fast_mode: response.usage.speed.as_deref() == Some("fast"),
+                    fast_mode: response.usage.inference.service_tier
+                        == Some(llm_runtime::services::sdk::protocol::ServiceTier::Fast),
                     time_since_last_api_call_ms: orch.record_api_call_gap_ms(),
                 },
             )
@@ -801,16 +810,20 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             request_id = orch.api.last_request_id().unwrap_or_default(),
             model = %model,
             stop_reason = response.stop_reason.as_deref().unwrap_or(""),
-            input_tokens = response.usage.billable_tokens.input,
-            output_tokens = response.usage.billable_tokens.output,
+            input_tokens = response.usage.counts().input_tokens,
+            output_tokens = response.usage.counts().output_tokens.saturating_sub(response.usage.counts().reasoning_tokens),
             body = %text,
         );
         telemetry::otel::emit_assistant_response_log(
             orch.api.last_request_id().as_deref().unwrap_or_default(),
             &model,
             response.stop_reason.as_deref().unwrap_or(""),
-            response.usage.billable_tokens.input,
-            response.usage.billable_tokens.output,
+            response.usage.counts().input_tokens,
+            response
+                .usage
+                .counts()
+                .output_tokens
+                .saturating_sub(response.usage.counts().reasoning_tokens),
             &text,
         );
     }

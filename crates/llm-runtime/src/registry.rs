@@ -386,7 +386,7 @@ mod pricing_policy_tests {
         provider.profile_name = "captured-profile".into();
         provider.pricing.overrides = vec![(
             "billing-only-alias".into(),
-            crate::TokenPricing::input_output(3.0, 7.0),
+            crate::cost::PricingOverride::input_output(3.0, 7.0),
         )];
         let expected = provider.pricing.clone();
         let registry = ModelRegistry::from_config(crate::ClientConfig {

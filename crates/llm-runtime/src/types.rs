@@ -51,53 +51,77 @@ pub struct PricingModelRef {
     pub display_model: String,
 }
 
-/// Independent billable token buckets.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenUsage {
-    /// Billable input tokens.
-    pub input: u64,
-    /// Billable output tokens.
-    pub output: u64,
-    /// Billable cache-write tokens.
-    pub cache_write: u64,
-    /// Billable cache-read tokens.
-    pub cache_read: u64,
-    /// Separately billable reasoning output tokens.
-    pub reasoning_output: u64,
-}
-
-/// Normalized usage returned by provider codecs.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Usage {
-    /// Independent billable token buckets used for cost calculation.
-    pub billable_tokens: TokenUsage,
-    /// Optional context-window total.
+/// Host execution envelope around the SDK's measured usage and inference.
+///
+/// Token counts and completion state belong to the SDK. The remaining fields
+/// are presentation or settlement data and must never be used as protocol
+/// observations when pricing an attempt.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExecutionUsage {
+    /// Canonical SDK usage, including whether the observation is partial.
+    pub report: lingxi_llm_client::protocol::UsageReport,
+    /// Canonical SDK inference observations, including the reported tier.
+    pub inference: lingxi_llm_client::protocol::InferenceReport,
+    /// Context occupancy shown to the host; never used for SDK pricing.
     pub context_tokens: Option<u64>,
-    /// Optional total exactly as reported by the provider.
+    /// Provider total retained for historical presentation.
     pub provider_reported_total_tokens: Option<u64>,
-    /// Optional provider-reported server tool usage.
-    pub server_tool_use: Option<ServerToolUsage>,
-    /// Redacted provider metadata retained for diagnostics.
-    #[serde(default)]
+    /// Redacted presentation metadata retained for transcript consumers.
     pub provider_metadata: Value,
-    /// API speed tier actually used for this request (`"fast"` for the
-    /// priority/low-latency tier; absent = standard tier).
-    ///
-    /// Mirrors `api-client::UsageApi.speed` and claude-code's
-    /// `BetaUsage.speed` (`services/api/claude.ts:2985`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speed: Option<String>,
     /// Host-only estimate frozen from the completed physical stream. It is
     /// transferred to accounting and never serialized as provider metadata.
-    #[serde(skip)]
     pub cost_estimate: Option<CostEstimate>,
 }
 
-/// Provider-side server tool usage counters.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServerToolUsage {
-    /// Number of provider-side web search requests.
-    pub web_search_requests: u64,
+impl ExecutionUsage {
+    /// Combine cumulative start and terminal stream observations.
+    #[must_use]
+    pub fn merge_snapshot(&self, delta: &Self) -> Self {
+        crate::stream_accumulator::merge_usage(self, delta)
+    }
+
+    /// Construct a complete SDK measurement for a host-owned fixture or result.
+    #[must_use]
+    pub fn from_counts(usage: lingxi_llm_client::protocol::Usage) -> Self {
+        let total = usage.total();
+        Self {
+            report: lingxi_llm_client::protocol::UsageReport::measured(
+                usage,
+                lingxi_llm_client::protocol::UsageState::Complete,
+            ),
+            context_tokens: Some(total),
+            provider_reported_total_tokens: Some(total),
+            ..Self::default()
+        }
+    }
+    /// Provider counters, defaulting to zero only for display of missing data.
+    #[must_use]
+    pub fn counts(&self) -> lingxi_llm_client::protocol::Usage {
+        self.report.usage.unwrap_or_default()
+    }
+
+    /// Mutable canonical counters, creating a partial report when necessary.
+    pub fn counts_mut(&mut self) -> &mut lingxi_llm_client::protocol::Usage {
+        if self.report.usage.is_none()
+            && self.report.state == lingxi_llm_client::protocol::UsageState::Missing
+        {
+            self.report.state = lingxi_llm_client::protocol::UsageState::Partial;
+        }
+        self.report.usage.get_or_insert_default()
+    }
+
+    /// Context total derived from the SDK's disjoint token buckets.
+    #[must_use]
+    pub fn context_tokens(&self) -> Option<u64> {
+        self.context_tokens
+            .or_else(|| self.report.usage.map(|usage| usage.total()))
+    }
+
+    /// Provider-reported hosted tool counters, when present.
+    #[must_use]
+    pub fn server_tool_usage(&self) -> Option<lingxi_llm_client::protocol::ServerToolUsage> {
+        self.report.usage.and_then(|usage| usage.server_tool_usage)
+    }
 }
 
 /// Per-call cost estimate.

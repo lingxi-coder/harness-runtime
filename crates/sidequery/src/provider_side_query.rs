@@ -229,7 +229,7 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
 ///   as JSON. A non-JSON body leaves `structured` as `None` rather than
 ///   erroring — `MemorySelector` tolerates `None` (empty selection), so the
 ///   best-effort path is the safer default.
-/// * `usage` maps `llm_runtime::Usage.billable_tokens` → `cost::Usage` with the
+/// * `usage` maps canonical SDK counts → `cost::Usage` with the
 ///   same cross-naming the provider's own cost path uses: API `cache_write` →
 ///   cost `cache_write`, API `cache_read` → cost `cache_read`.
 fn decode_response(
@@ -295,15 +295,17 @@ fn decode_response(
         None
     };
 
-    let bt = resp.usage.billable_tokens;
+    let bt = resp.usage.counts();
     let usage = cost::Usage {
         tokens: cost::TokenUsage {
-            input: bt.input,
-            output: bt.output,
-            cache_read: bt.cache_read,
-            cache_write: bt.cache_write,
-            cache_write_1h: 0,
-            reasoning_output: bt.reasoning_output,
+            input: bt.input_tokens,
+            output: bt.output_tokens.saturating_sub(bt.reasoning_tokens),
+            cache_read: bt.cache_read_tokens,
+            cache_write: bt
+                .cache_write_tokens
+                .saturating_sub(bt.cache_write_1h_tokens),
+            cache_write_1h: bt.cache_write_1h_tokens,
+            reasoning_output: bt.reasoning_tokens,
         },
         server_tool_use: None,
         speed: None,
@@ -1915,7 +1917,7 @@ mod tests {
     struct SchemaAttemptProbe {
         usages: Mutex<
             Vec<(
-                llm_runtime::Usage,
+                llm_runtime::ExecutionUsage,
                 llm_runtime::ModelAttemptUsageCompleteness,
             )>,
         >,
@@ -1943,7 +1945,7 @@ mod tests {
         }
         fn observe_usage(
             &mut self,
-            usage: &llm_runtime::Usage,
+            usage: &llm_runtime::ExecutionUsage,
             completeness: llm_runtime::ModelAttemptUsageCompleteness,
         ) {
             self.0
@@ -1989,8 +1991,14 @@ mod tests {
         assert!(probe.settled.load(std::sync::atomic::Ordering::SeqCst));
         let usages = probe.usages.lock().unwrap();
         let (usage, completeness) = usages.last().unwrap();
-        assert_eq!(usage.billable_tokens.input, 1);
-        assert_eq!(usage.billable_tokens.output, 1);
+        assert_eq!(usage.counts().input_tokens, 1);
+        assert_eq!(
+            usage
+                .counts()
+                .output_tokens
+                .saturating_sub(usage.counts().reasoning_tokens),
+            1
+        );
         assert_eq!(
             *completeness,
             llm_runtime::ModelAttemptUsageCompleteness::Complete

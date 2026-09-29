@@ -170,17 +170,17 @@ impl CredentialProvider for EnvCredentialProvider {
 ///
 /// `api.githubcopilot.com` rejects the raw OAuth token — it requires a token
 /// minted from `copilot_internal/v2/token` (see
-/// [`crate::copilot::exchange_copilot_token`]). This decorator wraps an inner
+/// [`lingxi_llm_client::auth::oauth::copilot::exchange_copilot_token`]). This decorator wraps an inner
 /// provider (which yields the raw OAuth token for the Copilot credential id);
 /// for that one credential id it exchanges + caches the short-lived bearer and
-/// re-exchanges once it is within [`crate::copilot::login::COPILOT_TOKEN_REFRESH_SKEW_SECS`]
+/// re-exchanges once it is within [`lingxi_llm_client::auth::oauth::copilot::COPILOT_TOKEN_REFRESH_SKEW_SECS`]
 /// of expiry. Every other credential id passes straight through unchanged, so
 /// this can safely wrap the host's composite credential provider.
 pub struct CopilotExchangeCredentialProvider {
     inner: std::sync::Arc<dyn CredentialProvider>,
     http: std::sync::Arc<dyn lingxi_llm_client::transport::Transport>,
     credential_id: String,
-    cached: std::sync::Mutex<Option<crate::copilot::ExchangedToken>>,
+    cached: std::sync::Mutex<Option<lingxi_llm_client::auth::oauth::copilot::ExchangedToken>>,
 }
 
 impl CopilotExchangeCredentialProvider {
@@ -248,15 +248,15 @@ impl CredentialProvider for CopilotExchangeCredentialProvider {
                 other => {
                     return Err(LlmError::InvalidRequest {
                         message: format!(
-                        "copilot credential must be an api-key/bearer OAuth token, got {other:?}"
-                    ),
-                    })
+                            "copilot credential must be an api-key/bearer OAuth token, got {other:?}"
+                        ),
+                    });
                 }
             };
-            let exchanged = crate::copilot::exchange_copilot_token(
+            let exchanged = lingxi_llm_client::auth::oauth::copilot::exchange_copilot_token(
                 &*self.http,
                 &raw,
-                crate::copilot::login::EXCHANGE_IDENTITY,
+                crate::copilot::EXCHANGE_IDENTITY,
             )
             .await
             .map_err(|error| match error {

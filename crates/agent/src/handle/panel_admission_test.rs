@@ -97,7 +97,7 @@ impl crate::api::SubagentApiClient for Api {
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
-            usage: llm_runtime::Usage::default(),
+            usage: llm_runtime::ExecutionUsage::default(),
             cost: None,
             provider_metadata: Value::Null,
         })

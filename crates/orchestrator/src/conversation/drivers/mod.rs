@@ -1919,7 +1919,11 @@ pub(super) fn llm_response_to_pumped_turn(
     use crate::turn_loop::translate_response_blocks;
     use protocol::ContentBlock;
 
-    let output_tokens = resp.usage.billable_tokens.output;
+    let output_tokens = resp
+        .usage
+        .counts()
+        .output_tokens
+        .saturating_sub(resp.usage.counts().reasoning_tokens);
     let stop_reason = resp.stop_reason.clone();
     // BILLING: carry the full usage so the streaming turn loop records it
     // in CostTracker. The non-streaming fallback issues a real messages_create

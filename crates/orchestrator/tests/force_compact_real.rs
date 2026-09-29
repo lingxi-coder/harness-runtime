@@ -481,7 +481,7 @@ fn history_is_valid(history: &[ConversationMessage]) -> bool {
 
 #[tokio::test]
 async fn compaction_safety_gate() {
-    use llm_runtime::{HistoryResponse, Usage};
+    use llm_runtime::{ExecutionUsage as Usage, HistoryResponse};
 
     // Scripted end_turn response so the post-compaction turn can run.
     let response = HistoryResponse {

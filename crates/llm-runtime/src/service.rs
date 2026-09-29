@@ -3224,9 +3224,9 @@ impl ApiService {
                                 && Self::is_fast_mode_not_enabled(&decode_err)
                             {
                                 tracing::info!(
-                                event = "fast_mode_disabled_retry",
-                                "fast mode not enabled for this account/model; disabling and retrying"
-                            );
+                                    event = "fast_mode_disabled_retry",
+                                    "fast mode not enabled for this account/model; disabling and retrying"
+                                );
                                 req.input.service_tier = None;
                                 continue;
                             }
@@ -4317,9 +4317,9 @@ impl ApiService {
                             && Self::is_fast_mode_not_enabled(&decode_err)
                         {
                             tracing::info!(
-                            event = "fast_mode_disabled_retry",
-                            "fast mode not enabled for this account/model; disabling and retrying (stream)"
-                        );
+                                event = "fast_mode_disabled_retry",
+                                "fast mode not enabled for this account/model; disabling and retrying (stream)"
+                            );
                             req.input.service_tier = None;
                             continue;
                         }

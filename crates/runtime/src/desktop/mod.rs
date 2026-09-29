@@ -79,8 +79,8 @@ use command_api::builtins::{
 };
 use cost::CostHydrator;
 use llm_runtime::oauth::anthropic::client::ClaudeAiOAuthClient;
-use llm_runtime::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use llm_runtime::oauth::anthropic::handle::OAuthHandle;
+use llm_runtime::oauth::anthropic::ClaudeAiOAuthConfig;
 use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
 use llm_runtime::oauth::openai as openai_oauth;
 use llm_runtime::{ModelRuntime, Transport};
@@ -8069,7 +8069,7 @@ pub enum BuildError {
 /// stored OAuth, and stored OAuth outranks the stored/settings/helper/Bedrock
 /// keys. When OAuth is the effective source, `shouldUseClaudeAIAuth(scopes)`
 /// (== presence of the `user:inference` scope, via
-/// `llm_runtime::oauth::anthropic::subscription_from_scopes`) decides.
+/// `lingxi_llm_client::auth::oauth::anthropic::subscription_from_scopes`) decides.
 ///
 /// KNOWN RESIDUAL DIVERGENCE (`zb()` @228933355). The oracle suppresses on
 /// TWO arms with TWO DIFFERENT host predicates:
@@ -8093,7 +8093,7 @@ fn oauth_subscriber_flag(
     matches!(
         source,
         llm_runtime::oauth::anthropic::resolver::AuthSource::OAuthClaudeAi
-    ) && llm_runtime::oauth::anthropic::subscription_from_scopes(scopes)
+    ) && lingxi_llm_client::auth::oauth::anthropic::subscription_from_scopes(scopes)
 }
 
 /// Seed of the shared subscription slot for a session that holds a stored
@@ -8136,20 +8136,13 @@ fn subscription_seed(
 /// that arm is purely defensive).
 fn subscription_snapshot_from(
     is_subscriber: bool,
-    profile: Option<&llm_runtime::oauth::anthropic::OAuthProfileResponse>,
-    roles: Option<&llm_runtime::oauth::anthropic::UserRolesResponse>,
+    profile: Option<&lingxi_llm_client::auth::oauth::anthropic::OAuthProfileResponse>,
+    roles: Option<&lingxi_llm_client::auth::oauth::anthropic::UserRolesResponse>,
 ) -> platform_api::subscription::SubscriptionSnapshot {
-    use llm_runtime::oauth::anthropic::SubscriptionType;
     let org = profile.and_then(|p| p.organization.as_ref());
     let subscription_type = profile
-        .and_then(llm_runtime::oauth::anthropic::profile::subscription_type)
-        .and_then(|t| match t {
-            SubscriptionType::Pro => Some("pro"),
-            SubscriptionType::Max => Some("max"),
-            SubscriptionType::Team => Some("team"),
-            SubscriptionType::Enterprise => Some("enterprise"),
-            SubscriptionType::Free | SubscriptionType::Unknown => None,
-        });
+        .and_then(lingxi_llm_client::auth::oauth::anthropic::subscription_type)
+        .and_then(lingxi_llm_client::auth::oauth::anthropic::paid_subscription_type);
     platform_api::subscription::SubscriptionSnapshot {
         is_subscriber,
         subscription_type: subscription_type.map(str::to_owned),
@@ -10713,7 +10706,7 @@ async fn resolve_llm_stack_with_credentials(
                             tokio::spawn(async move {
                                 let token = token.expose_secret();
                                 let Some(profile) =
-                                    llm_runtime::oauth::anthropic::fetch_profile_from_oauth_token(
+                                    lingxi_llm_client::auth::oauth::anthropic::fetch_profile_from_oauth_token(
                                         token,
                                         transport.as_ref(),
                                     )
@@ -10721,11 +10714,12 @@ async fn resolve_llm_stack_with_credentials(
                                 else {
                                     return;
                                 };
-                                let roles = llm_runtime::oauth::anthropic::fetch_user_roles(
-                                    token,
-                                    transport.as_ref(),
-                                )
-                                .await;
+                                let roles =
+                                    lingxi_llm_client::auth::oauth::anthropic::fetch_user_roles(
+                                        token,
+                                        transport.as_ref(),
+                                    )
+                                    .await;
                                 let snap = subscription_snapshot_from(
                                     true,
                                     Some(&profile),
@@ -26092,7 +26086,7 @@ must be filtered out: got {after:?}"
     /// tokens × $2.50/M = $2.50 exactly.
     #[test]
     fn pricing_override_end_to_end_estimator_yields_overridden_cost() {
-        use llm_runtime::{CostEstimator, PricingModelRef, PricingPolicy, TokenUsage, Usage};
+        use llm_runtime::{CostEstimator, PricingModelRef, PricingPolicy, Usage};
         use orchestrator::cost_wiring::llm_catalog_from_cost;
 
         // Build a ClientConfig with a custom "myprovider" profile that declares a
@@ -26120,19 +26114,22 @@ must be filtered out: got {after:?}"
 
         // Extract pricing overrides (mirrors the build() block: display_model →
         // billing_model resolution inside each profile).
-        let pricing_overrides: Vec<(llm_runtime::ProviderId, String, llm_runtime::TokenPricing)> =
-            cfg_obj
-                .providers
-                .iter()
-                .flat_map(|p| {
-                    p.pricing.overrides.iter().filter_map(|(model_id, tp)| {
-                        p.models
-                            .iter()
-                            .find(|m| m.display_model == *model_id)
-                            .map(|m| (p.provider_id.clone(), m.billing_model.clone(), *tp))
-                    })
+        let pricing_overrides: Vec<(
+            llm_runtime::ProviderId,
+            String,
+            llm_runtime::PricingOverride,
+        )> = cfg_obj
+            .providers
+            .iter()
+            .flat_map(|p| {
+                p.pricing.overrides.iter().filter_map(|(model_id, tp)| {
+                    p.models
+                        .iter()
+                        .find(|m| m.display_model == *model_id)
+                        .map(|m| (p.provider_id.clone(), m.billing_model.clone(), *tp))
                 })
-                .collect();
+            })
+            .collect();
 
         assert_eq!(pricing_overrides.len(), 1, "one override expected");
         let (ref prov_id, ref billing_model, _) = pricing_overrides[0];
@@ -26142,7 +26139,7 @@ must be filtered out: got {after:?}"
         let cost_cat = cost::pricing::PricingCatalog::builtin_reference();
         let mut llm_cat = llm_catalog_from_cost(&cost_cat);
         for (provider_id, bm, tp) in &pricing_overrides {
-            llm_cat.add_override(provider_id.clone(), bm.clone(), *tp);
+            llm_cat.add_override(provider_id.clone(), bm.clone(), tp.to_sdk());
         }
         let estimator = CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated);
 
@@ -26154,10 +26151,7 @@ must be filtered out: got {after:?}"
             display_model: "my-model".to_string(),
         };
         let usage = Usage {
-            billable_tokens: TokenUsage {
-                input: 1_000_000,
-                ..Default::default()
-            },
+            input_tokens: 1_000_000,
             ..Default::default()
         };
         let estimate = estimator
@@ -26191,17 +26185,19 @@ must be filtered out: got {after:?}"
 
     #[test]
     fn subscription_snapshot_maps_profile_and_roles() {
-        let profile = llm_runtime::oauth::anthropic::OAuthProfileResponse {
-            organization: Some(llm_runtime::oauth::anthropic::OAuthOrganization {
-                organization_type: Some("claude_team".to_string()),
-                rate_limit_tier: Some("default_claude_max_5x".to_string()),
-                billing_type: Some("stripe_subscription".to_string()),
-                has_extra_usage_enabled: Some(true),
-                ..Default::default()
-            }),
+        let profile = lingxi_llm_client::auth::oauth::anthropic::OAuthProfileResponse {
+            organization: Some(
+                lingxi_llm_client::auth::oauth::anthropic::OAuthOrganization {
+                    organization_type: Some("claude_team".to_string()),
+                    rate_limit_tier: Some("default_claude_max_5x".to_string()),
+                    billing_type: Some("stripe_subscription".to_string()),
+                    has_extra_usage_enabled: Some(true),
+                    ..Default::default()
+                },
+            ),
             account: None,
         };
-        let roles = llm_runtime::oauth::anthropic::UserRolesResponse {
+        let roles = lingxi_llm_client::auth::oauth::anthropic::UserRolesResponse {
             organization_role: Some("admin".to_string()),
             ..Default::default()
         };
@@ -26240,11 +26236,13 @@ must be filtered out: got {after:?}"
         // is unreachable from real profile parsing (purely defensive). This
         // test pins the observable contract: a non-paid/unknown org type folds
         // to `subscription_type: None` in the snapshot.
-        let profile = llm_runtime::oauth::anthropic::OAuthProfileResponse {
-            organization: Some(llm_runtime::oauth::anthropic::OAuthOrganization {
-                organization_type: Some("claude_free".to_string()),
-                ..Default::default()
-            }),
+        let profile = lingxi_llm_client::auth::oauth::anthropic::OAuthProfileResponse {
+            organization: Some(
+                lingxi_llm_client::auth::oauth::anthropic::OAuthOrganization {
+                    organization_type: Some("claude_free".to_string()),
+                    ..Default::default()
+                },
+            ),
             account: None,
         };
         let snap = super::subscription_snapshot_from(true, Some(&profile), None);
@@ -26258,11 +26256,13 @@ must be filtered out: got {after:?}"
         // reports `has_extra_usage_enabled: Some(false)` must fold to `false`
         // in the snapshot (same as the absent-`None` case, distinct from
         // `Some(true)`).
-        let profile = llm_runtime::oauth::anthropic::OAuthProfileResponse {
-            organization: Some(llm_runtime::oauth::anthropic::OAuthOrganization {
-                has_extra_usage_enabled: Some(false),
-                ..Default::default()
-            }),
+        let profile = lingxi_llm_client::auth::oauth::anthropic::OAuthProfileResponse {
+            organization: Some(
+                lingxi_llm_client::auth::oauth::anthropic::OAuthOrganization {
+                    has_extra_usage_enabled: Some(false),
+                    ..Default::default()
+                },
+            ),
             account: None,
         };
         let snap = super::subscription_snapshot_from(true, Some(&profile), None);

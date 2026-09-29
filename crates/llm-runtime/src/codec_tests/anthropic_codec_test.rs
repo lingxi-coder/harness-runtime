@@ -124,23 +124,54 @@ fn stream_connector_text_delta_decodes() {
 }
 
 #[test]
-fn usage_speed_decoded_by_normalize_anthropic_usage() {
-    use llm_runtime::normalize_anthropic_usage;
+fn sdk_response_inference_reports_fast_service_tier() {
     let value = serde_json::json!({
         "input_tokens": 100,
         "output_tokens": 50,
         "speed": "fast"
     });
-    let usage = normalize_anthropic_usage(&value);
-    assert_eq!(usage.speed.as_deref(), Some("fast"));
+    use lingxi_llm_client::{self as sdk, WireCodec};
+    let profile = serde_json::from_value(serde_json::json!({
+        "provider_id":"anthropic", "profile_name":"anthropic", "base_url":"https://api.anthropic.com",
+        "protocol":sdk::protocol::ProtocolFamily::AnthropicMessages, "auth":"none", "models":[]
+    })).unwrap();
+    let response = sdk::HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: serde_json::to_vec(&serde_json::json!({"usage":value}))
+            .unwrap()
+            .into(),
+    };
+    let inference = sdk::AnthropicMessagesCodec.response_inference(
+        &response,
+        &sdk::CodecContext::new(&profile, "model", sdk::RequestMode::Complete),
+    );
+    assert_eq!(
+        inference.service_tier,
+        Some(lingxi_llm_client::protocol::ServiceTier::Fast)
+    );
 }
 
 #[test]
 fn usage_speed_absent_is_none() {
-    use llm_runtime::normalize_anthropic_usage;
     let value = serde_json::json!({"input_tokens": 10, "output_tokens": 5});
-    let usage = normalize_anthropic_usage(&value);
-    assert!(usage.speed.is_none());
+    use lingxi_llm_client::{self as sdk, WireCodec};
+    let profile = serde_json::from_value(serde_json::json!({
+        "provider_id":"anthropic", "profile_name":"anthropic", "base_url":"https://api.anthropic.com",
+        "protocol":sdk::protocol::ProtocolFamily::AnthropicMessages, "auth":"none", "models":[]
+    })).unwrap();
+    let response = sdk::HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: serde_json::to_vec(&serde_json::json!({"usage":value}))
+            .unwrap()
+            .into(),
+    };
+    let inference = sdk::AnthropicMessagesCodec.response_inference(
+        &response,
+        &sdk::CodecContext::new(&profile, "model", sdk::RequestMode::Complete),
+    );
+    assert!(inference.service_tier.is_none());
 }
 
 #[test]
@@ -597,8 +628,8 @@ fn decode_text_response_maps_usage_and_stop_reason() {
     let decoded = codec.decode_response(response).unwrap();
 
     assert_eq!(decoded.id, "msg_1");
-    assert_eq!(decoded.usage.billable_tokens.input, 9);
-    assert_eq!(decoded.usage.billable_tokens.output, 3);
+    assert_eq!(decoded.usage.counts().input_tokens, 9);
+    assert_eq!(decoded.usage.counts().output_tokens, 3);
     assert_eq!(decoded.stop_reason.as_deref(), Some("end_turn"));
 }
 

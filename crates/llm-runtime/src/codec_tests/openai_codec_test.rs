@@ -270,8 +270,8 @@ fn decode_text_and_tool_responses() {
     );
     let decoded = codec.decode_response(text).unwrap();
     assert_eq!(decoded.model, "gpt-4o-2024-08-06");
-    assert_eq!(decoded.usage.billable_tokens.input, 9);
-    assert_eq!(decoded.usage.billable_tokens.output, 3);
+    assert_eq!(decoded.usage.counts().input_tokens, 9);
+    assert_eq!(decoded.usage.counts().output_tokens, 3);
     assert!(matches!(decoded.content[0], ContentBlock::Text { .. }));
     assert_eq!(decoded.stop_reason.as_deref(), Some("end_turn"));
 
@@ -498,10 +498,10 @@ fn stream_usage_keeps_reasoning_and_cached_buckets_independent() {
         })
         .expect("terminal usage");
 
-    assert_eq!(usage.billable_tokens.input, 60);
-    assert_eq!(usage.billable_tokens.cache_read, 40);
-    assert_eq!(usage.billable_tokens.output, 20);
-    assert_eq!(usage.billable_tokens.reasoning_output, 30);
+    assert_eq!(usage.counts().input_tokens, 60);
+    assert_eq!(usage.counts().cache_read_tokens, 40);
+    assert_eq!(usage.counts().output_tokens, 50);
+    assert_eq!(usage.counts().reasoning_tokens, 30);
 }
 
 #[test]
@@ -542,9 +542,9 @@ fn kimi_stream_requests_terminal_usage_and_decodes_top_level_cached_tokens() {
             _ => None,
         })
         .expect("Kimi terminal usage");
-    assert_eq!(usage.billable_tokens.input, 60);
-    assert_eq!(usage.billable_tokens.cache_read, 40);
-    assert_eq!(usage.billable_tokens.output, 25);
+    assert_eq!(usage.counts().input_tokens, 60);
+    assert_eq!(usage.counts().cache_read_tokens, 40);
+    assert_eq!(usage.counts().output_tokens, 25);
     assert_eq!(usage.provider_reported_total_tokens, Some(125));
 }
 
@@ -563,10 +563,10 @@ fn decode_response_usage_normalization_matches_stream_path() {
 
     let decoded = codec.decode_response(response).unwrap();
 
-    assert_eq!(decoded.usage.billable_tokens.input, 60);
-    assert_eq!(decoded.usage.billable_tokens.cache_read, 40);
-    assert_eq!(decoded.usage.billable_tokens.output, 20);
-    assert_eq!(decoded.usage.billable_tokens.reasoning_output, 30);
+    assert_eq!(decoded.usage.counts().input_tokens, 60);
+    assert_eq!(decoded.usage.counts().cache_read_tokens, 40);
+    assert_eq!(decoded.usage.counts().output_tokens, 50);
+    assert_eq!(decoded.usage.counts().reasoning_tokens, 30);
     assert_eq!(decoded.usage.provider_reported_total_tokens, Some(150));
 }
 

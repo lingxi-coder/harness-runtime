@@ -403,5 +403,5 @@ pub struct PricingConfig {
     /// resolution and catalog insertion happen at the host build step, not at
     /// parse time.  Absent → empty (no overrides).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overrides: Vec<(String, crate::cost::TokenPricing)>,
+    pub overrides: Vec<(String, crate::cost::PricingOverride)>,
 }

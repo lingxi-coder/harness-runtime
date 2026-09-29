@@ -50,8 +50,8 @@ pub enum SubagentEvent {
         result: serde_json::Value,
         /// Wire usage from the FINAL model response (the spawner translates this
         /// into `platform_api::SubagentUsage` + the result-level token total). The
-        /// legacy stub path has no real round-trips and emits `Usage::default()`.
-        usage: llm_runtime::Usage,
+        /// legacy stub path has no real round-trips and emits `ExecutionUsage::default()`.
+        usage: llm_runtime::ExecutionUsage,
         /// Number of tool-use blocks executed across the run (claude
         /// `totalToolUseCount`). `0` on the stub path.
         total_tool_use_count: u64,
@@ -68,7 +68,7 @@ pub enum SubagentEvent {
         last_request_id: Option<String>,
         /// Cross-turn summed usage. Distinct from [`Self::Completed::usage`].
         #[serde(default)]
-        cumulative_usage: llm_runtime::Usage,
+        cumulative_usage: llm_runtime::ExecutionUsage,
         /// `false` only on the CC 2.1.207 `api_error_partial` SALVAGE path
         /// (Finding [9]): a mid-stream provider error whose already-produced
         /// text is recovered as a `Completed` result instead of discarding
@@ -93,11 +93,11 @@ pub enum SubagentEvent {
         /// error, idle-timeout watchdog, max-turns/structured-output
         /// exhaustion) still reflects real, already-billed provider spend
         /// from any turn that succeeded before it — this lets a caller price
-        /// that spend instead of settling it at $0. `Usage::default()` on
+        /// that spend instead of settling it at $0. `ExecutionUsage::default()` on
         /// every path that made no real round-trip (spawn-time failure, the
         /// legacy stub).
         #[serde(default)]
-        cumulative_usage: llm_runtime::Usage,
+        cumulative_usage: llm_runtime::ExecutionUsage,
     },
     /// Agent was cancelled by the host.
     Killed {
@@ -1075,7 +1075,7 @@ async fn flush_transcript(
 fn publish_prompt_hook_transcript(
     ctx: &SubagentContext,
     history: &[protocol::ConversationMessage],
-    usage: &llm_runtime::Usage,
+    usage: &llm_runtime::ExecutionUsage,
 ) {
     if let Some(executor) = &ctx.hook_executor {
         executor.publish_agent_prompt_transcript(
@@ -1085,11 +1085,16 @@ fn publish_prompt_hook_transcript(
                 messages: history.to_vec(),
                 last_usage_tokens: usize::try_from(
                     usage
-                        .billable_tokens
-                        .input
-                        .saturating_add(usage.billable_tokens.output)
-                        .saturating_add(usage.billable_tokens.cache_read)
-                        .saturating_add(usage.billable_tokens.cache_write),
+                        .counts()
+                        .input_tokens
+                        .saturating_add(
+                            usage
+                                .counts()
+                                .output_tokens
+                                .saturating_sub(usage.counts().reasoning_tokens),
+                        )
+                        .saturating_add(usage.counts().cache_read_tokens)
+                        .saturating_add(usage.counts().cache_write_tokens),
                 )
                 .unwrap_or(usize::MAX),
                 ..Default::default()
@@ -1105,7 +1110,7 @@ async fn emit_failed(
     written: &mut usize,
     agent_id: AgentId,
     error: String,
-    cumulative_usage: llm_runtime::Usage,
+    cumulative_usage: llm_runtime::ExecutionUsage,
 ) {
     flush_transcript(transcript, history, written).await;
     if let Some(writer) = transcript {
@@ -1397,7 +1402,7 @@ async fn run_subagent_loop(
                     .send(SubagentEvent::Failed {
                         agent_id,
                         error: format!("Could not preload agent skills: {error}"),
-                        cumulative_usage: llm_runtime::Usage::default(),
+                        cumulative_usage: llm_runtime::ExecutionUsage::default(),
                     })
                     .await;
                 return;
@@ -1494,8 +1499,8 @@ async fn run_subagent_loop(
     // is overwritten — never accumulated — each turn.
     let run_start = std::time::Instant::now();
     let mut total_tool_use_count: u64 = 0;
-    let mut last_usage = llm_runtime::Usage::default();
-    let mut cumulative_usage = llm_runtime::Usage::default();
+    let mut last_usage = llm_runtime::ExecutionUsage::default();
+    let mut cumulative_usage = llm_runtime::ExecutionUsage::default();
     let mut usage_complete = true;
     // claude `agentMessages.length` — assistant turns produced across the run
     // (one per round-trip) — and the FINAL turn's provider request id (claude
@@ -2110,11 +2115,16 @@ async fn run_subagent_loop(
             last_usage = response.usage.clone();
             live_hook_transcript.last_usage_tokens = usize::try_from(
                 last_usage
-                    .billable_tokens
-                    .input
-                    .saturating_add(last_usage.billable_tokens.output)
-                    .saturating_add(last_usage.billable_tokens.cache_read)
-                    .saturating_add(last_usage.billable_tokens.cache_write),
+                    .counts()
+                    .input_tokens
+                    .saturating_add(
+                        last_usage
+                            .counts()
+                            .output_tokens
+                            .saturating_sub(last_usage.counts().reasoning_tokens),
+                    )
+                    .saturating_add(last_usage.counts().cache_read_tokens)
+                    .saturating_add(last_usage.counts().cache_write_tokens),
             )
             .unwrap_or(usize::MAX);
             accumulate_usage(&mut cumulative_usage, &last_usage);
@@ -2123,11 +2133,16 @@ async fn run_subagent_loop(
                 agent_id,
                 total_tool_use_count,
                 cumulative_usage
-                    .billable_tokens
-                    .input
-                    .saturating_add(cumulative_usage.billable_tokens.cache_write)
-                    .saturating_add(cumulative_usage.billable_tokens.cache_read)
-                    .saturating_add(cumulative_usage.billable_tokens.output),
+                    .counts()
+                    .input_tokens
+                    .saturating_add(cumulative_usage.counts().cache_write_tokens)
+                    .saturating_add(cumulative_usage.counts().cache_read_tokens)
+                    .saturating_add(
+                        cumulative_usage
+                            .counts()
+                            .output_tokens
+                            .saturating_sub(cumulative_usage.counts().reasoning_tokens),
+                    ),
             )
             .await;
             // Track the assistant-message count (claude `agentMessages.length`) and
@@ -2900,7 +2915,7 @@ async fn run_subagent_loop(
 async fn park_foreground_owner(
     ctx: &SubagentContext,
     result: &serde_json::Value,
-    usage: &llm_runtime::Usage,
+    usage: &llm_runtime::ExecutionUsage,
     tool_uses: u64,
     duration_ms: u64,
 ) -> bool {
@@ -3055,12 +3070,12 @@ async fn run_subagent_stub(
                             result: serde_json::json!({ "reason": reason }),
                             // Stub path makes no real round-trips: no usage / no
                             // tool-use count / no measured duration.
-                            usage: llm_runtime::Usage::default(),
+                            usage: llm_runtime::ExecutionUsage::default(),
                             total_tool_use_count: 0,
                             total_duration_ms: 0,
                             assistant_message_count: 0,
                             last_request_id: None,
-                            cumulative_usage: llm_runtime::Usage::default(),
+                            cumulative_usage: llm_runtime::ExecutionUsage::default(),
                             usage_complete: true,
                         })
                         .await;
@@ -3080,12 +3095,12 @@ async fn run_subagent_stub(
                 agent_id,
                 result: serde_json::json!({ "reason": "eof_graceful" }),
                 // Stub path makes no real round-trips.
-                usage: llm_runtime::Usage::default(),
+                usage: llm_runtime::ExecutionUsage::default(),
                 total_tool_use_count: 0,
                 total_duration_ms: 0,
                 assistant_message_count: 0,
                 last_request_id: None,
-                cumulative_usage: llm_runtime::Usage::default(),
+                cumulative_usage: llm_runtime::ExecutionUsage::default(),
                 usage_complete: true,
             })
             .await;
@@ -3094,33 +3109,30 @@ async fn run_subagent_stub(
             .send(SubagentEvent::Failed {
                 agent_id,
                 error: "run_subagent: event channel closed without terminal state".into(),
-                cumulative_usage: llm_runtime::Usage::default(),
+                cumulative_usage: llm_runtime::ExecutionUsage::default(),
             })
             .await;
     }
 }
 
-fn accumulate_usage(acc: &mut llm_runtime::Usage, turn: &llm_runtime::Usage) {
-    acc.billable_tokens.input = acc
-        .billable_tokens
-        .input
-        .saturating_add(turn.billable_tokens.input);
-    acc.billable_tokens.output = acc
-        .billable_tokens
-        .output
-        .saturating_add(turn.billable_tokens.output);
-    acc.billable_tokens.cache_write = acc
-        .billable_tokens
-        .cache_write
-        .saturating_add(turn.billable_tokens.cache_write);
-    acc.billable_tokens.cache_read = acc
-        .billable_tokens
-        .cache_read
-        .saturating_add(turn.billable_tokens.cache_read);
-    acc.billable_tokens.reasoning_output = acc
-        .billable_tokens
-        .reasoning_output
-        .saturating_add(turn.billable_tokens.reasoning_output);
+fn accumulate_usage(acc: &mut llm_runtime::ExecutionUsage, turn: &llm_runtime::ExecutionUsage) {
+    let current = acc.counts();
+    let next = turn.counts();
+    let counts = acc.counts_mut();
+    counts.input_tokens = current.input_tokens.saturating_add(next.input_tokens);
+    counts.output_tokens = current.output_tokens.saturating_add(next.output_tokens);
+    counts.cache_write_tokens = current
+        .cache_write_tokens
+        .saturating_add(next.cache_write_tokens);
+    counts.cache_read_tokens = current
+        .cache_read_tokens
+        .saturating_add(next.cache_read_tokens);
+    counts.cache_write_1h_tokens = current
+        .cache_write_1h_tokens
+        .saturating_add(next.cache_write_1h_tokens);
+    counts.reasoning_tokens = current
+        .reasoning_tokens
+        .saturating_add(next.reasoning_tokens);
 }
 
 /// Group `messages` into atomic trim units: an assistant message whose

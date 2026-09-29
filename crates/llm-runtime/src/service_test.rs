@@ -40,7 +40,7 @@ mod tests {
                 stop_reason: Some("end_turn".into()),
                 stop_details: None,
             },
-            usage: Some(crate::Usage::default()),
+            usage: Some(crate::ExecutionUsage::default()),
         }];
         attach_frozen_stream_quote(&mut events, None);
         let HistoryEvent::MessageDelta {
@@ -232,7 +232,7 @@ mod tests {
     #[derive(Default)]
     struct AttemptProbe {
         events: Mutex<Vec<&'static str>>,
-        observations: Mutex<Vec<(crate::Usage, crate::ModelAttemptUsageCompleteness)>>,
+        observations: Mutex<Vec<(crate::ExecutionUsage, crate::ModelAttemptUsageCompleteness)>>,
         fail_settlement: bool,
         admission_delay: Duration,
     }
@@ -280,7 +280,7 @@ mod tests {
         }
         fn observe_usage(
             &mut self,
-            usage: &crate::Usage,
+            usage: &crate::ExecutionUsage,
             completeness: crate::ModelAttemptUsageCompleteness,
         ) {
             self.probe
@@ -655,8 +655,8 @@ mod tests {
             {
                 let observations = probe.observations.lock().unwrap();
                 let (usage, completeness) = observations.last().unwrap();
-                assert_eq!(usage.billable_tokens.output, 4);
-                assert_eq!(usage.billable_tokens.reasoning_output, 6);
+                assert_eq!(usage.counts().output_tokens, 10);
+                assert_eq!(usage.counts().reasoning_tokens, 6);
                 assert_eq!(*completeness, crate::ModelAttemptUsageCompleteness::Partial);
             }
             if !drop_early {
@@ -871,7 +871,7 @@ mod tests {
         );
         let observations = probe.observations.lock().unwrap();
         assert_eq!(observations.len(), 1);
-        assert_eq!(observations[0].0.billable_tokens.input, 5);
+        assert_eq!(observations[0].0.counts().input_tokens, 5);
         assert_eq!(
             observations[0].1,
             crate::ModelAttemptUsageCompleteness::Complete
@@ -915,7 +915,7 @@ mod tests {
         {
             let seen = probe.observations.lock().unwrap();
             assert_eq!(seen.len(), 1);
-            assert_eq!(seen[0].0.billable_tokens.input, 1);
+            assert_eq!(seen[0].0.counts().input_tokens, 1);
             assert_eq!(seen[0].1, crate::ModelAttemptUsageCompleteness::Partial);
         }
         drop(stream);
@@ -937,8 +937,8 @@ mod tests {
         }
         let seen = probe.observations.lock().unwrap();
         let (usage, completeness) = seen.last().unwrap();
-        assert_eq!(usage.billable_tokens.input, 1);
-        assert_eq!(usage.billable_tokens.output, 1);
+        assert_eq!(usage.counts().input_tokens, 1);
+        assert_eq!(usage.counts().output_tokens, 1);
         assert_eq!(
             *completeness,
             crate::ModelAttemptUsageCompleteness::Complete
@@ -986,8 +986,8 @@ mod tests {
         assert_eq!(transport.seen_count(), 1);
         let seen = probe.observations.lock().unwrap();
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].0.billable_tokens.input, 5);
-        assert_eq!(seen[0].0.billable_tokens.output, 2);
+        assert_eq!(seen[0].0.counts().input_tokens, 5);
+        assert_eq!(seen[0].0.counts().output_tokens, 2);
         assert_eq!(seen[0].1, crate::ModelAttemptUsageCompleteness::Complete);
         assert_eq!(
             probe.events.lock().unwrap().last().copied(),
@@ -1018,9 +1018,9 @@ mod tests {
         assert!(stream.next().await.unwrap().is_err());
         let seen = probe.observations.lock().unwrap();
         let (usage, completeness) = seen.last().unwrap();
-        assert_eq!(usage.billable_tokens.input, 10);
-        assert_eq!(usage.billable_tokens.output, 4);
-        assert_eq!(usage.billable_tokens.reasoning_output, 3);
+        assert_eq!(usage.counts().input_tokens, 10);
+        assert_eq!(usage.counts().output_tokens, 7);
+        assert_eq!(usage.counts().reasoning_tokens, 3);
         assert_eq!(*completeness, crate::ModelAttemptUsageCompleteness::Partial);
         assert_eq!(
             probe.events.lock().unwrap().last().copied(),
@@ -1048,8 +1048,8 @@ mod tests {
         }
         let seen = probe.observations.lock().unwrap();
         let (usage, completeness) = seen.last().unwrap();
-        assert_eq!(usage.billable_tokens.cache_write, 100);
-        assert_eq!(usage.billable_tokens.output, 5);
+        assert_eq!(usage.counts().cache_write_tokens, 100);
+        assert_eq!(usage.counts().output_tokens, 5);
         assert_eq!(
             usage
                 .provider_metadata
@@ -1064,7 +1064,7 @@ mod tests {
         // The contract is cumulative replacement, never adding the repeated
         // output/cache counters a second time.
         assert!(seen.iter().all(|(usage, _)| {
-            usage.billable_tokens.output <= 5 && usage.billable_tokens.cache_write <= 100
+            usage.counts().output_tokens <= 5 && usage.counts().cache_write_tokens <= 100
         }));
     }
 
@@ -1259,7 +1259,7 @@ mod tests {
                 }
             );
             if complete {
-                assert_eq!(seen.last().unwrap().0.billable_tokens.cache_read, 2);
+                assert_eq!(seen.last().unwrap().0.counts().cache_read_tokens, 2);
             }
         }
     }

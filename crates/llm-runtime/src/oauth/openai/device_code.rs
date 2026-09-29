@@ -11,8 +11,8 @@
 //!    `OpenAiOAuthClient::exchange_code_with_redirect` and returns tokens.
 
 use crate::oauth::openai::client::{OAuthError, OpenAiOAuthClient};
-use crate::oauth::openai::config::OpenAiOAuthConfig;
 use lingxi_llm_client::auth::oauth::openai as sdk;
+use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
 use lingxi_llm_client::Transport;
 use platform_api::Clock;
 use std::sync::Arc;

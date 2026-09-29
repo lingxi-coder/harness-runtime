@@ -6,7 +6,9 @@
 
 use crate::conversation::OrchestratorApiClient;
 use async_trait::async_trait;
-use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError, Usage};
+use llm_runtime::{
+    ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryResponse, LlmError,
+};
 use platform_api::{CostSnapshot, OutputEvent, OutputStream};
 use protocol::ConversationMessage;
 use std::collections::VecDeque;

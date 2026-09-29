@@ -6,27 +6,12 @@
 
 #![allow(clippy::unwrap_used)]
 
+use lingxi_llm_client::auth::oauth::anthropic::parse_claudeai_quota_headers;
+pub use lingxi_llm_client::auth::oauth::anthropic::SubscriptionType;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::SystemTime;
-
-/// Top-level Claude.ai subscription tier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SubscriptionType {
-    /// Free tier.
-    Free,
-    /// Pro tier.
-    Pro,
-    /// Max tier.
-    Max,
-    /// Team tier.
-    Team,
-    /// Enterprise tier.
-    Enterprise,
-    /// Server didn't report a recognised tier.
-    Unknown,
-}
 
 /// Snapshot of subscription state and rolling-window usage.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -68,16 +53,11 @@ impl ClaudeAiLimitsTracker {
     /// Headers absent from the map leave the corresponding field unchanged.
     pub fn update_from_headers(&self, headers: &HashMap<String, String>) {
         let mut s = self.state.lock().unwrap();
-        if let Some(c) = headers
-            .get("x-claudeai-window-count")
-            .and_then(|v| v.parse().ok())
-        {
+        let quota = parse_claudeai_quota_headers(headers);
+        if let Some(c) = quota.message_count_window {
             s.message_count_window = c;
         }
-        if let Some(l) = headers
-            .get("x-claudeai-window-limit")
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(l) = quota.message_limit_window {
             s.message_limit_window = l;
         }
         s.last_updated = Some(SystemTime::now());

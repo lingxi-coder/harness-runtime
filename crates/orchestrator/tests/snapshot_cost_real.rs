@@ -6,7 +6,7 @@
 
 use cost::pricing::PricingCatalog;
 use cost::CostTracker;
-use llm_runtime::{ContentBlock, HistoryResponse, TokenUsage, Usage};
+use llm_runtime::{ContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -31,11 +31,17 @@ fn end_turn_response_with_usage(input: u64, output: u64) -> HistoryResponse {
         stop_reason: Some("end_turn".to_string()),
         stop_details: None,
         usage: Usage {
-            billable_tokens: TokenUsage {
-                input,
-                output,
-                ..Default::default()
-            },
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    reasoning_tokens: 0,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
             ..Default::default()
         },
         cost: None,

@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use platform_api::ModelAttemptContext;
 
-use crate::{LlmError, LlmRequest, PreparedLlmCall, Usage};
+use crate::{ExecutionUsage, LlmError, LlmRequest, PreparedLlmCall};
 
 /// Whether normalized usage is a partial observation or an explicitly complete
 /// provider report. Successful transport alone does not prove complete usage.
@@ -50,7 +50,11 @@ pub trait ModelAttemptLease: Send {
     /// parsing a Fusion/structured-output schema. This method must not await.
     /// Repeated cumulative snapshots replace earlier observations, not add to
     /// them. Content, raw source text and credentials are not part of this seam.
-    fn observe_usage(&mut self, usage: &Usage, completeness: ModelAttemptUsageCompleteness);
+    fn observe_usage(
+        &mut self,
+        usage: &ExecutionUsage,
+        completeness: ModelAttemptUsageCompleteness,
+    );
 
     /// Record that no provider response was ever accepted for this attempt.
     /// This does not prove the provider did not execute the request. Hosts
@@ -75,14 +79,14 @@ pub trait ModelAttemptSettlement: Send {
 /// host lease's required Drop contract; explicit finish transfers synchronously.
 pub(crate) struct WireAttempt {
     lease: Option<Box<dyn ModelAttemptLease>>,
-    usage: Usage,
+    usage: ExecutionUsage,
 }
 
 impl WireAttempt {
     pub(crate) fn new(lease: Option<Box<dyn ModelAttemptLease>>) -> Self {
         Self {
             lease,
-            usage: Usage::default(),
+            usage: ExecutionUsage::default(),
         }
     }
 
@@ -93,7 +97,11 @@ impl WireAttempt {
         }
     }
 
-    pub(crate) fn observe(&mut self, usage: &Usage, completeness: ModelAttemptUsageCompleteness) {
+    pub(crate) fn observe(
+        &mut self,
+        usage: &ExecutionUsage,
+        completeness: ModelAttemptUsageCompleteness,
+    ) {
         self.usage = usage.clone();
         if let Some(lease) = self.lease.as_mut() {
             lease.observe_usage(&self.usage, completeness);
@@ -110,15 +118,12 @@ impl WireAttempt {
                     self.observe(&response.usage, ModelAttemptUsageCompleteness::Partial);
                 }
                 crate::HistoryEvent::MessageDelta {
-                    usage: Some(usage),
-                    delta,
+                    usage: Some(usage), ..
                 } => {
-                    let merged = merge_attempt_usage(&self.usage, usage);
+                    let merged = self.usage.merge_snapshot(usage);
                     self.observe(
                         &merged,
-                        if delta.stop_reason.is_some()
-                            && complete_usage_for(&merged, "input_tokens", "output_tokens")
-                        {
+                        if merged.report.complete().is_some() {
                             ModelAttemptUsageCompleteness::Complete
                         } else {
                             ModelAttemptUsageCompleteness::Partial
@@ -145,213 +150,10 @@ impl WireAttempt {
     }
 }
 
-/// Normalizers retain the actual provider usage object. Empty/default
-/// responses are not a complete invoice simply because transport succeeded.
-pub(crate) fn has_usage_report(usage: &Usage) -> bool {
-    complete_usage_for(usage, "input_tokens", "output_tokens")
-        || complete_usage_for(usage, "prompt_tokens", "completion_tokens")
-        || complete_usage_for(usage, "promptTokenCount", "candidatesTokenCount")
-}
-
-/// Required provider input/output counters must both be explicitly numeric.
-/// Normalizer default zero and a total-only report cannot establish Exact.
-pub(crate) fn complete_usage_for(usage: &Usage, input: &str, output: &str) -> bool {
-    let metadata = &usage.provider_metadata;
-    let Some(input_count) = metadata.get(input).and_then(serde_json::Value::as_u64) else {
-        return false;
-    };
-    let Some(output_count) = metadata.get(output).and_then(serde_json::Value::as_u64) else {
-        return false;
-    };
-    for key in [
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-        "reasoning_output_tokens",
-        "thoughtsTokenCount",
-        "cached_tokens",
-    ] {
-        if metadata
-            .get(key)
-            .is_some_and(|value| value.as_u64().is_none())
-        {
-            return false;
-        }
-    }
-    // Kimi's top-level cached_tokens is used only when the standard nested
-    // count is absent. Match the normalizer's precedence, not both counts.
-    if input == "prompt_tokens"
-        && metadata
-            .pointer("/prompt_tokens_details/cached_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .is_none()
-        && metadata
-            .get("cached_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .is_some_and(|count| count > input_count)
-    {
-        return false;
-    }
-    for total_key in ["total_tokens", "totalTokenCount"] {
-        if let Some(value) = metadata.get(total_key) {
-            let Some(total) = value.as_u64() else {
-                return false;
-            };
-            let Some(mut expected) = input_count.checked_add(output_count) else {
-                return false;
-            };
-            // Gemini's visible and thought output counts are disjoint;
-            // OpenAI includes reasoning in its raw completion/output count.
-            if input == "promptTokenCount" {
-                if let Some(thoughts) = metadata.get("thoughtsTokenCount") {
-                    let Some(thoughts) = thoughts.as_u64() else {
-                        return false;
-                    };
-                    let Some(sum) = expected.checked_add(thoughts) else {
-                        return false;
-                    };
-                    expected = sum;
-                }
-            }
-            if total != expected {
-                return false;
-            }
-        }
-    }
-    // Independent bucket normalization uses subtraction for these subsets;
-    // refuse to call a saturated or malformed subtraction complete.
-    for (path, ceiling) in [
-        ("/prompt_tokens_details/cached_tokens", input_count),
-        ("/input_tokens_details/cached_tokens", input_count),
-        ("/completion_tokens_details/reasoning_tokens", output_count),
-        ("/output_tokens_details/reasoning_tokens", output_count),
-        ("/cachedContentTokenCount", input_count),
-    ] {
-        if metadata
-            .pointer(path)
-            .is_some_and(|value| value.as_u64().is_none_or(|count| count > ceiling))
-        {
-            return false;
-        }
-    }
-    if let Some(creation) = metadata.get("cache_creation") {
-        if !creation.is_object() {
-            return false;
-        }
-        let Some(total) = metadata
-            .get("cache_creation_input_tokens")
-            .and_then(serde_json::Value::as_u64)
-        else {
-            return false;
-        };
-        let mut split = 0_u64;
-        for key in ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"] {
-            if let Some(value) = creation.get(key) {
-                let Some(count) = value.as_u64() else {
-                    return false;
-                };
-                let Some(sum) = split.checked_add(count) else {
-                    return false;
-                };
-                split = sum;
-            }
-        }
-        let has_five = creation.get("ephemeral_5m_input_tokens").is_some();
-        let has_hour = creation.get("ephemeral_1h_input_tokens").is_some();
-        // The host can derive 5m = total - 1h when only 1h is supplied.
-        // A partial 5m-only split cannot identify the remaining tariff safely.
-        if split > total || ((has_five || !has_hour) && split != total) {
-            return false;
-        }
-    }
-    true
-}
-
-pub(crate) fn response_usage_observation(
-    usage: Usage,
-    status: u16,
-    input: &str,
-    output: &str,
-) -> (Usage, ModelAttemptUsageCompleteness) {
-    let completeness = if (200..300).contains(&status) && complete_usage_for(&usage, input, output)
-    {
-        ModelAttemptUsageCompleteness::Complete
-    } else {
-        ModelAttemptUsageCompleteness::Partial
-    };
-    (usage, completeness)
-}
-
-/// Retain only the fixed Anthropic billing fields when terminal usage is an
-/// output-only delta. No arbitrary provider metadata is accumulated.
-fn merge_attempt_usage(seed: &Usage, delta: &Usage) -> Usage {
-    let mut merged = crate::stream_accumulator::merge_usage(seed, delta);
-    // On the registered Anthropic path, field presence distinguishes a true
-    // cumulative zero from an omitted field. Preserve absent counters and
-    // replace explicitly observed zeros as well as positive observations.
-    if delta.provider_metadata.is_object() {
-        macro_rules! known_counter {
-            ($key:literal, $field:ident) => {
-                merged.billable_tokens.$field = if delta
-                    .provider_metadata
-                    .get($key)
-                    .and_then(serde_json::Value::as_u64)
-                    .is_some()
-                {
-                    delta.billable_tokens.$field
-                } else {
-                    seed.billable_tokens.$field
-                };
-            };
-        }
-        known_counter!("input_tokens", input);
-        known_counter!("output_tokens", output);
-        known_counter!("cache_creation_input_tokens", cache_write);
-        known_counter!("cache_read_input_tokens", cache_read);
-        known_counter!("reasoning_output_tokens", reasoning_output);
-    }
-    if !merged.provider_metadata.is_object() {
-        merged.provider_metadata = serde_json::json!({});
-    }
-    let metadata = merged
-        .provider_metadata
-        .as_object_mut()
-        .expect("metadata normalized");
-    for key in [
-        "input_tokens",
-        "output_tokens",
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-        "reasoning_output_tokens",
-    ] {
-        if !metadata.contains_key(key) {
-            if let Some(value) = seed
-                .provider_metadata
-                .get(key)
-                .filter(|value| value.is_u64())
-            {
-                metadata.insert(key.into(), value.clone());
-            }
-        }
-    }
-    let mut creation = serde_json::Map::new();
-    for key in ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"] {
-        if let Some(value) = delta
-            .provider_metadata
-            .get("cache_creation")
-            .and_then(|value| value.get(key))
-            .or_else(|| {
-                seed.provider_metadata
-                    .get("cache_creation")
-                    .and_then(|value| value.get(key))
-            })
-        {
-            creation.insert(key.into(), value.clone());
-        }
-    }
-    if !creation.is_empty() {
-        metadata.insert("cache_creation".into(), creation.into());
-    }
-    merged
+/// A complete SDK report is the only authority for exact settlement.
+/// Provider-specific field validation belongs to the SDK codec.
+pub(crate) fn has_usage_report(usage: &ExecutionUsage) -> bool {
+    usage.report.complete().is_some()
 }
 
 pub(crate) fn missing_hooks_error() -> LlmError {

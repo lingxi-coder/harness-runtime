@@ -21,27 +21,7 @@ use std::sync::Arc;
 
 use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 
-use crate::oauth::anthropic::refresh::{OAuthHookError, RefreshDriver};
-
-/// Which [`LlmError`] a failed refresh becomes.
-///
-/// Only an IdP that actually REJECTED the refresh token is the oracle's
-/// `OAuthRefreshDeadError` (`qQt`), the error whose surface reads "Login
-/// expired". A stale token hash means another caller already rotated, and an
-/// unreachable IdP is a transport failure — telling either of those users that
-/// their login expired would send them to `/login` for a problem `/login`
-/// cannot fix.
-#[must_use]
-pub(crate) fn llm_error_for(err: &OAuthHookError) -> LlmError {
-    match err {
-        OAuthHookError::RefreshFailed(_) => LlmError::OAuthRefreshDead,
-        OAuthHookError::TokenStale | OAuthHookError::ProviderUnreachable(_) => {
-            LlmError::Authentication {
-                message: String::new(),
-            }
-        }
-    }
-}
+use crate::oauth::anthropic::refresh::RefreshDriver;
 
 /// Serves the current OAuth access token, refreshing in place when expired
 /// (single-flight via the underlying refresh lock).
@@ -100,7 +80,7 @@ impl CredentialProvider for OAuthCredentialProvider {
                 .driver
                 .refresh(token_hash)
                 .await
-                .map_err(|e| llm_error_for(&e))?;
+                .map_err(|e| crate::oauth::lifecycle::llm_error_for(&e))?;
 
             Ok(Credential::BearerToken(bearer.0.expose_secret().clone()))
         })
@@ -110,25 +90,30 @@ impl CredentialProvider for OAuthCredentialProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oauth::lifecycle::OAuthHookError;
 
     /// The whole point of the split: three refresh failures, but only one of
     /// them means the user has to log in again.
     #[test]
     fn only_a_rejected_refresh_token_is_the_dead_oauth_session() {
         assert_eq!(
-            llm_error_for(&OAuthHookError::RefreshFailed("idp said no".into())),
+            crate::oauth::lifecycle::llm_error_for(&OAuthHookError::RefreshFailed(
+                "idp said no".into()
+            )),
             LlmError::OAuthRefreshDead
         );
         // Another caller rotated first — the retry succeeds, nothing expired.
         assert_eq!(
-            llm_error_for(&OAuthHookError::TokenStale),
+            crate::oauth::lifecycle::llm_error_for(&OAuthHookError::TokenStale),
             LlmError::Authentication {
                 message: String::new()
             }
         );
         // The IdP was unreachable; the refresh token may be perfectly valid.
         assert_eq!(
-            llm_error_for(&OAuthHookError::ProviderUnreachable("dns".into())),
+            crate::oauth::lifecycle::llm_error_for(&OAuthHookError::ProviderUnreachable(
+                "dns".into()
+            )),
             LlmError::Authentication {
                 message: String::new()
             }

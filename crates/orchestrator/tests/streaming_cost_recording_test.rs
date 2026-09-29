@@ -6,7 +6,7 @@
 
 use cost::pricing::PricingCatalog;
 use cost::{CostState, CostTracker};
-use llm_runtime::{TokenUsage, Usage};
+use llm_runtime::ExecutionUsage as Usage;
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -25,24 +25,35 @@ use tool_api::registry::ToolRegistry;
 /// real Anthropic wire: input + cache counts present, output = 0).
 fn start_usage_with_input(input: u64) -> Usage {
     Usage {
-        billable_tokens: TokenUsage {
-            input,
-            output: 0,
-            ..Default::default()
-        },
+        report: llm_runtime::UsageReport::measured(
+            llm_runtime::Usage {
+                input_tokens: input,
+                output_tokens: 0,
+                cache_write_tokens: 0,
+                cache_read_tokens: 0,
+                reasoning_tokens: 0,
+                ..Default::default()
+            },
+            llm_runtime::services::sdk::protocol::UsageState::Complete,
+        ),
         ..Default::default()
     }
 }
 
-/// Build a `Usage` with output tokens only (the `message_delta` shape on the
-/// real Anthropic wire: output present, input/cache = 0).
-fn delta_usage_with_output(output: u64) -> Usage {
+/// Build the canonical complete SDK measurement, including previously observed input.
+fn final_usage(input: u64, output: u64) -> Usage {
     Usage {
-        billable_tokens: TokenUsage {
-            input: 0,
-            output,
-            ..Default::default()
-        },
+        report: llm_runtime::UsageReport::measured(
+            llm_runtime::Usage {
+                input_tokens: input,
+                output_tokens: output,
+                cache_write_tokens: 0,
+                cache_read_tokens: 0,
+                reasoning_tokens: 0,
+                ..Default::default()
+            },
+            llm_runtime::services::sdk::protocol::UsageState::Complete,
+        ),
         ..Default::default()
     }
 }
@@ -108,7 +119,7 @@ async fn streaming_turn_records_cost_in_tracker() {
         content_block_start_text(0),
         text_delta(0, "hi"),
         content_block_stop(0),
-        message_delta_stop_with_usage("end_turn", delta_usage_with_output(500)),
+        message_delta_stop_with_usage("end_turn", final_usage(1_000, 500)),
         message_stop(),
     ];
 
@@ -138,7 +149,7 @@ async fn streaming_turn_increments_api_calls_recorded() {
         content_block_start_text(0),
         text_delta(0, "ok"),
         content_block_stop(0),
-        message_delta_stop_with_usage("end_turn", delta_usage_with_output(50)),
+        message_delta_stop_with_usage("end_turn", final_usage(100, 50)),
         message_stop(),
     ];
 

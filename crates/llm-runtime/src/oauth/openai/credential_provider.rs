@@ -14,30 +14,7 @@ use std::sync::Arc;
 
 use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 
-use crate::oauth::openai::refresh::{OAuthHookError, RefreshDriver};
-
-/// Which [`LlmError`] a failed refresh becomes — the `OpenAI` twin of
-/// `oauth::anthropic::credential_provider::llm_error_for`.
-///
-/// Deliberately duplicated rather than shared: the two modules own SEPARATE
-/// `OAuthHookError` types, and coupling them through a common trait would make
-/// a change to one provider's refresh contract silently reinterpret the
-/// other's. The variant meanings, not the type, are what must agree.
-///
-/// Only an IdP that REJECTED the refresh token is a dead session. A stale token
-/// hash means another caller already rotated, and an unreachable IdP is a
-/// transport failure — neither means the user has to sign in again.
-#[must_use]
-pub(crate) fn llm_error_for(err: &OAuthHookError) -> LlmError {
-    match err {
-        OAuthHookError::RefreshFailed(_) => LlmError::OAuthRefreshDead,
-        OAuthHookError::TokenStale | OAuthHookError::ProviderUnreachable(_) => {
-            LlmError::Authentication {
-                message: String::new(),
-            }
-        }
-    }
-}
+use crate::oauth::openai::refresh::RefreshDriver;
 
 /// Serves the current `OpenAI` OAuth access token, refreshing in place when expired
 /// (single-flight via the underlying refresh lock).
@@ -98,7 +75,7 @@ impl CredentialProvider for OpenAiOAuthCredentialProvider {
                 .driver
                 .refresh(token_hash)
                 .await
-                .map_err(|e| llm_error_for(&e))?;
+                .map_err(|e| crate::oauth::lifecycle::llm_error_for(&e))?;
 
             // Read the updated account_id/fedramp after rotation.
             let (new_account_id, new_fedramp) = {
@@ -118,9 +95,9 @@ impl CredentialProvider for OpenAiOAuthCredentialProvider {
 #[cfg(test)]
 mod credential_provider_tests {
     use super::*;
-    use crate::oauth::openai::config::OpenAiOAuthConfig;
     use crate::oauth::openai::refresh::AuthState;
     use crate::oauth::openai::testsupport::{Canned, MockHttp, TestClock};
+    use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
     use protocol::Secret;
     use std::time::{Duration, SystemTime};
 

@@ -1,6 +1,6 @@
 use crate::upstream::codec_fixtures::{AnthropicMessagesCodec, FixtureCodec};
 // Anthropic usage normalization and interrupted-stream cache accounting.
-use llm_runtime::{normalize_anthropic_usage, ModelAttemptUsageCompleteness, RawStreamFrame};
+use llm_runtime::{ModelAttemptUsageCompleteness, RawStreamFrame};
 
 #[test]
 fn normalizes_anthropic_usage_into_independent_billing_buckets() {
@@ -14,19 +14,35 @@ fn normalizes_anthropic_usage_into_independent_billing_buckets() {
         }
     });
 
-    let usage = normalize_anthropic_usage(&value);
+    use lingxi_llm_client::{self as sdk, WireCodec};
+    let profile = serde_json::from_value(serde_json::json!({
+        "provider_id":"anthropic", "profile_name":"anthropic", "base_url":"https://api.anthropic.com",
+        "protocol": sdk::protocol::ProtocolFamily::AnthropicMessages, "auth":"none", "models":[]
+    })).unwrap();
+    let response = sdk::HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: serde_json::to_vec(&serde_json::json!({"usage":value}))
+            .unwrap()
+            .into(),
+    };
+    let report = sdk::AnthropicMessagesCodec.response_usage(
+        &response,
+        &sdk::CodecContext::new(&profile, "model", sdk::RequestMode::Complete),
+    );
+    let usage = report.complete().expect("complete measured usage");
 
-    assert_eq!(usage.billable_tokens.input, 100);
-    assert_eq!(usage.billable_tokens.output, 20);
-    assert_eq!(usage.billable_tokens.cache_write, 30);
-    assert_eq!(usage.billable_tokens.cache_read, 40);
-    assert_eq!(usage.billable_tokens.reasoning_output, 0);
+    assert_eq!(usage.input_tokens, 100);
+    assert_eq!(usage.output_tokens, 20);
+    assert_eq!(usage.cache_write_tokens, 30);
+    assert_eq!(usage.cache_read_tokens, 40);
+    assert_eq!(usage.reasoning_tokens, 0);
     assert_eq!(
         usage
-            .server_tool_use
+            .server_tool_usage
             .expect("server tool usage")
             .web_search_requests,
-        2
+        Some(2)
     );
 }
 
@@ -56,12 +72,12 @@ fn interrupted_stream_retains_observed_one_hour_cache_tokens_as_partial() {
     );
     let (usage, completeness) = decoder.observed_usage().unwrap();
     assert_eq!(completeness, ModelAttemptUsageCompleteness::Partial);
-    assert_eq!(usage.billable_tokens.cache_write, 20);
+    assert_eq!(usage.counts().cache_write_tokens, 20);
+    assert_eq!(usage.counts().cache_write_1h_tokens, 15);
     assert_eq!(
-        usage.provider_metadata["cache_creation"]["ephemeral_1h_input_tokens"],
-        15
+        usage.report.state,
+        lingxi_llm_client::protocol::UsageState::Partial
     );
-    assert_eq!(usage.provider_metadata["upstreamUsageState"], "partial");
     assert!(usage.provider_metadata.get("input_tokens").is_none());
     assert!(usage.provider_metadata.get("output_tokens").is_none());
 }
