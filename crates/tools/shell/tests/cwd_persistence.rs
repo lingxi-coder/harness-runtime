@@ -12,7 +12,8 @@
 
 use async_trait::async_trait;
 use hooks::{CwdChangedFire, CwdChangedFirer};
-use platform_api::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
+use mobile_linux_api::{ProcessError, ProcessOutput};
+use platform_api::process::{ProcessHandle, ProcessRunner};
 use platform_api::sandbox::SandboxedCommand;
 use serde_json::json;
 use std::collections::VecDeque;

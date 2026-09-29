@@ -15,7 +15,7 @@ use local_apps::{
     AppRuntimeProfileBinding,
 };
 use lsp_types::{DiagnosticSeverity, NumberOrString};
-use platform_api::{
+use mobile_linux_api::{
     LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
 };
 use serde::{Deserialize, Serialize};
@@ -667,9 +667,7 @@ fn fixed_vite_build_args(build_memory_mb: u32, executable: String, out_dir: Stri
 fn local_app_build_mount(app_id: &str, channel: &str, build_root: &Path) -> MountSpec {
     MountSpec {
         host_path: build_root.to_path_buf(),
-        guest_path: platform_api::mobile_linux::guest_paths::local_app_build_project(
-            app_id, channel,
-        ),
+        guest_path: platform_api::local_app_paths::local_app_build_project(app_id, channel),
         read_only: false,
         purpose: MountPurpose::LocalAppBuild,
     }
@@ -2982,8 +2980,8 @@ mod tests {
         );
     }
     use async_trait::async_trait;
-    use platform_api::mobile_linux::{guest_paths, map_guest_path_to_host};
-    use platform_api::{
+    use mobile_linux_api::{guest_paths, map_guest_path_to_host};
+    use mobile_linux_api::{
         LinuxCommandResult, MobileLinuxCapability, MobileLinuxError, MobileLinuxRuntimeMode,
         MobileLinuxTaskSnapshot, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState,
         RootfsStatus, SandboxBackend,
@@ -3096,7 +3094,7 @@ mod tests {
                 exit_code: 0,
                 timed_out: false,
                 cancelled: false,
-                enforcement: platform_api::LinuxEnforcementReceipt {
+                enforcement: mobile_linux_api::LinuxEnforcementReceipt {
                     network_policy_enforced: true,
                     memory_limit_enforced: true,
                 },
@@ -3106,13 +3104,13 @@ mod tests {
         async fn spawn_background(
             &self,
             _request: LinuxCommandRequest,
-        ) -> Result<platform_api::LinuxProcessHandle, MobileLinuxError> {
+        ) -> Result<mobile_linux_api::LinuxProcessHandle, MobileLinuxError> {
             Err(MobileLinuxError::Unsupported)
         }
 
         async fn kill(
             &self,
-            _handle: &platform_api::LinuxProcessHandle,
+            _handle: &mobile_linux_api::LinuxProcessHandle,
         ) -> Result<(), MobileLinuxError> {
             Err(MobileLinuxError::Unsupported)
         }
@@ -3179,7 +3177,7 @@ mod tests {
 
         async fn configure_mounts(
             &self,
-            _mounts: Vec<platform_api::MountSpec>,
+            _mounts: Vec<mobile_linux_api::MountSpec>,
         ) -> Result<(), MobileLinuxError> {
             Ok(())
         }
@@ -4609,14 +4607,15 @@ mod tests {
             false,
             None,
         );
-        let runtime: Arc<dyn MobileLinuxRuntime> =
-            Arc::new(platform_api::UnavailableMobileLinuxRuntime::unavailable(
-                platform_api::SandboxBackend::IosIsh,
-                platform_api::MobileLinuxRuntimeMode::MobileLinux,
+        let runtime: Arc<dyn MobileLinuxRuntime> = Arc::new(
+            mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
+                mobile_linux_api::SandboxBackend::IosIsh,
+                mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
                 "ios",
                 "arm64",
                 "test runtime never executes node",
-            ));
+            ),
+        );
         let builder = LocalAppBuilder {
             mobile_linux: Some(runtime),
             host: broker.as_ref(),
@@ -4689,14 +4688,15 @@ mod tests {
             false,
             None,
         );
-        let runtime: Arc<dyn MobileLinuxRuntime> =
-            Arc::new(platform_api::UnavailableMobileLinuxRuntime::unavailable(
-                platform_api::SandboxBackend::IosIsh,
-                platform_api::MobileLinuxRuntimeMode::MobileLinux,
+        let runtime: Arc<dyn MobileLinuxRuntime> = Arc::new(
+            mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
+                mobile_linux_api::SandboxBackend::IosIsh,
+                mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
                 "ios",
                 "arm64",
                 "test runtime never executes node",
-            ));
+            ),
+        );
         let builder = LocalAppBuilder {
             mobile_linux: Some(runtime),
             host: broker.as_ref(),
@@ -4753,14 +4753,15 @@ mod tests {
             false,
             None,
         );
-        let runtime: Arc<dyn MobileLinuxRuntime> =
-            Arc::new(platform_api::UnavailableMobileLinuxRuntime::unavailable(
-                platform_api::SandboxBackend::IosIsh,
-                platform_api::MobileLinuxRuntimeMode::MobileLinux,
+        let runtime: Arc<dyn MobileLinuxRuntime> = Arc::new(
+            mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
+                mobile_linux_api::SandboxBackend::IosIsh,
+                mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
                 "ios",
                 "arm64",
                 "test runtime never executes node",
-            ));
+            ),
+        );
         let builder = LocalAppBuilder {
             mobile_linux: Some(runtime),
             host: broker.as_ref(),
@@ -4828,7 +4829,7 @@ mod tests {
             assert_eq!(request.mounts[0].host_path, workspace);
             assert_eq!(
                 request.mounts[0].guest_path,
-                guest_paths::local_app_build_project("aaaa1111", "store")
+                platform_api::local_app_paths::local_app_build_project("aaaa1111", "store")
             );
             assert_eq!(
                 request.cwd.as_deref(),
@@ -4981,14 +4982,15 @@ mod tests {
                 .with_diagnostics(diagnostics),
         );
 
-        let runtime: Arc<dyn MobileLinuxRuntime> =
-            Arc::new(platform_api::UnavailableMobileLinuxRuntime::unavailable(
-                platform_api::SandboxBackend::IosIsh,
-                platform_api::MobileLinuxRuntimeMode::MobileLinux,
+        let runtime: Arc<dyn MobileLinuxRuntime> = Arc::new(
+            mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
+                mobile_linux_api::SandboxBackend::IosIsh,
+                mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
                 "ios",
                 "arm64",
                 "test runtime never executes node",
-            ));
+            ),
+        );
         let broker = LocalAppsHostBroker::new(
             root.path().to_path_buf(),
             client::adapter::MockSink::arc(),

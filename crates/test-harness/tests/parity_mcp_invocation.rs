@@ -19,12 +19,13 @@ use std::sync::Arc;
 
 use llm_runtime::ContentBlock as LlmContentBlock;
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
+use mobile_linux_api::ProcessOutput;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::{McpTransport, McpTransportSpec, OutputEvent, ProcessOutput};
+use platform_api::{McpTransport, McpTransportSpec, OutputEvent};
 use protocol::ToolUseId;
 use test_harness::mocks::MockMcpTransport;
 use tool_api::registry::ToolRegistry;

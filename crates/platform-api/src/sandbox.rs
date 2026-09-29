@@ -51,7 +51,7 @@ pub trait Sandbox: Send + Sync {
     async fn probe_capability(&self) -> SandboxCapability;
 }
 
-pub use mobile_linux_api::SandboxBackend;
+use mobile_linux_api::SandboxBackend;
 
 /// Declarative sandbox policy applied by [`Sandbox::prepare`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,7 +68,7 @@ pub struct SandboxPolicy {
     pub limits: ResourceLimits,
 }
 
-pub use mobile_linux_api::{NetworkPolicy, ResourceLimits};
+use mobile_linux_api::{NetworkPolicy, ResourceLimits};
 
 /// Live probe result from [`Sandbox::probe_capability`].
 #[derive(Debug, Clone)]

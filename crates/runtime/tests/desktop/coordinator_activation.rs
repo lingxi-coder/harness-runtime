@@ -413,7 +413,7 @@ async fn anti_hollow_create_path_emits_nothing() {
 // Registry contract for every session.
 
 fn stub_ctx() -> tool_api::BuiltinToolContext {
-    tool_api::test_support::shell_test_ctx(platform_api::process::ProcessOutput {
+    tool_api::test_support::shell_test_ctx(mobile_linux_api::ProcessOutput {
         stdout: String::new(),
         stderr: String::new(),
         exit_code: 0,

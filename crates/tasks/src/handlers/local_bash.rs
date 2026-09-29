@@ -42,10 +42,8 @@ use crate::output_manager::TaskOutputManager;
 use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use async_trait::async_trait;
-use platform_api::{
-    BackgroundTaskHandle, ProcessCommand, ProcessError, ProcessOutput, ProcessRunner,
-    RuntimeSpawner, Sandbox,
-};
+use mobile_linux_api::{ProcessError, ProcessOutput};
+use platform_api::{BackgroundTaskHandle, ProcessCommand, ProcessRunner, RuntimeSpawner, Sandbox};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
@@ -618,8 +616,9 @@ impl Task for LocalBashHandler {
 mod tests {
     use super::*;
     use crate::state::TaskStatus;
+    use mobile_linux_api::SandboxBackend;
     use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use platform_api::sandbox::{SandboxCapability, SandboxedTag};
     use platform_api::{
         ProcessCommand, ProcessHandle, SandboxError, SandboxPolicy, SandboxedCommand,
     };

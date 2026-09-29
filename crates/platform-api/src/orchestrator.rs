@@ -1191,7 +1191,7 @@ pub struct ModelCapabilities {
 ///
 /// Keeping this separate from provider identity avoids inferring organization
 /// ownership from a provider name or auth mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelProvenance {
     /// A managed policy supplied or forced the model selection.
@@ -1199,13 +1199,8 @@ pub enum ModelProvenance {
     /// A user, CLI, or environment setting supplied the selection.
     UserOrEnv,
     /// The built-in/provider catalog supplied the selection.
+    #[default]
     ProviderCatalogTier,
-}
-
-impl Default for ModelProvenance {
-    fn default() -> Self {
-        Self::ProviderCatalogTier
-    }
 }
 
 impl ModelProvenance {

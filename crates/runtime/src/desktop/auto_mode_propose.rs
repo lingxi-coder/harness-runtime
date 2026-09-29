@@ -466,7 +466,7 @@ mod tests {
     async fn task_stop_cancels_a_scan_while_provider_stream_is_establishing() {
         use llm_runtime::{
             AuthStrategy, Capabilities, ClientConfig, CredentialConfig, DefaultLlmClient,
-            ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, Transport,
+            ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
         };
         use permission::auto_mode_propose::ProposeQuery;
         use std::sync::{

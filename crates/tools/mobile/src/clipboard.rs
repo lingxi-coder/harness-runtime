@@ -208,8 +208,8 @@ mod tests {
         }
     }
 
-    fn empty_output() -> platform_api::process::ProcessOutput {
-        platform_api::process::ProcessOutput {
+    fn empty_output() -> mobile_linux_api::ProcessOutput {
+        mobile_linux_api::ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,

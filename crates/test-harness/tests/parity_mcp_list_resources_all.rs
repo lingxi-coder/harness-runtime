@@ -14,7 +14,8 @@
 use std::sync::Arc;
 
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
-use platform_api::{McpTransport, McpTransportSpec, ProcessOutput};
+use mobile_linux_api::ProcessOutput;
+use platform_api::{McpTransport, McpTransportSpec};
 use test_harness::mocks::MockMcpTransport;
 use tool_api::BuiltinToolContext;
 use tool_mcp::ListMcpResourcesTool;

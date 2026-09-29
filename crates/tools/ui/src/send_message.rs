@@ -1254,8 +1254,8 @@ impl Tool for SendMessageTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mobile_linux_api::ProcessOutput;
     use platform_api::mailbox::{MailboxError, RouteAck};
-    use platform_api::process::ProcessOutput;
     use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,

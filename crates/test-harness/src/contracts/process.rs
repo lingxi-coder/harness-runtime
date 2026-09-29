@@ -15,8 +15,9 @@
 //!   from the runner's POV — non-zero exit is not a `ProcessError`).
 //! * A timeout that fires returns [`ProcessError::Timeout`].
 
+use mobile_linux_api::ProcessError;
 use platform_api::sandbox::ProcessCommand;
-use platform_api::{ProcessError, ProcessRunner, Sandbox};
+use platform_api::{ProcessRunner, Sandbox};
 use std::collections::HashMap;
 use std::time::Duration;
 

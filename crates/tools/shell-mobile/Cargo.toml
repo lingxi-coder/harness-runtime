@@ -11,6 +11,7 @@ license.workspace = true
 # and threaded through MobileConfig -> BuiltinToolContext.android_shell).
 
 [dependencies]
+mobile-linux-api.workspace = true
 tool-api = { path = "../../tool-api" }
 platform-api = { path = "../../platform-api" }
 permission = { path = "../../permission" }

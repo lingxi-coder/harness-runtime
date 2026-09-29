@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use mobile_linux_api::SandboxBackend;
 use platform_api::{
-    BackendPlanHandle, ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
-    SandboxPolicy, SandboxedCommand, SandboxedTag,
+    BackendPlanHandle, ProcessCommand, Sandbox, SandboxCapability, SandboxError, SandboxPolicy,
+    SandboxedCommand, SandboxedTag,
 };
 
 use crate::capabilities::CapabilityCache;
@@ -223,7 +224,8 @@ mod tests {
     use super::*;
     use crate::capabilities::AndroidSandboxCapabilities;
     use crate::policy::{AndroidSandboxPlan, NetProfile}; // not in the impl's imports — tests need it explicitly
-    use platform_api::{NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxPolicy};
+    use mobile_linux_api::{NetworkPolicy, ResourceLimits};
+    use platform_api::{ProcessCommand, Sandbox, SandboxPolicy};
     use std::collections::HashMap;
 
     fn ready_caps() -> AndroidSandboxCapabilities {
@@ -326,7 +328,7 @@ mod tests {
         assert!(matches!(
             sc.tag(),
             platform_api::SandboxedTag::Wrapped {
-                backend: platform_api::SandboxBackend::AndroidMinijail
+                backend: mobile_linux_api::SandboxBackend::AndroidMinijail
             }
         ));
         let plan = sc

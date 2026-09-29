@@ -3,12 +3,14 @@
 #![allow(missing_docs)]
 
 use async_trait::async_trait;
+use mobile_linux_api::{
+    LinuxCommandRequest, LinuxProcessHandle, MobileLinuxError, MobileLinuxRuntime,
+    MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskStatus, MountSpec, ProcessError,
+    ProcessOutput, ProcessStreamSink, SandboxBackend,
+};
 use platform_api::{
-    BackendPlanHandle, LinuxCommandRequest, LinuxProcessHandle, MobileLinuxError,
-    MobileLinuxRuntime, MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskStatus,
-    MountSpec, ProcessCommand, ProcessError, ProcessHandle, ProcessOutput, ProcessRunner,
-    ProcessStreamSink, Sandbox, SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures,
-    SandboxPolicy, SandboxedCommand, SandboxedTag,
+    BackendPlanHandle, ProcessCommand, ProcessHandle, ProcessRunner, Sandbox, SandboxCapability,
+    SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -17,10 +19,10 @@ use std::sync::{Arc, Mutex};
 
 pub use mobile_linux_core::*;
 const ALLOWED_WRITABLE_GUEST_PATHS: &[&str] = &[
-    platform_api::mobile_linux::guest_paths::HOME,
-    platform_api::mobile_linux::guest_paths::SCRATCH[0],
-    platform_api::mobile_linux::guest_paths::SCRATCH[1],
-    platform_api::mobile_linux::guest_paths::WORKSPACE_ROOT,
+    mobile_linux_api::guest_paths::HOME,
+    mobile_linux_api::guest_paths::SCRATCH[0],
+    mobile_linux_api::guest_paths::SCRATCH[1],
+    mobile_linux_api::guest_paths::WORKSPACE_ROOT,
 ];
 
 fn to_sandbox_error(error: MobileLinuxError) -> SandboxError {
@@ -703,7 +705,7 @@ fn task_status_is_terminal(status: MobileLinuxTaskStatus) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::{
+    use mobile_linux_api::{
         LinuxCommandResult, LinuxEnforcementReceipt, MobileLinuxCapability,
         MobileLinuxTaskSnapshot, MobileLinuxTaskStatus, PtyOpenRequest, PtySessionHandle,
         ResourceLimits, RootfsStatus,
@@ -874,7 +876,7 @@ mod tests {
         async fn resize_pty(
             &self,
             _handle: &PtySessionHandle,
-            _size: platform_api::PtySize,
+            _size: mobile_linux_api::PtySize,
         ) -> Result<(), MobileLinuxError> {
             Err(MobileLinuxError::Unsupported)
         }
@@ -938,13 +940,13 @@ mod tests {
                 host_path: temp.path().join("workspace"),
                 guest_path: "/workspace/project".to_string(),
                 read_only: false,
-                purpose: platform_api::MountPurpose::Workspace,
+                purpose: mobile_linux_api::MountPurpose::Workspace,
             },
             MountSpec {
                 host_path: temp.path().join("readonly"),
                 guest_path: "/root/readonly".to_string(),
                 read_only: true,
-                purpose: platform_api::MountPurpose::Shared,
+                purpose: mobile_linux_api::MountPurpose::Shared,
             },
         ]
     }
@@ -962,7 +964,7 @@ mod tests {
 
     fn sample_policy(temp: &tempfile::TempDir) -> SandboxPolicy {
         SandboxPolicy {
-            network: platform_api::NetworkPolicy::Disabled,
+            network: mobile_linux_api::NetworkPolicy::Disabled,
             writable_paths: vec![temp.path().join("workspace")],
             denied_paths: vec![],
             allow_subprocess: true,
@@ -991,7 +993,10 @@ mod tests {
 
         assert_eq!(plan.request.command, "/bin/sh");
         assert_eq!(plan.request.cwd.as_deref(), Some("/workspace/project"));
-        assert_eq!(plan.request.network, platform_api::NetworkPolicy::Disabled);
+        assert_eq!(
+            plan.request.network,
+            mobile_linux_api::NetworkPolicy::Disabled
+        );
         assert_eq!(plan.request.mounts.len(), 2);
     }
 
@@ -1071,7 +1076,7 @@ mod tests {
             host_path: temp.path().join("secrets"),
             guest_path: "/workspace/secrets".to_string(),
             read_only: true,
-            purpose: platform_api::MountPurpose::Shared,
+            purpose: mobile_linux_api::MountPurpose::Shared,
         }];
         let error = MobileLinuxSandbox::new(runtime.clone(), sensitive)
             .expect_err("sensitive path must be rejected");
@@ -1084,13 +1089,13 @@ mod tests {
                 host_path: temp.path().join("workspace"),
                 guest_path: "/workspace/project".to_string(),
                 read_only: false,
-                purpose: platform_api::MountPurpose::Workspace,
+                purpose: mobile_linux_api::MountPurpose::Workspace,
             },
             MountSpec {
                 host_path: temp.path().join("workspace-sub"),
                 guest_path: "/workspace/project/sub".to_string(),
                 read_only: false,
-                purpose: platform_api::MountPurpose::Shared,
+                purpose: mobile_linux_api::MountPurpose::Shared,
             },
         ];
         let error = MobileLinuxSandbox::new(runtime.clone(), overlapping)
@@ -1102,7 +1107,7 @@ mod tests {
             host_path: temp.path().join("external"),
             guest_path: "/workspace/external".to_string(),
             read_only: false,
-            purpose: platform_api::MountPurpose::External,
+            purpose: mobile_linux_api::MountPurpose::External,
         }];
         MobileLinuxSandbox::new(runtime, external_rw)
             .expect("explicit host-approved external write mount should be accepted");
@@ -1121,13 +1126,13 @@ mod tests {
                 host_path: host.clone(),
                 guest_path: "/root/readonly".to_string(),
                 read_only: true,
-                purpose: platform_api::MountPurpose::Shared,
+                purpose: mobile_linux_api::MountPurpose::Shared,
             },
             MountSpec {
                 host_path: host.clone(),
                 guest_path: "/workspace/writable-alias".to_string(),
                 read_only: false,
-                purpose: platform_api::MountPurpose::Workspace,
+                purpose: mobile_linux_api::MountPurpose::Workspace,
             },
         ];
         assert!(matches!(
@@ -1140,13 +1145,13 @@ mod tests {
                 host_path: host.clone(),
                 guest_path: "/workspace/project".to_string(),
                 read_only: false,
-                purpose: platform_api::MountPurpose::Workspace,
+                purpose: mobile_linux_api::MountPurpose::Workspace,
             },
             MountSpec {
                 host_path: host.join("nested"),
                 guest_path: "/root/nested".to_string(),
                 read_only: true,
-                purpose: platform_api::MountPurpose::Shared,
+                purpose: mobile_linux_api::MountPurpose::Shared,
             },
         ];
         assert!(matches!(
@@ -1171,7 +1176,7 @@ mod tests {
             host_path: linked,
             guest_path: "/workspace/project".to_string(),
             read_only: false,
-            purpose: platform_api::MountPurpose::Workspace,
+            purpose: mobile_linux_api::MountPurpose::Workspace,
         }];
 
         let error = MobileLinuxSandbox::new(runtime, mounts)

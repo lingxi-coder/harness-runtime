@@ -24,22 +24,22 @@
 //! * "Do NOT invent pairs" (task brief) — a mechanical derivation from the
 //!   single source of truth cannot drift from it the way a hand-copied
 //!   table could.
-//! * The brand gate's rule G7 (`scripts/check_brand_leaks.py`) treats a bare
+//! * The brand gate's rule G7 (`scripts/checks/check_brand_leaks.py`) treats a bare
 //!   `CLAUDE_PLUGIN_` / `.claude-plugin` / `CLAUDE_PROJECT_DIR` appearing in
 //!   non-comment source as an arriving oracle identifier, and this file
-//!   carries no `scripts/brand_frozen_identities.txt` license for any of the
+//!   carries no `scripts/checks/brand_frozen_identities.txt` license for any of the
 //!   three (that list is not among this task's owned files). Deriving the
 //!   spelling at run time from the LingXi constant means the oracle
 //!   spelling never appears as contiguous source text for G7 to match. As of
 //!   the P0a.7 review this holds with NO exceptions: [`scan_tokens`]'s two
 //!   prefixes are themselves derived (from `branding::ENV_PREFIX` and
 //!   `branding::DOT_DIR`), so the file spells out no oracle fragment at all.
-//!   Measured, not assumed — running `scripts/check_brand_leaks.py --list`
+//!   Measured, not assumed — running `scripts/checks/check_brand_leaks.py --list`
 //!   over a synthetic tree holding this file reports **zero G7 findings**.
 //!
 //! ## Frozen identities are a *second*, orthogonal concept
 //!
-//! `scripts/brand_frozen_identities.txt` (the L3 list) currently licenses two
+//! `scripts/checks/brand_frozen_identities.txt` (the L3 list) currently licenses two
 //! identifiers to remain their Claude spelling **at a specific file path**,
 //! because renaming them would discard already-shipped state: an upstream
 //! `CLAUDECODE` marker, and the literal `CLAUDE_PLUGIN_ROOT` HTTP-header key
@@ -55,7 +55,7 @@
 //!   `CLAUDE`, no `.claude-` prefix) — [`scan_tokens`] never recognizes it,
 //!   so it is inert to this module by construction, not by an exemption.
 //!
-//! This module reads `scripts/brand_frozen_identities.txt` at call time via
+//! This module reads `scripts/checks/brand_frozen_identities.txt` at call time via
 //! [`load_frozen_identities`] rather than hand-copying its two entries, for
 //! the same reason `claude_counterpart` derives rather than hard-codes: the
 //! file is this repo's single source of truth for frozen identities, and it
@@ -86,7 +86,7 @@
 //! counterpart, which is neither dotted nor prefixed), the `CLAUDECODE`
 //! marker, the upstream `anthropics/claude-plugins-official` marketplace repo
 //! name (deliberately — it has no leading dot and is an unchangeable upstream
-//! value, the same call `scripts/check_brand_leaks.py` makes for its own
+//! value, the same call `scripts/checks/check_brand_leaks.py` makes for its own
 //! `\.claude-plugin` needle), and bare product-name prose.
 //!
 //! So [`NormalizeReport::is_fully_understood`] means "every token of those two
@@ -113,7 +113,7 @@ pub struct BrandPair {
     pub claude: String,
 }
 
-/// One entry from `scripts/brand_frozen_identities.txt`: a (path, literal)
+/// One entry from `scripts/checks/brand_frozen_identities.txt`: a (path, literal)
 /// pair the brand gate — and this normalizer — must leave untouched, plus
 /// its stated reason (read for `report`/error messages, not matched on).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,7 +205,7 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Parse `scripts/brand_frozen_identities.txt` (format: `<path>:<literal>  #
+/// Parse `scripts/checks/brand_frozen_identities.txt` (format: `<path>:<literal>  #
 /// reason`, `#`-prefixed and blank lines skipped — mirrors
 /// `check_brand_leaks.py`'s `parse_frozen`). Returns an empty list if the
 /// file is missing rather than panicking: a normalizer with no frozen list to
@@ -217,6 +217,7 @@ fn workspace_root() -> PathBuf {
 pub fn load_frozen_identities() -> Vec<FrozenIdentity> {
     let path = workspace_root()
         .join("scripts")
+        .join("checks")
         .join("brand_frozen_identities.txt");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Vec::new();
@@ -424,7 +425,7 @@ mod tests {
         }
     }
 
-    /// Required test. For every entry in `scripts/brand_frozen_identities.txt`
+    /// Required test. For every entry in `scripts/checks/brand_frozen_identities.txt`
     /// (the L3 list), [`normalize`] at that entry's exact frozen path is the
     /// identity map on that literal: it survives byte-for-byte and is
     /// recorded as `preserved`, never `mapped` or `unmapped`.
@@ -454,7 +455,7 @@ mod tests {
             entries.len(),
             2,
             "expected exactly the two documented frozen entries in \
-             scripts/brand_frozen_identities.txt; update this test (and the \
+             scripts/checks/brand_frozen_identities.txt; update this test (and the \
              module doc) if that list grew or shrank"
         );
 
@@ -597,7 +598,7 @@ mod tests {
         let entries = load_frozen_identities();
         assert!(
             !entries.is_empty(),
-            "scripts/brand_frozen_identities.txt read as empty — \
+            "scripts/checks/brand_frozen_identities.txt read as empty — \
              load_frozen_identities is silently hitting its missing-file fallback"
         );
         for entry in &entries {

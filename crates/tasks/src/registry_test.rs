@@ -6671,8 +6671,8 @@ impl platform_api::ProcessRunner for ExitZeroRunner {
     async fn run(
         &self,
         _cmd: &platform_api::SandboxedCommand,
-    ) -> Result<platform_api::ProcessOutput, platform_api::ProcessError> {
-        Ok(platform_api::ProcessOutput {
+    ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+        Ok(mobile_linux_api::ProcessOutput {
             stdout: "done\n".into(),
             stderr: String::new(),
             exit_code: 0,
@@ -6682,13 +6682,13 @@ impl platform_api::ProcessRunner for ExitZeroRunner {
     async fn spawn_background(
         &self,
         _cmd: &platform_api::SandboxedCommand,
-    ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
-        Err(platform_api::ProcessError::Unsupported)
+    ) -> Result<platform_api::ProcessHandle, mobile_linux_api::ProcessError> {
+        Err(mobile_linux_api::ProcessError::Unsupported)
     }
     async fn kill(
         &self,
         _handle: &platform_api::ProcessHandle,
-    ) -> Result<(), platform_api::ProcessError> {
+    ) -> Result<(), mobile_linux_api::ProcessError> {
         Ok(())
     }
     fn is_available(&self) -> bool {
@@ -6705,8 +6705,8 @@ impl platform_api::Sandbox for PassSandbox {
     fn is_available(&self) -> bool {
         true
     }
-    fn backend(&self) -> platform_api::SandboxBackend {
-        platform_api::SandboxBackend::None
+    fn backend(&self) -> mobile_linux_api::SandboxBackend {
+        mobile_linux_api::SandboxBackend::None
     }
     fn prepare(
         &self,
@@ -8255,19 +8255,19 @@ impl ProcessRunner for HandoffProbeRunner {
     async fn run(
         &self,
         _: &platform_api::SandboxedCommand,
-    ) -> Result<platform_api::ProcessOutput, platform_api::ProcessError> {
-        Err(platform_api::ProcessError::Unsupported)
+    ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+        Err(mobile_linux_api::ProcessError::Unsupported)
     }
     async fn spawn_background(
         &self,
         _: &platform_api::SandboxedCommand,
-    ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
-        Err(platform_api::ProcessError::Unsupported)
+    ) -> Result<platform_api::ProcessHandle, mobile_linux_api::ProcessError> {
+        Err(mobile_linux_api::ProcessError::Unsupported)
     }
     async fn kill(
         &self,
         _: &platform_api::ProcessHandle,
-    ) -> Result<(), platform_api::ProcessError> {
+    ) -> Result<(), mobile_linux_api::ProcessError> {
         Ok(())
     }
     fn is_available(&self) -> bool {
@@ -8276,33 +8276,35 @@ impl ProcessRunner for HandoffProbeRunner {
     async fn export_shell(
         &self,
         handle: &platform_api::ProcessHandle,
-    ) -> Result<platform_api::process::ShellProcessHandoff, platform_api::ProcessError> {
+    ) -> Result<platform_api::process::ShellProcessHandoff, mobile_linux_api::ProcessError> {
         self.records
             .lock()
             .unwrap()
             .get(&handle.task_id)
             .filter(|record| record.pid == handle.pid)
             .cloned()
-            .ok_or_else(|| platform_api::ProcessError::Io("identity mismatch".into()))
+            .ok_or_else(|| mobile_linux_api::ProcessError::Io("identity mismatch".into()))
     }
     async fn validate_shell(
         &self,
         handoff: &platform_api::process::ShellProcessHandoff,
-    ) -> Result<(), platform_api::ProcessError> {
+    ) -> Result<(), mobile_linux_api::ProcessError> {
         if self.records.lock().unwrap().get(&handoff.task_id) == Some(handoff) {
             Ok(())
         } else {
-            Err(platform_api::ProcessError::Io("capability mismatch".into()))
+            Err(mobile_linux_api::ProcessError::Io(
+                "capability mismatch".into(),
+            ))
         }
     }
     async fn adopt_shell(
         &self,
         handoff: &platform_api::process::ShellProcessHandoff,
         sink: Arc<dyn platform_api::process::BackgroundExitSink>,
-    ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
+    ) -> Result<platform_api::ProcessHandle, mobile_linux_api::ProcessError> {
         self.validate_shell(handoff).await?;
         if self.fail_attach.as_deref() == Some(&handoff.task_id) {
-            return Err(platform_api::ProcessError::Io("attach failed".into()));
+            return Err(mobile_linux_api::ProcessError::Io("attach failed".into()));
         }
         self.sinks
             .lock()
@@ -8329,7 +8331,7 @@ impl ProcessRunner for HandoffProbeRunner {
     async fn release_shell(
         &self,
         handoff: &platform_api::process::ShellProcessHandoff,
-    ) -> Result<(), platform_api::ProcessError> {
+    ) -> Result<(), mobile_linux_api::ProcessError> {
         self.sinks.lock().unwrap().remove(&handoff.task_id);
         Ok(())
     }

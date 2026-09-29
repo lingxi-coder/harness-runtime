@@ -1279,7 +1279,7 @@ fn strip_official_pair(name: &str) -> Option<&str> {
 /// `k5u`: both halves are official list members.
 #[must_use]
 pub fn is_official_pair(adj: &str, noun: &str) -> bool {
-    ADJECTIVES.iter().any(|w| *w == adj) && NOUNS.iter().any(|w| *w == noun)
+    ADJECTIVES.contains(&adj) && NOUNS.contains(&noun)
 }
 
 /// Correspondent / local rename notice (2.1.232 `Zid`).

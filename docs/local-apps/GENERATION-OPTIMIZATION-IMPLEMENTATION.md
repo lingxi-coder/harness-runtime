@@ -442,10 +442,10 @@ This documents test scheduling sensitivity rather than claiming it was repaired.
 Additional checks from the repository root:
 
 ```sh
-python3 lingxi-code/scripts/check-phase2-plugin.py
-python3 lingxi-code/scripts/check-phase6-plugin.py
-python3 lingxi-code/scripts/check-phase7-plugin.py
-bash lingxi-code/scripts/mobile-linux/test-local-app-supply-chain.sh
+python3 lingxi-code/scripts/checks/check-phase2-plugin.py
+python3 lingxi-code/scripts/checks/check-phase6-plugin.py
+python3 lingxi-code/scripts/checks/check-phase7-plugin.py
+bash lingxi-code/scripts/tests/test-local-app-supply-chain.sh
 python3 clients/translations/generate.py --check
 git diff --check
 ```

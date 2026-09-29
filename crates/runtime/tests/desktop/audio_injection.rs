@@ -27,11 +27,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use harness_runtime::desktop::{build, desktop_tool_registry, DesktopAudio, DesktopConfig};
+use mobile_linux_api::ProcessOutput;
 use platform_api::audio::{
     AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioOperation, AudioOperationContext,
     AudioOperationKind, AudioOperationSuccess, AudioService,
 };
-use platform_api::process::ProcessOutput;
 use tool_api::BuiltinToolContext;
 
 /// A stand-in for `bridge_server::audio_bridge::AudioBridge`. Nothing here is

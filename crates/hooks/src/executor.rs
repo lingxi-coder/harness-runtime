@@ -50,10 +50,10 @@ use crate::response::{
 };
 use crate::ssrf_guard::SsrfGuard;
 use async_trait::async_trait;
+use mobile_linux_api::ProcessError;
 use platform_api::subagent_spawn::SubagentSpawner;
 use platform_api::{
-    HttpTransport, OutputStream, ProcessCommand, ProcessError, ProcessRunner, RuntimeSpawner,
-    Sandbox,
+    HttpTransport, OutputStream, ProcessCommand, ProcessRunner, RuntimeSpawner, Sandbox,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -1848,7 +1848,7 @@ impl Dispatcher {
                             );
                             let work: HookWork = Box::pin(async move {
                                 let out = output_rx.await.unwrap_or_else(|_| {
-                                    platform_api::ProcessOutput {
+                                    mobile_linux_api::ProcessOutput {
                                         stdout: String::new(),
                                         stderr: "async hook output channel closed".to_string(),
                                         exit_code: -1,
@@ -3606,7 +3606,7 @@ fn process_error_outcome(hook: &HookDefinition, e: &ProcessError) -> (HookResult
 ///    - any other non-zero ⇒ non-blocking error (`Error`, no `Block` decision).
 fn map_command_output(
     hook: &HookDefinition,
-    run: Result<platform_api::ProcessOutput, ProcessError>,
+    run: Result<mobile_linux_api::ProcessOutput, ProcessError>,
     expected_event: &'static str,
 ) -> (HookResult, bool) {
     match run {
@@ -4204,9 +4204,10 @@ mod attachment_wiring_tests {
     use crate::definition::{HookDefinition, HookSource};
     use crate::events::HookEventType;
     use crate::registry::HookRegistry;
+    use mobile_linux_api::{ProcessOutput, SandboxBackend};
     use platform_api::{
-        ProcessHandle, ProcessOutput, RuntimeError, SandboxBackend, SandboxCapability,
-        SandboxPolicy, SandboxedCommand, SandboxedTag,
+        ProcessHandle, RuntimeError, SandboxCapability, SandboxPolicy, SandboxedCommand,
+        SandboxedTag,
     };
     use protocol::{HookId, ToolUseId};
     use std::collections::HashMap;

@@ -6,10 +6,8 @@ use crate::output_manager::TaskOutputManager;
 use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use async_trait::async_trait;
-use platform_api::{
-    BackgroundTaskHandle, ProcessCommand, ProcessError, ProcessRunner, ProcessStreamSink,
-    RuntimeSpawner, Sandbox,
-};
+use mobile_linux_api::{ProcessError, ProcessStreamSink};
+use platform_api::{BackgroundTaskHandle, ProcessCommand, ProcessRunner, RuntimeSpawner, Sandbox};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -379,7 +377,7 @@ impl MonitorHandler {
         self
     }
 
-    fn classify(result: &Result<platform_api::ProcessOutput, ProcessError>) -> TaskStatus {
+    fn classify(result: &Result<mobile_linux_api::ProcessOutput, ProcessError>) -> TaskStatus {
         match result {
             Ok(output) if output.exit_code == 0 => TaskStatus::Completed,
             Ok(_) => TaskStatus::Failed,
@@ -406,7 +404,7 @@ impl MonitorHandler {
     ///   monitor stopped by the high-volume rule already said why.
     fn timeout_marker_due(
         had_deadline: bool,
-        result: &Result<platform_api::ProcessOutput, ProcessError>,
+        result: &Result<mobile_linux_api::ProcessOutput, ProcessError>,
         cancelled: bool,
     ) -> bool {
         had_deadline && matches!(result, Err(ProcessError::Timeout)) && !cancelled
@@ -414,7 +412,7 @@ impl MonitorHandler {
 
     fn terminal_status(
         cancelled: bool,
-        result: &Result<platform_api::ProcessOutput, ProcessError>,
+        result: &Result<mobile_linux_api::ProcessOutput, ProcessError>,
     ) -> TaskStatus {
         if cancelled {
             TaskStatus::Killed
@@ -827,10 +825,12 @@ impl Task for MonitorHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mobile_linux_api::ProcessOutput;
+    use mobile_linux_api::SandboxBackend;
     use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use platform_api::sandbox::{SandboxCapability, SandboxedTag};
     use platform_api::{
-        ProcessCommand, ProcessHandle, ProcessOutput, SandboxError, SandboxPolicy, SandboxedCommand,
+        ProcessCommand, ProcessHandle, SandboxError, SandboxPolicy, SandboxedCommand,
     };
     use std::collections::HashMap as StdHashMap;
     use std::sync::Mutex as StdMutex;
@@ -1082,7 +1082,8 @@ mod tests {
     /// even though they do meet the process runner's own default deadline.
     #[test]
     fn the_timeout_marker_is_owed_only_by_a_real_deadline() {
-        let timeout: Result<platform_api::ProcessOutput, ProcessError> = Err(ProcessError::Timeout);
+        let timeout: Result<mobile_linux_api::ProcessOutput, ProcessError> =
+            Err(ProcessError::Timeout);
         assert!(MonitorHandler::timeout_marker_due(true, &timeout, false));
 
         // Persistent monitor: the runner still times it out, the oracle is silent.

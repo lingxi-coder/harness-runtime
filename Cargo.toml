@@ -156,13 +156,13 @@ repository = "https://github.com/lingxi-coder/harness-runtime"
 [workspace.dependencies]
 lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client", rev = "58740df6606d5eafa1b575fde2af940278f11d0b", default-features = false }
 # Temporary local assembly; replaced by one immutable SDK Git revision before delivery.
-mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "9e8e19a473728722183fcbfa0814398c1dd8a8ff" }
-mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "9e8e19a473728722183fcbfa0814398c1dd8a8ff" }
-mobile-linux-android = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "9e8e19a473728722183fcbfa0814398c1dd8a8ff" }
-mobile-linux-ios = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "9e8e19a473728722183fcbfa0814398c1dd8a8ff" }
-platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "9e8e19a473728722183fcbfa0814398c1dd8a8ff" }
-platform-android-libcap = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "9e8e19a473728722183fcbfa0814398c1dd8a8ff" }
-platform-android-minijail = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "9e8e19a473728722183fcbfa0814398c1dd8a8ff" }
+mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771" }
+mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771" }
+mobile-linux-android = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771" }
+mobile-linux-ios = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771" }
+platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771" }
+platform-android-libcap = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771" }
+platform-android-minijail = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771" }
 
 # Single source of truth for the product namespace (paths, filenames, env
 # prefix, brand name). Path is workspace-root-relative so every member uses

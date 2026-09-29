@@ -566,13 +566,12 @@ mod tests {
     }
 
     fn context(service: Arc<dyn AudioService>) -> BuiltinToolContext {
-        let mut context =
-            tool_api::test_support::shell_test_ctx(platform_api::process::ProcessOutput {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: 0,
-                timed_out: false,
-            });
+        let mut context = tool_api::test_support::shell_test_ctx(mobile_linux_api::ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
         context.audio = Some(service);
         context
     }

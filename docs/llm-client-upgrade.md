@@ -9,13 +9,14 @@
 
 `deps/llm-client` 是独立 Git 子模块。根 `Cargo.toml` 将它排除在 runtime workspace 外，
 并通过 `[patch."https://github.com/lingxi-coder/llm-client"]` 指向本地源码。
+子模块使用相对父仓库的 URL；本地 SSH 别名和 CI 的 HTTPS checkout 各自沿用父仓库身份。
 根 `[workspace.dependencies]` 保留 canonical Git URL 与完整提交，供 `llm-runtime`、
 `http-client` 及下游消费；
 Cargo 不会继承依赖仓库根的 patch，下游若也需要联调，应在自己的 workspace 根配置 patch。
 
 ```sh
 # 新 checkout
-git clone --recurse-submodules https://github.com/lingxi-coder/harness-runtime.git
+git clone --recurse-submodules git@github.com-lingxi-coder:lingxi-coder/harness-runtime.git
 cd harness-runtime
 
 # 已有 checkout，或切换了父仓库提交后

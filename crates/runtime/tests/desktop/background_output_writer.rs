@@ -1,13 +1,14 @@
 //! Real child → managed output callback → TaskOutputManager failure recovery.
 #![cfg(unix)]
 use async_trait::async_trait;
+use mobile_linux_api::ProcessError;
 use platform_api::filesystem::{
     FileAppendError, FileAppendStage, FileContent, FileEvent, FlockGuard, FsError,
 };
 use platform_api::task_registry::TaskRegistryHandle;
 use platform_api::{
-    BackgroundExitSink, BackgroundTaskBinding, FileSystem, ProcessCommand, ProcessError,
-    ProcessRunner, SandboxedCommand, SandboxedTag,
+    BackgroundExitSink, BackgroundTaskBinding, FileSystem, ProcessCommand, ProcessRunner,
+    SandboxedCommand, SandboxedTag,
 };
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -351,7 +352,7 @@ fn supervised_registry(
         fs.clone(),
         output,
     );
-    let mut ctx = tool_api::test_support::shell_test_ctx(platform_api::ProcessOutput {
+    let mut ctx = tool_api::test_support::shell_test_ctx(mobile_linux_api::ProcessOutput {
         stdout: String::new(),
         stderr: String::new(),
         exit_code: 0,

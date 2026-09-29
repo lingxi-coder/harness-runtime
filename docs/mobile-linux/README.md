@@ -1,6 +1,6 @@
 > Shared rootfs schemas, licenses, toolchain pins and producers now belong to the
 > Git-pinned `mobile-linux-runtime` SDK. Resolve it with
-> `python3 scripts/mobile-linux/sdk_source.py`; compatibility scripts delegate there.
+> `python3 scripts/lib/sdk_source.py`; compatibility scripts delegate there.
 > Release evidence is external: set `MOBILE_LINUX_EVIDENCE_DIR` and
 > `MOBILE_LINUX_ROOTFS_ARCHIVE`. The enabled gate requires the real archive,
 > complete inventory, SPDX licenses, and existing product authorization evidence.
@@ -53,7 +53,7 @@ packages over the network inside the emulated guest. The Xcode phase fails
 closed when it is absent, so produce it first:
 
 ```text
-scripts/mobile-linux/build-local-app-node-modules.sh --arch aarch64
+scripts/local-apps/build-local-app-node-modules.sh --arch aarch64
 clients/ios/scripts/stage-local-app-runtime.sh --variant full \
   --node-modules clients/ios/build/local-app-node-modules/aarch64/node_modules
 ```

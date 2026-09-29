@@ -2186,6 +2186,7 @@ dependencies = [
  "mcp",
  "memory",
  "migrations",
+ "mobile-linux-api",
  "msgqueue",
  "nix 0.27.1",
  "orchestrator",
@@ -2331,6 +2332,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "core",
+ "mobile-linux-api",
  "permission",
  "platform-api",
  "protocol",
@@ -3069,6 +3071,7 @@ dependencies = [
  "async-trait",
  "branding",
  "git2",
+ "mobile-linux-api",
  "platform-api",
  "rand 0.9.4",
  "rusqlite",
@@ -3365,7 +3368,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-android"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=9e8e19a473728722183fcbfa0814398c1dd8a8ff#9e8e19a473728722183fcbfa0814398c1dd8a8ff"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771#acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771"
 dependencies = [
  "async-trait",
  "mobile-linux-api",
@@ -3379,7 +3382,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-api"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=9e8e19a473728722183fcbfa0814398c1dd8a8ff#9e8e19a473728722183fcbfa0814398c1dd8a8ff"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771#acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771"
 dependencies = [
  "async-trait",
  "serde",
@@ -3389,7 +3392,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-core"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=9e8e19a473728722183fcbfa0814398c1dd8a8ff#9e8e19a473728722183fcbfa0814398c1dd8a8ff"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771#acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771"
 dependencies = [
  "mobile-linux-api",
  "serde",
@@ -4125,6 +4128,7 @@ dependencies = [
  "mcp",
  "memory",
  "migrations",
+ "mobile-linux-api",
  "once_cell",
  "outputstyles",
  "permission",
@@ -4481,6 +4485,7 @@ dependencies = [
  "hex",
  "http-client",
  "mobile-linux-android",
+ "mobile-linux-api",
  "nix 0.27.1",
  "platform-android-minijail",
  "platform-api",
@@ -4497,7 +4502,7 @@ dependencies = [
 [[package]]
 name = "platform-android-libcap"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=9e8e19a473728722183fcbfa0814398c1dd8a8ff#9e8e19a473728722183fcbfa0814398c1dd8a8ff"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771#acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771"
 dependencies = [
  "cc",
 ]
@@ -4505,7 +4510,7 @@ dependencies = [
 [[package]]
 name = "platform-android-minijail"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=9e8e19a473728722183fcbfa0814398c1dd8a8ff#9e8e19a473728722183fcbfa0814398c1dd8a8ff"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771#acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771"
 dependencies = [
  "cc",
  "hex",
@@ -4557,6 +4562,7 @@ dependencies = [
  "ignore",
  "jsonrpc",
  "llm-runtime",
+ "mobile-linux-api",
  "mobile-linux-core",
  "platform-api",
  "protocol",
@@ -4579,6 +4585,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "http-client",
+ "mobile-linux-api",
  "platform-api",
  "platform-common",
  "platform-posix-minimal",
@@ -4624,6 +4631,7 @@ dependencies = [
  "libc",
  "lsp",
  "mcp",
+ "mobile-linux-api",
  "nix 0.27.1",
  "notify",
  "notify-debouncer-mini",
@@ -4657,6 +4665,7 @@ dependencies = [
  "jsonrpc",
  "libc",
  "mcp",
+ "mobile-linux-api",
  "platform-api",
  "protocol",
  "serde",
@@ -4670,7 +4679,7 @@ dependencies = [
 [[package]]
 name = "platform-pty"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=9e8e19a473728722183fcbfa0814398c1dd8a8ff#9e8e19a473728722183fcbfa0814398c1dd8a8ff"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771#acdf47a4c01ce1c3ccab4e8aa3f8e51fcffac771"
 dependencies = [
  "anyhow",
  "filedescriptor",
@@ -4699,6 +4708,7 @@ dependencies = [
  "jsonrpc",
  "lsp",
  "mcp",
+ "mobile-linux-api",
  "notify",
  "notify-debouncer-mini",
  "platform-api",
@@ -5643,6 +5653,7 @@ name = "sandbox"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "mobile-linux-api",
  "permission",
  "platform-api",
  "protocol",
@@ -6336,6 +6347,7 @@ dependencies = [
  "llm-runtime",
  "local-apps",
  "mcp",
+ "mobile-linux-api",
  "permission",
  "platform-api",
  "protocol",
@@ -6446,6 +6458,7 @@ dependencies = [
  "lsp",
  "mcp",
  "memory",
+ "mobile-linux-api",
  "orchestrator",
  "outputstyles",
  "permission",
@@ -6859,6 +6872,7 @@ dependencies = [
  "lingxi-llm-client",
  "lsp",
  "mcp",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -6903,6 +6917,7 @@ dependencies = [
  "branding",
  "core",
  "cron",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -6957,6 +6972,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "git2",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -7025,6 +7041,7 @@ dependencies = [
  "branding",
  "core",
  "mcp",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -7043,6 +7060,7 @@ name = "tool-mobile"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -7080,6 +7098,7 @@ dependencies = [
  "async-trait",
  "base64",
  "hooks",
+ "mobile-linux-api",
  "nix 0.27.1",
  "once_cell",
  "permission",
@@ -7102,6 +7121,7 @@ name = "tool-shell-mobile"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -7119,6 +7139,7 @@ dependencies = [
  "command-api",
  "compaction",
  "core",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -7142,6 +7163,7 @@ dependencies = [
  "branding",
  "core",
  "cron",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -7164,6 +7186,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "core",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",
@@ -7226,6 +7249,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "core",
+ "mobile-linux-api",
  "once_cell",
  "permission",
  "platform-api",

@@ -722,13 +722,12 @@ mod tests {
             "../../tools/task/tests/fixtures/monitor_schema_2_1_270.json"
         ))
         .unwrap();
-        let context =
-            tool_api::test_support::shell_test_ctx(platform_api::process::ProcessOutput {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: 0,
-                timed_out: false,
-            });
+        let context = tool_api::test_support::shell_test_ctx(mobile_linux_api::ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
         let tool: Arc<dyn tool_api::Tool> = Arc::new(tool_task::monitor::MonitorTool::new(context));
         let mut registry = tool_api::ToolRegistry::new();
         registry.register_builtin(tool.clone());

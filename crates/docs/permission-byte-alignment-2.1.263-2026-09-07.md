@@ -26,11 +26,11 @@ This is a delta-porting programme, not a byte-polish pass.
 
 ## Method (reproducible; scripts committed)
 
-1. `scripts/oracle_prose_delta.py` — prose-string set difference between two
+1. `scripts/tests/oracle_prose_delta.py` — prose-string set difference between two
    oracle binaries, then filter by permission keywords and drop code-shaped runs.
-2. `scripts/perm_extract_literals.py` — pull every shipped string literal from
+2. `scripts/checks/perm_extract_literals.py` — pull every shipped string literal from
    `permission/src` (skips `#[cfg(test)]` blocks and comments).
-3. `scripts/perm_verify_literals.py` — verify each literal against the oracle
+3. `scripts/checks/perm_verify_literals.py` — verify each literal against the oracle
    binary **placeholder-aware**: split on `{…}`, require every fixed segment to
    appear. Tries raw / `\n`-escaped / `\uXXXX` / `\xXX` / quote-escaped forms.
 

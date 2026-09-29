@@ -3175,21 +3175,21 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 async fn run(
                     &self,
                     _: &platform_api::SandboxedCommand,
-                ) -> Result<platform_api::ProcessOutput, platform_api::ProcessError>
+                ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError>
                 {
                     unreachable!()
                 }
                 async fn spawn_background(
                     &self,
                     _: &platform_api::SandboxedCommand,
-                ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError>
+                ) -> Result<platform_api::ProcessHandle, mobile_linux_api::ProcessError>
                 {
                     unreachable!()
                 }
                 async fn kill(
                     &self,
                     _: &platform_api::ProcessHandle,
-                ) -> Result<(), platform_api::ProcessError> {
+                ) -> Result<(), mobile_linux_api::ProcessError> {
                     unreachable!()
                 }
                 fn is_available(&self) -> bool {

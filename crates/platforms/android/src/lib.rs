@@ -42,12 +42,15 @@ pub use process::AndroidMinijailProcessRunner;
 pub use receipt::AndroidSandboxReceipt;
 pub use sandbox::AndroidMinijailSandbox;
 
+use mobile_linux_api::{
+    MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec, SandboxBackend,
+    UnavailableMobileLinuxRuntime,
+};
 use platform_api::{
     AndroidUiAutomation, AudioService, CalendarProvider, CameraControl, Clipboard, Clock,
     ContactsProvider, DeepLinkOpener, DeviceStatusProvider, FileSystem, HapticService,
-    HttpTransport, LocationProvider, MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose,
-    MountSpec, NotificationService, Platform, ProcessRunner, Sandbox, SandboxBackend, SandboxError,
-    SecureStorage, SharingService, UnavailableMobileLinuxRuntime, WorktreeManager,
+    HttpTransport, LocationProvider, NotificationService, Platform, ProcessRunner, Sandbox,
+    SandboxError, SecureStorage, SharingService, WorktreeManager,
 };
 use platform_common::{MobileLinuxProcessRunner, MobileLinuxSandbox};
 use std::path::PathBuf;
@@ -417,10 +420,10 @@ impl Platform for AndroidPlatform {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use mobile_linux_api::{SandboxBackend, UnavailableMobileLinuxRuntime};
     use platform_api::{
         CameraControl, CameraError, CapturePhotoOpts, CapturedImage, LocationError, LocationFix,
-        Platform, SandboxBackend, ShareError, SharePayload, ShareResult, SharingService,
-        UnavailableMobileLinuxRuntime,
+        Platform, ShareError, SharePayload, ShareResult, SharingService,
     };
 
     struct NoCam;

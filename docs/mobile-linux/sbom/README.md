@@ -38,10 +38,10 @@ does not match the staged native/rootfs bytes.
 Regenerate and verify the bundled engine-free local-app seed evidence with:
 
 ```text
-python3 scripts/mobile-linux/generate-local-app-sbom.py \
+python3 scripts/local-apps/generate-local-app-sbom.py \
   --lock crates/local-apps/templates/runtime-profiles/react-dom/r1/pnpm-lock.yaml \
   --output docs/mobile-linux/sbom/local-app-runtime.spdx.json
-bash scripts/mobile-linux/test-local-app-supply-chain.sh
+bash scripts/tests/test-local-app-supply-chain.sh
 ```
 
 Historical aggregate source records are preserved byte-for-byte in the SDK

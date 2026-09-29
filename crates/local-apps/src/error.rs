@@ -1,7 +1,7 @@
 //! Typed error surface for the local-apps core.
 //!
 //! Follows the repo error convention (`thiserror` enums with `String`
-//! payloads, like `platform_api::MobileLinuxError`). Every variant maps to exactly
+//! payloads, like `mobile_linux_api::MobileLinuxError`). Every variant maps to exactly
 //! one wire-level [`AppErrorCode`] so the engine can surface failures as a
 //! typed `AppOperationFailed { code, message }` client event.
 

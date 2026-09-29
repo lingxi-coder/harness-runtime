@@ -21,7 +21,7 @@ fn workspace_root() -> PathBuf {
 }
 
 /// `cargo metadata --no-deps` for the workspace, parsed to JSON. Mirrors the
-/// invocation in `scripts/check-deps.sh` (offline first; the metadata call does
+/// invocation in `scripts/checks/check-deps.sh` (offline first; the metadata call does
 /// not need a full resolve, only the direct workspace edges).
 fn cargo_metadata() -> Value {
     let root = workspace_root();
@@ -136,7 +136,7 @@ fn client_has_no_app_edge() {
 #[test]
 fn check_deps_sh_green() {
     let root = workspace_root();
-    let script = root.join("scripts").join("check-deps.sh");
+    let script = root.join("scripts/checks/check-deps.sh");
     assert!(
         script.is_file(),
         "the authoritative dep gate `{}` must exist",
@@ -147,11 +147,11 @@ fn check_deps_sh_green() {
         .arg(&script)
         .current_dir(&root)
         .output()
-        .expect("spawn scripts/check-deps.sh");
+        .expect("spawn scripts/checks/check-deps.sh");
 
     assert!(
         out.status.success(),
-        "scripts/check-deps.sh must exit 0 (no §8.1 dependency violations).\n\
+        "scripts/checks/check-deps.sh must exit 0 (no §8.1 dependency violations).\n\
          --- stdout ---\n{}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),

@@ -26,13 +26,13 @@ use crate::filesystem::FileSystem;
 use crate::haptics::HapticService;
 use crate::http::HttpTransport;
 use crate::location::LocationProvider;
-use crate::mobile_linux::MobileLinuxRuntime;
 use crate::notification::NotificationService;
 use crate::process::ProcessRunner;
 use crate::sandbox::Sandbox;
 use crate::secure_storage::SecureStorage;
 use crate::share::SharingService;
 use crate::worktree::WorktreeManager;
+use mobile_linux_api::MobileLinuxRuntime;
 use std::sync::Arc;
 
 /// Aggregate of the OS handles a built engine needs.

@@ -17,6 +17,7 @@ license.workspace = true
 # compiles + is verified on the host build.
 
 [dependencies]
+mobile-linux-api.workspace = true
 platform-api = { path = "../../platform-api" }
 platform-posix-minimal = { path = "../posix-minimal" }
 platform-common = { path = "../common" }

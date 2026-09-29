@@ -1,9 +1,10 @@
 //! Single-spawn foreground/background capture shared by Windows Bash paths.
 use super::runner::{StreamingProcessTreeGuard, WindowsProcess, DEFAULT_TIMEOUT};
+use mobile_linux_api::{ProcessError, ProcessOutput};
 use platform_api::task_output::Utf8StreamDecoder;
 use platform_api::{
-    BackgroundTaskBinding, ForegroundOutcome, ForegroundRunResult, ProcessError, ProcessHandle,
-    ProcessOutput, ProcessOutputFile, SandboxedCommand,
+    BackgroundTaskBinding, ForegroundOutcome, ForegroundRunResult, ProcessHandle,
+    ProcessOutputFile, SandboxedCommand,
 };
 use std::process::Stdio;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

@@ -2990,12 +2990,12 @@ mod tests {
         async fn run(
             &self,
             cmd: &platform_api::SandboxedCommand,
-        ) -> Result<platform_api::ProcessOutput, platform_api::ProcessError> {
+        ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
             self.recorded
                 .lock()
                 .unwrap()
                 .push((cmd.inner().command.clone(), cmd.inner().args.clone()));
-            Ok(platform_api::ProcessOutput {
+            Ok(mobile_linux_api::ProcessOutput {
                 stdout: String::new(),
                 stderr: self.stderr.clone(),
                 exit_code: self.exit_code,
@@ -3006,14 +3006,14 @@ mod tests {
         async fn spawn_background(
             &self,
             _cmd: &platform_api::SandboxedCommand,
-        ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
-            Err(platform_api::ProcessError::Unsupported)
+        ) -> Result<platform_api::ProcessHandle, mobile_linux_api::ProcessError> {
+            Err(mobile_linux_api::ProcessError::Unsupported)
         }
 
         async fn kill(
             &self,
             _handle: &platform_api::ProcessHandle,
-        ) -> Result<(), platform_api::ProcessError> {
+        ) -> Result<(), mobile_linux_api::ProcessError> {
             Ok(())
         }
 

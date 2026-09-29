@@ -784,7 +784,7 @@ impl Tool for MonitorTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::process::ProcessOutput;
+    use mobile_linux_api::ProcessOutput;
     use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,

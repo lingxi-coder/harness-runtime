@@ -76,4 +76,4 @@ is for a call that had already STARTED, `gle` for one that had not run yet.
 The 267 deltas for `agent` and `plan/goal` (baseline 2.1.266, one release back)
 were out of this sweep's scope, and `permission` (2.1.263) was not swept —
 `permission`'s own literal-regression gate
-(`scripts/perm_verify_literals.py`) is the better instrument for it.
+(`scripts/checks/perm_verify_literals.py`) is the better instrument for it.

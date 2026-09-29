@@ -27,8 +27,9 @@
 
 use async_trait::async_trait;
 use futures::Stream;
-use platform_api::mobile_linux::guest_paths;
-use platform_api::{FileContent, FileEvent, FileSystem, FlockGuard, FsError, MobileLinuxRuntime};
+use mobile_linux_api::guest_paths;
+use mobile_linux_api::MobileLinuxRuntime;
+use platform_api::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -62,26 +63,21 @@ impl GuestPathFileSystem {
     /// space / refused writes.
     fn resolve_translation(&self, path: &str, write: bool) -> Result<Option<String>, FsError> {
         let mounts = self.runtime.current_mounts();
-        mobile_linux_core::guest_path::resolve_guest_path(
-            path,
-            &mounts,
-            &guest_paths::writable_roots(),
-            write,
-        )
-        .map(|host| host.map(|value| value.to_string_lossy().into_owned()))
-        .map_err(|error| match error {
-            mobile_linux_core::guest_path::GuestPathError::ReadOnly { guest_path } => {
-                FsError::PermissionDenied(format!(
-                    "guest path is on a read-only mount ({guest_path}): {path}"
-                ))
-            }
-            mobile_linux_core::guest_path::GuestPathError::NotHostBacked => {
-                FsError::PermissionDenied(format!(
+        mobile_linux_core::resolve_guest_path(path, &mounts, &guest_paths::writable_roots(), write)
+            .map(|host| host.map(|value| value.to_string_lossy().into_owned()))
+            .map_err(|error| match error {
+                mobile_linux_core::GuestPathError::ReadOnly { guest_path } => {
+                    FsError::PermissionDenied(format!(
+                        "guest path is on a read-only mount ({guest_path}): {path}"
+                    ))
+                }
+                mobile_linux_core::GuestPathError::NotHostBacked => {
+                    FsError::PermissionDenied(format!(
                     "guest path is not host-backed (emulated-filesystem area); file tools can only \
                      reach bind-mounted guest paths — use the shell for: {path}"
                 ))
-            }
-        })
+                }
+            })
     }
 
     fn resolve_root(&self, root: &Path, write: bool) -> Result<PathBuf, FsError> {
@@ -255,7 +251,7 @@ impl FileSystem for GuestPathFileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::{
+    use mobile_linux_api::{
         LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
         MobileLinuxError, MobileLinuxRuntimeMode, MountPurpose, MountSpec, PtyOpenRequest,
         PtySessionHandle, RootfsStatus, SandboxBackend,
@@ -315,7 +311,7 @@ mod tests {
         async fn resize_pty(
             &self,
             _handle: &PtySessionHandle,
-            _size: platform_api::PtySize,
+            _size: mobile_linux_api::PtySize,
         ) -> Result<(), MobileLinuxError> {
             Err(MobileLinuxError::Unsupported)
         }

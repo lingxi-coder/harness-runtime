@@ -6,7 +6,8 @@
 //!
 //! See spec §24.2 (`SandboxPolicy`).
 
-pub use platform_api::{NetworkPolicy, ResourceLimits, SandboxPolicy};
+use mobile_linux_api::{NetworkPolicy, ResourceLimits};
+pub use platform_api::SandboxPolicy;
 
 /// Conservative default: no network, project workspace writable,
 /// system paths denied, subprocess allowed, modest resource ceilings.

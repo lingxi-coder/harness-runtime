@@ -3,8 +3,9 @@
 use crate::process::ShellProcessHandoff;
 use crate::{
     BackgroundExitSink, BackgroundTaskBinding, ForegroundOutcome, ForegroundRunResult,
-    ProcessCommand, ProcessError, ProcessHandle, ProcessRunner, SandboxedCommand, SandboxedTag,
+    ProcessCommand, ProcessHandle, ProcessRunner, SandboxedCommand, SandboxedTag,
 };
+use mobile_linux_api::ProcessError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
