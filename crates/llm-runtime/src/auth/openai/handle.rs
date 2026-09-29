@@ -4,12 +4,12 @@
 //! Drives either:
 //!   A. PKCE Authorization-Code flow (`login`):
 //!      1. [`CallbackListener::bind`] on ports 1455/1457
-//!      2. [`OpenAiOAuthClient::build_authorize_url_with_redirect`]
+//!      2. SDK config builds the authorization URL.
 //!      3. Open browser (injectable — no-op in tests)
 //!      4. [`CallbackListener::accept`] — validate state
-//!      5. [`OpenAiOAuthClient::exchange_code_with_redirect`]
-//!      6. [`parse_id_token`] for `account_id` / fedramp
-//!      7. [`OpenAiOAuthClient::obtain_api_key`] — mint an `sk-...` key
+//!      5. SDK exchanges the authorization code.
+//!      6. SDK parses `id_token` for `account_id` / fedramp.
+//!      7. SDK mints an `sk-...` key.
 //!      8. Persist via [`secret::CredentialManager::store_openai_oauth_tokens`]
 //!      9. Persist the minted API key via
 //!         [`secret::CredentialManager::set_provider_key`] (under id `"chatgpt"`)
@@ -23,10 +23,11 @@
 //! `fedramp`. The engine M8 wrapper (`ChatGptConnectDriver`) will call these
 //! inherent methods directly.
 
-use crate::oauth::openai::callback::{CallbackError, CallbackListener};
-use crate::oauth::openai::client::OpenAiOAuthClient;
-use crate::oauth::openai::device_code;
-use lingxi_llm_client::auth::oauth::openai::parse_id_token;
+use crate::auth::openai::callback::{CallbackError, CallbackListener};
+use crate::auth::openai::device_code;
+use crate::auth::openai::login::{exchange_error, into_login_tokens};
+use lingxi_llm_client::auth::oauth::openai::{self as sdk, OpenAiOAuthConfig};
+use lingxi_llm_client::Transport;
 use platform_api::Clock;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -84,7 +85,9 @@ pub struct OpenAiLoginInfo {
 /// Handle that drives either the browser-PKCE or device-code `OpenAI` OAuth flow
 /// and persists the resulting tokens in the `secret` keychain.
 pub struct OpenAiOAuthHandle {
-    client: Arc<OpenAiOAuthClient>,
+    config: OpenAiOAuthConfig,
+    http: Arc<dyn Transport>,
+    clock: Arc<dyn Clock>,
     credentials: Arc<secret::CredentialManager>,
     browser_open: BrowserOpener,
 }
@@ -93,14 +96,23 @@ impl OpenAiOAuthHandle {
     /// Construct a handle that opens a real browser for the login redirect.
     #[must_use]
     pub fn new(
-        client: Arc<OpenAiOAuthClient>,
+        config: OpenAiOAuthConfig,
+        http: Arc<dyn Transport>,
         credentials: Arc<secret::CredentialManager>,
     ) -> Self {
         Self {
-            client,
+            config,
+            http,
+            clock: Arc::new(RealClock),
             credentials,
             browser_open: Arc::new(real_browser_open),
         }
+    }
+
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Override the browser opener (tests inject a no-op so the flow runs
@@ -117,7 +129,7 @@ impl OpenAiOAuthHandle {
     /// so this path deliberately does not bind the desktop loopback listener.
     #[must_use]
     pub fn begin_mobile_browser_login(&self, redirect_uri: &str) -> (String, String, String) {
-        self.client.build_authorize_url_with_redirect(redirect_uri)
+        self.config.build_authorize_url_with_redirect(redirect_uri)
     }
 
     /// Complete a native-host callback and persist the ChatGPT session.
@@ -127,16 +139,22 @@ impl OpenAiOAuthHandle {
         verifier: &str,
         redirect_uri: &str,
     ) -> Result<OpenAiLoginInfo, OpenAiAuthError> {
-        let tokens = self
-            .client
-            .exchange_code_with_redirect(code, verifier, redirect_uri)
-            .await
-            .map_err(|e| OpenAiAuthError::ServerError(e.to_string()))?;
+        let tokens = sdk::exchange_code(
+            self.http.as_ref(),
+            &self.config,
+            code,
+            verifier,
+            redirect_uri,
+        )
+        .await
+        .map_err(exchange_error)
+        .map_err(|e| OpenAiAuthError::ServerError(e.to_string()))?;
+        let tokens = into_login_tokens(tokens, self.clock.as_ref());
 
         let claims = tokens
             .id_token
             .as_deref()
-            .and_then(parse_id_token)
+            .and_then(sdk::parse_id_token)
             .unwrap_or_default();
         // Persist the OAuth session BEFORE minting the API key: the mint is
         // best-effort (see `mint_api_key_best_effort`), and failing it used to
@@ -190,7 +208,7 @@ impl OpenAiOAuthHandle {
             );
             return String::new();
         };
-        match self.client.obtain_api_key(id_token).await {
+        match sdk::obtain_api_key(self.http.as_ref(), &self.config, id_token).await {
             Ok(api_key) => {
                 if let Err(error) = self.credentials.set_provider_key("chatgpt", &api_key).await {
                     tracing::warn!(
@@ -232,10 +250,10 @@ impl OpenAiOAuthHandle {
             .await
             .map_err(callback_to_auth_err)?;
         let bound_port = listener.port();
-        let redirect_uri = self.client.config().redirect_uri(bound_port);
+        let redirect_uri = self.config.redirect_uri(bound_port);
 
         // (2) Build the authorize URL.
-        let (url, verifier, state) = self.client.build_authorize_url_with_redirect(&redirect_uri);
+        let (url, verifier, state) = self.config.build_authorize_url_with_redirect(&redirect_uri);
 
         // Start listening BEFORE opening the browser.
         let accept_state = state.clone();
@@ -251,17 +269,23 @@ impl OpenAiOAuthHandle {
             .map_err(callback_to_auth_err)?;
 
         // (5) Exchange the code for tokens.
-        let tokens = self
-            .client
-            .exchange_code_with_redirect(&params.code, &verifier, &redirect_uri)
-            .await
-            .map_err(|e| OpenAiAuthError::ServerError(e.to_string()))?;
+        let tokens = sdk::exchange_code(
+            self.http.as_ref(),
+            &self.config,
+            &params.code,
+            &verifier,
+            &redirect_uri,
+        )
+        .await
+        .map_err(exchange_error)
+        .map_err(|e| OpenAiAuthError::ServerError(e.to_string()))?;
+        let tokens = into_login_tokens(tokens, self.clock.as_ref());
 
         // (6) Parse id_token for account_id / fedramp.
         let claims = tokens
             .id_token
             .as_deref()
-            .and_then(parse_id_token)
+            .and_then(sdk::parse_id_token)
             .unwrap_or_default();
 
         // (7) Persist OAuth tokens. This comes BEFORE the API-key mint, which
@@ -306,12 +330,9 @@ impl OpenAiOAuthHandle {
     /// mints an API key, and persists everything — same storage as `login()`.
     pub async fn login_device_code(&self) -> Result<OpenAiLoginInfo, OpenAiAuthError> {
         let tokens = device_code::run_device_code_login(
-            self.client.config().clone(),
-            self.client.http(),
-            // `run_device_code_login` constructs its own `OpenAiOAuthClient`
-            // internally, so we pass a real clock for production use.  Test
-            // coverage for the device-code flow itself lives in `device_code.rs`.
-            Arc::new(RealClock),
+            self.config.clone(),
+            self.http.clone(),
+            self.clock.clone(),
         )
         .await
         .map_err(|e| OpenAiAuthError::ServerError(e.to_string()))?;
@@ -319,7 +340,7 @@ impl OpenAiOAuthHandle {
         let claims = tokens
             .id_token
             .as_deref()
-            .and_then(parse_id_token)
+            .and_then(sdk::parse_id_token)
             .unwrap_or_default();
 
         let refresh = tokens
@@ -432,7 +453,7 @@ fn real_browser_open(url: &str) -> Result<(), OpenAiAuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth::openai::testsupport::{
+    use crate::auth::openai::testsupport::{
         mem_credential_manager, port_guard, Canned, MemStorage, MockHttp, TestClock,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -468,10 +489,8 @@ mod tests {
         let storage = MemStorage::new();
         let cm = mem_credential_manager(storage.clone(), clock.clone());
         let cfg = lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig::default();
-        let client = Arc::new(
-            OpenAiOAuthClient::new(cfg, http as Arc<dyn lingxi_llm_client::Transport>)
-                .with_clock(clock),
-        );
+        let handle = OpenAiOAuthHandle::new(cfg, http as Arc<dyn lingxi_llm_client::Transport>, cm)
+            .with_clock(clock);
 
         let was_opened = Arc::new(AtomicBool::new(false));
         let browser_flag = was_opened.clone();
@@ -501,11 +520,7 @@ mod tests {
             Ok(())
         });
 
-        (
-            OpenAiOAuthHandle::new(client, cm).with_browser_opener(opener),
-            storage,
-            was_opened,
-        )
+        (handle.with_browser_opener(opener), storage, was_opened)
     }
 
     /// Parse `redirect_uri` port and `state` out of an authorize URL.

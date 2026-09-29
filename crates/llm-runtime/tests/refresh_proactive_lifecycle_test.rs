@@ -3,9 +3,9 @@
 //! cancellable via `AuthState::shutdown` (Task 6).
 
 use async_trait::async_trait;
+use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
-use llm_runtime::oauth::anthropic::refresh::{AuthState, RefreshDriver};
-use llm_runtime::oauth::anthropic::ClaudeAiOAuthConfig;
+use llm_runtime::auth::anthropic::refresh::{AuthState, RefreshDriver};
 use platform_api::{BackgroundTaskHandle, Clock, RuntimeError, RuntimeSpawner};
 use protocol::Secret;
 use std::future::Future;
@@ -251,7 +251,7 @@ async fn proactive_then_reactive_collapses_to_one_refresh() {
         .expect("spawn ok");
 
     // Fire a reactive refresh BEFORE the proactive timer's 30s wake.
-    let driver = llm_runtime::oauth::anthropic::refresh::RefreshDriver::new(state.clone());
+    let driver = llm_runtime::auth::anthropic::refresh::RefreshDriver::new(state.clone());
     let prev = state.token.read().await.token_hash();
     let r = driver.refresh(prev).await;
     assert!(r.is_ok(), "reactive refresh ok: {r:?}");

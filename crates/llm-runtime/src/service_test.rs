@@ -7410,7 +7410,7 @@ mod tests {
         calls: std::sync::atomic::AtomicU32,
     }
 
-    impl crate::aws_auth::AwsAuthRefresh for CountingAwsRefresh {
+    impl crate::auth::external_aws::AwsAuthRefresh for CountingAwsRefresh {
         fn refresh(&self) -> BoxFuture<'_, bool> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async { true })
@@ -7535,7 +7535,7 @@ mod tests {
         );
         assert_eq!(
             aws.calls.load(std::sync::atomic::Ordering::SeqCst),
-            crate::aws_auth::AWS_AUTH_MAX_ATTEMPTS,
+            crate::auth::external_aws::AWS_AUTH_MAX_ATTEMPTS,
             "refresh bounded at Ygf=2"
         );
         assert_eq!(

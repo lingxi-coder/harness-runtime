@@ -9,10 +9,10 @@
 
 #![allow(dead_code)]
 
-use crate::oauth::lifecycle::{
+use crate::auth::lifecycle::{
     self, BearerToken, OAuthHookError, Preflight, RefreshableToken, TokenHash,
 };
-use crate::oauth::openai::client::OAuthError;
+use crate::auth::openai::login::OAuthError;
 use async_trait::async_trait;
 use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
 use lingxi_llm_client::auth::oauth::openai::{
@@ -307,12 +307,7 @@ impl RefreshDriver {
 
         // 5. Build the new TokenInfo.
         let now = self.state.clock.now();
-        let expires_in = if body.expires_in == 0 {
-            3600
-        } else {
-            body.expires_in
-        };
-        let new_expiry = now + Duration::from_secs(expires_in);
+        let new_expiry = now + body.effective_lifetime();
 
         // Update account_id/fedramp/email from id_token if present.
         let (new_account_id, new_fedramp, new_email) = if let Some(ref id_token) = body.id_token {
@@ -518,7 +513,7 @@ async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn platform_api::Ru
 #[cfg(test)]
 mod refresh_tests {
     use super::*;
-    use crate::oauth::openai::testsupport::{
+    use crate::auth::openai::testsupport::{
         mem_credential_manager, Canned, MemStorage, MockHttp, TestClock,
     };
 
@@ -843,7 +838,7 @@ mod refresh_tests {
 
     #[tokio::test]
     async fn proactive_loop_fires_then_exits_on_401() {
-        use crate::oauth::openai::testsupport::InstantSpawner;
+        use crate::auth::openai::testsupport::InstantSpawner;
 
         let http = MockHttp::new(vec![(
             "oauth/token",

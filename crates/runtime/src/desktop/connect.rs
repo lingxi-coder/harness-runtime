@@ -67,7 +67,7 @@ use command_api::builtins::{
 use lingxi_core::settings::enterprise::{
     check_org_membership, ForceLoginOrgPin, OrgMembershipCheck,
 };
-use llm_runtime::oauth::openai as openai_oauth;
+use llm_runtime::auth::openai as openai_oauth;
 use llm_runtime::services::sdk;
 use platform_api::AuthHandle;
 use sdk::auth::oauth::copilot::{CopilotLogin, DeviceCodeResponse, PollOutcome};
@@ -150,8 +150,8 @@ impl EngineCopilotConnect {
             credentials,
             CopilotLogin::new(
                 transport,
-                llm_runtime::copilot::copilot_client_id(),
-                llm_runtime::copilot::COPILOT_USER_AGENT,
+                llm_runtime::auth::copilot::copilot_client_id(),
+                llm_runtime::auth::copilot::COPILOT_USER_AGENT,
             ),
             Arc::new(TokioSleeper),
         )
@@ -249,16 +249,8 @@ pub struct EngineChatGptConnect {
 impl EngineChatGptConnect {
     /// Production constructor: uses a real browser opener.
     #[must_use]
-    pub fn new(
-        client: Arc<openai_oauth::client::OpenAiOAuthClient>,
-        credentials: Arc<CredentialManager>,
-    ) -> Self {
-        Self {
-            handle: Arc::new(openai_oauth::handle::OpenAiOAuthHandle::new(
-                client,
-                credentials,
-            )),
-        }
+    pub fn new(handle: Arc<openai_oauth::OpenAiOAuthHandle>) -> Self {
+        Self { handle }
     }
 }
 

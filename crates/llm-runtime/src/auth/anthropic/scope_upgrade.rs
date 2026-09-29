@@ -5,14 +5,13 @@
 //! On failure: leave the existing `TokenInfo` untouched (the user isn't logged
 //! out — the next API call retries with the still-valid `refresh_token`).
 
-use crate::oauth::anthropic::client::OAuthError;
-use crate::oauth::anthropic::refresh::{AuthState, TokenInfo};
+use crate::auth::anthropic::login::OAuthError;
+use crate::auth::anthropic::refresh::{AuthState, TokenInfo};
 use async_trait::async_trait;
+use lingxi_llm_client::auth::oauth::anthropic::ScopeUpgradeRequired;
 use protocol::Secret;
 use std::sync::Arc;
 use std::time::SystemTime;
-
-pub use lingxi_llm_client::auth::oauth::anthropic::{parse_scope_upgrade, ScopeUpgradeRequired};
 
 /// Result of running a PKCE flow: a complete `TokenInfo` ready to swap into
 /// `AuthState`.
@@ -29,7 +28,7 @@ pub struct PkceRunResult {
 }
 
 /// Abstraction over the PKCE flow. Production uses
-/// `BrowserOpeningPkceRunner` (lives in `client.rs`); tests inject mocks.
+/// `BrowserOpeningPkceRunner`; tests inject mocks.
 #[async_trait]
 pub trait PkceRunner: Send + Sync {
     /// Run a PKCE flow against the IdP and return the fresh tokens, or an

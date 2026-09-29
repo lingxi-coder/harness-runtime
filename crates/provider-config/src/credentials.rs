@@ -25,7 +25,7 @@ pub struct MultiCredentialProvider {
     sources: BTreeMap<String, CredentialSource>,
     anthropic_api_key: Option<String>,
     anthropic_api_key_helper: Option<String>,
-    anthropic_api_key_helper_cache: llm_runtime::oauth::anthropic::ApiKeyHelperCache,
+    anthropic_api_key_helper_cache: llm_runtime::auth::anthropic::ApiKeyHelperCache,
     oauth_delegates: BTreeMap<String, Arc<dyn CredentialProvider>>,
 }
 
@@ -71,7 +71,7 @@ impl MultiCredentialProvider {
             sources,
             anthropic_api_key,
             anthropic_api_key_helper,
-            anthropic_api_key_helper_cache: llm_runtime::oauth::anthropic::ApiKeyHelperCache::new(),
+            anthropic_api_key_helper_cache: llm_runtime::auth::anthropic::ApiKeyHelperCache::new(),
             oauth_delegates,
         }
     }
@@ -99,8 +99,8 @@ impl MultiCredentialProvider {
         // through to the store; only when the store is ALSO empty does a helper
         // failure surface, preserving its diagnostic message.
         let helper_error = if let Some(helper) = self.anthropic_api_key_helper.as_deref() {
-            let ttl_ms = llm_runtime::oauth::anthropic::api_key_helper_ttl_ms();
-            match llm_runtime::oauth::anthropic::fetch_api_key_result(
+            let ttl_ms = llm_runtime::auth::anthropic::api_key_helper_ttl_ms();
+            match llm_runtime::auth::anthropic::fetch_api_key_result(
                 helper,
                 &self.anthropic_api_key_helper_cache,
                 ttl_ms,

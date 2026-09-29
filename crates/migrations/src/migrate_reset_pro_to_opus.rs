@@ -8,7 +8,7 @@
 use crate::context::{js_truthy, MigrationEnv};
 use crate::global_config;
 use crate::settings_update::{read_settings_map, settings_path, WritableScope};
-use llm_runtime::oauth::anthropic::limits::SubscriptionType;
+use llm_runtime::auth::anthropic::limits::SubscriptionType;
 use serde_json::{json, Value};
 use telemetry::sink::AnalyticsValue;
 
@@ -86,7 +86,7 @@ pub async fn run(env: &MigrationEnv) {
 mod tests {
     use super::*;
     use crate::test_support::temp_config;
-    use llm_runtime::oauth::anthropic::limits::SubscriptionType;
+    use llm_runtime::auth::anthropic::limits::SubscriptionType;
     use serde_json::json;
 
     fn test_env(t: &crate::test_support::TempConfig) -> crate::context::MigrationEnv {

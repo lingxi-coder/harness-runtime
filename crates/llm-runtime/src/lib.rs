@@ -37,27 +37,24 @@ mod attempt_pricing;
 mod codec_tests;
 pub use attempt_pricing::{AttemptPriceBounds, AttemptTokenRates};
 
-pub mod aws_auth;
 pub mod catalog;
 #[allow(missing_docs)]
 pub mod client;
 pub mod cloud_provider_env;
 pub mod config;
 pub mod convert;
-pub mod copilot;
 pub mod cost;
-pub mod credentials;
 pub mod error;
 mod execution;
 mod execution_context;
 pub use execution_context::ExecutionContext;
+pub mod auth;
 pub mod fusion_hints;
 pub mod history;
 mod history_projection;
 mod history_usage;
 pub mod model;
 pub mod model_attempt;
-pub mod oauth;
 pub mod prompt_format;
 pub mod protocol;
 pub mod provider_settings;
@@ -78,9 +75,12 @@ pub mod types;
 pub mod unicode_repair;
 mod upstream;
 
-pub use aws_auth::{
-    AwsAuthProcess, AwsAuthRefresh, AwsAuthRefresher, AwsAuthSettings, AwsExportedCredentials,
-    ShellAwsAuthProcess,
+pub use auth::external_aws::{
+    AwsAuthProcess, AwsAuthRefresh, AwsAuthRefresher, AwsAuthSettings, ShellAwsAuthProcess,
+};
+pub use auth::provider::{
+    CopilotExchangeCredentialProvider, Credential, CredentialProvider, CredentialScope,
+    EnvCredentialProvider, StaticCredentialProvider,
 };
 pub use catalog::{builtin_presets, BuiltinCatalog};
 pub use client::{
@@ -100,10 +100,6 @@ pub use config::{
     FailoverTriggers, ModelProfile, PricingConfig, ProtocolFamily, ProviderProfile, SigningConfig,
 };
 pub use cost::{CostEstimator, PricingCatalog, PricingOverride, PricingPolicy};
-pub use credentials::{
-    CopilotExchangeCredentialProvider, Credential, CredentialProvider, CredentialScope,
-    EnvCredentialProvider, StaticCredentialProvider,
-};
 pub use error::{
     api_error_detail, api_error_status, error_display_text, LlmError, MediaDelegationAccounting,
 };

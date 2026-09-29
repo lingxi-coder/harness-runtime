@@ -78,11 +78,10 @@ use command_api::builtins::{
     register_core_batch_4, register_core_batch_5,
 };
 use cost::CostHydrator;
-use llm_runtime::oauth::anthropic::client::ClaudeAiOAuthClient;
-use llm_runtime::oauth::anthropic::handle::OAuthHandle;
-use llm_runtime::oauth::anthropic::ClaudeAiOAuthConfig;
-use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
-use llm_runtime::oauth::openai as openai_oauth;
+use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
+use llm_runtime::auth::anthropic::handle::OAuthHandle;
+use llm_runtime::auth::anthropic::{OAuthCredentialProvider, RefreshDriver};
+use llm_runtime::auth::openai as openai_oauth;
 use llm_runtime::{ModelRuntime, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
@@ -4363,7 +4362,7 @@ impl command_api::builtins::CopilotConnectDriver for FusionCatalogRefreshingCopi
 
 /// See [`FusionCatalogRefreshingCredentialWriter`] — the same wrapping for
 /// the ChatGPT-subscription OAuth seam (`/connect chatgpt`), which persists
-/// its credential inside `llm_runtime::oauth::openai`'s handle rather than
+/// its credential inside `llm_runtime::auth::openai`'s handle rather than
 /// through `ConnectCredentialWriter`. Round-5 review finding [15] class
 /// sweep: this was the one harness-runtime::desktop `/connect` driver round 4 left
 /// unwrapped, so a ChatGPT sign-in stayed invisible to Fusion for the rest of
@@ -5942,10 +5941,10 @@ pub struct DesktopConfig {
     /// (M13) The HOST launcher forces Claude.ai OAuth as the effective auth
     /// source: with a stored OAuth session it then outranks even an env
     /// `ANTHROPIC_API_KEY` in the auth resolver
-    /// (`llm_runtime::oauth::anthropic::resolver`). claude-code derives this
+    /// (`llm_runtime::auth::anthropic::resolver`). claude-code derives this
     /// from `KWr()` (@228931361), a pure env predicate that
     /// `resolve_llm_stack` reads itself via
-    /// [`llm_runtime::oauth::anthropic::resolver::host_managed_oauth_only`], so
+    /// [`llm_runtime::auth::anthropic::resolver::host_managed_oauth_only`], so
     /// every host gets it for free; this field only lets an embedding host
     /// declare the same forcing without the launcher env. A managed
     /// `forceLoginMethod` policy must NEVER be fed here — it has no place in
@@ -8063,7 +8062,7 @@ pub enum BuildError {
 /// `isClaudeAISubscriber()` is `isAnthropicAuthEnabled() && shouldUseClaudeAIAuth(scopes)`.
 /// `isAnthropicAuthEnabled()` reduces to "the auth resolver picks the stored
 /// OAuth session" — `resolve` is driven with the FULL
-/// [`llm_runtime::oauth::anthropic::resolver::ResolverContext`] (M13), so every
+/// [`llm_runtime::auth::anthropic::resolver::ResolverContext`] (M13), so every
 /// documented ranking applies: managed OAuth forcing outranks env keys, env
 /// `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` and an FD-inherited key outrank
 /// stored OAuth, and stored OAuth outranks the stored/settings/helper/Bedrock
@@ -8087,12 +8086,12 @@ pub enum BuildError {
 /// fixed) is correct. Closing this needs the resolver to carry the `YIt()`
 /// reading alongside `managed_oauth_only`.
 fn oauth_subscriber_flag(
-    source: &llm_runtime::oauth::anthropic::resolver::AuthSource,
+    source: &llm_runtime::auth::anthropic::resolver::AuthSource,
     scopes: &[String],
 ) -> bool {
     matches!(
         source,
-        llm_runtime::oauth::anthropic::resolver::AuthSource::OAuthClaudeAi
+        llm_runtime::auth::anthropic::resolver::AuthSource::OAuthClaudeAi
     ) && lingxi_llm_client::auth::oauth::anthropic::subscription_from_scopes(scopes)
 }
 
@@ -8109,14 +8108,14 @@ fn oauth_subscriber_flag(
 /// [`oauth_subscriber_flag`], so an inference-less OAuth session still reports
 /// its tier while `is_subscriber` is false.
 fn subscription_seed(
-    source: &llm_runtime::oauth::anthropic::resolver::AuthSource,
+    source: &llm_runtime::auth::anthropic::resolver::AuthSource,
     scopes: &[String],
     subscription_type: Option<&String>,
     rate_limit_tier: Option<&String>,
 ) -> platform_api::subscription::SubscriptionSnapshot {
     let oauth_effective = matches!(
         source,
-        llm_runtime::oauth::anthropic::resolver::AuthSource::OAuthClaudeAi
+        llm_runtime::auth::anthropic::resolver::AuthSource::OAuthClaudeAi
     );
     platform_api::subscription::SubscriptionSnapshot {
         is_subscriber: oauth_subscriber_flag(source, scopes),
@@ -10221,8 +10220,8 @@ pub struct LlmStack {
     pub resolved_anthropic_api_key: Option<String>,
     /// See [`build`] for the resolution rules behind `is_subscriber`.
     pub is_subscriber: bool,
-    /// See [`build`] for the resolution rules behind `openai_oauth_client`.
-    pub openai_oauth_client: Arc<openai_oauth::OpenAiOAuthClient>,
+    /// See [`build`] for the resolution rules behind `openai_oauth_handle`.
+    pub openai_oauth_handle: Arc<openai_oauth::OpenAiOAuthHandle>,
     /// See [`build`] for the resolution rules behind `pricing`.
     pub pricing: cost::PricingCatalog,
     /// See [`build`] for the resolution rules behind `chains`.
@@ -10509,7 +10508,7 @@ async fn resolve_llm_stack_with_credentials(
     // resolved OAuth `AuthState` (`Some` only for an OAuth-effective subscriber
     // session) that step (2) bridges into the assembled client's credential
     // seam as an `oauth_delegate`.
-    let mut oauth_auth_state: Option<Arc<llm_runtime::oauth::anthropic::refresh::AuthState>> = None;
+    let mut oauth_auth_state: Option<Arc<llm_runtime::auth::anthropic::refresh::AuthState>> = None;
     let mut openai_oauth_state: Option<Arc<openai_oauth::AuthState>> = None;
     // (3) Credential manager + OAuth client (used by /login, /logout).
     //
@@ -10544,12 +10543,12 @@ async fn resolve_llm_stack_with_credentials(
         Some(cfg.api_key.clone())
     };
     let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
-    let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
+    let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(
         oauth_cfg.clone(),
         llm_transport.clone(),
         credentials.clone(),
+        clock.clone(),
     ));
-    let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(oauth_client));
 
     // (3.1) M5-13 / Task 10: build the OAuth refresh driver when the keychain
     //        already holds a logged-in OAuth token.  `init_refresh_driver` spawns
@@ -10579,8 +10578,8 @@ async fn resolve_llm_stack_with_credentials(
             // below-OAuth sources (settings key / helper / Bedrock) cannot
             // change the outcome once `has_stored_oauth` is true, so their
             // slots stay conservative.
-            let auth_source = llm_runtime::oauth::anthropic::resolver::resolve(
-                &llm_runtime::oauth::anthropic::resolver::ResolverContext {
+            let auth_source = llm_runtime::auth::anthropic::resolver::resolve(
+                &llm_runtime::auth::anthropic::resolver::ResolverContext {
                     // The ONLY thing that demotes an env key below the
                     // stored session is `KWr()` (@228931361), read HERE —
                     // the credential-resolution point, exactly where
@@ -10589,7 +10588,7 @@ async fn resolve_llm_stack_with_credentials(
                     // pass through the CLI's `build_runtime_from_config`
                     // (`mcp serve`, `auto-mode-setup`, bridge-server).
                     managed_oauth_only: cfg.managed_oauth_only
-                        || llm_runtime::oauth::anthropic::resolver::host_managed_oauth_only(),
+                        || llm_runtime::auth::anthropic::resolver::host_managed_oauth_only(),
                     env_auth_token: std::env::var("ANTHROPIC_AUTH_TOKEN")
                         .ok()
                         .filter(|v| !v.is_empty()),
@@ -10618,7 +10617,7 @@ async fn resolve_llm_stack_with_credentials(
             // LingXi equivalent, and everything else takes the `/login` wording
             // anyway.
             credential_origin = match &auth_source {
-                llm_runtime::oauth::anthropic::resolver::AuthSource::EnvApiKey => {
+                llm_runtime::auth::anthropic::resolver::AuthSource::EnvApiKey => {
                     // This is the ANTHROPIC auth resolver, and its `EnvApiKey`
                     // is defined as `ANTHROPIC_API_KEY` (see `AuthSource`), so
                     // naming the variable here is a fact, not a guess. Another
@@ -10627,7 +10626,7 @@ async fn resolve_llm_stack_with_credentials(
                         var: "ANTHROPIC_API_KEY".to_string(),
                     }
                 }
-                llm_runtime::oauth::anthropic::resolver::AuthSource::ApiKeyHelper { .. } => {
+                llm_runtime::auth::anthropic::resolver::AuthSource::ApiKeyHelper { .. } => {
                     orchestrator::api_error_copy::CredentialOrigin::ApiKeyHelper
                 }
                 _ => orchestrator::api_error_copy::CredentialOrigin::Other,
@@ -10654,7 +10653,7 @@ async fn resolve_llm_stack_with_credentials(
                 *guard = Some(seed);
             }
             let profile_token = protocol::Secret::new(tokens.access_token.expose_secret().clone());
-            match llm_runtime::oauth::anthropic::client::init_refresh_driver(
+            match llm_runtime::auth::anthropic::login::init_refresh_driver(
                 oauth_cfg,
                 tokens.access_token,
                 tokens.refresh_token,
@@ -10763,11 +10762,15 @@ async fn resolve_llm_stack_with_credentials(
     //        Returns `Arc<openai_oauth::AuthState>` for the credential delegate;
     //        on Ok(None) / Err we leave `openai_oauth_state = None` (warn on Err).
     //        No subscriber-flag / profile-fetch needed for OpenAI — minimal path.
-    let openai_oauth_cfg = openai_oauth::OpenAiOAuthConfig::default();
-    let openai_oauth_client = Arc::new(openai_oauth::OpenAiOAuthClient::new(
-        openai_oauth_cfg.clone(),
-        llm_transport.clone(),
-    ));
+    let openai_oauth_cfg = lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig::default();
+    let openai_oauth_handle = Arc::new(
+        openai_oauth::OpenAiOAuthHandle::new(
+            openai_oauth_cfg.clone(),
+            llm_transport.clone(),
+            credentials.clone(),
+        )
+        .with_clock(clock.clone()),
+    );
 
     // (3.2a-pre) P3 enterprise precedence for the openai-chatgpt credential:
     // PAT env  >  external-tokens env  >  OAuth login session. First hit wins.
@@ -10775,7 +10778,13 @@ async fn resolve_llm_stack_with_credentials(
     if let Ok(pat) = std::env::var("OPENAI_PERSONAL_ACCESS_TOKEN") {
         if !pat.trim().is_empty() {
             let http_dyn: Arc<dyn Transport> = llm_transport.clone() as Arc<dyn Transport>;
-            match openai_oauth::whoami(&openai_oauth_cfg, &http_dyn, &pat).await {
+            match lingxi_llm_client::auth::oauth::openai::whoami(
+                http_dyn.as_ref(),
+                &openai_oauth_cfg,
+                &pat,
+            )
+            .await
+            {
                 Ok(md) => {
                     openai_chatgpt_delegate =
                         Some(Arc::new(openai_oauth::PatCredentialProvider::new(pat, md))
@@ -10812,7 +10821,7 @@ async fn resolve_llm_stack_with_credentials(
     if openai_chatgpt_delegate.is_none() {
         match credentials.get_openai_oauth_tokens().await {
             Ok(Some(tokens)) => {
-                match openai_oauth::client::init_refresh_driver(
+                match openai_oauth::login::init_refresh_driver(
                     openai_oauth_cfg.clone(),
                     tokens.access_token,
                     tokens.refresh_token,
@@ -11421,7 +11430,7 @@ async fn resolve_llm_stack_with_credentials(
         subscription,
         resolved_anthropic_api_key,
         is_subscriber,
-        openai_oauth_client,
+        openai_oauth_handle,
         pricing: assembled.pricing,
         chains: assembled.chains,
         model_providers,
@@ -11916,7 +11925,7 @@ pub async fn build_with_credential_stack(
         subscription,
         resolved_anthropic_api_key,
         is_subscriber,
-        openai_oauth_client,
+        openai_oauth_handle,
         pricing,
         chains,
         model_providers,
@@ -16200,11 +16209,9 @@ pub async fn build_with_credential_stack(
             )),
             refresher: fusion_catalog_refresher.clone(),
         });
-    let connect_chatgpt_inner: Arc<dyn command_api::builtins::ChatGptConnectDriver> =
-        Arc::new(crate::desktop::connect::EngineChatGptConnect::new(
-            openai_oauth_client,
-            credentials.clone(),
-        ));
+    let connect_chatgpt_inner: Arc<dyn command_api::builtins::ChatGptConnectDriver> = Arc::new(
+        crate::desktop::connect::EngineChatGptConnect::new(openai_oauth_handle),
+    );
     // Round-5 review finding [15] class sweep: EVERY `/connect` seam that
     // persists a credential refreshes Fusion's catalog, not just the two
     // round 4 wrapped. The OAuth driver below is built over the UNWRAPPED
@@ -20348,7 +20355,7 @@ still flip to available"
 
     #[test]
     fn oauth_subscriber_flag_gating() {
-        use llm_runtime::oauth::anthropic::resolver::{resolve, ResolverContext};
+        use llm_runtime::auth::anthropic::resolver::{resolve, ResolverContext};
         let inference = vec!["user:inference".to_string(), "user:profile".to_string()];
         let no_inference = vec!["user:profile".to_string()];
         // The context `resolve_llm_stack` builds for a stored-OAuth session,
@@ -20420,7 +20427,7 @@ still flip to available"
     /// the resolver keeps the stored session as the effective source.
     #[test]
     fn subscription_seed_gates_persisted_tier_on_effective_oauth() {
-        use llm_runtime::oauth::anthropic::resolver::AuthSource;
+        use llm_runtime::auth::anthropic::resolver::AuthSource;
         let inference = vec!["user:inference".to_string()];
         let tier = "enterprise".to_string();
         let limit = "default_claude_max_20x".to_string();

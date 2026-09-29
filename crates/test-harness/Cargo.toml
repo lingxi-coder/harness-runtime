@@ -43,6 +43,7 @@ hyper-util = { version = "0.1", features = ["server", "tokio"] }
 http-body-util = "0.1"
 
 [dev-dependencies]
+lingxi-llm-client.workspace = true
 llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 proptest.workspace = true
 platform-posix-minimal = { path = "../platforms/posix-minimal" }

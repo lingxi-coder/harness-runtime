@@ -7,10 +7,9 @@
 //! 1. `request_device_code` → POST `device_usercode_url` → `DeviceUserCode`
 //! 2. Show `user_code` + `device_verify_url` to the user.
 //! 3. `poll_for_token` in a loop until Ready or timeout.
-//! 4. `run_device_code_login` orchestrates steps 1-3, then hands off to
-//!    `OpenAiOAuthClient::exchange_code_with_redirect` and returns tokens.
+//! 4. `run_device_code_login` exchanges the code with the SDK and returns tokens.
 
-use crate::oauth::openai::client::{OAuthError, OpenAiOAuthClient};
+use crate::auth::openai::login::{exchange_error, into_login_tokens, LoginTokens, OAuthError};
 use lingxi_llm_client::auth::oauth::openai as sdk;
 use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
 use lingxi_llm_client::Transport;
@@ -20,35 +19,15 @@ use std::time::Duration;
 
 const MAX_WAIT: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_INTERVAL_SECS: u64 = 5;
-pub use sdk::{DeviceUserCode, PollOutcome};
-
-pub async fn request_device_code(
-    cfg: &OpenAiOAuthConfig,
-    http: Arc<dyn Transport>,
-) -> Result<DeviceUserCode, OAuthError> {
-    sdk::request_device_code(http.as_ref(), cfg)
-        .await
-        .map_err(|e| OAuthError::DeviceCode(e.to_string()))
-}
-
-pub async fn poll_for_token(
-    cfg: &OpenAiOAuthConfig,
-    http: Arc<dyn Transport>,
-    device_auth_id: &str,
-    user_code: &str,
-) -> Result<PollOutcome, OAuthError> {
-    sdk::poll_for_token(http.as_ref(), cfg, device_auth_id, user_code)
-        .await
-        .map_err(|e| OAuthError::DeviceCode(e.to_string()))
-}
+use sdk::PollOutcome;
 
 /// Run the complete device-code login flow.
 ///
 /// 1. Calls `request_device_code` to get a user code.
 /// 2. Loops calling `poll_for_token`, sleeping `interval` seconds between
 ///    attempts, for up to 15 minutes.
-/// 3. When the poll returns `Ready`, calls `client.exchange_code_with_redirect`
-///    with the device callback URI and returns the `ExchangedTokens`.
+/// 3. When the poll returns `Ready`, exchanges the code with the device
+///    callback URI and converts the SDK tokens using the host clock.
 ///
 /// `clock` is injected for testability (production callers pass `SystemClock`).
 ///
@@ -59,8 +38,10 @@ pub async fn run_device_code_login(
     cfg: OpenAiOAuthConfig,
     http: Arc<dyn Transport>,
     clock: Arc<dyn Clock>,
-) -> Result<crate::oauth::openai::client::ExchangedTokens, OAuthError> {
-    let uc = request_device_code(&cfg, http.clone()).await?;
+) -> Result<LoginTokens, OAuthError> {
+    let uc = sdk::request_device_code(http.as_ref(), &cfg)
+        .await
+        .map_err(|e| OAuthError::DeviceCode(e.to_string()))?;
     let interval = Duration::from_secs(if uc.interval == 0 {
         DEFAULT_INTERVAL_SECS
     } else {
@@ -77,21 +58,25 @@ pub async fn run_device_code_login(
             ));
         }
 
-        match poll_for_token(&cfg, http.clone(), &uc.device_auth_id, &uc.user_code).await? {
+        match sdk::poll_for_token(http.as_ref(), &cfg, &uc.device_auth_id, &uc.user_code)
+            .await
+            .map_err(|e| OAuthError::DeviceCode(e.to_string()))?
+        {
             PollOutcome::Ready {
                 authorization_code,
                 code_verifier,
             } => {
-                // Device-code redirect URI is `{issuer}/deviceauth/callback` —
-                // note NO `/api/accounts/` prefix (that prefix is only on the
-                // usercode/token endpoints). Byte-aligned with codex
-                // `login/src/device_code_auth.rs:194`.
-                let redirect_uri =
-                    format!("{}/deviceauth/callback", cfg.issuer.trim_end_matches('/'));
-                let client = OpenAiOAuthClient::new(cfg, http.clone());
-                return client
-                    .exchange_code_with_redirect(&authorization_code, &code_verifier, &redirect_uri)
-                    .await;
+                let redirect_uri = cfg.device_redirect_uri();
+                let tokens = sdk::exchange_code(
+                    http.as_ref(),
+                    &cfg,
+                    &authorization_code,
+                    &code_verifier,
+                    &redirect_uri,
+                )
+                .await
+                .map_err(exchange_error)?;
+                return Ok(into_login_tokens(tokens, clock.as_ref()));
             }
             PollOutcome::Pending => {
                 // Sleep interval (or remaining time, whichever is smaller).
@@ -107,7 +92,7 @@ pub async fn run_device_code_login(
 #[cfg(test)]
 mod device_code_tests {
     use super::*;
-    use crate::oauth::openai::testsupport::{Canned, MockHttp, TestClock};
+    use crate::auth::openai::testsupport::{Canned, MockHttp, TestClock};
 
     // -----------------------------------------------------------------------
     // request_device_code
@@ -128,7 +113,7 @@ mod device_code_tests {
             },
         )]);
         let cfg = OpenAiOAuthConfig::default();
-        let uc = request_device_code(&cfg, http as Arc<dyn Transport>)
+        let uc = sdk::request_device_code(http.as_ref(), &cfg)
             .await
             .expect("request_device_code ok");
 
@@ -152,7 +137,7 @@ mod device_code_tests {
             },
         )]);
         let cfg = OpenAiOAuthConfig::default();
-        let uc = request_device_code(&cfg, http as Arc<dyn Transport>)
+        let uc = sdk::request_device_code(http.as_ref(), &cfg)
             .await
             .expect("request_device_code ok");
 
@@ -169,13 +154,10 @@ mod device_code_tests {
             },
         )]);
         let cfg = OpenAiOAuthConfig::default();
-        let err = request_device_code(&cfg, http as Arc<dyn Transport>)
+        let err = sdk::request_device_code(http.as_ref(), &cfg)
             .await
             .expect_err("404 must error");
-        match err {
-            OAuthError::DeviceCode(msg) => assert!(msg.contains("404")),
-            other => panic!("expected DeviceCode, got {other:?}"),
-        }
+        assert!(matches!(err, sdk::OAuthProtocolError::Status(404)));
     }
 
     // -----------------------------------------------------------------------
@@ -192,7 +174,7 @@ mod device_code_tests {
             },
         )]);
         let cfg = OpenAiOAuthConfig::default();
-        let outcome = poll_for_token(&cfg, http as Arc<dyn Transport>, "auth-id", "user-code")
+        let outcome = sdk::poll_for_token(http.as_ref(), &cfg, "auth-id", "user-code")
             .await
             .expect("poll ok");
         assert!(matches!(outcome, PollOutcome::Pending));
@@ -208,7 +190,7 @@ mod device_code_tests {
             },
         )]);
         let cfg = OpenAiOAuthConfig::default();
-        let outcome = poll_for_token(&cfg, http as Arc<dyn Transport>, "auth-id", "user-code")
+        let outcome = sdk::poll_for_token(http.as_ref(), &cfg, "auth-id", "user-code")
             .await
             .expect("poll ok");
         assert!(matches!(outcome, PollOutcome::Pending));
@@ -229,7 +211,7 @@ mod device_code_tests {
             },
         )]);
         let cfg = OpenAiOAuthConfig::default();
-        let outcome = poll_for_token(&cfg, http as Arc<dyn Transport>, "auth-id", "user-code")
+        let outcome = sdk::poll_for_token(http.as_ref(), &cfg, "auth-id", "user-code")
             .await
             .expect("poll ok");
         match outcome {
@@ -254,13 +236,10 @@ mod device_code_tests {
             },
         )]);
         let cfg = OpenAiOAuthConfig::default();
-        let err = poll_for_token(&cfg, http as Arc<dyn Transport>, "auth-id", "user-code")
+        let err = sdk::poll_for_token(http.as_ref(), &cfg, "auth-id", "user-code")
             .await
             .expect_err("500 must error");
-        match err {
-            OAuthError::DeviceCode(msg) => assert!(msg.contains("500")),
-            other => panic!("expected DeviceCode, got {other:?}"),
-        }
+        assert!(matches!(err, sdk::OAuthProtocolError::Status(500)));
     }
 
     // -----------------------------------------------------------------------

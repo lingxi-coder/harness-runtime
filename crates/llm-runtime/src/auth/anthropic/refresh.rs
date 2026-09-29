@@ -13,8 +13,8 @@
 // inherent `refresh` + `spawn_proactive`. Allow until then.
 #![allow(dead_code)]
 
-use crate::oauth::anthropic::client::OAuthError;
-use crate::oauth::lifecycle::{
+use crate::auth::anthropic::login::OAuthError;
+use crate::auth::lifecycle::{
     self, BearerToken, OAuthHookError, Preflight, RefreshableToken, TokenHash,
 };
 use async_trait::async_trait;
@@ -337,10 +337,7 @@ impl RefreshDriver {
         // 5. Build the new `TokenInfo`.
         let now = self.state.clock.now();
         let new_expiry = now + Duration::from_secs(body.expires_in);
-        let scopes = body.scope.as_deref().map_or_else(
-            || self.state.config.scopes.clone(),
-            |s| s.split_whitespace().map(str::to_string).collect::<Vec<_>>(),
-        );
+        let scopes = body.granted_scopes(&self.state.config);
 
         let new_access_token_str = body.access_token.clone();
         let new_info = TokenInfo {
@@ -525,7 +522,7 @@ async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn platform_api::Ru
 #[cfg(test)]
 mod wire_and_persist_tests {
     use super::*;
-    use crate::oauth::anthropic::testsupport::{
+    use crate::auth::anthropic::testsupport::{
         mem_credential_manager, Canned, MemStorage, MockHttp, TestClock,
     };
     use protocol::HttpMethod;
@@ -616,7 +613,7 @@ mod wire_and_persist_tests {
     /// rather than spinning).
     #[tokio::test]
     async fn proactive_loop_fires_then_exits_on_401() {
-        use crate::oauth::anthropic::testsupport::InstantSpawner;
+        use crate::auth::anthropic::testsupport::InstantSpawner;
 
         let http = MockHttp::new(vec![(
             "oauth/token",

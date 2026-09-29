@@ -242,7 +242,7 @@ pub struct OrchestratorConfig {
     /// === "apiKeyHelper"`). `false` — the default — yields the /login copy,
     /// which is the right advice for a stored or OAuth credential.
     ///
-    /// Set from `llm_runtime::oauth::anthropic::AuthSource` at the composition
+    /// Set from `llm_runtime::auth::anthropic::AuthSource` at the composition
     /// root. Started life as a `bool`; widened because the org-disabled copy
     /// tells an env-var user and an `apiKeyHelper` user to unset DIFFERENT
     /// things, which a single flag cannot express.

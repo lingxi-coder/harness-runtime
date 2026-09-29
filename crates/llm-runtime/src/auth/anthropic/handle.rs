@@ -1,10 +1,10 @@
-//! [`AuthHandle`] implementation backed by the [`ClaudeAiOAuthClient`].
+//! Host [`AuthHandle`] for Anthropic OAuth login.
 //!
 //! Drives the full interactive PKCE Authorization-Code flow:
-//!   1. [`ClaudeAiOAuthClient::build_authorize_url_with_redirect`]
+//!   1. SDK authorization URL construction
 //!   2. open the browser (via an injectable opener — no-op in tests)
-//!   3. [`crate::oauth::anthropic::callback::CallbackListener::accept`] on the loopback listener
-//!   4. [`ClaudeAiOAuthClient::exchange_code_with_redirect`]
+//!   3. [`crate::auth::anthropic::callback::CallbackListener::accept`] on the loopback listener
+//!   4. SDK authorization-code exchange
 //!   5. resolve `email` + `org_id` from the exchange response (`account` /
 //!      `organization`) or, failing that, the profile endpoint — there is no
 //!      JWT id-token to decode for this provider
@@ -14,13 +14,19 @@
 //! The whole flow runs under a five-minute deadline (the trait contract);
 //! exceeding it yields [`AuthError::Timeout`].
 
-use crate::oauth::anthropic::callback::{CallbackError, CallbackListener};
-use crate::oauth::anthropic::client::{AuthorizeOptions, ClaudeAiOAuthClient, ExchangedTokens};
+use crate::auth::anthropic::callback::{CallbackError, CallbackListener};
+use crate::auth::anthropic::login::{prepare_exchanged_tokens, ExchangedTokens, OAuthError};
 use async_trait::async_trait;
+use lingxi_llm_client::auth::oauth::anthropic::{
+    self as sdk, AuthorizeOptions, ClaudeAiOAuthConfig,
+};
 use lingxi_llm_client::auth::oauth::anthropic::{
     CLAUDE_CODE_INFERENCE_SCOPE, LONG_LIVED_OAUTH_TOKEN_TTL_SECONDS,
 };
+use lingxi_llm_client::transport::Transport;
+use platform_api::Clock;
 use platform_api::{AuthError, AuthHandle, LoginInfo};
+use secret::CredentialManager;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,9 +55,12 @@ pub struct CodeFlowIo {
     pub manual_rx: Option<tokio::sync::mpsc::Receiver<(String, String)>>,
 }
 
-/// `AuthHandle` impl wrapping the [`ClaudeAiOAuthClient`].
+/// Host login coordinator backed directly by SDK protocol functions.
 pub struct OAuthHandle {
-    client: Arc<ClaudeAiOAuthClient>,
+    config: ClaudeAiOAuthConfig,
+    http: Arc<dyn Transport>,
+    credentials: Arc<CredentialManager>,
+    clock: Arc<dyn Clock>,
     browser_open: BrowserOpener,
 }
 
@@ -84,9 +93,17 @@ impl std::fmt::Debug for OAuthLoginOptions {
 impl OAuthHandle {
     /// Construct a handle that opens a real browser for the login redirect.
     #[must_use]
-    pub fn new(client: Arc<ClaudeAiOAuthClient>) -> Self {
+    pub fn new(
+        config: ClaudeAiOAuthConfig,
+        http: Arc<dyn Transport>,
+        credentials: Arc<CredentialManager>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
-            client,
+            config,
+            http,
+            credentials,
+            clock,
             browser_open: Arc::new(real_browser_open),
         }
     }
@@ -107,8 +124,7 @@ impl OAuthHandle {
     /// receives the callback.
     #[must_use]
     pub fn begin_mobile_browser_login(&self, redirect_uri: &str) -> (String, String, String) {
-        self.client
-            .build_authorize_url_with_options(redirect_uri, &AuthorizeOptions::default())
+        sdk::build_authorize_url(&self.config, redirect_uri, &AuthorizeOptions::default())
     }
 
     /// Complete a native-host callback and persist the Anthropic session.
@@ -124,10 +140,8 @@ impl OAuthHandle {
         redirect_uri: &str,
     ) -> Result<LoginInfo, AuthError> {
         let tokens = self
-            .client
-            .exchange_code_with_redirect(code, verifier, state, redirect_uri)
-            .await
-            .map_err(|e| AuthError::ServerError(e.to_string()))?;
+            .exchange_tokens(code, verifier, state, redirect_uri, None)
+            .await?;
 
         let (email, org_id) = match (&tokens.account, &tokens.organization) {
             (Some(acc), Some(org)) if !acc.email_address.is_empty() => {
@@ -143,8 +157,7 @@ impl OAuthHandle {
             .refresh_token
             .as_ref()
             .map(|s| s.expose_secret().clone());
-        self.client
-            .credentials()
+        self.credentials
             .store_oauth_tokens(
                 tokens.access_token.expose_secret(),
                 refresh.as_deref(),
@@ -176,14 +189,12 @@ impl OAuthHandle {
         // (1+) Bind the loopback listener first so the redirect target exists
         // before the browser opens. Port 0 → OS-assigned; read it back and bake
         // the real port into the redirect_uri so authorize + exchange agree.
-        let listener = CallbackListener::bind(callback_port(&self.client.config().redirect_uri))
+        let listener = CallbackListener::bind(callback_port(&self.config.redirect_uri))
             .await
             .map_err(callback_to_auth_err)?;
         let redirect_uri = format!("http://localhost:{}/callback", listener.port());
 
-        let urls = self
-            .client
-            .build_authorize_url_pair_with_options(&redirect_uri, &authorize);
+        let urls = sdk::build_authorize_url_pair(&self.config, &redirect_uri, &authorize);
 
         // (1b) Surface the MANUAL URL variant to the host FIRST (oracle
         // `await e(i)` before `await Cc(s)`), so the fallback instructions are
@@ -243,20 +254,47 @@ impl OAuthHandle {
         // against the hosted code page, so the exchange must present THAT
         // redirect_uri (oracle `useManualRedirect: !automatic`).
         let exchange_redirect = if via_manual {
-            self.client.config().manual_redirect_uri.clone()
+            self.config.manual_redirect_uri.clone()
         } else {
             redirect_uri
         };
-        self.client
-            .exchange_code_with_options(
-                &code,
-                &urls.verifier,
-                &urls.state,
-                &exchange_redirect,
-                expires_in,
-            )
-            .await
-            .map_err(|e| AuthError::ServerError(e.to_string()))
+        self.exchange_tokens(
+            &code,
+            &urls.verifier,
+            &urls.state,
+            &exchange_redirect,
+            expires_in,
+        )
+        .await
+    }
+
+    /// Exchange using SDK wire protocol, then apply host secret and clock policy.
+    async fn exchange_tokens(
+        &self,
+        code: &str,
+        verifier: &str,
+        state: &str,
+        redirect_uri: &str,
+        expires_in: Option<u64>,
+    ) -> Result<ExchangedTokens, AuthError> {
+        let response = sdk::exchange_code(
+            self.http.as_ref(),
+            &self.config,
+            code,
+            verifier,
+            state,
+            redirect_uri,
+            expires_in,
+        )
+        .await
+        .map_err(|e| {
+            AuthError::ServerError(OAuthError::TokenExchange(e.to_string()).to_string())
+        })?;
+        Ok(prepare_exchanged_tokens(
+            response,
+            &self.config,
+            self.clock.as_ref(),
+        ))
     }
 
     /// Run the normal login flow and persist the resulting credential.
@@ -302,8 +340,7 @@ impl OAuthHandle {
             .refresh_token
             .as_ref()
             .map(|s| s.expose_secret().clone());
-        self.client
-            .credentials()
+        self.credentials
             .store_oauth_tokens(
                 tokens.access_token.expose_secret(),
                 refresh.as_deref(),
@@ -324,18 +361,16 @@ impl OAuthHandle {
         // subscription-gated prompt logic (e.g. the `AgentTool` pro-plan gate).
         // Best-effort + scope-gated (`hasProfileScope`): a token without
         // `user:profile`, or any fetch failure, leaves both unchanged.
-        let transport = self.client.http();
-        if let Some(snapshot) =
-            crate::oauth::anthropic::subscription::resolve_subscription_snapshot(
-                tokens.access_token.expose_secret(),
-                &tokens.scopes,
-                &transport,
-            )
-            .await
+        let transport = self.http.clone();
+        if let Some(snapshot) = crate::auth::anthropic::subscription::resolve_subscription_snapshot(
+            tokens.access_token.expose_secret(),
+            &tokens.scopes,
+            &transport,
+        )
+        .await
         {
             if let Err(error) = self
-                .client
-                .credentials()
+                .credentials
                 .update_oauth_subscription(
                     snapshot.subscription_type.as_deref(),
                     snapshot.rate_limit_tier.as_deref(),
@@ -375,8 +410,8 @@ impl OAuthHandle {
     /// GET the profile endpoint with `Authorization: Bearer <access>`.
     async fn fetch_profile(&self, access_token: &str) -> Result<(String, String), AuthError> {
         lingxi_llm_client::auth::oauth::anthropic::fetch_login_identity(
-            self.client.http().as_ref(),
-            &self.client.config().profile_endpoint,
+            self.http.as_ref(),
+            &self.config.profile_endpoint,
             access_token,
         )
         .await
@@ -400,15 +435,14 @@ impl AuthHandle for OAuthHandle {
 
     async fn logout(&self) -> Result<(), AuthError> {
         // Idempotent — deleting absent entries is not an error.
-        self.client
-            .credentials()
+        self.credentials
             .delete_oauth_tokens()
             .await
             .map_err(|e| AuthError::ServerError(format!("logout: {e}")))
     }
 
     async fn current_user(&self) -> Option<LoginInfo> {
-        match self.client.credentials().get_oauth_tokens().await {
+        match self.credentials.get_oauth_tokens().await {
             Ok(Some(t)) => Some(LoginInfo {
                 email: t.email,
                 org_id: t.org_id,
@@ -465,7 +499,7 @@ fn real_browser_open(url: &str) -> Result<(), AuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth::anthropic::testsupport::{
+    use crate::auth::anthropic::testsupport::{
         mem_credential_manager, Canned, MemStorage, MockHttp, TestClock,
     };
     use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
@@ -527,9 +561,7 @@ mod tests {
         let storage = MemStorage::new();
         let cm = mem_credential_manager(storage.clone(), clock.clone());
         let cfg = ClaudeAiOAuthConfig::default_with_port(0);
-        let client = Arc::new(
-            ClaudeAiOAuthClient::new(cfg, http.clone() as Arc<dyn Transport>, cm).with_clock(clock),
-        );
+        let handle = OAuthHandle::new(cfg, http.clone() as Arc<dyn Transport>, cm, clock);
 
         let was_opened = Arc::new(AtomicBool::new(false));
         let browser_flag = was_opened.clone();
@@ -560,11 +592,48 @@ mod tests {
         });
 
         (
-            OAuthHandle::new(client).with_browser_opener(opener),
+            handle.with_browser_opener(opener),
             storage,
             was_opened,
             http,
         )
+    }
+
+    #[tokio::test]
+    async fn exchange_errors_keep_host_prefix_and_invalid_code_message() {
+        for (status, expected) in [
+            (
+                401,
+                "token exchange failed: Authentication failed: Invalid authorization code",
+            ),
+            (500, "token exchange failed:"),
+        ] {
+            let http = MockHttp::new(vec![(
+                "oauth/token",
+                Canned {
+                    status,
+                    body: r#"{"error":"invalid_grant"}"#.into(),
+                },
+            )]);
+            let clock = TestClock::new(1_000);
+            let credentials = mem_credential_manager(MemStorage::new(), clock.clone());
+            let config = ClaudeAiOAuthConfig::default_with_port(0);
+            let handle = OAuthHandle::new(config, http, credentials, clock);
+            let error = handle
+                .exchange_tokens(
+                    "bad",
+                    "verifier",
+                    "state",
+                    "http://localhost:0/callback",
+                    None,
+                )
+                .await
+                .expect_err("token endpoint must reject the exchange");
+            let AuthError::ServerError(message) = error else {
+                panic!("expected server error");
+            };
+            assert!(message.starts_with(expected), "{message}");
+        }
     }
 
     /// `redirect_uri` off the `oauth/token` POST body. It travels ONLY in the
@@ -613,7 +682,7 @@ mod tests {
     async fn login_uses_account_org_from_token_response() {
         // Binds the fixed loopback port 45321 — same machine-global resource
         // contention as the OpenAI ports, and these three raced each other.
-        let _g = crate::oauth::openai::testsupport::port_guard().await;
+        let _g = crate::auth::openai::testsupport::port_guard().await;
         let body = r#"{
             "access_token":"acc","refresh_token":"ref","expires_in":3600,
             "scope":"read:user",
@@ -638,7 +707,7 @@ mod tests {
     async fn login_falls_back_to_profile_endpoint() {
         // Binds the fixed loopback port 45321 — same machine-global resource
         // contention as the OpenAI ports, and these three raced each other.
-        let _g = crate::oauth::openai::testsupport::port_guard().await;
+        let _g = crate::auth::openai::testsupport::port_guard().await;
         // Token body omits account/organization → profile GET is used.
         let body = r#"{"access_token":"acc","refresh_token":"ref","expires_in":3600}"#;
         let (handle, _storage, _opened, _http) = handle_with_token_body(body);
@@ -651,7 +720,7 @@ mod tests {
     async fn logout_clears_and_current_user_is_none() {
         // Binds the fixed loopback port 45321 — same machine-global resource
         // contention as the OpenAI ports, and these three raced each other.
-        let _g = crate::oauth::openai::testsupport::port_guard().await;
+        let _g = crate::auth::openai::testsupport::port_guard().await;
         let body = r#"{"access_token":"acc","refresh_token":"ref","expires_in":3600,
             "account":{"uuid":"u","email_address":"e@x"},"organization":{"uuid":"o"}}"#;
         let (handle, storage, _, _http) = handle_with_token_body(body);
@@ -681,7 +750,7 @@ mod tests {
     async fn manual_code_entry_completes_login_when_browser_fails() {
         // Binds the fixed loopback port 45321 — same machine-global resource
         // contention as the OpenAI ports, and these tests raced each other.
-        let _g = crate::oauth::openai::testsupport::port_guard().await;
+        let _g = crate::auth::openai::testsupport::port_guard().await;
         let body = r#"{
             "access_token":"acc","refresh_token":"ref","expires_in":3600,
             "scope":"read:user",
@@ -749,7 +818,7 @@ mod tests {
     async fn loopback_callback_exchanges_against_the_loopback_redirect() {
         // Binds the fixed loopback port 45321 — same machine-global resource
         // contention as the OpenAI ports, and these tests raced each other.
-        let _g = crate::oauth::openai::testsupport::port_guard().await;
+        let _g = crate::auth::openai::testsupport::port_guard().await;
         let body = r#"{
             "access_token":"acc","refresh_token":"ref","expires_in":3600,
             "scope":"read:user",
@@ -783,10 +852,10 @@ mod tests {
     async fn login_persists_subscription_tier_from_profile() {
         // Binds the fixed loopback port 45321 — same machine-global resource
         // contention as the OpenAI ports, and these tests raced each other.
-        let _g = crate::oauth::openai::testsupport::port_guard().await;
+        let _g = crate::auth::openai::testsupport::port_guard().await;
         // This login WRITES the process-global subscription cache; serialize
         // with the other global-cache tests.
-        let _s = crate::oauth::anthropic::testsupport::SUBSCRIPTION_CACHE_LOCK
+        let _s = crate::auth::anthropic::testsupport::SUBSCRIPTION_CACHE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let token_body = r#"{
@@ -820,7 +889,7 @@ mod tests {
     /// caller timeout is what ends it.
     #[tokio::test]
     async fn browser_failure_alone_keeps_waiting_not_error() {
-        let _g = crate::oauth::openai::testsupport::port_guard().await;
+        let _g = crate::auth::openai::testsupport::port_guard().await;
         let body = r#"{"access_token":"acc","expires_in":3600}"#;
         let (handle, _storage, _, _http) = handle_with_token_body(body);
         let handle = handle.with_browser_opener(Arc::new(|_url: &str| {

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 
-use crate::oauth::openai::refresh::RefreshDriver;
+use crate::auth::openai::refresh::RefreshDriver;
 
 /// Serves the current `OpenAI` OAuth access token, refreshing in place when expired
 /// (single-flight via the underlying refresh lock).
@@ -75,7 +75,7 @@ impl CredentialProvider for OpenAiOAuthCredentialProvider {
                 .driver
                 .refresh(token_hash)
                 .await
-                .map_err(|e| crate::oauth::lifecycle::llm_error_for(&e))?;
+                .map_err(|e| crate::auth::lifecycle::llm_error_for(&e))?;
 
             // Read the updated account_id/fedramp after rotation.
             let (new_account_id, new_fedramp) = {
@@ -95,8 +95,8 @@ impl CredentialProvider for OpenAiOAuthCredentialProvider {
 #[cfg(test)]
 mod credential_provider_tests {
     use super::*;
-    use crate::oauth::openai::refresh::AuthState;
-    use crate::oauth::openai::testsupport::{Canned, MockHttp, TestClock};
+    use crate::auth::openai::refresh::AuthState;
+    use crate::auth::openai::testsupport::{Canned, MockHttp, TestClock};
     use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
     use protocol::Secret;
     use std::time::{Duration, SystemTime};

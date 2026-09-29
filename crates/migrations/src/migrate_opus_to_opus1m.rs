@@ -24,7 +24,7 @@
 
 use crate::context::{env_var_truthy, MigrationEnv};
 use crate::settings_update::{read_settings_map, settings_path, update_settings, WritableScope};
-use llm_runtime::oauth::anthropic::limits::SubscriptionType;
+use llm_runtime::auth::anthropic::limits::SubscriptionType;
 use serde_json::{json, Value};
 
 /// `isOpus1mMergeEnabled` port (`model.ts:314-332`): false when 1M disabled
@@ -95,7 +95,7 @@ mod tests {
     use super::*;
     use crate::settings_update::{read_settings_map, settings_path, WritableScope};
     use crate::test_support::{env_lock, temp_config};
-    use llm_runtime::oauth::anthropic::limits::SubscriptionType;
+    use llm_runtime::auth::anthropic::limits::SubscriptionType;
 
     fn test_env(t: &crate::test_support::TempConfig) -> crate::context::MigrationEnv {
         crate::context::MigrationEnv {

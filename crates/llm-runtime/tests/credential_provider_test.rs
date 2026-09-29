@@ -7,8 +7,8 @@
 
 use async_trait::async_trait;
 use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
-use llm_runtime::oauth::anthropic::OAuthCredentialProvider;
-use llm_runtime::oauth::anthropic::{
+use llm_runtime::auth::anthropic::OAuthCredentialProvider;
+use llm_runtime::auth::anthropic::{
     refresh::AuthState, refresh::RefreshDriver, ClaudeAiOAuthConfig,
 };
 use llm_runtime::{Credential, CredentialProvider, CredentialScope, LlmError, ProviderId};
