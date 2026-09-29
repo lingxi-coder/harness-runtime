@@ -849,6 +849,7 @@ fn anthropic_only_catalog(models: &[&str]) -> Vec<CatalogModel> {
 
 fn request(prompt: &str) -> FusionRequest {
     FusionRequest {
+        verify_claims: false,
         schema_version: 1,
         origin: FusionOrigin::Slash,
         prompt: prompt.into(),
@@ -1213,7 +1214,17 @@ enum FakePanel {
     /// `reasoning_output_tokens: 0`, so a mutation zeroing that argument
     /// stays green against them.
     ReportWithReasoning(PanelReport, u64),
+    /// The tool-using analyst's final answer after `turns` provider calls.
+    /// Scripted under [`ANALYST_SCRIPT`] because the analyst's model can be a
+    /// panel's model too.
+    Analysis {
+        value: Value,
+        turns: u64,
+    },
 }
+
+/// The `by_model` key a `fusion-analyst` spawn is scripted under.
+const ANALYST_SCRIPT: &str = "__analyst__";
 
 impl FakeSpawner {
     fn new(map: HashMap<String, FakePanel>) -> Arc<Self> {
@@ -1284,7 +1295,11 @@ impl FakeSpawner {
         self.prompts.lock().unwrap().push(request.prompt.clone());
         self.requests.lock().unwrap().push(request.clone());
         tokio::time::sleep(std::time::Duration::from_millis(15)).await;
-        let model = request.model.clone().unwrap_or_default();
+        let model = if request.subagent_type == platform_api::FUSION_ANALYST_TYPE {
+            ANALYST_SCRIPT.to_string()
+        } else {
+            request.model.clone().unwrap_or_default()
+        };
         let script = self.by_model.lock().unwrap().remove(&model);
         if !matches!(
             script,
@@ -1423,6 +1438,29 @@ impl FakeSpawner {
                     usage_complete: true,
                 })
             }
+            Some(FakePanel::Analysis { value, turns }) => {
+                let usage = SubagentUsage {
+                    total_tokens: 30 * turns,
+                    input_tokens: 20 * turns,
+                    output_tokens: 10 * turns,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    reasoning_output_tokens: 0,
+                };
+                Ok(SubagentResult::Completed {
+                    agent_id: AgentId::new(),
+                    content: value,
+                    usage: usage.clone(),
+                    total_tool_use_count: turns.saturating_sub(1),
+                    total_duration_ms: 1,
+                    total_tokens: usage.total_tokens,
+                    assistant_message_count: turns,
+                    response_char_count: 1,
+                    last_request_id: None,
+                    cumulative_usage: usage,
+                    usage_complete: true,
+                })
+            }
             Some(FakePanel::MalformedReport) => Ok(SubagentResult::Completed {
                 agent_id: AgentId::new(),
                 content: json!({"not": "a valid panel report"}),
@@ -1534,6 +1572,7 @@ fn merge_analysis(panels: &[&str], dims: &[String], confidence: u8, critical: bo
     };
     let _ = confidence;
     serde_json::to_value(FusionAnalysis {
+        verified_claims: Vec::new(),
         schema_version: 1,
         consensus: vec![platform_api::SupportedPoint {
             point: "shared".into(),
@@ -1562,6 +1601,7 @@ fn needs_parent_analysis_with_injection(panels: &[&str], dims: &[String]) -> Val
         scores.insert((*id).to_string(), Value::Object(row));
     }
     serde_json::to_value(FusionAnalysis {
+        verified_claims: Vec::new(),
         schema_version: 1,
         consensus: vec![platform_api::SupportedPoint {
             point: "partial agreement".into(),
@@ -2209,6 +2249,7 @@ async fn anthropic_only_catalog_clears_structured_output_preflight() {
         ])),
     );
     let req = FusionRequest {
+        verify_claims: false,
         schema_version: 1,
         origin: FusionOrigin::Slash,
         prompt: "task".into(),
@@ -5962,6 +6003,7 @@ fn leftover_gateway_panel_catalog() -> Vec<CatalogModel> {
 async fn analyst_overlaps_panel_telemetry_uses_canonical_model_key() {
     let panel_catalog = leftover_gateway_panel_catalog();
     let explicit_request = FusionRequest {
+        verify_claims: false,
         schema_version: 1,
         origin: FusionOrigin::Slash,
         prompt: "task".into(),
@@ -7725,4 +7767,170 @@ fn the_agent_surface_offers_implement_mode_only_with_a_host() {
             .agent_surface()
             .implement_available
     );
+}
+
+/// An analyst answer with `verified_claims`, over panels `P1..=P3`.
+fn analysis_with_claims(claims: Value) -> Value {
+    let dims: Vec<String> = DEFAULT_FUSION_DIMENSIONS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let mut value = pick_analysis(&["P1", "P2", "P3"], &dims);
+    value["verified_claims"] = claims;
+    value
+}
+
+fn tool_analyst_config() -> FusionRuntimeConfig {
+    let mut config = test_config();
+    config.analyst_tools = true;
+    config.analyst_max_turns = 5;
+    config
+}
+
+#[tokio::test]
+async fn a_tool_analyst_runs_as_a_subagent_and_only_well_formed_claim_checks_survive() {
+    let mut map = three_ok();
+    map.insert(
+        ANALYST_SCRIPT.into(),
+        FakePanel::Analysis {
+            value: analysis_with_claims(json!([
+                { "panel_id": "P1", "claim": "retry is capped at 3", "verdict": "supported",
+                  "evidence": "src/retry.rs:12-18" },
+                { "panel_id": "P2", "claim": "no lock is held", "verdict": "unverified",
+                  "evidence": "" },
+                // Named a panel that did not run.
+                { "panel_id": "P9", "claim": "ghost", "verdict": "supported", "evidence": "x" },
+                // A verdict nobody can look at.
+                { "panel_id": "P3", "claim": "bare assertion", "verdict": "refuted",
+                  "evidence": "  " },
+            ])),
+            turns: 4,
+        },
+    );
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = FusionOrchestrator::new(
+        spawner.clone(),
+        side.clone(),
+        Arc::new(tool_analyst_config()),
+        Arc::new(catalog()),
+    );
+    let result = orch.run(request("task"), inherit(), None).await.unwrap();
+
+    assert_eq!(result.status, FusionStatus::Analyzed);
+    assert_eq!(
+        side.analyst_calls.load(Ordering::SeqCst),
+        0,
+        "the analyst is a subagent, not the single structured call"
+    );
+    let analyst_spawns: Vec<SubagentSpawnRequest> = spawner
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.subagent_type == platform_api::FUSION_ANALYST_TYPE)
+        .cloned()
+        .collect();
+    assert_eq!(analyst_spawns.len(), 1);
+    assert_eq!(analyst_spawns[0].max_turns_override, Some(5));
+    assert!(analyst_spawns[0].prompt.contains("Read, Grep, Glob"));
+    assert!(analyst_spawns[0]
+        .schema
+        .as_ref()
+        .unwrap()
+        .contains("verified_claims"));
+    // Nothing names a provider or model to the analyst.
+    assert!(!analyst_spawns[0].prompt.contains("deepseek"));
+
+    let analysis = result.analysis.clone().expect("analysis");
+    let kept: Vec<(&str, platform_api::ClaimVerdict)> = analysis
+        .verified_claims
+        .iter()
+        .map(|c| (c.panel_id.as_str(), c.verdict))
+        .collect();
+    assert_eq!(
+        kept,
+        vec![
+            ("P1", platform_api::ClaimVerdict::Supported),
+            ("P2", platform_api::ClaimVerdict::Unverified)
+        ]
+    );
+    assert_eq!(
+        analysis.verified_claims[0].evidence.as_deref(),
+        Some("src/retry.rs:12-18")
+    );
+    assert_eq!(analysis.verified_claims[1].evidence, None);
+    // Three panels of one request each plus the analyst's four turns.
+    assert_eq!(result.usage.provider_requests, 3 + 4);
+    let material = platform_api::render_fusion_material(&result);
+    assert!(material.contains("<verified-claims>"), "{material}");
+    assert!(material.contains("verdict=\"supported\""), "{material}");
+    assert!(!material.contains("ghost"), "{material}");
+}
+
+#[tokio::test]
+async fn a_failed_tool_analyst_degrades_to_material_without_a_retry() {
+    let mut map = three_ok();
+    map.insert(ANALYST_SCRIPT.into(), FakePanel::Fail);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = FusionOrchestrator::new(
+        spawner.clone(),
+        side.clone(),
+        Arc::new(tool_analyst_config()),
+        Arc::new(catalog()),
+    );
+    let result = orch.run(request("task"), inherit(), None).await.unwrap();
+    assert_eq!(result.status, FusionStatus::Unanalyzed);
+    assert_eq!(
+        result.analysis_failure.as_deref(),
+        Some("analyst_run_failed")
+    );
+    assert_eq!(result.responses.len(), 3, "the panels' material is kept");
+    let analyst_spawns = spawner
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.subagent_type == platform_api::FUSION_ANALYST_TYPE)
+        .count();
+    assert_eq!(
+        analyst_spawns, 1,
+        "a second run would pay for every turn again"
+    );
+    assert_eq!(side.analyst_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn the_analyst_stays_a_single_call_unless_tools_are_asked_for() {
+    for (config, verify_claims, mode) in [
+        (
+            test_config(),
+            false,
+            platform_api::FusionPanelMode::Analysis,
+        ),
+        (
+            tool_analyst_config(),
+            false,
+            platform_api::FusionPanelMode::Implement,
+        ),
+    ] {
+        assert!(
+            !config.analyst_uses_tools(&FusionRequest {
+                verify_claims,
+                mode,
+                ..request("task")
+            }),
+            "{mode:?} with tools {}",
+            config.analyst_tools
+        );
+    }
+    let mut asked = request("task");
+    asked.verify_claims = true;
+    assert!(test_config().analyst_uses_tools(&asked));
+    asked.mode = platform_api::FusionPanelMode::Implement;
+    assert!(!test_config().analyst_uses_tools(&asked));
+    let mut fast = request("task");
+    fast.preset = FusionPreset::Fast;
+    assert!(!tool_analyst_config().analyst_uses_tools(&fast));
 }

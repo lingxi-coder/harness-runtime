@@ -1022,6 +1022,7 @@ async fn authority() -> Arc<RunAuthority> {
             tokio_util::sync::CancellationToken::new(),
         ),
         request: platform_api::FusionRequest {
+            verify_claims: false,
             schema_version: platform_api::FUSION_SCHEMA_VERSION,
             origin: platform_api::FusionOrigin::Slash,
             prompt: "test".into(),

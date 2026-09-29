@@ -1150,6 +1150,7 @@ impl FusionOrchestrator {
                 started,
                 &resolved_egress,
                 &stage_settlement,
+                &inherit,
             ) => outcome,
         };
 
@@ -1564,6 +1565,7 @@ impl FusionOrchestrator {
         // [Round-5 review items 1/2/4] Refreshed at every boundary of this
         // stage — see `StageSettlement`.
         stage_settlement: &StageSettlement<'_>,
+        inherit: &FusionInheritance,
     ) -> AnalysisOutcome {
         progress::emit(
             progress,
@@ -1580,6 +1582,8 @@ impl FusionOrchestrator {
                 started,
                 resolved_egress,
                 stage_settlement,
+                inherit,
+                run_id,
             )
             .await;
 
@@ -1763,6 +1767,8 @@ impl FusionOrchestrator {
         _started: Instant,
         resolved_egress: &Arc<Mutex<Option<Vec<String>>>>,
         stage_settlement: &StageSettlement<'_>,
+        inherit: &FusionInheritance,
+        run_id: &str,
     ) -> (
         Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)>,
         u64,
@@ -1905,15 +1911,15 @@ impl FusionOrchestrator {
                     .map_or_else(|poisoned| poisoned.into_inner().clone(), |latest| latest.clone());
                 Err((AnalystError::Failed("timeout".into()), latest))
             }
-            outcome = crate::analyst::analyze_registered(
-                Arc::clone(&self.side_query),
+            outcome = self.analyze(
                 config,
                 request,
-                &resolved.analyst,
+                resolved,
                 panels,
                 analyst_limits,
                 &mut observe,
-                self.attempt_run.as_deref(),
+                inherit,
+                run_id,
             ) => outcome,
         };
         let attempted = latest
@@ -1921,6 +1927,52 @@ impl FusionOrchestrator {
             .map(|snapshot| snapshot.calls > 0)
             .unwrap_or(true);
         (analysis_outcome, millis_since(analyst_started), attempted)
+    }
+
+    /// The analyst call itself: a read-only subagent when this run's analyst
+    /// checks claims with tools, otherwise the single structured query.
+    #[allow(clippy::too_many_arguments)]
+    async fn analyze<F>(
+        &self,
+        config: &FusionRuntimeConfig,
+        request: &FusionRequest,
+        resolved: &ResolvedSet,
+        panels: &[PanelInternal],
+        limits: crate::model_resolver::ModelLimits,
+        observe: &mut F,
+        inherit: &FusionInheritance,
+        run_id: &str,
+    ) -> Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)>
+    where
+        F: FnMut(&AnalystUsage, bool),
+    {
+        if config.analyst_uses_tools(request) {
+            return crate::analyst::analyze_with_tools(
+                &self.spawner,
+                inherit,
+                self.side_query.as_ref(),
+                config,
+                request,
+                &resolved.analyst,
+                panels,
+                limits,
+                run_id,
+                observe,
+                self.attempt_run.as_deref(),
+            )
+            .await;
+        }
+        crate::analyst::analyze_registered(
+            Arc::clone(&self.side_query),
+            config,
+            request,
+            &resolved.analyst,
+            panels,
+            limits,
+            observe,
+            self.attempt_run.as_deref(),
+        )
+        .await
     }
 
     /// `run_analysis` helper: the `ANALYSIS_FAILED` telemetry shared by the
@@ -2236,12 +2288,13 @@ impl FusionExecutor for FusionOrchestrator {
         // Quote during preparation so an invalid price/configuration fails
         // before TaskCreated. The actual reservation remains activation-only.
         let quote = if self.attempt_registrar.is_none() {
-            Some(budget::quote(
+            Some(budget::quote_for(
                 &config,
                 &resolved,
                 &catalog_snapshot,
                 &captured_prices,
                 inherit.budget().max_session_nano_usd().is_some(),
+                config.analyst_uses_tools(&request),
             )?)
         } else {
             None
@@ -3577,6 +3630,7 @@ mod check_panel_bar_preflight_tests {
     /// `ok == 0` branch, so the exact field values here are irrelevant.
     fn minimal_request() -> FusionRequest {
         FusionRequest {
+            verify_claims: false,
             schema_version: 1,
             origin: FusionOrigin::Agent,
             prompt: "task".into(),
@@ -3926,6 +3980,7 @@ mod outer_err_arm_realized_tokens_tests {
 
     fn request() -> FusionRequest {
         FusionRequest {
+            verify_claims: false,
             schema_version: 1,
             origin: FusionOrigin::Slash,
             prompt: "task".into(),

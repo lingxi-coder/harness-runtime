@@ -992,6 +992,16 @@ pub struct FusionSettingsJson {
     /// Analyst output cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analyst_max_output_tokens: Option<u32>,
+    /// Let the analyst check the panels' claims with read-only tools (Read,
+    /// Grep, Glob) instead of comparing the reports blind. Analysis mode and
+    /// the `quality` preset only. Costs several analyst turns, and the analyst
+    /// then runs as a subagent rather than a single structured call. Default
+    /// false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyst_tools: Option<bool>,
+    /// Turn cap for the tool-using analyst (1..=12). Default 6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyst_max_turns: Option<u32>,
     /// Panel idle timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel_idle_timeout_ms: Option<u64>,
@@ -1205,6 +1215,15 @@ impl FusionSettingsJson {
                 if n == 0 {
                     return Err(SchemaViolation(format!("{name} must be positive")));
                 }
+            }
+        }
+        if let Some(turns) = self.analyst_max_turns {
+            // The `fusion-analyst` agent definition
+            // (`agent::builtins::fusion_analyst_definition`) caps at 12.
+            if !(1..=12).contains(&turns) {
+                return Err(SchemaViolation(
+                    "fusion.analystMaxTurns must be in 1..=12".into(),
+                ));
             }
         }
         if let Some(retries) = self.analysis_protocol_retries {

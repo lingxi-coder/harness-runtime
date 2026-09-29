@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tasks::{TaskSpawnInput, TaskType};
 use tokio::sync::Mutex;
 
-const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-provider] [--implement [--verify \"COMMAND\"]...] PROMPT | setup | clean | --retry-publication fu_RUN_ID";
+const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-provider] [--verify-claims] [--implement [--verify \"COMMAND\"]...] PROMPT | setup | clean | --retry-publication fu_RUN_ID";
 
 /// What `/fusion setup` reports when it reaches THIS handler.
 ///

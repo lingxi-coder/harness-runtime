@@ -65,7 +65,10 @@ pub mod transcript;
 pub mod worktree_policy;
 
 pub use api::{NearLimitCheckpointRequest, SubagentApiClient};
-pub use builtins::{builtin_agent_definitions, fork_agent_definition, fusion_panel_definition};
+pub use builtins::{
+    builtin_agent_definitions, fork_agent_definition, fusion_analyst_definition,
+    fusion_panel_definition,
+};
 pub use catalog::{
     load_agents_from_dirs, parse_agent_from_json, parse_agent_markdown,
     parse_agents_from_flag_json, parse_agents_from_flag_json_checked, parse_agents_from_json,

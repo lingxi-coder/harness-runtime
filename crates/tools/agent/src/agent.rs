@@ -1064,6 +1064,7 @@ fn fusion_request_from_agent(
             ))
         })?;
     Ok(FusionRequest {
+        verify_claims: false,
         schema_version: platform_api::FUSION_SCHEMA_VERSION,
         origin: FusionOrigin::Agent,
         prompt: parsed.prompt.clone(),

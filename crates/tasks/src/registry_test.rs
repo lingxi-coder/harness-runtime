@@ -1808,6 +1808,7 @@ async fn a_fusion_row_survives_the_sweep_until_its_publication_settles() {
         RecordingHandler::new(TaskType::LocalFusion, "fsweep1"),
     );
     let request = platform_api::FusionRequest {
+        verify_claims: false,
         schema_version: 1,
         origin: platform_api::FusionOrigin::Slash,
         prompt: "review this".into(),
@@ -1891,6 +1892,7 @@ async fn a_finished_fusion_run_wakes_an_idle_host_with_the_material_as_result() 
         RecordingHandler::new(TaskType::LocalFusion, "fwake1"),
     );
     let request = platform_api::FusionRequest {
+        verify_claims: false,
         schema_version: 1,
         origin: platform_api::FusionOrigin::Slash,
         prompt: "review this".into(),
@@ -1965,6 +1967,7 @@ async fn spawn_publishes_the_handlers_captured_fusion_timeout_on_the_task_state(
         RecordingHandler::with_fusion_timeout("ftimeout1", TIMEOUT_MS),
     );
     let request = platform_api::FusionRequest {
+        verify_claims: false,
         schema_version: 1,
         origin: platform_api::FusionOrigin::Slash,
         prompt: "review this".into(),
@@ -3143,6 +3146,7 @@ async fn fusion_activation_timestamp_is_published_after_task_created_hook() {
                 TaskType::LocalFusion,
                 TaskSpawnInput::LocalFusion {
                     request: platform_api::FusionRequest {
+                        verify_claims: false,
                         schema_version: 1,
                         origin: platform_api::FusionOrigin::Slash,
                         prompt: "review this".into(),

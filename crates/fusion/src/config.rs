@@ -110,6 +110,11 @@ pub struct FusionRuntimeConfig {
     pub max_reserved_nano_usd: Option<u64>,
     /// Analyst output cap.
     pub analyst_max_output_tokens: u32,
+    /// The analyst checks panel claims with read-only tools (quality preset,
+    /// analysis mode). See [`Self::analyst_uses_tools`].
+    pub analyst_tools: bool,
+    /// Turn cap for the tool-using analyst.
+    pub analyst_max_turns: u32,
     /// Panel idle timeout.
     pub panel_idle_timeout_ms: u64,
     /// Panel total timeout.
@@ -140,6 +145,18 @@ pub struct FusionRuntimeConfig {
 }
 
 impl FusionRuntimeConfig {
+    /// Whether this run's analyst checks claims with tools. Implement mode
+    /// never does: the patches and the host's verification runs already are
+    /// its evidence. Otherwise the setting applies to the `quality` preset,
+    /// and a `/fusion --verify-claims` request turns it on for any preset.
+    #[must_use]
+    pub fn analyst_uses_tools(&self, request: &platform_api::FusionRequest) -> bool {
+        if request.mode != platform_api::FusionPanelMode::Analysis {
+            return false;
+        }
+        request.verify_claims
+            || (self.analyst_tools && request.preset == platform_api::FusionPreset::Quality)
+    }
     /// Documented defaults (enabled stays false).
     #[must_use]
     pub fn defaults() -> Self {
@@ -157,6 +174,8 @@ impl FusionRuntimeConfig {
             panel_reserved_input_tokens_per_turn: 32768,
             max_reserved_nano_usd: None,
             analyst_max_output_tokens: 8192,
+            analyst_tools: false,
+            analyst_max_turns: 6,
             panel_idle_timeout_ms: 180_000,
             panel_total_timeout_ms: 600_000,
             analyst_timeout_ms: 120_000,
@@ -265,6 +284,12 @@ impl FusionRuntimeConfig {
         cfg.max_reserved_nano_usd = settings.max_reserved_nano_usd;
         if let Some(n) = settings.analyst_max_output_tokens {
             cfg.analyst_max_output_tokens = n;
+        }
+        if let Some(v) = settings.analyst_tools {
+            cfg.analyst_tools = v;
+        }
+        if let Some(n) = settings.analyst_max_turns {
+            cfg.analyst_max_turns = n;
         }
         if let Some(n) = settings.panel_idle_timeout_ms {
             cfg.panel_idle_timeout_ms = n;

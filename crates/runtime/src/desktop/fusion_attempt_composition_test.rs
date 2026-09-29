@@ -172,6 +172,7 @@ fn submission(
     budget: Arc<cost::BudgetEnforcer>,
 ) -> platform_api::FusionSubmission {
     let request = platform_api::FusionRequest {
+        verify_claims: false,
         schema_version: 1,
         origin: platform_api::FusionOrigin::Slash,
         prompt: "Review offline".into(),

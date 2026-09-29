@@ -956,6 +956,7 @@ mod tests {
 
     fn sentinel_analysis() -> FusionAnalysis {
         FusionAnalysis {
+            verified_claims: Vec::new(),
             schema_version: 2,
             consensus: vec![platform_api::SupportedPoint {
                 point: "ANALYSIS_SENTINEL_consensus".into(),

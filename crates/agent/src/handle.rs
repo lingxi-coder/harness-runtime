@@ -1581,11 +1581,8 @@ impl PoolSubagentSpawner {
         }
         // 0b. Hidden Fusion panel: resolved BEFORE the catalog so a user agent
         // named `fusion-panel` cannot shadow the synthetic definition.
-        if subagent_type == platform_api::FUSION_PANEL_TYPE {
-            return crate::builtins::fusion_panel_definition();
-        }
-        if subagent_type == platform_api::FUSION_IMPLEMENTER_TYPE {
-            return crate::builtins::fusion_implementer_definition();
+        if let Some(definition) = hidden_fusion_definition(subagent_type) {
+            return definition;
         }
         // 0c. [Finding 25] `fusion` is reserved for the Fusion Agent surface:
         // tools/agent's `call` intercepts any subagent_type normalizing to
@@ -4135,6 +4132,21 @@ impl PoolSubagentSpawner {
             }
         });
         Ok((agent_id, forwarded_rx))
+    }
+}
+
+/// The hidden Fusion subagent definitions, built out of line: this sits on the
+/// spawn path, and inlining three whole `AgentDefinition`s into it would grow
+/// the frame of every subagent spawn, which is deeply nested already.
+#[inline(never)]
+fn hidden_fusion_definition(subagent_type: &str) -> Option<AgentDefinition> {
+    match subagent_type {
+        platform_api::FUSION_PANEL_TYPE => Some(crate::builtins::fusion_panel_definition()),
+        platform_api::FUSION_IMPLEMENTER_TYPE => {
+            Some(crate::builtins::fusion_implementer_definition())
+        }
+        platform_api::FUSION_ANALYST_TYPE => Some(crate::builtins::fusion_analyst_definition()),
+        _ => None,
     }
 }
 

@@ -918,6 +918,7 @@ mod tests {
 
     fn request() -> FusionRequest {
         FusionRequest {
+            verify_claims: false,
             schema_version: 1,
             origin: FusionOrigin::Slash,
             prompt: "task".into(),

@@ -1021,6 +1021,7 @@ impl TaskStatusSink for BlockingStageSink {
 
 fn dummy_request() -> FusionRequest {
     FusionRequest {
+        verify_claims: false,
         schema_version: 1,
         origin: FusionOrigin::Slash,
         prompt: "review this".into(),

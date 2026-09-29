@@ -396,6 +396,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
         },
         TaskType::LocalFusion => TaskSpawnInput::LocalFusion {
             request: platform_api::FusionRequest {
+                verify_claims: false,
                 schema_version: platform_api::FUSION_SCHEMA_VERSION,
                 origin: platform_api::FusionOrigin::Slash,
                 prompt: String::new(),

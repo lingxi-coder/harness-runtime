@@ -200,6 +200,25 @@ pub fn quote(
     prices: &dyn FusionPriceBook,
     session_has_max: bool,
 ) -> Result<FusionQuote, FusionError> {
+    quote_for(config, resolved, catalog, prices, session_has_max, false)
+}
+
+/// [`quote`] for a run whose analyst may check claims with tools
+/// (`analyst_tools`): the analyst then costs like a panel — up to
+/// `analyst_max_turns` provider calls, each re-reading its context — instead of
+/// one call plus its protocol retry.
+///
+/// # Errors
+///
+/// As [`quote`].
+pub fn quote_for(
+    config: &FusionRuntimeConfig,
+    resolved: &ResolvedSet,
+    catalog: &dyn ModelSource,
+    prices: &dyn FusionPriceBook,
+    session_has_max: bool,
+    analyst_tools: bool,
+) -> Result<FusionQuote, FusionError> {
     let panel_count = u64::from(u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX));
     let turns = u64::from(config.panel_max_turns);
     let mut reserved_input_tokens = 0_u64;
@@ -216,11 +235,27 @@ pub fn quote(
     }
     let analyst_limits = route_limits(catalog, &resolved.analyst);
     let analyst_output_cap = analyst_limits.output_cap(config.analyst_max_output_tokens);
-    let analyst_output = u64::from(analyst_output_cap)
-        .saturating_mul(1 + u64::from(config.analysis_protocol_retries));
+    // The single-call analyst is priced for output only, as it always was. A
+    // tool-using analyst re-sends its growing context every turn, so it also
+    // reserves input, on the same per-turn basis a panel does.
+    let analyst_calls = if analyst_tools {
+        u64::from(config.analyst_max_turns)
+    } else {
+        1 + u64::from(config.analysis_protocol_retries)
+    };
+    let analyst_output = u64::from(analyst_output_cap).saturating_mul(analyst_calls);
+    let analyst_input = if analyst_tools {
+        let per_turn = analyst_limits.input_cap(analyst_output_cap).map_or(
+            u64::from(config.panel_reserved_input_tokens_per_turn),
+            |cap| cap.min(u64::from(config.panel_reserved_input_tokens_per_turn)),
+        );
+        analyst_calls.saturating_mul(per_turn)
+    } else {
+        0
+    };
+    reserved_input_tokens = reserved_input_tokens.saturating_add(analyst_input);
     let reserved_output_tokens = panel_output.saturating_add(analyst_output);
     let panel_calls = panel_count.saturating_mul(turns);
-    let analyst_calls = 1 + u64::from(config.analysis_protocol_retries);
     let max_calls = panel_calls.saturating_add(analyst_calls);
 
     let mut reserved_usd = 0_u64;
@@ -252,7 +287,7 @@ pub fn quote(
         catalog,
         prices,
         session_has_max,
-        0,
+        analyst_input,
         analyst_output,
         analyst_calls,
     )?);
@@ -476,13 +511,20 @@ impl Drop for ReservationLease {
 pub async fn acquire(
     config: &FusionRuntimeConfig,
     resolved: &ResolvedSet,
-    _request: &FusionRequest,
+    request: &FusionRequest,
     catalog: &dyn ModelSource,
     prices: &dyn FusionPriceBook,
     budget: Arc<dyn BudgetEnforcerHandle>,
 ) -> Result<ReservationLease, FusionError> {
     let session_has_max = budget.max_session_nano_usd().is_some();
-    let quote = quote(config, resolved, catalog, prices, session_has_max)?;
+    let quote = quote_for(
+        config,
+        resolved,
+        catalog,
+        prices,
+        session_has_max,
+        config.analyst_uses_tools(request),
+    )?;
     acquire_quoted(quote, budget).await
 }
 
@@ -589,6 +631,7 @@ comparator, not dead API surface and not a production fallback"
 
     fn request() -> FusionRequest {
         FusionRequest {
+            verify_claims: false,
             schema_version: 1,
             origin: FusionOrigin::Slash,
             prompt: "task".into(),
@@ -677,6 +720,51 @@ comparator, not dead API surface and not a production fallback"
         let remaining = (q.reserved_input_tokens + wrong_input) / 2;
         assert!(q.reserved_nano_usd <= remaining);
         assert!(wrong_input > remaining);
+    }
+
+    #[test]
+    fn a_tool_analyst_reserves_its_turns_and_the_input_it_re_reads() {
+        let mut config = FusionRuntimeConfig::defaults();
+        config.analyst_max_turns = 6;
+        let catalog = vec![
+            hinted("anthropic", "sonnet", false),
+            hinted("openai", "terra", false),
+            hinted("deepseek", "pro", false),
+        ];
+        let single = quote_for(
+            &config,
+            &resolved_three(),
+            &catalog,
+            &unit_prices(),
+            true,
+            false,
+        )
+        .unwrap();
+        let tools = quote_for(
+            &config,
+            &resolved_three(),
+            &catalog,
+            &unit_prices(),
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            single,
+            quote(&config, &resolved_three(), &catalog, &unit_prices(), true).unwrap(),
+            "without tools the quote is the one it always was"
+        );
+        // One call plus its protocol retry becomes `analyst_max_turns` calls.
+        assert_eq!(
+            tools.max_calls - single.max_calls,
+            u64::from(config.analyst_max_turns) - (1 + u64::from(config.analysis_protocol_retries))
+        );
+        assert_eq!(
+            tools.reserved_input_tokens - single.reserved_input_tokens,
+            u64::from(config.analyst_max_turns)
+                * u64::from(config.panel_reserved_input_tokens_per_turn)
+        );
+        assert!(tools.reserved_nano_usd > single.reserved_nano_usd);
     }
 
     #[test]

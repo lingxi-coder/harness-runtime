@@ -12,7 +12,7 @@ use platform_api::{
 };
 
 /// Usage line for empty / invalid invocations.
-pub const FUSION_SLASH_USAGE: &str = "Usage: /fusion [--quality|--fast] [--same-provider|--cross-provider] [--models profile:model,...] [--dimensions dim,...] [--partial-ok|--no-partial] [--max-panel N] [--implement [--verify \"COMMAND\"]...] PROMPT\n   or: /fusion setup\n   or: /fusion clean\n   or: /fusion --retry-publication fu_RUN_ID";
+pub const FUSION_SLASH_USAGE: &str = "Usage: /fusion [--quality|--fast] [--same-provider|--cross-provider] [--models profile:model,...] [--dimensions dim,...] [--partial-ok|--no-partial] [--max-panel N] [--verify-claims] [--implement [--verify \"COMMAND\"]...] PROMPT\n   or: /fusion setup\n   or: /fusion clean\n   or: /fusion --retry-publication fu_RUN_ID";
 
 /// Parsed `/fusion` flags plus the remaining prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +36,9 @@ pub struct FusionSlashArgs {
     /// `fusion.implement.verifyCommands` for this run and only exist together
     /// with `--implement`.
     pub verify_commands: Vec<String>,
+    /// `--verify-claims`: the analyst checks the panels' claims with read-only
+    /// tools for this run. Analysis runs only.
+    pub verify_claims: bool,
     /// Non-empty task prompt.
     pub prompt: String,
 }
@@ -54,6 +57,7 @@ struct FusionFlagAccum {
     max_panel: Option<u8>,
     implement: bool,
     verify_commands: Vec<String>,
+    verify_claims: bool,
 }
 
 /// Outcome of consuming one token in the `/fusion` flag loop.
@@ -167,6 +171,13 @@ fn consume_fusion_flag(
                 next_cursor: advance_past_token(raw, next_cursor, value),
             })
         }
+        "--verify-claims" => {
+            if acc.verify_claims {
+                return Err("--verify-claims specified more than once".into());
+            }
+            acc.verify_claims = true;
+            Ok(consumed_one(cursor))
+        }
         "--implement" => {
             if acc.implement {
                 return Err("--implement specified more than once".into());
@@ -235,6 +246,12 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
     if !acc.verify_commands.is_empty() && !acc.implement {
         return Err("--verify requires --implement".into());
     }
+    if acc.verify_claims && acc.implement {
+        return Err(
+            "--verify-claims applies to analysis runs; an implement run's evidence is the patches and the verification commands"
+                .into(),
+        );
+    }
     let mode = if acc.implement {
         FusionPanelMode::Implement
     } else {
@@ -251,6 +268,7 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
         max_panel: acc.max_panel,
         implement: acc.implement,
         verify_commands,
+        verify_claims: acc.verify_claims,
         prompt,
     })
 }
@@ -368,6 +386,7 @@ pub fn fusion_request_from_slash(
         normalize_dimensions_for(mode, Vec::new()).unwrap_or_default()
     });
     FusionRequest {
+        verify_claims: parsed.verify_claims,
         schema_version: FUSION_SCHEMA_VERSION,
         origin: FusionOrigin::Slash,
         prompt: parsed.prompt,
@@ -748,6 +767,27 @@ mod tests {
         assert!(plain.verify_commands.is_empty());
         assert_eq!(plain.prompt, "refactor the parser");
         assert!(!parse("/fusion review this").unwrap().implement);
+    }
+
+    #[test]
+    fn verify_claims_is_an_analysis_flag_that_reaches_the_request() {
+        let args = parse("/fusion --verify-claims review the retry logic").unwrap();
+        assert!(args.verify_claims);
+        assert_eq!(args.prompt, "review the retry logic");
+        assert!(!parse("/fusion review it").unwrap().verify_claims);
+        let request = fusion_request_from_slash(
+            args,
+            "anthropic".into(),
+            "claude-sonnet-5".into(),
+            true,
+            FusionPreset::Fast,
+            true,
+        );
+        assert!(request.verify_claims);
+        let err = parse("/fusion --verify-claims --implement do it").unwrap_err();
+        assert!(err.contains("analysis runs"), "{err}");
+        let err = parse("/fusion --verify-claims --verify-claims review").unwrap_err();
+        assert!(err.contains("more than once"), "{err}");
     }
 
     #[test]

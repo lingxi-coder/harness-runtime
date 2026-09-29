@@ -1,6 +1,6 @@
 # Fusion 父模型综合设计
 
-状态：第 1 阶段（analysis 模式下的父模型综合）、第 2a 阶段（宿主证据核对）、第 3 阶段（沙箱按命令根目录解析）、第 4 阶段（implement 模式）与第 5 阶段（Fusion 模式入口、空闲唤醒契约）已实现；2b（带工具的 analyst）仍为设计草案（2026-09-29）。
+状态：第 1 阶段（analysis 模式下的父模型综合）、第 2a 阶段（宿主证据核对）、第 3 阶段（沙箱按命令根目录解析）、第 4 阶段（implement 模式）与第 5 阶段（Fusion 模式入口、空闲唤醒契约）已实现；2b（带工具的 analyst）已实现（2026-09-29）。
 两种 panel 模式（analysis / implement）在各阶段的差异见"两种 panel 模式"一节。
 
 ## 背景与目标
@@ -484,7 +484,7 @@ Fusion 本身从不写用户工作区，主模型对用户工作区的写入全�
 
 | 需要 | 现状 | 差距 |
 |---|---|---|
-| analyst 用工具核实 panel 的说法 | analyst 无工具；宿主证据核对已实现（第 2a 阶段） | 带工具的 analyst 子 agent 延后，作为 quality 预设可选项 |
+| analyst 用工具核实 panel 的说法 | 已实现（2b）：`fusion.analystTools` / `--verify-claims`，见"带工具的 analyst" | implement 模式下 analyst 仍无工具 |
 | panel 在隔离 worktree 中写代码 | worktree 由 `AgentTool` 在派发前创建（`tools/agent/src/agent.rs`，slug `agent-<id>`），经 `SubagentSpawnRequest.cwd` / `.worktree` 交给子 agent；fusion 直接调 `SubagentSpawner`，不经过 `AgentTool` | 编排器需注入 `WorktreeManager`，自己创建 worktree 并填这两个字段；新增 `fusion-implementer` 类型 |
 | worktree 基于用户当前状态 | `create_worktree` 从分支建，不含未提交改动 | 需 `snapshot_base()`，`base_branch` 接受提交 id |
 | implementer 不向用户冒泡权限 | `fusion-panel` 为 `AgentPermissionMode::Bubble` | 需"worktree 内自动批准、其余拒绝"的非交互权限模式，读取也限定在 worktree |
@@ -522,19 +522,38 @@ Fusion 模式 = 用户选定的主模型 + 开启 fusion 入口 + 一段何时�
 - 并发池：panel 占用 `max_concurrent_subagents`（默认 20）；原子组准入沿用
   `reserve_fusion_panel_group`。
 
-### 带工具的 analyst（2b）
+### 带工具的 analyst（2b，已实现）
 
-```rust
-pub struct VerifiedClaim {              // analyst 用只读工具核实的结论
-    pub panel_id: String,
-    pub claim: String,
-    pub verdict: ClaimVerdict,          // Supported | Refuted | Unverified
-    pub evidence: Option<String>,
-}
-```
+analyst 默认仍是一次严格 schema 的 side query，看不到工作区。开启后它变成只读子 agent，
+自己去核对 panel 的说法：
 
-analyst 获得工具后，其工具轮次计入同一预算预留。implement 模式下它的只读范围包括各 panel 的
-worktree。
+- **开关**：设置 `fusion.analystTools`（默认 false）和 `fusion.analystMaxTurns`（1..=12，默认 6）；
+  `/fusion --verify-claims` 为单次运行打开，不受预设限制，只在 analysis 模式可用
+  （`FusionRequest.verify_claims`，Agent 工具不能设，只有用户键入的 `/fusion` 行能设，
+  因为它会成倍放大 analyst 的花费）。判定集中在 `FusionRuntimeConfig::analyst_uses_tools`：
+  implement 模式永远不用（补丁和宿主验证结果已经是它的证据），设置只对 `quality` 预设生效。
+- **执行**：hidden 子 agent `fusion-analyst`（`FUSION_ANALYST_TYPE`，与 panel 一样先于目录解析、
+  不列出、不触发 hook），工具只有 Read / Grep / Glob，不写文件、不联网。载荷与单次调用相同
+  （同一套 packing 与字节预算），系统提示多一段"核对决定答案的说法：panel 之间有分歧的、
+  只有一个 panel 提出的"，结果经 StructuredOutput 交回。
+- **输出**：`FusionAnalysis.verified_claims: Vec<VerifiedClaim>`（`panel_id`、`claim`、
+  `verdict: supported | refuted | unverified`、`evidence`），`FUSION_SCHEMA_VERSION` 升为 4，
+  `render_fusion_material` 渲染为 `<verified-claims>`。宿主落地前过滤：指向未运行 panel 的、
+  空陈述的、以及给出 supported/refuted 却没有 evidence 的一律丢弃，最多保留 16 条；
+  丢弃不使整份分析失败。文本与其余 analyst 输出一样过 `guard_text`。
+- **记账**：按 panel 的方式而不是单次调用的方式。子 agent 结束才有 provider 用量，所以过程中
+  按"1 次调用、用量未知"结算（输入估算），结束后用累计用量和真实请求数；失败时仍计入失败前
+  已完成的轮次并标记 `estimated`。预留报价 `budget::quote_for(.., analyst_tools)`：
+  analyst 调用数取 `analystMaxTurns`（取代"1 次 + 协议重试"），并像 panel 一样按每轮预留输入
+  （`panelReservedInputTokensPerTurn` 与模型输入上限取小），因为每轮都会重读上下文。
+  `analystTimeoutMs` 约束整个子 agent，而不是单轮。
+- **失败**：不重试（再跑一次要把每一轮再付一遍），降级为 `Unanalyzed`，类别为 `timeout`、
+  `analyst_run_failed`、`spawn`、`cancelled` 或载荷装不下时的 packing 类别；panel 材料照常交出。
+- **与设计的差异**：设计里写的"子 agent 请求需支持温度 0"没有做：`SubagentSpawnRequest` 没有温度字段，
+  panel 也是同样处理，analyst 沿用子 agent 的默认采样。"为 analyst 预留并发池槽位"也没有做：
+  analyst 在 panel 全部结束后才启动，走未占位的 spawn，池满时降级为 `spawn` 失败。
+- **只覆盖 analysis 模式**：implement 模式下 analyst 仍无工具。若以后要让它读各 panel 的 worktree，
+  需要多个根目录的只读调用器，届时再做。
 
 ## 第 3 阶段：沙箱按命令根目录解析（已实现）
 
@@ -583,8 +602,7 @@ worktree。
 
 1. **父模型综合（analysis 模式）**：已完成。
 2. **证据核对**：2a 宿主确定性证据核对，已完成；2b 带只读工具的 analyst 子 agent，
-   作为 quality 预设可选项，产出 `VerifiedClaim`，需要多轮预算、为 analyst 预留并发池槽位、
-   analyst 阶段按轮计费，子 agent 请求需支持温度 0。
+   已完成，产出 `VerifiedClaim`，按轮预留与计费，见"带工具的 analyst"。
 3. **沙箱按命令根目录解析**：已完成，见上文"第 3 阶段"。
 4. **implement 模式**（见"两种 panel 模式"，已实现）：
    1. 快照与 worktree：`snapshot_base()`，编排器注入 `WorktreeManager`，创建 worktree 并填
