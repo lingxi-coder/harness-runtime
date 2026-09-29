@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import test from 'node:test';
 
-const root = fileURLToPath(new URL('../crates/plugins/lingxi-local-app/assets/templates/', import.meta.url));
+const root = fileURLToPath(new URL('../../crates/plugins/lingxi-local-app/assets/templates/', import.meta.url));
 const revision = 'r4';
 const families = ['react-dom', 'canvas-2d', 'three-3d', 'phaser-2d', 'babylon-3d'];
 

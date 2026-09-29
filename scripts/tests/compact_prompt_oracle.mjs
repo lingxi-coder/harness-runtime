@@ -42,7 +42,7 @@ const fixture = {
   ),
 };
 const output = `${JSON.stringify(fixture, null, 2)}\n`;
-const path = fileURLToPath(new URL('../crates/compaction/tests/fixtures/claude_2_1_261_prompt.json', import.meta.url));
+const path = fileURLToPath(new URL('../../crates/compaction/tests/fixtures/claude_2_1_261_prompt.json', import.meta.url));
 if (process.argv.includes('--check')) {
   if (readFileSync(path, 'utf8') !== output) throw new Error('Compact oracle fixture differs');
   console.log(`Compact oracle fixture matches Claude Code ${fixture.version} (${sha256})`);
