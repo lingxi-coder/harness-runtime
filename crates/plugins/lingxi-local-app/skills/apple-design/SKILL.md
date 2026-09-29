@@ -1,6 +1,6 @@
 ---
 name: apple-design
-description: Design or review Apple-style web interfaces: gestures, spring motion, drag and swipe, translucent materials, typography, reduced motion, feedback, and spatial consistency.
+description: Use for Apple-style web interfaces with gestures, spring motion, drag and swipe, translucent materials, typography, reduced motion, feedback, and spatial consistency.
 ---
 
 # Apple Design
