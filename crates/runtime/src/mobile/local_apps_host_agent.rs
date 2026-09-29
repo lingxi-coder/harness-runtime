@@ -11,12 +11,12 @@ use super::{BridgeFailure, LocalAppsHostBroker};
 use async_trait::async_trait;
 use client::protocol::events::ClientEvent;
 use client::protocol::local_apps::{AppAgentProfileProposalDto, AppCapabilityKindDto, AppEventDto};
+use lingxi_core::host::{CostSnapshot, OutputStream};
 use local_apps::mailbox::{load_mailbox, save_mailbox};
 use local_apps::{
     AgentBudget, AgentSessionRecord, AgentSessionStatus, AppAgentProfile, AppAgentProfileProposal,
     AppCapability, RUNTIME_CONTRACT_SCHEMA_VERSION,
 };
-use platform_api::{CostSnapshot, OutputStream};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -287,11 +287,17 @@ impl OutputStream for AgentOutputStream {
         .await;
     }
 
-    async fn emit_tool_call(&self, _id: &protocol::ToolUseId, _tool: &str, _input: &Value) {}
+    async fn emit_tool_call(
+        &self,
+        _id: &lingxi_core::types::ToolUseId,
+        _tool: &str,
+        _input: &Value,
+    ) {
+    }
 
     async fn emit_tool_result(
         &self,
-        _id: &protocol::ToolUseId,
+        _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
         _model_text: &str,
         _result: &Value,
@@ -331,7 +337,7 @@ impl OutputStream for AgentOutputRouter {
         }
     }
 
-    async fn emit_tool_call(&self, id: &protocol::ToolUseId, tool: &str, input: &Value) {
+    async fn emit_tool_call(&self, id: &lingxi_core::types::ToolUseId, tool: &str, input: &Value) {
         if let Some(target) = self.target().await {
             target.emit_tool_call(id, tool, input).await;
         }
@@ -339,7 +345,7 @@ impl OutputStream for AgentOutputRouter {
 
     async fn emit_tool_result(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         tool: &str,
         model_text: &str,
         result: &Value,
@@ -1107,6 +1113,7 @@ mod tests {
         AppBridgeOperationDto, AppBridgeRequestDto, AppEventDto, AppUiActionKindDto,
         AppUiRequestDto,
     };
+    use lingxi_core::host::OutputStream;
     use local_apps::mailbox::{load_mailbox, MAX_MAILBOX_EVENTS};
     use local_apps::test_support::FixedClock;
     use local_apps::{
@@ -1114,7 +1121,6 @@ mod tests {
         AgentSessionStatus, AppAgentProfile, AppCapability, AppLayout, AppService,
         NoopAppEventObserver,
     };
-    use platform_api::OutputStream;
     use serde_json::{json, Value};
     use std::sync::Arc;
     use std::time::Duration;

@@ -10,7 +10,7 @@ pub struct CostSessionRetirement {
     entry: Arc<SessionEntry>,
     bookkeeping: OwnedMutexGuard<HashMap<SessionId, u64>>,
     budget: Option<crate::budget::BudgetCacheRetirement>,
-    retirement: Option<platform_api::SessionRetirement>,
+    retirement: Option<lingxi_core::host::SessionRetirement>,
     closing: bool,
 }
 
@@ -46,7 +46,9 @@ impl CostTracker {
         }
         let retirement = match authority.retention_gate().try_begin_retirement() {
             Ok(Some(token)) => token,
-            Ok(None) | Err(platform_api::SessionRetentionError::Unavailable) => return Ok(None),
+            Ok(None) | Err(lingxi_core::host::SessionRetentionError::Unavailable) => {
+                return Ok(None)
+            }
             Err(error) => {
                 authority.freeze(error.to_string());
                 return Err(CostPersistError::Storage(error.to_string()));
@@ -165,7 +167,7 @@ mod tests {
     use crate::{BudgetConfig, BudgetEnforcer, BudgetExceedPolicy};
 
     struct Lease(String);
-    impl platform_api::live_sessions::SessionWriterLease for Lease {
+    impl lingxi_core::host::live_sessions::SessionWriterLease for Lease {
         fn session_id(&self) -> &str {
             &self.0
         }
@@ -233,7 +235,7 @@ mod tests {
         drop(
             budget
                 .workflow_output_scopes()
-                .begin_turn(session, protocol::MessageId::new(), Some(100))
+                .begin_turn(session, lingxi_core::types::MessageId::new(), Some(100))
                 .await
                 .unwrap(),
         );
@@ -353,7 +355,7 @@ mod tests {
         assert_eq!(
             budget
                 .workflow_output_scopes()
-                .ensure_current(session, protocol::MessageId::new(), Some(100))
+                .ensure_current(session, lingxi_core::types::MessageId::new(), Some(100))
                 .await
                 .unwrap()
                 .spent(),

@@ -6,9 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+core = { path = "../core" }
 branding.workspace = true
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
 tool-api = { path = "../tool-api" }
 hooks = { path = "../hooks" }
 mcp = { path = "../mcp" }

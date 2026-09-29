@@ -1,6 +1,6 @@
 //! T4 tests — populate a tempdir, assert `list_recent_sessions` returns sorted desc.
 
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use session::jsonl::{list_recent_sessions, project_dir_name, LoaderError};
 use std::sync::Arc;

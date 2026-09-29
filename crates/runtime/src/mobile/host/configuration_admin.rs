@@ -14,7 +14,7 @@ use client::protocol::listings::{
     ConfigurationDomainDto as Domain, ConfigurationEffectDto as Effect,
     ConfigurationOperationStatusDto as Status,
 };
-use platform_api::OrchestratorHandle;
+use lingxi_core::host::OrchestratorHandle;
 use serde_json::{json, Value};
 
 async fn protocol_error(sink: &dyn ClientEventSink, message: impl Into<String>) {
@@ -275,22 +275,24 @@ impl MobileEngineHandle {
                 ("plugin", false)
             } else {
                 match config.as_ref().map(|config| &config.scope) {
-                    Some(mcp::ConfigScope::Settings(protocol::SettingsScope::User)) => {
+                    Some(mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User)) => {
                         ("user", true)
                     }
-                    Some(mcp::ConfigScope::Settings(protocol::SettingsScope::Project)) => {
-                        ("project", true)
-                    }
-                    Some(mcp::ConfigScope::Settings(protocol::SettingsScope::Local)) => {
+                    Some(mcp::ConfigScope::Settings(
+                        lingxi_core::types::SettingsScope::Project,
+                    )) => ("project", true),
+                    Some(mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Local)) => {
                         ("local", true)
                     }
                     _ => ("runtime", false),
                 }
             };
             let status = match server.status {
-                platform_api::McpStatus::Connected => json!("connected"),
-                platform_api::McpStatus::Disconnected => json!("disconnected"),
-                platform_api::McpStatus::Error(reason) => json!({"type":"error","reason":reason}),
+                lingxi_core::host::McpStatus::Connected => json!("connected"),
+                lingxi_core::host::McpStatus::Disconnected => json!("disconnected"),
+                lingxi_core::host::McpStatus::Error(reason) => {
+                    json!({"type":"error","reason":reason})
+                }
             };
             runtime.push(json!({"name":server.name,"status":status,"transport":server.transport,"source":source,"writable":writable}));
         }
@@ -652,7 +654,7 @@ mod tests {
         use crate::mobile::test_support::{
             test_config, CollectingPermissionSink, FakeListener, HostFakePlatform,
         };
-        use platform_api::SecureStorage;
+        use lingxi_core::host::SecureStorage;
         use std::sync::Arc;
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
@@ -671,7 +673,7 @@ mod tests {
         std::fs::write(home.join("settings.json"),json!({"enabledPlugins":{"fixture@tests":false,(crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME):false}}).to_string()).unwrap();
         let mut cfg = test_config(&workspace);
         cfg.lingxi_home = home.clone();
-        let storage = Arc::new(platform_api::InMemorySecureStorage::new());
+        let storage = Arc::new(lingxi_core::host::InMemorySecureStorage::new());
         let platform = Arc::new(
             HostFakePlatform::new(temp.path().into()).with_secure_storage(storage.clone()),
         );
@@ -704,12 +706,12 @@ mod tests {
             .store(
                 "lingxi",
                 "plugin-secret-fixture@tests/API_TOKEN",
-                protocol::SecureStorageData::new(
+                lingxi_core::types::SecureStorageData::new(
                     b"test-only-token".to_vec(),
-                    protocol::SecureStorageMetadata {
+                    lingxi_core::types::SecureStorageMetadata {
                         created_at: std::time::UNIX_EPOCH,
                         last_accessed: None,
-                        kind: protocol::SecretKindDto(
+                        kind: lingxi_core::types::SecretKindDto(
                             r#"{"PluginSecret":{"plugin":"fixture@tests","key":"API_TOKEN"}}"#
                                 .into(),
                         ),

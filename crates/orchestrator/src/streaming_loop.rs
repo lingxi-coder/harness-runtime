@@ -13,9 +13,9 @@ use crate::sse::accumulator::BlockAccumulator;
 use crate::sse::event_router::{dispatch_event, RouterAction};
 use crate::streaming_executor::StreamingToolExecutor;
 use futures::stream::{BoxStream, StreamExt};
+use lingxi_core::host::OutputStream;
+use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
 use llm_runtime::{ExecutionUsage as LlmUsage, HistoryEvent, LlmError};
-use platform_api::OutputStream;
-use protocol::{ContentBlock, MessageId, ToolUseId};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -573,7 +573,7 @@ mod tests {
         message_start, message_start_with_usage, message_stop, text_delta, thinking_delta,
     };
     use futures::stream;
-    use protocol::ToolUseId;
+    use lingxi_core::types::ToolUseId;
 
     fn boxed(events: Vec<HistoryEvent>) -> BoxStream<'static, Result<HistoryEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
@@ -774,8 +774,8 @@ mod tests {
     #[tokio::test]
     async fn thinking_and_usage_deltas_emit_to_output() {
         use crate::test_support::MockOutputStream;
+        use lingxi_core::host::OutputEvent;
         use llm_runtime::ExecutionUsage as Usage;
-        use platform_api::OutputEvent;
 
         let mock = Arc::new(MockOutputStream::new());
         let out: Arc<dyn OutputStream> = mock.clone();

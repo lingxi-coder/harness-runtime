@@ -122,10 +122,10 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
         }
     }
     projected.pricing.billing_mode = match profile.pricing.billing_mode {
-        platform_api::ModelBillingMode::PerToken => wire::BillingMode::PerToken,
-        platform_api::ModelBillingMode::Subscription => wire::BillingMode::Subscription,
-        platform_api::ModelBillingMode::Free => wire::BillingMode::Free,
-        platform_api::ModelBillingMode::Unknown => wire::BillingMode::Unknown,
+        lingxi_core::host::ModelBillingMode::PerToken => wire::BillingMode::PerToken,
+        lingxi_core::host::ModelBillingMode::Subscription => wire::BillingMode::Subscription,
+        lingxi_core::host::ModelBillingMode::Free => wire::BillingMode::Free,
+        lingxi_core::host::ModelBillingMode::Unknown => wire::BillingMode::Unknown,
     };
     for model in &mut projected.models {
         if let Some((_, price)) = profile.pricing.overrides.iter().find(|(name, _)| {

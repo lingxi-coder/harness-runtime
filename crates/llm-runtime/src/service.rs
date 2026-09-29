@@ -3,7 +3,7 @@
 //!
 //! `ApiService` owns the inherent drive loop relocated from the orchestrator's
 //! `ProviderApiAdapter` (`orchestrator/src/provider_adapter.rs`). It speaks
-//! `protocol::ConversationMessage` + llm-runtime types and references only
+//! `lingxi_core::types::ConversationMessage` + llm-runtime types and references only
 //! `crate::*` + `protocol`/`traits`/`telemetry` — never any orchestrator-internal
 //! path. The orchestrator's consumer-trait impls delegate to it 1:1.
 
@@ -31,7 +31,7 @@ use crate::{
     ModelRuntime, ResponsesSession, Transport,
 };
 use futures::stream::BoxStream;
-use protocol::{is_nested_media_value, ContentBlock, ConversationMessage};
+use lingxi_core::types::{is_nested_media_value, ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -403,7 +403,7 @@ pub struct ApiService {
     /// by the composition root's background profile/roles fetch (batch 4);
     /// `None` when the host has no OAuth profile fetch (mobile) or predates
     /// the wiring. Read via [`Self::effective_subscriber`].
-    subscription: Option<platform_api::subscription::SharedSubscription>,
+    subscription: Option<lingxi_core::host::subscription::SharedSubscription>,
     /// Forced `tool_choice` for every request this adapter drives, set by
     /// [`Self::with_forced_tool_choice`]. Used by `--json-schema` structured
     /// output to COMPEL the `StructuredOutput` tool (1:1 with claude-code forcing
@@ -835,7 +835,7 @@ impl ApiService {
         effort: Option<serde_json::Value>,
         max_tokens: Option<u32>,
         query_source: Option<&str>,
-        model_attempt: Option<platform_api::ModelAttemptContext>,
+        model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let mut request =
             self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
@@ -1128,7 +1128,7 @@ impl ApiService {
     #[must_use]
     pub fn with_subscription(
         mut self,
-        slot: platform_api::subscription::SharedSubscription,
+        slot: lingxi_core::host::subscription::SharedSubscription,
     ) -> Self {
         self.subscription = Some(slot);
         self
@@ -1422,8 +1422,8 @@ impl ApiService {
                         .any(|block| {
                             matches!(
                                 block,
-                                protocol::ContentBlock::Thinking { .. }
-                                    | protocol::ContentBlock::RedactedThinking { .. }
+                                lingxi_core::types::ContentBlock::Thinking { .. }
+                                    | lingxi_core::types::ContentBlock::RedactedThinking { .. }
                             )
                         })
                         .then_some(*id)
@@ -1440,7 +1440,7 @@ impl ApiService {
                 &thinking_recovery_scope.messages(),
             );
         }
-        let tool_search_enabled = platform_api::session_flags::tool_search_enabled();
+        let tool_search_enabled = lingxi_core::host::session_flags::tool_search_enabled();
         let available_tool_names: std::collections::HashSet<String> = tools
             .iter()
             .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
@@ -1750,12 +1750,14 @@ impl ApiService {
                             == Some(true)
                 })
             });
-        let interactive = self
-            .interactive_session
-            .unwrap_or_else(|| !platform_api::session_flags::effective_non_interactive_session());
+        let interactive = self.interactive_session.unwrap_or_else(|| {
+            !lingxi_core::host::session_flags::effective_non_interactive_session()
+        });
         BetaContext::for_model(model)
             .with_interactive(interactive)
-            .with_show_thinking_summaries(platform_api::session_flags::show_thinking_summaries())
+            .with_show_thinking_summaries(
+                lingxi_core::host::session_flags::show_thinking_summaries(),
+            )
             .with_fast_mode(fast_mode)
             .with_effort(has_effort)
             .with_tool_search(has_tool_search)
@@ -1770,8 +1772,9 @@ impl ApiService {
 
     #[cfg(test)]
     fn interactive_session_for_test(&self) -> bool {
-        self.interactive_session
-            .unwrap_or_else(|| !platform_api::session_flags::effective_non_interactive_session())
+        self.interactive_session.unwrap_or_else(|| {
+            !lingxi_core::host::session_flags::effective_non_interactive_session()
+        })
     }
 
     /// Return host-validated CLI betas only for the first-party Anthropic
@@ -1809,9 +1812,9 @@ impl ApiService {
             .and_then(serde_json::Value::as_str)
             .unwrap_or(&prepared.route.resolved_route.request_model);
         let allowed = Self::direct_anthropic_api_route(prepared)
-            && platform_api::model_capabilities::has_capability(
+            && lingxi_core::host::model_capabilities::has_capability(
                 model,
-                platform_api::model_capabilities::ModelCapability::FastMode,
+                lingxi_core::host::model_capabilities::ModelCapability::FastMode,
             );
         if allowed {
             return;
@@ -2344,13 +2347,13 @@ impl ApiService {
 
     pub fn thinking_stripped_messages(
         &self,
-    ) -> std::collections::HashMap<protocol::MessageId, usize> {
+    ) -> std::collections::HashMap<lingxi_core::types::MessageId, usize> {
         self.thinking_recovery_scope().messages()
     }
 
     pub fn set_thinking_stripped_messages(
         &self,
-        messages: std::collections::HashMap<protocol::MessageId, usize>,
+        messages: std::collections::HashMap<lingxi_core::types::MessageId, usize>,
     ) {
         self.thinking_recovery_scope().merge(messages);
     }

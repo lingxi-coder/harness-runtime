@@ -18,7 +18,7 @@
 //!      [`device_code::run_device_code_login`] → same persist steps.
 //!
 //! **Trait note:** we expose INHERENT async methods rather than implementing
-//! `platform_api::AuthHandle`, because that trait's `LoginInfo` type carries
+//! `lingxi_core::host::AuthHandle`, because that trait's `LoginInfo` type carries
 //! `email`+`org_id` (Anthropic-shaped) whereas `ChatGPT` carries `account_id`+
 //! `fedramp`. The engine M8 wrapper (`ChatGptConnectDriver`) will call these
 //! inherent methods directly.
@@ -26,9 +26,9 @@
 use crate::auth::openai::callback::{CallbackError, CallbackListener};
 use crate::auth::openai::device_code;
 use crate::auth::openai::login::{exchange_error, into_login_tokens};
+use lingxi_core::host::Clock;
 use lingxi_llm_client::auth::oauth::openai::{self as sdk, OpenAiOAuthConfig};
 use lingxi_llm_client::Transport;
-use platform_api::Clock;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;

@@ -425,8 +425,8 @@ pub fn default_mode_from_settings_json(raw: &str) -> Option<PermissionMode> {
 pub fn auto_mode_grantable_by_source(source: PermissionRuleSource) -> bool {
     matches!(
         source,
-        PermissionRuleSource::Settings(protocol::SettingsScope::User)
-            | PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User)
+            | PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)
             | PermissionRuleSource::FlagSettings
     )
 }
@@ -617,20 +617,20 @@ mod tests {
     fn auto_mode_grantable_only_from_trusted_tiers() {
         // `le` / `C(e)`: policy/user/flag may grant auto AND bypassPermissions.
         assert!(auto_mode_grantable_by_source(
-            PermissionRuleSource::Settings(protocol::SettingsScope::User)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User)
         ));
         assert!(auto_mode_grantable_by_source(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)
         ));
         assert!(auto_mode_grantable_by_source(
             PermissionRuleSource::FlagSettings
         ));
         // Repo-controllable tiers may NOT.
         assert!(!auto_mode_grantable_by_source(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project)
         ));
         assert!(!auto_mode_grantable_by_source(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local)
         ));
         // Runtime tiers never carry a settings defaultMode.
         assert!(!auto_mode_grantable_by_source(PermissionRuleSource::CliArg));
@@ -645,8 +645,8 @@ mod tests {
     #[test]
     fn default_mode_applies_from_source_trust_gates_auto_and_bypass_only() {
         use crate::mode::PermissionMode;
-        let project = PermissionRuleSource::Settings(protocol::SettingsScope::Project);
-        let user = PermissionRuleSource::Settings(protocol::SettingsScope::User);
+        let project = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project);
+        let user = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User);
         assert!(!default_mode_applies_from_source(
             PermissionMode::Auto,
             project
@@ -731,7 +731,7 @@ mod tests {
     fn no_permissions_block_is_empty() {
         assert!(permission_rules_from_settings_json(
             "{}",
-            PermissionRuleSource::Settings(protocol::SettingsScope::User)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User)
         )
         .unwrap()
         .is_empty());
@@ -739,7 +739,7 @@ mod tests {
         let raw = r#"{ "model": "claude-opus-4-7" }"#;
         assert!(permission_rules_from_settings_json(
             raw,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project)
         )
         .unwrap()
         .is_empty());
@@ -749,7 +749,7 @@ mod tests {
     fn invalid_json_is_err() {
         assert!(permission_rules_from_settings_json(
             "{not json",
-            PermissionRuleSource::Settings(protocol::SettingsScope::User)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User)
         )
         .is_err());
     }
@@ -765,14 +765,13 @@ mod tests {
         }"#;
         let rules = permission_rules_from_settings_json(
             raw,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(rules.len(), 4);
         // Every rule carries the caller's source.
-        assert!(rules
-            .iter()
-            .all(|r| r.source == PermissionRuleSource::Settings(protocol::SettingsScope::Project)));
+        assert!(rules.iter().all(|r| r.source
+            == PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project)));
 
         let find = |tool: &str, content: Option<&str>| {
             rules
@@ -806,7 +805,7 @@ mod tests {
         let raw = r#"{ "permissions": { "allow": [], "deny": [], "ask": [] } }"#;
         assert!(permission_rules_from_settings_json(
             raw,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User)
         )
         .unwrap()
         .is_empty());
@@ -973,18 +972,18 @@ mod tests {
     fn managed_only_lockdown_retain_drops_non_managed_rules() {
         let user = permission_rules_from_settings_json(
             r#"{ "permissions": { "allow": ["WebFetch"] } }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         let managed = permission_rules_from_settings_json(
             r#"{ "permissions": { "deny": ["Bash(rm:*)"] } }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
         )
         .unwrap();
         let mut rules: Vec<PermissionRule> = user.into_iter().chain(managed).collect();
         assert_eq!(rules.len(), 2);
         rules.retain(|r| {
-            r.source == PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
+            r.source == PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)
         });
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].value.tool_name, "Bash");
@@ -1028,7 +1027,7 @@ mod tests {
         let rule = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Write(src/foo.ts)"),
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
         assert_eq!(
             permission_rule_startup_warning(&rule, ".lingxi/settings.json").as_deref(),
@@ -1040,7 +1039,7 @@ mod tests {
         let deny = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Glob(**/*.rs)"),
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
         };
         assert_eq!(
             permission_rule_startup_warning(&deny, "managed policy settings").as_deref(),
@@ -1052,7 +1051,7 @@ mod tests {
         let ok = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Edit(src/foo.ts)"),
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         };
         assert!(permission_rule_startup_warning(&ok, "settings.json").is_none());
     }
@@ -1062,7 +1061,7 @@ mod tests {
         let rule = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Bash(git -C * status *)"),
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
         assert_eq!(
             permission_rule_startup_warning(&rule, ".lingxi/settings.json").as_deref(),
@@ -1075,7 +1074,7 @@ mod tests {
         let reduced = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Bash(git * main)"),
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         };
         assert_eq!(
             permission_rule_startup_warning(&reduced, "settings.json").as_deref(),
@@ -1089,20 +1088,20 @@ mod tests {
     fn startup_warning_bash_wildcard_checks_all_settings_tier_prefixes() {
         let displays = [
             (
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
                 "user settings",
             ),
             (
-                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
                 "project settings",
             ),
             (
-                PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
                 "local settings",
             ),
             (PermissionRuleSource::CliArg, "CLI argument"),
             (
-                PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
                 "managed policy settings",
             ),
         ];
@@ -1129,7 +1128,7 @@ mod tests {
             let rule = PermissionRule {
                 value: PermissionRuleValue::from_rule_string(spec),
                 behavior,
-                source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             };
             permission_rule_startup_warning(&rule, "settings.json")
         };
@@ -1160,7 +1159,7 @@ mod tests {
             let rule = PermissionRule {
                 value: PermissionRuleValue::from_rule_string(spec),
                 behavior: PermissionBehavior::Allow,
-                source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             };
             permission_rule_startup_warning(&rule, "settings.json")
         };

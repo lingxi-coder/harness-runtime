@@ -5,11 +5,11 @@
 //! avoid the env-mutation test races this codebase has hit before — the
 //! project tier alone is enough to pin the file-existence mapping.
 
+use lingxi_core::host::OrchestratorHandle;
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::OrchestratorHandle;
 use std::sync::Arc;
 
 fn build_orch(cwd: std::path::PathBuf) -> ConversationOrchestrator {

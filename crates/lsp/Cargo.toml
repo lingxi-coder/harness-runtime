@@ -6,8 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
+core = { path = "../core" }
 jsonrpc = { path = "../jsonrpc" }
 lsp-types = "0.95"
 url = "2"

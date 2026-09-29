@@ -330,7 +330,7 @@ mod exclude_filter_tests {
 #[must_use]
 pub fn build_memdir_prefetch(
     side_query_client: Arc<dyn sidequery::SideQueryClient>,
-    runtime: Arc<dyn platform_api::RuntimeSpawner>,
+    runtime: Arc<dyn lingxi_core::host::RuntimeSpawner>,
     home: &std::path::Path,
     cwd: &std::path::Path,
 ) -> Arc<memory::prefetch::MemoryPrefetch> {
@@ -356,7 +356,7 @@ pub fn build_session_memory_handle(
     initialization_threshold: u32,
     update_threshold: u32,
     home: &std::path::Path,
-    runtime: Arc<dyn platform_api::RuntimeSpawner>,
+    runtime: Arc<dyn lingxi_core::host::RuntimeSpawner>,
 ) -> Arc<crate::SessionMemoryHandle> {
     // Called only when the composition root is enabling the feature, so
     // `enabled = true`. The `$LINGXI_CONFIG_DIR`-aware config-home is the SAME
@@ -407,7 +407,7 @@ pub fn build_memdir_prefetch_from_anthropic(
     api_key: impl Into<String>,
     api_base: Option<String>,
     http: Arc<dyn llm_runtime::Transport>,
-    runtime: Arc<dyn platform_api::RuntimeSpawner>,
+    runtime: Arc<dyn lingxi_core::host::RuntimeSpawner>,
     home: &std::path::Path,
     cwd: &std::path::Path,
 ) -> Arc<memory::prefetch::MemoryPrefetch> {

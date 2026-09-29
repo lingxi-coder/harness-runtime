@@ -41,11 +41,11 @@ use client::adapter::lowering::{
 };
 use client::protocol::listings::{CheckStatusDto, McpStatusDto, TaskStatusDto};
 
-use platform_api::orchestrator::{
+use lingxi_core::host::orchestrator::{
     AgentInfo, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary, HookInfo, McpServerInfo,
     McpStatus, StatusSnapshot,
 };
-use platform_api::task_registry::{TaskOutputChunk, TaskRecord};
+use lingxi_core::host::task_registry::{TaskOutputChunk, TaskRecord};
 use session::jsonl::loader::SessionMetadata;
 
 // ── Sessions (resume screen) ───────────────────────────────────────────────

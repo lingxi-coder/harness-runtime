@@ -11,8 +11,8 @@
 //! - probes availability through `tmux -V` exit status
 
 use async_trait::async_trait;
-use platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
-use protocol::AgentId;
+use lingxi_core::host::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+use lingxi_core::types::AgentId;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::process::Command;
@@ -370,11 +370,11 @@ impl SwarmBackend for TmuxBackend {
     async fn pane_metadata(
         &self,
         pane: &PaneId,
-    ) -> Result<platform_api::team_spawn::PaneLaunchMetadata, SwarmError> {
+    ) -> Result<lingxi_core::host::team_spawn::PaneLaunchMetadata, SwarmError> {
         // Model-facing labels are logical coordinates in upstream pe, even
         // when the user's tmux session or window has a different actual name.
         let inside = Self::is_running_inside();
-        Ok(platform_api::team_spawn::PaneLaunchMetadata {
+        Ok(lingxi_core::host::team_spawn::PaneLaunchMetadata {
             backend_type: "tmux".into(),
             session_name: if inside { "current" } else { "lingxi-swarm" }.into(),
             window_name: if inside {

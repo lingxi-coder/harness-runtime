@@ -19,7 +19,7 @@ presentation = [
 ]
 adapter = [
     "presentation",
-    "dep:platform-api",
+    "dep:core",
     "dep:permission",
     "dep:session",
     "dep:chrono",
@@ -33,7 +33,7 @@ test-support = ["adapter"]
 uniffi = ["dep:uniffi"]
 
 [dependencies]
-protocol = { path = "../protocol" }
+core = { path = "../core", optional = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 uniffi = { workspace = true, optional = true }
@@ -44,7 +44,6 @@ syntect = { version = "=5.3.0", default-features = false, features = ["default-f
 pulldown-cmark = { version = "=0.13.4", default-features = false, optional = true }
 similar = { version = "=2.7.0", optional = true }
 tool-api = { path = "../tool-api", optional = true }
-platform-api = { path = "../platform-api", optional = true }
 permission = { path = "../permission", optional = true }
 session = { path = "../session", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }

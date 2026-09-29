@@ -14,7 +14,7 @@
 //! prompt's body is fetched from a remote server, so it is untrusted input, and
 //! `SkillTool` already refuses to expand `SlashCommandKind::Mcp`.
 
-use protocol::McpConnectionId;
+use lingxi_core::types::McpConnectionId;
 
 use crate::model::{CommandSource, SlashCommand, SlashCommandKind};
 
@@ -35,7 +35,7 @@ pub fn mcp_prompt_command_name(server: &str, prompt: &str) -> String {
 /// one, mirroring the same flag on markdown commands.
 #[must_use]
 pub fn mcp_prompt_commands(
-    prompts: &[(String, McpConnectionId, platform_api::McpPromptDto)],
+    prompts: &[(String, McpConnectionId, lingxi_core::host::McpPromptDto)],
 ) -> Vec<SlashCommand> {
     prompts
         .iter()
@@ -90,11 +90,11 @@ mod tests {
         server: &str,
         name: &str,
         description: Option<&str>,
-    ) -> (String, McpConnectionId, platform_api::McpPromptDto) {
+    ) -> (String, McpConnectionId, lingxi_core::host::McpPromptDto) {
         (
             server.to_string(),
             McpConnectionId::new(),
-            platform_api::McpPromptDto {
+            lingxi_core::host::McpPromptDto {
                 name: name.to_string(),
                 description: description.map(str::to_string),
                 arguments: Vec::new(),
@@ -155,12 +155,12 @@ mod tests {
     fn prompt_arguments_drive_hint_and_positional_names() {
         let mut advertised = prompt("github", "review", Some("Review"));
         advertised.2.arguments = vec![
-            platform_api::McpPromptArgumentDto {
+            lingxi_core::host::McpPromptArgumentDto {
                 name: "owner".to_string(),
                 description: Some("Repository owner".to_string()),
                 required: true,
             },
-            platform_api::McpPromptArgumentDto {
+            lingxi_core::host::McpPromptArgumentDto {
                 name: "focus".to_string(),
                 description: None,
                 required: false,

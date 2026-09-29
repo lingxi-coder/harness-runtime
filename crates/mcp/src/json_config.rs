@@ -15,7 +15,7 @@
 
 use crate::connection::{ConfigScope, McpServerConfig, McpServerMetadata, McpServerRole};
 use crate::env_expansion::expand_env_vars_in_string;
-use platform_api::{
+use lingxi_core::host::{
     McpConfiguredToolPolicyDto, McpHeaders, McpOAuthConfigDto, McpPermissionCeiling,
     McpToolPermissionPolicy, McpTransportSpec,
 };
@@ -50,7 +50,7 @@ fn expand_map_values(
 
 /// Order-preserving variant of [`expand_map_values`] for `headers`. The header
 /// key order must survive parse → spec so the `getServerKey` config hash
-/// byte-matches claude-code (see [`platform_api::McpHeaders`]).
+/// byte-matches claude-code (see [`lingxi_core::host::McpHeaders`]).
 fn expand_header_values(map: McpHeaders, missing: &mut Vec<String>) -> McpHeaders {
     map.into_iter()
         .map(|(k, v)| {
@@ -1216,7 +1216,7 @@ pub fn load_mcp_json_with_precedence(
     if let Ok(raw) = std::fs::read_to_string(global_path) {
         match parse_global_config_mcp_servers(
             &raw,
-            ConfigScope::Settings(protocol::SettingsScope::User),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         ) {
             Ok(cfgs) => {
                 for c in cfgs {
@@ -1237,11 +1237,11 @@ pub fn load_mcp_json_with_precedence(
     // rejection or other read error is already logged inside that call.
     if let Ok(raw) = crate::config_diagnostics::read_mcp_config_file(
         project_path,
-        ConfigScope::Settings(protocol::SettingsScope::Project),
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
     ) {
         match parse_mcp_json_string(
             &raw,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         ) {
             Ok(cfgs) => {
                 for c in cfgs {
@@ -1313,7 +1313,7 @@ pub fn load_mcp_servers(
     if let Some(raw) = &global_raw {
         match parse_global_config_mcp_servers(
             raw,
-            ConfigScope::Settings(protocol::SettingsScope::User),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         ) {
             Ok(cfgs) => {
                 for c in cfgs {
@@ -1333,11 +1333,11 @@ pub fn load_mcp_servers(
     // [`load_mcp_json_with_precedence`] for the rationale.
     if let Ok(raw) = crate::config_diagnostics::read_mcp_config_file(
         project_mcp_path,
-        ConfigScope::Settings(protocol::SettingsScope::Project),
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
     ) {
         match parse_mcp_json_string(
             &raw,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         ) {
             Ok(cfgs) => {
                 // Approval is evaluated before precedence. A pending/rejected
@@ -1376,7 +1376,7 @@ pub fn load_mcp_servers(
         match parse_local_config_mcp_servers(
             raw,
             &key,
-            ConfigScope::Settings(protocol::SettingsScope::Local),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Local),
         ) {
             Ok(cfgs) => {
                 for c in cfgs {
@@ -1406,7 +1406,7 @@ mod tests {
     fn parse_empty_json_yields_no_servers() {
         let cfgs = parse_mcp_json_string(
             "{}",
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert!(cfgs.is_empty());
@@ -1420,9 +1420,11 @@ mod tests {
             "filesystem": { "command": "mcp-filesystem", "args": ["/tmp"],   "env": {} }
           }
         }"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 2);
         // Sorted by name.
         assert_eq!(cfgs[0].name, "filesystem");
@@ -1447,8 +1449,11 @@ mod tests {
             "remote": { "type": "http", "url": "https://example.test/mcp" }
           }
         }"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         match &cfgs[0].spec {
             McpTransportSpec::Http { url, .. } => {
@@ -1475,8 +1480,11 @@ mod tests {
     #[test]
     fn bare_url_without_type_is_rejected() {
         let raw = r#"{"mcpServers":{"remote":{"url":"https://example.test/mcp"}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert!(
             cfgs.is_empty(),
             "a url-only entry with no type is an implicit (and invalid) stdio attempt, not Http"
@@ -1491,8 +1499,11 @@ mod tests {
     #[test]
     fn unknown_type_with_url_is_rejected_not_defaulted_to_http() {
         let raw = r#"{"mcpServers":{"remote":{"type":"bogus","url":"https://example.test/mcp"}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert!(
             cfgs.is_empty(),
             "an unrecognized type must reject the entry"
@@ -1506,8 +1517,11 @@ mod tests {
     #[test]
     fn http_type_with_command_but_no_url_is_rejected() {
         let raw = r#"{"mcpServers":{"remote":{"type":"http","command":"x"}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert!(
             cfgs.is_empty(),
             "an http-typed entry must never be reinterpreted as stdio"
@@ -1520,9 +1534,11 @@ mod tests {
     #[test]
     fn empty_stdio_command_is_rejected() {
         let raw = r#"{"mcpServers":{"s":{"command":""}}}"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert!(
             cfgs.is_empty(),
             "an empty stdio command must reject the entry"
@@ -1540,8 +1556,11 @@ mod tests {
             "claude-vscode": { "type": "sdk", "name": "claude-vscode", "timeout": 5000, "alwaysLoad": true }
           }
         }"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1, "sdk entry without url/command must be kept");
         assert_eq!(cfgs[0].name, "claude-vscode");
         match &cfgs[0].spec {
@@ -1565,16 +1584,22 @@ mod tests {
     #[test]
     fn sdk_entry_without_name_is_rejected() {
         let raw = r#"{"mcpServers":{"x":{"type":"sdk","timeout":5000}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert!(
             cfgs.is_empty(),
             "`MAn.name` is required; a nameless sdk entry must be skipped"
         );
         // `i()` has no `.min(1)`, so an EMPTY name is schema-valid and kept.
         let raw = r#"{"mcpServers":{"x":{"type":"sdk","name":""}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1, "an empty `name` still satisfies `i()`");
     }
 
@@ -1586,8 +1611,11 @@ mod tests {
     #[test]
     fn sdk_entry_uses_the_declared_name_not_the_map_key() {
         let raw = r#"{"mcpServers":{"vscode":{"type":"sdk","name":"claude-vscode"}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "vscode", "registry key is the map key");
         match &cfgs[0].spec {
@@ -1606,8 +1634,11 @@ mod tests {
     #[test]
     fn sdk_entry_ignores_a_stray_url_field() {
         let raw = r#"{"mcpServers":{"srv":{"type":"sdk","name":"srv","url":"should-be-ignored"}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         match &cfgs[0].spec {
             McpTransportSpec::SdkControl { control_channel_id } => {
@@ -1634,7 +1665,7 @@ mod tests {
             );
             let cfgs = parse_mcp_json_string(
                 &raw,
-                ConfigScope::Settings(protocol::SettingsScope::Project),
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
             )
             .unwrap();
             assert!(
@@ -1646,7 +1677,7 @@ mod tests {
                 format!(r#"{{"mcpServers":{{"ide":{{"type":"{ty}","url":"http://x/sse"}}}}}}"#);
             assert!(parse_global_config_mcp_servers(
                 &global,
-                ConfigScope::Settings(protocol::SettingsScope::User)
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::User)
             )
             .unwrap()
             .is_empty());
@@ -1687,12 +1718,12 @@ mod tests {
                 let loader_kept = build_server_from_json_entry(
                     "srv",
                     &entry,
-                    ConfigScope::Settings(protocol::SettingsScope::Project),
+                    ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
                 )
                 .is_some();
                 let diagnostics_kept = crate::config_diagnostics::collect_mcp_config_warnings(
                     &serde_json::json!({ "mcpServers": { "srv": entry.clone() } }),
-                    ConfigScope::Settings(protocol::SettingsScope::Project),
+                    ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
                     None,
                 )
                 .is_empty();
@@ -1726,7 +1757,7 @@ mod tests {
                 build_server_from_json_entry(
                     "srv",
                     &entry,
-                    ConfigScope::Settings(protocol::SettingsScope::Project)
+                    ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
                 )
                 .is_none(),
                 "{entry}: a non-boolean discoveryCache fails safeParse"
@@ -1737,7 +1768,7 @@ mod tests {
             );
             let warnings = crate::config_diagnostics::collect_mcp_config_warnings(
                 &serde_json::json!({ "mcpServers": { "srv": entry.clone() } }),
-                ConfigScope::Settings(protocol::SettingsScope::Project),
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
                 None,
             );
             let joined = format!("{warnings:?}");
@@ -1757,7 +1788,7 @@ mod tests {
                 build_server_from_json_entry(
                     "srv",
                     &entry,
-                    ConfigScope::Settings(protocol::SettingsScope::Project)
+                    ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
                 )
                 .is_some(),
                 "{entry}: discoveryCache is not a schema key for this type"
@@ -1769,7 +1800,7 @@ mod tests {
             assert!(
                 crate::config_diagnostics::collect_mcp_config_warnings(
                     &serde_json::json!({ "mcpServers": { "srv": entry.clone() } }),
-                    ConfigScope::Settings(protocol::SettingsScope::Project),
+                    ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
                     None,
                 )
                 .is_empty(),
@@ -1783,7 +1814,7 @@ mod tests {
         assert!(build_server_from_json_entry(
             "srv",
             &ok,
-            ConfigScope::Settings(protocol::SettingsScope::Project)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
         )
         .is_some());
         assert!(server_entry_shape_is_valid(&ok));
@@ -1830,7 +1861,7 @@ mod tests {
                     build_server_from_json_entry(
                         "srv",
                         &entry,
-                        ConfigScope::Settings(protocol::SettingsScope::Project)
+                        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
                     )
                     .is_some(),
                     "{entry}: zod strips {key} off this type without type-checking it; \
@@ -2246,8 +2277,11 @@ mod tests {
             }
           }
         }"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         let McpTransportSpec::Http {
             headers_helper,
             oauth: Some(oauth),
@@ -2271,8 +2305,11 @@ mod tests {
     #[test]
     fn oauth_callback_port_zero_rejects_the_whole_entry() {
         let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"https://x.test","oauth":{"callbackPort":0}}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert!(
             cfgs.is_empty(),
             "callbackPort:0 fails `.int().positive()`; the server must be skipped, not connected with port 0"
@@ -2282,8 +2319,11 @@ mod tests {
     #[test]
     fn oauth_non_https_auth_server_metadata_url_rejects_the_whole_entry() {
         let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"https://x.test","oauth":{"authServerMetadataUrl":"http://auth.example/.well-known/oauth-authorization-server"}}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert!(
             cfgs.is_empty(),
             "a non-https authServerMetadataUrl must fail `.startsWith(\"https://\")`"
@@ -2291,8 +2331,11 @@ mod tests {
 
         // An arbitrary non-URL string must also reject (the `.url()` half).
         let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"https://x.test","oauth":{"authServerMetadataUrl":"not-a-url"}}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert!(
             cfgs.is_empty(),
             "a non-URL authServerMetadataUrl must fail `.url()`"
@@ -2302,16 +2345,22 @@ mod tests {
     #[test]
     fn oauth_empty_scopes_rejects_the_whole_entry() {
         let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"https://x.test","oauth":{"scopes":""}}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert!(cfgs.is_empty(), "an empty scopes string fails `.min(1)`");
     }
 
     #[test]
     fn oauth_valid_https_metadata_url_is_kept() {
         let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"https://x.test","oauth":{"authServerMetadataUrl":"https://auth.example/.well-known/oauth-authorization-server","callbackPort":8123,"scopes":"read"}}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(
             cfgs.len(),
             1,
@@ -2335,8 +2384,11 @@ mod tests {
             }
           }
         }"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         let McpTransportSpec::WebSocket {
             headers,
             headers_helper,
@@ -2359,8 +2411,11 @@ mod tests {
     fn non_oracle_websocket_alias_is_rejected() {
         let raw =
             r#"{"mcpServers":{"remote":{"type":"websocket","url":"wss://example.test/mcp"}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert!(cfgs.is_empty(), "\"websocket\" is not an oracle-valid type");
     }
 
@@ -2371,8 +2426,11 @@ mod tests {
     fn ws_ignores_request_timeout_ms() {
         let raw =
             r#"{"mcpServers":{"r":{"type":"ws","url":"wss://x.test","request_timeout_ms":45000}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(
             cfgs[0].timeout_ms, None,
@@ -2388,8 +2446,11 @@ mod tests {
     #[test]
     fn claudeai_proxy_ignores_request_timeout_ms() {
         let raw = r#"{"mcpServers":{"r":{"type":"claudeai-proxy","url":"https://x.test","id":"conn-1","request_timeout_ms":45000}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(
             cfgs[0].timeout_ms, None,
@@ -2397,8 +2458,11 @@ mod tests {
         );
         // An explicit `timeout` is still honoured — only the alias is stripped.
         let raw = r#"{"mcpServers":{"r":{"type":"claudeai-proxy","url":"https://x.test","id":"conn-1","timeout":9000,"request_timeout_ms":45000}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs[0].timeout_ms, Some(9000));
     }
 
@@ -2427,7 +2491,7 @@ mod tests {
                 build_server_from_json_entry(
                     "srv",
                     &entry,
-                    ConfigScope::Settings(protocol::SettingsScope::Project)
+                    ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
                 )
                 .is_some(),
                 "`f` has no catchall, so a non-string `id` is stripped, not \
@@ -2446,7 +2510,7 @@ mod tests {
         assert!(build_server_from_json_entry(
             "p",
             &proxy,
-            ConfigScope::Settings(protocol::SettingsScope::Project)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
         )
         .is_none());
         assert!(!server_entry_shape_is_valid(&proxy));
@@ -2469,7 +2533,7 @@ mod tests {
             build_server_from_json_entry(
                 "p",
                 &malformed,
-                ConfigScope::Settings(protocol::SettingsScope::Project)
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
             )
             .is_some(),
             "`NAn` has no `headers` key, so `f` strips it and the server loads"
@@ -2480,8 +2544,11 @@ mod tests {
         let raw = r#"{"mcpServers":{"p":{"type":"claudeai-proxy","url":"https://x.test",
             "id":"c1","headers":{"X":"y"},"headersHelper":"echo leak",
             "oauth":{"clientId":"z"}}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         match &cfgs[0].spec {
             McpTransportSpec::Http {
@@ -2519,8 +2586,11 @@ mod tests {
         std::env::set_var("LX_PROXY_EMPTY_PROBE", "");
         let raw = r#"{"mcpServers":{"p":{"type":"claudeai-proxy",
             "url":"https://${LX_PROXY_EXPAND_PROBE}/mcp","id":"c1"}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         match &cfgs[0].spec {
             McpTransportSpec::Http { url, .. } => assert_eq!(
                 url, "https://${LX_PROXY_EXPAND_PROBE}/mcp",
@@ -2531,8 +2601,11 @@ mod tests {
         // Positive control: the same url under `http` DOES expand.
         let raw = r#"{"mcpServers":{"h":{"type":"http",
             "url":"https://${LX_PROXY_EXPAND_PROBE}/mcp"}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         match &cfgs[0].spec {
             McpTransportSpec::Http { url, .. } => assert_eq!(url, "https://real.example/mcp"),
             other => panic!("{other:?}"),
@@ -2540,16 +2613,22 @@ mod tests {
         // A url that WOULD expand to empty gets no `configError` either.
         let raw = r#"{"mcpServers":{"p":{"type":"claudeai-proxy",
             "url":"${LX_PROXY_EMPTY_PROBE}","id":"c1"}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(
             cfgs[0].config_error, None,
             "`r` stays false for claudeai-proxy, so `Oe=fe` with no configError"
         );
         // Positive control: `http` stamps it.
         let raw = r#"{"mcpServers":{"h":{"type":"http","url":"${LX_PROXY_EMPTY_PROBE}"}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert!(cfgs[0].config_error.is_some());
         std::env::remove_var("LX_PROXY_EXPAND_PROBE");
         std::env::remove_var("LX_PROXY_EMPTY_PROBE");
@@ -2563,8 +2642,11 @@ mod tests {
     #[test]
     fn claudeai_proxy_entry_without_id_is_rejected() {
         let raw = r#"{"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test"}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert!(
             cfgs.is_empty(),
             "`NAn.id` is required; an idless claudeai-proxy entry must be skipped"
@@ -2572,8 +2654,11 @@ mod tests {
         // `i()` has no `.min(1)`, so an EMPTY id still satisfies the schema.
         let raw =
             r#"{"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test","id":""}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1, "an empty `id` still satisfies `i()`");
     }
 
@@ -2583,9 +2668,11 @@ mod tests {
         // (safeParse failure → continue) instead of dropping the file. A lone
         // bad entry therefore yields an empty list, NOT an Err.
         let raw = r#"{"mcpServers":{"bogus":{}}}"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert!(cfgs.is_empty(), "bad entry skipped, no Err");
     }
 
@@ -2607,9 +2694,11 @@ mod tests {
             r#"{"mcpServers":{"remote":{"type":"http","url":"   "}}}"#,
             r#"{"mcpServers":{"remote":{"type":"http","url":""}}}"#,
         ] {
-            let cfgs =
-                parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                    .unwrap();
+            let cfgs = parse_mcp_json_string(
+                raw,
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+            )
+            .unwrap();
             assert_eq!(cfgs.len(), 1, "blank remote url must keep the server");
             assert_eq!(cfgs[0].config_error, None, "blank url is not a configError");
             assert!(
@@ -2631,9 +2720,11 @@ mod tests {
         // match) so it does NOT empty the url; emptiness needs a var that IS
         // set to "" or — deterministic for a test — an empty `:-` default.
         let raw = r#"{"mcpServers":{"r":{"type":"http","url":"${LINGXI_MCP_TEST_UNSET_M5:-}"}}}"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1, "expanded-to-empty url must keep the server");
         assert_eq!(
             cfgs[0].config_error.as_deref(),
@@ -2659,7 +2750,7 @@ mod tests {
         // A url that expands to something non-empty carries NO configError.
         let ok = parse_mcp_json_string(
             r#"{"mcpServers":{"r":{"type":"http","url":"${B:-https://x.test}"}}}"#,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(ok[0].config_error, None);
@@ -2672,9 +2763,11 @@ mod tests {
         // top-level map of {name: serverConfig} with NO `mcpServers` wrapper is
         // accepted as the server map directly.
         let raw = r#"{"x":{"command":"foo"}}"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "x");
         match &cfgs[0].spec {
@@ -2688,9 +2781,11 @@ mod tests {
         // One invalid entry (no command/url) and one valid: the valid one
         // survives, the file is NOT dropped (per-entry skip, no Err).
         let raw = r#"{"mcpServers":{"bad":{},"good":{"command":"g"}}}"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "good");
         match &cfgs[0].spec {
@@ -2707,9 +2802,11 @@ mod tests {
           "mcpServers": { "wrapped": { "command": "w" } },
           "sibling": { "command": "s" }
         }"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "wrapped");
     }
@@ -2726,7 +2823,7 @@ mod tests {
         assert_eq!(cfgs.len(), 1);
         assert_eq!(
             cfgs[0].scope,
-            ConfigScope::Settings(protocol::SettingsScope::Project)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
         );
         match &cfgs[0].spec {
             McpTransportSpec::Stdio { command, .. } => assert_eq!(command, "project-x"),
@@ -2748,9 +2845,11 @@ mod tests {
             }
           }
         }"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         match &cfgs[0].spec {
             McpTransportSpec::Stdio { command, args, env } => {
@@ -2773,8 +2872,11 @@ mod tests {
             }
           }
         }"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         match &cfgs[0].spec {
             McpTransportSpec::Http { url, headers, .. } => {
                 assert_eq!(url, "https://example.test/mcp");
@@ -2802,9 +2904,11 @@ mod tests {
             }
           }
         }"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         match &cfgs[0].spec {
             McpTransportSpec::Http { headers, .. } => {
                 let order: Vec<&str> = headers.keys().map(String::as_str).collect();
@@ -2823,9 +2927,11 @@ mod tests {
         // A uniquely-named var (set for this process) is substituted.
         std::env::set_var("LINGXI_MCP_TEST_BIN_5B", "/opt/mcp/bin");
         let raw = r#"{"mcpServers":{"s":{"command":"${LINGXI_MCP_TEST_BIN_5B}"}}}"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         match &cfgs[0].spec {
             McpTransportSpec::Stdio { command, .. } => assert_eq!(command, "/opt/mcp/bin"),
             other => panic!("expected Stdio, got {other:?}"),
@@ -2838,9 +2944,11 @@ mod tests {
         // An unset `${MISSING}` with no default is left verbatim; parsing still
         // succeeds (TS surfaces a non-fatal error, never aborts the config).
         let raw = r#"{"mcpServers":{"s":{"command":"${LINGXI_MCP_TEST_UNSET_5B}","args":["ok"]}}}"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         match &cfgs[0].spec {
             McpTransportSpec::Stdio { command, args, .. } => {
                 assert_eq!(command, "${LINGXI_MCP_TEST_UNSET_5B}");
@@ -2877,14 +2985,14 @@ mod tests {
         }"#;
         let cfgs = parse_global_config_mcp_servers(
             raw,
-            ConfigScope::Settings(protocol::SettingsScope::User),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "mem");
         assert_eq!(
             cfgs[0].scope,
-            ConfigScope::Settings(protocol::SettingsScope::User)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User)
         );
     }
 
@@ -2896,7 +3004,7 @@ mod tests {
         let raw = r#"{ "numStartups": 7, "projects": { "/p": {} } }"#;
         let cfgs = parse_global_config_mcp_servers(
             raw,
-            ConfigScope::Settings(protocol::SettingsScope::User),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert!(cfgs.is_empty());
@@ -2919,7 +3027,7 @@ mod tests {
         assert_eq!(cfgs[0].name, "g");
         assert_eq!(
             cfgs[0].scope,
-            ConfigScope::Settings(protocol::SettingsScope::User)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User)
         );
     }
 
@@ -2931,14 +3039,14 @@ mod tests {
         let cfgs = parse_local_config_mcp_servers(
             raw,
             "/some/proj",
-            ConfigScope::Settings(protocol::SettingsScope::Local),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Local),
         )
         .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "loc");
         assert_eq!(
             cfgs[0].scope,
-            ConfigScope::Settings(protocol::SettingsScope::Local)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Local)
         );
     }
 
@@ -2949,7 +3057,7 @@ mod tests {
         let cfgs = parse_local_config_mcp_servers(
             raw,
             "/some/proj",
-            ConfigScope::Settings(protocol::SettingsScope::Local),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Local),
         )
         .unwrap();
         assert!(cfgs.is_empty());
@@ -2982,7 +3090,7 @@ mod tests {
         assert_eq!(cfgs.len(), 1);
         assert_eq!(
             cfgs[0].scope,
-            ConfigScope::Settings(protocol::SettingsScope::Local)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Local)
         );
         match &cfgs[0].spec {
             McpTransportSpec::Stdio { command, .. } => assert_eq!(command, "local-s"),
@@ -3016,15 +3124,15 @@ mod tests {
             cfgs.iter().map(|c| (c.name.as_str(), c.scope)).collect();
         assert_eq!(
             by_name["loc"],
-            ConfigScope::Settings(protocol::SettingsScope::Local)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Local)
         );
         assert_eq!(
             by_name["prj"],
-            ConfigScope::Settings(protocol::SettingsScope::Project)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
         );
         assert_eq!(
             by_name["usr"],
-            ConfigScope::Settings(protocol::SettingsScope::User)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User)
         );
     }
 
@@ -3049,7 +3157,7 @@ mod tests {
         assert_eq!(cfgs.len(), 1);
         assert_eq!(
             cfgs[0].scope,
-            ConfigScope::Settings(protocol::SettingsScope::User)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User)
         );
         assert!(matches!(
             &cfgs[0].spec,
@@ -3123,7 +3231,7 @@ mod tests {
         assert_eq!(cfgs.len(), 1);
         assert_eq!(
             cfgs[0].scope,
-            ConfigScope::Settings(protocol::SettingsScope::Project)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
         );
         assert!(matches!(
             &cfgs[0].spec,
@@ -3139,9 +3247,11 @@ mod tests {
     #[test]
     fn stdio_timeout_is_parsed() {
         let raw = r#"{"mcpServers":{"s":{"command":"c","timeout":5000}}}"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(cfgs[0].timeout_ms, Some(5000));
         assert!(!cfgs[0].always_load);
     }
@@ -3151,14 +3261,20 @@ mod tests {
         // RAn: `timeout` unset + `request_timeout_ms` set → timeout =
         // min(request_timeout_ms, 300_000). A huge alias is capped.
         let raw = r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","request_timeout_ms":999999999}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs[0].timeout_ms, Some(300_000), "capped at LTm=300_000");
 
         // Under the cap it is folded verbatim.
         let raw = r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","request_timeout_ms":45000}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs[0].timeout_ms, Some(45000));
     }
 
@@ -3167,8 +3283,11 @@ mod tests {
         // RAn only folds when `timeout` is UNSET; an explicit `timeout` wins and
         // is NOT capped at 300_000.
         let raw = r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","timeout":600000,"request_timeout_ms":10}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs[0].timeout_ms, Some(600000));
     }
 
@@ -3177,18 +3296,22 @@ mod tests {
         // The stdio zod schema carries no `request_timeout_ms` field (zod strips
         // it); the alias must NOT be folded for a stdio transport.
         let raw = r#"{"mcpServers":{"s":{"command":"c","request_timeout_ms":45000}}}"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(cfgs[0].timeout_ms, None);
     }
 
     #[test]
     fn always_load_is_parsed() {
         let raw = r#"{"mcpServers":{"s":{"command":"c","alwaysLoad":true}}}"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert!(cfgs[0].always_load);
     }
 
@@ -3207,9 +3330,11 @@ mod tests {
             }
           }
         }"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].tools.len(), 1);
         assert_eq!(
@@ -3242,9 +3367,11 @@ mod tests {
             }
           }
         }"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(
             cfgs[0].tools[0].permission_policy,
             Some(McpToolPermissionPolicy::AlwaysAllow)
@@ -3261,8 +3388,11 @@ mod tests {
         // failing the entry. A string alias must NOT skip the server; it is just
         // ignored (no fold).
         let raw = r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","request_timeout_ms":"nope"}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(
             cfgs.len(),
             1,
@@ -3273,8 +3403,11 @@ mod tests {
         // Non-positive alias is also coerced away (.positive()).
         let raw =
             r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","request_timeout_ms":0}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs[0].timeout_ms, None);
     }
 
@@ -3284,9 +3417,11 @@ mod tests {
         // entry's safeParse → the whole server is skipped (valid siblings kept).
         let raw =
             r#"{"mcpServers":{"bad":{"command":"c","timeout":"soon"},"good":{"command":"g"}}}"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "good");
     }
@@ -3299,9 +3434,11 @@ mod tests {
         // serde alone accepts it; the positive-integer guard is what drops the
         // entry, matching CC's `.positive()` (review RV10).
         let raw = r#"{"mcpServers":{"bad":{"command":"c","timeout":0},"good":{"command":"g"}}}"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "good");
 
@@ -3312,8 +3449,11 @@ mod tests {
         // entry for an unrelated reason, which would pin nothing about
         // `timeout:0` specifically.
         let raw = r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","timeout":0}}}"#;
-        let cfgs = parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::User))
-            .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
         assert!(cfgs.is_empty(), "timeout:0 must drop the remote server");
     }
 
@@ -3326,12 +3466,12 @@ mod tests {
         let with = r#"{"mcpServers":{"ordered":{"url":"https://mcp.example.com/v1","type":"http","headers":{"Z-Header":"z","A-Header":"a"},"timeout":12345,"alwaysLoad":true}}}"#;
         let a = parse_mcp_json_string(
             bare,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         let b = parse_mcp_json_string(
             with,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(
@@ -3450,9 +3590,11 @@ mod tests {
             "good": { "type": "http", "url": "https://y.example" }
           }
         }"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(
             cfgs.len(),
             1,
@@ -3470,9 +3612,11 @@ mod tests {
             "srv": { "command": "c", "discoveryCache": "nope" }
           }
         }"#;
-        let cfgs =
-            parse_mcp_json_string(raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-                .unwrap();
+        let cfgs = parse_mcp_json_string(
+            raw,
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "srv");
         assert_eq!(cfgs[0].discovery_cache, None);
@@ -3487,7 +3631,7 @@ mod tests {
                 "url": "https://false.example",
                 "discoveryCache": false
             }),
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .expect("http entry with false discoveryCache loads");
         assert_eq!(false_cfg.discovery_cache, Some(false));
@@ -3499,7 +3643,7 @@ mod tests {
                 "url": "https://true.example",
                 "discoveryCache": true
             }),
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .expect("sse entry with true discoveryCache loads");
         assert_eq!(true_cfg.discovery_cache, Some(true));
@@ -3510,7 +3654,7 @@ mod tests {
                 "type": "http",
                 "url": "https://absent.example"
             }),
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .expect("http entry without discoveryCache loads");
         assert_eq!(absent_cfg.discovery_cache, None);

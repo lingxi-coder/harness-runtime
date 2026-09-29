@@ -34,19 +34,19 @@ use crate::side_query::{
     SideQueryRequest, SideQueryResponse,
 };
 use async_trait::async_trait;
+#[cfg(test)]
+use lingxi_core::host::http::SseStream;
+#[cfg(test)]
+use lingxi_core::host::{HttpError, HttpTransport};
+use lingxi_core::types::MediaAnalysis;
+#[cfg(test)]
+use lingxi_core::types::{HttpRequest, HttpResponse};
 use llm_runtime::Transport;
 use llm_runtime::{
     AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, LlmError, LlmRequest,
     ModelProfile, ModelRuntime, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
     StaticCredentialProvider, SystemBlock,
 };
-#[cfg(test)]
-use platform_api::http::SseStream;
-#[cfg(test)]
-use platform_api::{HttpError, HttpTransport};
-use protocol::MediaAnalysis;
-#[cfg(test)]
-use protocol::{HttpRequest, HttpResponse};
 use std::sync::Arc;
 
 /// Default Anthropic API base URL used when the caller passes `None`.
@@ -445,7 +445,7 @@ impl SideQueryClient for ProviderSideQueryClient {
             .map(|s| vec![SystemBlock::text(s)])
             .unwrap_or_default();
 
-        // Convert protocol::ConversationMessage → llm_runtime::Message.
+        // Convert lingxi_core::types::ConversationMessage → llm_runtime::Message.
         // We inline a minimal conversion here so sidequery does not need to
         // depend on `agent` (which depends back on sidequery — a cycle).
         let messages = convert_messages(request.messages)?;
@@ -748,30 +748,30 @@ async fn collect_completed_response(
 }
 
 fn convert_messages(
-    messages: Vec<protocol::ConversationMessage>,
+    messages: Vec<lingxi_core::types::ConversationMessage>,
 ) -> Result<Vec<llm_runtime::Message>, llm_runtime::LlmError> {
     messages.into_iter().map(convert_one_message).collect()
 }
 
 fn convert_one_message(
-    msg: protocol::ConversationMessage,
+    msg: lingxi_core::types::ConversationMessage,
 ) -> Result<llm_runtime::Message, llm_runtime::LlmError> {
     match msg {
-        protocol::ConversationMessage::User { content, .. } => Ok(llm_runtime::Message {
+        lingxi_core::types::ConversationMessage::User { content, .. } => Ok(llm_runtime::Message {
             role: "user".to_string(),
             content: content
                 .into_iter()
                 .map(convert_content_block)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
-        protocol::ConversationMessage::Assistant { content, .. } => Ok(llm_runtime::Message {
+        lingxi_core::types::ConversationMessage::Assistant { content, .. } => Ok(llm_runtime::Message {
             role: "assistant".to_string(),
             content: content
                 .into_iter()
                 .map(convert_content_block)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
-        protocol::ConversationMessage::System { .. } => Err(llm_runtime::LlmError::InvalidRequest {
+        lingxi_core::types::ConversationMessage::System { .. } => Err(llm_runtime::LlmError::InvalidRequest {
             message:
                 "System messages must not appear in the messages vec; pass them via system_prompt"
                     .to_string(),
@@ -780,17 +780,17 @@ fn convert_one_message(
 }
 
 fn convert_content_block(
-    block: protocol::ContentBlock,
+    block: lingxi_core::types::ContentBlock,
 ) -> Result<llm_runtime::ContentBlock, llm_runtime::LlmError> {
     match block {
-        protocol::ContentBlock::ProviderContent { protocol, value } => {
+        lingxi_core::types::ContentBlock::ProviderContent { protocol, value } => {
             Ok(llm_runtime::ContentBlock::ProviderContent { protocol, value })
         }
-        protocol::ContentBlock::Text { text } => Ok(llm_runtime::ContentBlock::Text {
+        lingxi_core::types::ContentBlock::Text { text } => Ok(llm_runtime::ContentBlock::Text {
             text,
             cache_control: None,
         }),
-        protocol::ContentBlock::TextJsUtf16 {
+        lingxi_core::types::ContentBlock::TextJsUtf16 {
             text,
             utf16_code_units,
         } => Ok(llm_runtime::ContentBlock::TextJsUtf16 {
@@ -798,7 +798,7 @@ fn convert_content_block(
             utf16_code_units,
             cache_control: None,
         }),
-        protocol::ContentBlock::ToolUse {
+        lingxi_core::types::ContentBlock::ToolUse {
             id,
             name,
             input,
@@ -809,7 +809,7 @@ fn convert_content_block(
             name,
             input,
         }),
-        protocol::ContentBlock::ToolResult {
+        lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id,
             content,
             is_error,
@@ -828,35 +828,37 @@ fn convert_content_block(
             cache_control: None,
             cache_reference: None,
         }),
-        protocol::ContentBlock::Thinking {
+        lingxi_core::types::ContentBlock::Thinking {
             thinking,
             signature,
         } => Ok(llm_runtime::ContentBlock::Reasoning {
             text: thinking,
             signature,
         }),
-        protocol::ContentBlock::Image { source } => convert_image(source),
-        protocol::ContentBlock::Document { source } => convert_document(source),
-        protocol::ContentBlock::MediaAnalysis { analysis } => Ok(llm_runtime::ContentBlock::Text {
-            text: render_media_analysis(&analysis),
-            cache_control: None,
-        }),
+        lingxi_core::types::ContentBlock::Image { source } => convert_image(source),
+        lingxi_core::types::ContentBlock::Document { source } => convert_document(source),
+        lingxi_core::types::ContentBlock::MediaAnalysis { analysis } => {
+            Ok(llm_runtime::ContentBlock::Text {
+                text: render_media_analysis(&analysis),
+                cache_control: None,
+            })
+        }
         // Low-frequency server-side blocks: replayed verbatim into the request
         // so the provider round-trips them (see agent::convert::convert_block).
-        protocol::ContentBlock::RedactedThinking { data } => {
+        lingxi_core::types::ContentBlock::RedactedThinking { data } => {
             Ok(llm_runtime::ContentBlock::RedactedThinking { data })
         }
-        protocol::ContentBlock::ServerToolUse { id, name, input } => {
+        lingxi_core::types::ContentBlock::ServerToolUse { id, name, input } => {
             Ok(llm_runtime::ContentBlock::ServerToolUse { id, name, input })
         }
-        protocol::ContentBlock::ConnectorText {
+        lingxi_core::types::ContentBlock::ConnectorText {
             connector_text,
             signature,
         } => Ok(llm_runtime::ContentBlock::ConnectorText {
             connector_text,
             signature,
         }),
-        protocol::ContentBlock::AdvisorToolResult {
+        lingxi_core::types::ContentBlock::AdvisorToolResult {
             tool_use_id,
             content,
             is_error,
@@ -869,10 +871,10 @@ fn convert_content_block(
 }
 
 fn convert_image(
-    source: protocol::ImageSource,
+    source: lingxi_core::types::ImageSource,
 ) -> Result<llm_runtime::ContentBlock, llm_runtime::LlmError> {
     match source {
-        protocol::ImageSource::Base64 { media_type, data } => {
+        lingxi_core::types::ImageSource::Base64 { media_type, data } => {
             use base64::Engine as _;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&data)
@@ -881,15 +883,17 @@ fn convert_image(
                 })?;
             Ok(llm_runtime::ContentBlock::Image { media_type, bytes })
         }
-        protocol::ImageSource::Url { url } => Ok(llm_runtime::ContentBlock::ImageUrl { url }),
+        lingxi_core::types::ImageSource::Url { url } => {
+            Ok(llm_runtime::ContentBlock::ImageUrl { url })
+        }
     }
 }
 
 fn convert_document(
-    source: protocol::DocumentSource,
+    source: lingxi_core::types::DocumentSource,
 ) -> Result<llm_runtime::ContentBlock, llm_runtime::LlmError> {
     match source {
-        protocol::DocumentSource::Base64 { media_type, data } => {
+        lingxi_core::types::DocumentSource::Base64 { media_type, data } => {
             use base64::Engine as _;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&data)
@@ -972,7 +976,7 @@ fn convert_one_tool(
 mod tests {
     use super::*;
     use crate::purposes::QuerySource;
-    use protocol::{ConversationMessage, MessageId};
+    use lingxi_core::types::{ConversationMessage, MessageId};
     use std::sync::Mutex;
 
     /// Minimal in-process [`HttpTransport`] that returns a single scripted
@@ -1037,11 +1041,11 @@ mod tests {
     async fn registered_side_queries_reject_direct_backend_and_json_cannot_grant_authority() {
         let transport = Arc::new(StubTransport::new("unused"));
         let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
-        let run = platform_api::ModelAttemptRun::new(Arc::new(()));
+        let run = lingxi_core::host::ModelAttemptRun::new(Arc::new(()));
         let mut request = req(None);
         let ordinary = serde_json::to_value(&request).unwrap();
         request.model_attempt = Some(
-            run.context(platform_api::ModelAttemptStage::Analyst, None)
+            run.context(lingxi_core::host::ModelAttemptStage::Analyst, None)
                 .unwrap(),
         );
         assert_eq!(serde_json::to_value(&request).unwrap(), ordinary);
@@ -1054,7 +1058,7 @@ mod tests {
         assert!(client.query(request).await.is_err());
         let mut strict = strict_req();
         strict.model_attempt = Some(
-            run.context(platform_api::ModelAttemptStage::Analyst, None)
+            run.context(lingxi_core::host::ModelAttemptStage::Analyst, None)
                 .unwrap(),
         );
         assert!(client.query_json_schema(strict).await.is_err());
@@ -1931,7 +1935,7 @@ mod tests {
     impl llm_runtime::ModelAttemptHooks for SchemaAttemptHooks {
         async fn begin(
             &self,
-            _: &platform_api::ModelAttemptContext,
+            _: &lingxi_core::host::ModelAttemptContext,
             _: &LlmRequest,
             _: &llm_runtime::PreparedLlmCall,
         ) -> Result<Box<dyn llm_runtime::ModelAttemptLease>, LlmError> {
@@ -1980,8 +1984,8 @@ mod tests {
         service.set_model_attempt_hooks(Arc::new(SchemaAttemptHooks(probe.clone())));
         let mut request = strict_req();
         request.model_attempt = Some(
-            platform_api::ModelAttemptRun::new(Arc::new(()))
-                .context(platform_api::ModelAttemptStage::Analyst, None)
+            lingxi_core::host::ModelAttemptRun::new(Arc::new(()))
+                .context(lingxi_core::host::ModelAttemptStage::Analyst, None)
                 .unwrap(),
         );
         assert!(matches!(
@@ -2097,7 +2101,7 @@ mod tests {
                     // real gpt-5.6-*/kimi-* judge rows carry this exact
                     // value (`llm-runtime/data/models-dev/openai.json` etc.,
                     // mapped by `catalog::map::to_metadata`).
-                    metadata: platform_api::ModelMetadata {
+                    metadata: lingxi_core::host::ModelMetadata {
                         temperature_control: Some(false),
                         ..Default::default()
                     },

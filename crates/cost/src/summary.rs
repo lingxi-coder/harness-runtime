@@ -40,7 +40,7 @@ pub struct CostSummary {
 
 /// Session-scope rollup.
 ///
-/// `platform_api::CostSnapshot` (M5-02) mirrors the three primary fields
+/// `lingxi_core::host::CostSnapshot` (M5-02) mirrors the three primary fields
 /// (`session_id`, `total_nano_usd`, `total_tokens`) without depending on
 /// `lingxi-cost`, so traits-tier consumers can publish costs without
 /// pulling in pricing. The two types convert via
@@ -50,7 +50,7 @@ pub struct CostSummary {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionCostSummary {
     /// The session this summary is for.
-    pub session_id: protocol::SessionId,
+    pub session_id: lingxi_core::types::SessionId,
     /// Cumulative cost across all models in nano-USD.
     pub total_nano_usd: u64,
     /// Cumulative total tokens (input + output across all models).
@@ -70,7 +70,7 @@ pub struct SessionCostSummary {
     /// NOTE: this is the [`CostTracker::summary`] projection, which has no
     /// production caller today — the live `/usage`/`/cost` rendering path is
     /// `ConversationModel::snapshot_cost_real` /
-    /// `platform_api::CostSnapshot`, which does not yet read this field (see
+    /// `lingxi_core::host::CostSnapshot`, which does not yet read this field (see
     /// [`crate::tracker::CostTracker::record_external_cost`] doc comment).
     pub external_nano_usd: u64,
     /// Pre-V1 totals-only opening balance included in `total_nano_usd` but not

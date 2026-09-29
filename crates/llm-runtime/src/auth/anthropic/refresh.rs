@@ -18,10 +18,10 @@ use crate::auth::lifecycle::{
     self, BearerToken, OAuthHookError, Preflight, RefreshableToken, TokenHash,
 };
 use async_trait::async_trait;
+use lingxi_core::types::Secret;
 use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use lingxi_llm_client::auth::oauth::anthropic::{self as sdk, RefreshResponse, TokenError};
 use lingxi_llm_client::transport::Transport;
-use protocol::Secret;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
@@ -76,12 +76,12 @@ pub struct AuthState {
     pub(crate) refresh_lock: Arc<Mutex<()>>,
     /// Proactive task handle. Populated by `RefreshDriver::spawn_proactive`;
     /// cleared by `AuthState::shutdown`.
-    pub(crate) proactive_handle: RwLock<Option<platform_api::BackgroundTaskHandle>>,
+    pub(crate) proactive_handle: RwLock<Option<lingxi_core::host::BackgroundTaskHandle>>,
     /// HTTP transport for token-endpoint POSTs. Engine code never imports a
     /// concrete HTTP client; we go through the trait per D17.
     pub(crate) http: Arc<dyn Transport>,
     /// Wall-clock source. Tests inject a virtual clock.
-    pub(crate) clock: Arc<dyn platform_api::Clock>,
+    pub(crate) clock: Arc<dyn lingxi_core::host::Clock>,
     /// Optional analytics bus for `tengu_oauth_*` events. `None` in tests that
     /// don't care about telemetry.
     pub(crate) bus: Option<Arc<telemetry::AnalyticsBus>>,
@@ -104,7 +104,7 @@ impl AuthState {
         refresh_token: Option<Secret<String>>,
         expires_at: SystemTime,
         http: Arc<dyn Transport>,
-        clock: Arc<dyn platform_api::Clock>,
+        clock: Arc<dyn lingxi_core::host::Clock>,
         bus: Option<Arc<telemetry::AnalyticsBus>>,
         credentials: Option<Arc<secret::CredentialManager>>,
     ) -> Arc<Self> {
@@ -154,7 +154,7 @@ impl AuthState {
     }
 
     /// Borrow the proactive task handle if one has been spawned.
-    pub async fn proactive_handle(&self) -> Option<platform_api::BackgroundTaskHandle> {
+    pub async fn proactive_handle(&self) -> Option<lingxi_core::host::BackgroundTaskHandle> {
         self.proactive_handle.read().await.clone()
     }
 
@@ -165,7 +165,7 @@ impl AuthState {
     /// `spawner` must be the same `RuntimeSpawner` used by `spawn_proactive`;
     /// if a different one is passed, the handle may not be recognized and
     /// `cancel` returns `RuntimeError::NotFound` which we treat as a no-op.
-    pub async fn shutdown(&self, spawner: &dyn platform_api::RuntimeSpawner) {
+    pub async fn shutdown(&self, spawner: &dyn lingxi_core::host::RuntimeSpawner) {
         let handle = self.proactive_handle.write().await.take();
         let Some(handle) = handle else {
             // Already shut down — emit no event; matches v3 §16.4 idempotency.
@@ -268,7 +268,7 @@ impl Transport for NullTransport {
 /// Null clock — always returns [`SystemTime::UNIX_EPOCH`]. Used by
 /// [`AuthState::new_for_test`].
 struct NullClock;
-impl platform_api::Clock for NullClock {
+impl lingxi_core::host::Clock for NullClock {
     fn now(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH
     }
@@ -290,7 +290,7 @@ impl RefreshDriver {
     }
 
     /// Stop proactive refresh and invalidate this driver's in-memory token.
-    pub async fn invalidate(&self, spawner: &dyn platform_api::RuntimeSpawner) {
+    pub async fn invalidate(&self, spawner: &dyn lingxi_core::host::RuntimeSpawner) {
         self.state.shutdown(spawner).await;
         self.state.invalidate().await;
     }
@@ -449,7 +449,7 @@ impl RefreshDriver {
     /// before expiry (spec §7 line 721).
     pub async fn spawn_proactive(
         state: Arc<AuthState>,
-        spawner: Arc<dyn platform_api::RuntimeSpawner>,
+        spawner: Arc<dyn lingxi_core::host::RuntimeSpawner>,
     ) -> Result<(), OAuthError> {
         let task_state = state.clone();
         let task_spawner = spawner.clone();
@@ -468,7 +468,10 @@ impl RefreshDriver {
 
 /// The proactive task loop. Wakes at `min(remaining/2, 5min)` before expiry,
 /// calls `RefreshDriver::refresh`, and reschedules against the new expiry.
-async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn platform_api::RuntimeSpawner>) {
+async fn proactive_loop(
+    state: Arc<AuthState>,
+    spawner: Arc<dyn lingxi_core::host::RuntimeSpawner>,
+) {
     let driver = RefreshDriver::new(state.clone());
     loop {
         // Read current expiry + token_hash.
@@ -525,7 +528,7 @@ mod wire_and_persist_tests {
     use crate::auth::anthropic::testsupport::{
         mem_credential_manager, Canned, MemStorage, MockHttp, TestClock,
     };
-    use protocol::HttpMethod;
+    use lingxi_core::types::HttpMethod;
 
     /// Reactive refresh must send a JSON body carrying the `scope` param and
     /// persist the rotated tokens to the attached `CredentialManager`.
@@ -561,7 +564,7 @@ mod wire_and_persist_tests {
             Some(Secret::new("OLD_REFRESH".into())),
             SystemTime::UNIX_EPOCH + Duration::from_secs(2_010),
             http.clone() as Arc<dyn Transport>,
-            clock.clone() as Arc<dyn platform_api::Clock>,
+            clock.clone() as Arc<dyn lingxi_core::host::Clock>,
             None,
             Some(cm.clone()),
         );
@@ -631,14 +634,14 @@ mod wire_and_persist_tests {
             // Expires soon so the proactive lead computation yields a short sleep.
             SystemTime::UNIX_EPOCH + Duration::from_secs(2),
             http.clone() as Arc<dyn Transport>,
-            clock.clone() as Arc<dyn platform_api::Clock>,
+            clock.clone() as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );
         let spawner = InstantSpawner::new();
         RefreshDriver::spawn_proactive(
             state.clone(),
-            spawner.clone() as Arc<dyn platform_api::RuntimeSpawner>,
+            spawner.clone() as Arc<dyn lingxi_core::host::RuntimeSpawner>,
         )
         .await
         .expect("spawn ok");
@@ -685,7 +688,7 @@ mod wire_and_persist_tests {
             Some(Secret::new("REFRESH".into())),
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
             http as Arc<dyn Transport>,
-            clock as Arc<dyn platform_api::Clock>,
+            clock as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );
@@ -725,7 +728,7 @@ mod wire_and_persist_tests {
             Some(Secret::new("REFRESH".into())),
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
             http.clone() as Arc<dyn Transport>,
-            clock as Arc<dyn platform_api::Clock>,
+            clock as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );
@@ -767,7 +770,7 @@ mod wire_and_persist_tests {
             Some(Secret::new("REFRESH".into())),
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
             http.clone() as Arc<dyn Transport>,
-            clock as Arc<dyn platform_api::Clock>,
+            clock as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );

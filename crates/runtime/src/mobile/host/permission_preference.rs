@@ -31,11 +31,11 @@ pub(super) fn save(home: &Path, mode: &str) -> Result<(), String> {
     // needed. An atomic replacement also repairs malformed preference JSON.
     let bytes = serde_json::to_vec(&serde_json::json!({ "mode": mode }))
         .map_err(|error| error.to_string())?;
-    platform_api::rooted_fs::atomic_write(
+    lingxi_core::host::rooted_fs::atomic_write(
         home,
         Path::new("last-permission-mode.json"),
         &bytes,
-        platform_api::rooted_fs::AtomicWriteOptions::default(),
+        lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
     )
     .map_err(|error| error.to_string())
 }

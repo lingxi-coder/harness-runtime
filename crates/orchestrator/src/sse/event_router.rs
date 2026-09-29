@@ -13,11 +13,11 @@
 
 use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use super::StreamingError;
+use lingxi_core::host::OutputStream;
+use lingxi_core::types::{ContentBlock, ToolUseId};
 use llm_runtime::{
     ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryContentDelta, HistoryEvent,
 };
-use platform_api::OutputStream;
-use protocol::{ContentBlock, ToolUseId};
 use serde_json::{json, Value};
 use std::sync::Arc;
 

@@ -204,7 +204,7 @@ const RULES_DIR: &str = "rules";
 /// `processedPaths` set. Missing dirs/files are silently skipped (NOT an error).
 ///
 /// Answers: what order `LINGXI.md` files are spliced into the prompt. One of
-/// several orderings over these rungs; `protocol::scope`'s module docs index
+/// several orderings over these rungs; `lingxi_core::types::scope`'s module docs index
 /// them all and say which question each answers.
 #[must_use]
 pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {

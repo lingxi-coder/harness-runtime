@@ -1,6 +1,6 @@
 //! Shared device-audio helpers for the public speech and voice tools.
 
-use platform_api::audio::{
+use lingxi_core::host::audio::{
     AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioOperation, AudioOperationContext,
     AudioOperationId, AudioOperationKind, AudioOperationSuccess, AudioService,
 };
@@ -101,7 +101,7 @@ pub(crate) fn map_audio_error(error: AudioError) -> ToolError {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::audio::{
+    use lingxi_core::host::audio::{
         AudioCapabilitySnapshot, AudioOperationReadiness, AudioReadinessState,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -155,7 +155,7 @@ mod tests {
 
     fn use_context() -> ToolUseContext {
         let mut context = tool_api::test_support::fresh_ctx();
-        context.origin_session_id = Some(protocol::SessionId::new());
+        context.origin_session_id = Some(lingxi_core::types::SessionId::new());
         context
     }
 

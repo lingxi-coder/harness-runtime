@@ -9,8 +9,8 @@
 //! `src/utils/swarm/backends/InProcessBackend.ts`.
 
 use async_trait::async_trait;
-use platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
-use protocol::AgentId;
+use lingxi_core::host::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+use lingxi_core::types::AgentId;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);

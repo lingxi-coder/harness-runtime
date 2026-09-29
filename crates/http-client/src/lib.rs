@@ -1,6 +1,6 @@
 //! Shared pure-Rust HTTP transport (`reqwest` + `rustls-tls`).
 //!
-//! Single source of truth for the production [`platform_api::http::HttpTransport`]
+//! Single source of truth for the production [`lingxi_core::host::http::HttpTransport`]
 //! used by every host (desktop, windows, mobile). Replaces the formerly
 //! duplicated `platforms/{common,windows,posix}` copies.
 

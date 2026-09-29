@@ -1,8 +1,8 @@
 use super::*;
 use crate::budget::{BudgetConfig, BudgetEnforcer, BudgetExceedPolicy};
 use crate::{AttemptDisposition, AttemptIntent, AttemptReceipt};
-use platform_api::WorkflowOutputScope;
-use protocol::MessageId;
+use lingxi_core::host::WorkflowOutputScope;
+use lingxi_core::types::MessageId;
 use tokio::sync::Semaphore;
 
 async fn setup(
@@ -147,7 +147,7 @@ async fn start(
     id: &str,
     run_limit: u64,
 ) -> tokio::sync::oneshot::Receiver<
-    Result<crate::budget::CostBudgetAttempt, platform_api::BudgetError>,
+    Result<crate::budget::CostBudgetAttempt, lingxi_core::host::BudgetError>,
 > {
     tracker
         .begin_budgeted_attempt(
@@ -165,7 +165,7 @@ async fn owned_begin_rejects_a_supplied_output_generation_mismatch() {
     let (tracker, enforcer, scope, mut requests, permits) = setup(100).await;
     let mut attempted = intent(scope.session_id(), "mismatch");
     attempted.output_scope = Some(crate::AttemptOutputScope {
-        generation_id: protocol::MessageId::new(),
+        generation_id: lingxi_core::types::MessageId::new(),
         max_output_tokens: Some(100),
     });
     let result = tracker.begin_budgeted_attempt(

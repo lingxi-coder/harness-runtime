@@ -3,9 +3,9 @@ mod model_preference_tests {
     use super::*;
 
     async fn selected_model(handle: &MobileEngineHandle) -> String {
-        let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner().orchestrator.clone();
+        let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> = handle.inner().orchestrator.clone();
         let snapshot = orch.get_status_snapshot().await;
-        platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref())
+        lingxi_core::host::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref())
     }
 
     #[test]
@@ -110,9 +110,9 @@ mod model_preference_tests {
                 })
                 .await
                 .unwrap();
-            let orch: Arc<dyn platform_api::OrchestratorHandle> =
+            let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 handle.inner().orchestrator.clone();
-            orch.set_reasoning_selection(platform_api::ReasoningSelection::Level {
+            orch.set_reasoning_selection(lingxi_core::host::ReasoningSelection::Level {
                 id: "high".into(),
             })
             .await
@@ -159,12 +159,12 @@ mod model_preference_tests {
         let home = cfg.lingxi_home.clone();
         model_preference::save(&home, "github-copilot/gpt-5.6-sol").unwrap();
         cfg.default_model = "openai/gpt-5.6-sol".into();
-        cfg.host_environment = Some(platform_api::MobileHostEnvironment::new(
-            platform_api::MobileHostOs::Ios,
+        cfg.host_environment = Some(lingxi_core::host::MobileHostEnvironment::new(
+            lingxi_core::host::MobileHostOs::Ios,
             None,
-            platform_api::MobileDeviceClass::Phone,
-            platform_api::MobileExecutionTarget::PhysicalDevice,
-            platform_api::MobileLaunchMode::ScheduledHeadless,
+            lingxi_core::host::MobileDeviceClass::Phone,
+            lingxi_core::host::MobileExecutionTarget::PhysicalDevice,
+            lingxi_core::host::MobileLaunchMode::ScheduledHeadless,
         ));
         let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
         handle.runtime().block_on(async {

@@ -6,8 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
+core = { path = "../core" }
 jsonrpc = { path = "../jsonrpc" }
 # Local-scope MCP servers live in `~/.claude.json` projects[<cwd-key>].mcpServers;
 # the canonical project key is resolved by migrations::global_config.

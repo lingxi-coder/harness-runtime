@@ -20,21 +20,21 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use once_cell::sync::Lazy;
-use permission::result::PermissionMetadata;
-use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::budget::BudgetError;
-use platform_api::fusion::{
+use lingxi_core::host::budget::BudgetError;
+use lingxi_core::host::fusion::{
     FusionActivation, FusionAgentSurface, FusionExecutor, FusionInheritance, FusionModelRef,
     FusionOrigin, FusionPreparedSummary, FusionPreset, FusionProgress, FusionRequest,
     FusionRunControl, FusionRunFactsRecorder, FusionRunId, FusionRunIdentity, FusionRunRecorder,
     FusionRunRecorderFactory, FusionStage, FusionStatus, FusionSubmission,
     FusionTerminalCapability, PreparedFusionRun, FUSION_MAX_PANEL, FUSION_MIN_PANEL,
 };
-use platform_api::subagent_spawn::{
+use lingxi_core::host::subagent_spawn::{
     StructuredOutputMode, SubagentInheritance, SubagentListingEntry, SubagentResult,
     SubagentSpawnRequest,
 };
+use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use telemetry::pii::{PiiTagged, Verified};
@@ -64,7 +64,7 @@ pub const LEGACY_AGENT_TOOL_NAME: &str = "Task";
 /// `claude-code/src/tools/AgentTool/built-in/*.ts`.
 ///
 /// ADVISORY ONLY. `AgentTool` no longer rejects a `subagent_type` outside this
-/// list: the catalog-aware [`platform_api::subagent_spawn::SubagentSpawner`] resolves
+/// list: the catalog-aware [`lingxi_core::host::subagent_spawn::SubagentSpawner`] resolves
 /// any type (user/project catalog overrides built-ins; an unknown type →
 /// `general-purpose`, matching claude-code's `effectiveType ?? GENERAL_PURPOSE`).
 /// `tool-agent` cannot depend on the `agent` crate (cycle — see the module
@@ -138,7 +138,7 @@ const EXAMPLE_MIGRATION_REVIEW_PROMPT: &str = "Review migration 0042_user_schema
 /// `t` (`allowedAgentTypes`, the `att()` wildcard-rule allowlist) has no port
 /// seam, so `o(...)` is the JS `?? !0` default — always true.
 fn general_purpose_is_available(
-    agents: &[platform_api::subagent_spawn::SubagentListingEntry],
+    agents: &[lingxi_core::host::subagent_spawn::SubagentListingEntry],
 ) -> bool {
     let target = normalize_agent_type(GENERAL_PURPOSE_AGENT_TYPE);
     let matches = agents
@@ -288,7 +288,7 @@ fn agent_type_tools_denied_error(agent_type: &str) -> String {
 /// mode (it is a per-session `CoordinatorModeHandle`, not a process global), so
 /// the arm is enforced here.
 fn drop_coordinator_hidden_builtins(
-    agents: &mut Vec<platform_api::subagent_spawn::SubagentListingEntry>,
+    agents: &mut Vec<lingxi_core::host::subagent_spawn::SubagentListingEntry>,
     is_coordinator: bool,
 ) {
     if is_coordinator {
@@ -298,13 +298,13 @@ fn drop_coordinator_hidden_builtins(
 
 /// Decode a forwarded-subagent-message progress line (`--forward-subagent-text`,
 /// 2.1.212). Returns the inner subagent message `Value` when `line` is a JSON
-/// object carrying [`platform_api::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL`]
+/// object carrying [`lingxi_core::host::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL`]
 /// (the pool spawner's sentinel wrapper); `None` for a plain nested-activity
 /// line, which never parses as such an object.
 fn decode_forward_subagent_message(line: &str) -> Option<Value> {
     let parsed: Value = serde_json::from_str(line).ok()?;
     parsed
-        .get(platform_api::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL)
+        .get(lingxi_core::host::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL)
         .cloned()
 }
 
@@ -439,7 +439,7 @@ const AGENT_MODEL_PARAM_COORDINATOR_SUFFIX: &str = " Set this only when EXPLICIT
 /// clears it), so the description says so instead of steering its use.
 #[must_use]
 pub(crate) fn coordinator_forces_worker_inherit_model() -> bool {
-    platform_api::env::is_env_truthy(
+    lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_COORDINATOR_FORCE_WORKER_INHERIT_MODEL")
             .or_else(|_| std::env::var("CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL"))
             .ok()
@@ -454,7 +454,7 @@ pub(crate) fn coordinator_forces_worker_inherit_model() -> bool {
 /// this one call" clause (@3569298).
 #[must_use]
 pub(crate) fn subagent_model_forced() -> bool {
-    platform_api::env::is_env_truthy(
+    lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_SUBAGENT_MODEL_FORCE")
             .or_else(|_| std::env::var("CLAUDE_CODE_SUBAGENT_MODEL_FORCE"))
             .ok()
@@ -741,8 +741,8 @@ fn budget_limit_reached_error(current_nano_usd: u64, limit_nano_usd: u64) -> Str
 }
 
 /// Render a handoff review into the block `EZe` prepends, in its own copy.
-fn render_handoff_review(review: &platform_api::permission_gate::HandoffReview) -> String {
-    use platform_api::permission_gate::HandoffReview;
+fn render_handoff_review(review: &lingxi_core::host::permission_gate::HandoffReview) -> String {
+    use lingxi_core::host::permission_gate::HandoffReview;
     match review {
         HandoffReview::Flagged { reason } => {
             crate::classifier_handoff::format_security_warning(reason)
@@ -832,7 +832,7 @@ fn should_run_in_background(d: BackgroundDecision) -> bool {
 }
 
 fn async_launch_result(
-    launch: platform_api::subagent_spawn::AsyncLaunch,
+    launch: lingxi_core::host::subagent_spawn::AsyncLaunch,
     task_id: Option<String>,
     prompt: &str,
     description: &str,
@@ -864,7 +864,7 @@ fn async_launch_result(
 #[path = "foreground_task.rs"]
 mod foreground_task;
 
-use platform_api::subagent_output::max_turns_harness_note;
+use lingxi_core::host::subagent_output::max_turns_harness_note;
 
 /// `N2n(e)` (@3530xxx) reduced to the shape the port's runner publishes: the
 /// max-turns fall-through is the only completion that stamps
@@ -993,13 +993,13 @@ fn parse_fusion_preset(raw: Option<&str>) -> Result<FusionPreset, ToolError> {
     }
 }
 
-/// Delegates to the single `platform_api::parse_fusion_models` every caller
+/// Delegates to the single `lingxi_core::host::parse_fusion_models` every caller
 /// (Agent tool, `/fusion`) parses caller-supplied model strings through, so a
 /// malformed entry like `"openai:"` is rejected identically from either
 /// entrypoint instead of one silently treating the whole literal as a bare
 /// model id.
 fn parse_fusion_models(raw: &[String]) -> Result<Vec<FusionModelRef>, ToolError> {
-    platform_api::parse_fusion_models(raw)
+    lingxi_core::host::parse_fusion_models(raw)
         .map_err(|error| ToolError::InvalidInput(error.to_string()))
 }
 
@@ -1012,7 +1012,7 @@ fn fusion_request_from_agent(
 ) -> Result<FusionRequest, ToolError> {
     if parsed.cross_provider == Some(true) && !surface.allow_cross_provider {
         return Err(ToolError::InvalidInput(
-            platform_api::FusionError::CrossProviderDenied.to_string(),
+            lingxi_core::host::FusionError::CrossProviderDenied.to_string(),
         ));
     }
     let preset = match parsed.preset.as_deref() {
@@ -1040,7 +1040,7 @@ fn fusion_request_from_agent(
             ))
         })?;
     Ok(FusionRequest {
-        schema_version: platform_api::FUSION_SCHEMA_VERSION,
+        schema_version: lingxi_core::host::FUSION_SCHEMA_VERSION,
         origin: FusionOrigin::Agent,
         prompt: parsed.prompt.clone(),
         preset,
@@ -1109,12 +1109,12 @@ fn panels_proven_spawned(stage: &FusionStage) -> Option<u64> {
     }
 }
 
-fn fusion_tool_result(result: platform_api::FusionResult) -> ToolCallResult {
+fn fusion_tool_result(result: lingxi_core::host::FusionResult) -> ToolCallResult {
     let status = match result.status {
         FusionStatus::Analyzed => "analyzed",
         FusionStatus::Unanalyzed => "unanalyzed",
     };
-    let material = platform_api::render_fusion_material(&result);
+    let material = lingxi_core::host::render_fusion_material(&result);
     let panels: Vec<Value> = result
         .panels
         .iter()
@@ -1158,15 +1158,15 @@ fn fusion_tool_result(result: platform_api::FusionResult) -> ToolCallResult {
 
 /// Preserve computation independently from reliable attempt settlement status.
 fn fusion_tool_result_with_settlement(
-    result: platform_api::FusionResult,
-    settlement: Option<&platform_api::FusionAttemptSettlementStatus>,
+    result: lingxi_core::host::FusionResult,
+    settlement: Option<&lingxi_core::host::FusionAttemptSettlementStatus>,
 ) -> ToolCallResult {
     let mut output = fusion_tool_result(result);
     if let Some(settlement) = settlement {
         output.data["attemptSettlement"] = json!(settlement);
         if matches!(
             settlement,
-            platform_api::FusionAttemptSettlementStatus::Failed { .. }
+            lingxi_core::host::FusionAttemptSettlementStatus::Failed { .. }
         ) {
             output.data["computationStatus"] = output.data["status"].clone();
             output.data["status"] = json!("failed");
@@ -1182,7 +1182,7 @@ fn fusion_tool_result_with_settlement(
     output
 }
 
-/// Map a terminal [`platform_api::FusionError`] to the [`ToolError`] surfaced
+/// Map a terminal [`lingxi_core::host::FusionError`] to the [`ToolError`] surfaced
 /// to the model (F008). Explicit arms for the load-bearing distinctions the
 /// generic `InvalidInput(other.to_string())` fallback erased:
 ///
@@ -1198,7 +1198,7 @@ fn fusion_tool_result_with_settlement(
 ///
 /// Everything else — including `InvalidRequest`/`InvalidConfiguration`/
 /// `InvalidCustomModels` — falls through to the generic
-/// `InvalidInput(other.to_string())` arm, which is [`platform_api::FusionError`]'s
+/// `InvalidInput(other.to_string())` arm, which is [`lingxi_core::host::FusionError`]'s
 /// own `Display` (e.g. "invalid fusion configuration: fusion.maxPanel must be
 /// between 1 and 12") — NOT the bare inner message, so the model sees which
 /// category of misconfiguration it hit, matching §3's promise that an invalid
@@ -1209,8 +1209,8 @@ fn fusion_tool_result_with_settlement(
 /// function has no budget handle), reusing the same
 /// [`budget_limit_reached_error`] format as the pre-spawn budget check a few
 /// lines above it.
-fn fusion_tool_error(err: platform_api::FusionError) -> ToolError {
-    use platform_api::FusionError;
+fn fusion_tool_error(err: lingxi_core::host::FusionError) -> ToolError {
+    use lingxi_core::host::FusionError;
     match err {
         FusionError::Cancelled => ToolError::Aborted,
         FusionError::Internal
@@ -1237,7 +1237,7 @@ fn fusion_tool_error(err: platform_api::FusionError) -> ToolError {
 ///   `PanelDispatch`'s separate `reached`/`allocated` flags, and only the
 ///   latter proves a subagent exists.
 ///
-/// SOURCE OF TRUTH: [`platform_api::fusion::panel_never_dispatched`], which
+/// SOURCE OF TRUTH: [`lingxi_core::host::fusion::panel_never_dispatched`], which
 /// both crates now call — `fusion::panel::is_never_dispatched_category` is a
 /// crate-local alias for the very same function. This is deliberately NOT a
 /// second `matches!` list: round-6 blocking B2 was exactly two independent
@@ -1246,10 +1246,10 @@ fn fusion_tool_error(err: platform_api::FusionError) -> ToolError {
 /// panel silently burned a lifetime spawn slot for a subagent that never
 /// existed). `fusion_panels_that_reached_the_spawner` is the only caller.
 fn fusion_category_proves_never_dispatched(category: Option<&str>) -> bool {
-    platform_api::fusion::panel_never_dispatched(category)
+    lingxi_core::host::fusion::panel_never_dispatched(category)
 }
 
-/// How many of a successful [`platform_api::FusionResult`]'s panels actually
+/// How many of a successful [`lingxi_core::host::FusionResult`]'s panels actually
 /// reached the subagent spawner — i.e. how many subagents genuinely exist and
 /// must stay charged against the session's lifetime spawn quota. `call_fusion`
 /// releases `panel_n - this` as surplus on the `Ok` path.
@@ -1259,23 +1259,23 @@ fn fusion_category_proves_never_dispatched(category: Option<&str>) -> bool {
 /// (see [`fusion_category_proves_never_dispatched`]); counting those as
 /// spawned under-releases the reservation and permanently over-charges
 /// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`.
-fn fusion_panels_that_reached_the_spawner(panels: &[platform_api::PanelOutcome]) -> usize {
+fn fusion_panels_that_reached_the_spawner(panels: &[lingxi_core::host::PanelOutcome]) -> usize {
     panels
         .iter()
         .filter(|panel| !fusion_category_proves_never_dispatched(panel.error_category.as_deref()))
         .count()
 }
 
-/// Whether a [`platform_api::FusionError`] is guaranteed to have made ZERO
+/// Whether a [`lingxi_core::host::FusionError`] is guaranteed to have made ZERO
 /// provider calls (F008 spawn accounting) — the doc comment on
-/// [`platform_api::FusionError`] itself: "Preflight variants guarantee zero
+/// [`lingxi_core::host::FusionError`] itself: "Preflight variants guarantee zero
 /// provider calls." `call_fusion` releases the FULL `panel_n` reservation
 /// only for these; every other variant means panels genuinely spawned (or the
 /// error carries no data to say how many), so the reservation stays charged —
 /// mirroring how `Ok` releases only the trimmed surplus
 /// (`panel_n - result.panels.len()`), never the whole amount.
-fn fusion_error_is_preflight(err: &platform_api::FusionError) -> bool {
-    use platform_api::FusionError;
+fn fusion_error_is_preflight(err: &lingxi_core::host::FusionError) -> bool {
+    use lingxi_core::host::FusionError;
     matches!(
         err,
         FusionError::Disabled
@@ -1321,7 +1321,7 @@ fn fusion_error_is_preflight(err: &platform_api::FusionError) -> bool {
 /// terminal finalizer. That finalizer waits for stable prepared facts before
 /// applying the same allocation truth the normal `Err(Cancelled)` arm uses.
 struct FusionSpawnReservationGuard {
-    registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     outstanding: u64,
     /// The prepared run's lifecycle authority. A dropped Agent waiter must
     /// defer settlement until this control publishes stable terminal facts;
@@ -1374,9 +1374,9 @@ fn allocation_capped_charge(resolved: u64, allocated: u64, allocated_observed: b
 /// legacy progress latches only when the prepared envelope did not provide a
 /// count. The facts argument is already terminal-stable when present.
 fn settle_dropped_fusion_reservation(
-    registry: &Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    registry: &Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     outstanding: u64,
-    facts: Option<platform_api::FusionRunFacts>,
+    facts: Option<lingxi_core::host::FusionRunFacts>,
     resolved_panels: &Arc<std::sync::atomic::AtomicU64>,
     allocated_panels: &Arc<std::sync::atomic::AtomicU64>,
     allocated_panels_observed: &Arc<std::sync::atomic::AtomicBool>,
@@ -1409,7 +1409,7 @@ fn settle_dropped_fusion_reservation(
 
 impl FusionSpawnReservationGuard {
     fn new(
-        registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
         panel_n: u64,
         control: FusionRunControl,
         resolved_panels: Arc<std::sync::atomic::AtomicU64>,
@@ -1549,11 +1549,13 @@ fn main_loop_model_parent(ctx: &ToolUseContext) -> Option<String> {
 }
 
 /// The child's agent id, whatever way its run ended.
-fn subagent_result_agent_id(result: &platform_api::SubagentResult) -> protocol::AgentId {
+fn subagent_result_agent_id(
+    result: &lingxi_core::host::SubagentResult,
+) -> lingxi_core::types::AgentId {
     match result {
-        platform_api::SubagentResult::Completed { agent_id, .. }
-        | platform_api::SubagentResult::Failed { agent_id, .. }
-        | platform_api::SubagentResult::Killed { agent_id, .. } => *agent_id,
+        lingxi_core::host::SubagentResult::Completed { agent_id, .. }
+        | lingxi_core::host::SubagentResult::Failed { agent_id, .. }
+        | lingxi_core::host::SubagentResult::Killed { agent_id, .. } => *agent_id,
     }
 }
 
@@ -1583,9 +1585,9 @@ impl AgentTool {
     ///   (`i = o && r`), not in `z1e()` itself, and this schema builder has no
     ///   session context at all. The port's stand-in for the missing GrowthBook
     ///   flag is `LINGXI_FORK_SUBAGENT` (see
-    ///   [`platform_api::fork_subagent::is_fork_subagent_enabled`]), read raw here.
+    ///   [`lingxi_core::host::fork_subagent::is_fork_subagent_enabled`]), read raw here.
     ///
-    /// The pre-2.1.238 port gated on `platform_api::subscription::is_pro_plan()`
+    /// The pre-2.1.238 port gated on `lingxi_core::host::subscription::is_pro_plan()`
     /// instead of the fork flag. That was wrong in both directions: on a Pro plan
     /// it hid `run_in_background` and forced synchronous dispatch, and with fork
     /// enabled it kept advertising a field the binary omits. All four
@@ -1595,13 +1597,14 @@ impl AgentTool {
     /// background agents.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        let background_tasks_disabled = platform_api::env::is_env_truthy(
+        let background_tasks_disabled = lingxi_core::host::env::is_env_truthy(
             std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
                 .ok()
                 .as_deref(),
         );
-        let fork_feature_enabled =
-            platform_api::env::is_env_truthy(std::env::var("LINGXI_FORK_SUBAGENT").ok().as_deref());
+        let fork_feature_enabled = lingxi_core::host::env::is_env_truthy(
+            std::env::var("LINGXI_FORK_SUBAGENT").ok().as_deref(),
+        );
         let advertise_run_in_background = !background_tasks_disabled && !fork_feature_enabled;
         Self {
             ctx,
@@ -1643,7 +1646,7 @@ impl AgentTool {
 
     fn terminal_recorder_for(
         &self,
-        session_id: Option<protocol::SessionId>,
+        session_id: Option<lingxi_core::types::SessionId>,
     ) -> Option<Arc<dyn FusionRunRecorder>> {
         if let Some(factory) = self.terminal_recorder_factory.as_ref() {
             // A production task normally carries the trusted origin session.
@@ -1667,7 +1670,7 @@ impl AgentTool {
     /// read the live session cell; nested calls use the explicit origin hop
     /// stamped by the parent runner. Never infer this from hook/session
     /// metadata because those may describe a boot session after resume.
-    async fn origin_session_id(ctx: &ToolUseContext) -> Option<protocol::SessionId> {
+    async fn origin_session_id(ctx: &ToolUseContext) -> Option<lingxi_core::types::SessionId> {
         if let Some(session) = ctx.session.as_ref() {
             return Some(session.lock().await.session_id);
         }
@@ -1675,9 +1678,9 @@ impl AgentTool {
     }
 
     fn budget_for_origin(
-        budget: Arc<dyn platform_api::budget::BudgetEnforcerHandle>,
-        origin_session_id: Option<protocol::SessionId>,
-    ) -> Arc<dyn platform_api::budget::BudgetEnforcerHandle> {
+        budget: Arc<dyn lingxi_core::host::budget::BudgetEnforcerHandle>,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
+    ) -> Arc<dyn lingxi_core::host::budget::BudgetEnforcerHandle> {
         origin_session_id
             .and_then(|session_id| budget.scoped_for_session(session_id))
             .unwrap_or(budget)
@@ -2111,7 +2114,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 }
                 let _ = forward_progress
                     .send(tool_api::progress::ToolProgress {
-                        tool_use_id: protocol::ToolUseId::new(),
+                        tool_use_id: lingxi_core::types::ToolUseId::new(),
                         data: serde_json::json!({
                             // F005: `subagent_activity` is the key
                             // `turn_loop.rs::forward_tool_progress` actually
@@ -2176,7 +2179,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 }
                 if matches!(
                     &facts.attempt_settlement,
-                    Some(platform_api::FusionAttemptSettlementStatus::Failed { .. })
+                    Some(lingxi_core::host::FusionAttemptSettlementStatus::Failed { .. })
                 ) {
                     Self::emit_failed(
                         bus,
@@ -2233,7 +2236,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                     || panels_allocated_figure_seen.load(std::sync::atomic::Ordering::Relaxed);
                 let has_allocated_fact = allocated_panels_observed && allocated_panels > 0;
                 let releases_full_reservation = fusion_error_is_preflight(&err)
-                    || (matches!(err, platform_api::FusionError::Cancelled)
+                    || (matches!(err, lingxi_core::host::FusionError::Cancelled)
                         && resolved_panels == 0
                         && !has_allocated_fact);
                 if let Some(guard) = reservation_guard.as_mut() {
@@ -2292,7 +2295,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 // the SAME live numbers (current/limit nano-USD) the
                 // pre-spawn budget check above already uses, rather than
                 // `fusion_tool_error`'s generic `other.to_string()` fallback.
-                if matches!(err, platform_api::FusionError::BudgetExceeded) {
+                if matches!(err, lingxi_core::host::FusionError::BudgetExceeded) {
                     let current_nano_usd = budget.snapshot_total_nano_usd().await;
                     return Err(match budget.max_session_nano_usd() {
                         Some(limit_nano_usd) => ToolError::InvalidInput(
@@ -2317,10 +2320,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// this prompt is being rendered for. A definition that declares a
     /// `whenToUseLean` renders it only on that arm.
     fn format_agent_line(
-        agent: &platform_api::subagent_spawn::SubagentListingEntry,
+        agent: &lingxi_core::host::subagent_spawn::SubagentListingEntry,
         lean: bool,
     ) -> String {
-        platform_api::subagent_spawn::format_agent_line(agent, lean)
+        lingxi_core::host::subagent_spawn::format_agent_line(agent, lean)
     }
 
     /// Build the dynamic Agent tool prompt, porting claude-code v2.1.193's
@@ -2331,7 +2334,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// static pointer line "Available agent types are listed in <system-reminder>
     /// messages in the conversation." — there is NO inline-catalog variant in the
     /// description. The `should_inject_agent_list_in_messages()` gate (now default
-    /// ON, see [`platform_api::subagent_spawn`]) reflects that: ON ⇒ pointer (the
+    /// ON, see [`lingxi_core::host::subagent_spawn`]) reflects that: ON ⇒ pointer (the
     /// 2.1.193 default); an explicit `LINGXI_AGENT_LIST_IN_MESSAGES=false`
     /// opt-out keeps a LEGACY inline-catalog body (not a 2.1.193 form).
     ///
@@ -2347,18 +2350,18 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// coordinator system prompt already covers usage / examples).
     ///
     /// The `d` pro-plan gate (`vi()==="pro"`) IS modeled: a `pro` subscription
-    /// (read from the process-global [`platform_api::subscription::is_pro_plan`]) injects
+    /// (read from the process-global [`lingxi_core::host::subscription::is_pro_plan`]) injects
     /// the "Do not spawn agents unless the user asks" block after the catalog
     /// pointer line and suppresses `## When to use`. It is inert until a
     /// composition root resolves the plan via
-    /// [`platform_api::subscription::set_current_subscription`] (subscription resolution
+    /// [`lingxi_core::host::subscription::set_current_subscription`] (subscription resolution
     /// may be unwired ⇒ `None` ⇒ no block, matching the binary's unknown-plan
     /// default).
     ///
     /// The `o` fork-subagent gate (`isForkSubagentEnabled` / 2.1.232 `SPe`) IS
     /// modeled: when fork is enabled (`is_fork_subagent_enabled(is_coordinator,
     /// is_non_interactive)`, reading the process-global
-    /// [`platform_api::session_flags::is_non_interactive_session`]), the subagent_type
+    /// [`lingxi_core::host::session_flags::is_non_interactive_session`]), the subagent_type
     /// sentence explains `"fork"`, a fork addendum follows `## When to use`, and
     /// the SendMessage bullet gains the `(except subagent_type: "fork", …)`
     /// qualifier. Default ON for interactive non-coordinator sessions; set
@@ -2378,7 +2381,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// PRE-deny-filter listing exactly as the binary's `prompt({agents,…})`
     /// wrapper does (@292885292).
     fn build_prompt(
-        agents: &[platform_api::subagent_spawn::SubagentListingEntry],
+        agents: &[lingxi_core::host::subagent_spawn::SubagentListingEntry],
         mcp_server_names: &[String],
         is_coordinator: bool,
         model: Option<&str>,
@@ -2393,7 +2396,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         //     (CLI/TUI/desktop are always out-of-process), so it is modeled as
         //     a constant `false` — matching the binary's CLI/TUI default.
         // ⇒ `l` is TRUE unless the kill-switch env is set.
-        let async_agents_available = !platform_api::env::is_env_truthy(
+        let async_agents_available = !lingxi_core::host::env::is_env_truthy(
             std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
                 .ok()
                 .as_deref(),
@@ -2411,7 +2414,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// `build_prompt` with the binary's `l` gate supplied explicitly, so tests
     /// can exercise both arms without touching the process-global env.
     fn build_prompt_with_async_agents(
-        agents: &[platform_api::subagent_spawn::SubagentListingEntry],
+        agents: &[lingxi_core::host::subagent_spawn::SubagentListingEntry],
         _mcp_server_names: &[String],
         is_coordinator: bool,
         async_agents_available: bool,
@@ -2457,7 +2460,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 )
             });
         let agent_list_section =
-            if platform_api::subagent_spawn::should_inject_agent_list_in_messages() {
+            if lingxi_core::host::subagent_spawn::should_inject_agent_list_in_messages() {
                 format!(
                     "Available agent types are listed in <system-reminder> messages in the conversation.{}",
                     fusion_notice.unwrap_or_default()
@@ -2478,7 +2481,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // binary's unknown-plan default). The block is injected right after the
         // catalog pointer line, and (below) it SUPPRESSES the `## When to use`
         // section — both per the binary's `${d}` / `${d?"":…}` placements.
-        let pro_block = if platform_api::subscription::is_pro_plan() {
+        let pro_block = if lingxi_core::host::subscription::is_pro_plan() {
             // Binary `d=Pi()==="pro"?`\n\n**Do not spawn…`:""` — DOUBLE leading `\n`
             // (injected as `…conversation.${d}\n\n${subagent}`; od -c verified on
             // 2.1.195 @211615145).
@@ -2496,9 +2499,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // non-coordinator sessions. The non-interactive flag is read from the
         // process-global session flag (the port's `getIsNonInteractiveSession()`
         // analog, set by `ConversationOrchestrator::new`).
-        let is_fork = platform_api::fork_subagent::is_fork_subagent_enabled(
+        let is_fork = lingxi_core::host::fork_subagent::is_fork_subagent_enabled(
             is_coordinator,
-            platform_api::session_flags::effective_non_interactive_session(),
+            lingxi_core::host::session_flags::effective_non_interactive_session(),
         );
 
         // Subagent_type sentence — fork variant (binary `${o?…:…}`).
@@ -2555,10 +2558,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
         // Steer gate `g = DZ()==="default"` (binary @292441984 / the `${g?…:…}`
         // arms). Already ported as
-        // `platform_api::live_sessions::subagent_steer_is_default` and consumed by the
+        // `lingxi_core::host::live_sessions::subagent_steer_is_default` and consumed by the
         // system-prompt bullet at `orchestrator/src/prompt/body_sections.rs`;
         // the Agent tool prompt consults the SAME gate.
-        let steer_is_default = platform_api::live_sessions::subagent_steer_is_default();
+        let steer_is_default = lingxi_core::host::live_sessions::subagent_steer_is_default();
 
         // LEAN/LONG split (binary `m = qk(e)`, the shared `Dh(model)` gate the
         // port already implements as `tool_api::dh_simple_system_prompt`):
@@ -3072,7 +3075,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
     async fn emit_subagent_output_flagged(
         bus: &Arc<AnalyticsBus>,
         agent_id: &str,
-        result: &platform_api::subagent_output_guard::SanitizeResult,
+        result: &lingxi_core::host::subagent_output_guard::SanitizeResult,
     ) {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
@@ -3166,7 +3169,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
     ///
     /// claude returns the `async_launched` payload immediately and drives the
     /// lifecycle detached (AgentTool.tsx:686-764). This calls the
-    /// [`platform_api::subagent_spawn::SubagentSpawner::spawn_async`] seam, which
+    /// [`lingxi_core::host::subagent_spawn::SubagentSpawner::spawn_async`] seam, which
     /// DEFAULTS to a clear error when unwired — so an unwired async branch
     /// surfaces an explicit message rather than silently running synchronously
     /// (the task forbids a silent wrong path). When the production spawner
@@ -3186,18 +3189,18 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         bus: &Arc<AnalyticsBus>,
         invocation_id: &str,
         started: Instant,
-        spawner: &dyn platform_api::subagent_spawn::SubagentSpawner,
+        spawner: &dyn lingxi_core::host::subagent_spawn::SubagentSpawner,
         parsed: &AgentToolInput,
         effective_type: &str,
-        selected: &platform_api::subagent_spawn::SelectedAgentMeta,
+        selected: &lingxi_core::host::subagent_spawn::SelectedAgentMeta,
         is_fork: bool,
         ctx: &ToolUseContext,
-        budget: Arc<dyn platform_api::budget::BudgetEnforcerHandle>,
-        origin_session_id: Option<protocol::SessionId>,
+        budget: Arc<dyn lingxi_core::host::budget::BudgetEnforcerHandle>,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
         parent_registry: Arc<tool_api::ToolRegistry>,
         effective_isolation: Option<String>,
         resolved_cwd: Option<String>,
-        agent_worktree: Option<platform_api::worktree::WorktreeHandle>,
+        agent_worktree: Option<lingxi_core::host::worktree::WorktreeHandle>,
     ) -> Result<ToolCallResult, ToolError> {
         // [round-4 review, finding 15] `dispatch_async` is reached ONLY when
         // `run_in_background` is true (its sole caller gates on that flag
@@ -3219,7 +3222,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }
-        let invoker: Arc<dyn platform_api::tool_invoker::ToolInvoker> = Arc::new(invoker_impl);
+        let invoker: Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker> = Arc::new(invoker_impl);
         let inherit = SubagentInheritance {
             tool_invoker: invoker,
             budget,
@@ -3329,7 +3332,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                     can_read_output_file,
                 ))
             }
-            Err(platform_api::subagent_spawn::SubagentSpawnError::PoolFull) => {
+            Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::PoolFull) => {
                 self.release_spawn_reservation();
                 Self::emit_failed(
                     bus,
@@ -3339,7 +3342,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                 )
                 .await;
                 Err(ToolError::InvalidInput(concurrent_subagent_limit_error(
-                    platform_api::subagent_spawn::max_concurrent_subagents(),
+                    lingxi_core::host::subagent_spawn::max_concurrent_subagents(),
                 )))
             }
             Err(e) => {
@@ -3350,7 +3353,9 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                if let platform_api::subagent_spawn::SubagentSpawnError::DeniedByHook(reason) = &e {
+                if let lingxi_core::host::subagent_spawn::SubagentSpawnError::DeniedByHook(reason) =
+                    &e
+                {
                     return Err(ToolError::InvalidInput(format!("Agent: {reason}")));
                 }
                 Err(ToolError::Internal(format!(
@@ -3447,7 +3452,7 @@ impl Tool for AgentTool {
         }
         // TGo has a second .refine(!l0); Zod reports both for "main".
         let normalized = self.ctx.subagent_spawner.as_ref().map_or_else(
-            || platform_api::live_sessions::normalize_name(name),
+            || lingxi_core::host::live_sessions::normalize_name(name),
             |spawner| spawner.normalize_teammate_recipient(name),
         );
         if normalized == "main" || normalized == "team-lead" || reserved_agent_id_shape(&normalized)
@@ -3663,7 +3668,7 @@ impl Tool for AgentTool {
         // Claude Code 2.1.217 defaults the nesting cap to 1: the main thread
         // (depth 0) may spawn a child, while that child may not spawn another
         // unless CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH raises the limit.
-        let depth_limit = platform_api::subagent_spawn::max_subagent_spawn_depth();
+        let depth_limit = lingxi_core::host::subagent_spawn::max_subagent_spawn_depth();
         if ctx.depth >= depth_limit {
             Self::emit_failed(
                 &bus,
@@ -3684,7 +3689,7 @@ impl Tool for AgentTool {
         // next races the stop at a model round-trip — so without this a dying
         // agent can still launch a child that outlives it.
         if let Some(agent_id) = ctx.agent_id {
-            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+            if lingxi_core::host::agent_processes::is_stop_pending(&agent_id.to_string()) {
                 Self::emit_failed(
                     &bus,
                     &invocation_id,
@@ -3693,7 +3698,7 @@ impl Tool for AgentTool {
                 )
                 .await;
                 return Err(ToolError::InvalidInput(
-                    platform_api::agent_processes::stop_pending_refusal("launch new agents."),
+                    lingxi_core::host::agent_processes::stop_pending_refusal("launch new agents."),
                 ));
             }
         }
@@ -3755,7 +3760,7 @@ impl Tool for AgentTool {
             .as_deref()
             .is_some_and(|t| normalize_agent_type(t) == "fork");
         let is_fork = wants_fork
-            && platform_api::fork_subagent::is_fork_subagent_enabled(
+            && lingxi_core::host::fork_subagent::is_fork_subagent_enabled(
                 is_coordinator,
                 ctx.options.is_non_interactive_session,
             );
@@ -3786,7 +3791,7 @@ impl Tool for AgentTool {
                 .await;
         }
 
-        if is_fork && platform_api::fork_subagent::is_in_fork_child(&ctx.messages) {
+        if is_fork && lingxi_core::host::fork_subagent::is_in_fork_child(&ctx.messages) {
             Self::emit_failed(
                 &bus,
                 &invocation_id,
@@ -3970,7 +3975,7 @@ impl Tool for AgentTool {
         // change.
         let tools_denied: Vec<String> = spawner.tools_denied_agent_types().await;
         let effective_type: String = if is_fork {
-            platform_api::fork_subagent::FORK_SUBAGENT_TYPE.to_string()
+            lingxi_core::host::fork_subagent::FORK_SUBAGENT_TYPE.to_string()
         } else {
             let candidate = parsed
                 .subagent_type
@@ -4194,7 +4199,7 @@ impl Tool for AgentTool {
         // runtime already has the configured number of active subagents. Keep
         // this before the session-total counter so a rejected concurrent spawn
         // does not consume one of the 200 lifetime slots.
-        let concurrent_cap = platform_api::subagent_spawn::max_concurrent_subagents();
+        let concurrent_cap = lingxi_core::host::subagent_spawn::max_concurrent_subagents();
         if spawner.concurrent_subagent_count().await >= concurrent_cap {
             Self::emit_failed(
                 &bus,
@@ -4381,7 +4386,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // `!dqt`; the remote path is separate and out of scope here.) The same
         // `run_in_background` value drives BOTH the telemetry `is_async` flag and
         // the async-dispatch branch below.
-        let background_tasks_disabled = platform_api::env::is_env_truthy(
+        let background_tasks_disabled = lingxi_core::host::env::is_env_truthy(
             std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
                 .ok()
                 .as_deref(),
@@ -4480,7 +4485,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             }
             other => other,
         };
-        let mut agent_worktree: Option<platform_api::worktree::WorktreeHandle> = None;
+        let mut agent_worktree: Option<lingxi_core::host::worktree::WorktreeHandle> = None;
         let mut resolved_cwd: Option<String> = if is_fork { None } else { parsed.cwd.clone() };
         if effective_isolation.as_deref() == Some("worktree") {
             let slug = format!("agent-{invocation_id}");
@@ -4548,7 +4553,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }
-        let invoker: Arc<dyn platform_api::tool_invoker::ToolInvoker> = Arc::new(invoker_impl);
+        let invoker: Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker> = Arc::new(invoker_impl);
         let inherit = SubagentInheritance {
             tool_invoker: invoker,
             budget: budget.clone(),
@@ -4562,34 +4567,35 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // ALREADY the trailing block inside that prefix, so on the fork path
         // `request.prompt` is unused as a seed (the spawner seeds an empty
         // prompt_messages — see handle.rs spawn note (A)).
-        let fork_context_messages: Option<Vec<protocol::ConversationMessage>> = if is_fork {
-            let assistant = ctx
-                .messages
-                .iter()
-                .rev()
-                .find(|m| matches!(m, protocol::ConversationMessage::Assistant { .. }));
-            let fork_msgs = match assistant {
-                Some(a) => platform_api::fork_subagent::build_forked_messages(&parsed.prompt, a),
-                // No assistant turn yet → fallback directive-only user message.
-                None => platform_api::fork_subagent::build_forked_messages(
-                    &parsed.prompt,
-                    &protocol::ConversationMessage::Assistant {
-                        id: protocol::MessageId::new(),
-                        content: vec![],
-                        stop_reason: None,
-                    },
-                ),
+        let fork_context_messages: Option<Vec<lingxi_core::types::ConversationMessage>> =
+            if is_fork {
+                let assistant = ctx.messages.iter().rev().find(|m| {
+                    matches!(m, lingxi_core::types::ConversationMessage::Assistant { .. })
+                });
+                let fork_msgs = match assistant {
+                    Some(a) => {
+                        lingxi_core::host::fork_subagent::build_forked_messages(&parsed.prompt, a)
+                    }
+                    // No assistant turn yet → fallback directive-only user message.
+                    None => lingxi_core::host::fork_subagent::build_forked_messages(
+                        &parsed.prompt,
+                        &lingxi_core::types::ConversationMessage::Assistant {
+                            id: lingxi_core::types::MessageId::new(),
+                            content: vec![],
+                            stop_reason: None,
+                        },
+                    ),
+                };
+                // Worktree notice (claude AgentTool.tsx:598-602): when the fork child
+                // runs in an isolated worktree, claude appends
+                // `build_worktree_notice(getCwd(), worktreeInfo.worktreePath)` to the
+                // fork prefix. LingXi's fork path deliberately carries no
+                // teammate/isolation/cwd overrides (see the request fields below), so
+                // there is no worktree to notice here — do NOT fabricate one.
+                Some(fork_msgs)
+            } else {
+                None
             };
-            // Worktree notice (claude AgentTool.tsx:598-602): when the fork child
-            // runs in an isolated worktree, claude appends
-            // `build_worktree_notice(getCwd(), worktreeInfo.worktreePath)` to the
-            // fork prefix. LingXi's fork path deliberately carries no
-            // teammate/isolation/cwd overrides (see the request fields below), so
-            // there is no worktree to notice here — do NOT fabricate one.
-            Some(fork_msgs)
-        } else {
-            None
-        };
 
         let request = SubagentSpawnRequest {
             teammate_color: None,
@@ -4719,7 +4725,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 );
                 let _ = forward_progress
                     .send(tool_api::progress::ToolProgress {
-                        tool_use_id: protocol::ToolUseId::new(),
+                        tool_use_id: lingxi_core::types::ToolUseId::new(),
                         data,
                     })
                     .await;
@@ -4799,14 +4805,14 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // Worktree lifecycle (claude `fe()` / `getWorktreeResult`): once the
         // agent finished, KEEP the worktree (return its path + branch) if it
         // left changes, else REMOVE it (auto-clean). The judgment itself lives
-        // in `platform_api::worktree::agent_worktree_result` (shared with the ASYNC
+        // in `lingxi_core::host::worktree::agent_worktree_result` (shared with the ASYNC
         // lifecycle owner in the local_agent task handler); it runs for ANY
         // outcome so a worktree never leaks on a failed/killed agent.
         let worktree_result: Option<(String, String)> = match foreground_worktree_result {
             Some(result) => result,
             None => match &agent_worktree {
                 Some(handle) => {
-                    platform_api::worktree::agent_worktree_result(
+                    lingxi_core::host::worktree::agent_worktree_result(
                         self.ctx.worktree.as_ref(),
                         handle,
                     )
@@ -4868,7 +4874,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // blocks feed BOTH the result `content` array and the model-facing
                 // string, and a `tengu_subagent_output_flagged` event is emitted.
                 let sanitized =
-                    platform_api::subagent_output_guard::sanitize_blocks(&raw_content_texts);
+                    lingxi_core::host::subagent_output_guard::sanitize_blocks(&raw_content_texts);
                 if sanitized.any_reportable() {
                     Self::emit_subagent_output_flagged(&bus, &agent_id.to_string(), &sanitized)
                         .await;
@@ -5016,7 +5022,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 .await;
                 Err(ToolError::Internal("Agent: subagent was killed".into()))
             }
-            Err(platform_api::subagent_spawn::SubagentSpawnError::PoolFull) => {
+            Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::PoolFull) => {
                 self.release_spawn_reservation();
                 Self::emit_failed(
                     &bus,
@@ -5026,14 +5032,14 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 )
                 .await;
                 Err(ToolError::InvalidInput(concurrent_subagent_limit_error(
-                    platform_api::subagent_spawn::max_concurrent_subagents(),
+                    lingxi_core::host::subagent_spawn::max_concurrent_subagents(),
                 )))
             }
             // A plugin hook saying "no" is a POLICY outcome, not a crash.
             // Folding it into `Internal` told the user the runtime broke and
             // filed it under `spawn_error` — the variant existed for exactly
             // this distinction and nothing was matching on it.
-            Err(platform_api::subagent_spawn::SubagentSpawnError::DeniedByHook(reason)) => {
+            Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::DeniedByHook(reason)) => {
                 // 🚨 Give the lifetime slot back. The 200-per-session cap is
                 // reserved BEFORE the spawn, and only the pool-full arms
                 // released it — so a plugin denying a common spawn would walk
@@ -5104,8 +5110,8 @@ mod f_description_l_gate_tests {
         out
     }
 
-    fn agents() -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
-        vec![platform_api::subagent_spawn::SubagentListingEntry {
+    fn agents() -> Vec<lingxi_core::host::subagent_spawn::SubagentListingEntry> {
+        vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
             when_to_use_lean: None,
@@ -5256,7 +5262,7 @@ mod f_description_l_gate_tests {
     #[test]
     fn default_gate_still_advertises_fusion_when_the_entry_is_present() {
         let mut fixture = agents();
-        fixture.push(platform_api::subagent_spawn::SubagentListingEntry {
+        fixture.push(lingxi_core::host::subagent_spawn::SubagentListingEntry {
             agent_type: "fusion".into(),
             when_to_use: crate::agent::FUSION_WHEN_TO_USE.into(),
             when_to_use_lean: None,
@@ -5326,7 +5332,7 @@ mod round3_finding_11_19_spawn_signal_tests {
     fn stage_proves_panel_spawned(stage: &FusionStage) -> bool {
         panels_proven_spawned(stage).is_some()
     }
-    use platform_api::{FusionError, FusionStage};
+    use lingxi_core::host::{FusionError, FusionStage};
 
     /// [round-5 review, finding 10] The proving events carry the RESOLVED
     /// panel count, which is what lets `call_fusion`'s `Err` and drop paths

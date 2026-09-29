@@ -6,9 +6,9 @@
 //! `"initialized"` notification once the server has responded.
 
 use jsonrpc::Connection;
+use lingxi_core::host::LspServerConfig;
 use lsp::client::LspClient;
 use lsp_types::ServerCapabilities;
-use platform_api::LspServerConfig;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -92,7 +92,7 @@ async fn initialize_sends_canonical_lsp_params_and_receives_capabilities() {
         // is how the LSP copy drifted behind the constant before 2026-09-10.
         assert_eq!(
             params["clientInfo"]["version"],
-            platform_api::CLAUDE_CODE_VERSION
+            lingxi_core::host::CLAUDE_CODE_VERSION
         );
         assert_eq!(
             params["initializationOptions"],
@@ -270,7 +270,7 @@ async fn notify_surfaces_closed_connection_error() {
         .await
         .expect_err("closed connection should reject notifications");
     assert!(
-        matches!(error, platform_api::LspError::Transport(ref message) if message.contains("LSP notification 'initialized' failed") && message.contains("writer closed")),
+        matches!(error, lingxi_core::host::LspError::Transport(ref message) if message.contains("LSP notification 'initialized' failed") && message.contains("writer closed")),
         "expected closed-notify transport error, got {error:?}"
     );
 }
@@ -435,7 +435,7 @@ async fn shutdown_timeout_does_not_send_exit() {
         .expect("client task")
         .expect_err("shutdown must time out");
     assert!(
-        matches!(error, platform_api::LspError::Transport(ref message) if message.contains("shutdown")),
+        matches!(error, lingxi_core::host::LspError::Transport(ref message) if message.contains("shutdown")),
         "expected transport shutdown timeout, got {error:?}"
     );
     peer.await.expect("peer task");
@@ -474,7 +474,7 @@ async fn shutdown_server_error_does_not_send_exit() {
         .await
         .expect_err("shutdown server error must surface");
     assert!(
-        matches!(error, platform_api::LspError::ServerError(ref message) if message.contains("shutdown failed")),
+        matches!(error, lingxi_core::host::LspError::ServerError(ref message) if message.contains("shutdown failed")),
         "expected server shutdown failure, got {error:?}"
     );
     peer.await.expect("peer task");

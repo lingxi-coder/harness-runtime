@@ -162,7 +162,7 @@ impl Tool for SleepTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::process::ProcessOutput;
+    use lingxi_core::host::process::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     fn dummy_out() -> ProcessOutput {

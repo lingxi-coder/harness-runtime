@@ -250,10 +250,10 @@ async fn preserved_read_tool_use_prevents_file_restore() {
     set(&map, path.clone(), stale_entry("stale"));
     let sink = Arc::new(telemetry::InMemorySink::new());
     let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
-    let boundary = protocol::ConversationMessage::Assistant {
-        id: protocol::MessageId::new(),
-        content: vec![protocol::ContentBlock::ToolUse {
-            id: protocol::ToolUseId::new(),
+    let boundary = lingxi_core::types::ConversationMessage::Assistant {
+        id: lingxi_core::types::MessageId::new(),
+        content: vec![lingxi_core::types::ContentBlock::ToolUse {
+            id: lingxi_core::types::ToolUseId::new(),
             name: "Read".to_string(),
             input: serde_json::json!({"file_path": path}),
             provider_id: None,
@@ -279,8 +279,8 @@ async fn textual_file_reference_does_not_suppress_a_fresh_restore() {
     let sink = Arc::new(telemetry::InMemorySink::new());
     let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
     let escaped = crate::prompt::sanitize::escape_reminder_path(&path.to_string_lossy());
-    let boundary = protocol::ConversationMessage::user_meta(
-        protocol::MessageId::new(),
+    let boundary = lingxi_core::types::ConversationMessage::user_meta(
+        lingxi_core::types::MessageId::new(),
         format!(
             "<system-reminder>\nNote: {escaped} was read before the last conversation was summarized, but the contents are too large to include. Use Read tool if you need to access it.\n</system-reminder>"
         ),
@@ -311,23 +311,23 @@ async fn preserved_unchanged_read_stub_does_not_hide_the_missing_file_content() 
         Arc::new(telemetry::InMemorySink::new()),
     )
     .await;
-    let id = protocol::ToolUseId::new();
-    let call = protocol::ConversationMessage::Assistant {
-        id: protocol::MessageId::new(),
+    let id = lingxi_core::types::ToolUseId::new();
+    let call = lingxi_core::types::ConversationMessage::Assistant {
+        id: lingxi_core::types::MessageId::new(),
         stop_reason: None,
-        content: vec![protocol::ContentBlock::ToolUse {
+        content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: id.clone(),
             name: "Read".into(),
             input: serde_json::json!({"file_path": path}),
             provider_id: Some("toolu-native-id".into()),
         }],
     };
-    let result = protocol::ConversationMessage::User {
-        id: protocol::MessageId::new(),
+    let result = lingxi_core::types::ConversationMessage::User {
+        id: lingxi_core::types::MessageId::new(),
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
-        content: vec![protocol::ContentBlock::ToolResult {
+        content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: id,
             content: tool_file::read::FILE_UNCHANGED_SHORT.into(),
             is_error: false,
@@ -402,7 +402,7 @@ async fn file_restore_budgets_json_escapes_and_continues_after_overflow() {
     );
     let all = restored
         .iter()
-        .map(protocol::ConversationMessage::text_content)
+        .map(lingxi_core::types::ConversationMessage::text_content)
         .collect::<Vec<_>>()
         .join("\n");
     assert!(all.contains("first.txt"));
@@ -425,22 +425,22 @@ async fn only_meta_text_bodies_suppress_skill_registry_truncation() {
         )
         .await;
         register_invoked_skill(&orch, "large", std::path::Path::new("/skill"), &body, None).await;
-        let message = protocol::ConversationMessage::User {
-            id: protocol::MessageId::new(),
+        let message = lingxi_core::types::ConversationMessage::User {
+            id: lingxi_core::types::MessageId::new(),
             is_meta,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
             content: if is_meta {
                 vec![
-                    protocol::ContentBlock::Text {
+                    lingxi_core::types::ContentBlock::Text {
                         text: first.clone(),
                     },
-                    protocol::ContentBlock::Text {
+                    lingxi_core::types::ContentBlock::Text {
                         text: second.clone(),
                     },
                 ]
             } else {
-                vec![protocol::ContentBlock::Text { text: body.clone() }]
+                vec![lingxi_core::types::ContentBlock::Text { text: body.clone() }]
             },
         };
         assert_eq!(
@@ -850,10 +850,10 @@ async fn invoked_skill_split_surrogate_reaches_attachment_with_exact_utf16_sidec
     let restored = orch.restore_post_compact_attachments().await;
 
     assert_eq!(restored.len(), 1);
-    let protocol::ConversationMessage::User { content, .. } = &restored[0] else {
+    let lingxi_core::types::ConversationMessage::User { content, .. } = &restored[0] else {
         panic!("post-compact attachment must be a user message");
     };
-    let protocol::ContentBlock::TextJsUtf16 {
+    let lingxi_core::types::ContentBlock::TextJsUtf16 {
         utf16_code_units, ..
     } = &content[0]
     else {

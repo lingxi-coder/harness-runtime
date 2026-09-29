@@ -2,7 +2,7 @@
 //! at least one event arrives. Detailed parity tests live in posix/.
 
 use futures_util::StreamExt;
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use platform_windows::WindowsFileSystem;
 use std::time::Duration;
 use tempfile::tempdir;

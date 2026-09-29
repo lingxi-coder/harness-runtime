@@ -8,8 +8,8 @@ use crate::test_support::{PermissionDecision, PermissionDecisionSource, Permissi
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use hooks::response::HookDecision;
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
-use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use telemetry::tengu::orchestrator as orch_events;
@@ -18,7 +18,7 @@ use tool_api::tool_trait::tool_result_turn_end;
 use tool_api::ContextModifier;
 
 async fn forward_tool_progress(
-    output: &dyn platform_api::OutputStream,
+    output: &dyn lingxi_core::host::OutputStream,
     parent_tool_use_id: &str,
     progress: tool_api::progress::ToolProgress,
 ) {
@@ -1297,12 +1297,14 @@ pub(crate) async fn call_api_with_ptl_recovery(
         compaction::is_compact_warning_suppressed(),
         None,
     )
-    .map(|b| platform_api::ContextPressureBanner {
+    .map(|b| lingxi_core::host::ContextPressureBanner {
         text: b.text,
         level: match b.color {
-            compaction::TokenWarningColor::Dim => platform_api::ContextPressureLevel::Dim,
-            compaction::TokenWarningColor::Warning => platform_api::ContextPressureLevel::Warning,
-            compaction::TokenWarningColor::Error => platform_api::ContextPressureLevel::Error,
+            compaction::TokenWarningColor::Dim => lingxi_core::host::ContextPressureLevel::Dim,
+            compaction::TokenWarningColor::Warning => {
+                lingxi_core::host::ContextPressureLevel::Warning
+            }
+            compaction::TokenWarningColor::Error => lingxi_core::host::ContextPressureLevel::Error,
         },
     });
     // Context usage as a 0-1 fraction of the model's effective context window
@@ -1573,7 +1575,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
     if let Some(compactor) = orch.compaction_runtime.compaction.clone() {
         let snapshot = orch.session.lock().await.model_context_history();
         let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
-        let bytes_before: u64 = snapshot.iter().map(protocol::text_byte_size).sum();
+        let bytes_before: u64 = snapshot
+            .iter()
+            .map(lingxi_core::types::text_byte_size)
+            .sum();
         // Capture the boundary's preTokens before the summary consumes the snapshot.
         let pre_tokens_estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
         // hooks compaction lifecycle: PreCompact fires before the reactive
@@ -2100,7 +2105,7 @@ pub(crate) async fn clear_goal_after_unrecoverable_error(
     // are inseparable here.
     //
     // DIVERGENCE (recorded): the oracle stamps the goal-status attachment with
-    // `context_limit` / `api_error`; `platform_api::GoalStatusKind` has only
+    // `context_limit` / `api_error`; `lingxi_core::host::GoalStatusKind` has only
     // `Set|Cleared|Achieved`, and widening it would change a serialized
     // transcript enum, so the teardown records `Cleared`.
     // `kB(e, d==="context_limit" ? "context_limit" : "api_error")` — upstream
@@ -2109,9 +2114,9 @@ pub(crate) async fn clear_goal_after_unrecoverable_error(
     // yields `Auth` / `Billing` / `ModelUnavailable` / no-clear), so testing the
     // bucket here is the same test.
     let cleared_reason = if bucket == GoalClearBucket::ContextLimit {
-        platform_api::GoalClearedReason::ContextLimit
+        lingxi_core::host::GoalClearedReason::ContextLimit
     } else {
-        platform_api::GoalClearedReason::ApiError
+        lingxi_core::host::GoalClearedReason::ApiError
     };
     let Some(goal) = orch.clear_active_goal_state_and_hook(cleared_reason).await else {
         return;
@@ -2536,7 +2541,9 @@ const SCHEDULE_WAKEUP_TOOL_NAME: &str = "ScheduleWakeup";
 /// model-generation mitigation, so most models never take the branch and keep
 /// feeding the tool result back, exactly as before.
 fn lone_wakeup_ends_turn_model(model_id: &str) -> bool {
-    use platform_api::model_capabilities::{has_capability, normalize_model_id, ModelCapability};
+    use lingxi_core::host::model_capabilities::{
+        has_capability, normalize_model_id, ModelCapability,
+    };
     has_capability(model_id, ModelCapability::Fable5Mitigations)
         || normalize_model_id(model_id) == "claude-mythos-5"
 }
@@ -2794,14 +2801,14 @@ pub(crate) const STRUCTURED_OUTPUT_TOOL_NAME: &str = "StructuredOutput";
 pub(crate) fn prior_assistant_used_structured_output(history: &[ConversationMessage]) -> bool {
     for msg in history.iter().rev() {
         match msg.role() {
-            protocol::MessageRole::User => {
+            lingxi_core::types::MessageRole::User => {
                 // `if(Sn.isMeta||Jde(Sn))continue; return!1`
                 if msg.is_meta() || is_tool_result_carrier(msg) {
                     continue;
                 }
                 return false;
             }
-            protocol::MessageRole::Assistant => {
+            lingxi_core::types::MessageRole::Assistant => {
                 // `Sn.message.content.some(b=>b.type==="tool_use"&&b.name===bp)`
                 if msg.tool_calls().iter().any(|b| {
                     matches!(b, ContentBlock::ToolUse { name, .. } if name == STRUCTURED_OUTPUT_TOOL_NAME)
@@ -2810,7 +2817,7 @@ pub(crate) fn prior_assistant_used_structured_output(history: &[ConversationMess
                 }
             }
             // `if(Sn.type!=="assistant")continue` — system / other lines skipped.
-            protocol::MessageRole::System => continue,
+            lingxi_core::types::MessageRole::System => continue,
         }
     }
     false
@@ -2916,7 +2923,7 @@ async fn handle_thinking_only(
 /// (`Image`/`ImageUrl`/`Document`/…) remain dropped on the response path.
 #[must_use]
 pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<ContentBlock> {
-    use protocol::ToolUseId;
+    use lingxi_core::types::ToolUseId;
     content
         .iter()
         .filter_map(|b| match b {
@@ -3365,7 +3372,7 @@ struct PersistenceOutcome {
 /// layer cannot fall back to a path that cannot be tied to the spill.
 fn process_output_file_from_data(
     data: &serde_json::Value,
-) -> Option<platform_api::ProcessOutputFile> {
+) -> Option<lingxi_core::host::ProcessOutputFile> {
     let object = data.as_object()?;
     let path = object
         .get("persistedOutputPath")
@@ -3387,7 +3394,7 @@ fn process_output_file_from_data(
     if task_id.is_empty() || path.is_empty() {
         return None;
     }
-    Some(platform_api::ProcessOutputFile {
+    Some(lingxi_core::host::ProcessOutputFile {
         task_id,
         path: path.to_string(),
         size,
@@ -3405,7 +3412,7 @@ async fn apply_tool_result_persistence_with_process_output(
     threshold: Option<usize>,
     content: String,
     content_blocks: Option<&[serde_json::Value]>,
-    output_file: Option<&platform_api::ProcessOutputFile>,
+    output_file: Option<&lingxi_core::host::ProcessOutputFile>,
 ) -> PersistenceOutcome {
     use crate::tool_result_persistence as trp;
 
@@ -3427,9 +3434,9 @@ async fn apply_tool_result_persistence_with_process_output(
                 // truncated with `(size ?? 0) >= HY ? HY : undefined`, where
                 // `HY = 67108864`. The spool stops at the same 64 MiB, so a
                 // result that REACHED the cap is exactly the one that was cut.
-                (output_file.size >= platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES)
+                (output_file.size >= lingxi_core::host::task_output::MAX_PERSISTED_OUTPUT_BYTES)
                     .then_some(
-                        usize::try_from(platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES)
+                        usize::try_from(lingxi_core::host::task_output::MAX_PERSISTED_OUTPUT_BYTES)
                             .unwrap_or(usize::MAX),
                     ),
             );
@@ -3940,7 +3947,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             agent_name: None,
             team_name: None,
             origin_session_id: None,
-            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+            tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             content_replacement_state: None,
             session: Some(orch.session.clone()),
             observer_pairings: orch.model_runtime.observer_pairings.clone(),
@@ -3967,7 +3974,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             file_history: orch
                 .file_history
                 .clone()
-                .map(|fh| fh as std::sync::Arc<dyn platform_api::FileHistorySink>),
+                .map(|fh| fh as std::sync::Arc<dyn lingxi_core::host::FileHistorySink>),
         };
 
         // validate_input gate (claude-code `toolExecution.ts:683-723`): a
@@ -4515,7 +4522,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         } else if hook_allowed && !plan_mode {
             // Carry the REAL tool_use_id so a hook-allow→ask-rule re-check emits a
             // byte-faithful stdio `can_use_tool` (correlatable id + decision_reason).
-            let ctx = platform_api::permission_gate::PermissionCheckContext {
+            let ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
                 tool_use_id: Some(tool_use_id.to_string()),
                 requires_user_interaction,
                 suppress_always_allow_rule: requires_user_interaction
@@ -4528,7 +4535,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                 .await;
             let mut hook_decision_classification = None;
             let hook_decision = match hook_outcome {
-                platform_api::permission_gate::PermissionOutcome::Allow {
+                lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                     updated_input,
                     decision_classification,
                     permission_updates: _,
@@ -4539,7 +4546,9 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                     }
                     PermissionDecision::Allow
                 }
-                platform_api::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+                lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
+                    updated_input,
+                } => {
                     if let Some(updated) = updated_input {
                         effective_input = updated;
                     }
@@ -4556,12 +4565,12 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                         // `match` is unconditional, so writing the label here
                         // could never be observed (it was, and was not).
                         hook_decision_classification = Some(
-                            platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
+                            lingxi_core::host::permission_gate::ToolDecisionClassification::UserTemporary,
                         );
                     }
                     PermissionDecision::Allow
                 }
-                platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
+                lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => {
                     PermissionDecision::Deny { reason }
                 }
             };
@@ -4575,7 +4584,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             decision_otel_source = if matches!(hook_decision, PermissionDecision::Allow) {
                 hook_decision_classification.map_or(
                     "hook",
-                    platform_api::permission_gate::ToolDecisionClassification::as_str,
+                    lingxi_core::host::permission_gate::ToolDecisionClassification::as_str,
                 )
             } else {
                 "config"
@@ -4585,7 +4594,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             // NORMAL permission path. Resolve the decision SOURCE first (without
             // delegating to the prompt transport) so the source-gated permission
             // hooks fire the way claude-code does.
-            let resolution_ctx = platform_api::permission_gate::PermissionCheckContext {
+            let resolution_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
                 tool_use_id: Some(tool_use_id.to_string()),
                 requires_user_interaction,
                 suppress_always_allow_rule: requires_user_interaction
@@ -4781,7 +4790,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                     // `decide_outcome_with_context` emission (subagent dispatch) is
                     // never reached here — emit through the outer gate, which
                     // forwards to the stdio transport. No-op on non-stdio transports.
-                    let sysmsg_ctx = platform_api::permission_gate::PermissionCheckContext {
+                    let sysmsg_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
                         tool_use_id: Some(tool_use_id.to_string()),
                         ..Default::default()
                     };
@@ -4904,21 +4913,22 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                                 // REAL tool_use_id (so a stdio `can_use_tool` request is
                                 // byte-faithful) and applying the host's `updatedInput`
                                 // rewrite to the input the tool actually runs with.
-                                let ctx = platform_api::permission_gate::PermissionCheckContext {
-                                    tool_use_id: Some(tool_use_id.to_string()),
-                                    requires_user_interaction,
-                                    suppress_always_allow_rule,
-                                    // HOOK-ASKFLOOR-03: a PreToolUse hook `ask` sets the
-                                    // floor so the Auto classifier can't re-allow past it
-                                    // (policy_gate Ask arm gates the classifier on this).
-                                    hook_ask_floor: hook_ask,
-                                    is_non_interactive_session: !orch
-                                        .config
-                                        .interactive_permissions,
-                                    decision_reason_type: ask_reason_context.0.clone(),
-                                    decision_reason: ask_reason_context.1.clone(),
-                                    ..Default::default()
-                                };
+                                let ctx =
+                                    lingxi_core::host::permission_gate::PermissionCheckContext {
+                                        tool_use_id: Some(tool_use_id.to_string()),
+                                        requires_user_interaction,
+                                        suppress_always_allow_rule,
+                                        // HOOK-ASKFLOOR-03: a PreToolUse hook `ask` sets the
+                                        // floor so the Auto classifier can't re-allow past it
+                                        // (policy_gate Ask arm gates the classifier on this).
+                                        hook_ask_floor: hook_ask,
+                                        is_non_interactive_session: !orch
+                                            .config
+                                            .interactive_permissions,
+                                        decision_reason_type: ask_reason_context.0.clone(),
+                                        decision_reason: ask_reason_context.1.clone(),
+                                        ..Default::default()
+                                    };
                                 // BASH-10: an ask that the TOOL raised must NOT be
                                 // re-derived from the rule/mode layer — `PolicyPermissionGate`
                                 // would recompute the very allow the tool escalated
@@ -4938,7 +4948,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                                         .await
                                 };
                                 match outcome {
-                                    platform_api::permission_gate::PermissionOutcome::Allow {
+                                    lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                                         updated_input,
                                         // `permission_updates` (the host's
                                         // `updatedPermissions`) are applied + persisted
@@ -4953,14 +4963,14 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                                         // temporary-allow fallback.
                                         decision_otel_source = decision_classification.map_or(
                                         "user_temporary",
-                                        platform_api::permission_gate::ToolDecisionClassification::as_str,
+                                        lingxi_core::host::permission_gate::ToolDecisionClassification::as_str,
                                     );
                                         if let Some(u) = updated_input {
                                             effective_input = u;
                                         }
                                         PermissionDecision::Allow
                                     }
-                                    platform_api::permission_gate::PermissionOutcome::AllowAuto {
+                                    lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
                                         updated_input,
                                     } => {
                                         if let Some(u) = updated_input {
@@ -4978,7 +4988,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                                         }
                                         PermissionDecision::Allow
                                     }
-                                    platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
+                                    lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => {
                                         // An ABORTED prompt is a distinct label: claude-code
                                         // denies with `decisionReason: iYt` ("tool permission
                                         // request aborted") when `signal.aborted`, and `eQ_`
@@ -5058,7 +5068,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                     } else {
                         let (decision_reason_type, decision_reason) =
                             tool_ask_reason_context(reason);
-                        let ask_ctx = platform_api::permission_gate::PermissionCheckContext {
+                        let ask_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
                             tool_use_id: Some(tool_use_id.to_string()),
                             requires_user_interaction,
                             suppress_always_allow_rule: requires_user_interaction
@@ -5073,7 +5083,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                             .ask_via_transport(name, &effective_input, &ask_ctx)
                             .await
                         {
-                            platform_api::permission_gate::PermissionOutcome::Allow {
+                            lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                                 updated_input,
                                 ..
                             } => {
@@ -5082,7 +5092,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                                 }
                                 PermissionDecision::Allow
                             }
-                            platform_api::permission_gate::PermissionOutcome::AllowAuto {
+                            lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
                                 updated_input,
                             } => {
                                 if let Some(updated) = updated_input {
@@ -5090,9 +5100,9 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                                 }
                                 PermissionDecision::Allow
                             }
-                            platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
-                                PermissionDecision::Deny { reason }
-                            }
+                            lingxi_core::host::permission_gate::PermissionOutcome::Deny {
+                                reason,
+                            } => PermissionDecision::Deny { reason },
                         }
                     }
                 }
@@ -5924,8 +5934,8 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             let real_agent_id = emit_payload
                 .get("agentId")
                 .and_then(serde_json::Value::as_str)
-                .and_then(protocol::AgentId::parse_prefixed);
-            let child_id = real_agent_id.unwrap_or_else(protocol::AgentId::new);
+                .and_then(lingxi_core::types::AgentId::parse_prefixed);
+            let child_id = real_agent_id.unwrap_or_else(lingxi_core::types::AgentId::new);
             // R7: did the child runner already fire the canonical SubagentStart
             // (+ its own frontmatter SubagentStop)? Only the REAL Agent tool sets
             // this; FakeAgentTool fixtures and the failure path leave it absent.
@@ -6074,7 +6084,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                 persistence.content,
                 persistence
                     .utf16_code_units
-                    .map(protocol::js_utf16::tool_result_sidecar),
+                    .map(lingxi_core::types::js_utf16::tool_result_sidecar),
             )
         } else {
             (persistence.content, content_blocks)
@@ -6219,7 +6229,7 @@ async fn run_post_tool_batch_hooks_inner(
         .await;
     let mut injected_messages = Vec::new();
     let identity = post_tool_batch_identity();
-    let batch_id = protocol::ToolUseId::from(identity.tool_use_id.clone());
+    let batch_id = lingxi_core::types::ToolUseId::from(identity.tool_use_id.clone());
 
     if turn_already_ended {
         // `eBn` yields only `fe.message` from the hook runner, then logs
@@ -6330,7 +6340,7 @@ fn post_tool_batch_identity() -> hooks::HookAttachmentIdentity {
     hooks::HookAttachmentIdentity {
         hook_name: "PostToolBatch".to_string(),
         hook_event: "PostToolBatch".to_string(),
-        tool_use_id: format!("hook-{}", protocol::HookId::new().as_uuid()),
+        tool_use_id: format!("hook-{}", lingxi_core::types::HookId::new().as_uuid()),
     }
 }
 
@@ -6426,7 +6436,8 @@ pub(crate) async fn apply_model_context_modifiers(
         .main_loop_model;
     if resolved != current {
         let listings = orch.api.list_model_listings();
-        let (target_model, explicit_profile) = platform_api::parse_model_ref(&resolved, &listings);
+        let (target_model, explicit_profile) =
+            lingxi_core::host::parse_model_ref(&resolved, &listings);
         let target_profile = explicit_profile.or_else(|| {
             current_profile
                 .as_ref()
@@ -6648,7 +6659,7 @@ mod image_tool_result_tests {
 mod code_change_accumulation_tests {
     use super::accumulate_code_change;
     use cost::{CostTracker, PricingCatalog};
-    use protocol::SessionId;
+    use lingxi_core::types::SessionId;
     use serde_json::json;
     use std::sync::Arc;
 
@@ -6777,7 +6788,7 @@ mod decision_otel_source_tests {
     /// telemetry it was restoring.
     #[test]
     fn an_auto_mode_approval_renders_as_a_temporary_user_allow() {
-        use platform_api::permission_gate::ToolDecisionClassification;
+        use lingxi_core::host::permission_gate::ToolDecisionClassification;
         assert_eq!(
             ToolDecisionClassification::UserTemporary.as_str(),
             "user_temporary"
@@ -6890,10 +6901,10 @@ mod denial_kind_wiring_tests {
     use crate::turn_loop::dispatch_tool_uses_tracked;
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
-    use platform_api::permission_gate::{
+    use lingxi_core::host::permission_gate::{
         PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
     };
-    use protocol::ToolUseId;
+    use lingxi_core::types::ToolUseId;
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -7285,7 +7296,7 @@ mod interrupted_denial_stamp_tests {
     };
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
-    use protocol::ToolUseId;
+    use lingxi_core::types::ToolUseId;
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -7477,7 +7488,7 @@ mod hook_context_attachment_tests {
     use hooks::registry::HookRegistry;
     use hooks::response::HookResponse;
     use hooks::{HookContext, HookOutcome, HookResult};
-    use protocol::{ContentBlock, ConversationMessage, HookId, ToolUseId};
+    use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, ToolUseId};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -7576,36 +7587,41 @@ mod hook_context_attachment_tests {
 
     struct UnusedHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for UnusedHttp {
+    impl lingxi_core::host::HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
     struct UnusedRuntime;
     #[async_trait]
-    impl platform_api::RuntimeSpawner for UnusedRuntime {
+    impl lingxi_core::host::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-            Err(platform_api::RuntimeError::Internal("unused".into()))
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _d: std::time::Duration) {}
         async fn cancel(
             &self,
-            _h: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _h: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
@@ -8113,10 +8129,10 @@ mod hook_context_attachment_tests {
     /// in `conversation.rs`, so neither file's unit tests alone prove the seam.
     #[tokio::test]
     async fn dispatched_tool_result_reaches_the_transcript_as_tool_use_result() {
-        use protocol::MessageId;
+        use lingxi_core::types::MessageId;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
         );
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
@@ -8241,7 +8257,7 @@ mod hook_context_attachment_tests {
             None => orch,
             Some(path) => {
                 let root = path.parent().expect("parent").to_path_buf();
-                let fs: Arc<dyn platform_api::FileSystem> =
+                let fs: Arc<dyn lingxi_core::host::FileSystem> =
                     Arc::new(platform_posix::fs::PosixFileSystem::new(root));
                 orch.with_jsonl_writer(Arc::new(session::jsonl::writer::JsonlWriter::new(
                     path.to_path_buf(),
@@ -8454,7 +8470,7 @@ mod tool_result_persistence_wiring_tests {
     use crate::tool_result_persistence::{PERSISTED_OUTPUT_OPEN, TOOL_RESULTS_DIR};
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
-    use protocol::{ContentBlock, ToolUseId};
+    use lingxi_core::types::{ContentBlock, ToolUseId};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -8602,8 +8618,8 @@ mod tool_result_persistence_wiring_tests {
 
     #[tokio::test]
     async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
+        use lingxi_core::types::{ConversationMessage, MessageId};
         use llm_runtime::services::sdk::{self, WireCodec};
-        use protocol::{ConversationMessage, MessageId};
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("history.jsonl");
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
@@ -8996,8 +9012,8 @@ mod observer_pairings_reach_tools_tests {
     use crate::turn_loop::dispatch_tool_uses_tracked;
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
-    use platform_api::observer_pairing::ObserverPairings;
-    use protocol::{ContentBlock, ToolUseId};
+    use lingxi_core::host::observer_pairing::ObserverPairings;
+    use lingxi_core::types::{ContentBlock, ToolUseId};
     use serde_json::{json, Value};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -9130,9 +9146,11 @@ mod tool_hook_wiring_tests {
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use hooks::events::HookEventType;
-    use platform_api::permission_gate::{PermissionDecision, PermissionGate, PermissionResolution};
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker};
-    use protocol::{ContentBlock, HookId, ToolUseId};
+    use lingxi_core::host::permission_gate::{
+        PermissionDecision, PermissionGate, PermissionResolution,
+    };
+    use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker};
+    use lingxi_core::types::{ContentBlock, HookId, ToolUseId};
     use serde_json::{json, Value};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -9327,40 +9345,45 @@ mod tool_hook_wiring_tests {
     struct UnusedHookHttp;
 
     #[async_trait]
-    impl platform_api::HttpTransport for UnusedHookHttp {
+    impl lingxi_core::host::HttpTransport for UnusedHookHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
 
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
     struct UnusedHookRuntime;
 
     #[async_trait]
-    impl platform_api::RuntimeSpawner for UnusedHookRuntime {
+    impl lingxi_core::host::RuntimeSpawner for UnusedHookRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-            Err(platform_api::RuntimeError::Internal("unused".into()))
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal("unused".into()))
         }
 
         async fn sleep(&self, _duration: std::time::Duration) {}
 
         async fn cancel(
             &self,
-            _handle: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
@@ -9412,7 +9435,7 @@ mod tool_hook_wiring_tests {
         async fn resolve_detailed(&self, _t: &str, _i: &Value) -> PermissionResolution {
             PermissionResolution::Deny {
                 reason: "prompted-and-declined".into(),
-                source: platform_api::permission_gate::PermissionDecisionSource::Rule,
+                source: lingxi_core::host::permission_gate::PermissionDecisionSource::Rule,
                 rule_source: Some("userSettings".into()),
                 decision_reason_type: Some("rule".into()),
                 decision_reason: None,
@@ -9823,7 +9846,7 @@ mod tool_hook_wiring_tests {
             permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
-            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+            tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: Some("researcher".into()),
             team_name: Some("alpha".into()),
             is_async: false,
@@ -9845,7 +9868,7 @@ mod tool_hook_wiring_tests {
             .await
             .expect_err("nested Read denial must stop subagent Workflow");
         assert!(
-            matches!(error, platform_api::tool_invoker::ToolInvokerError::Internal(ref reason) if reason == "prompted-and-declined")
+            matches!(error, lingxi_core::host::tool_invoker::ToolInvokerError::Internal(ref reason) if reason == "prompted-and-declined")
         );
     }
 }

@@ -1,5 +1,5 @@
 use compaction::{CompactionLayer, CompactionOrchestrator};
-use protocol::{ContentBlock, ConversationMessage, MessageId};
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
 #[tokio::test]
 async fn over_threshold_triggers_autocompact() {

@@ -198,7 +198,7 @@ impl Default for ThinkingConfig {
 /// `LINGXI_DISABLE_THINKING` / `LINGXI_DISABLE_ADAPTIVE_THINKING`.
 #[must_use]
 pub fn is_thinking_env_disabled(name: &str) -> bool {
-    platform_api::env::is_env_truthy(std::env::var(name).ok().as_deref())
+    lingxi_core::host::env::is_env_truthy(std::env::var(name).ok().as_deref())
 }
 
 /// Session-level "thinking is on" gate: the session [`ThinkingConfig`] is not
@@ -234,7 +234,7 @@ pub fn session_thinking_active(thinking: ThinkingConfig) -> bool {
 /// ```
 ///
 /// The env value is parsed by claude-code's shared `hp` helper
-/// ([`platform_api::env::parse_int_env`]), which since 2.1.211 accepts scientific
+/// ([`lingxi_core::host::env::parse_int_env`]), which since 2.1.211 accepts scientific
 /// notation and digit-group separators in addition to plain `parseInt` values.
 ///
 /// A positive env/flag budget PRE-EMPTS adaptive thinking (claude-code sets the
@@ -259,7 +259,7 @@ pub fn session_thinking_from_env(
         .ok()
         .filter(|s| !s.is_empty())
     {
-        let wn = platform_api::env::parse_int_env(&raw);
+        let wn = lingxi_core::host::env::parse_int_env(&raw);
         return if wn > 0.0 {
             ThinkingConfig::Enabled {
                 budget_tokens: u32::try_from(wn as u64).unwrap_or(u32::MAX),

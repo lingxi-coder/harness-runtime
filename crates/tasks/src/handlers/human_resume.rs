@@ -2,8 +2,8 @@
 use super::*;
 
 struct RestoredWorktreeGuard {
-    manager: Arc<dyn platform_api::worktree::WorktreeManager>,
-    handle: Option<platform_api::worktree::WorktreeHandle>,
+    manager: Arc<dyn lingxi_core::host::worktree::WorktreeManager>,
+    handle: Option<lingxi_core::host::worktree::WorktreeHandle>,
 }
 impl Drop for RestoredWorktreeGuard {
     fn drop(&mut self) {
@@ -11,7 +11,8 @@ impl Drop for RestoredWorktreeGuard {
             let manager = self.manager.clone();
             tokio::spawn(async move {
                 let _ =
-                    platform_api::worktree::agent_worktree_result(manager.as_ref(), &handle).await;
+                    lingxi_core::host::worktree::agent_worktree_result(manager.as_ref(), &handle)
+                        .await;
             });
         }
     }
@@ -77,12 +78,12 @@ impl LocalAgentHandler {
             }
             if let Some(message) = value.get("message") {
                 history.push(
-                    serde_json::from_value::<protocol::ConversationMessage>(message.clone())
-                        .map_err(|error| {
-                            TaskError::Internal(format!(
-                                "invalid agent transcript message: {error}"
-                            ))
-                        })?,
+                    serde_json::from_value::<lingxi_core::types::ConversationMessage>(
+                        message.clone(),
+                    )
+                    .map_err(|error| {
+                        TaskError::Internal(format!("invalid agent transcript message: {error}"))
+                    })?,
                 );
             }
         }

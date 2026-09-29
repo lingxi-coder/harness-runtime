@@ -6,8 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
+core = { path = "../core" }
 # Only for `jsonl::path::project_dir_name` — the SAME project-dir sanitizer the
 # session transcripts use, so a project's memories sit beside its sessions
 # instead of inventing a second naming scheme (MEM-2).

@@ -11,26 +11,26 @@ use crate::read_file_state::ReadFileStateMap;
 use crate::sandbox_runner::SandboxRunner;
 use crate::session_cwd::SessionCwd;
 use crate::worktree_session::WorktreeSessionCell;
+use lingxi_core::host::agent_name_registry::AgentNameRegistry;
+use lingxi_core::host::audio::{AudioRecordingHandle, AudioService};
+use lingxi_core::host::budget::BudgetEnforcerHandle;
+use lingxi_core::host::camera::CameraControl;
+use lingxi_core::host::clipboard::Clipboard;
+use lingxi_core::host::clock::Clock;
+use lingxi_core::host::computer_control::ComputerControl;
+use lingxi_core::host::coordinator_mode::CoordinatorModeHandle;
+use lingxi_core::host::filesystem::FileSystem;
+use lingxi_core::host::http::HttpTransport;
+use lingxi_core::host::mailbox::MailboxRouterHandle;
+use lingxi_core::host::notification::NotificationService;
+use lingxi_core::host::permission_gate::PermissionGate;
+use lingxi_core::host::process::ProcessRunner;
+use lingxi_core::host::sandbox::Sandbox;
+use lingxi_core::host::share::SharingService;
+use lingxi_core::host::subagent_spawn::SubagentSpawner;
+use lingxi_core::host::task_registry::TaskRegistryHandle;
+use lingxi_core::host::worktree::WorktreeManager;
 use permission::PermissionMode;
-use platform_api::agent_name_registry::AgentNameRegistry;
-use platform_api::audio::{AudioRecordingHandle, AudioService};
-use platform_api::budget::BudgetEnforcerHandle;
-use platform_api::camera::CameraControl;
-use platform_api::clipboard::Clipboard;
-use platform_api::clock::Clock;
-use platform_api::computer_control::ComputerControl;
-use platform_api::coordinator_mode::CoordinatorModeHandle;
-use platform_api::filesystem::FileSystem;
-use platform_api::http::HttpTransport;
-use platform_api::mailbox::MailboxRouterHandle;
-use platform_api::notification::NotificationService;
-use platform_api::permission_gate::PermissionGate;
-use platform_api::process::ProcessRunner;
-use platform_api::sandbox::Sandbox;
-use platform_api::share::SharingService;
-use platform_api::subagent_spawn::SubagentSpawner;
-use platform_api::task_registry::TaskRegistryHandle;
-use platform_api::worktree::WorktreeManager;
 use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -131,7 +131,7 @@ pub struct BuiltinToolContext {
     /// `None` at construction sites that have no session (tests, and the
     /// mobile/git shims that never persist); those keep the workspace-local
     /// fallback. The production desktop context sets it.
-    pub session_id: Option<protocol::SessionId>,
+    pub session_id: Option<lingxi_core::types::SessionId>,
     /// Shared record of the single active worktree the session entered via
     /// `EnterWorktree` (worktree 206 parity plan, Task 8). `None` when no
     /// worktree is active — the INERT default at every construction site.
@@ -157,7 +157,7 @@ pub struct BuiltinToolContext {
     pub default_model: String,
     /// Runtime `/web` config loader for provider-agnostic client-side WebSearch.
     /// `None` preserves env-only fallback behavior.
-    pub web_search_config: Option<Arc<dyn platform_api::WebSearchConfigProvider>>,
+    pub web_search_config: Option<Arc<dyn lingxi_core::host::WebSearchConfigProvider>>,
     /// Worktree manager (M2-01 trait) — backs `EnterWorktree` + `ExitWorktree`
     /// (M4-04). Tests inject `MockWorktreeManager`; production uses
     /// `platform_posix::PosixWorktreeManager`.
@@ -237,7 +237,7 @@ pub struct BuiltinToolContext {
     /// can stop only that owner's recording.
     pub audio_recording_handles: Arc<
         tokio::sync::Mutex<
-            std::collections::HashMap<platform_api::audio::AudioOwner, AudioRecordingHandle>,
+            std::collections::HashMap<lingxi_core::host::audio::AudioOwner, AudioRecordingHandle>,
         >,
     >,
     /// Native share sheet — `tool-share`'s `ShareTool` routes here. `None` on
@@ -445,7 +445,7 @@ impl BuiltinToolContext {
                     .settle_diagnostics_under_host_root(path, std::time::Duration::from_millis(500))
                     .await;
             }
-            Err(platform_api::LspError::Unavailable) => {}
+            Err(lingxi_core::host::LspError::Unavailable) => {}
             Err(error) => tracing::warn!(
                 target: "lingxi_lsp::file_sync",
                 path = %path.display(),
@@ -758,7 +758,7 @@ impl MobileShellToolCtx {
 /// Forward low-level shell-discovery diagnostics through the host's tracing sink.
 /// Both Bash and standalone Monitor construct through this shared boundary.
 pub fn install_shell_discovery_logging() {
-    platform_api::shell_support::set_shell_discovery_logger(|warning, message| {
+    lingxi_core::host::shell_support::set_shell_discovery_logger(|warning, message| {
         if warning {
             tracing::warn!("{message}");
         } else {
@@ -774,7 +774,7 @@ pub fn install_shell_discovery_logging() {
 mod tests {
     use super::*;
     use crate::test_support::{ctx_for_file_tools, make_dummy_fs};
-    use platform_api::permission_gate::PermissionDecision;
+    use lingxi_core::host::permission_gate::PermissionDecision;
     use serde_json::Value;
     use std::sync::Arc;
     use telemetry::AnalyticsBus;
@@ -1022,7 +1022,7 @@ mod tests {
             std::sync::Arc::new(telemetry::AnalyticsBus::new()),
             vec![],
         );
-        let sid = protocol::SessionId::new();
+        let sid = lingxi_core::types::SessionId::new();
         ctx.session_id = Some(sid);
         let dir = ctx.tool_results_dir();
         let text = dir.to_string_lossy().to_string();

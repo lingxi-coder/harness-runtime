@@ -3,7 +3,7 @@
 //! actual policy. Real sandbox-exec / namespaces wiring lands in Plan 17.
 
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures,
     SandboxPolicy, SandboxedCommand, SandboxedTag,
 };

@@ -9,7 +9,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use platform_api::ResolvedAddressOverride;
+use lingxi_core::host::ResolvedAddressOverride;
 use thiserror::Error;
 
 /// Outbound URL validator used by the HTTP hook executor.

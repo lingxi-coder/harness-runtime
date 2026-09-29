@@ -106,7 +106,7 @@ fn compile_hook_layer(
             for entry in &group.hooks {
                 let (name, executor) = build_executor(entry).expect("validated hook entry");
                 hooks.push(HookDefinition {
-                    id: protocol::HookId::new(),
+                    id: lingxi_core::types::HookId::new(),
                     name,
                     events: vec![event_type.clone()],
                     if_condition: build_condition(
@@ -448,7 +448,7 @@ mod tests {
 
         let parsed = parse_hook_layer_value_strict(
             &raw,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(serialize_hook_layer(&parsed.document).unwrap(), raw);
@@ -472,7 +472,7 @@ mod tests {
 
         let error = parse_hook_layer_value_strict(
             &raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap_err();
         let issues = error.issues();
@@ -503,7 +503,7 @@ mod tests {
 
         let error = parse_hook_layer_value_strict(
             &raw,
-            HookSource::Settings(protocol::SettingsScope::Local),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Local),
         )
         .unwrap_err();
         let issues = error.issues();
@@ -528,7 +528,7 @@ mod tests {
                     "hooks": [{ "type": "command", "command": "./stop.sh" }]
                 }]
             }),
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
 

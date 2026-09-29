@@ -30,7 +30,7 @@
 //! so the ~4000 locked fixtures stay byte-identical.
 
 use crate::file::{parse_markdown_with_frontmatter, MemoryError, MemoryFrontmatter};
-use protocol::{ConversationMessage, MessageId};
+use lingxi_core::types::{ConversationMessage, MessageId};
 use sidequery::{CacheSafeParams, ForkPurpose, ForkedAgentRequest, ForkedAgentRunner, QuerySource};
 use std::path::{Path, PathBuf};
 
@@ -488,8 +488,8 @@ fn estimate_message_tokens(message: &ConversationMessage) -> u64 {
     }
 }
 
-fn estimate_block_tokens(block: &protocol::ContentBlock) -> u64 {
-    use protocol::ContentBlock;
+fn estimate_block_tokens(block: &lingxi_core::types::ContentBlock) -> u64 {
+    use lingxi_core::types::ContentBlock;
 
     match block {
         ContentBlock::ProviderContent { value, .. } => rough_token_count(json_len(value)),
@@ -624,14 +624,19 @@ fn write_session_memory(path: &Path, content: &str) -> Result<(), MemoryError> {
     let file_name = path
         .file_name()
         .ok_or_else(|| MemoryError::Io("session-memory path has no file name".to_string()))?;
-    let mut options = platform_api::rooted_fs::AtomicWriteOptions::default();
+    let mut options = lingxi_core::host::rooted_fs::AtomicWriteOptions::default();
     #[cfg(unix)]
     if let Ok(metadata) = std::fs::metadata(path) {
         use std::os::unix::fs::PermissionsExt as _;
         options.file_mode = metadata.permissions().mode() & 0o777;
     }
-    platform_api::rooted_fs::atomic_write(parent, Path::new(file_name), content.as_bytes(), options)
-        .map_err(|error| MemoryError::Io(error.to_string()))
+    lingxi_core::host::rooted_fs::atomic_write(
+        parent,
+        Path::new(file_name),
+        content.as_bytes(),
+        options,
+    )
+    .map_err(|error| MemoryError::Io(error.to_string()))
 }
 
 /// Resolve the config-home directory used for session-memory writes:
@@ -660,7 +665,7 @@ const SESSION_MEMORY_EXTRACTION_PROMPT: &str = "Distil durable, reusable notes f
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{ContentBlock, MessageId, ToolUseId};
+    use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
     use std::sync::Arc;
 
     fn enabled_config(init: u32, update: u32) -> SessionMemoryConfig {

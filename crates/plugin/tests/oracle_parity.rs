@@ -411,7 +411,7 @@ fn mcp_specs(components: &PluginComponents) -> BTreeMap<String, McpSpec> {
         .iter()
         .map(|(name, cfg)| {
             let spec = match &cfg.spec {
-                platform_api::McpTransportSpec::Stdio { command, args, env } => McpSpec {
+                lingxi_core::host::McpTransportSpec::Stdio { command, args, env } => McpSpec {
                     command: command.clone(),
                     args: args.clone(),
                     env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),

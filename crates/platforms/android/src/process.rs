@@ -1,4 +1,4 @@
-//! [`platform_api::ProcessRunner`] for Android. P2 turns on execution: after the P1
+//! [`lingxi_core::host::ProcessRunner`] for Android. P2 turns on execution: after the P1
 //! security invariants pass, the runner translates the prepared
 //! [`AndroidSandboxPlan`] into a [`platform_android_minijail::JailSpec`] and
 //! runs it through `run_jailed` on a blocking thread. `platform-android` stays
@@ -7,11 +7,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use platform_android_minijail::{JailRlimit, JailSpec};
-use platform_api::{
+use lingxi_core::host::{
     ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxBackend, SandboxedCommand,
     SandboxedTag,
 };
+use platform_android_minijail::{JailRlimit, JailSpec};
 
 use crate::capabilities::CapabilityCache;
 use crate::policy::{AndroidSandboxPlan, NetProfile, RlimitResource};
@@ -257,7 +257,7 @@ impl ProcessRunner for AndroidMinijailProcessRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::{
+    use lingxi_core::host::{
         BackendPlanHandle, ProcessCommand, ProcessError, ProcessRunner, SandboxBackend,
         SandboxedCommand, SandboxedTag,
     };

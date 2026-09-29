@@ -15,13 +15,13 @@
 //! output was visible on screen. Provider/server errors retain their existing
 //! fallback behavior until a block completes.
 
+use lingxi_core::types::{ContentBlock, ConversationMessage};
 use llm_runtime::{HistoryEvent, LlmError};
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_start, text_delta, MockApiClient,
     MockOutputStream, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use protocol::{ContentBlock, ConversationMessage};
 use std::path::PathBuf;
 use std::sync::Arc;
 use telemetry::{AnalyticsBus, AnalyticsValue, InMemorySink};
@@ -161,7 +161,7 @@ async fn assert_finalizes(err: LlmError, expected_cause: &str, expected_notice: 
     assert!(
         output.snapshot().await.iter().any(|e| matches!(
             e,
-            platform_api::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
+            lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
         )),
         "finalize ends the turn with stop_reason model_error"
     );

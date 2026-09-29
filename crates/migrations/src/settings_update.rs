@@ -22,7 +22,7 @@ use serde_json::{Map, Value};
 /// `User` → `<claude-config-home>/settings.json`, `Project` →
 /// `<project>/.lingxi/settings.json`, `Local` →
 /// `<project>/.lingxi/settings.local.json`; [`settings_path`] resolves them.
-pub use protocol::WritableScope;
+pub use lingxi_core::types::WritableScope;
 
 /// Resolve the file path for a source (TS `getSettingsFilePathForSource`).
 #[must_use]

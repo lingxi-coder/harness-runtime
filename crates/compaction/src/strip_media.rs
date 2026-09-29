@@ -5,7 +5,7 @@
 //! nested tool-result blocks, with `[image]` / `[document]`. Cache-sharing
 //! summary requests preserve the original media until this recovery is needed.
 
-use protocol::{ContentBlock, ConversationMessage};
+use lingxi_core::types::{ContentBlock, ConversationMessage};
 
 /// Text placeholder substituted for a stripped image block — byte-locked to
 /// claude-code (`compact.ts:160`).
@@ -76,7 +76,7 @@ fn strip_one(message: ConversationMessage) -> ConversationMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{ContentBlock, ConversationMessage, ImageSource, MessageId};
+    use lingxi_core::types::{ContentBlock, ConversationMessage, ImageSource, MessageId};
 
     fn image_block() -> ContentBlock {
         ContentBlock::Image {
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn strips_nested_media_without_changing_tool_result_identity_or_text() {
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         let input = ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {

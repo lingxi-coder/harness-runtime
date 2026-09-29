@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use platform_api::fork_resume_gate::ForkResumeGate;
+use lingxi_core::host::fork_resume_gate::ForkResumeGate;
 
 /// Resolves whether a skill name still names a FORK-CAPABLE skill.
 ///
@@ -93,7 +93,7 @@ pub struct DesktopForkResumeGate {
 impl ForkResumeGate for DesktopForkResumeGate {
     async fn check_resume(
         &self,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         task_forked_skill_name: Option<&str>,
     ) -> Result<(), String> {
         let jsonl = session::forked_skill::agent_transcript_path(
@@ -168,7 +168,7 @@ mod tests {
     #[tokio::test]
     async fn an_ordinary_agent_resumes() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         assert!(gate(dir.path(), true).check_resume(id, None).await.is_ok());
     }
 
@@ -177,7 +177,7 @@ mod tests {
     #[tokio::test]
     async fn a_corroborated_fork_resumes() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         write_fork_records(
             &session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()),
             &scoping("review"),
@@ -196,7 +196,7 @@ mod tests {
     #[tokio::test]
     async fn deleting_the_scoping_record_refuses_rather_than_widening() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         let jsonl = session::forked_skill::agent_transcript_path(dir.path(), &id.to_string());
         write_fork_records(&jsonl, &scoping("review"))
             .await
@@ -220,7 +220,7 @@ mod tests {
     #[tokio::test]
     async fn a_mismatched_identity_refuses() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         write_fork_records(
             &session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()),
             &scoping("review"),
@@ -239,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn a_skill_that_lost_fork_capability_refuses() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         write_fork_records(
             &session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()),
             &scoping("review"),
@@ -260,7 +260,7 @@ mod tests {
     #[tokio::test]
     async fn a_corrupt_record_refuses() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         let jsonl = session::forked_skill::agent_transcript_path(dir.path(), &id.to_string());
         tokio::fs::write(
             session::forked_skill::forked_skill_paths(&jsonl).scoping,
@@ -283,7 +283,7 @@ mod tests {
     #[tokio::test]
     async fn a_cold_resume_without_a_witness_refuses() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         let jsonl = session::forked_skill::agent_transcript_path(dir.path(), &id.to_string());
         // Write ONLY the scoping record — no marker.
         tokio::fs::write(
@@ -307,7 +307,7 @@ mod tests {
     #[tokio::test]
     async fn a_cold_resume_with_a_matching_witness_proceeds() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         write_fork_records(
             &session::forked_skill::agent_transcript_path(dir.path(), &id.to_string()),
             &scoping("review"),

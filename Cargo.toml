@@ -4,7 +4,6 @@ resolver = "2"
 members = [
     "crates/runtime",
     "crates/branding",
-    "crates/protocol",
     "crates/client",
     "crates/configuration-admin",
     "crates/tool-api",
@@ -28,7 +27,6 @@ members = [
     "crates/tools/computer-use",
     "crates/tools/android-use",
     "crates/core",
-    "crates/platform-api",
     "crates/test-harness",
     "crates/secret",
     "crates/cost",
@@ -82,7 +80,6 @@ members = [
 default-members = [
     "crates/runtime",
     "crates/branding",
-    "crates/protocol",
     "crates/client",
     "crates/tool-api",
     "crates/tools/file",
@@ -105,7 +102,6 @@ default-members = [
     "crates/tools/computer-use",
     "crates/tools/android-use",
     "crates/core",
-    "crates/platform-api",
     "crates/secret",
     "crates/cost",
     "crates/permission",

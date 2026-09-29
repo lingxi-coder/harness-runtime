@@ -17,7 +17,7 @@ use crate::{
     ModelRef,
 };
 use indexmap::IndexMap;
-use protocol::SessionId;
+use lingxi_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -296,7 +296,7 @@ pub struct CostSessionScope {
 /// accidentally resolve a replacement authority.
 #[must_use = "a prepared cost session has no effect until it is activated"]
 pub struct PreparedCostSession {
-    retention_pin: platform_api::SessionRetentionPin,
+    retention_pin: lingxi_core::host::SessionRetentionPin,
     ledger: Arc<SessionLedger>,
     entry: Arc<SessionEntry>,
     catalog: Arc<PricingCatalog>,
@@ -425,7 +425,7 @@ impl CostSessionScope {
             let mutation_id = CostMutationId::new(format!(
                 "model-response:v1:{}:{}",
                 authority.session_id,
-                protocol::SessionId::new().as_uuid()
+                lingxi_core::types::SessionId::new().as_uuid()
             ));
             let mut retained = authority
                 .response_settlements
@@ -564,7 +564,7 @@ struct SessionEntry {
     session_id: SessionId,
     state: Arc<RwLock<CostState>>,
     persistence: Option<Arc<dyn CostPersistence>>,
-    writer_lease: Option<platform_api::live_sessions::SharedSessionWriterLease>,
+    writer_lease: Option<lingxi_core::host::live_sessions::SharedSessionWriterLease>,
     durability_gate: CostDurabilityGate,
     missing_durable_authority: bool,
     response_settlements: std::sync::Mutex<HashMap<CostMutationId, Arc<CostResponseSlot>>>,
@@ -684,7 +684,7 @@ impl SessionLedger {
 /// session projection switched by the orchestrator at clear/resume boundaries.
 #[derive(Clone)]
 pub struct CostTracker {
-    _retention_pin: Option<platform_api::SessionRetentionPin>,
+    _retention_pin: Option<lingxi_core::host::SessionRetentionPin>,
     ledger: Arc<SessionLedger>,
     scope: Option<Arc<SessionEntry>>,
     catalog: Arc<PricingCatalog>,
@@ -730,7 +730,7 @@ impl CostTracker {
         self,
         hydration: CostHydration,
         persistence: Arc<dyn CostPersistence>,
-        writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+        writer_lease: lingxi_core::host::live_sessions::SharedSessionWriterLease,
         durability_gate: CostDurabilityGate,
     ) -> Self {
         self.try_with_durable_persistence(hydration, persistence, writer_lease, durability_gate)
@@ -744,7 +744,7 @@ impl CostTracker {
         self,
         hydration: CostHydration,
         persistence: Arc<dyn CostPersistence>,
-        writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+        writer_lease: lingxi_core::host::live_sessions::SharedSessionWriterLease,
         durability_gate: CostDurabilityGate,
     ) -> Result<Self, crate::persistence::CostPersistError> {
         let session_id = *self
@@ -915,14 +915,18 @@ impl CostTracker {
     /// Keep the claim alive for callers that need to prove the scope remains
     /// writable. The concrete lease deliberately exposes no filesystem API.
     #[must_use]
-    pub fn writer_lease(&self) -> Option<platform_api::live_sessions::SharedSessionWriterLease> {
+    pub fn writer_lease(
+        &self,
+    ) -> Option<lingxi_core::host::live_sessions::SharedSessionWriterLease> {
         let entry = self.selected_entry();
         let lease = entry.writer_lease.clone()?;
         let pin = self
             ._retention_pin
             .clone()
             .or_else(|| entry.durability_gate.retention_gate().try_pin().ok())?;
-        Some(platform_api::live_sessions::pin_writer_lease(lease, pin))
+        Some(lingxi_core::host::live_sessions::pin_writer_lease(
+            lease, pin,
+        ))
     }
 
     fn scope_or_active(&self) -> SessionId {
@@ -1247,7 +1251,7 @@ impl CostTracker {
         session_id: SessionId,
         existing: Option<&Arc<SessionEntry>>,
         persistence: &Arc<dyn CostPersistence>,
-        writer_lease: &platform_api::live_sessions::SharedSessionWriterLease,
+        writer_lease: &lingxi_core::host::live_sessions::SharedSessionWriterLease,
         durability_gate: &CostDurabilityGate,
     ) -> Result<Option<Arc<SessionEntry>>, CostPersistError> {
         let Some(existing) = existing else {
@@ -1259,7 +1263,7 @@ impl CostTracker {
                 .writer_lease
                 .as_ref()
                 .is_some_and(|existing_lease| {
-                    platform_api::live_sessions::same_writer_lease_authority(
+                    lingxi_core::host::live_sessions::same_writer_lease_authority(
                         existing_lease,
                         writer_lease,
                     )
@@ -1306,7 +1310,7 @@ impl CostTracker {
         session_id: SessionId,
         hydrator: &dyn CostHydrator,
         persistence: Arc<dyn CostPersistence>,
-        writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+        writer_lease: lingxi_core::host::live_sessions::SharedSessionWriterLease,
         durability_gate: CostDurabilityGate,
     ) -> Result<PreparedCostSession, CostPersistError> {
         if self.scope.is_some() {
@@ -1385,7 +1389,7 @@ impl CostTracker {
         session_id: SessionId,
         hydrator: &dyn CostHydrator,
         persistence: Arc<dyn CostPersistence>,
-        writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+        writer_lease: lingxi_core::host::live_sessions::SharedSessionWriterLease,
         durability_gate: CostDurabilityGate,
     ) -> Result<PreparedCostSession, CostPersistError> {
         self.prepare_hydrated_durable_session(
@@ -1407,7 +1411,7 @@ impl CostTracker {
         session_id: SessionId,
         hydrator: &dyn CostHydrator,
         persistence: Arc<dyn CostPersistence>,
-        writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+        writer_lease: lingxi_core::host::live_sessions::SharedSessionWriterLease,
         durability_gate: CostDurabilityGate,
     ) -> Result<(), crate::persistence::CostPersistError> {
         let prepared = self
@@ -2056,7 +2060,7 @@ impl CostTracker {
     /// [`CostState::external_nano_usd`] and [`crate::summary::CostTracker::summary`]
     /// self-reconciling, but does NOT reach the production `/usage`/`/cost`
     /// rendering path — `ConversationModel::snapshot_cost_real`
-    /// (`orchestrator/src/conversation/model.rs`) builds `platform_api::CostSnapshot`
+    /// (`orchestrator/src/conversation/model.rs`) builds `lingxi_core::host::CostSnapshot`
     /// from `state.total_nano_usd` and `state.per_model_usage` directly and does
     /// not read this field, so a Fusion-only session still renders a nonzero
     /// total above a `by_model`/token breakdown of zero. Closing that requires
@@ -2330,7 +2334,7 @@ mod tests {
     use crate::pricing::ProviderId;
     use crate::usage::TokenUsage;
     use async_trait::async_trait;
-    use platform_api::live_sessions::{SessionWriterLease, SharedSessionWriterLease};
+    use lingxi_core::host::live_sessions::{SessionWriterLease, SharedSessionWriterLease};
 
     #[tokio::test]
     async fn frozen_client_quote_overrides_conditional_catalog_fallback() {
@@ -3187,10 +3191,12 @@ mod tests {
         let scope = prepared.activate();
         assert_eq!(tracker.session_id().await, session_b);
         assert_eq!(scope.tracker.snapshot().await.total_nano_usd, 41);
-        assert!(platform_api::live_sessions::same_writer_lease_authority(
-            &scope.tracker.writer_lease().unwrap(),
-            &lease_b
-        ));
+        assert!(
+            lingxi_core::host::live_sessions::same_writer_lease_authority(
+                &scope.tracker.writer_lease().unwrap(),
+                &lease_b
+            )
+        );
         assert!(scope.tracker.durability_gate().shares_authority(&gate_b));
     }
 
@@ -3410,14 +3416,18 @@ mod tests {
             }))
             .unwrap();
         assert!(current.settle().await.persistence_result().is_ok());
-        assert!(platform_api::live_sessions::same_writer_lease_authority(
-            &a1_tracker.writer_lease().unwrap(),
-            &lease_a
-        ));
-        assert!(platform_api::live_sessions::same_writer_lease_authority(
-            &tracker.writer_lease().unwrap(),
-            &lease_a
-        ));
+        assert!(
+            lingxi_core::host::live_sessions::same_writer_lease_authority(
+                &a1_tracker.writer_lease().unwrap(),
+                &lease_a
+            )
+        );
+        assert!(
+            lingxi_core::host::live_sessions::same_writer_lease_authority(
+                &tracker.writer_lease().unwrap(),
+                &lease_a
+            )
+        );
         assert!(tracker.durability_gate().shares_authority(&gate_a));
     }
 

@@ -16,9 +16,9 @@ pub struct ExecutionContext {
     /// applied only at the SDK JSON boundary.
     pub message_json_string_overrides: std::collections::BTreeMap<String, Vec<u16>>,
     /// Registered admission authority, never forwarded to the provider.
-    pub model_attempt: Option<platform_api::ModelAttemptContext>,
+    pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
     /// Historical identities used by signature recovery; never provider wire.
-    pub thinking_source_message_ids: Vec<::protocol::MessageId>,
+    pub thinking_source_message_ids: Vec<::lingxi_core::types::MessageId>,
     /// Query ownership for retries and lazy streams; never provider wire.
     pub thinking_recovery_scope: Option<crate::thinking_scope::ThinkingRecoveryScope>,
     /// Trusted account identity for provider continuations and hosted resources.

@@ -14,7 +14,7 @@
 //! wiring below that floor would prove nothing — the driver would return
 //! `Skipped` whether or not it was reached).
 
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::{json, Map};
 use session::jsonl::schema::JsonlMessage;

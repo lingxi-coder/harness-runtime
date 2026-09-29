@@ -5,8 +5,8 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::process::ProcessOutput;
-    use protocol::{AgentId, SessionId};
+    use lingxi_core::host::process::ProcessOutput;
+    use lingxi_core::types::{AgentId, SessionId};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, StubProcess};
 
     fn dummy_out() -> ProcessOutput {
@@ -371,12 +371,14 @@ mod tests {
             .expect("ok");
         assert_eq!(out.new_messages.len(), 1, "expanded prompt injected");
         match &out.new_messages[0] {
-            protocol::ConversationMessage::User { content, .. } => match content.first() {
-                Some(protocol::ContentBlock::Text { text }) => {
-                    assert_eq!(text, "Review PR 123 now");
+            lingxi_core::types::ConversationMessage::User { content, .. } => {
+                match content.first() {
+                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                        assert_eq!(text, "Review PR 123 now");
+                    }
+                    other => panic!("expected leading Text block, got {other:?}"),
                 }
-                other => panic!("expected leading Text block, got {other:?}"),
-            },
+            }
             other => panic!("expected injected User message, got {other:?}"),
         }
         // The inline model-facing string is still the launch line — the body is
@@ -410,10 +412,14 @@ mod tests {
             .await
             .expect("ok");
         match &out.new_messages[0] {
-            protocol::ConversationMessage::User { content, .. } => match content.first() {
-                Some(protocol::ContentBlock::Text { text }) => assert_eq!(text, "Hello world"),
-                other => panic!("expected leading Text block, got {other:?}"),
-            },
+            lingxi_core::types::ConversationMessage::User { content, .. } => {
+                match content.first() {
+                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                        assert_eq!(text, "Hello world")
+                    }
+                    other => panic!("expected leading Text block, got {other:?}"),
+                }
+            }
             other => panic!("expected injected User message, got {other:?}"),
         }
     }
@@ -493,10 +499,14 @@ mod tests {
             .await
             .expect("ok");
         match &out.new_messages[0] {
-            protocol::ConversationMessage::User { content, .. } => match content.first() {
-                Some(protocol::ContentBlock::Text { text }) => assert_eq!(text, "USAGE"),
-                other => panic!("expected leading Text block, got {other:?}"),
-            },
+            lingxi_core::types::ConversationMessage::User { content, .. } => {
+                match content.first() {
+                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                        assert_eq!(text, "USAGE")
+                    }
+                    other => panic!("expected leading Text block, got {other:?}"),
+                }
+            }
             other => panic!("expected injected User message, got {other:?}"),
         }
 
@@ -514,12 +524,14 @@ mod tests {
             .await
             .expect("ok");
         match &out.new_messages[0] {
-            protocol::ConversationMessage::User { content, .. } => match content.first() {
-                Some(protocol::ContentBlock::Text { text }) => {
-                    assert_eq!(text, "BUILT[check the deploy]");
+            lingxi_core::types::ConversationMessage::User { content, .. } => {
+                match content.first() {
+                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                        assert_eq!(text, "BUILT[check the deploy]");
+                    }
+                    other => panic!("expected leading Text block, got {other:?}"),
                 }
-                other => panic!("expected leading Text block, got {other:?}"),
-            },
+            }
             other => panic!("expected injected User message, got {other:?}"),
         }
     }
@@ -537,10 +549,14 @@ mod tests {
             .await
             .expect("ok");
         match &out.new_messages[0] {
-            protocol::ConversationMessage::User { content, .. } => match content.first() {
-                Some(protocol::ContentBlock::Text { text }) => assert_eq!(text, "body here"),
-                other => panic!("expected leading Text block, got {other:?}"),
-            },
+            lingxi_core::types::ConversationMessage::User { content, .. } => {
+                match content.first() {
+                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                        assert_eq!(text, "body here")
+                    }
+                    other => panic!("expected leading Text block, got {other:?}"),
+                }
+            }
             other => panic!("expected injected User message, got {other:?}"),
         }
     }
@@ -577,13 +593,15 @@ mod tests {
             .await
             .expect("ok");
         match &out.new_messages[0] {
-            protocol::ConversationMessage::User { content, .. } => match content.first() {
-                Some(protocol::ContentBlock::Text { text }) => {
-                    // format_bash_output trims the stdout -> "hi".
-                    assert_eq!(text, "before hi after");
+            lingxi_core::types::ConversationMessage::User { content, .. } => {
+                match content.first() {
+                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                        // format_bash_output trims the stdout -> "hi".
+                        assert_eq!(text, "before hi after");
+                    }
+                    other => panic!("expected leading Text block, got {other:?}"),
                 }
-                other => panic!("expected leading Text block, got {other:?}"),
-            },
+            }
             other => panic!("expected injected User message, got {other:?}"),
         }
         // The model-facing line is still the launch string (body not leaked).
@@ -617,12 +635,14 @@ mod tests {
                 .await
                 .expect("ok");
             match &out.new_messages[0] {
-                protocol::ConversationMessage::User { content, .. } => match content.first() {
-                    Some(protocol::ContentBlock::Text { text }) => {
-                        assert_eq!(text, "before hi after");
+                lingxi_core::types::ConversationMessage::User { content, .. } => {
+                    match content.first() {
+                        Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                            assert_eq!(text, "before hi after");
+                        }
+                        other => panic!("expected leading Text block, got {other:?}"),
                     }
-                    other => panic!("expected leading Text block, got {other:?}"),
-                },
+                }
                 other => panic!("expected injected User message, got {other:?}"),
             }
         }
@@ -665,13 +685,15 @@ mod tests {
             .await
             .expect("ok");
         match &out.new_messages[0] {
-            protocol::ConversationMessage::User { content, .. } => match content.first() {
-                Some(protocol::ContentBlock::Text { text }) => {
-                    assert_eq!(text, &expected);
-                    assert_eq!(text, "Review PR 123 now (no shell here)");
+            lingxi_core::types::ConversationMessage::User { content, .. } => {
+                match content.first() {
+                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                        assert_eq!(text, &expected);
+                        assert_eq!(text, "Review PR 123 now (no shell here)");
+                    }
+                    other => panic!("expected leading Text block, got {other:?}"),
                 }
-                other => panic!("expected leading Text block, got {other:?}"),
-            },
+            }
             other => panic!("expected injected User message, got {other:?}"),
         }
     }
@@ -698,13 +720,15 @@ mod tests {
             .await
             .expect("ok");
         match &out.new_messages[0] {
-            protocol::ConversationMessage::User { content, .. } => match content.first() {
-                Some(protocol::ContentBlock::Text { text }) => {
-                    // Body is verbatim — the `!`echo hi`` block is NOT expanded.
-                    assert_eq!(text, "before !`echo hi` after");
+            lingxi_core::types::ConversationMessage::User { content, .. } => {
+                match content.first() {
+                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                        // Body is verbatim — the `!`echo hi`` block is NOT expanded.
+                        assert_eq!(text, "before !`echo hi` after");
+                    }
+                    other => panic!("expected leading Text block, got {other:?}"),
                 }
-                other => panic!("expected leading Text block, got {other:?}"),
-            },
+            }
             other => panic!("expected injected User message, got {other:?}"),
         }
     }
@@ -784,10 +808,12 @@ mod tests {
     /// Extract the leading Text block of the single injected user message.
     fn injected_text(out: &ToolCallResult) -> String {
         match &out.new_messages[0] {
-            protocol::ConversationMessage::User { content, .. } => match content.first() {
-                Some(protocol::ContentBlock::Text { text }) => text.clone(),
-                other => panic!("expected leading Text block, got {other:?}"),
-            },
+            lingxi_core::types::ConversationMessage::User { content, .. } => {
+                match content.first() {
+                    Some(lingxi_core::types::ContentBlock::Text { text }) => text.clone(),
+                    other => panic!("expected leading Text block, got {other:?}"),
+                }
+            }
             other => panic!("expected injected User message, got {other:?}"),
         }
     }
@@ -929,11 +955,11 @@ mod tests {
         stdout: String,
     }
     #[async_trait]
-    impl platform_api::process::ProcessRunner for CapturingProcess {
+    impl lingxi_core::host::process::ProcessRunner for CapturingProcess {
         async fn run(
             &self,
-            cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<ProcessOutput, platform_api::process::ProcessError> {
+            cmd: &lingxi_core::host::sandbox::SandboxedCommand,
+        ) -> Result<ProcessOutput, lingxi_core::host::process::ProcessError> {
             if let Some(last) = cmd.inner().args.last() {
                 self.seen.lock().unwrap().push(last.clone());
             }
@@ -946,15 +972,17 @@ mod tests {
         }
         async fn spawn_background(
             &self,
-            _cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessHandle, platform_api::process::ProcessError>
-        {
-            Err(platform_api::process::ProcessError::Unsupported)
+            _cmd: &lingxi_core::host::sandbox::SandboxedCommand,
+        ) -> Result<
+            lingxi_core::host::process::ProcessHandle,
+            lingxi_core::host::process::ProcessError,
+        > {
+            Err(lingxi_core::host::process::ProcessError::Unsupported)
         }
         async fn kill(
             &self,
-            _handle: &platform_api::process::ProcessHandle,
-        ) -> Result<(), platform_api::process::ProcessError> {
+            _handle: &lingxi_core::host::process::ProcessHandle,
+        ) -> Result<(), lingxi_core::host::process::ProcessError> {
             Ok(())
         }
         fn is_available(&self) -> bool {
@@ -1401,13 +1429,13 @@ this turn, the skill is loaded — follow it directly rather than calling again.
 #[cfg(test)]
 mod fork_dispatch_tests {
     use super::*;
-    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-    use platform_api::process::ProcessOutput;
-    use platform_api::subagent_spawn::{
+    use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+    use lingxi_core::host::process::ProcessOutput;
+    use lingxi_core::host::subagent_spawn::{
         AsyncLaunch, SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnError,
         SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
     };
-    use platform_api::task_registry::{
+    use lingxi_core::host::task_registry::{
         TaskCreateInput, TaskListFilter, TaskRecord, TaskRegistryError, TaskRegistryHandle,
         TaskUpdatePatch,
     };
@@ -1448,7 +1476,7 @@ mod fork_dispatch_tests {
         ) -> Result<SubagentResult, SubagentSpawnError> {
             *self.seen.lock().unwrap() = Some(request);
             Ok(SubagentResult::Completed {
-                agent_id: protocol::AgentId::nil(),
+                agent_id: lingxi_core::types::AgentId::nil(),
                 content: self.sync_content.clone().unwrap_or(json!([])),
                 usage: Default::default(),
                 total_tool_use_count: 0,
@@ -1471,7 +1499,7 @@ mod fork_dispatch_tests {
         ) -> Result<AsyncLaunch, SubagentSpawnError> {
             *self.seen.lock().unwrap() = Some(request);
             Ok(AsyncLaunch {
-                agent_id: protocol::AgentId::nil(),
+                agent_id: lingxi_core::types::AgentId::nil(),
                 output_file: "/tmp/a.output".into(),
             })
         }
@@ -1519,7 +1547,7 @@ mod fork_dispatch_tests {
             &self,
             _id: &str,
             _offset: Option<u64>,
-        ) -> Result<platform_api::task_registry::TaskOutputChunk, TaskRegistryError> {
+        ) -> Result<lingxi_core::host::task_registry::TaskOutputChunk, TaskRegistryError> {
             Err(TaskRegistryError::Internal("unused".into()))
         }
         fn get_total_agent_spawns(&self) -> u64 {
@@ -1681,13 +1709,13 @@ mod fork_dispatch_tests {
         calls: std::sync::Mutex<Vec<(Vec<String>, bool)>>,
     }
     #[async_trait::async_trait]
-    impl platform_api::permission_gate::PermissionGate for RecordingDenyGate {
+    impl lingxi_core::host::permission_gate::PermissionGate for RecordingDenyGate {
         async fn check(
             &self,
             _name: &str,
             _input: &serde_json::Value,
-        ) -> platform_api::permission_gate::PermissionDecision {
-            platform_api::permission_gate::PermissionDecision::Allow
+        ) -> lingxi_core::host::permission_gate::PermissionDecision {
+            lingxi_core::host::permission_gate::PermissionDecision::Allow
         }
         fn set_command_input_denies(&self, specs: &[String], union: bool) {
             self.calls
@@ -1794,11 +1822,11 @@ mod fork_dispatch_tests {
         );
         // A different SOURCE is not frozen, even for the same tool.
         policy.deny_rules.insert(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             vec![PermissionRule {
                 value: PermissionRuleValue::from_rule_string("Bash(curl:*)"),
                 behavior: PermissionBehavior::Deny,
-                source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             }],
         );
         ctx.permission_policy = Arc::new(policy);

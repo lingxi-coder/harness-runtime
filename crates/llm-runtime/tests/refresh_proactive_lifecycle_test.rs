@@ -3,11 +3,11 @@
 //! cancellable via `AuthState::shutdown` (Task 6).
 
 use async_trait::async_trait;
+use lingxi_core::host::{BackgroundTaskHandle, Clock, RuntimeError, RuntimeSpawner};
+use lingxi_core::types::Secret;
 use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
 use llm_runtime::auth::anthropic::refresh::{AuthState, RefreshDriver};
-use platform_api::{BackgroundTaskHandle, Clock, RuntimeError, RuntimeSpawner};
-use protocol::Secret;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};

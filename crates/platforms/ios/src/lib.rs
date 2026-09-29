@@ -1,6 +1,6 @@
 //! `platform-ios` (M8-P10) — the iOS platform skeleton.
 //!
-//! [`IosPlatform`] implements the [`platform_api::Platform`] aggregate. The core OS
+//! [`IosPlatform`] implements the [`lingxi_core::host::Platform`] aggregate. The core OS
 //! handles (filesystem/clock/process/sandbox/worktree) are currently reused
 //! from `platform-posix-minimal` — those impls are portable Rust (`std::fs`
 //! over the App-Sandbox root, `std::time`, and `Unsupported` stubs) and valid
@@ -25,7 +25,7 @@
 // line.
 #![allow(missing_docs)]
 
-use platform_api::{
+use lingxi_core::host::{
     AudioService, CalendarProvider, CameraControl, Clipboard, Clock, ContactsProvider,
     DeepLinkOpener, DeviceStatusProvider, FileSystem, HapticService, HttpTransport,
     LocationProvider, MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec,
@@ -194,7 +194,9 @@ fn build_mobile_linux_mounts(
         .map(|host_path| {
             vec![MountSpec {
                 host_path,
-                guest_path: platform_api::mobile_linux::guest_paths::workspace(&guest_workspace_id),
+                guest_path: lingxi_core::host::mobile_linux::guest_paths::workspace(
+                    &guest_workspace_id,
+                ),
                 read_only: false,
                 purpose: MountPurpose::Workspace,
             }]
@@ -268,7 +270,7 @@ impl Platform for IosPlatform {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::{
+    use lingxi_core::host::{
         CameraError, CapturePhotoOpts, CapturedImage, FsError, ShareError, SharePayload,
         ShareResult, UnavailableMobileLinuxRuntime,
     };
@@ -290,8 +292,8 @@ mod tests {
     struct StubAudio;
     #[async_trait]
     impl AudioService for StubAudio {
-        fn capabilities(&self) -> platform_api::AudioCapabilitySnapshot {
-            platform_api::AudioCapabilitySnapshot {
+        fn capabilities(&self) -> lingxi_core::host::AudioCapabilitySnapshot {
+            lingxi_core::host::AudioCapabilitySnapshot {
                 service_epoch: 0,
                 support_revision: 0,
                 supported_operations: Vec::new(),
@@ -301,18 +303,19 @@ mod tests {
         }
         async fn execute(
             &self,
-            _context: platform_api::AudioOperationContext,
-            _operation: platform_api::AudioOperation,
-        ) -> Result<platform_api::AudioOperationSuccess, platform_api::AudioError> {
-            Err(platform_api::AudioError::new(
-                platform_api::AudioErrorKind::Unavailable,
+            _context: lingxi_core::host::AudioOperationContext,
+            _operation: lingxi_core::host::AudioOperation,
+        ) -> Result<lingxi_core::host::AudioOperationSuccess, lingxi_core::host::AudioError>
+        {
+            Err(lingxi_core::host::AudioError::new(
+                lingxi_core::host::AudioErrorKind::Unavailable,
                 "audio service not wired",
             ))
         }
         async fn cancel(
             &self,
-            _identity: platform_api::AudioOperationId,
-        ) -> Result<(), platform_api::AudioError> {
+            _identity: lingxi_core::host::AudioOperationId,
+        ) -> Result<(), lingxi_core::host::AudioError> {
             Ok(())
         }
     }

@@ -33,7 +33,7 @@ use serde_json::{Map, Value};
 use crate::plugin_policy;
 use crate::plugin_policy::MarketplaceSourceIdentity;
 use crate::plugin_settings::{parse_scope_str, scope_label, scope_path, SCOPES};
-use protocol::WritableScope;
+use lingxi_core::types::WritableScope;
 
 /// The resolved-marketplaces registry file under the plugins root.
 fn registry_path(plugins_dir: &Path) -> PathBuf {
@@ -165,11 +165,11 @@ fn write_registry(plugins_dir: &Path, map: &Map<String, Value>) -> Result<(), St
         .map_err(|e| format!("Failed to serialize registry: {e}"))?;
     std::fs::create_dir_all(plugins_dir)
         .map_err(|e| format!("Failed to create {}: {e}", plugins_dir.display()))?;
-    platform_api::rooted_fs::atomic_write(
+    lingxi_core::host::rooted_fs::atomic_write(
         plugins_dir,
         Path::new("known_marketplaces.json"),
         serialized.as_bytes(),
-        platform_api::AtomicWriteOptions::default(),
+        lingxi_core::host::AtomicWriteOptions::default(),
     )
     .map_err(|e| {
         format!(
@@ -1210,7 +1210,7 @@ fn write_marketplace_unlocked(
 ) -> Result<String, String> {
     let settings_path = scope_path(target, home, cwd);
     let previous_settings = std::fs::read(&settings_path).ok();
-    let previous_registry = platform_api::rooted_fs::read_to_string_limited(
+    let previous_registry = lingxi_core::host::rooted_fs::read_to_string_limited(
         plugins_dir,
         Path::new("known_marketplaces.json"),
         16 * 1024 * 1024,
@@ -1259,14 +1259,14 @@ fn write_marketplace_unlocked(
     ))
 }
 
-fn lock_marketplace_state(plugins_dir: &Path) -> Result<platform_api::RootedFileLock, String> {
+fn lock_marketplace_state(plugins_dir: &Path) -> Result<lingxi_core::host::RootedFileLock, String> {
     std::fs::create_dir_all(plugins_dir)
         .map_err(|error| format!("Failed to create plugin state root: {error}"))?;
-    platform_api::rooted_fs::lock_exclusive(
+    lingxi_core::host::rooted_fs::lock_exclusive(
         plugins_dir,
         Path::new(".marketplace.lock"),
-        platform_api::rooted_fs::PRIVATE_DIR_MODE,
-        platform_api::rooted_fs::PRIVATE_FILE_MODE,
+        lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
+        lingxi_core::host::rooted_fs::PRIVATE_FILE_MODE,
     )
     .map_err(|error| format!("Failed to lock marketplace state: {error}"))
 }
@@ -1287,15 +1287,16 @@ fn restore_snapshot(path: &Path, snapshot: Option<&[u8]>) {
 
 fn restore_registry_snapshot(plugins_dir: &Path, snapshot: Option<&[u8]>) {
     let result = match snapshot {
-        Some(bytes) => platform_api::rooted_fs::atomic_write(
+        Some(bytes) => lingxi_core::host::rooted_fs::atomic_write(
             plugins_dir,
             Path::new("known_marketplaces.json"),
             bytes,
-            platform_api::AtomicWriteOptions::default(),
+            lingxi_core::host::AtomicWriteOptions::default(),
         ),
-        None => {
-            platform_api::rooted_fs::remove_file(plugins_dir, Path::new("known_marketplaces.json"))
-        }
+        None => lingxi_core::host::rooted_fs::remove_file(
+            plugins_dir,
+            Path::new("known_marketplaces.json"),
+        ),
     };
     if let Err(error) = result {
         tracing::warn!(%error, "failed to restore marketplace registry");

@@ -8,6 +8,7 @@
 //! `MockApiClient` (extended with `set_rate_limit_full`) + the recording
 //! `MockOutputStream`.
 
+use lingxi_core::host::OutputEvent;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::model::rate_limit::RateLimitInfo;
 use orchestrator::test_support::{
@@ -15,7 +16,6 @@ use orchestrator::test_support::{
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::OutputEvent;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 

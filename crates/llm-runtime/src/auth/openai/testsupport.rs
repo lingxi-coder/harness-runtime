@@ -8,12 +8,12 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream;
-use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
-use platform_api::{
+use lingxi_core::host::{
     BackgroundTaskHandle, Clock, RuntimeError, RuntimeSpawner, SecureStorage, SecureStorageBackend,
     SecureStorageError,
 };
-use protocol::SecureStorageData;
+use lingxi_core::types::SecureStorageData;
+use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -376,23 +376,23 @@ pub fn mem_credential_manager(
 ) -> Arc<secret::CredentialManager> {
     struct CredentialHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for CredentialHttp {
+    impl lingxi_core::host::HttpTransport for CredentialHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
             panic!("CredentialManager network request was not expected in OAuth test")
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
             panic!("CredentialManager stream request was not expected in OAuth test")
         }
     }
     Arc::new(secret::CredentialManager::new(
         storage as Arc<dyn SecureStorage>,
         clock,
-        Arc::new(CredentialHttp) as Arc<dyn platform_api::HttpTransport>,
+        Arc::new(CredentialHttp) as Arc<dyn lingxi_core::host::HttpTransport>,
     ))
 }

@@ -25,7 +25,7 @@
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::{OrchestratorHandle, RecapOutcome};
+use lingxi_core::host::{OrchestratorHandle, RecapOutcome};
 use std::sync::Arc;
 
 /// Shown when `/btw` is invoked with no question. (The TUI dispatcher also

@@ -159,10 +159,10 @@ pub fn resolve_budget(settings_budget: Option<u64>) -> u64 {
 #[must_use]
 pub fn after_user_turn(settings_flag: Option<bool>) -> bool {
     let raw = std::env::var("CLAUDE_CODE_TOTAL_TOKENS_REMINDER_AFTER_USER_TURN").ok();
-    if platform_api::env::is_env_truthy(raw.as_deref()) {
+    if lingxi_core::host::env::is_env_truthy(raw.as_deref()) {
         return true;
     }
-    if platform_api::env::is_env_defined_falsy(raw.as_deref()) {
+    if lingxi_core::host::env::is_env_defined_falsy(raw.as_deref()) {
         return false;
     }
     settings_flag.unwrap_or(true)

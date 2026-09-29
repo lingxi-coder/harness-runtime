@@ -8,9 +8,9 @@
 
 use crate::definition::AgentDefinition;
 use crate::display::AgentDisplay;
+use lingxi_core::host::WorktreeHandle;
+use lingxi_core::types::{AgentId, ConversationMessage, McpConnectionId, SessionId};
 use memory::snapshot::AgentMemorySnapshot;
-use platform_api::WorktreeHandle;
-use protocol::{AgentId, ConversationMessage, McpConnectionId, SessionId};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -26,7 +26,7 @@ pub struct SubagentContext {
     /// Stable identifier for this spawn — every event carries this id.
     pub agent_id: AgentId,
     /// Shared registry used for recipient-scoped notification folding.
-    pub task_registry: Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
+    pub task_registry: Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>,
     /// Parent agent id, when this agent was dispatched by another agent.
     pub parent_agent_id: Option<AgentId>,
     /// DISPLAY NAME of this agent when it is an in-process teammate in a swarm
@@ -34,13 +34,13 @@ pub struct SubagentContext {
     /// For a teammate this is its human name (e.g. `"researcher"`), NOT the
     /// `agent:<uuid>` form of [`Self::agent_id`]. `None` for one-shot subagents
     /// and the main thread. The runner threads this into every dispatched
-    /// tool's [`platform_api::tool_invoker::SubagentInvocationContext`] so the
+    /// tool's [`lingxi_core::host::tool_invoker::SubagentInvocationContext`] so the
     /// swarm-only `TaskUpdate` side-effects (auto-owner / owner-change mailbox
     /// notification) key on the NAME (matching `getAgentStatuses`).
     pub agent_name: Option<String>,
     /// TEAM NAME this teammate belongs to (claude-code
     /// `TeammateContext.teamName`, surfaced via `getTeamName()`). Threaded into
-    /// every dispatched tool's [`platform_api::tool_invoker::SubagentInvocationContext`]
+    /// every dispatched tool's [`lingxi_core::host::tool_invoker::SubagentInvocationContext`]
     /// so `getTaskListId()` resolves the teammate to the leader's on-disk task
     /// directory. `None` for one-shot subagents / standalone sessions.
     pub team_name: Option<String>,
@@ -73,7 +73,7 @@ pub struct SubagentContext {
     /// Per-agent working directory the agent's tools operate in — the worktree
     /// path (`isolation:"worktree"`) or an explicit `cwd` override. Threaded by
     /// the runner into every dispatched tool's
-    /// [`platform_api::tool_invoker::SubagentInvocationContext::cwd`] →
+    /// [`lingxi_core::host::tool_invoker::SubagentInvocationContext::cwd`] →
     /// `ToolUseContext.cwd`, so the agent's filesystem + shell tools run there
     /// instead of the shared session workspace (claude-code's per-agent
     /// `agentWorktree`/cwd). `None` for a non-isolated agent (tools use the shared
@@ -113,7 +113,7 @@ pub struct SubagentContext {
     /// `None` ⇒ nothing is persisted (tests / minimal builds), byte-identical
     /// to the previous behaviour.
     #[allow(clippy::struct_field_names)]
-    pub transcript_fs: Option<Arc<dyn platform_api::FileSystem>>,
+    pub transcript_fs: Option<Arc<dyn lingxi_core::host::FileSystem>>,
     /// A conversation recovered from this agent's persisted transcript, used to
     /// RESTORE it in a later process.
     ///
@@ -146,7 +146,7 @@ pub struct SubagentContext {
     pub display: AgentDisplay,
     /// Provider profile name used to route this subagent's model round-trips to
     /// a specific provider (the dual-LLM candidate's resolved profile). Threaded
-    /// from [`platform_api::subagent_spawn::SubagentSpawnRequest::model_profile`] by the
+    /// from [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::model_profile`] by the
     /// spawner; the runner passes it as the `profile` arg of the api client's
     /// `messages_create_*_in` methods. `None` ⇒ default/unscoped provider
     /// resolution (the legacy single-provider behavior).
@@ -163,16 +163,16 @@ pub struct SubagentContext {
     pub refusal_fallback_chain: Vec<String>,
     pub api_client: Option<Arc<dyn crate::api::SubagentApiClient>>,
     /// Tool dispatch seam inherited from the parent via
-    /// [`platform_api::subagent_spawn::SubagentInheritance`]. `None` means the agent
+    /// [`lingxi_core::host::subagent_spawn::SubagentInheritance`]. `None` means the agent
     /// cannot dispatch tools — a `tool_use` in that state surfaces a failure.
-    pub tool_invoker: Option<Arc<dyn platform_api::ToolInvoker>>,
+    pub tool_invoker: Option<Arc<dyn lingxi_core::host::ToolInvoker>>,
     /// Per-agent passive LSP diagnostics cursor. Each spawned agent receives
     /// an independent source so consuming a builder reminder cannot suppress
     /// the same diagnostic for the main conversation or another agent.
     ///
     /// The runner polls this immediately after a `Write`/`Edit` tool result;
     /// implementations may wait briefly for the matching LSP publication.
-    pub new_diagnostics_source: Option<Arc<dyn platform_api::NewDiagnosticsSource>>,
+    pub new_diagnostics_source: Option<Arc<dyn lingxi_core::host::NewDiagnosticsSource>>,
     /// Wire tool definitions (`{name, description, input_schema}`) advertised to
     /// the model on every round-trip of the multi-turn loop — the streaming
     /// analog of the orchestrator's own `tools` array. Built by the spawner via
@@ -200,22 +200,22 @@ pub struct SubagentContext {
     /// AND `allowed_tools` together, while `general-purpose` keeps the full set.
     pub tool_schemas: Vec<serde_json::Value>,
     /// Structured-output schema (JSON Schema string) forwarded from
-    /// [`platform_api::subagent_spawn::SubagentSpawnRequest::schema`]. When `Some`, the
+    /// [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::schema`]. When `Some`, the
     /// runner injects a forced `StructuredOutput` tool and returns the model's
     /// tool input as the result. `None` ⇒ free-form text output.
     pub schema: Option<String>,
     /// Per-turn `tool_choice` policy applied while [`Self::schema`] is `Some`,
     /// forwarded from
-    /// [`platform_api::subagent_spawn::SubagentSpawnRequest::structured_output_mode`].
+    /// [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::structured_output_mode`].
     /// Ignored when [`Self::schema`] is `None`.
-    pub structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode,
+    pub structured_output_mode: lingxi_core::host::subagent_spawn::StructuredOutputMode,
     /// Maximum opt-in malformed StructuredOutput retries across this run (0..=2).
     pub structured_output_parse_retries: u32,
     /// Inherited budget enforcer (from `SubagentInheritance::budget`). When
     /// `Some`, the multi-turn loop consults it once per turn and stops with a
     /// budget-exhausted terminal when the cumulative cost is over the limit.
     /// `None` disables budget enforcement (legacy/test contexts).
-    pub budget: Option<Arc<dyn platform_api::budget::BudgetEnforcerHandle>>,
+    pub budget: Option<Arc<dyn lingxi_core::host::budget::BudgetEnforcerHandle>>,
     /// Hook executor the runner fires `SubagentStart` through to collect the
     /// hooks' `additionalContexts` and inject them into the child's initial
     /// messages (claude `runAgent.ts:530-555`), and to register/clear the
@@ -232,10 +232,10 @@ pub struct SubagentContext {
     pub strict_plugin_only_hooks: bool,
     /// Skill loader the runner uses to preload the agent definition's
     /// frontmatter `skills:` into the child's initial messages (claude
-    /// `runAgent.ts:577-646`). A leaf-trait seam (see [`platform_api::skill_loader`])
+    /// `runAgent.ts:577-646`). A leaf-trait seam (see [`lingxi_core::host::skill_loader`])
     /// so the agent crate avoids a cycle into the command/skill registry. `None`
     /// ⇒ no skill preloading (byte-identical legacy).
-    pub skill_loader: Option<Arc<dyn platform_api::skill_loader::SkillLoader>>,
+    pub skill_loader: Option<Arc<dyn lingxi_core::host::skill_loader::SkillLoader>>,
     /// Session id stamped on the `HookContext` the runner builds for the
     /// SubagentStart fire + frontmatter-hook registration (the orchestrator's
     /// session). Only consulted when [`Self::hook_executor`] is `Some`.
@@ -245,32 +245,32 @@ pub struct SubagentContext {
     pub hook_cwd: PathBuf,
     /// This agent's recursion depth (claude `agentContext.depth`): the main
     /// thread is 0, a subagent is its spawning parent's depth + 1 (set by the
-    /// spawner from [`platform_api::subagent_spawn::SubagentSpawnRequest::depth`]). The
+    /// spawner from [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::depth`]). The
     /// runner threads it into every dispatched tool's
-    /// [`platform_api::tool_invoker::SubagentInvocationContext::depth`] →
+    /// [`lingxi_core::host::tool_invoker::SubagentInvocationContext::depth`] →
     /// `ToolUseContext.depth`, and the spawner passes it to
     /// [`crate::tool_resolver::AgentToolResolver`] to gate the `Agent` tool at
     /// `depth < CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 1).
     pub depth: u32,
     /// Observer declaration whose companion watches this agent and, when
     /// enabled, propagates to recursive children.
-    pub observer: Option<platform_api::subagent_spawn::ObserverSpec>,
+    pub observer: Option<lingxi_core::host::subagent_spawn::ObserverSpec>,
     /// The child's EFFECTIVE permission-context mode as a WIRE string
     /// (`"plan"`/`"acceptEdits"`/…), computed by [`crate::handle`] from the Agent
     /// tool `mode` clamped against the parent's live mode (claude-code 2.1.207
     /// `wKe`/`ve`) or the agent definition's own permission mode. `Some` ⇒ the
     /// runner threads it into every dispatched tool's
-    /// [`platform_api::tool_invoker::SubagentInvocationContext::mode_override`] so the
+    /// [`lingxi_core::host::tool_invoker::SubagentInvocationContext::mode_override`] so the
     /// child's tool-dispatch permission checks run under this mode — e.g. a
     /// `mode:"plan"` child gates mutations (`Edit`/`Write`/`Bash`) while reads stay
     /// frictionless. `None` ⇒ the child inherits the shared gate's live/boot mode
     /// (byte-identical to pre-2.1.207). The fork path never sets it.
     pub permission_mode_override: Option<String>,
     /// Command-deny rules FROZEN at fork time (claude `freezeCommandDenies`),
-    /// carried from [`platform_api::subagent_spawn::SubagentSpawnRequest`] so the
+    /// carried from [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest`] so the
     /// runner can replay them on every dispatched tool call.
     ///
-    /// See [`platform_api::tool_invoker::SubagentInvocationContext::frozen_command_denies`]
+    /// See [`lingxi_core::host::tool_invoker::SubagentInvocationContext::frozen_command_denies`]
     /// for why they exist and why a frozen deny beats a live allow. Empty for
     /// every non-fork spawn, which keeps the dispatch path unchanged.
     pub frozen_command_denies: Vec<String>,
@@ -281,7 +281,7 @@ pub struct SubagentContext {
     /// Optional COGS query-source label forwarded to the API client.
     pub query_source_label: Option<String>,
     /// Caller correlation id, forwarded from
-    /// [`platform_api::subagent_spawn::SubagentSpawnRequest::correlation_id`]
+    /// [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::correlation_id`]
     /// (Fusion's `{run_id}:p{index}` stamp, `fusion::panel::spawn_request`).
     /// `None` for spawns that don't set one. Threaded onto the transcript's
     /// metadata (via [`crate::transcript::AgentTranscriptWriter`]) so a
@@ -291,7 +291,7 @@ pub struct SubagentContext {
     /// Typed registered run context, retained across rounds and never serialized.
     ///
     /// Deliberately LAST, for the same reason as
-    /// [`platform_api::subagent_spawn::SubagentSpawnRequest::model_attempt`]:
+    /// [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::model_attempt`]:
     /// `main` grows this struct from the front.
-    pub model_attempt: Option<platform_api::ModelAttemptContext>,
+    pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
 }

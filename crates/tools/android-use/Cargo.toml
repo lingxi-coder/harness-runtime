@@ -10,8 +10,8 @@ license.workspace = true
 # backend, injected via UniFFI in P12). Linked only by engine-mobile on Android.
 
 [dependencies]
+core = { path = "../../core" }
 tool-api = { path = "../../tool-api" }
-platform-api = { path = "../../platform-api" }
 permission = { path = "../../permission" }
 async-trait.workspace = true
 serde.workspace = true

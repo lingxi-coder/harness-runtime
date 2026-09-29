@@ -33,7 +33,7 @@
 //! [`SessionMemoryConfig::enabled`] (+ [`SessionMemoryConfig::compact_extracts_memory`]
 //! for this dual-extraction path), exactly as §13.8's `should_use` shows.
 
-use protocol::{ConversationMessage, MessageId};
+use lingxi_core::types::{ConversationMessage, MessageId};
 
 /// Configuration for the session-memory subsystem (spec §6.5 + §13.8).
 ///
@@ -170,7 +170,7 @@ fn extract_section<'a>(haystack: &'a str, open: &str, close: &str) -> Option<&'a
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::MessageId;
+    use lingxi_core::types::MessageId;
 
     fn enabled_config(compact_extracts: bool) -> SessionMemoryConfig {
         SessionMemoryConfig {

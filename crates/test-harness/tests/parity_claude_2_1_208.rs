@@ -1,7 +1,7 @@
 //! Parity regression pins vs Claude Code 2.1.208.
 //!
 //! This file is a historical behavior regression. It deliberately uses a local
-//! literal and must not pin the live `platform_api::CLAUDE_CODE_VERSION`.
+//! literal and must not pin the live `lingxi_core::host::CLAUDE_CODE_VERSION`.
 
 const HISTORICAL_VERSION: &str = "2.1.208";
 

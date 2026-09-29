@@ -19,11 +19,11 @@
 
 use async_trait::async_trait;
 use jsonrpc::Connection;
-use lsp::LspClient;
-use platform_api::{
+use lingxi_core::host::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
 };
-use protocol::McpConnectionId;
+use lingxi_core::types::McpConnectionId;
+use lsp::LspClient;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;

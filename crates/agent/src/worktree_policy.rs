@@ -6,7 +6,7 @@
 //! agents skip worktrees entirely.
 
 use crate::definition::WorktreeRequirement;
-use platform_api::{WorktreeError, WorktreeHandle, WorktreeManager};
+use lingxi_core::host::{WorktreeError, WorktreeHandle, WorktreeManager};
 
 /// Try to create a worktree for the agent identified by `slug`, applying
 /// the policy from `requirement`:

@@ -5,7 +5,7 @@
 //! `Arc<McpClient>`, and [`crate::client::McpClient`] wraps an
 //! `Arc<jsonrpc::Connection>`. The transport privately owns that
 //! `Arc<Connection>` (e.g. inside `PosixMcpTransport`'s connection map), and
-//! [`crate::registry::McpRegistry`] only holds an `Arc<dyn platform_api::McpTransport>`
+//! [`crate::registry::McpRegistry`] only holds an `Arc<dyn lingxi_core::host::McpTransport>`
 //! — it cannot reach jsonrpc through the frozen `traits` boundary.
 //!
 //! This trait lives in the **`mcp` crate** (NOT `traits/`) precisely so it can
@@ -30,5 +30,8 @@ use std::sync::Arc;
 /// transport, or a connection that was already torn down).
 pub trait RawConnectionProvider: Send + Sync {
     /// Clone out the `Arc<jsonrpc::Connection>` for `id`, if one is live.
-    fn connection_for(&self, id: protocol::McpConnectionId) -> Option<Arc<jsonrpc::Connection>>;
+    fn connection_for(
+        &self,
+        id: lingxi_core::types::McpConnectionId,
+    ) -> Option<Arc<jsonrpc::Connection>>;
 }

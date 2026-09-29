@@ -4,7 +4,7 @@ use crate::test_support::{
 };
 use crate::ConversationOrchestrator;
 use crate::OrchestratorConfig;
-use protocol::MessageId;
+use lingxi_core::types::MessageId;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use tool_api::context::ToolUseContext;
@@ -122,11 +122,12 @@ async fn orch(reg: ToolRegistry, assistant_turns: usize) -> ConversationOrchestr
     {
         let mut s = orch.session.lock().await;
         for _ in 0..assistant_turns {
-            s.history.push(protocol::ConversationMessage::Assistant {
-                id: MessageId::new(),
-                content: vec![protocol::ContentBlock::Text { text: "ok".into() }],
-                stop_reason: None,
-            });
+            s.history
+                .push(lingxi_core::types::ConversationMessage::Assistant {
+                    id: MessageId::new(),
+                    content: vec![lingxi_core::types::ContentBlock::Text { text: "ok".into() }],
+                    stop_reason: None,
+                });
         }
     }
     orch
@@ -201,7 +202,7 @@ async fn it_never_fires_alongside_a_todo_reminder_or_with_deferral_off() {
 
 struct ReminderCoordinatorMode(std::sync::atomic::AtomicBool);
 
-impl platform_api::coordinator_mode::CoordinatorModeHandle for ReminderCoordinatorMode {
+impl lingxi_core::host::coordinator_mode::CoordinatorModeHandle for ReminderCoordinatorMode {
     fn is_enabled(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::SeqCst)
     }

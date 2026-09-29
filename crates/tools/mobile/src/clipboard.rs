@@ -7,10 +7,10 @@
 //! actions are `set` (write `text`) and `get` (read the current contents).
 
 use async_trait::async_trait;
+use lingxi_core::host::clipboard::ClipboardError;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::clipboard::ClipboardError;
 use serde_json::{json, Value};
 
 use tool_api::context::ToolUseContext;
@@ -179,7 +179,7 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::clipboard::Clipboard;
+    use lingxi_core::host::clipboard::Clipboard;
     use std::sync::{Arc, Mutex};
 
     /// Fake `Clipboard` that records the last written text and serves a
@@ -208,8 +208,8 @@ mod tests {
         }
     }
 
-    fn empty_output() -> platform_api::process::ProcessOutput {
-        platform_api::process::ProcessOutput {
+    fn empty_output() -> lingxi_core::host::process::ProcessOutput {
+        lingxi_core::host::process::ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,

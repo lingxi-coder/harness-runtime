@@ -14,8 +14,8 @@
 //! share timeout, completion, persistence, and re-wake behavior.
 
 use crate::response::{HookOutcome, HookResult};
-use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
-use protocol::HookId;
+use lingxi_core::host::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use lingxi_core::types::HookId;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;

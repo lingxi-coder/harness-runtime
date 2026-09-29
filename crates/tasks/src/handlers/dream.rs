@@ -47,7 +47,7 @@ use crate::output_manager::TaskOutputManager;
 use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
@@ -507,9 +507,11 @@ impl Task for DreamHandler {
 mod tests {
     use super::*;
     use crate::state::TaskStatus;
-    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use platform_api::{BudgetError, SubagentSpawnError, SubagentUsage};
+    use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use lingxi_core::host::tool_invoker::{
+        SubagentInvocationContext, ToolInvoker, ToolInvokerError,
+    };
+    use lingxi_core::host::{BudgetError, SubagentSpawnError, SubagentUsage};
     use serde_json::json;
     use std::any::Any;
     use std::collections::HashMap as StdHashMap;
@@ -650,7 +652,7 @@ mod tests {
             match canned {
                 Some(CannedResult::Completed(content, total_tokens)) => {
                     Ok(SubagentResult::Completed {
-                        agent_id: protocol::AgentId::new(),
+                        agent_id: lingxi_core::types::AgentId::new(),
                         content,
                         usage: SubagentUsage {
                             total_tokens,
@@ -667,12 +669,12 @@ mod tests {
                     })
                 }
                 Some(CannedResult::Failed(reason)) => Ok(SubagentResult::Failed {
-                    agent_id: protocol::AgentId::new(),
+                    agent_id: lingxi_core::types::AgentId::new(),
                     reason,
-                    usage: platform_api::subagent_spawn::SubagentUsage::default(),
+                    usage: lingxi_core::host::subagent_spawn::SubagentUsage::default(),
                 }),
                 Some(CannedResult::Killed) => Ok(SubagentResult::Killed {
-                    agent_id: protocol::AgentId::new(),
+                    agent_id: lingxi_core::types::AgentId::new(),
                 }),
                 Some(CannedResult::Err(msg)) => Err(SubagentSpawnError::Runtime(msg)),
                 Some(CannedResult::Pending) | None => {

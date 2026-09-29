@@ -31,7 +31,7 @@ fn deadline() -> Instant {
 
 #[tokio::test]
 async fn producer_ticket_waits_for_every_physical_owner_without_holding_capacity() {
-    use platform_api::panel_pool::PanelPoolDrain;
+    use lingxi_core::host::panel_pool::PanelPoolDrain;
     let core = CapacityCore::new(2).unwrap();
     let mut permits = core
         .reserve_group(2, deadline(), CancellationToken::new())

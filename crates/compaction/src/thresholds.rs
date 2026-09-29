@@ -414,7 +414,7 @@ fn model_default_compact_window(model: &str, model_window: u64, enabled: bool) -
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn resolve_auto_compact_env_window(raw: &str) -> Option<u64> {
-    let value = platform_api::env::parse_int_env(raw);
+    let value = lingxi_core::host::env::parse_int_env(raw);
     (!value.is_nan() && value > 0.0).then(|| value.clamp(100_000.0, 1_000_000.0) as u64)
 }
 
@@ -752,16 +752,16 @@ fn percent_left_of(threshold: u64, usage: u64) -> u8 {
     u8::try_from(rounded.clamp(0, 100)).unwrap_or(0)
 }
 
-/// Read an env var and apply `isEnvTruthy` ([`platform_api::env::is_env_truthy`])
+/// Read an env var and apply `isEnvTruthy` ([`lingxi_core::host::env::is_env_truthy`])
 /// semantics (`1` / `true` / `yes` / `on`, case-insensitive, trimmed).
 fn env_truthy(name: &str) -> bool {
-    platform_api::env::is_env_truthy(std::env::var(name).ok().as_deref())
+    lingxi_core::host::env::is_env_truthy(std::env::var(name).ok().as_deref())
 }
 
 /// Shared integer env coercion (`tl`), including scientific/grouped notation.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn parse_positive_u64(raw: &str) -> Option<u64> {
-    let value = platform_api::env::parse_int_env(raw);
+    let value = lingxi_core::host::env::parse_int_env(raw);
     (!value.is_nan() && value > 0.0).then_some(value as u64)
 }
 

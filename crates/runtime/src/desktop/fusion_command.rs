@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use command_api::builtins::{fusion_request_from_slash, parse_fusion_slash};
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
-use platform_api::{
+use lingxi_core::host::{
     FusionCompletionSink, FusionExecutor, FusionPublicationReceipt, FusionResult, FusionRunId,
     FusionStatus, OrchestratorHandle,
 };
@@ -162,7 +162,7 @@ pub(crate) fn fusion_completion_notice_other_session_for_status(
     // `parse_prefixed` accepts both the prefixed display form and a bare uuid,
     // so this stays correct if a caller ever hands over an unprefixed id; a
     // string that is neither falls back to being truncated as-is.
-    let body = protocol::SessionId::parse_prefixed(conversation_id).map_or_else(
+    let body = lingxi_core::types::SessionId::parse_prefixed(conversation_id).map_or_else(
         || conversation_id.to_string(),
         |id| id.as_uuid().to_string(),
     );
@@ -197,7 +197,7 @@ pub(crate) fn fusion_persisted_notice(
             "Fusion run failed — see the recorded error in this conversation.".to_string()
         }
         ("error", false) => {
-            let body = protocol::SessionId::parse_prefixed(conversation_id).map_or_else(
+            let body = lingxi_core::types::SessionId::parse_prefixed(conversation_id).map_or_else(
                 || conversation_id.to_string(),
                 |id| id.as_uuid().to_string(),
             );
@@ -363,7 +363,7 @@ impl DesktopFusionCommandHandler {
     async fn execute(
         &self,
         args: &ParsedSlashCommand,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
     ) -> CommandResult {
         let retry_run_id = match publication_retry_run_id(args) {
             Ok(retry) => retry,
@@ -384,10 +384,10 @@ impl DesktopFusionCommandHandler {
             };
             let receipt = retrier.retry_publication(session_id, run_id.as_str()).await;
             let display = match receipt.status {
-                platform_api::FusionPublicationStatus::Published => {
+                lingxi_core::host::FusionPublicationStatus::Published => {
                     format!("Fusion publication {} is published.", run_id.as_str())
                 }
-                platform_api::FusionPublicationStatus::Queued => format!(
+                lingxi_core::host::FusionPublicationStatus::Queued => format!(
                     "Fusion publication {} is durably queued for retry.",
                     run_id.as_str()
                 ),
@@ -435,8 +435,8 @@ impl DesktopFusionCommandHandler {
             surface.default_partial_ok,
         );
         let preset_word = match preset {
-            platform_api::FusionPreset::Quality => "quality",
-            platform_api::FusionPreset::Fast => "fast",
+            lingxi_core::host::FusionPreset::Quality => "quality",
+            lingxi_core::host::FusionPreset::Fast => "fast",
         };
         let scope_word = if cross {
             "cross-provider"
@@ -531,7 +531,7 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
 mod tests {
     use super::*;
     use command_api::parse_slash_command;
-    use platform_api::{FusionStatus, FusionTiming, FusionUsage};
+    use lingxi_core::host::{FusionStatus, FusionTiming, FusionUsage};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn dummy_result(run_id: &str) -> FusionResult {
@@ -541,7 +541,7 @@ mod tests {
             status: FusionStatus::Unanalyzed,
             analysis_failure: Some("timeout".into()),
             analysis: None,
-            responses: vec![platform_api::PanelMaterial {
+            responses: vec![lingxi_core::host::PanelMaterial {
                 panel_id: "P1".into(),
                 summary: "summary".into(),
                 candidate_answer: "the secret panel answer".into(),
@@ -562,8 +562,8 @@ mod tests {
     impl FusionExecutor for UnusedExecutor {
         fn prepare(
             self: Arc<Self>,
-            _: platform_api::FusionSubmission,
-        ) -> Result<platform_api::PreparedFusionRun, platform_api::FusionError> {
+            _: lingxi_core::host::FusionSubmission,
+        ) -> Result<lingxi_core::host::PreparedFusionRun, lingxi_core::host::FusionError> {
             panic!("the unregistered task must never dispatch a provider request")
         }
     }
@@ -763,7 +763,7 @@ mod tests {
         let duplicate = deferred.publish("c", &result).await;
         assert_eq!(
             first.status,
-            platform_api::FusionPublicationStatus::OutboxFailed
+            lingxi_core::host::FusionPublicationStatus::OutboxFailed
         );
         assert_eq!(duplicate, first);
         assert!(first
@@ -782,7 +782,7 @@ mod tests {
         let published = deferred.publish("c", &result).await;
         assert_eq!(
             published.status,
-            platform_api::FusionPublicationStatus::Published
+            lingxi_core::host::FusionPublicationStatus::Published
         );
         assert_eq!(counter.0.load(Ordering::SeqCst), 1);
     }
@@ -842,7 +842,7 @@ mod tests {
     /// session that is no longer current as long as the durable write landed
     /// — it only touches live history inside its `current == target` branch,
     /// and only errors when nothing was persisted. `MockOrchestratorHandle`
-    /// uses the platform-api TRAIT DEFAULT instead, which fails closed on a
+    /// uses the core::host TRAIT DEFAULT instead, which fails closed on a
     /// session mismatch, so every existing test drives the opposite of
     /// production on exactly the path this finding is about. This double
     /// delegates everything to the mock except that one method, whose
@@ -858,7 +858,7 @@ mod tests {
             &self,
             session_id: &str,
             _text: &str,
-        ) -> Result<(), platform_api::HandleError> {
+        ) -> Result<(), lingxi_core::host::HandleError> {
             self.appended_to
                 .lock()
                 .unwrap()
@@ -868,25 +868,25 @@ mod tests {
         async fn emit_background_system_notice(&self, body: &str) {
             self.inner.emit_background_system_notice(body).await;
         }
-        async fn current_session_id(&self) -> protocol::SessionId {
+        async fn current_session_id(&self) -> lingxi_core::types::SessionId {
             self.inner.current_session_id().await
         }
-        async fn clear_session(&self) -> Result<(), platform_api::HandleError> {
+        async fn clear_session(&self) -> Result<(), lingxi_core::host::HandleError> {
             self.inner.clear_session().await
         }
         async fn force_compact(
             &self,
-        ) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
+        ) -> Result<lingxi_core::host::CompactionSummary, lingxi_core::host::HandleError> {
             self.inner.force_compact().await
         }
-        async fn snapshot_cost(&self) -> platform_api::CostSnapshot {
+        async fn snapshot_cost(&self) -> lingxi_core::host::CostSnapshot {
             self.inner.snapshot_cost().await
         }
         async fn switch_model(
             &self,
             model: &str,
             profile: Option<&str>,
-        ) -> Result<(), platform_api::HandleError> {
+        ) -> Result<(), lingxi_core::host::HandleError> {
             self.inner.switch_model(model, profile).await
         }
         async fn request_exit(&self) {
@@ -897,35 +897,38 @@ mod tests {
         }
         async fn open_memory_editor(
             &self,
-        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+        ) -> Result<lingxi_core::host::MemoryEditorOutcome, lingxi_core::host::HandleError>
+        {
             self.inner.open_memory_editor().await
         }
-        async fn list_mcp_servers(&self) -> Vec<platform_api::McpServerInfo> {
+        async fn list_mcp_servers(&self) -> Vec<lingxi_core::host::McpServerInfo> {
             self.inner.list_mcp_servers().await
         }
-        async fn list_skills(&self) -> Vec<platform_api::SkillInfo> {
+        async fn list_skills(&self) -> Vec<lingxi_core::host::SkillInfo> {
             self.inner.list_skills().await
         }
-        async fn list_hooks(&self) -> Vec<platform_api::HookInfo> {
+        async fn list_hooks(&self) -> Vec<lingxi_core::host::HookInfo> {
             self.inner.list_hooks().await
         }
-        async fn list_agents(&self) -> Vec<platform_api::AgentInfo> {
+        async fn list_agents(&self) -> Vec<lingxi_core::host::AgentInfo> {
             self.inner.list_agents().await
         }
-        async fn run_doctor_checks(&self) -> platform_api::DoctorReport {
+        async fn run_doctor_checks(&self) -> lingxi_core::host::DoctorReport {
             self.inner.run_doctor_checks().await
         }
-        async fn get_status_snapshot(&self) -> platform_api::StatusSnapshot {
+        async fn get_status_snapshot(&self) -> lingxi_core::host::StatusSnapshot {
             self.inner.get_status_snapshot().await
         }
         async fn edit_config_file(
             &self,
-        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+        ) -> Result<lingxi_core::host::MemoryEditorOutcome, lingxi_core::host::HandleError>
+        {
             self.inner.edit_config_file().await
         }
         async fn edit_permissions_file(
             &self,
-        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+        ) -> Result<lingxi_core::host::MemoryEditorOutcome, lingxi_core::host::HandleError>
+        {
             self.inner.edit_permissions_file().await
         }
         async fn list_available_models(&self) -> Vec<String> {
@@ -952,7 +955,7 @@ mod tests {
         let started_in = "sess:11112222-3333-4444-5555-666677778888";
         assert_eq!(
             started_in,
-            protocol::SessionId::parse_prefixed(started_in)
+            lingxi_core::types::SessionId::parse_prefixed(started_in)
                 .expect("fixture must parse as a real SessionId")
                 .to_string(),
             "sanity: the fixture must be exactly what `SessionId::to_string()` produces"
@@ -1022,7 +1025,7 @@ mod tests {
         let receipt = sink.publish(&current, &result).await;
         assert_eq!(
             receipt.status,
-            platform_api::FusionPublicationStatus::Published
+            lingxi_core::host::FusionPublicationStatus::Published
         );
 
         let notices = mock.background_notices();
@@ -1044,7 +1047,7 @@ mod tests {
 
         assert_eq!(
             receipt.status,
-            platform_api::FusionPublicationStatus::StorageFailure
+            lingxi_core::host::FusionPublicationStatus::StorageFailure
         );
         assert!(receipt
             .error
@@ -1082,7 +1085,7 @@ mod tests {
             .await;
         assert_eq!(
             receipt.status,
-            platform_api::FusionPublicationStatus::StorageFailure,
+            lingxi_core::host::FusionPublicationStatus::StorageFailure,
             "an append error must never be reported as Published"
         );
 

@@ -670,7 +670,7 @@ impl DurableTurnStore {
     }
 
     fn read_relative(&self, relative: &Path) -> Result<CachedTurn, DurableTurnStoreError> {
-        let body = platform_api::rooted_fs::read_to_string(&self.root, relative)
+        let body = lingxi_core::host::rooted_fs::read_to_string(&self.root, relative)
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
         let metadata = serde_json::from_str::<StoredTurnMetadata>(&body)
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
@@ -697,11 +697,11 @@ impl DurableTurnStore {
         let mut body = serde_json::to_vec_pretty(&checkpoint.stored_metadata())
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
         body.push(b'\n');
-        platform_api::rooted_fs::atomic_write(
+        lingxi_core::host::rooted_fs::atomic_write(
             &self.root,
             relative,
             &body,
-            platform_api::rooted_fs::AtomicWriteOptions::default(),
+            lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
         )
         .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))
     }
@@ -746,11 +746,11 @@ impl DurableTurnStore {
                 .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
             body.push(b'\n');
         }
-        platform_api::rooted_fs::atomic_write(
+        lingxi_core::host::rooted_fs::atomic_write(
             &self.root,
             &journal_relative_path(relative)?,
             &body,
-            platform_api::rooted_fs::AtomicWriteOptions::default(),
+            lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
         )
         .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))
     }
@@ -783,11 +783,11 @@ impl DurableTurnStore {
             .sum::<usize>();
         let events = parse_journal_events(&body[..valid_len])?;
         if valid_len < body.len() {
-            platform_api::rooted_fs::atomic_write(
+            lingxi_core::host::rooted_fs::atomic_write(
                 &self.root,
                 &journal_relative,
                 &body[..valid_len],
-                platform_api::rooted_fs::AtomicWriteOptions::default(),
+                lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
             )
             .map_err(|error| DurableTurnStoreError::Storage(error.to_string()))?;
         }

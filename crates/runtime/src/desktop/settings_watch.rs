@@ -15,7 +15,7 @@
 //! not reload ordinary user/project/local settings or rebuild the full policy;
 //! those remain composition-root concerns. It watches the relevant `.claude`
 //! (and managed) directories via the in-tree `fs_watch` primitive
-//! ([`platform_api::FileSystem::watch`]), classifies each changed path to a
+//! ([`lingxi_core::host::FileSystem::watch`]), classifies each changed path to a
 //! [`ConfigChangeSource`] layer, and fires
 //! [`ConversationOrchestrator::fire_config_change`] best-effort.
 //!
@@ -44,7 +44,7 @@
 //! [`SettingsWatcher::spawn`] starts one background task per watched directory
 //! and returns a [`SettingsWatcherHandle`]. Dropping the handle aborts every
 //! task (RAII) and the underlying `notify` watcher is released when the
-//! [`platform_api::FileSystem::watch`] stream is dropped — a clean teardown with no
+//! [`lingxi_core::host::FileSystem::watch`] stream is dropped — a clean teardown with no
 //! lingering OS handles. The task is started even when no ConfigChange hook is
 //! configured so the managed safety callback cannot be disabled by hook setup.
 
@@ -54,7 +54,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_core::Stream;
 use hooks::events::ConfigChangeSource;
-use platform_api::{FileEvent, FileSystem, PermissionGate};
+use lingxi_core::host::{FileEvent, FileSystem, PermissionGate};
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
@@ -525,7 +525,7 @@ pub async fn handle_event_with_permission_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::FileEventKind;
+    use lingxi_core::host::FileEventKind;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -615,10 +615,10 @@ mod tests {
             _: &str,
             _: Option<u64>,
             _: Option<u64>,
-        ) -> Result<platform_api::FileContent, platform_api::FsError> {
-            Err(platform_api::FsError::Io("unused".into()))
+        ) -> Result<lingxi_core::host::FileContent, lingxi_core::host::FsError> {
+            Err(lingxi_core::host::FsError::Io("unused".into()))
         }
-        async fn write_file(&self, _: &str, _: &str) -> Result<(), platform_api::FsError> {
+        async fn write_file(&self, _: &str, _: &str) -> Result<(), lingxi_core::host::FsError> {
             Ok(())
         }
         fn is_within_workspace(&self, _: &str) -> bool {
@@ -627,42 +627,44 @@ mod tests {
         async fn watch(
             &self,
             _: &str,
-        ) -> Result<std::pin::Pin<Box<dyn Stream<Item = FileEvent> + Send>>, platform_api::FsError>
-        {
+        ) -> Result<
+            std::pin::Pin<Box<dyn Stream<Item = FileEvent> + Send>>,
+            lingxi_core::host::FsError,
+        > {
             if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                 return Ok(Box::pin(PendingStream(self.first_stream_dropped.clone())));
             }
             self.second_watch.notify_one();
             std::future::pending().await
         }
-        async fn append_file(&self, _: &str, _: &str) -> Result<(), platform_api::FsError> {
+        async fn append_file(&self, _: &str, _: &str) -> Result<(), lingxi_core::host::FsError> {
             Ok(())
         }
-        async fn truncate(&self, _: &str, _: u64) -> Result<(), platform_api::FsError> {
+        async fn truncate(&self, _: &str, _: u64) -> Result<(), lingxi_core::host::FsError> {
             Ok(())
         }
         async fn file_mtime(
             &self,
             _: &str,
-        ) -> Result<std::time::SystemTime, platform_api::FsError> {
+        ) -> Result<std::time::SystemTime, lingxi_core::host::FsError> {
             Ok(std::time::SystemTime::UNIX_EPOCH)
         }
-        async fn file_size(&self, _: &str) -> Result<u64, platform_api::FsError> {
+        async fn file_size(&self, _: &str) -> Result<u64, lingxi_core::host::FsError> {
             Ok(0)
         }
-        async fn delete_file(&self, _: &str) -> Result<(), platform_api::FsError> {
+        async fn delete_file(&self, _: &str) -> Result<(), lingxi_core::host::FsError> {
             Ok(())
         }
-        async fn symlink(&self, _: &str, _: &str) -> Result<(), platform_api::FsError> {
+        async fn symlink(&self, _: &str, _: &str) -> Result<(), lingxi_core::host::FsError> {
             Ok(())
         }
         async fn flock_exclusive(
             &self,
             _: &str,
-        ) -> Result<Box<dyn platform_api::FlockGuard>, platform_api::FsError> {
-            Err(platform_api::FsError::Io("unused".into()))
+        ) -> Result<Box<dyn lingxi_core::host::FlockGuard>, lingxi_core::host::FsError> {
+            Err(lingxi_core::host::FsError::Io("unused".into()))
         }
-        async fn fsync(&self, _: &str) -> Result<(), platform_api::FsError> {
+        async fn fsync(&self, _: &str) -> Result<(), lingxi_core::host::FsError> {
             Ok(())
         }
     }

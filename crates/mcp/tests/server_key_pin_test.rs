@@ -21,8 +21,8 @@
 //! loudly, here, instead of silently in production key-value storage.
 #![allow(clippy::unwrap_used)]
 
+use lingxi_core::host::{McpHeaders, McpTransportSpec};
 use mcp::oauth;
-use platform_api::{McpHeaders, McpTransportSpec};
 
 #[test]
 fn server_key_is_frozen_because_it_keys_every_stored_oauth_token() {

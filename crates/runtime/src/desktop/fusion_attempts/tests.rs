@@ -5,7 +5,7 @@ use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct DurableLease(String);
-impl platform_api::live_sessions::SessionWriterLease for DurableLease {
+impl lingxi_core::host::live_sessions::SessionWriterLease for DurableLease {
     fn session_id(&self) -> &str {
         &self.0
     }
@@ -15,7 +15,7 @@ struct DurableQueue(tokio::sync::mpsc::Sender<cost::AttemptPersistRequest>);
 impl cost::CostPersistence for DurableQueue {
     async fn acquire_permit(
         &self,
-        _: protocol::SessionId,
+        _: lingxi_core::types::SessionId,
     ) -> Result<cost::CostPersistPermit, cost::CostPersistError> {
         Err(cost::CostPersistError::Rejected(
             "ordinary write not expected".into(),
@@ -23,7 +23,7 @@ impl cost::CostPersistence for DurableQueue {
     }
     async fn acquire_attempt_permit(
         &self,
-        _: protocol::SessionId,
+        _: lingxi_core::types::SessionId,
     ) -> Result<cost::AttemptPersistPermit, cost::CostPersistError> {
         let permit = self.0.clone().reserve_owned().await.unwrap();
         Ok(cost::AttemptPersistPermit::new(move |request| {
@@ -166,7 +166,7 @@ impl DurableHarness {
                     }],
                     pricing: llm_runtime::PricingConfig {
                         billing_mode: if dynamic {
-                            platform_api::ModelBillingMode::PerToken
+                            lingxi_core::host::ModelBillingMode::PerToken
                         } else {
                             Default::default()
                         },
@@ -196,7 +196,7 @@ impl DurableHarness {
             None,
             None,
         ));
-        let session = protocol::SessionId::new();
+        let session = lingxi_core::types::SessionId::new();
         let (legacy, _) = tokio::sync::mpsc::channel(1);
         let (tx, queue) = tokio::sync::mpsc::channel(4);
         let initial = cost::CostState {
@@ -228,7 +228,11 @@ impl DurableHarness {
         ));
         let outputs = budget.workflow_output_scopes();
         let scope = outputs
-            .begin_turn(session, protocol::MessageId::new(), Some(output_limit))
+            .begin_turn(
+                session,
+                lingxi_core::types::MessageId::new(),
+                Some(output_limit),
+            )
             .await
             .unwrap();
         let mut authority = authority().await;
@@ -236,17 +240,17 @@ impl DurableHarness {
         inner.output = scope;
         inner.tracker = tracker.scoped(session);
         inner.budget = budget.clone();
-        inner.captured.control = platform_api::FusionRunControl::new_with_billing_mode(
-            platform_api::FusionRunIdentity::new(
-                platform_api::FusionRunId::generated(),
+        inner.captured.control = lingxi_core::host::FusionRunControl::new_with_billing_mode(
+            lingxi_core::host::FusionRunIdentity::new(
+                lingxi_core::host::FusionRunId::generated(),
                 Some(session),
-                platform_api::FusionOrigin::Slash,
+                lingxi_core::host::FusionOrigin::Slash,
                 None,
             ),
             60_000,
             tokio_util::sync::CancellationToken::new(),
             Default::default(),
-            platform_api::ModelAttemptBillingMode::MeteredAttempts,
+            lingxi_core::host::ModelAttemptBillingMode::MeteredAttempts,
         );
         assert!(inner
             .captured
@@ -690,7 +694,7 @@ llm_runtime::impl_fixture_transport!(NoTransport);
 fn tracker_and_budget() -> (Arc<cost::CostTracker>, Arc<cost::BudgetEnforcer>) {
     let (tx, _) = tokio::sync::mpsc::channel(1);
     let tracker = Arc::new(cost::CostTracker::new(
-        protocol::SessionId::new(),
+        lingxi_core::types::SessionId::new(),
         Arc::new(cost::PricingCatalog::empty()),
         tx,
     ));
@@ -921,7 +925,7 @@ fn desktop_attempt_explicit_reasoning_zero_and_fast_override_stay_pinned() {
         "a different live override must not silently reuse stale catalog rates"
     );
     let subscription = llm_runtime::PricingConfig {
-        billing_mode: platform_api::ModelBillingMode::Subscription,
+        billing_mode: lingxi_core::host::ModelBillingMode::Subscription,
         ..Default::default()
     };
     assert!(pricing::captured_prices(
@@ -951,13 +955,13 @@ async fn desktop_attempt_wait_slot_survives_dropped_waiter() {
 
 struct InertTools;
 #[async_trait]
-impl platform_api::ToolInvoker for InertTools {
+impl lingxi_core::host::ToolInvoker for InertTools {
     async fn invoke(
         &self,
         _: &str,
         _: serde_json::Value,
-        _: platform_api::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         Ok(serde_json::Value::Null)
     }
     fn as_any(&self) -> &dyn std::any::Any {
@@ -970,16 +974,16 @@ impl fusion::FusionAttemptLivePolicy for Live {
         &self,
         _: ModelAttemptStage,
         _: Option<u32>,
-    ) -> Result<(), platform_api::FusionError> {
+    ) -> Result<(), lingxi_core::host::FusionError> {
         Ok(())
     }
 }
-struct Output(protocol::SessionId, protocol::MessageId);
-impl platform_api::WorkflowOutputAccount for Output {
-    fn session_id(&self) -> protocol::SessionId {
+struct Output(lingxi_core::types::SessionId, lingxi_core::types::MessageId);
+impl lingxi_core::host::WorkflowOutputAccount for Output {
+    fn session_id(&self) -> lingxi_core::types::SessionId {
         self.0
     }
-    fn generation_id(&self) -> protocol::MessageId {
+    fn generation_id(&self) -> lingxi_core::types::MessageId {
         self.1
     }
     fn spent(&self) -> u64 {
@@ -987,9 +991,9 @@ impl platform_api::WorkflowOutputAccount for Output {
     }
     fn record_legacy(
         &self,
-        _: platform_api::WorkflowOutputEventId,
+        _: lingxi_core::host::WorkflowOutputEventId,
         _: u64,
-    ) -> Result<(), platform_api::BudgetError> {
+    ) -> Result<(), lingxi_core::host::BudgetError> {
         Ok(())
     }
 }
@@ -997,36 +1001,39 @@ impl platform_api::WorkflowOutputAccount for Output {
 async fn authority() -> Arc<RunAuthority> {
     let (tracker, budget) = tracker_and_budget();
     let session = tracker.session_id().await;
-    let output = WorkflowOutputScope::new(Arc::new(Output(session, protocol::MessageId::new())));
-    let control = platform_api::FusionRunControl::new_with_billing_mode(
-        platform_api::FusionRunIdentity::new(
-            platform_api::FusionRunId::generated(),
+    let output = WorkflowOutputScope::new(Arc::new(Output(
+        session,
+        lingxi_core::types::MessageId::new(),
+    )));
+    let control = lingxi_core::host::FusionRunControl::new_with_billing_mode(
+        lingxi_core::host::FusionRunIdentity::new(
+            lingxi_core::host::FusionRunId::generated(),
             Some(session),
-            platform_api::FusionOrigin::Slash,
+            lingxi_core::host::FusionOrigin::Slash,
             None,
         ),
         1_000,
         tokio_util::sync::CancellationToken::new(),
         Default::default(),
-        platform_api::ModelAttemptBillingMode::MeteredAttempts,
+        lingxi_core::host::ModelAttemptBillingMode::MeteredAttempts,
     );
     let config = fusion::FusionRuntimeConfig::defaults();
     let catalog = fusion::CatalogSnapshot::capture(&Vec::<fusion::CatalogModel>::new()).unwrap();
     let prices = fusion::CapturedPriceBook::capture(&(), Vec::<(String, String)>::new());
     let captured = fusion::FusionAttemptRegistration {
         control,
-        inherit: platform_api::FusionInheritance::new(
-            platform_api::SubagentInheritance {
+        inherit: lingxi_core::host::FusionInheritance::new(
+            lingxi_core::host::SubagentInheritance {
                 tool_invoker: Arc::new(InertTools),
                 budget: budget.clone(),
             },
             tokio_util::sync::CancellationToken::new(),
         ),
-        request: platform_api::FusionRequest {
-            schema_version: platform_api::FUSION_SCHEMA_VERSION,
-            origin: platform_api::FusionOrigin::Slash,
+        request: lingxi_core::host::FusionRequest {
+            schema_version: lingxi_core::host::FUSION_SCHEMA_VERSION,
+            origin: lingxi_core::host::FusionOrigin::Slash,
             prompt: "test".into(),
-            preset: platform_api::FusionPreset::Quality,
+            preset: lingxi_core::host::FusionPreset::Quality,
             models: None,
             dimensions: vec!["correctness".into()],
             partial_ok: true,

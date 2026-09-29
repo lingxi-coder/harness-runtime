@@ -8,9 +8,9 @@
 
 use crate::model_resolver::{ModelLimits, ResolvedPanel};
 use crate::panel::PanelInternal;
-use platform_api::subagent_output_guard::sanitize_blocks;
-use platform_api::{FusionRequest, PanelReport, RiskSeverity};
-use protocol::{ConversationMessage, MessageId};
+use lingxi_core::host::subagent_output_guard::sanitize_blocks;
+use lingxi_core::host::{FusionRequest, PanelReport, RiskSeverity};
+use lingxi_core::types::{ConversationMessage, MessageId};
 use serde_json::{json, Value};
 use sidequery::{
     CanonicalSideQueryRequest, QuerySource, SideQueryClient, SideQueryError,
@@ -673,7 +673,7 @@ fn truncate_bytes(value: &str, cap: usize) -> String {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::{FusionOrigin, FusionPreset, PanelRunStatus};
+    use lingxi_core::host::{FusionOrigin, FusionPreset, PanelRunStatus};
 
     struct DtoEstimator;
 
@@ -717,7 +717,7 @@ mod tests {
                 claims: vec![],
                 evidence: vec![],
                 assumptions: vec![],
-                risks: vec![platform_api::PanelRisk {
+                risks: vec![lingxi_core::host::PanelRisk {
                     severity: RiskSeverity::Critical,
                     description: "do not ignore".into(),
                 }],
@@ -746,7 +746,7 @@ mod tests {
         content
             .iter()
             .find_map(|block| match block {
-                protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
                 _ => None,
             })
             .expect("user text")
@@ -875,14 +875,14 @@ mod tests {
         let mut four_groups = panel("P2", 8_000);
         let report = four_groups.report.as_mut().unwrap();
         report.summary = "summary".repeat(1_000);
-        report.claims.push(platform_api::PanelClaim {
+        report.claims.push(lingxi_core::host::PanelClaim {
             statement: "claim".repeat(1_000),
             evidence_refs: vec!["e1".into()],
             confidence: 80,
         });
-        report.evidence.push(platform_api::PanelEvidence {
+        report.evidence.push(lingxi_core::host::PanelEvidence {
             id: "e1".into(),
-            kind: platform_api::EvidenceKind::File,
+            kind: lingxi_core::host::EvidenceKind::File,
             locator: "src/lib.rs".into(),
             excerpt: Some("evidence".repeat(1_000)),
         });

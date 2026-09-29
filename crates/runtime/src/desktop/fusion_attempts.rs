@@ -6,11 +6,11 @@ mod tests;
 
 use async_trait::async_trait;
 use futures::FutureExt;
-use llm_runtime::{LlmError, ModelAttemptUsageCompleteness};
-use platform_api::{
+use lingxi_core::host::{
     ModelAttemptContext, ModelAttemptRegistrationId, ModelAttemptRun, ModelAttemptStage,
     WorkflowOutputScope, WorkflowOutputScopes,
 };
+use llm_runtime::{LlmError, ModelAttemptUsageCompleteness};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
@@ -106,8 +106,8 @@ fn unavailable(error: impl ToString) -> LlmError {
         message: error.to_string(),
     }
 }
-fn fusion_error(error: impl ToString) -> platform_api::FusionError {
-    platform_api::FusionError::InvalidConfiguration(error.to_string())
+fn fusion_error(error: impl ToString) -> lingxi_core::host::FusionError {
+    lingxi_core::host::FusionError::InvalidConfiguration(error.to_string())
 }
 
 impl DesktopFusionAttempts {
@@ -134,7 +134,7 @@ impl fusion::FusionAttemptRegistrar for DesktopFusionAttempts {
     fn register(
         &self,
         captured: fusion::FusionAttemptRegistration,
-    ) -> Result<fusion::RegisteredFusionAttempts, platform_api::FusionError> {
+    ) -> Result<fusion::RegisteredFusionAttempts, lingxi_core::host::FusionError> {
         self.register_routes(captured, true)
     }
 }
@@ -144,13 +144,14 @@ impl DesktopFusionAttempts {
         &self,
         captured: fusion::FusionAttemptRegistration,
         include_judges: bool,
-    ) -> Result<fusion::RegisteredFusionAttempts, platform_api::FusionError> {
+    ) -> Result<fusion::RegisteredFusionAttempts, lingxi_core::host::FusionError> {
         let session = captured
             .control
             .identity()
             .session_id
             .ok_or_else(|| fusion_error("attempt registration requires canonical session"))?;
-        if captured.control.billing_mode() != platform_api::ModelAttemptBillingMode::MeteredAttempts
+        if captured.control.billing_mode()
+            != lingxi_core::host::ModelAttemptBillingMode::MeteredAttempts
         {
             return Err(fusion_error(
                 "attempt registration requires metered control",
@@ -190,7 +191,7 @@ impl DesktopFusionAttempts {
                     config.panel_max_output_tokens_per_turn,
                 ))
             })
-            .collect::<Result<Vec<_>, platform_api::FusionError>>()?;
+            .collect::<Result<Vec<_>, lingxi_core::host::FusionError>>()?;
         if include_judges {
             selected.push((
                 (ModelAttemptStage::Analyst, None),
@@ -200,7 +201,7 @@ impl DesktopFusionAttempts {
         }
         let mut routes = HashMap::new();
         for (key, panel, configured_output) in selected {
-            let pinned = (|| -> Result<PinnedRoute, platform_api::FusionError> {
+            let pinned = (|| -> Result<PinnedRoute, lingxi_core::host::FusionError> {
                 let resolved = service
                     .resolve_media_route(&panel.model, Some(&panel.profile))
                     .map_err(fusion_error)?
@@ -297,7 +298,7 @@ impl fusion::FusionPanelAttemptFence for RunAuthority {
         self.changed.notify_waiters();
     }
 
-    async fn wait(&self) -> Result<(), platform_api::FusionError> {
+    async fn wait(&self) -> Result<(), lingxi_core::host::FusionError> {
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
@@ -308,13 +309,13 @@ impl fusion::FusionPanelAttemptFence for RunAuthority {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if !state.panel_closed {
-                    return Err(platform_api::FusionError::InvalidConfiguration(
+                    return Err(lingxi_core::host::FusionError::InvalidConfiguration(
                         "panel fence is not closed".into(),
                     ));
                 }
                 if state.panel_pending == 0 {
                     return state.error.as_ref().map_or(Ok(()), |reason| {
-                        Err(platform_api::FusionError::InvalidConfiguration(
+                        Err(lingxi_core::host::FusionError::InvalidConfiguration(
                             reason.clone(),
                         ))
                     });
@@ -470,7 +471,7 @@ impl llm_runtime::ModelAttemptHooks for DesktopFusionAttempts {
         let (pricing, usage_contract, input, output, money) =
             pricing::quote(route, prepared).map_err(unavailable)?;
         let profile = route.resolved.profile_name.clone();
-        let id = protocol::MessageId::new().to_string();
+        let id = lingxi_core::types::MessageId::new().to_string();
         let intent = {
             let mut state = authority
                 .state
@@ -881,7 +882,7 @@ impl RunAuthority {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut usage = platform_api::FusionUsage::default();
+        let mut usage = lingxi_core::host::FusionUsage::default();
         let mut possible = Vec::new();
         let mut confirmed = Vec::new();
         let mut overflow = false;

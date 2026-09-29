@@ -2,9 +2,9 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
-use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
-use platform_api::{BudgetError, SubagentUsage};
+use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
+use lingxi_core::host::{BudgetError, SubagentUsage};
 use serde_json::json;
 use std::any::Any;
 use std::collections::HashMap as StdHashMap;
@@ -54,7 +54,7 @@ fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
         None,
         None,
         &Ok(SubagentResult::Completed {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             content: json!("answer"),
             usage: SubagentUsage::default(),
             total_tool_use_count: 0,
@@ -72,7 +72,7 @@ fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
         None,
         None,
         &Ok(SubagentResult::Failed {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             reason: "boom".into(),
             usage: SubagentUsage::default(),
         }),
@@ -82,7 +82,7 @@ fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
         None,
         None,
         &Ok(SubagentResult::Failed {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             reason: "skipped by user".into(),
             usage: SubagentUsage::default(),
         }),
@@ -166,7 +166,7 @@ struct EchoSpawner {
 #[derive(Default)]
 struct WorkflowForwardingProbeSpawner {
     plain_spawns: std::sync::atomic::AtomicUsize,
-    watchdogs: StdMutex<Vec<platform_api::subagent_spawn::WorkflowQueryWatchdog>>,
+    watchdogs: StdMutex<Vec<lingxi_core::host::subagent_spawn::WorkflowQueryWatchdog>>,
     observer_presence: StdMutex<Vec<bool>>,
 }
 
@@ -206,7 +206,7 @@ impl BlockingWorkflowObserverSpawner {
     }
 }
 
-fn completed_probe_result(agent_id: protocol::AgentId) -> SubagentResult {
+fn completed_probe_result(agent_id: lingxi_core::types::AgentId) -> SubagentResult {
     SubagentResult::Completed {
         agent_id,
         content: Value::String("done".to_string()),
@@ -231,7 +231,7 @@ impl SubagentSpawner for WorkflowForwardingProbeSpawner {
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.plain_spawns
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(completed_probe_result(protocol::AgentId::new()))
+        Ok(completed_probe_result(lingxi_core::types::AgentId::new()))
     }
 
     async fn spawn_workflow_with_observer(
@@ -239,19 +239,19 @@ impl SubagentSpawner for WorkflowForwardingProbeSpawner {
         request: SubagentSpawnRequest,
         _inherit: SubagentInheritance,
         _progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
-        watchdog: platform_api::subagent_spawn::WorkflowQueryWatchdog,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: lingxi_core::host::subagent_spawn::WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.watchdogs.lock().unwrap().push(watchdog);
         self.observer_presence
             .lock()
             .unwrap()
             .push(observer.is_some());
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         if let Some(observer) = observer {
             observer
                 .on_event(
-                    platform_api::subagent_spawn::SubagentObservation::Allocated {
+                    lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
                         agent_id,
                         agent_type: request.subagent_type,
                         name: request.name,
@@ -270,8 +270,8 @@ impl SubagentSpawner for WorkflowForwardingProbeSpawner {
 
 #[async_trait]
 impl SubagentSpawner for BlockingWorkflowObserverSpawner {
-    async fn agent_listing(&self) -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
-        vec![platform_api::subagent_spawn::SubagentListingEntry {
+    async fn agent_listing(&self) -> Vec<lingxi_core::host::subagent_spawn::SubagentListingEntry> {
+        vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
             agent_type: DEFAULT_WORKFLOW_SUBAGENT.to_string(),
             when_to_use: String::new(),
             when_to_use_lean: None,
@@ -294,7 +294,7 @@ impl SubagentSpawner for BlockingWorkflowObserverSpawner {
             let _ = tx.send(request.prompt);
         }
         self.wait_until_released().await;
-        Ok(completed_probe_result(protocol::AgentId::new()))
+        Ok(completed_probe_result(lingxi_core::types::AgentId::new()))
     }
 
     async fn spawn_workflow_with_observer(
@@ -302,8 +302,8 @@ impl SubagentSpawner for BlockingWorkflowObserverSpawner {
         request: SubagentSpawnRequest,
         _inherit: SubagentInheritance,
         _progress: Option<tokio::sync::mpsc::Sender<String>>,
-        _observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
-        _watchdog: platform_api::subagent_spawn::WorkflowQueryWatchdog,
+        _observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
+        _watchdog: lingxi_core::host::subagent_spawn::WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.started
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -315,7 +315,7 @@ impl SubagentSpawner for BlockingWorkflowObserverSpawner {
             let _ = tx.send(request.prompt);
         }
         self.wait_until_released().await;
-        Ok(completed_probe_result(protocol::AgentId::new()))
+        Ok(completed_probe_result(lingxi_core::types::AgentId::new()))
     }
 }
 
@@ -325,11 +325,11 @@ struct AllocationCountingObserver {
 }
 
 #[async_trait]
-impl platform_api::subagent_spawn::SubagentSpawnObserver for AllocationCountingObserver {
-    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
+impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for AllocationCountingObserver {
+    async fn on_event(&self, event: lingxi_core::host::subagent_spawn::SubagentObservation) {
         if matches!(
             event,
-            platform_api::subagent_spawn::SubagentObservation::Allocated { .. }
+            lingxi_core::host::subagent_spawn::SubagentObservation::Allocated { .. }
         ) {
             self.allocations
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -339,7 +339,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for AllocationCountingO
 
 #[async_trait]
 impl SubagentSpawner for EchoSpawner {
-    async fn agent_listing(&self) -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
+    async fn agent_listing(&self) -> Vec<lingxi_core::host::subagent_spawn::SubagentListingEntry> {
         [
             "general-purpose",
             "Explore",
@@ -347,12 +347,14 @@ impl SubagentSpawner for EchoSpawner {
             "workflow-subagent",
         ]
         .iter()
-        .map(|t| platform_api::subagent_spawn::SubagentListingEntry {
-            agent_type: (*t).to_string(),
-            when_to_use: String::new(),
-            when_to_use_lean: None,
-            tools_description: String::new(),
-        })
+        .map(
+            |t| lingxi_core::host::subagent_spawn::SubagentListingEntry {
+                agent_type: (*t).to_string(),
+                when_to_use: String::new(),
+                when_to_use_lean: None,
+                tools_description: String::new(),
+            },
+        )
         .collect()
     }
     async fn spawn(
@@ -368,13 +370,13 @@ impl SubagentSpawner for EchoSpawner {
         self.seen_reqs.lock().unwrap().push(request.clone());
         if self.fail {
             return Ok(SubagentResult::Failed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 reason: "boom".into(),
                 usage: SubagentUsage::default(),
             });
         }
         Ok(SubagentResult::Completed {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             content: Value::String(format!("echo:{}", request.prompt)),
             usage: SubagentUsage {
                 output_tokens: 100,
@@ -394,25 +396,28 @@ impl SubagentSpawner for EchoSpawner {
 
 #[derive(Default)]
 struct RecordingWorktreeManager {
-    created: StdMutex<Vec<(String, platform_api::worktree::WorktreeHandle)>>,
-    removed: StdMutex<Vec<platform_api::worktree::WorktreeHandle>>,
+    created: StdMutex<Vec<(String, lingxi_core::host::worktree::WorktreeHandle)>>,
+    removed: StdMutex<Vec<lingxi_core::host::worktree::WorktreeHandle>>,
 }
 
 impl RecordingWorktreeManager {
-    fn created(&self) -> Vec<(String, platform_api::worktree::WorktreeHandle)> {
+    fn created(&self) -> Vec<(String, lingxi_core::host::worktree::WorktreeHandle)> {
         self.created.lock().unwrap().clone()
     }
 }
 
 #[async_trait]
-impl platform_api::worktree::WorktreeManager for RecordingWorktreeManager {
+impl lingxi_core::host::worktree::WorktreeManager for RecordingWorktreeManager {
     async fn create_worktree(
         &self,
         slug: &str,
         _base_branch: Option<&str>,
         _copy_includes: &[PathBuf],
-    ) -> Result<platform_api::worktree::WorktreeHandle, platform_api::worktree::WorktreeError> {
-        let handle = platform_api::worktree::WorktreeHandle {
+    ) -> Result<
+        lingxi_core::host::worktree::WorktreeHandle,
+        lingxi_core::host::worktree::WorktreeError,
+    > {
+        let handle = lingxi_core::host::worktree::WorktreeHandle {
             path: PathBuf::from(format!("/tmp/mock-worktrees/{slug}")),
             branch_name: format!("worktree-{slug}"),
             base_commit: Some("base".into()),
@@ -426,23 +431,25 @@ impl platform_api::worktree::WorktreeManager for RecordingWorktreeManager {
 
     async fn remove_worktree(
         &self,
-        handle: &platform_api::worktree::WorktreeHandle,
-    ) -> Result<(), platform_api::worktree::WorktreeError> {
+        handle: &lingxi_core::host::worktree::WorktreeHandle,
+    ) -> Result<(), lingxi_core::host::worktree::WorktreeError> {
         self.removed.lock().unwrap().push(handle.clone());
         Ok(())
     }
 
     async fn list_worktrees(
         &self,
-    ) -> Result<Vec<platform_api::worktree::WorktreeInfo>, platform_api::worktree::WorktreeError>
-    {
+    ) -> Result<
+        Vec<lingxi_core::host::worktree::WorktreeInfo>,
+        lingxi_core::host::worktree::WorktreeError,
+    > {
         Ok(Vec::new())
     }
 
     async fn cleanup_stale(
         &self,
         _max_age: std::time::Duration,
-    ) -> Result<Vec<PathBuf>, platform_api::worktree::WorktreeError> {
+    ) -> Result<Vec<PathBuf>, lingxi_core::host::worktree::WorktreeError> {
         Ok(Vec::new())
     }
 
@@ -482,7 +489,7 @@ impl BudgetEnforcerHandle for MockBudget {
 }
 
 struct RecordingBudget {
-    scoped: Arc<StdMutex<Vec<protocol::SessionId>>>,
+    scoped: Arc<StdMutex<Vec<lingxi_core::types::SessionId>>>,
     scoped_total: u64,
 }
 
@@ -498,7 +505,7 @@ impl BudgetEnforcerHandle for RecordingBudget {
 
     fn scoped_for_session(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
     ) -> Option<Arc<dyn BudgetEnforcerHandle>> {
         self.scoped.lock().unwrap().push(session_id);
         Some(Arc::new(SnapshotBudget(self.scoped_total)))
@@ -612,7 +619,7 @@ impl FileSystem for InMemoryFs {
 #[derive(Default)]
 struct RecordingSink {
     statuses: StdMutex<Vec<(String, TaskStatus)>>,
-    workflow_outcome: StdMutex<Option<platform_api::task_registry::WorkflowTerminalOutcome>>,
+    workflow_outcome: StdMutex<Option<lingxi_core::host::task_registry::WorkflowTerminalOutcome>>,
     calls: StdMutex<Vec<&'static str>>,
 }
 #[async_trait]
@@ -630,7 +637,7 @@ impl TaskStatusSink for RecordingSink {
     async fn set_workflow_outcome(
         &self,
         _task_id: &str,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
     ) {
         self.calls.lock().unwrap().push("outcome");
         *self.workflow_outcome.lock().unwrap() = Some(outcome);
@@ -691,7 +698,7 @@ impl TaskStatusSink for BlockingWorkflowTerminalSink {
     async fn set_workflow_outcome(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
     ) {
         self.inner.set_workflow_outcome(task_id, outcome).await;
     }
@@ -699,7 +706,7 @@ impl TaskStatusSink for BlockingWorkflowTerminalSink {
     async fn finish_workflow_terminal(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
         status: TaskStatus,
     ) {
         self.terminalizing
@@ -769,8 +776,8 @@ struct TranscriptOverrideSpawner {
 
 #[async_trait]
 impl SubagentSpawner for TranscriptOverrideSpawner {
-    async fn agent_listing(&self) -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
-        vec![platform_api::subagent_spawn::SubagentListingEntry {
+    async fn agent_listing(&self) -> Vec<lingxi_core::host::subagent_spawn::SubagentListingEntry> {
+        vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
             agent_type: DEFAULT_WORKFLOW_SUBAGENT.to_string(),
             when_to_use: String::new(),
             when_to_use_lean: None,
@@ -801,7 +808,7 @@ impl SubagentSpawner for TranscriptOverrideSpawner {
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "<none>".to_string())
         ));
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         if self.transcript_lines {
             let dir = override_dir.expect("workflow transcript override present");
             std::fs::create_dir_all(&dir).expect("create transcript dir");
@@ -811,9 +818,9 @@ impl SubagentSpawner for TranscriptOverrideSpawner {
                 format!(
                     "{}\n",
                     serde_json::json!({
-                        "message": protocol::ConversationMessage::Assistant {
-                            id: protocol::MessageId::new(),
-                            content: vec![protocol::ContentBlock::Text {
+                        "message": lingxi_core::types::ConversationMessage::Assistant {
+                            id: lingxi_core::types::MessageId::new(),
+                            content: vec![lingxi_core::types::ContentBlock::Text {
                                 text: "hello from child".to_string(),
                             }],
                             stop_reason: None,
@@ -931,7 +938,9 @@ async fn run_with_progress_drain_completes_and_does_not_hang() {
     struct YieldSpawner;
     #[async_trait]
     impl SubagentSpawner for YieldSpawner {
-        async fn agent_listing(&self) -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
+        async fn agent_listing(
+            &self,
+        ) -> Vec<lingxi_core::host::subagent_spawn::SubagentListingEntry> {
             Vec::new()
         }
         async fn spawn(
@@ -944,7 +953,7 @@ async fn run_with_progress_drain_completes_and_does_not_hang() {
             tokio::task::yield_now().await;
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             Ok(SubagentResult::Completed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 content: Value::String(format!("echo:{}", request.prompt)),
                 usage: SubagentUsage {
                     output_tokens: 1,
@@ -1174,15 +1183,17 @@ struct NamespacedListingSpawner {
 
 #[async_trait]
 impl SubagentSpawner for NamespacedListingSpawner {
-    async fn agent_listing(&self) -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
+    async fn agent_listing(&self) -> Vec<lingxi_core::host::subagent_spawn::SubagentListingEntry> {
         self.listing
             .iter()
-            .map(|t| platform_api::subagent_spawn::SubagentListingEntry {
-                agent_type: t.clone(),
-                when_to_use: String::new(),
-                when_to_use_lean: None,
-                tools_description: String::new(),
-            })
+            .map(
+                |t| lingxi_core::host::subagent_spawn::SubagentListingEntry {
+                    agent_type: t.clone(),
+                    when_to_use: String::new(),
+                    when_to_use_lean: None,
+                    tools_description: String::new(),
+                },
+            )
             .collect()
     }
 
@@ -1193,7 +1204,7 @@ impl SubagentSpawner for NamespacedListingSpawner {
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.seen_reqs.lock().unwrap().push(request.clone());
         Ok(SubagentResult::Completed {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             content: Value::String(format!("echo:{}", request.prompt)),
             usage: SubagentUsage::default(),
             total_tool_use_count: 0,
@@ -2325,11 +2336,11 @@ async fn workflow_process_owners_use_allocation_receipts_without_async_progress(
             _: SubagentSpawnRequest,
             _: SubagentInheritance,
             _: Option<mpsc::Sender<String>>,
-            observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+            observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
         ) -> Result<SubagentResult, SubagentSpawnError> {
-            let id = protocol::AgentId::new();
+            let id = lingxi_core::types::AgentId::new();
             observer.expect("ungated process observer").on_allocated(
-                &platform_api::subagent_spawn::SubagentObservation::Allocated {
+                &lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
                     agent_id: id,
                     agent_type: "general-purpose".into(),
                     name: None,
@@ -2344,7 +2355,7 @@ async fn workflow_process_owners_use_allocation_receipts_without_async_progress(
             Ok(SubagentResult::Killed { agent_id: id })
         }
     }
-    use platform_api::task_registry::TaskRegistryHandle;
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let dir = tempdir().unwrap();
     let mgr = Arc::new(TaskOutputManager::new(dir.path().to_path_buf(), fs.clone()));
@@ -2421,8 +2432,9 @@ async fn local_workflow_scopes_budget_to_its_origin_session_at_spawn() {
         output_manager,
     )
     .with_status_sink(status_sink.clone());
-    let expected = protocol::SessionId::parse_prefixed("11111111-2222-4333-8444-555555555555")
-        .expect("valid session id");
+    let expected =
+        lingxi_core::types::SessionId::parse_prefixed("11111111-2222-4333-8444-555555555555")
+            .expect("valid session id");
     let mut input = workflow_input("const a = await agent('probe'); return { a };");
     let TaskSpawnInput::LocalWorkflow { session_uuid, .. } = &mut input else {
         unreachable!("workflow_input builds a LocalWorkflow request");
@@ -2510,7 +2522,7 @@ async fn workflow_isolation_spawner_forwards_live_observer_and_watchdog() {
         transcript_subdir: None,
     };
     let observer = Arc::new(AllocationCountingObserver::default());
-    let watchdog = platform_api::subagent_spawn::WorkflowQueryWatchdog {
+    let watchdog = lingxi_core::host::subagent_spawn::WorkflowQueryWatchdog {
         stall_timeout_ms: 1_234,
         max_retries: 2,
         retry_response_body: false,
@@ -3388,7 +3400,7 @@ async fn handler_rejects_a_non_workflow_input() {
     );
 
     let wrong = TaskSpawnInput::LocalAgent {
-        agent_id: protocol::AgentId::new(),
+        agent_id: lingxi_core::types::AgentId::new(),
         subagent_type: "general-purpose".into(),
         prompt: "p".into(),
         is_backgrounded: true,
@@ -4739,12 +4751,12 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
         None,
         0,
     );
-    let agent_id = protocol::AgentId::new();
+    let agent_id = lingxi_core::types::AgentId::new();
     let agent_id_string = agent_id.to_string();
 
-    platform_api::subagent_spawn::SubagentSpawnObserver::on_event(
+    lingxi_core::host::subagent_spawn::SubagentSpawnObserver::on_event(
         &observer,
-        platform_api::subagent_spawn::SubagentObservation::Allocated {
+        lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
             agent_id,
             agent_type: "designer".to_string(),
             name: Some("Design agent".to_string()),
@@ -4765,9 +4777,9 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
     assert_eq!(allocated.agent_type.as_deref(), Some("designer"));
     assert_eq!(allocated.model.as_deref(), Some("deepseek/deepseek-flash"));
 
-    platform_api::subagent_spawn::SubagentSpawnObserver::on_event(
+    lingxi_core::host::subagent_spawn::SubagentSpawnObserver::on_event(
         &observer,
-        platform_api::subagent_spawn::SubagentObservation::Retry {
+        lingxi_core::host::subagent_spawn::SubagentObservation::Retry {
             agent_id,
             attempt: 2,
             reason: "workflow model query stalled while opening the response stream".to_string(),
@@ -4841,10 +4853,10 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
         None,
         0,
     );
-    let agent_id = protocol::AgentId::new();
-    platform_api::subagent_spawn::SubagentSpawnObserver::on_event(
+    let agent_id = lingxi_core::types::AgentId::new();
+    lingxi_core::host::subagent_spawn::SubagentSpawnObserver::on_event(
         &observer,
-        platform_api::subagent_spawn::SubagentObservation::Allocated {
+        lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
             agent_id,
             agent_type: "designer".to_string(),
             name: Some("Design agent".to_string()),
@@ -4856,18 +4868,18 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
         },
     )
     .await;
-    platform_api::subagent_spawn::SubagentSpawnObserver::on_event(
+    lingxi_core::host::subagent_spawn::SubagentSpawnObserver::on_event(
         &observer,
-        platform_api::subagent_spawn::SubagentObservation::Progress {
+        lingxi_core::host::subagent_spawn::SubagentObservation::Progress {
             agent_id,
             token_count: 11,
             tool_use_count: 2,
         },
     )
     .await;
-    platform_api::subagent_spawn::SubagentSpawnObserver::on_event(
+    lingxi_core::host::subagent_spawn::SubagentSpawnObserver::on_event(
         &observer,
-        platform_api::subagent_spawn::SubagentObservation::Completed {
+        lingxi_core::host::subagent_spawn::SubagentObservation::Completed {
             agent_id,
             content: Value::String("done".to_string()),
             total_tool_use_count: 3,

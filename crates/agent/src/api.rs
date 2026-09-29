@@ -17,9 +17,9 @@
 
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
+use lingxi_core::host::{SubagentObservation, SubagentSpawnObserver, WorkflowQueryWatchdog};
+use lingxi_core::types::{AgentId, SessionId};
 use llm_runtime::{HistoryEvent, HistoryResponse, LlmError};
-use platform_api::{SubagentObservation, SubagentSpawnObserver, WorkflowQueryWatchdog};
-use protocol::{AgentId, SessionId};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -85,20 +85,20 @@ impl ObserverEventSink {
             // their pump. Their rest marker is lifecycle, not lossy telemetry.
             SubagentObservation::Message {
                 message:
-                    protocol::ConversationMessage::System {
+                    lingxi_core::types::ConversationMessage::System {
                         subtype: Some(subtype),
                         ..
                     },
                 ..
             } if subtype == "agent_idle" => true,
             SubagentObservation::Message {
-                message: protocol::ConversationMessage::User { content, .. },
+                message: lingxi_core::types::ConversationMessage::User { content, .. },
                 ..
             } => !content.iter().any(|block| {
                 matches!(
                     block,
-                    protocol::ContentBlock::ToolResult { .. }
-                        | protocol::ContentBlock::AdvisorToolResult { .. }
+                    lingxi_core::types::ContentBlock::ToolResult { .. }
+                        | lingxi_core::types::ContentBlock::AdvisorToolResult { .. }
                 )
             }),
             _ => false,
@@ -191,7 +191,7 @@ pub trait SubagentApiClient: Send + Sync {
         &self,
         model: &str,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<HistoryResponse, LlmError>;
 
@@ -216,7 +216,7 @@ pub trait SubagentApiClient: Send + Sync {
         &self,
         model: &str,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
@@ -236,7 +236,7 @@ pub trait SubagentApiClient: Send + Sync {
         &self,
         model: &str,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
@@ -259,7 +259,7 @@ pub trait SubagentApiClient: Send + Sync {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<HistoryResponse, LlmError> {
         let _ = profile;
@@ -277,7 +277,7 @@ pub trait SubagentApiClient: Send + Sync {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
@@ -296,7 +296,7 @@ pub trait SubagentApiClient: Send + Sync {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
@@ -313,7 +313,7 @@ pub trait SubagentApiClient: Send + Sync {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
         opts: SubagentApiCallOpts,
@@ -334,7 +334,7 @@ pub trait SubagentApiClient: Send + Sync {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
@@ -362,7 +362,7 @@ pub trait SubagentApiClient: Send + Sync {
 #[derive(Debug, Clone, Default)]
 pub struct SubagentApiCallOpts {
     /// Trusted per-logical-call capability; retries retain this exact context.
-    pub model_attempt: Option<platform_api::ModelAttemptContext>,
+    pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
     /// Output token cap for this turn.
     pub max_output_tokens: Option<u32>,
     /// COGS query-source label.
@@ -431,7 +431,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         &self,
         model: &str,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<HistoryResponse, LlmError> {
         self.inner
@@ -443,7 +443,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         &self,
         model: &str,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
@@ -456,7 +456,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         &self,
         model: &str,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
@@ -471,7 +471,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<HistoryResponse, LlmError> {
         self.inner
@@ -484,7 +484,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
@@ -498,7 +498,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
@@ -529,7 +529,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
         opts: SubagentApiCallOpts,
@@ -544,7 +544,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
@@ -621,11 +621,13 @@ mod tests {
         for _ in 0..OBSERVER_EVENT_BUFFER + 10 {
             sink.try_emit(progress());
         }
-        let mut tool_result =
-            protocol::ConversationMessage::user(protocol::MessageId::new(), String::new());
-        if let protocol::ConversationMessage::User { content, .. } = &mut tool_result {
-            *content = vec![protocol::ContentBlock::ToolResult {
-                tool_use_id: protocol::ToolUseId::new(),
+        let mut tool_result = lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            String::new(),
+        );
+        if let lingxi_core::types::ConversationMessage::User { content, .. } = &mut tool_result {
+            *content = vec![lingxi_core::types::ContentBlock::ToolResult {
+                tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "ordinary tool output".into(),
                 is_error: false,
                 provider_tool_use_id: None,
@@ -649,8 +651,8 @@ mod tests {
         sink.emit_terminal(completed());
         sink.try_emit(SubagentObservation::Message {
             agent_id,
-            message: protocol::ConversationMessage::System {
-                id: protocol::MessageId::new(),
+            message: lingxi_core::types::ConversationMessage::System {
+                id: lingxi_core::types::MessageId::new(),
                 content: "idle".into(),
                 subtype: Some("agent_idle".into()),
                 compact_metadata: None,
@@ -659,15 +661,15 @@ mod tests {
         });
         sink.try_emit(SubagentObservation::Message {
             agent_id,
-            message: protocol::ConversationMessage::user(
-                protocol::MessageId::new(),
+            message: lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
                 "resume".into(),
             ),
         });
         sink.try_emit(SubagentObservation::Message {
             agent_id,
-            message: protocol::ConversationMessage::user_meta(
-                protocol::MessageId::new(),
+            message: lingxi_core::types::ConversationMessage::user_meta(
+                lingxi_core::types::MessageId::new(),
                 "wake".into(),
             ),
         });
@@ -703,14 +705,14 @@ mod tests {
                 SubagentObservation::Completed { .. } => Some("completed"),
                 SubagentObservation::Message {
                     message:
-                        protocol::ConversationMessage::System {
+                        lingxi_core::types::ConversationMessage::System {
                             subtype: Some(subtype),
                             ..
                         },
                     ..
                 } if subtype == "agent_idle" => Some("idle"),
                 SubagentObservation::Message {
-                    message: protocol::ConversationMessage::User { is_meta, .. },
+                    message: lingxi_core::types::ConversationMessage::User { is_meta, .. },
                     ..
                 } => Some(if *is_meta { "wake" } else { "resume" }),
                 SubagentObservation::Failed { .. } => Some("failed"),
@@ -747,7 +749,7 @@ mod tests {
             &self,
             _model: &str,
             _system: Option<&str>,
-            _messages: Vec<protocol::ConversationMessage>,
+            _messages: Vec<lingxi_core::types::ConversationMessage>,
             _tools: Vec<serde_json::Value>,
         ) -> Result<HistoryResponse, LlmError> {
             self.calls.fetch_add(1, Ordering::SeqCst);

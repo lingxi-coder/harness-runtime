@@ -24,7 +24,7 @@
 
 use async_trait::async_trait;
 use hooks::{HookBackgroundTask, HookSessionCron};
-use platform_api::task_registry::TaskRecord;
+use lingxi_core::host::task_registry::TaskRecord;
 
 /// claude-code `Ljo` — the per-field truncation cap (characters) applied to a
 /// background task's `description` / `command` and a cron's `prompt`.

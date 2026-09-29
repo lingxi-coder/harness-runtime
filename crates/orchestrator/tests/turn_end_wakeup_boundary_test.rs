@@ -33,6 +33,7 @@
 //! The `/loop` subsystem is what this protects: the flag surviving is how a
 //! scheduled wake-up still fires after a turn that a hook stopped.
 
+use lingxi_core::types::ToolUseId;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
@@ -41,7 +42,6 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use protocol::ToolUseId;
 use serde_json::json;
 use std::future::Future;
 use std::path::PathBuf;

@@ -32,7 +32,7 @@ use crate::jsonl::title::{
     extract_title, has_autonomous_tick_prompt, truncate_title, EMPTY_TITLE_FALLBACK,
 };
 use crate::jsonl::SessionMode;
-use platform_api::{FileSystem, FileSystemCacheIdentity};
+use lingxi_core::host::{FileSystem, FileSystemCacheIdentity};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::HashMap;

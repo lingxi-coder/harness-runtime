@@ -2,9 +2,9 @@
 //! cli-demo and host-side tests.
 //!
 //! Real I/O is provided for the trait pairs the demo exercises today —
-//! [`FileSystem`](platform_api::FileSystem),
-//! [`RuntimeSpawner`](platform_api::RuntimeSpawner), and
-//! [`Clock`](platform_api::Clock). Every other trait is stubbed with the
+//! [`FileSystem`](lingxi_core::host::FileSystem),
+//! [`RuntimeSpawner`](lingxi_core::host::RuntimeSpawner), and
+//! [`Clock`](lingxi_core::host::Clock). Every other trait is stubbed with the
 //! "unsupported / unavailable" branch of its error enum so engine code that
 //! reaches them during the demo fails loudly rather than silently no-oping.
 //!

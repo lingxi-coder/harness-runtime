@@ -24,7 +24,7 @@ use crate::thresholds::{
     MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES, MAX_CONSECUTIVE_RAPID_REFILLS,
 };
 use cost::Usage;
-use protocol::{ContentBlock, ConversationMessage};
+use lingxi_core::types::{ContentBlock, ConversationMessage};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
@@ -683,7 +683,7 @@ mod tests {
     use super::*;
     use crate::autocompact::CompactionResult;
     use async_trait::async_trait;
-    use protocol::{ContentBlock, MediaAnalysis, MessageId, ToolUseId};
+    use lingxi_core::types::{ContentBlock, MediaAnalysis, MessageId, ToolUseId};
     use serde_json::json;
     use sidequery::{
         CacheSafeParams, CacheSafeParamsSlot, ForkedAgentRunner, SideQueryClient, SideQueryError,

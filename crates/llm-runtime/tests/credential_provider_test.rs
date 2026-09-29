@@ -6,14 +6,13 @@
 //!   3. Refresh failure maps to `LlmError::Authentication` (no secret material leaked).
 
 use async_trait::async_trait;
+use lingxi_core::host::Clock;
+use lingxi_core::types::Secret;
+use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
 use llm_runtime::auth::anthropic::OAuthCredentialProvider;
-use llm_runtime::auth::anthropic::{
-    refresh::AuthState, refresh::RefreshDriver, ClaudeAiOAuthConfig,
-};
+use llm_runtime::auth::anthropic::{refresh::AuthState, refresh::RefreshDriver};
 use llm_runtime::{Credential, CredentialProvider, CredentialScope, LlmError, ProviderId};
-use platform_api::Clock;
-use protocol::Secret;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 

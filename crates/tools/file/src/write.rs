@@ -77,13 +77,16 @@ fn write_rooted_snapshot(
     requested: &std::path::Path,
     approved: &std::path::Path,
     trusted_dirs: &[std::path::PathBuf],
-) -> Result<platform_api::rooted_fs::RootedFileSnapshot, platform_api::rooted_fs::RootedFsError> {
+) -> Result<
+    lingxi_core::host::rooted_fs::RootedFileSnapshot,
+    lingxi_core::host::rooted_fs::RootedFsError,
+> {
     let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
-        return Err(platform_api::rooted_fs::RootedFsError::Fs(
-            platform_api::FsError::OutsideWorkspace(approved.display().to_string()),
+        return Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
+            lingxi_core::host::FsError::OutsideWorkspace(approved.display().to_string()),
         ));
     };
-    platform_api::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
+    lingxi_core::host::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
 }
 
 /// Resolve a write target without materializing any missing parent through its
@@ -111,17 +114,20 @@ fn canonicalize_write_target(path: &Path, trusted_dirs: &[PathBuf]) -> Result<Pa
     Ok(canonical)
 }
 
-fn write_resolution_error(path: &str, error: platform_api::rooted_fs::RootedFsError) -> ToolError {
+fn write_resolution_error(
+    path: &str,
+    error: lingxi_core::host::rooted_fs::RootedFsError,
+) -> ToolError {
     match error {
-        platform_api::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
+        lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
             "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
         )),
-        platform_api::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged => {
+        lingxi_core::host::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged => {
             ToolError::InvalidInput(format!(
                 "Refusing to write {path}: its parent-directory symlink resolution changed after permission was checked."
             ))
         }
-        platform_api::rooted_fs::RootedFsError::SymlinkResolutionChanged => {
+        lingxi_core::host::rooted_fs::RootedFsError::SymlinkResolutionChanged => {
             if std::fs::symlink_metadata(path)
                 .map(|metadata| metadata.file_type().is_symlink())
                 .unwrap_or(false)
@@ -135,10 +141,10 @@ fn write_resolution_error(path: &str, error: platform_api::rooted_fs::RootedFsEr
                 ))
             }
         }
-        platform_api::rooted_fs::RootedFsError::NotRegularFile => {
+        lingxi_core::host::rooted_fs::RootedFsError::NotRegularFile => {
             ToolError::Io(format!("File {path} is not a regular file"))
         }
-        platform_api::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string()),
+        lingxi_core::host::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string()),
     }
 }
 
@@ -351,7 +357,7 @@ impl Tool for FileWriteTool {
         // straddle a swap between the two calls.
         let mut trusted_dirs = self.ctx.trusted_dirs();
         if let Some(root) =
-            platform_api::teammate_plan::own_plan_file_root(ctx.agent_id.as_ref(), &path)
+            lingxi_core::host::teammate_plan::own_plan_file_root(ctx.agent_id.as_ref(), &path)
         {
             trusted_dirs.push(root);
         }
@@ -385,12 +391,14 @@ impl Tool for FileWriteTool {
         // still requires a prior Read.
         let prior_snapshot = match write_rooted_snapshot(&path, &canon, &trusted_dirs) {
             Ok(snapshot) => Some(snapshot),
-            Err(platform_api::rooted_fs::RootedFsError::Fs(platform_api::FsError::NotFound(_))) => {
-                None
-            }
-            Err(error @ platform_api::rooted_fs::RootedFsError::LeafSymlink)
-            | Err(error @ platform_api::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged)
-            | Err(error @ platform_api::rooted_fs::RootedFsError::SymlinkResolutionChanged) => {
+            Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
+                lingxi_core::host::FsError::NotFound(_),
+            )) => None,
+            Err(error @ lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink)
+            | Err(
+                error @ lingxi_core::host::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged,
+            )
+            | Err(error @ lingxi_core::host::rooted_fs::RootedFsError::SymlinkResolutionChanged) => {
                 self.emit_failed(&invocation_id, "symlink_resolution_changed")
                     .await;
                 return Err(write_resolution_error(file_path, error));
@@ -445,7 +453,7 @@ impl Tool for FileWriteTool {
             self.emit_failed(&invocation_id, "path_blocked").await;
             return Err(ToolError::PathBlocked { path });
         };
-        let write_result = match platform_api::rooted_fs::write_file_after_permission(
+        let write_result = match lingxi_core::host::rooted_fs::write_file_after_permission(
             &root,
             &relative,
             &path,
@@ -672,7 +680,7 @@ mod tests {
     #[test]
     fn write_resolution_messages_are_byte_exact() {
         assert_eq!(
-            write_resolution_error("/tmp/link.txt", platform_api::rooted_fs::RootedFsError::LeafSymlink)
+            write_resolution_error("/tmp/link.txt", lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink)
                 .to_string()
                 .strip_prefix("invalid input: ")
                 .unwrap_or_default(),
@@ -681,7 +689,7 @@ mod tests {
         assert_eq!(
             write_resolution_error(
                 "/tmp/link.txt",
-                platform_api::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged,
+                lingxi_core::host::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged,
             )
             .to_string(),
             "invalid input: Refusing to write /tmp/link.txt: its parent-directory symlink resolution changed after permission was checked."
@@ -846,7 +854,7 @@ mod tests {
         let tool = FileWriteTool::new(ctx);
 
         let mut subagent_ctx = fresh_ctx();
-        subagent_ctx.agent_id = Some(protocol::AgentId::new());
+        subagent_ctx.agent_id = Some(lingxi_core::types::AgentId::new());
         let err = tool
             .call(
                 json!({ "file_path": target.to_str().unwrap(), "content": "findings" }),
@@ -1392,7 +1400,7 @@ mod tests {
     }
     struct PlanFileOwner(String);
     #[async_trait]
-    impl platform_api::teammate_plan::TeammatePlanRequester for PlanFileOwner {
+    impl lingxi_core::host::teammate_plan::TeammatePlanRequester for PlanFileOwner {
         fn writable_plan_path(&self) -> Option<&str> {
             Some(&self.0)
         }
@@ -1409,10 +1417,10 @@ mod tests {
         let sibling = root.join("sibling.md");
         let (ctx, _) = make_ctx(&workspace);
         let tool = FileWriteTool::new(ctx);
-        let agent = protocol::AgentId::new();
-        let owner: Arc<dyn platform_api::teammate_plan::TeammatePlanRequester> =
+        let agent = lingxi_core::types::AgentId::new();
+        let owner: Arc<dyn lingxi_core::host::teammate_plan::TeammatePlanRequester> =
             Arc::new(PlanFileOwner(target.to_string_lossy().into_owned()));
-        platform_api::teammate_plan::register(agent, &owner);
+        lingxi_core::host::teammate_plan::register(agent, &owner);
         let context = || {
             let mut ctx = fresh_ctx();
             ctx.agent_id = Some(agent);

@@ -7,7 +7,7 @@
 //! `LXe(servers)` walks every **`dynamic`-scope** `http`/`sse` server's
 //! `tools[]` array (each entry `{name, permission_policy?}`), builds the FQN
 //! `mcp__<normalize(server)>__<normalize(tool)>` (`xc`/`Ul`, using the SAME
-//! [`protocol::normalize_name_for_mcp`] normalizer — verified byte-for-byte:
+//! [`lingxi_core::types::normalize_name_for_mcp`] normalizer — verified byte-for-byte:
 //! the oracle's local `ln()` in this chunk IS `normalizeNameForMCP`, not the
 //! unrelated NFC/lowercase `ln()` used elsewhere in the bundle), and resolves a
 //! duplicate FQN **strictest-wins** via the ordinal `{always_allow:0,
@@ -233,8 +233,8 @@ fn behavior_for_severity(severity: u8) -> PermissionBehavior {
 fn fqn(server_name: &str, tool_name: &str) -> String {
     format!(
         "mcp__{}__{}",
-        protocol::normalize_name_for_mcp(server_name),
-        protocol::normalize_name_for_mcp(tool_name)
+        lingxi_core::types::normalize_name_for_mcp(server_name),
+        lingxi_core::types::normalize_name_for_mcp(tool_name)
     )
 }
 
@@ -355,18 +355,20 @@ impl McpPolicyTool for McpServerToolDecl {
     }
 }
 
-impl McpPolicyTool for platform_api::McpConfiguredToolPolicyDto {
+impl McpPolicyTool for lingxi_core::host::McpConfiguredToolPolicyDto {
     fn policy_tool_name(&self) -> &str {
         &self.name
     }
 
     fn policy_permission(&self) -> Option<McpToolPermissionPolicy> {
         self.permission_policy.map(|policy| match policy {
-            platform_api::McpToolPermissionPolicy::AlwaysAllow => {
+            lingxi_core::host::McpToolPermissionPolicy::AlwaysAllow => {
                 McpToolPermissionPolicy::AlwaysAllow
             }
-            platform_api::McpToolPermissionPolicy::AlwaysAsk => McpToolPermissionPolicy::AlwaysAsk,
-            platform_api::McpToolPermissionPolicy::AlwaysDeny => {
+            lingxi_core::host::McpToolPermissionPolicy::AlwaysAsk => {
+                McpToolPermissionPolicy::AlwaysAsk
+            }
+            lingxi_core::host::McpToolPermissionPolicy::AlwaysDeny => {
                 McpToolPermissionPolicy::AlwaysDeny
             }
         })
@@ -378,7 +380,7 @@ pub fn permission_rules_from_mcp_tool_policies<T: McpPolicyTool>(
     server_name: &str,
     tools: &[T],
 ) -> Vec<PermissionRule> {
-    let normalized_server = protocol::normalize_name_for_mcp(server_name);
+    let normalized_server = lingxi_core::types::normalize_name_for_mcp(server_name);
     let mut collapsed = BTreeMap::<String, McpToolPermissionPolicy>::new();
     for tool in tools {
         let Some(policy) = tool.policy_permission() else {
@@ -386,7 +388,7 @@ pub fn permission_rules_from_mcp_tool_policies<T: McpPolicyTool>(
         };
         let tool_name = format!(
             "mcp__{normalized_server}__{}",
-            protocol::normalize_name_for_mcp(tool.policy_tool_name())
+            lingxi_core::types::normalize_name_for_mcp(tool.policy_tool_name())
         );
         collapsed
             .entry(tool_name)
@@ -622,14 +624,16 @@ mod tests {
         let rules = permission_rules_from_mcp_tool_policies(
             "srv",
             &[
-                platform_api::McpConfiguredToolPolicyDto {
+                lingxi_core::host::McpConfiguredToolPolicyDto {
                     name: "write".into(),
-                    permission_policy: Some(platform_api::McpToolPermissionPolicy::AlwaysAllow),
+                    permission_policy: Some(
+                        lingxi_core::host::McpToolPermissionPolicy::AlwaysAllow,
+                    ),
                     org_max_permission: None,
                 },
-                platform_api::McpConfiguredToolPolicyDto {
+                lingxi_core::host::McpConfiguredToolPolicyDto {
                     name: "write".into(),
-                    permission_policy: Some(platform_api::McpToolPermissionPolicy::AlwaysDeny),
+                    permission_policy: Some(lingxi_core::host::McpToolPermissionPolicy::AlwaysDeny),
                     org_max_permission: None,
                 },
             ],

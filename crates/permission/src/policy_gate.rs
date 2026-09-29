@@ -57,7 +57,7 @@ use crate::result::{
 };
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
 use async_trait::async_trait;
-use platform_api::permission_gate::PermissionRequestSource;
+use lingxi_core::host::permission_gate::PermissionRequestSource;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -187,13 +187,13 @@ impl PolicyPermissionGate {
     fn parse_update_destination(value: &Value) -> Option<PermissionRuleSource> {
         match value.as_str()? {
             "userSettings" => Some(PermissionRuleSource::Settings(
-                protocol::SettingsScope::User,
+                lingxi_core::types::SettingsScope::User,
             )),
             "projectSettings" => Some(PermissionRuleSource::Settings(
-                protocol::SettingsScope::Project,
+                lingxi_core::types::SettingsScope::Project,
             )),
             "localSettings" => Some(PermissionRuleSource::Settings(
-                protocol::SettingsScope::Local,
+                lingxi_core::types::SettingsScope::Local,
             )),
             "cliArg" => Some(PermissionRuleSource::CliArg),
             "session" => Some(PermissionRuleSource::Session),
@@ -489,7 +489,7 @@ impl PolicyPermissionGate {
                 updated_input,
                 permission_updates: Vec::new(),
                 decision_classification: Some(
-                    platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
+                    lingxi_core::host::permission_gate::ToolDecisionClassification::UserTemporary,
                 ),
             };
         }
@@ -659,7 +659,7 @@ impl PolicyPermissionGate {
                             // the optional classification still represents a
                             // temporary user grant, not a standing hook allow.
                             decision_classification: decision_classification.or(Some(
-                                platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
+                                lingxi_core::host::permission_gate::ToolDecisionClassification::UserTemporary,
                             )),
                         }
                     }
@@ -2217,8 +2217,8 @@ impl PermissionGate for PolicyPermissionGate {
         name: &str,
         input: &Value,
         transient_allow_rules: &[String],
-    ) -> Option<platform_api::permission_gate::NonInteractivePermissionDecision> {
-        use platform_api::permission_gate::NonInteractivePermissionDecision;
+    ) -> Option<lingxi_core::host::permission_gate::NonInteractivePermissionDecision> {
+        use lingxi_core::host::permission_gate::NonInteractivePermissionDecision;
 
         let mode = self.effective_mode_for_tool(name);
         let mut live = self
@@ -2844,7 +2844,7 @@ impl PermissionGate for PolicyPermissionGate {
         server_name: &str,
         mode: Option<&str>,
     ) -> Result<(), String> {
-        let normalized = protocol::normalize_name_for_mcp(server_name);
+        let normalized = lingxi_core::types::normalize_name_for_mcp(server_name);
         let mut overrides = self
             .mcp_mode_overrides
             .write()
@@ -3195,7 +3195,7 @@ mod plan_mode_divergence_test {
     fn gate_in(mode: PermissionMode, inner: Arc<CountingInner>) -> PolicyPermissionGate {
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": {} }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         )
         .unwrap();
         let policy = Arc::new(PermissionPolicy::from_rules(mode, rules));
@@ -3362,7 +3362,7 @@ mod gate_sysmsg_test {
                 rule_content: None,
             },
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         };
         let policy = Arc::new(PermissionPolicy::from_rules(
             PermissionMode::Default,
@@ -3425,17 +3425,17 @@ mod task_pause_tests {
     ) -> (PolicyPermissionGate, PermissionCheckContext, Arc<AtomicU64>) {
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{"permissions":{}}"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         )
         .unwrap();
         let total = Arc::new(AtomicU64::new(0));
         let sink = total.clone();
         let ctx = PermissionCheckContext {
-            pause_observer: Some(platform_api::permission_gate::PermissionPauseObserver::new(
-                move |ms| {
+            pause_observer: Some(
+                lingxi_core::host::permission_gate::PermissionPauseObserver::new(move |ms| {
                     sink.fetch_add(ms, Ordering::SeqCst);
-                },
-            )),
+                }),
+            ),
             ..Default::default()
         };
         (

@@ -12,18 +12,18 @@
 use super::{BridgeFailure, LocalAppsHostBroker};
 use base64::Engine as _;
 use client::protocol::local_apps::AppCapabilityKindDto;
-use local_apps::{load_permissions, AppCapability};
-use platform_api::audio::{
+use lingxi_core::host::audio::{
     AudioError, AudioErrorKind, AudioInitiator, AudioOperation, AudioOperationContext,
     AudioOperationId, AudioOperationKind, AudioOperationSuccess, AudioOwner, AudioRecordingHandle,
     AudioService,
 };
-use platform_api::{
+use lingxi_core::host::{
     CalendarError, CalendarEvent, CalendarQuery, CameraError, CameraPosition, CapturePhotoOpts,
     ClipboardError, ContactsError, ContactsQuery, DeepLinkError, DeviceStatusError, HapticError,
     HapticStyle, LocationError, NotificationError, NotificationRequest, ShareError, SharePayload,
     ShareResult, VoiceRecording,
 };
+use local_apps::{load_permissions, AppCapability};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1170,7 +1170,7 @@ impl LocalAppsHostBroker {
         if !audio
             .capabilities()
             .supported_operations
-            .contains(&platform_api::audio::AudioOperationKind::Record)
+            .contains(&lingxi_core::host::audio::AudioOperationKind::Record)
         {
             return Err(BridgeFailure::coded(
                 "unsupported",
@@ -2415,23 +2415,23 @@ mod tests {
     use client::protocol::local_apps::{
         AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppEventDto,
     };
-    use local_apps::test_support::FixedClock;
-    use local_apps::{
-        load_manifest, load_permissions, save_manifest, save_permissions, AppCapability,
-        AppDependencyRecord, AppDependencyState, AppLayout, AppRuntimeProfile, AppService,
-        AppSurface, NoopAppEventObserver, APPS_SCHEMA_VERSION,
-    };
-    use platform_api::audio::{
+    use lingxi_core::host::audio::{
         AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioOperation, AudioOperationContext,
         AudioOperationId, AudioOperationKind, AudioOperationReadiness, AudioOperationSuccess,
         AudioOwner, AudioReadinessState, AudioRecordingHandle, AudioService, AudioStatus,
     };
-    use platform_api::{
+    use lingxi_core::host::{
         CalendarError, CalendarEvent, CalendarProvider, CalendarQuery, CameraControl, CameraError,
         CapturePhotoOpts, CapturedImage, Clipboard, ClipboardError, Contact, ContactsError,
         ContactsProvider, ContactsQuery, LocationError, LocationFix, LocationProvider,
         NotificationError, NotificationRequest, NotificationService, ShareError, SharePayload,
         ShareResult, SharingService, SttTranscript, TtsAudio, VoiceRecording,
+    };
+    use local_apps::test_support::FixedClock;
+    use local_apps::{
+        load_manifest, load_permissions, save_manifest, save_permissions, AppCapability,
+        AppDependencyRecord, AppDependencyState, AppLayout, AppRuntimeProfile, AppService,
+        AppSurface, NoopAppEventObserver, APPS_SCHEMA_VERSION,
     };
     use serde_json::{json, Value};
     use sha2::{Digest, Sha256};

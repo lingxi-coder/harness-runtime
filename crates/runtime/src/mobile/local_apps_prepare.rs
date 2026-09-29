@@ -23,8 +23,8 @@
 //! keys are never read from the model's object.
 
 use super::*;
-use platform_api::rooted_fs;
-use platform_api::{AtomicWriteOptions, FsError};
+use lingxi_core::host::rooted_fs;
+use lingxi_core::host::{AtomicWriteOptions, FsError};
 use serde::{Deserialize, Serialize};
 
 const MAX_STATE_BYTES: u64 = 2 * 1024 * 1024;

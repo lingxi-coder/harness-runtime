@@ -1,12 +1,12 @@
 use hooks::definition::{HookCondition, HookExecutor, HookSource};
 use hooks::events::HookEventType;
 use hooks::{HookDefinition, HookRegistry};
+use lingxi_core::host::OrchestratorHandle;
+use lingxi_core::types::HookId;
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::OrchestratorHandle;
-use protocol::HookId;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -30,7 +30,7 @@ fn hk(
         executor: HookExecutor::Builtin {
             handler_id: "noop".into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout,
         priority: 0,
@@ -110,7 +110,7 @@ async fn list_hooks_maps_executor_type_content_and_source() {
             cwd: None,
             shell: None,
         },
-        source: HookSource::Settings(protocol::SettingsScope::Project),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         blocking: true,
         timeout: None,
         priority: 0,

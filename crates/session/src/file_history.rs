@@ -792,7 +792,7 @@ pub async fn rewind_from_disk(
 }
 
 #[async_trait::async_trait]
-impl platform_api::FileHistorySink for FileHistory {
+impl lingxi_core::host::FileHistorySink for FileHistory {
     async fn track_edit(&self, file_path: &str) {
         FileHistory::track_edit(self, file_path).await;
     }

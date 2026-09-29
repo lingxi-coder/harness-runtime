@@ -29,7 +29,7 @@
 //!    `JobState` doesn't model, e.g. `backend`/`routine`) round-trips
 //!    untouched.
 //! 4. **`job_stop_self` marker** — telemetry only.
-//! 5. **Exit** — [`platform_api::OrchestratorHandle::request_exit`] (exists,
+//! 5. **Exit** — [`lingxi_core::host::OrchestratorHandle::request_exit`] (exists,
 //!    used as-is), then `CommandResult::Done` with the locked
 //!    `"Session stopped."` literal so the REPL loop observes
 //!    `current_should_exit() == true` and exits with code 0.
@@ -54,7 +54,7 @@
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::OrchestratorHandle;
+use lingxi_core::host::OrchestratorHandle;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

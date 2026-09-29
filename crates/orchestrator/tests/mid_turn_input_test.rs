@@ -15,6 +15,7 @@
 //!    injected — today's behavior unchanged.
 
 use async_trait::async_trait;
+use lingxi_core::types::{ContentBlock, ConversationMessage, ToolUseId};
 use orchestrator::prompt::mid_turn_input::{CancelReason, CancelReasonFlag, MidTurnInputSource};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
@@ -24,7 +25,6 @@ use orchestrator::test_support_stream::{
     message_start, message_stop, text_delta, MockStreamingApiClient,
 };
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig, TurnOutcome};
-use protocol::{ContentBlock, ConversationMessage, ToolUseId};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;

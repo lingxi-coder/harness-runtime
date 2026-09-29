@@ -10,7 +10,7 @@
 //! this helper is the dumb-but-safe fallback for the proactive/manual path.
 
 use crate::grouping::group_messages_by_api_round;
-use protocol::{ConversationMessage, MessageId};
+use lingxi_core::types::{ConversationMessage, MessageId};
 
 /// Synthetic marker prepended as a meta user message when the surviving head is
 /// assistant-first (TS `PTL_RETRY_MARKER`, `compact.ts:228`).
@@ -77,7 +77,7 @@ pub fn truncate_head_for_ptl_retry(
             is_meta: true,
             content,
             ..
-        }) if matches!(content.as_slice(), [protocol::ContentBlock::Text { text }] if text == PTL_RETRY_MARKER) => {
+        }) if matches!(content.as_slice(), [lingxi_core::types::ContentBlock::Text { text }] if text == PTL_RETRY_MARKER) => {
             &messages[1..]
         }
         _ => &messages[..],
@@ -134,7 +134,7 @@ pub fn truncate_head_for_ptl_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{ContentBlock, MessageId, ToolUseId};
+    use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
     use serde_json::json;
 
     /// A user message of `n` 'x' characters (≈ `n/4` estimated tokens).

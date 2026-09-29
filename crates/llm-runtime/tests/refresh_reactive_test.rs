@@ -7,11 +7,11 @@
 //! `refresh_single_flight_test.rs` — this file is a tokio-level smoke test.
 
 use async_trait::async_trait;
+use lingxi_core::host::Clock;
+use lingxi_core::types::Secret;
 use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
 use llm_runtime::auth::anthropic::refresh::{AuthState, RefreshDriver};
-use platform_api::Clock;
-use protocol::Secret;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};

@@ -155,7 +155,7 @@ impl AutocompactHandler {
     fn env_window() -> Option<u64> {
         std::env::var(WINDOW_ENV_VAR)
             .ok()
-            .map(|raw| platform_api::env::parse_int_env(&raw))
+            .map(|raw| lingxi_core::host::env::parse_int_env(&raw))
             .filter(|value| !value.is_nan() && *value > 0.0)
             .map(|value| value.clamp(100_000.0, 1_000_000.0) as u64)
     }

@@ -8,7 +8,7 @@
 
 use std::sync::OnceLock;
 
-use platform_api::{SandboxCapability, SandboxFeatures};
+use lingxi_core::host::{SandboxCapability, SandboxFeatures};
 
 /// Locked toybox applet inventory for the bundled shell (toybox 0.8.11).
 ///

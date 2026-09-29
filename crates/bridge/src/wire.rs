@@ -120,7 +120,7 @@ pub struct ServerHello {
 
 /// A framed JSON-RPC-style request from client to server.
 ///
-/// M9 maps `method`/`params` onto `protocol::Effect` execution; M8 keeps the
+/// M9 maps `method`/`params` onto `lingxi_core::types::Effect` execution; M8 keeps the
 /// envelope generic (a `serde_json::Value` payload) so the wire shape is locked
 /// without coupling to the concrete effect enum yet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,7 +129,7 @@ pub struct BridgeRequest {
     pub id: u64,
     /// Method name (e.g. `"run_turn"`, `"dispatch_tool"`).
     pub method: String,
-    /// Method parameters. // M9: typed against `protocol::Effect`.
+    /// Method parameters. // M9: typed against `lingxi_core::types::Effect`.
     pub params: serde_json::Value,
 }
 
@@ -138,7 +138,7 @@ pub struct BridgeRequest {
 pub struct BridgeResponse {
     /// Correlation id of the originating request.
     pub id: u64,
-    /// Success payload. // M9: typed against `protocol::EffectResult`.
+    /// Success payload. // M9: typed against `lingxi_core::types::EffectResult`.
     pub result: Option<serde_json::Value>,
     /// Error payload (mutually exclusive with `result`).
     pub error: Option<BridgeWireError>,

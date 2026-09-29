@@ -18,7 +18,7 @@
 //! `serde_json::to_string` line terminated with a single `\n`, written through
 //! the [`FileSystem`] trait (parent dir created on first write).
 
-use platform_api::{FileSystem, FsError};
+use lingxi_core::host::{FileSystem, FsError};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;

@@ -4,7 +4,7 @@
 //! This is the end-to-end exercise of the ENOENT guard + connection setup +
 //! request round-trip.
 
-use platform_api::LspServerConfig;
+use lingxi_core::host::LspServerConfig;
 use std::collections::HashMap;
 use test_harness::mocks::mock_lsp_server::mock_lsp_server_path;
 
@@ -29,7 +29,7 @@ fn mock_config() -> LspServerConfig {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn posix_spawn_and_initialize_round_trip() {
-    use platform_api::LspTransport;
+    use lingxi_core::host::LspTransport;
     use platform_posix::lsp::PosixLspTransport;
 
     // The mock binary must be present. Cargo does not cross-build artifacts
@@ -70,7 +70,7 @@ async fn posix_spawn_and_initialize_round_trip() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn posix_spawn_enoent_is_clean_error() {
-    use platform_api::LspTransport;
+    use lingxi_core::host::LspTransport;
     use platform_posix::lsp::PosixLspTransport;
     let mut config = mock_config();
     config.command = "/nonexistent/path/to/lsp-server".into();
@@ -92,7 +92,7 @@ async fn posix_spawn_enoent_is_clean_error() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn posix_spawn_uses_absolute_workspace_folder_as_child_cwd() {
-    use platform_api::LspTransport;
+    use lingxi_core::host::LspTransport;
     use platform_posix::lsp::PosixLspTransport;
     use tempfile::tempdir;
     use tokio::time::{sleep, timeout, Duration};

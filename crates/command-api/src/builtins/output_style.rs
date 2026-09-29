@@ -22,7 +22,7 @@ use crate::builtin_support::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::OrchestratorHandle;
+use lingxi_core::host::OrchestratorHandle;
 use std::sync::Arc;
 
 /// Arguments that ask for the listing instead of naming a style — upstream
@@ -89,7 +89,7 @@ impl OutputStyleHandler {
 /// Render the listing — upstream's no-match arm, verbatim in shape:
 /// `Output style: {current}\n\nAvailable styles:\n{lines}\n\nUsage: /output-style <style>`,
 /// each line `- {name}[ (current)][: {description}]`.
-fn render_listing(listing: &platform_api::OutputStyleListing) -> String {
+fn render_listing(listing: &lingxi_core::host::OutputStyleListing) -> String {
     let lines: Vec<String> = listing
         .styles
         .iter()
@@ -215,7 +215,7 @@ mod tests {
 
     fn handler(current: &str) -> (OutputStyleHandler, Arc<MockOrchestratorHandle>) {
         let mock = Arc::new(MockOrchestratorHandle::new());
-        mock.set_output_style_listing(platform_api::OutputStyleListing {
+        mock.set_output_style_listing(lingxi_core::host::OutputStyleListing {
             current: current.to_string(),
             styles: vec![
                 ("default".to_string(), None),

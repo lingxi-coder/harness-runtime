@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use lingxi_core::host::{ModelAttemptRun, ModelAttemptStage};
 use llm_runtime::LlmRequest;
-use platform_api::{ModelAttemptRun, ModelAttemptStage};
 
 #[test]
 fn registered_capability_is_in_memory_only_and_cannot_be_forged_by_json() {

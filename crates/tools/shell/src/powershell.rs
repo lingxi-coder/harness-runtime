@@ -232,7 +232,7 @@ impl Tool for PowerShellTool {
         ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        use platform_api::sandbox::ProcessCommand as SbxCommand;
+        use lingxi_core::host::sandbox::ProcessCommand as SbxCommand;
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
 
         let cmd_str = input
@@ -452,7 +452,7 @@ impl Tool for PowerShellTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::process::ProcessOutput;
+    use lingxi_core::host::process::ProcessOutput;
     use std::ffi::OsString;
     use std::sync::Mutex;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
@@ -741,7 +741,7 @@ mod tests {
     fn sandbox_refusal_literal_byte_locked_at_m204_site() {
         // The literal lives at `SandboxError::Unsupported` in lingxi-traits:
         // `#[error("sandbox not supported on this platform")]`.
-        let err = platform_api::sandbox::SandboxError::Unsupported;
+        let err = lingxi_core::host::sandbox::SandboxError::Unsupported;
         assert_eq!(err.to_string(), "sandbox not supported on this platform");
     }
 

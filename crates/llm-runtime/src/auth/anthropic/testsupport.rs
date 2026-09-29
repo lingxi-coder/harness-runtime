@@ -7,21 +7,21 @@
 
 use async_trait::async_trait;
 use futures::stream;
-use lingxi_llm_client::protocol::LlmError;
-use lingxi_llm_client::transport::{HttpRequest as SdkHttpRequest, StreamResponse, Transport};
-use platform_api::http::SseStream;
-use platform_api::{
+use lingxi_core::host::http::SseStream;
+use lingxi_core::host::{
     BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner,
     SecureStorage, SecureStorageBackend, SecureStorageError,
 };
-use protocol::{HttpRequest, HttpResponse, SecureStorageData};
+use lingxi_core::types::{HttpRequest, HttpResponse, SecureStorageData};
+use lingxi_llm_client::protocol::LlmError;
+use lingxi_llm_client::transport::{HttpRequest as SdkHttpRequest, StreamResponse, Transport};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 /// Serializes tests that WRITE the process-global subscription cache
-/// (`platform_api::subscription::set_current_subscription`) so one test's write
+/// (`lingxi_core::host::subscription::set_current_subscription`) so one test's write
 /// can't interleave with another's assertion. Poison-tolerant.
 pub static SUBSCRIPTION_CACHE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -70,9 +70,9 @@ impl MockHttp {
                 .last()
                 .map(|r| HttpRequest {
                     method: if r.method == "POST" {
-                        protocol::HttpMethod::Post
+                        lingxi_core::types::HttpMethod::Post
                     } else {
-                        protocol::HttpMethod::Get
+                        lingxi_core::types::HttpMethod::Get
                     },
                     url: r.url.clone(),
                     headers: r.headers.clone(),

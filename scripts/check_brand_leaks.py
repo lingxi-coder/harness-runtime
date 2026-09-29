@@ -442,7 +442,7 @@ BASELINE_HEADER = """\
 # ⚠️ 一条条目断言的是「该文件里该 needle **至少命中一次**」，而不是你以为的
 # 那一次命中。已知的一处不对应：
 #
-#     G2\tcrates/platform-api/src/uds_inbox.rs\tCLAUDE_CODE_TMPDIR
+#     G2\tcrates/core/src/host/uds_inbox.rs\tCLAUDE_CODE_TMPDIR
 #
 # 这一条钉住的是**测试**里 uds_inbox.rs:1116 的
 # `std::env::var_os("CLAUDE_CODE_TMPDIR")` 存档/还原，**不是** uds_inbox.rs:123

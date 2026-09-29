@@ -10,7 +10,7 @@ use crate::builtin_support::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::{CheckStatus, DoctorReport, OrchestratorHandle};
+use lingxi_core::host::{CheckStatus, DoctorReport, OrchestratorHandle};
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
 
@@ -71,8 +71,8 @@ pub fn render_doctor(r: &DoctorReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lingxi_core::host::{DoctorCheck, DoctorSummary};
     use orchestrator::test_support::MockOrchestratorHandle;
-    use platform_api::{DoctorCheck, DoctorSummary};
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {

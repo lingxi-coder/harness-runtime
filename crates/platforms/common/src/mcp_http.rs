@@ -17,7 +17,7 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use jsonrpc::messages::Message as JsonRpcMessage;
 use jsonrpc::{BrokerError, Connection, ConnectionError};
-use platform_api::mcp::McpError;
+use lingxi_core::host::mcp::McpError;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -112,7 +112,7 @@ where
 /// `jsonrpc::Connection`.
 ///
 /// `extra_headers` is generic over the map type so both an unordered `HashMap`
-/// and the insertion-ordered [`platform_api::McpHeaders`] (`IndexMap`) the MCP
+/// and the insertion-ordered [`lingxi_core::host::McpHeaders`] (`IndexMap`) the MCP
 /// transport specs now carry are accepted (header order is irrelevant to the
 /// emitted HTTP request).
 ///

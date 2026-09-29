@@ -13,7 +13,7 @@
 //! so PTL head-truncation drops the correct round boundaries.
 
 use crate::post_compact::estimate_content_tokens;
-use protocol::{ContentBlock, ConversationMessage, MessageId};
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use serde_json::Value;
 
 /// A contiguous range of messages forming one API round.
@@ -160,7 +160,7 @@ fn estimate_json_block_tokens(block: &Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{ContentBlock, MessageId, ToolUseId};
+    use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
     use serde_json::json;
 
     #[test]

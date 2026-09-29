@@ -4,7 +4,7 @@ use crate::{
     parse_markdown_with_frontmatter, MemoryFrontmatter, MAX_MEMORY_FILE_SIZE,
     MEMORY_AGE_HARD_DROP_DAYS,
 };
-use protocol::{MemoryEntry, MemoryEntryTier};
+use lingxi_core::types::{MemoryEntry, MemoryEntryTier};
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::time::SystemTime;
@@ -379,7 +379,7 @@ mod tests {
     use super::*;
     use crate::memdir::paths::{memdir_path, MemdirRoots};
     use crate::{secret_scan::redact, MEMORY_AGE_HARD_DROP_DAYS};
-    use protocol::MemoryEntryTier;
+    use lingxi_core::types::MemoryEntryTier;
 
     /// The budget order and the relevance order rank `Project` at opposite
     /// ends, and that is deliberate — see `tier_priority`'s docs. Pinned so a

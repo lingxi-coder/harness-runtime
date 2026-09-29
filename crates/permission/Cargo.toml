@@ -6,10 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+core = { path = "../core" }
 branding = { path = "../branding" }
-protocol = { path = "../protocol" }
 telemetry = { path = "../telemetry" }
-platform-api = { path = "../platform-api" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

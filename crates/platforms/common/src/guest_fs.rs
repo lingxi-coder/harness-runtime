@@ -27,8 +27,10 @@
 
 use async_trait::async_trait;
 use futures::Stream;
-use platform_api::mobile_linux::guest_paths;
-use platform_api::{FileContent, FileEvent, FileSystem, FlockGuard, FsError, MobileLinuxRuntime};
+use lingxi_core::host::mobile_linux::guest_paths;
+use lingxi_core::host::{
+    FileContent, FileEvent, FileSystem, FlockGuard, FsError, MobileLinuxRuntime,
+};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -142,11 +144,11 @@ impl FileSystem for GuestPathFileSystem {
         root: &Path,
         relative: &Path,
         content: &str,
-        expected: Option<&platform_api::rooted_fs::RootIdentity>,
-    ) -> Result<(), platform_api::filesystem::FileAppendError> {
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+    ) -> Result<(), lingxi_core::host::filesystem::FileAppendError> {
         let root = self.resolve_root(root, true).map_err(|error| {
-            platform_api::filesystem::FileAppendError {
-                stage: platform_api::filesystem::FileAppendStage::Open,
+            lingxi_core::host::filesystem::FileAppendError {
+                stage: lingxi_core::host::filesystem::FileAppendStage::Open,
                 error,
             }
         })?;
@@ -255,7 +257,7 @@ impl FileSystem for GuestPathFileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::{
+    use lingxi_core::host::{
         LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
         MobileLinuxError, MobileLinuxRuntimeMode, MountPurpose, MountSpec, PtyOpenRequest,
         PtySessionHandle, RootfsStatus, SandboxBackend,
@@ -315,7 +317,7 @@ mod tests {
         async fn resize_pty(
             &self,
             _handle: &PtySessionHandle,
-            _size: platform_api::PtySize,
+            _size: lingxi_core::host::PtySize,
         ) -> Result<(), MobileLinuxError> {
             Err(MobileLinuxError::Unsupported)
         }

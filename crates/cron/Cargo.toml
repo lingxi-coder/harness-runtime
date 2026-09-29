@@ -6,9 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+core = { path = "../core" }
 branding = { path = "../branding" }
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
 tasks = { path = "../tasks" }
 # `autonomous_loop` (relocated here to satisfy §8.1 layering) reads feature
 # flags via `telemetry::flag_bool`, emits `emit_loop_persistent_activated`, and

@@ -22,6 +22,7 @@
 //! assumptions.
 
 use async_trait::async_trait;
+use lingxi_core::types::ConversationMessage;
 use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
 use orchestrator::test_support::{
     mock_message_response, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
@@ -29,7 +30,6 @@ use orchestrator::test_support::{
 use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, TurnOutcome,
 };
-use protocol::ConversationMessage;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -161,12 +161,12 @@ fn a_cancel_arriving_after_the_batched_step_succeeded_keeps_the_end_turn() {
 // CAN observe an end event, so "no event" is a real absence rather than a
 // blind instrument.
 
+use lingxi_core::host::OutputEvent;
 use orchestrator::scripted;
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockStreamingApiClient,
 };
-use platform_api::OutputEvent;
 
 fn end_events(events: &[OutputEvent]) -> Vec<String> {
     events

@@ -30,13 +30,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use coordinator::mailbox::{MailboxRouter, TeammateMailbox};
 use coordinator::run_teammate_pump;
-use platform_api::subagent_spawn::{
+use lingxi_core::host::subagent_spawn::{
     AsyncLaunch, SelectedAgentMeta, SubagentInheritance, SubagentListingEntry, SubagentResult,
     SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
 };
-use platform_api::team_spawn::TeamSpawnSeam;
-use platform_api::RuntimeSpawner;
-use protocol::AgentId;
+use lingxi_core::host::team_spawn::TeamSpawnSeam;
+use lingxi_core::host::RuntimeSpawner;
+use lingxi_core::types::AgentId;
 use tasks::registry::TaskRegistry;
 use tasks::task_trait::TaskSpawnInput;
 use tasks::TaskType;
@@ -246,7 +246,7 @@ impl SubagentSpawner for BackgroundAgentSpawner {
         &self,
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
-    ) -> Result<platform_api::team_spawn::TeammateLaunch, SubagentSpawnError> {
+    ) -> Result<lingxi_core::host::team_spawn::TeammateLaunch, SubagentSpawnError> {
         match &self.teammate_spawner {
             Some(spawner) => spawner.spawn(request, inherit).await,
             None => Err(SubagentSpawnError::Runtime(
@@ -285,7 +285,7 @@ impl SubagentSpawner for BackgroundAgentSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.inner
             .spawn_with_observer(request, inherit, progress, observer)
@@ -304,8 +304,8 @@ impl SubagentSpawner for BackgroundAgentSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
-        watchdog: platform_api::subagent_spawn::WorkflowQueryWatchdog,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: lingxi_core::host::subagent_spawn::WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.inner
             .spawn_workflow_with_observer(request, inherit, progress, observer, watchdog)
@@ -388,9 +388,11 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
-    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use platform_api::{BackgroundTaskHandle, RuntimeError};
+    use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+    use lingxi_core::host::tool_invoker::{
+        SubagentInvocationContext, ToolInvoker, ToolInvokerError,
+    };
+    use lingxi_core::host::{BackgroundTaskHandle, RuntimeError};
     use platform_posix::PosixFileSystem;
     use serde_json::json;
     use tasks::output_manager::TaskOutputManager;
@@ -582,7 +584,7 @@ mod tests {
             _request: SubagentSpawnRequest,
             _inherit: SubagentInheritance,
             progress: Option<tokio::sync::mpsc::Sender<String>>,
-            observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+            observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
         ) -> Result<SubagentResult, SubagentSpawnError> {
             self.calls.lock().unwrap().push("spawn_with_observer");
             if progress.is_some() {
@@ -599,8 +601,8 @@ mod tests {
             _request: SubagentSpawnRequest,
             _inherit: SubagentInheritance,
             progress: Option<tokio::sync::mpsc::Sender<String>>,
-            observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
-            watchdog: platform_api::subagent_spawn::WorkflowQueryWatchdog,
+            observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
+            watchdog: lingxi_core::host::subagent_spawn::WorkflowQueryWatchdog,
         ) -> Result<SubagentResult, SubagentSpawnError> {
             self.calls
                 .lock()
@@ -622,8 +624,8 @@ mod tests {
     /// spawner SEES one, not what it publishes.
     struct InertObserver;
     #[async_trait]
-    impl platform_api::subagent_spawn::SubagentSpawnObserver for InertObserver {
-        async fn on_event(&self, _event: platform_api::subagent_spawn::SubagentObservation) {}
+    impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for InertObserver {
+        async fn on_event(&self, _event: lingxi_core::host::subagent_spawn::SubagentObservation) {}
     }
 
     struct MockInvoker;
@@ -794,7 +796,7 @@ mod tests {
             runtime,
             subagents_dir: None,
         };
-        let observer: Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver> =
+        let observer: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver> =
             Arc::new(InertObserver);
         let (tx, _rx) = tokio::sync::mpsc::channel::<String>(4);
 
@@ -807,7 +809,7 @@ mod tests {
                 },
                 Some(tx),
                 Some(observer),
-                platform_api::subagent_spawn::WorkflowQueryWatchdog {
+                lingxi_core::host::subagent_spawn::WorkflowQueryWatchdog {
                     stall_timeout_ms: 4321,
                     max_retries: 2,
                     retry_response_body: false,
@@ -859,7 +861,7 @@ mod tests {
             tool_invoker: Arc::new(MockInvoker),
             budget: Arc::new(MockBudget),
         };
-        let observer: Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver> =
+        let observer: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver> =
             Arc::new(InertObserver);
         let (tx, _rx) = tokio::sync::mpsc::channel::<String>(4);
 

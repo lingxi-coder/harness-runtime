@@ -1,11 +1,11 @@
 //! Runtime Fusion settings with defaults applied.
 
-pub use lingxi_core::settings::schema::FusionCompletionPolicy;
-use lingxi_core::settings::schema::FusionSettingsJson;
-use platform_api::{
+use lingxi_core::host::{
     FusionError, FusionModelChoice, FusionModelRole, FusionPreset, FUSION_MAX_PANEL,
     FUSION_MIN_PANEL,
 };
+pub use lingxi_core::settings::schema::FusionCompletionPolicy;
+use lingxi_core::settings::schema::FusionSettingsJson;
 
 /// Resolved Fusion knobs. Invalid *present* settings fail construction;
 /// missing fields take the documented defaults.
@@ -593,11 +593,11 @@ mod tests {
 
     /// `core` and `platform-api` cannot depend on each other, so the settings
     /// READER (`FusionSettingsJson`) and the settings WRITER the UIs use
-    /// (`platform_api::fusion_setup`) spell the same keys twice. This crate is
+    /// (`lingxi_core::host::fusion_setup`) spell the same keys twice. This crate is
     /// the one that sees both: it fails the moment either side is renamed.
     #[test]
     fn the_settings_reader_and_the_setup_writer_agree() {
-        use platform_api::fusion_setup::FusionModelRoles;
+        use lingxi_core::host::fusion_setup::FusionModelRoles;
 
         let roles = FusionModelRoles {
             panels: vec![
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn the_enabled_switch_and_the_roles_are_independent_settings() {
-        use platform_api::fusion_setup;
+        use lingxi_core::host::fusion_setup;
 
         let mut written = serde_json::json!({"fusion": {"enabled": true}});
         fusion_setup::FusionModelRoles {

@@ -9,8 +9,6 @@ license.workspace = true
 # Product namespace for the rate-limit checkpoint's user-visible `RESUME.md`
 # (`branding::PRODUCT_NAME`, `branding::DOT_DIR`).
 branding.workspace = true
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
 core = { path = "../core" }
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }

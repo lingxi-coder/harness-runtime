@@ -6,8 +6,8 @@ use crate::test_support::{
     StaticMemoryProvider,
 };
 use crate::OrchestratorConfig;
+use lingxi_core::types::ToolUseId;
 use llm_runtime::ContentBlock as LlmContentBlock;
-use protocol::ToolUseId;
 use std::sync::Arc;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;

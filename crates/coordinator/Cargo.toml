@@ -7,8 +7,6 @@ license.workspace = true
 [dependencies]
 task-store = { path = "../task-store" }
 branding.workspace = true
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
 core = { path = "../core" }
 tool-api = { path = "../tool-api" }
 permission = { path = "../permission" }

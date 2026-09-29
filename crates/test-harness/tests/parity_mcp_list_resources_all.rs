@@ -13,8 +13,8 @@
 
 use std::sync::Arc;
 
+use lingxi_core::host::{McpTransport, McpTransportSpec, ProcessOutput};
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
-use platform_api::{McpTransport, McpTransportSpec, ProcessOutput};
 use test_harness::mocks::MockMcpTransport;
 use tool_api::BuiltinToolContext;
 use tool_mcp::ListMcpResourcesTool;
@@ -29,7 +29,7 @@ fn config(name: &str) -> McpServerConfig {
         spec: McpTransportSpec::InProcess {
             registry_key: name.into(),
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::User),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         disabled: false,
         timeout_ms: None,
         always_load: false,

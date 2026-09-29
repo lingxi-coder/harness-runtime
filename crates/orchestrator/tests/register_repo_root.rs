@@ -1,11 +1,11 @@
 use async_trait::async_trait;
+use lingxi_core::host::{
+    RegisterRepoRootRequest, RepoRootReloadOutcome, RepoRootReloadRequest, RepoRootReloader,
+};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::{
-    RegisterRepoRootRequest, RepoRootReloadOutcome, RepoRootReloadRequest, RepoRootReloader,
-};
 use std::sync::Arc;
 use tool_api::{SessionCwd, ToolRegistry};
 

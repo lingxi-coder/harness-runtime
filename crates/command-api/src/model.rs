@@ -2,7 +2,7 @@
 //! the trait every built-in handler implements.
 
 use crate::parser::ParsedSlashCommand;
-use protocol::{Effect, McpConnectionId, PluginId};
+use lingxi_core::types::{Effect, McpConnectionId, PluginId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -179,7 +179,7 @@ pub enum SlashCommandKind {
         prompt_name: String,
         /// Server-declared named arguments, in wire order.
         #[serde(default)]
-        arguments: Vec<platform_api::McpPromptArgumentDto>,
+        arguments: Vec<lingxi_core::host::McpPromptArgumentDto>,
     },
     /// Programmatically-registered bundled skill (port of the reference
     /// `registerBundledSkill`, `bundledSkills.ts`). Unlike [`Self::Markdown`],
@@ -283,7 +283,7 @@ pub enum FrontmatterShell {
 
 /// Where the command came from.
 ///
-/// The settings rungs are the shared [`protocol::SettingsScope`]; `Builtin`,
+/// The settings rungs are the shared [`lingxi_core::types::SettingsScope`]; `Builtin`,
 /// `Bundled`, `Plugin` and `Mcp` are this subsystem's own producers.
 ///
 /// `Builtin` and `Bundled` are both "in the binary" and are NOT
@@ -296,7 +296,7 @@ pub enum CommandSource {
     #[default]
     Builtin,
     /// Read from a settings tier's `commands/` directory.
-    Settings(protocol::SettingsScope),
+    Settings(lingxi_core::types::SettingsScope),
     /// Loaded by an installed plugin.
     Plugin,
     /// Derived from an MCP server prompt.

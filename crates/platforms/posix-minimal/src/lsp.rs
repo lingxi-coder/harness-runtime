@@ -1,10 +1,10 @@
 //! Stub [`LspTransport`] — full stdio-based wiring lands in Plan 17.
 
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
 };
-use protocol::McpConnectionId;
+use lingxi_core::types::McpConnectionId;
 use serde_json::Value;
 
 /// Stub LSP transport.

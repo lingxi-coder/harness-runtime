@@ -1,9 +1,9 @@
 //! Fusion deliberation task handler.
 //!
 //! `/fusion` spawns a [`TaskType::LocalFusion`] row, runs
-//! [`platform_api::FusionExecutor`] on the engine runtime (never `tokio::spawn`
-//! — D17), spools a sanitized [`platform_api::FusionResult`], and publishes one
-//! `user_meta` fusion-result envelope through [`platform_api::FusionCompletionSink`].
+//! [`lingxi_core::host::FusionExecutor`] on the engine runtime (never `tokio::spawn`
+//! — D17), spools a sanitized [`lingxi_core::host::FusionResult`], and publishes one
+//! `user_meta` fusion-result envelope through [`lingxi_core::host::FusionCompletionSink`].
 //! Sink failures must not rewrite the task's terminal status.
 
 use crate::id::TaskType;
@@ -11,7 +11,7 @@ use crate::output_manager::TaskOutputManager;
 use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     BackgroundTaskHandle, BudgetEnforcerHandle, FusionActivation, FusionCompletionSink,
     FusionError, FusionExecutor, FusionInheritance, FusionOrigin, FusionPreparedSummary,
     FusionResult, FusionRunFacts, FusionRunId, FusionRunIdentity, FusionRunOutcome,
@@ -46,7 +46,7 @@ const FUSION_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(
 struct WorkerCancel {
     handle: BackgroundTaskHandle,
     runtime: Arc<dyn RuntimeSpawner>,
-    control: platform_api::FusionRunControl,
+    control: lingxi_core::host::FusionRunControl,
     /// Worker completion signal, fired (via [`WorkerCompletionSignal`]'s
     /// `Drop`) once the spawned worker future is fully done — naturally, or
     /// forcibly on `runtime.cancel`'s own abort. `kill`/`drain_pending_kills`
@@ -129,11 +129,11 @@ async fn finalize_fusion_outcome(
     last_realized_output_tokens: Option<u64>,
     // [Round-3 review B2] Same latching as `last_realized_output_tokens`,
     // for the resolved egress profile list — see
-    // `platform_api::FusionProgress::egress_profiles`.
+    // `lingxi_core::host::FusionProgress::egress_profiles`.
     last_egress_profiles: Option<Vec<String>>,
 ) {
     let accounting_failed =
-        if let Some(platform_api::FusionAttemptSettlementStatus::Failed { reason }) =
+        if let Some(lingxi_core::host::FusionAttemptSettlementStatus::Failed { reason }) =
             &outcome.facts.attempt_settlement
         {
             status_sink
@@ -151,7 +151,7 @@ async fn finalize_fusion_outcome(
             // The parent model synthesizes the final answer from this
             // material; it reaches the parent through the task
             // notification's `<result>`, and the spool keeps the full JSON.
-            let material = platform_api::render_fusion_material(result);
+            let material = lingxi_core::host::render_fusion_material(result);
             let body = serde_json::to_string_pretty(result).unwrap_or_else(|_| material.clone());
             let _ = output_manager.append(worker_spool_path, &body).await;
             // Write the egress/usage summary BEFORE the terminal status
@@ -159,10 +159,10 @@ async fn finalize_fusion_outcome(
             // registry's notification drain is terminal-status-gated, so the
             // reverse order could let a drain observe a completed task whose
             // usage summary hasn't landed yet.
-            let usage_summary = platform_api::task_registry::AgentRunUsage {
+            let usage_summary = lingxi_core::host::task_registry::AgentRunUsage {
                 // [Round-7 items 5+6] `AgentRunUsage.subagent_tokens` is
                 // main-owned and documented as claude-code's `totalTokens`
-                // (`platform_api::task_registry::AgentRunUsage`); main's own
+                // (`lingxi_core::host::task_registry::AgentRunUsage`); main's own
                 // producer sums the four BILLABLE buckets —
                 // `local_agent.rs`'s `bt.input + bt.cache_write +
                 // bt.cache_read + bt.output`, mirrored in
@@ -200,8 +200,8 @@ async fn finalize_fusion_outcome(
             // even when their best-effort UI sink fails. Typed production
             // receipts are projected before the terminal row becomes visible;
             // they never call the legacy sink or get published twice.
-            let legacy_sink =
-                outcome.publication.status == platform_api::FusionPublicationStatus::NotRequired;
+            let legacy_sink = outcome.publication.status
+                == lingxi_core::host::FusionPublicationStatus::NotRequired;
             let mut receipt = outcome.publication.clone();
             if !legacy_sink {
                 status_sink
@@ -281,7 +281,7 @@ async fn finalize_fusion_outcome(
 /// real panel spend: `FusionError` carries neither payload, so the progress
 /// channel's last-seen `realized_output_tokens` / `egress_profiles`
 /// (latched by `run_fusion_worker`'s forwarder — see
-/// `platform_api::FusionProgress::egress_profiles`'s doc for where the
+/// `lingxi_core::host::FusionProgress::egress_profiles`'s doc for where the
 /// orchestrator populates it) are the only signals available at this seam.
 /// `tool_uses`/`duration_ms` are still unknown too and stay at `0` rather
 /// than fabricated. A no-op when nothing ever egressed (e.g. a preflight
@@ -311,7 +311,7 @@ async fn disclose_partial_usage(
             .set_fusion_egress_and_usage(
                 worker_task_id,
                 last_egress_profiles.unwrap_or_default(),
-                Some(platform_api::task_registry::AgentRunUsage {
+                Some(lingxi_core::host::task_registry::AgentRunUsage {
                     subagent_tokens: tokens,
                     tool_uses: 0,
                     duration_ms: 0,
@@ -338,7 +338,7 @@ async fn disclose_facts_or_partial_usage(
     let usage = facts
         .usage
         .as_ref()
-        .map(|usage| platform_api::task_registry::AgentRunUsage {
+        .map(|usage| lingxi_core::host::task_registry::AgentRunUsage {
             subagent_tokens: usage
                 .input_tokens
                 .saturating_add(usage.cache_write_tokens)
@@ -425,7 +425,8 @@ async fn run_fusion_worker(args: FusionWorkerArgs) {
     // Agent-tool path forwards as `subagent_activity` — before this the
     // task carried NO progress at all between `Running` and its terminal
     // status.
-    let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(32);
+    let (prog_tx, mut prog_rx) =
+        tokio::sync::mpsc::channel::<lingxi_core::host::FusionProgress>(32);
     let forward_status_sink = status_sink.clone();
     let forward_task_id = worker_task_id.clone();
     // [Finding 14; round-3 review B2 follow-up] Track the LAST
@@ -633,7 +634,7 @@ impl Task for LocalFusionHandler {
         // orphaned output file behind. The task input is the only trusted
         // source for the originating session; request text is compatibility
         // data and never supplies identity.
-        let trusted_session = protocol::SessionId::parse_prefixed(&conversation_id);
+        let trusted_session = lingxi_core::types::SessionId::parse_prefixed(&conversation_id);
         if trusted_session.is_none() {
             return Err(TaskError::Internal(
                 "fusion task conversation_id must be a valid session id".into(),
@@ -680,11 +681,11 @@ impl Task for LocalFusionHandler {
         }) {
             Ok(prepared) => prepared,
             Err(error) => {
-                let control = platform_api::FusionRunControl::new(
+                let control = lingxi_core::host::FusionRunControl::new(
                     identity,
                     fallback_duration_ms,
                     cancel.clone(),
-                    platform_api::FusionRunFactsRecorder::default(),
+                    lingxi_core::host::FusionRunFactsRecorder::default(),
                 );
                 PreparedFusionRun::failed(fallback_summary.clone(), control, error)
             }
@@ -875,10 +876,10 @@ pub fn fusion_result_xml(result: &FusionResult) -> String {
         .iter()
         .map(|panel| {
             let status = match panel.status {
-                platform_api::PanelRunStatus::Completed => "completed",
-                platform_api::PanelRunStatus::Failed => "failed",
-                platform_api::PanelRunStatus::TimedOut => "timed_out",
-                platform_api::PanelRunStatus::Cancelled => "cancelled",
+                lingxi_core::host::PanelRunStatus::Completed => "completed",
+                lingxi_core::host::PanelRunStatus::Failed => "failed",
+                lingxi_core::host::PanelRunStatus::TimedOut => "timed_out",
+                lingxi_core::host::PanelRunStatus::Cancelled => "cancelled",
             };
             format!("{}:{status}", panel.panel_id)
         })
@@ -909,7 +910,9 @@ pub fn fusion_result_xml(result: &FusionResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::{FusionAnalysis, FusionTiming, FusionUsage, PanelMaterial, PanelReport};
+    use lingxi_core::host::{
+        FusionAnalysis, FusionTiming, FusionUsage, PanelMaterial, PanelReport,
+    };
 
     fn result(analysis: Option<FusionAnalysis>) -> FusionResult {
         let report = PanelReport {
@@ -933,9 +936,9 @@ mod tests {
             analysis_failure: analysis.is_none().then(|| "timeout".to_string()),
             analysis,
             responses: vec![PanelMaterial::from_report("P1", &report, &[])],
-            panels: vec![platform_api::PanelOutcome {
+            panels: vec![lingxi_core::host::PanelOutcome {
                 panel_id: "P1".into(),
-                status: platform_api::PanelRunStatus::Completed,
+                status: lingxi_core::host::PanelRunStatus::Completed,
                 duration_ms: 1,
                 error_category: None,
                 error_detail: None,
@@ -956,7 +959,7 @@ mod tests {
     fn sentinel_analysis() -> FusionAnalysis {
         FusionAnalysis {
             schema_version: 2,
-            consensus: vec![platform_api::SupportedPoint {
+            consensus: vec![lingxi_core::host::SupportedPoint {
                 point: "ANALYSIS_SENTINEL_consensus".into(),
                 panel_ids: vec!["P1".into()],
             }],

@@ -50,7 +50,7 @@ use crate::trust::default_trust_for_source;
 use hooks::loader::parse_hooks_from_settings_json;
 use hooks::HookSource;
 use indexmap::IndexMap;
-use protocol::PluginId;
+use lingxi_core::types::PluginId;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -3765,7 +3765,7 @@ fn qy_eq(a: &str, b: &str) -> bool {
 
 /// Raw JS-string truthiness for an env var: unset or empty is falsy, any
 /// other value (including `"0"`/`"false"`) is truthy. Distinct from
-/// `platform_api::env::is_env_truthy`'s stricter `1|true|yes|on` allowlist — the
+/// `lingxi_core::host::env::is_env_truthy`'s stricter `1|true|yes|on` allowlist — the
 /// oracle reads `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS` as a bare
 /// `process.env` property, not through `isEnvTruthy`.
 fn env_set_nonempty(name: &str) -> bool {
@@ -3887,7 +3887,9 @@ async fn load_mcp_servers(plugin_dir: &Path) -> HashMap<String, mcp::McpServerCo
 /// registry keys by `config.name`). A missing / malformed file yields an empty
 /// map. Manifest-declared `lspServers` is merged separately by
 /// [`load_declared_lsp_servers`].
-async fn load_lsp_servers(plugin_dir: &Path) -> IndexMap<String, platform_api::LspServerConfig> {
+async fn load_lsp_servers(
+    plugin_dir: &Path,
+) -> IndexMap<String, lingxi_core::host::LspServerConfig> {
     let path = plugin_dir.join(".lsp.json");
     let Some(path) = canonical_regular_path_under(plugin_dir, &path) else {
         return IndexMap::new();
@@ -4417,7 +4419,7 @@ async fn load_mcpb_mcp_server(
 async fn load_declared_lsp_servers(
     plugin_dir: &Path,
     value: Option<Value>,
-) -> IndexMap<String, platform_api::LspServerConfig> {
+) -> IndexMap<String, lingxi_core::host::LspServerConfig> {
     let Some(value) = value else {
         return IndexMap::new();
     };
@@ -4450,11 +4452,11 @@ async fn load_declared_lsp_servers(
 
 fn parse_lsp_records(
     records: IndexMap<String, Value>,
-) -> IndexMap<String, platform_api::LspServerConfig> {
+) -> IndexMap<String, lingxi_core::host::LspServerConfig> {
     records
         .into_iter()
         .filter_map(|(key, value)| {
-            let mut config = match serde_json::from_value::<platform_api::LspServerConfig>(value) {
+            let mut config = match serde_json::from_value::<lingxi_core::host::LspServerConfig>(value) {
                 Ok(config) => config,
                 Err(error) => {
                     tracing::warn!(server = %key, %error, "skipping malformed plugin LSP server configuration");
@@ -4470,7 +4472,7 @@ fn parse_lsp_records(
         .collect()
 }
 
-fn validate_lsp_config(config: &platform_api::LspServerConfig) -> bool {
+fn validate_lsp_config(config: &lingxi_core::host::LspServerConfig) -> bool {
     let valid = !config.command.trim().is_empty()
         && !config.extension_to_language.is_empty()
         && matches!(config.transport.as_str(), "stdio" | "socket")
@@ -6895,7 +6897,7 @@ mod tests {
                 )
             });
         match &server.spec {
-            platform_api::McpTransportSpec::Stdio { command, args, .. } => {
+            lingxi_core::host::McpTransportSpec::Stdio { command, args, .. } => {
                 assert_eq!(command, "node");
                 assert!(
                     args[0].ends_with("/index.js") && args[0].contains(plugin.to_str().unwrap()),
@@ -6975,7 +6977,7 @@ mod tests {
             .mcp_servers
             .get("bundled-server")
             .unwrap();
-        let platform_api::McpTransportSpec::Stdio { args, .. } = &server.spec else {
+        let lingxi_core::host::McpTransportSpec::Stdio { args, .. } = &server.spec else {
             panic!("expected a stdio spec, got {:?}", server.spec)
         };
         assert_eq!(

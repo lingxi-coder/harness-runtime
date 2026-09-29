@@ -38,9 +38,9 @@ fn config_default_uses_current_claude_code_endpoints() {
 
 #[tokio::test]
 async fn auth_state_new_returns_arc() {
+    use lingxi_core::types::Secret;
     use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
     use llm_runtime::auth::anthropic::refresh::AuthState;
-    use protocol::Secret;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
@@ -59,9 +59,9 @@ async fn auth_state_new_returns_arc() {
 
 #[tokio::test]
 async fn refresh_driver_new_holds_state() {
+    use lingxi_core::types::Secret;
     use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
     use llm_runtime::auth::anthropic::refresh::{AuthState, RefreshDriver};
-    use protocol::Secret;
     use std::time::{Duration, SystemTime};
 
     let cfg = ClaudeAiOAuthConfig::default_with_port(0);

@@ -288,7 +288,7 @@ fn uri_to_file_path(uri: &str) -> String {
 fn rewrite_server_uris_to_host(
     value: &mut Value,
     registry: &LspRegistry,
-) -> Result<(), platform_api::LspError> {
+) -> Result<(), lingxi_core::host::LspError> {
     match value {
         Value::Array(items) => {
             for item in items {
@@ -1350,7 +1350,7 @@ impl Tool for LSPTool {
             .await
         {
             Ok(triple) => triple,
-            Err(platform_api::LspError::Unavailable) => {
+            Err(lingxi_core::host::LspError::Unavailable) => {
                 let extension = path
                     .extension()
                     .and_then(|extension| extension.to_str())
@@ -1531,7 +1531,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use jsonrpc::Connection;
-    use protocol::McpConnectionId;
+    use lingxi_core::types::McpConnectionId;
     use serde_json::Value;
 
     #[test]
@@ -1689,58 +1689,58 @@ mod tests {
     struct DummyTransport;
 
     #[async_trait]
-    impl platform_api::LspTransport for DummyTransport {
+    impl lingxi_core::host::LspTransport for DummyTransport {
         async fn start_server(
             &self,
-            _config: &platform_api::LspServerConfig,
-        ) -> Result<platform_api::LspRawConnection, platform_api::LspError> {
-            Err(platform_api::LspError::Unavailable)
+            _config: &lingxi_core::host::LspServerConfig,
+        ) -> Result<lingxi_core::host::LspRawConnection, lingxi_core::host::LspError> {
+            Err(lingxi_core::host::LspError::Unavailable)
         }
 
         async fn initialize(
             &self,
-            _conn: &platform_api::LspRawConnection,
+            _conn: &lingxi_core::host::LspRawConnection,
             _root_uri: &str,
-        ) -> Result<platform_api::LspServerCapabilities, platform_api::LspError> {
-            Err(platform_api::LspError::Unavailable)
+        ) -> Result<lingxi_core::host::LspServerCapabilities, lingxi_core::host::LspError> {
+            Err(lingxi_core::host::LspError::Unavailable)
         }
 
         async fn connection(
             &self,
             _conn_id: McpConnectionId,
-        ) -> Result<Arc<Connection>, platform_api::LspError> {
-            Err(platform_api::LspError::Unavailable)
+        ) -> Result<Arc<Connection>, lingxi_core::host::LspError> {
+            Err(lingxi_core::host::LspError::Unavailable)
         }
 
         async fn request(
             &self,
-            _connection: &platform_api::LspRawConnection,
+            _connection: &lingxi_core::host::LspRawConnection,
             _method: &str,
             _params: Value,
-        ) -> Result<Value, platform_api::LspError> {
-            Err(platform_api::LspError::Unavailable)
+        ) -> Result<Value, lingxi_core::host::LspError> {
+            Err(lingxi_core::host::LspError::Unavailable)
         }
 
         async fn notify(
             &self,
-            _connection: &platform_api::LspRawConnection,
+            _connection: &lingxi_core::host::LspRawConnection,
             _method: &str,
             _params: Value,
-        ) -> Result<(), platform_api::LspError> {
-            Err(platform_api::LspError::Unavailable)
+        ) -> Result<(), lingxi_core::host::LspError> {
+            Err(lingxi_core::host::LspError::Unavailable)
         }
 
         async fn shutdown(
             &self,
             _connection_id: McpConnectionId,
-        ) -> Result<(), platform_api::LspError> {
+        ) -> Result<(), lingxi_core::host::LspError> {
             Ok(())
         }
 
         async fn terminate(
             &self,
             _connection_id: McpConnectionId,
-        ) -> Result<(), platform_api::LspError> {
+        ) -> Result<(), lingxi_core::host::LspError> {
             Ok(())
         }
 
@@ -1758,7 +1758,7 @@ mod tests {
             &self,
             path: &Path,
             _workspace_cwd: &Path,
-        ) -> Result<lsp::LspDocumentPath, platform_api::LspError> {
+        ) -> Result<lsp::LspDocumentPath, lingxi_core::host::LspError> {
             let uri = self.uri_for_host_path(path)?;
             Ok(lsp::LspDocumentPath {
                 host_path: path.to_path_buf(),
@@ -1770,20 +1770,23 @@ mod tests {
         fn workspace_root_for(
             &self,
             workspace_cwd: &Path,
-        ) -> Result<PathBuf, platform_api::LspError> {
+        ) -> Result<PathBuf, lingxi_core::host::LspError> {
             Ok(workspace_cwd.to_path_buf())
         }
 
-        fn uri_for_host_path(&self, path: &Path) -> Result<Url, platform_api::LspError> {
+        fn uri_for_host_path(&self, path: &Path) -> Result<Url, lingxi_core::host::LspError> {
             Url::from_file_path(path).map_err(|()| {
-                platform_api::LspError::Transport(format!(
+                lingxi_core::host::LspError::Transport(format!(
                     "cannot convert path to file URI: {}",
                     path.display()
                 ))
             })
         }
 
-        fn host_path_for_uri(&self, uri: &Url) -> Result<Option<PathBuf>, platform_api::LspError> {
+        fn host_path_for_uri(
+            &self,
+            uri: &Url,
+        ) -> Result<Option<PathBuf>, lingxi_core::host::LspError> {
             let Ok(path) = uri.to_file_path() else {
                 return Ok(None);
             };

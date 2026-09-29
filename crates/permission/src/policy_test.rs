@@ -100,7 +100,7 @@ mod tests {
         let mut p = PermissionPolicy::new(PermissionMode::Default);
         p.allow_rules
             .entry(PermissionRuleSource::Settings(
-                protocol::SettingsScope::User,
+                lingxi_core::types::SettingsScope::User,
             ))
             .or_default()
             .push(PermissionRule {
@@ -109,11 +109,11 @@ mod tests {
                     rule_content: None,
                 },
                 behavior: PermissionBehavior::Allow,
-                source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             });
         p.deny_rules
             .entry(PermissionRuleSource::Settings(
-                protocol::SettingsScope::Project,
+                lingxi_core::types::SettingsScope::Project,
             ))
             .or_default()
             .push(PermissionRule {
@@ -122,7 +122,7 @@ mod tests {
                     rule_content: None,
                 },
                 behavior: PermissionBehavior::Deny,
-                source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             });
         let r = p.authorize("Bash", &serde_json::json!({}));
         assert!(matches!(r, PermissionResult::Deny { .. }));
@@ -141,7 +141,7 @@ mod tests {
                     rule_content: None,
                 },
                 behavior: PermissionBehavior::Deny,
-                source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             },
             // MCP server-prefix tool-wide deny → included
             PermissionRule {
@@ -150,7 +150,7 @@ mod tests {
                     rule_content: None,
                 },
                 behavior: PermissionBehavior::Deny,
-                source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             },
             // CONTENT deny → EXCLUDED (denies the call, not the tool)
             PermissionRule {
@@ -159,7 +159,7 @@ mod tests {
                     rule_content: Some("rm:*".into()),
                 },
                 behavior: PermissionBehavior::Deny,
-                source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             },
             // allow rule of any kind → never in the deny list
             allow_rule("Read", None),
@@ -196,7 +196,7 @@ mod tests {
                 rule_content: Some("curl:*".into()),
             },
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         }];
         let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
 
@@ -259,7 +259,7 @@ mod tests {
                 rule_content: Some("git status:*".into()),
             },
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         }];
         // `with_roots` is required here: `shell_exact_allow`/`shell_allow` (the
         // real content-pattern matchers, `authorize_inner` steps 2c-exact/3) are
@@ -333,14 +333,15 @@ mod tests {
         use std::path::PathBuf;
 
         let plans_dir = PathBuf::from("/home/u/.claude/plans");
-        let matcher =
-            std::sync::Arc::new(platform_api::plan_files::PlanFileMatcher::with_identity(
-                platform_api::plan_files::PlanFileIdentity {
+        let matcher = std::sync::Arc::new(
+            lingxi_core::host::plan_files::PlanFileMatcher::with_identity(
+                lingxi_core::host::plan_files::PlanFileIdentity {
                     plans_dir: plans_dir.clone(),
                     slug: "brave-baking-otter".into(),
                     workshop_enabled: false,
                 },
-            ));
+            ),
+        );
         let policy = PermissionPolicy::new(PermissionMode::Plan)
             .with_roots(crate::FsRoots {
                 cwd: PathBuf::from("/home/u/project"),
@@ -357,7 +358,7 @@ mod tests {
             crate::PermissionResult::Allow { reason, .. } => match reason {
                 crate::PermissionDecisionReason::Other { reason } => assert_eq!(
                     reason,
-                    platform_api::plan_files::PLAN_FILE_WRITE_ALLOW_REASON
+                    lingxi_core::host::plan_files::PLAN_FILE_WRITE_ALLOW_REASON
                 ),
                 other => panic!("expected the byte-locked carve-out reason, got {other:?}"),
             },
@@ -494,7 +495,7 @@ mod tests {
         // deny bucket and wins; an allow rule lands in the allow bucket.
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": { "allow": ["Read"], "deny": ["Bash"], "ask": ["WebFetch"] } }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
@@ -533,7 +534,7 @@ mod tests {
     fn policy_with_roots(raw: &str, mode: PermissionMode) -> PermissionPolicy {
         let rules = crate::loader::permission_rules_from_settings_json(
             raw,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         PermissionPolicy::from_rules(mode, rules).with_roots(roots())
@@ -679,7 +680,7 @@ mod tests {
         // regardless of path (content ignored).
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": { "allow": ["Edit(src/**)"] } }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
@@ -946,7 +947,7 @@ mod tests {
         // the allow rule applies (preserves pre-guard behavior).
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": { "allow": ["Bash"] } }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
@@ -1075,7 +1076,7 @@ mod tests {
         // allow rule applies (preserves pre-guard behavior).
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": { "allow": ["Bash"] } }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
@@ -1318,7 +1319,7 @@ mod tests {
         // `/x/**` in a USER-settings rule resolves against ~/.claude, not cwd.
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": { "deny": ["Read(/agents/**)"] } }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         let p = PermissionPolicy::from_rules(PermissionMode::Default, rules).with_roots(roots());
@@ -1342,7 +1343,7 @@ mod tests {
                 rule_content: content.map(str::to_string),
             },
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         }
     }
 
@@ -1359,7 +1360,7 @@ mod tests {
                 rule_content: Some("rm:*".into()),
             },
             behavior: PermissionBehavior::Ask,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
         match ask_with_rule(&rule, "Bash") {
             PermissionResult::Ask { prompt, .. } => assert_eq!(
@@ -1402,7 +1403,7 @@ mod tests {
                 rule_content: Some("rm:*".into()),
             },
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         };
         p.deny_rules.entry(rule.source).or_default().push(rule);
         match p.authorize("Bash", &serde_json::json!({ "command": "  rm -rf /  " })) {
@@ -1421,7 +1422,7 @@ mod tests {
                 rule_content: None,
             },
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         };
         p2.deny_rules
             .entry(toolwide.source)
@@ -1439,7 +1440,7 @@ mod tests {
                 rule_content: Some("iex:*".into()),
             },
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         };
         p3.deny_rules
             .entry(ps_rule.source)
@@ -1574,7 +1575,7 @@ mod tests {
     fn accept_edits_policy(raw: &str) -> PermissionPolicy {
         let rules = crate::loader::permission_rules_from_settings_json(
             raw,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         PermissionPolicy::from_rules(PermissionMode::AcceptEdits, rules).with_roots(roots())
@@ -1724,7 +1725,7 @@ mod tests {
         let p = accept_edits_policy(r#"{ "permissions": {} }"#).with_working_dirs(
             crate::working_dirs::AdditionalWorkingDirs::from_sources([(
                 vec!["/extra/work"],
-                PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
             )]),
         );
         assert!(matches!(
@@ -2067,7 +2068,7 @@ mod tests {
         // The phase-2 (no-roots) path also honors the server-level match…
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": { "deny": ["mcp__github"] } }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
@@ -2252,7 +2253,7 @@ mod tests {
         assert_eq!(
             p.agent_type_deny_source("Explore"),
             Some(PermissionRuleSource::Settings(
-                protocol::SettingsScope::Project
+                lingxi_core::types::SettingsScope::Project
             ))
         );
         assert_eq!(
@@ -2262,12 +2263,13 @@ mod tests {
         );
         // Raw SettingSource identifier is byte-locked to claude-code.
         assert_eq!(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project)
                 .lingxi_settings_source(),
             "projectSettings"
         );
         assert_eq!(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local).lingxi_settings_source(),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local)
+                .lingxi_settings_source(),
             "localSettings"
         );
         let mut set = p.agent_deny_content_types();
@@ -2281,7 +2283,7 @@ mod tests {
         assert_eq!(
             p2.agent_type_deny_source("Explore"),
             Some(PermissionRuleSource::Settings(
-                protocol::SettingsScope::Project
+                lingxi_core::types::SettingsScope::Project
             ))
         );
         assert_eq!(p2.agent_deny_content_types(), vec!["Explore".to_string()]);
@@ -2492,7 +2494,7 @@ mod tests {
         // allowed even when no roots are configured.
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": {} }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
@@ -4173,7 +4175,7 @@ mod tests {
         let outside = "/home/u/.lingxi/secret.txt";
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": { "allow": ["Read(/secret.txt)"] } }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         // Without the block the rule allows the read…
@@ -4353,8 +4355,8 @@ mod tests {
         for source in [
             PermissionRuleSource::Session,
             PermissionRuleSource::CliArg,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         ] {
             assert!(
                 !matches!(
@@ -4368,7 +4370,7 @@ mod tests {
         assert!(
             matches!(
                 policy_with(PermissionRuleSource::Settings(
-                    protocol::SettingsScope::Project
+                    lingxi_core::types::SettingsScope::Project
                 ))
                 .authorize("Read", &read("/extra/a.txt")),
                 PermissionResult::Deny { .. }
@@ -4378,7 +4380,7 @@ mod tests {
         // …but it still widens everything that uses the ordinary `rb` union:
         // only the read block applies the narrower `mEt` set.
         let project = policy_with(PermissionRuleSource::Settings(
-            protocol::SettingsScope::Project,
+            lingxi_core::types::SettingsScope::Project,
         ));
         assert_eq!(
             project.all_working_dirs(&roots()),
@@ -4563,7 +4565,7 @@ mod tests {
         }
         // projectSettings-sourced: excluded from `mEt` ⇒ the read block asks.
         let out = with(PermissionRuleSource::Settings(
-            protocol::SettingsScope::Project,
+            lingxi_core::types::SettingsScope::Project,
         ))
         .authorize("Bash", &cmd);
         let PermissionResult::Ask { reason, .. } = &out else {
@@ -4835,7 +4837,7 @@ mod tests {
         }
         // projectSettings-sourced does not.
         let out = with(PermissionRuleSource::Settings(
-            protocol::SettingsScope::Project,
+            lingxi_core::types::SettingsScope::Project,
         ))
         .authorize("Bash", &bash("cat /extra/x"));
         let PermissionResult::Ask { reason, .. } = &out else {
@@ -5081,7 +5083,7 @@ mod tests {
         let build = |confined: bool| {
             let rules = crate::loader::permission_rules_from_settings_json(
                 settings,
-                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             )
             .unwrap();
             PermissionPolicy::from_rules_confined(PermissionMode::Default, rules, confined)
@@ -5152,7 +5154,7 @@ mod tests {
     #[test]
     fn a_negation_carves_an_exception_out_of_a_deny_in_the_same_source() {
         let policy = policy_from(&[(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             r#"{"permissions":{"deny":["Read(src/**)","Read(!src/public/**)"]}}"#,
         )]);
         assert!(
@@ -5171,7 +5173,7 @@ mod tests {
         // evaluates a pattern that could change the current verdict, so this is
         // the third flip in one source.
         let policy = policy_from(&[(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             r#"{"permissions":{"deny":[
                 "Read(src/**)",
                 "Read(!src/public/**)",
@@ -5193,11 +5195,11 @@ mod tests {
         // that spells it. Both directions matter.
         let user_denies = policy_from(&[
             (
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
                 r#"{"permissions":{"deny":["Read(src/**)"]}}"#,
             ),
             (
-                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
                 r#"{"permissions":{"deny":["Read(!src/public/**)"]}}"#,
             ),
         ]);
@@ -5208,11 +5210,11 @@ mod tests {
 
         let user_negates = policy_from(&[
             (
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
                 r#"{"permissions":{"deny":["Read(!src/public/**)"]}}"#,
             ),
             (
-                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
                 r#"{"permissions":{"deny":["Read(src/**)"]}}"#,
             ),
         ]);
@@ -5225,7 +5227,7 @@ mod tests {
     #[test]
     fn a_lone_negation_denies_nothing() {
         let policy = policy_from(&[(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             r#"{"permissions":{"deny":["Read(!src/**)"]}}"#,
         )]);
         assert!(
@@ -5234,7 +5236,7 @@ mod tests {
         );
         // Not vacuous: the same harness DOES deny when the pattern is positive.
         let positive = policy_from(&[(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             r#"{"permissions":{"deny":["Read(src/**)"]}}"#,
         )]);
         assert!(denies(&positive, "/proj/src/main.rs"));
@@ -5243,7 +5245,7 @@ mod tests {
     #[test]
     fn a_bare_bang_rule_denies_nothing_and_cancels_nothing() {
         let policy = policy_from(&[(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             r#"{"permissions":{"deny":["Read(src/**)","Read(!)"]}}"#,
         )]);
         assert!(
@@ -5262,7 +5264,7 @@ mod tests {
         // stays the first one — which is what this port reported before HP-7
         // and what every existing expectation is written against.
         let policy = policy_from(&[(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             r#"{"permissions":{"deny":["Read(src/**)","Read(src/main.rs)"]}}"#,
         )]);
         match policy.authorize("Read", &read("/proj/src/main.rs")) {

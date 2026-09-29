@@ -31,11 +31,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
-      - name: Zero-OS-deps check
+      - name: Shared core and minimal client check
         run: |
-          cargo check --locked -p protocol --no-default-features
           cargo check --locked -p core --no-default-features
-          cargo check --locked -p platform-api
+          cargo check --locked -p client --no-default-features
 
   # The mobile clients are the only consumers that turn `client`'s
   # `uniffi` feature on, and NOTHING else in this file builds with it: the
@@ -130,10 +129,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: ${{ matrix.target }}
-      - name: Check all four core packages with the native SDK
-        run: cargo check --locked --target ${{ matrix.target }} -p protocol -p core -p platform-api -p llm-runtime
+      - name: Check shared core and LLM runtime with the native SDK
+        run: cargo check --locked --target ${{ matrix.target }} -p core -p llm-runtime
 
-  # Former cross-compile-mobile checks of these same four packages now run
+  # Mobile checks of these shared packages run
   # below in harness-ios (Apple SDK) and harness-android (pinned Android NDK),
   # alongside the complete runtime checks, without informational-only skipping.
 
@@ -155,9 +154,7 @@ jobs:
           # Per spec line 608: musl is a check-only gate (NOT build/test) —
           # confirms the engine type-checks against musl, no runtime needed.
           cargo check --locked --target x86_64-unknown-linux-musl \
-                      -p protocol \
                       -p core \
-                      -p platform-api \
                       -p llm-runtime
 
   supply-chain:
@@ -298,7 +295,7 @@ jobs:
           SDKROOT="$(xcrun --sdk "$HARNESS_APPLE_SDK" --show-sdk-path)"
           export SDKROOT
           export BINDGEN_EXTRA_CLANG_ARGS="--target=$HARNESS_CLANG_TARGET -isysroot $SDKROOT"
-          cargo check --locked --target "$HARNESS_TARGET" -p protocol -p core -p platform-api -p llm-runtime
+          cargo check --locked --target "$HARNESS_TARGET" -p core -p llm-runtime
           cargo check --locked -p harness-runtime --no-default-features --features mobile,uniffi --target "$HARNESS_TARGET"
 
   harness-android:
@@ -334,7 +331,7 @@ jobs:
           HARNESS_ANDROID_ABI: ${{ matrix.abi }}
           HARNESS_FEATURES: ${{ matrix.features }}
         run: |
-          cargo ndk -t "$HARNESS_ANDROID_ABI" --platform 29 check --locked -p protocol -p core -p platform-api -p llm-runtime
+          cargo ndk -t "$HARNESS_ANDROID_ABI" --platform 29 check --locked -p core -p llm-runtime
           cargo ndk -t "$HARNESS_ANDROID_ABI" --platform 29 check --locked -p harness-runtime --no-default-features --features "$HARNESS_FEATURES"
 
   linux-seccomp-helper:

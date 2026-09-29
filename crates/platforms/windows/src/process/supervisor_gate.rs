@@ -4,7 +4,7 @@
 //! associates descendants atomically, including a child whose PID has not yet
 //! been reported to the source. No assignment-after-spawn race is introduced.
 #![allow(unsafe_code)]
-use platform_api::ProcessError;
+use lingxi_core::host::ProcessError;
 use std::ffi::c_void;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::OnceLock;

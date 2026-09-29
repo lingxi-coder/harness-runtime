@@ -22,6 +22,11 @@ use client::protocol::local_apps::{
     ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto, McpAppWidgetDto,
 };
 use futures_util::StreamExt;
+use lingxi_core::host::mobile_linux::guest_paths;
+use lingxi_core::host::{
+    LinuxCommandRequest, McpError, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy,
+    ResourceLimits,
+};
 use local_apps::{
     derive_mcp_status, effective_tool_surface_sha256, load_manifest, load_mcp_settings,
     load_permissions, mcp_catalog_tool_names, save_mcp_settings, save_permissions, AppCapability,
@@ -29,11 +34,6 @@ use local_apps::{
     AppRuntimeMode, AppRuntimeProfile, AppRuntimeState, AppService, BackgroundTaskStatus,
     DataMigrationPreview, DataMutation, DataQuery, DataSortDirection, DataSortKey,
     PermissionDecision, SessionPermissions,
-};
-use platform_api::mobile_linux::guest_paths;
-use platform_api::{
-    LinuxCommandRequest, McpError, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy,
-    ResourceLimits,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -1116,7 +1116,7 @@ pub(crate) struct SessionCatalog {
     /// The engine's per-profile data dir — `projects/` hangs off it.
     pub(crate) lingxi_home: std::path::PathBuf,
     /// The filesystem transcripts are read and appended through.
-    pub(crate) fs: Arc<dyn platform_api::FileSystem>,
+    pub(crate) fs: Arc<dyn lingxi_core::host::FileSystem>,
 }
 
 /// The latest effective `custom-title` for `session_id` in a transcript: the
@@ -1263,7 +1263,7 @@ pub(crate) fn latest_custom_title_is_mobile_placeholder(
 pub(crate) async fn reconcile_app_init_session_title(
     lingxi_home: &std::path::Path,
     data_root: &std::path::Path,
-    fs: Arc<dyn platform_api::FileSystem>,
+    fs: Arc<dyn lingxi_core::host::FileSystem>,
     record: &local_apps::AppRecord,
 ) -> Result<bool, String> {
     // Clause 1. Today no production state can reach this with a name that
@@ -1387,7 +1387,7 @@ pub(crate) struct LocalAppsHostBroker {
     /// supply one: the reminder is all it sees, and the reminder's device
     /// vocabulary (`phone`/`tablet`) does not name an iOS form factor.
     /// Unattached — desktop embedders and host tests — means no context.
-    host_environment: OnceLock<platform_api::MobileHostEnvironment>,
+    host_environment: OnceLock<lingxi_core::host::MobileHostEnvironment>,
     /// Host-owned app Agent execution seam, attached by the mobile composition
     /// root after the app service and MCP host are ready.
     agent_executor: OnceLock<Arc<dyn LocalAppsAgentExecutor>>,
@@ -1655,12 +1655,12 @@ impl LocalAppsHostBroker {
     ) -> Result<mcp::McpServerConfig, String> {
         Ok(mcp::McpServerConfig {
             name: scope.server_name(),
-            spec: platform_api::McpTransportSpec::InProcess {
+            spec: lingxi_core::host::McpTransportSpec::InProcess {
                 registry_key: scope
                     .scoped_registry_key(conversation_id)
                     .map_err(|error| error.to_string())?,
             },
-            scope: mcp::ConfigScope::Settings(protocol::SettingsScope::Managed),
+            scope: mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
             disabled: false,
             timeout_ms: Some(crate::mobile::host::LOCAL_APPS_MCP_TIMEOUT_MS),
             always_load: true,
@@ -1731,7 +1731,7 @@ impl LocalAppsHostBroker {
 
         let desired = Self::managed_mcp_config(&scope, conversation_id)?;
         let desired_registry_key = match &desired.spec {
-            platform_api::McpTransportSpec::InProcess { registry_key } => registry_key,
+            lingxi_core::host::McpTransportSpec::InProcess { registry_key } => registry_key,
             _ => unreachable!("managed Local App MCP is always in-process"),
         };
         let existing = registry.get_config(&scope.server_name()).await;
@@ -1739,7 +1739,7 @@ impl LocalAppsHostBroker {
             existing
                 .as_ref()
                 .is_some_and(|current| match &current.spec {
-                    platform_api::McpTransportSpec::InProcess { registry_key } => {
+                    lingxi_core::host::McpTransportSpec::InProcess { registry_key } => {
                         let current_route = registry_key.rsplit_once(':').map(|(route, _)| route);
                         let desired_route = desired_registry_key
                             .rsplit_once(':')
@@ -2360,8 +2360,8 @@ impl LocalAppsHostBroker {
     /// call site as [`Self::attach_agent_executor`].
     pub(crate) fn attach_host_environment(
         &self,
-        environment: platform_api::MobileHostEnvironment,
-    ) -> Result<(), platform_api::MobileHostEnvironment> {
+        environment: lingxi_core::host::MobileHostEnvironment,
+    ) -> Result<(), lingxi_core::host::MobileHostEnvironment> {
         self.host_environment.set(environment)
     }
 
@@ -2472,11 +2472,11 @@ impl LocalAppsHostBroker {
         let mut body = serde_json::to_vec_pretty(candidate)
             .map_err(|error| format!("serialize MCP candidate: {error}"))?;
         body.push(b'\n');
-        platform_api::rooted_fs::atomic_write(
+        lingxi_core::host::rooted_fs::atomic_write(
             &self.root,
             &path,
             &body,
-            platform_api::rooted_fs::AtomicWriteOptions::default(),
+            lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
         )
         .map_err(|error| local_apps::AppError::from_fs("write MCP candidate", &error).to_string())
     }
@@ -2488,10 +2488,11 @@ impl LocalAppsHostBroker {
     ) -> Result<PersistedMcpCandidate, String> {
         let path =
             Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
-        let body = platform_api::rooted_fs::read_to_string_limited(&self.root, &path, 512 * 1024)
-            .map_err(|error| {
-            local_apps::AppError::from_fs("read MCP candidate", &error).to_string()
-        })?;
+        let body =
+            lingxi_core::host::rooted_fs::read_to_string_limited(&self.root, &path, 512 * 1024)
+                .map_err(|error| {
+                    local_apps::AppError::from_fs("read MCP candidate", &error).to_string()
+                })?;
         serde_json::from_str(&body).map_err(|error| format!("parse MCP candidate: {error}"))
     }
 
@@ -2504,8 +2505,8 @@ impl LocalAppsHostBroker {
         local_apps::delete_candidate_journal(layout).map_err(|error| error.to_string())?;
         let relative =
             Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
-        match platform_api::rooted_fs::remove_file(&self.root, &relative) {
-            Ok(()) | Err(platform_api::FsError::NotFound(_)) => {}
+        match lingxi_core::host::rooted_fs::remove_file(&self.root, &relative) {
+            Ok(()) | Err(lingxi_core::host::FsError::NotFound(_)) => {}
             Err(error) => {
                 return Err(local_apps::AppError::from_fs(
                     "delete create-only MCP candidate",
@@ -2554,9 +2555,9 @@ impl LocalAppsHostBroker {
         let rel = layout
             .workspace_rel()
             .join(".lingxi/mcp-flow-contexts.json");
-        let body = platform_api::rooted_fs::read_to_string_limited(&self.root, &rel, 512 * 1024)
+        let body = lingxi_core::host::rooted_fs::read_to_string_limited(&self.root, &rel, 512 * 1024)
             .map_err(|error| match error {
-                platform_api::FsError::NotFound(_) => {
+                lingxi_core::host::FsError::NotFound(_) => {
                     "mcp_flow_contexts_missing: Host could not resolve any trusted MCP flow contexts for this app".to_string()
                 }
                 other => local_apps::AppError::from_fs("read MCP flow contexts", &other).to_string(),
@@ -2787,7 +2788,7 @@ impl LocalAppsHostBroker {
             .join(workflow_run_id)
             .join("validated-selection.json");
         let body =
-            platform_api::rooted_fs::read_to_string_limited(&self.root, &relative, 256 * 1024)
+            lingxi_core::host::rooted_fs::read_to_string_limited(&self.root, &relative, 256 * 1024)
                 .map_err(|error| format!("validated_selection_missing: {error}"))?;
         let value: Value = serde_json::from_str(&body)
             .map_err(|error| format!("validated_selection_invalid: {error}"))?;
@@ -7714,8 +7715,8 @@ impl LocalAppsHostBroker {
         create_seed: Option<CreateScaffoldSeed>,
     ) -> Result<
         (
-            platform_api::rooted_fs::RootedFileLock,
-            platform_api::rooted_fs::RootedFileLock,
+            lingxi_core::host::rooted_fs::RootedFileLock,
+            lingxi_core::host::rooted_fs::RootedFileLock,
             local_apps::storage::ScaffoldRecoveryHandle,
         ),
         String,
@@ -7759,8 +7760,8 @@ impl LocalAppsHostBroker {
             move ||
                 -> Result<
                     (
-                        platform_api::rooted_fs::RootedFileLock,
-                        platform_api::rooted_fs::RootedFileLock,
+                        lingxi_core::host::rooted_fs::RootedFileLock,
+                        lingxi_core::host::rooted_fs::RootedFileLock,
                         local_apps::storage::ScaffoldRecoveryHandle,
                     ),
                     String,
@@ -8998,10 +8999,10 @@ impl LocalAppsHostBroker {
         &self,
         app_id: &str,
         tool_input: Value,
-        definition: &platform_api::McpToolDefinitionDto,
+        definition: &lingxi_core::host::McpToolDefinitionDto,
         binding: &local_apps::AppMcpFlowBinding,
         context: &local_apps::AppMcpFlowContext,
-        catalog_ceiling: platform_api::McpPermissionCeiling,
+        catalog_ceiling: lingxi_core::host::McpPermissionCeiling,
         mode: BoundMcpFlowMode,
     ) -> Result<BoundMcpExecution, String> {
         let input_bytes = serde_json::to_vec(&tool_input)
@@ -9038,9 +9039,13 @@ impl LocalAppsHostBroker {
                     .into(),
             );
         }
-        if matches!(derived_ceiling, platform_api::McpPermissionCeiling::Deny)
-            || matches!(catalog_ceiling, platform_api::McpPermissionCeiling::Deny)
-        {
+        if matches!(
+            derived_ceiling,
+            lingxi_core::host::McpPermissionCeiling::Deny
+        ) || matches!(
+            catalog_ceiling,
+            lingxi_core::host::McpPermissionCeiling::Deny
+        ) {
             return Err("permission_ceiling: Host denied this MCP Flow".into());
         }
 
@@ -9280,7 +9285,7 @@ impl LocalAppsHostBroker {
                 "unknown_tool: Local App tool is not in the active catalog".to_string()
             })?;
         let definition_value = entry.get("definition").unwrap_or(entry);
-        let definition: platform_api::McpToolDefinitionDto =
+        let definition: lingxi_core::host::McpToolDefinitionDto =
             serde_json::from_value(definition_value.clone())
                 .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
         let binding_value = entry.get("flow").cloned().ok_or_else(|| {
@@ -9327,7 +9332,7 @@ impl LocalAppsHostBroker {
         let catalog_ceiling = entry
             .get("ceiling")
             .and_then(Value::as_str)
-            .and_then(platform_api::McpPermissionCeiling::from_policy_str)
+            .and_then(lingxi_core::host::McpPermissionCeiling::from_policy_str)
             .ok_or_else(|| "permission_ceiling: active tool ceiling is invalid".to_string())?;
         Ok(self
             .execute_bound_mcp_flow(
@@ -12088,7 +12093,7 @@ fn lower_managed_mcp_status(status: AppMcpStatus) -> ManagedLocalAppMcpStatusDto
     }
 }
 
-fn tool_meta_resource_uri(definition: &platform_api::McpToolDefinitionDto) -> Option<String> {
+fn tool_meta_resource_uri(definition: &lingxi_core::host::McpToolDefinitionDto) -> Option<String> {
     let meta = definition.meta.as_ref()?;
     meta.get("ui")
         .and_then(Value::as_object)
@@ -12136,9 +12141,12 @@ fn validate_managed_mcp_widget_file(
         .join(local_apps::manifest::MCP_DIR)
         .join(LOCAL_APP_WIDGET_DIR)
         .join(format!("{resource_sha256}.html"));
-    let body =
-        platform_api::rooted_fs::read_to_string_limited(layout.root(), &relative, 4 * 1024 * 1024)
-            .map_err(|error| format!("widget_invalid: {}: {error}", relative.display()))?;
+    let body = lingxi_core::host::rooted_fs::read_to_string_limited(
+        layout.root(),
+        &relative,
+        4 * 1024 * 1024,
+    )
+    .map_err(|error| format!("widget_invalid: {}: {error}", relative.display()))?;
     let actual = format!("{:x}", Sha256::digest(body.as_bytes()));
     if actual != resource_sha256 {
         return Err("widget_invalid: Local App MCP widget digest mismatch".into());
@@ -12212,7 +12220,7 @@ fn managed_mcp_widget_resource(
         .and_then(Value::as_array)
         .ok_or_else(|| "catalog_invalid: active catalog tools are missing".to_string())?;
     for entry in entries {
-        let definition: platform_api::McpToolDefinitionDto =
+        let definition: lingxi_core::host::McpToolDefinitionDto =
             serde_json::from_value(entry.get("definition").unwrap_or(entry).clone())
                 .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
         let Some(uri) = tool_meta_resource_uri(&definition) else {
@@ -12247,9 +12255,9 @@ fn managed_mcp_widget_resource(
 }
 
 fn mcp_tool_surface(
-    definition: platform_api::McpToolDefinitionDto,
+    definition: lingxi_core::host::McpToolDefinitionDto,
     flow: Value,
-    ceiling: platform_api::McpPermissionCeiling,
+    ceiling: lingxi_core::host::McpPermissionCeiling,
 ) -> Result<LocalAppMcpToolSurfaceDto, String> {
     Ok(LocalAppMcpToolSurfaceDto {
         name: definition.name,
@@ -12263,9 +12271,9 @@ fn mcp_tool_surface(
         visible_meta_json: optional_json_string(definition.meta.as_ref())?,
         semantic_flow_json: serde_json::to_string(&flow).map_err(|error| error.to_string())?,
         permission_ceiling: match ceiling {
-            platform_api::McpPermissionCeiling::Allow => "allow",
-            platform_api::McpPermissionCeiling::Ask => "ask",
-            platform_api::McpPermissionCeiling::Deny => "deny",
+            lingxi_core::host::McpPermissionCeiling::Allow => "allow",
+            lingxi_core::host::McpPermissionCeiling::Ask => "ask",
+            lingxi_core::host::McpPermissionCeiling::Deny => "deny",
         }
         .into(),
     })
@@ -12280,7 +12288,7 @@ fn mcp_tool_surfaces_from_catalog(
         .ok_or_else(|| "catalog_invalid: active catalog tools are missing".to_string())?;
     let mut tools = Vec::with_capacity(entries.len());
     for entry in entries {
-        let definition: platform_api::McpToolDefinitionDto =
+        let definition: lingxi_core::host::McpToolDefinitionDto =
             serde_json::from_value(entry.get("definition").unwrap_or(entry).clone())
                 .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
         let flow = entry
@@ -12290,7 +12298,7 @@ fn mcp_tool_surfaces_from_catalog(
         let ceiling = entry
             .get("ceiling")
             .and_then(Value::as_str)
-            .and_then(platform_api::McpPermissionCeiling::from_policy_str)
+            .and_then(lingxi_core::host::McpPermissionCeiling::from_policy_str)
             .ok_or_else(|| "catalog_invalid: active tool ceiling is invalid".to_string())?;
         tools.push(mcp_tool_surface(definition, flow, ceiling)?);
     }
@@ -14068,14 +14076,14 @@ mod tests {
     use async_trait::async_trait;
     use client::adapter::{ClientEventSink, MockSink};
     use futures_util::stream;
-    use local_apps::test_support::FixedClock;
-    use local_apps::{storage, AppState, NoopAppEventObserver};
-    use platform_api::{
+    use lingxi_core::host::{
         LinuxCommandRequest, LinuxEnforcementReceipt, LinuxProcessHandle, MobileLinuxCapability,
         MobileLinuxError, MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus,
         NetworkPolicy, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState, RootfsStatus,
         SandboxBackend,
     };
+    use local_apps::test_support::FixedClock;
+    use local_apps::{storage, AppState, NoopAppEventObserver};
     use serde_json::json;
     use std::fs;
     use std::future::Future;
@@ -14304,7 +14312,7 @@ mod tests {
         async fn run(
             &self,
             request: LinuxCommandRequest,
-        ) -> Result<platform_api::LinuxCommandResult, MobileLinuxError> {
+        ) -> Result<lingxi_core::host::LinuxCommandResult, MobileLinuxError> {
             Self::enforce_network_policy(&request)?;
             Err(MobileLinuxError::Unsupported)
         }
@@ -14312,7 +14320,7 @@ mod tests {
         async fn run_isolated(
             &self,
             request: LinuxCommandRequest,
-        ) -> Result<platform_api::LinuxCommandResult, MobileLinuxError> {
+        ) -> Result<lingxi_core::host::LinuxCommandResult, MobileLinuxError> {
             *self.last_request.lock().await = Some(request.clone());
             self.isolated_requests.lock().await.push(request.clone());
             let build_mount = request.mounts.first().ok_or_else(|| {
@@ -14348,13 +14356,13 @@ mod tests {
                 && request.args.iter().any(|arg| arg == "--frozen-lockfile")
                 && self.fail_frozen_install.load(Ordering::SeqCst)
             {
-                return Ok(platform_api::LinuxCommandResult {
+                return Ok(lingxi_core::host::LinuxCommandResult {
                     stdout: String::new(),
                     stderr: "synthetic frozen install failure".into(),
                     exit_code: 1,
                     timed_out: false,
                     cancelled: false,
-                    enforcement: platform_api::LinuxEnforcementReceipt {
+                    enforcement: lingxi_core::host::LinuxEnforcementReceipt {
                         network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                         memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                     },
@@ -14381,13 +14389,13 @@ mod tests {
             if matches!(request.command.as_str(), "/usr/bin/pnpm")
                 && request.args.iter().any(|arg| arg == "--lockfile-only")
             {
-                return Ok(platform_api::LinuxCommandResult {
+                return Ok(lingxi_core::host::LinuxCommandResult {
                     stdout: "lockfile resolved".into(),
                     stderr: String::new(),
                     exit_code: 0,
                     timed_out: false,
                     cancelled: false,
-                    enforcement: platform_api::LinuxEnforcementReceipt {
+                    enforcement: lingxi_core::host::LinuxEnforcementReceipt {
                         network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                         memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                     },
@@ -14395,13 +14403,13 @@ mod tests {
             }
             if matches!(request.command.as_str(), "/usr/bin/node") {
                 if self.fail_build.load(Ordering::SeqCst) {
-                    return Ok(platform_api::LinuxCommandResult {
+                    return Ok(lingxi_core::host::LinuxCommandResult {
                         stdout: String::new(),
                         stderr: "synthetic build failure".into(),
                         exit_code: 1,
                         timed_out: false,
                         cancelled: false,
-                        enforcement: platform_api::LinuxEnforcementReceipt {
+                        enforcement: lingxi_core::host::LinuxEnforcementReceipt {
                             network_policy_enforced: self
                                 .enforcement_receipt
                                 .load(Ordering::SeqCst),
@@ -14427,13 +14435,13 @@ mod tests {
                 .map_err(|error| {
                     MobileLinuxError::Io(format!("write fake build output: {error}"))
                 })?;
-                return Ok(platform_api::LinuxCommandResult {
+                return Ok(lingxi_core::host::LinuxCommandResult {
                     stdout: "built".into(),
                     stderr: String::new(),
                     exit_code: 0,
                     timed_out: false,
                     cancelled: false,
-                    enforcement: platform_api::LinuxEnforcementReceipt {
+                    enforcement: lingxi_core::host::LinuxEnforcementReceipt {
                         network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                         memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                     },
@@ -14512,13 +14520,13 @@ mod tests {
                     MobileLinuxError::Io(format!("write fake installed package: {error}"))
                 })?;
             }
-            Ok(platform_api::LinuxCommandResult {
+            Ok(lingxi_core::host::LinuxCommandResult {
                 stdout: "ok".into(),
                 stderr: String::new(),
                 exit_code: 0,
                 timed_out: false,
                 cancelled: false,
-                enforcement: platform_api::LinuxEnforcementReceipt {
+                enforcement: lingxi_core::host::LinuxEnforcementReceipt {
                     network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                     memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
                 },
@@ -14973,8 +14981,8 @@ mod tests {
         assert!(broker.attach_service(service.clone()).is_ok());
         assert!(broker
             .attach_host_environment(host_environment(
-                platform_api::MobileHostOs::Ios,
-                platform_api::MobileDeviceClass::Phone,
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Phone,
             ))
             .is_ok());
         let app_id = create_app_fixture(&root, &service, "Host QA").await;
@@ -17379,7 +17387,7 @@ mod tests {
         .expect("write flow contexts");
 
         let mut definition =
-            platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
+            lingxi_core::host::McpToolDefinitionDto::new("runtime_status", input_schema);
         definition.output_schema = Some(output_schema);
         let binding = json!({
             "flowId": "runtime-status-flow",
@@ -17746,8 +17754,8 @@ mod tests {
         let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
         assert!(broker
             .attach_host_environment(host_environment(
-                platform_api::MobileHostOs::Ios,
-                platform_api::MobileDeviceClass::Tablet,
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Tablet,
             ))
             .is_ok());
         let record = service
@@ -18295,7 +18303,7 @@ mod tests {
         });
         let output_schema = runtime_record_output_schema();
         let mut definition =
-            platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
+            lingxi_core::host::McpToolDefinitionDto::new("runtime_status", input_schema);
         definition.title = Some("Runtime status".into());
         definition.description =
             Some("Read the current runtime status from the staged flow.".into());
@@ -18318,7 +18326,7 @@ mod tests {
             tools: vec![local_apps::HostValidatedMcpTool {
                 definition: definition.clone(),
                 flow,
-                ceiling: platform_api::McpPermissionCeiling::Allow,
+                ceiling: lingxi_core::host::McpPermissionCeiling::Allow,
             }],
             proposal_sha256: local_apps::approval_contract_sha256(
                 serde_json::to_value(&proposal).expect("serialize proposal"),
@@ -25988,15 +25996,15 @@ mod tests {
 
     /// Build the host facts a native client reports for one device.
     fn host_environment(
-        host_os: platform_api::MobileHostOs,
-        device_class: platform_api::MobileDeviceClass,
-    ) -> platform_api::MobileHostEnvironment {
-        platform_api::MobileHostEnvironment::new(
+        host_os: lingxi_core::host::MobileHostOs,
+        device_class: lingxi_core::host::MobileDeviceClass,
+    ) -> lingxi_core::host::MobileHostEnvironment {
+        lingxi_core::host::MobileHostEnvironment::new(
             host_os,
             Some("19.0".into()),
             device_class,
-            platform_api::MobileExecutionTarget::PhysicalDevice,
-            platform_api::MobileLaunchMode::Interactive,
+            lingxi_core::host::MobileExecutionTarget::PhysicalDevice,
+            lingxi_core::host::MobileLaunchMode::Interactive,
         )
     }
 
@@ -26020,8 +26028,8 @@ mod tests {
         assert!(broker.attach_service(service.clone()).is_ok());
         assert!(broker
             .attach_host_environment(host_environment(
-                platform_api::MobileHostOs::Ios,
-                platform_api::MobileDeviceClass::Phone,
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Phone,
             ))
             .is_ok());
         let app_id = create_app_fixture(&root, &service, "Device").await;
@@ -26058,8 +26066,8 @@ mod tests {
         assert!(broker.attach_service(service.clone()).is_ok());
         assert!(broker
             .attach_host_environment(host_environment(
-                platform_api::MobileHostOs::Android,
-                platform_api::MobileDeviceClass::Tablet,
+                lingxi_core::host::MobileHostOs::Android,
+                lingxi_core::host::MobileDeviceClass::Tablet,
             ))
             .is_ok());
         let app_id = create_app_fixture(&root, &service, "Tablet").await;
@@ -26089,8 +26097,8 @@ mod tests {
         assert!(broker.attach_service(service.clone()).is_ok());
         assert!(broker
             .attach_host_environment(host_environment(
-                platform_api::MobileHostOs::Ios,
-                platform_api::MobileDeviceClass::Unknown,
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Unknown,
             ))
             .is_ok());
         let app_id = create_app_fixture(&root, &service, "Unclassified").await;
@@ -26119,8 +26127,8 @@ mod tests {
         assert!(broker.attach_service(service.clone()).is_ok());
         assert!(broker
             .attach_host_environment(host_environment(
-                platform_api::MobileHostOs::Ios,
-                platform_api::MobileDeviceClass::Tablet,
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Tablet,
             ))
             .is_ok());
         let app_id = create_app_fixture(&root, &service, "Ignored").await;
@@ -26511,7 +26519,7 @@ mod tests {
         service: Arc<AppService>,
         broker: Arc<LocalAppsHostBroker>,
         lingxi_home: PathBuf,
-        fs: Arc<dyn platform_api::FileSystem>,
+        fs: Arc<dyn lingxi_core::host::FileSystem>,
         app_id: String,
         init_session_id: String,
         /// Captured at creation so the transcript path is derived exactly the
@@ -26636,7 +26644,7 @@ mod tests {
         let root = TempDir::new().expect("tempdir");
         let lingxi_home = root.path().join(".lingxi");
         fs::create_dir_all(&lingxi_home).expect("create lingxi home");
-        let fs_impl: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs_impl: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix_minimal::PosixFileSystem::new(root.path().to_path_buf()),
         );
         let service = test_service(&root).await;

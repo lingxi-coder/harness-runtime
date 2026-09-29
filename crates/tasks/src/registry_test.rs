@@ -4,7 +4,7 @@
 use super::*;
 use crate::task_trait::{Task, TaskContext, TaskHandle};
 use async_trait::async_trait;
-use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
@@ -15,7 +15,7 @@ use tokio::sync::oneshot;
 #[tokio::test]
 async fn parked_agent_is_completed_retained_resumable_and_stoppable() {
     use crate::handlers::TaskStatusSink;
-    use platform_api::task_registry::TaskRegistryHandle;
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
     let (_dir, registry) = make_registry();
     let registry = Arc::new(registry);
     registry
@@ -31,7 +31,7 @@ async fn parked_agent_is_completed_retained_resumable_and_stoppable() {
         .unwrap();
     assert_eq!(record.status, "completed");
     assert!(record.is_parked);
-    assert!(!platform_api::task_activity::is_active_delegated_task(
+    assert!(!lingxi_core::host::task_activity::is_active_delegated_task(
         &record
     ));
     assert!(
@@ -57,7 +57,7 @@ async fn parked_agent_is_completed_retained_resumable_and_stoppable() {
         .unwrap();
     assert_eq!(running.status, "running");
     assert!(!running.is_parked);
-    assert!(platform_api::task_activity::is_active_delegated_task(
+    assert!(lingxi_core::host::task_activity::is_active_delegated_task(
         &running
     ));
     sink.notify_rest(
@@ -86,7 +86,7 @@ async fn parked_agent_is_completed_retained_resumable_and_stoppable() {
 
 #[tokio::test]
 async fn resumed_agent_clears_exhausted_turn_note_before_normal_rest() {
-    use platform_api::task_registry::AgentTerminalOutcome;
+    use lingxi_core::host::task_registry::AgentTerminalOutcome;
     let (_dir, registry) = make_registry();
     registry
         .insert_state_for_test(agent_state("aresume01", TaskStatus::Running))
@@ -134,9 +134,9 @@ async fn resumed_agent_clears_exhausted_turn_note_before_normal_rest() {
 
 #[tokio::test]
 async fn notification_resume_clears_exhausted_turn_note() {
-    use platform_api::task_registry::AgentTerminalOutcome;
+    use lingxi_core::host::task_registry::AgentTerminalOutcome;
     let (_dir, registry) = make_registry();
-    let owner = protocol::AgentId::new();
+    let owner = lingxi_core::types::AgentId::new();
     let mut parent = agent_state("anoturn1", TaskStatus::Running);
     if let TaskState::LocalAgent(agent) = &mut parent {
         agent.agent_id = owner;
@@ -178,10 +178,10 @@ async fn notification_resume_clears_exhausted_turn_note() {
 #[tokio::test]
 async fn nested_parked_keepalive_defers_notifications_and_cascades_only_its_tree() {
     let (_dir, registry) = make_registry();
-    let a = protocol::AgentId::new();
-    let b = protocol::AgentId::new();
-    let c = protocol::AgentId::new();
-    let d = protocol::AgentId::new();
+    let a = lingxi_core::types::AgentId::new();
+    let b = lingxi_core::types::AgentId::new();
+    let c = lingxi_core::types::AgentId::new();
+    let d = lingxi_core::types::AgentId::new();
     for (task, agent_id, parent) in [
         ("anest001", a, None),
         ("bnest001", b, Some(a)),
@@ -246,8 +246,8 @@ async fn nested_parked_keepalive_defers_notifications_and_cascades_only_its_tree
 #[tokio::test]
 async fn completed_child_keeps_parked_ancestors_until_recipient_fold() {
     let (_dir, registry) = make_registry();
-    let a = protocol::AgentId::new();
-    let b = protocol::AgentId::new();
+    let a = lingxi_core::types::AgentId::new();
+    let b = lingxi_core::types::AgentId::new();
     let mut parent = agent_state("await001", TaskStatus::Running);
     if let TaskState::LocalAgent(agent) = &mut parent {
         agent.agent_id = a;
@@ -297,8 +297,8 @@ async fn completed_child_keeps_parked_ancestors_until_recipient_fold() {
 #[tokio::test]
 async fn notified_empty_park_does_not_hold_its_parent() {
     let (_dir, registry) = make_registry();
-    let a = protocol::AgentId::new();
-    let b = protocol::AgentId::new();
+    let a = lingxi_core::types::AgentId::new();
+    let b = lingxi_core::types::AgentId::new();
     for (id, agent_id, creator) in [("aempty01", a, None), ("bempty01", b, Some(a))] {
         let mut state = agent_state(id, TaskStatus::Running);
         if let TaskState::LocalAgent(agent) = &mut state {
@@ -326,7 +326,7 @@ async fn notified_empty_park_does_not_hold_its_parent() {
 #[tokio::test]
 async fn teammate_idle_producer_reaches_active_work_predicate() {
     use crate::handlers::TaskStatusSink;
-    use platform_api::task_registry::TaskRegistryHandle;
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
     let (_dir, mut registry) = make_registry();
     registry.register_handler(
         TaskType::InProcessTeammate,
@@ -348,7 +348,7 @@ async fn teammate_idle_producer_reaches_active_work_predicate() {
         .await
         .unwrap()
         .unwrap();
-    assert!(platform_api::task_activity::is_active_delegated_task(
+    assert!(lingxi_core::host::task_activity::is_active_delegated_task(
         &before
     ));
     sink.set_teammate_idle(&id).await;
@@ -360,7 +360,7 @@ async fn teammate_idle_producer_reaches_active_work_predicate() {
         idle.is_idle,
         "real sink→registry→TaskRecord projection must carry idle"
     );
-    assert!(!platform_api::task_activity::is_active_delegated_task(
+    assert!(!lingxi_core::host::task_activity::is_active_delegated_task(
         &idle
     ));
     sink.set_status(&id, TaskStatus::Running).await;
@@ -369,7 +369,7 @@ async fn teammate_idle_producer_reaches_active_work_predicate() {
         .unwrap()
         .unwrap();
     assert!(!resumed.is_idle);
-    assert!(platform_api::task_activity::is_active_delegated_task(
+    assert!(lingxi_core::host::task_activity::is_active_delegated_task(
         &resumed
     ));
 }
@@ -405,7 +405,7 @@ async fn concurrent_in_process_stops_wait_for_backing_exit_before_departure() {
         }
     }
     #[async_trait]
-    impl platform_api::team_spawn::TeammateDepartureCleanup for BlockingStop {
+    impl lingxi_core::host::team_spawn::TeammateDepartureCleanup for BlockingStop {
         async fn has_pending_departure(&self, _: &str) -> bool {
             true
         }
@@ -436,7 +436,8 @@ async fn concurrent_in_process_stops_wait_for_backing_exit_before_departure() {
             )
             .await
             .unwrap();
-        let owner: Arc<dyn platform_api::team_spawn::TeammateDepartureCleanup> = handler.clone();
+        let owner: Arc<dyn lingxi_core::host::team_spawn::TeammateDepartureCleanup> =
+            handler.clone();
         registry
             .set_teammate_departure_cleanup(Arc::downgrade(&owner))
             .await;
@@ -479,7 +480,7 @@ async fn approved_departure_io_failure_is_retryable_after_task_is_already_killed
         calls: AtomicUsize,
     }
     #[async_trait]
-    impl platform_api::team_spawn::TeammateDepartureCleanup for DepartureOwner {
+    impl lingxi_core::host::team_spawn::TeammateDepartureCleanup for DepartureOwner {
         async fn has_pending_departure(&self, task_id: &str) -> bool {
             task_id == self.task_id && self.calls.load(Ordering::SeqCst) < 2
         }
@@ -509,11 +510,11 @@ async fn approved_departure_io_failure_is_retryable_after_task_is_already_killed
         task_id: task_id.clone(),
         calls: AtomicUsize::new(0),
     });
-    let cleanup: Arc<dyn platform_api::team_spawn::TeammateDepartureCleanup> = owner.clone();
+    let cleanup: Arc<dyn lingxi_core::host::team_spawn::TeammateDepartureCleanup> = owner.clone();
     registry
         .set_teammate_departure_cleanup(Arc::downgrade(&cleanup))
         .await;
-    let public: &dyn platform_api::TaskRegistryHandle = &registry;
+    let public: &dyn lingxi_core::host::TaskRegistryHandle = &registry;
     assert!(public.kill(&task_id).await.is_err());
     assert_eq!(
         registry.get(&task_id).await.unwrap().base().status,
@@ -556,7 +557,7 @@ async fn external_teammate_stop_failure_is_retryable_through_public_task_registr
     impl TeamSpawnSeam for StopOwner {
         async fn spawn_teammate(
             &self,
-            _: protocol::AgentId,
+            _: lingxi_core::types::AgentId,
             _: String,
             _: String,
             _: String,
@@ -592,7 +593,7 @@ async fn external_teammate_stop_failure_is_retryable_through_public_task_registr
         .set_external_teammate_controller(Arc::downgrade(&seam))
         .await;
     registry.register_external_teammate_task(&task_id).await;
-    let public: &dyn platform_api::task_registry::TaskRegistryHandle = &registry;
+    let public: &dyn lingxi_core::host::task_registry::TaskRegistryHandle = &registry;
     assert!(public.kill(&task_id).await.is_err());
     assert_eq!(
         public.get(&task_id).await.unwrap().unwrap().status,
@@ -768,11 +769,11 @@ impl Task for RecordingHandler {
         let handle = TaskHandle::new(self.task_id.clone(), cleanup);
         Ok(match self.fusion_duration_ms {
             Some(duration_ms) => {
-                handle.with_fusion_prepared_summary(platform_api::FusionPreparedSummary {
-                    identity: platform_api::FusionRunIdentity::new(
-                        platform_api::FusionRunId::generated(),
+                handle.with_fusion_prepared_summary(lingxi_core::host::FusionPreparedSummary {
+                    identity: lingxi_core::host::FusionRunIdentity::new(
+                        lingxi_core::host::FusionRunId::generated(),
                         None,
-                        platform_api::FusionOrigin::Slash,
+                        lingxi_core::host::FusionOrigin::Slash,
                         Some(self.task_id.clone()),
                     ),
                     duration_ms,
@@ -1202,7 +1203,7 @@ async fn an_agents_background_shell_defers_that_agents_rest_notification() {
     // fully at rest, and the model is told it finished while its own command is
     // still running.
     let (_dir, registry) = make_registry();
-    let owner = protocol::AgentId::new();
+    let owner = lingxi_core::types::AgentId::new();
 
     let agent_task = "a-owner-rest".to_string();
     registry
@@ -1308,7 +1309,7 @@ struct RecordingBackgrounder {
 }
 
 #[async_trait::async_trait]
-impl platform_api::task_registry::TaskBackgrounder for RecordingBackgrounder {
+impl lingxi_core::host::task_registry::TaskBackgrounder for RecordingBackgrounder {
     async fn background(&self) {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
@@ -1322,7 +1323,7 @@ async fn arm_foreground(
     registry
         .register_foreground_bash(
             &id,
-            platform_api::task_registry::BackgroundBashRegistration {
+            lingxi_core::host::task_registry::BackgroundBashRegistration {
                 command: format!("sleep 60 # {label}"),
                 description: label.into(),
                 tool_use_id: Some(format!("toolu_{label}")),
@@ -1348,15 +1349,15 @@ async fn arm_foreground(
 /// started.
 #[tokio::test]
 async fn foreground_shell_caller_is_produced_and_retained_after_backgrounding() {
-    use platform_api::task_registry::TaskRegistryHandle;
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
     let (_dir, registry) = make_registry();
-    for owner in [None, Some(protocol::AgentId::new())] {
+    for owner in [None, Some(lingxi_core::types::AgentId::new())] {
         let (id, _) = registry.allocate_bash_output().await.unwrap();
         let caller = if owner.is_some() { "agent" } else { "turn" };
         registry
             .register_foreground_bash(
                 &id,
-                platform_api::task_registry::BackgroundBashRegistration {
+                lingxi_core::host::task_registry::BackgroundBashRegistration {
                     command: "sleep 60".into(),
                     description: "caller probe".into(),
                     creator_agent_id: owner,
@@ -1483,8 +1484,8 @@ async fn background_all_moves_every_armed_row_and_tool_use_targets_one() {
 #[tokio::test]
 async fn a_finishing_agent_also_silences_shells_it_already_finished() {
     let (_dir, registry) = make_registry();
-    let mine = protocol::AgentId::new();
-    let theirs = protocol::AgentId::new();
+    let mine = lingxi_core::types::AgentId::new();
+    let theirs = lingxi_core::types::AgentId::new();
 
     let mut ids = Vec::new();
     for (label, owner) in [
@@ -1549,8 +1550,8 @@ async fn a_finishing_agent_stops_only_its_own_background_shells() {
     // took everything would kill the main session's commands every time any
     // subagent finished.
     let (_dir, registry) = make_registry();
-    let mine = protocol::AgentId::new();
-    let theirs = protocol::AgentId::new();
+    let mine = lingxi_core::types::AgentId::new();
+    let theirs = lingxi_core::types::AgentId::new();
 
     let mut ids = Vec::new();
     for (label, owner) in [
@@ -1741,7 +1742,7 @@ fn teammate_input() -> TaskSpawnInput {
     TaskSpawnInput::InProcessTeammate {
         spawn_request: None,
         inheritance: None,
-        agent_id: protocol::AgentId::new(),
+        agent_id: lingxi_core::types::AgentId::new(),
         name: "buddy".into(),
         team_name: "alpha".into(),
         description: String::new(),
@@ -1807,11 +1808,11 @@ async fn a_fusion_row_survives_the_sweep_until_its_publication_settles() {
         TaskType::LocalFusion,
         RecordingHandler::new(TaskType::LocalFusion, "fsweep1"),
     );
-    let request = platform_api::FusionRequest {
+    let request = lingxi_core::host::FusionRequest {
         schema_version: 1,
-        origin: platform_api::FusionOrigin::Slash,
+        origin: lingxi_core::host::FusionOrigin::Slash,
         prompt: "review this".into(),
-        preset: platform_api::FusionPreset::Quality,
+        preset: lingxi_core::host::FusionPreset::Quality,
         models: None,
         dimensions: vec!["coverage".into()],
         partial_ok: true,
@@ -1849,7 +1850,7 @@ async fn a_fusion_row_survives_the_sweep_until_its_publication_settles() {
     };
     assert_eq!(
         pending,
-        platform_api::FusionPublicationStatus::Pending,
+        lingxi_core::host::FusionPublicationStatus::Pending,
         "precondition: the append has not resolved yet"
     );
 
@@ -1865,7 +1866,10 @@ async fn a_fusion_row_survives_the_sweep_until_its_publication_settles() {
 
     // Once the append settles, retention has nothing left to protect.
     registry
-        .set_fusion_publication(&id, platform_api::FusionPublicationReceipt::published())
+        .set_fusion_publication(
+            &id,
+            lingxi_core::host::FusionPublicationReceipt::published(),
+        )
         .await;
     let _ = registry.take_pending_task_notifications().await;
     let _ = registry.take_pending_task_notifications().await;
@@ -1883,11 +1887,11 @@ async fn spawn_publishes_the_handlers_captured_fusion_timeout_on_the_task_state(
         TaskType::LocalFusion,
         RecordingHandler::with_fusion_timeout("ftimeout1", TIMEOUT_MS),
     );
-    let request = platform_api::FusionRequest {
+    let request = lingxi_core::host::FusionRequest {
         schema_version: 1,
-        origin: platform_api::FusionOrigin::Slash,
+        origin: lingxi_core::host::FusionOrigin::Slash,
         prompt: "review this".into(),
-        preset: platform_api::FusionPreset::Quality,
+        preset: lingxi_core::host::FusionPreset::Quality,
         models: None,
         dimensions: vec!["coverage".into()],
         partial_ok: true,
@@ -1938,7 +1942,7 @@ async fn spawn_unknown_type_errors() {
 
 fn local_agent_input() -> TaskSpawnInput {
     TaskSpawnInput::LocalAgent {
-        agent_id: protocol::AgentId::new(),
+        agent_id: lingxi_core::types::AgentId::new(),
         subagent_type: "general-purpose".into(),
         prompt: "do the work".into(),
         is_backgrounded: true,
@@ -1953,7 +1957,7 @@ fn local_agent_input() -> TaskSpawnInput {
 
 fn local_agent_input_with_creator(name: &str, team: &str) -> TaskSpawnInput {
     TaskSpawnInput::LocalAgent {
-        agent_id: protocol::AgentId::new(),
+        agent_id: lingxi_core::types::AgentId::new(),
         subagent_type: "general-purpose".into(),
         prompt: "do the work".into(),
         is_backgrounded: true,
@@ -2014,7 +2018,7 @@ async fn spawn_local_agent_dispatches_once_registered() {
 #[tokio::test]
 async fn budget_stop_matches_claude_background_agent_filter() {
     use crate::state::LocalAgentTaskState;
-    use platform_api::task_registry::TaskRegistryHandle;
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
 
     let (_d, mut registry) = make_registry();
     let agent_handler = RecordingHandler::new(TaskType::LocalAgent, "abudget01");
@@ -2081,7 +2085,7 @@ async fn budget_stop_matches_claude_background_agent_filter() {
                 creator_team_name: None,
                 creator_agent_id: None,
             },
-            agent_id: protocol::AgentId::nil(),
+            agent_id: lingxi_core::types::AgentId::nil(),
             subagent_type: "general-purpose".into(),
             prompt: String::new(),
             error: None,
@@ -2192,7 +2196,7 @@ async fn failed_handler_kill_preserves_route_and_cleanup_for_retry() {
 
 #[tokio::test]
 async fn team_spawn_seam_spawns_real_teammate() {
-    use platform_api::team_spawn::TeamSpawnSeam;
+    use lingxi_core::host::team_spawn::TeamSpawnSeam;
 
     let (_d, mut registry) = make_registry();
     // Reuse the T01 recording handler: it records that `spawn` ran and
@@ -2204,7 +2208,7 @@ async fn team_spawn_seam_spawns_real_teammate() {
     let seam: &dyn TeamSpawnSeam = &registry;
     let task_id = seam
         .spawn_teammate(
-            protocol::AgentId::new(),
+            lingxi_core::types::AgentId::new(),
             "buddy".into(),
             "alpha".into(),
             "a teammate".into(),
@@ -2239,14 +2243,14 @@ async fn team_spawn_seam_spawns_real_teammate() {
 
 #[tokio::test]
 async fn team_spawn_seam_unknown_handler_is_unsupported() {
-    use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+    use lingxi_core::host::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 
     let (_d, registry) = make_registry();
     // No InProcessTeammate handler registered.
     let seam: &dyn TeamSpawnSeam = &registry;
     let err = seam
         .spawn_teammate(
-            protocol::AgentId::new(),
+            lingxi_core::types::AgentId::new(),
             "buddy".into(),
             "alpha".into(),
             "no handler".into(),
@@ -2345,7 +2349,7 @@ impl Task for MsgRecordingHandler {
 
 #[tokio::test]
 async fn seam_send_message_routes_to_recording_handler() {
-    use platform_api::team_spawn::TeamSpawnSeam;
+    use lingxi_core::host::team_spawn::TeamSpawnSeam;
 
     let (_d, mut registry) = make_registry();
     let handler = MsgRecordingHandler::new(TaskType::InProcessTeammate, "tmsgid");
@@ -2356,7 +2360,7 @@ async fn seam_send_message_routes_to_recording_handler() {
     let seam: &dyn TeamSpawnSeam = &registry;
     let task_id = seam
         .spawn_teammate(
-            protocol::AgentId::new(),
+            lingxi_core::types::AgentId::new(),
             "buddy".into(),
             "alpha".into(),
             "a teammate".into(),
@@ -2384,13 +2388,13 @@ async fn seam_send_message_accepts_the_same_aliases_as_stop_and_output() {
     // looked the raw string up in the spawned-id index and answered
     // `Terminated`, which reads as "that agent is gone" for an agent that is
     // very much alive.
-    use platform_api::team_spawn::TeamSpawnSeam;
+    use lingxi_core::host::team_spawn::TeamSpawnSeam;
 
     let (_d, mut registry) = make_registry();
     let handler = MsgRecordingHandler::new(TaskType::InProcessTeammate, "tmsgid2");
     registry.register_handler(TaskType::InProcessTeammate, handler.clone());
 
-    let agent_id = protocol::AgentId::new();
+    let agent_id = lingxi_core::types::AgentId::new();
     let seam: &dyn TeamSpawnSeam = &registry;
     let task_id = seam
         .spawn_teammate(
@@ -2434,7 +2438,7 @@ async fn seam_send_message_accepts_the_same_aliases_as_stop_and_output() {
 
 #[tokio::test]
 async fn seam_send_message_unknown_task_is_terminated() {
-    use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+    use lingxi_core::host::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 
     let (_d, registry) = make_registry();
     let seam: &dyn TeamSpawnSeam = &registry;
@@ -2448,7 +2452,7 @@ async fn seam_send_message_unknown_task_is_terminated() {
 
 #[tokio::test]
 async fn seam_send_message_terminated_handler_maps_to_terminated() {
-    use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+    use lingxi_core::host::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 
     let (_d, mut registry) = make_registry();
     let handler = MsgRecordingHandler::terminating(TaskType::InProcessTeammate, "tgone");
@@ -2457,7 +2461,7 @@ async fn seam_send_message_terminated_handler_maps_to_terminated() {
     let seam: &dyn TeamSpawnSeam = &registry;
     let task_id = seam
         .spawn_teammate(
-            protocol::AgentId::new(),
+            lingxi_core::types::AgentId::new(),
             "buddy".into(),
             "alpha".into(),
             "x".into(),
@@ -2474,7 +2478,7 @@ async fn seam_send_message_terminated_handler_maps_to_terminated() {
 
 #[tokio::test]
 async fn seam_send_message_unsupporting_handler_is_unsupported() {
-    use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+    use lingxi_core::host::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 
     let (_d, mut registry) = make_registry();
     let handler = MsgRecordingHandler::no_messages(TaskType::InProcessTeammate, "tnomsg");
@@ -2483,7 +2487,7 @@ async fn seam_send_message_unsupporting_handler_is_unsupported() {
     let seam: &dyn TeamSpawnSeam = &registry;
     let task_id = seam
         .spawn_teammate(
-            protocol::AgentId::new(),
+            lingxi_core::types::AgentId::new(),
             "buddy".into(),
             "alpha".into(),
             "x".into(),
@@ -2820,13 +2824,13 @@ impl Task for FusionActivationTimestampHandler {
         _ctx: TaskContext,
     ) -> Result<TaskHandle, TaskError> {
         let task_id = self.task_id.clone();
-        let identity = platform_api::FusionRunIdentity::new(
-            platform_api::FusionRunId::generated(),
+        let identity = lingxi_core::host::FusionRunIdentity::new(
+            lingxi_core::host::FusionRunId::generated(),
             None,
-            platform_api::FusionOrigin::Slash,
+            lingxi_core::host::FusionOrigin::Slash,
             Some(task_id.clone()),
         );
-        let summary = platform_api::FusionPreparedSummary {
+        let summary = lingxi_core::host::FusionPreparedSummary {
             identity,
             duration_ms: 1_000,
             planned_panels: Some(3),
@@ -3059,11 +3063,11 @@ async fn fusion_activation_timestamp_is_published_after_task_created_hook() {
             .spawn(
                 TaskType::LocalFusion,
                 TaskSpawnInput::LocalFusion {
-                    request: platform_api::FusionRequest {
+                    request: lingxi_core::host::FusionRequest {
                         schema_version: 1,
-                        origin: platform_api::FusionOrigin::Slash,
+                        origin: lingxi_core::host::FusionOrigin::Slash,
                         prompt: "review this".into(),
-                        preset: platform_api::FusionPreset::Quality,
+                        preset: lingxi_core::host::FusionPreset::Quality,
                         models: None,
                         dimensions: vec!["coverage".into()],
                         partial_ok: true,
@@ -3254,11 +3258,12 @@ impl FileSystem for ExclusiveCountingFs {
         path: &str,
         _o: Option<u64>,
         _l: Option<u64>,
-    ) -> Result<platform_api::filesystem::FileContent, platform_api::filesystem::FsError> {
+    ) -> Result<lingxi_core::host::filesystem::FileContent, lingxi_core::host::filesystem::FsError>
+    {
         let map = self.files.lock().await;
         let content = map.get(path).cloned().unwrap_or_default();
         let total_lines = content.lines().count() as u64;
-        Ok(platform_api::filesystem::FileContent {
+        Ok(lingxi_core::host::filesystem::FileContent {
             content,
             truncated: false,
             total_lines,
@@ -3268,18 +3273,21 @@ impl FileSystem for ExclusiveCountingFs {
         &self,
         path: &str,
         body: &str,
-    ) -> Result<(), platform_api::filesystem::FsError> {
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
         self.files
             .lock()
             .await
             .insert(path.to_string(), body.to_string());
         Ok(())
     }
-    async fn create_new_file(&self, path: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn create_new_file(
+        &self,
+        path: &str,
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
         self.creates.fetch_add(1, Ord2::SeqCst);
         let mut map = self.files.lock().await;
         if map.contains_key(path) {
-            return Err(platform_api::filesystem::FsError::AlreadyExists(
+            return Err(lingxi_core::host::filesystem::FsError::AlreadyExists(
                 path.to_string(),
             ));
         }
@@ -3293,16 +3301,18 @@ impl FileSystem for ExclusiveCountingFs {
         &self,
         _: &str,
     ) -> Result<
-        std::pin::Pin<Box<dyn futures::Stream<Item = platform_api::filesystem::FileEvent> + Send>>,
-        platform_api::filesystem::FsError,
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = lingxi_core::host::filesystem::FileEvent> + Send>,
+        >,
+        lingxi_core::host::filesystem::FsError,
     > {
-        Err(platform_api::filesystem::FsError::Io("nope".into()))
+        Err(lingxi_core::host::filesystem::FsError::Io("nope".into()))
     }
     async fn append_file(
         &self,
         path: &str,
         body: &str,
-    ) -> Result<(), platform_api::filesystem::FsError> {
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
         self.files
             .lock()
             .await
@@ -3311,34 +3321,44 @@ impl FileSystem for ExclusiveCountingFs {
             .push_str(body);
         Ok(())
     }
-    async fn truncate(&self, _: &str, _: u64) -> Result<(), platform_api::filesystem::FsError> {
+    async fn truncate(
+        &self,
+        _: &str,
+        _: u64,
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
         Ok(())
     }
     async fn file_mtime(
         &self,
         _: &str,
-    ) -> Result<std::time::SystemTime, platform_api::filesystem::FsError> {
+    ) -> Result<std::time::SystemTime, lingxi_core::host::filesystem::FsError> {
         Ok(std::time::SystemTime::UNIX_EPOCH)
     }
-    async fn file_size(&self, path: &str) -> Result<u64, platform_api::filesystem::FsError> {
+    async fn file_size(&self, path: &str) -> Result<u64, lingxi_core::host::filesystem::FsError> {
         let map = self.files.lock().await;
         Ok(map.get(path).map_or(0, |s| s.len() as u64))
     }
-    async fn delete_file(&self, path: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn delete_file(&self, path: &str) -> Result<(), lingxi_core::host::filesystem::FsError> {
         self.files.lock().await.remove(path);
         Ok(())
     }
-    async fn symlink(&self, _: &str, _: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn symlink(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
         Ok(())
     }
     async fn flock_exclusive(
         &self,
         _: &str,
-    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError>
-    {
-        Err(platform_api::filesystem::FsError::Io("nope".into()))
+    ) -> Result<
+        Box<dyn lingxi_core::host::filesystem::FlockGuard>,
+        lingxi_core::host::filesystem::FsError,
+    > {
+        Err(lingxi_core::host::filesystem::FsError::Io("nope".into()))
     }
-    async fn fsync(&self, _: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn fsync(&self, _: &str) -> Result<(), lingxi_core::host::filesystem::FsError> {
         Ok(())
     }
 }
@@ -3439,7 +3459,7 @@ async fn spawn_does_not_reallocate_and_worker_output_survives() {
 
 #[tokio::test]
 async fn ordinary_agent_raw_result_id_reads_output_and_stops_owning_handler() {
-    use platform_api::task_registry::TaskRegistryHandle;
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
 
     let (_dir, mut registry) = make_registry();
     let handler = RecordingHandler::new(TaskType::LocalAgent, "aordinarytask");
@@ -3496,7 +3516,7 @@ async fn spawned_agent_aliases_resolve_to_task_id_and_kill_routes() {
     let handler = RecordingHandler::new(TaskType::InProcessTeammate, "thandlerid");
     registry.register_handler(TaskType::InProcessTeammate, handler.clone());
 
-    let agent_id = protocol::AgentId::new();
+    let agent_id = lingxi_core::types::AgentId::new();
     let id = registry
         .spawn(
             TaskType::InProcessTeammate,
@@ -3738,7 +3758,7 @@ fn local_fusion_state_for_test(id: &str, output_dir: &std::path::Path) -> TaskSt
         effective_timeout_ms: None,
         planned_panels: None,
         fusion_activation_deadline: None,
-        publication_status: platform_api::FusionPublicationStatus::Pending,
+        publication_status: lingxi_core::host::FusionPublicationStatus::Pending,
         publication_error: None,
     })
 }
@@ -3787,7 +3807,7 @@ async fn take_pending_drains_local_fusion_error_through_status_sink() {
 async fn take_pending_drains_local_fusion_egress_and_usage_through_status_sink() {
     use crate::handlers::TaskStatusSink;
     use crate::registry_status_sink::RegistryStatusSink;
-    use platform_api::task_registry::AgentRunUsage;
+    use lingxi_core::host::task_registry::AgentRunUsage;
 
     let (dir, registry) = make_registry();
     let registry = Arc::new(registry);
@@ -3918,25 +3938,25 @@ async fn a_published_receipt_lands_on_the_row_in_place() {
 
     assert_eq!(
         status_of(&registry.get(id).await.expect("task exists")),
-        platform_api::FusionPublicationStatus::Pending,
+        lingxi_core::host::FusionPublicationStatus::Pending,
         "a freshly spawned run has not published its result yet"
     );
 
     let sink = RegistryStatusSink::new();
     sink.bind(registry.clone());
-    sink.set_fusion_publication(id, platform_api::FusionPublicationReceipt::published())
+    sink.set_fusion_publication(id, lingxi_core::host::FusionPublicationReceipt::published())
         .await;
 
     assert_eq!(
         status_of(&registry.get(id).await.expect("task exists")),
-        platform_api::FusionPublicationStatus::Published
+        lingxi_core::host::FusionPublicationStatus::Published
     );
 
     // An unknown/evicted task id is a benign no-op, same as the other
     // best-effort fusion status-sink writes above (set_fusion_stage etc).
     sink.set_fusion_publication(
         "fu_does_not_exist",
-        platform_api::FusionPublicationReceipt::published(),
+        lingxi_core::host::FusionPublicationReceipt::published(),
     )
     .await;
 }
@@ -3964,7 +3984,7 @@ async fn fusion_publication_failure_keeps_answer_and_never_sets_legacy_published
     .await;
     sink.set_fusion_publication(
         id,
-        platform_api::FusionPublicationReceipt::storage_failure("append failed"),
+        lingxi_core::host::FusionPublicationReceipt::storage_failure("append failed"),
     )
     .await;
 
@@ -3978,7 +3998,7 @@ async fn fusion_publication_failure_keeps_answer_and_never_sets_legacy_published
     );
     assert_eq!(
         fusion.publication_status,
-        platform_api::FusionPublicationStatus::StorageFailure
+        lingxi_core::host::FusionPublicationStatus::StorageFailure
     );
     assert_eq!(fusion.publication_error.as_deref(), Some("append failed"));
 
@@ -4014,9 +4034,9 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         creator_team_name: None,
         creator_agent_id: None,
     };
-    let creator_agent_id = protocol::AgentId::new();
+    let creator_agent_id = lingxi_core::types::AgentId::new();
     let input = TaskSpawnInput::LocalAgent {
-        agent_id: protocol::AgentId::nil(),
+        agent_id: lingxi_core::types::AgentId::nil(),
         subagent_type: "general-purpose".into(),
         prompt: "go".into(),
         is_backgrounded: true,
@@ -4055,7 +4075,7 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         creator_agent_id: None,
     };
     let input2 = TaskSpawnInput::LocalAgent {
-        agent_id: protocol::AgentId::nil(),
+        agent_id: lingxi_core::types::AgentId::nil(),
         subagent_type: "general-purpose".into(),
         prompt: "go".into(),
         is_backgrounded: true,
@@ -4075,7 +4095,7 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
 
 #[test]
 fn state_for_spawn_stamps_local_workflow_tool_use_id() {
-    let creator_agent_id = protocol::AgentId::new();
+    let creator_agent_id = lingxi_core::types::AgentId::new();
     let base = TaskStateBase {
         id: "wspawn001".into(),
         task_type: TaskType::LocalWorkflow,
@@ -4159,7 +4179,7 @@ async fn take_pending_carries_workflow_resume_and_terminal_metadata() {
             script_path: Some("/tmp/session/workflows/wf_abcdef.js".into()),
             transcript_dir: Some("/tmp/session/subagents/workflows/wf_abcdef".into()),
             current_step: 2,
-            outcome: platform_api::task_registry::WorkflowTerminalOutcome {
+            outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                 result: Some("ok".into()),
                 failures: vec!["one retry exhausted".into()],
                 agent_count: 4,
@@ -4234,7 +4254,7 @@ async fn workflow_notification_omits_default_progress_counts() {
             script_path: Some("/tmp/session/workflows/wf_counts_hidden.js".into()),
             transcript_dir: Some("/tmp/session/subagents/workflows/wf_counts_hidden".into()),
             current_step: 1,
-            outcome: platform_api::task_registry::WorkflowTerminalOutcome {
+            outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                 result: Some("stopped".into()),
                 agent_count: 2,
                 total_tokens: 40,
@@ -4289,7 +4309,7 @@ async fn take_pending_carries_agent_error() {
             is_observer: false,
             observed_agent_id: None,
             base,
-            agent_id: protocol::AgentId::nil(),
+            agent_id: lingxi_core::types::AgentId::nil(),
             subagent_type: String::new(),
             prompt: String::new(),
             error: Some("rate limited".into()),
@@ -4335,7 +4355,7 @@ fn agent_state(id: &str, status: TaskStatus) -> crate::state::TaskState {
             creator_team_name: None,
             creator_agent_id: None,
         },
-        agent_id: protocol::AgentId::nil(),
+        agent_id: lingxi_core::types::AgentId::nil(),
         subagent_type: String::new(),
         prompt: String::new(),
         error: None,
@@ -4360,9 +4380,9 @@ async fn take_pending_carries_agent_result_usage_and_worktree() {
     registry
         .set_agent_outcome(
             "adone0001",
-            platform_api::task_registry::AgentTerminalOutcome {
+            lingxi_core::host::task_registry::AgentTerminalOutcome {
                 result: Some("the answer".into()),
-                usage: Some(platform_api::task_registry::AgentRunUsage {
+                usage: Some(lingxi_core::host::task_registry::AgentRunUsage {
                     subagent_tokens: 120,
                     tool_uses: 3,
                     duration_ms: 4_500,
@@ -4439,7 +4459,7 @@ async fn a_terminal_transition_stamps_the_end_time() {
 #[tokio::test]
 async fn an_agent_holding_live_children_gets_no_eviction_deadline() {
     let (_d, registry) = make_registry();
-    let parent = protocol::AgentId::new();
+    let parent = lingxi_core::types::AgentId::new();
     let mut parent_state = agent_state("aheld0001", TaskStatus::Running);
     if let crate::state::TaskState::LocalAgent(agent) = &mut parent_state {
         agent.agent_id = parent;
@@ -4544,7 +4564,7 @@ fn workflow_state_for_evict(id: &str) -> crate::state::TaskState {
         script_path: None,
         transcript_dir: None,
         current_step: 0,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome::default(),
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome::default(),
         scope: None,
     })
 }
@@ -4591,7 +4611,7 @@ async fn take_pending_carries_the_exhausted_turn_budget() {
     registry
         .set_agent_outcome(
             "aturn0001",
-            platform_api::task_registry::AgentTerminalOutcome {
+            lingxi_core::host::task_registry::AgentTerminalOutcome {
                 max_turns_reached: Some(12),
                 ..Default::default()
             },
@@ -4618,7 +4638,7 @@ async fn take_pending_leaves_the_turn_budget_unset_for_a_normal_completion() {
     registry
         .set_agent_outcome(
             "aturn0002",
-            platform_api::task_registry::AgentTerminalOutcome {
+            lingxi_core::host::task_registry::AgentTerminalOutcome {
                 result: Some("done".into()),
                 ..Default::default()
             },
@@ -4646,7 +4666,7 @@ async fn set_agent_outcome_error_reaches_the_failed_summary() {
     registry
         .set_agent_outcome(
             "afail0001",
-            platform_api::task_registry::AgentTerminalOutcome {
+            lingxi_core::host::task_registry::AgentTerminalOutcome {
                 error: Some("model refused".into()),
                 ..Default::default()
             },
@@ -4673,7 +4693,7 @@ async fn set_agent_outcome_merges_rather_than_replaces() {
     registry
         .set_agent_outcome(
             "amerge001",
-            platform_api::task_registry::AgentTerminalOutcome {
+            lingxi_core::host::task_registry::AgentTerminalOutcome {
                 result: Some("partial answer".into()),
                 ..Default::default()
             },
@@ -4682,7 +4702,7 @@ async fn set_agent_outcome_merges_rather_than_replaces() {
     registry
         .set_agent_outcome(
             "amerge001",
-            platform_api::task_registry::AgentTerminalOutcome {
+            lingxi_core::host::task_registry::AgentTerminalOutcome {
                 worktree_path: Some("/wt".into()),
                 ..Default::default()
             },
@@ -4738,7 +4758,7 @@ async fn kill_with_reason_records_the_stop_initiator() {
 /// asserts the ORDINARY `Terminated`, reached through the same missing entry.
 #[tokio::test]
 async fn seam_send_message_refuses_a_user_stopped_agent() {
-    use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+    use lingxi_core::host::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 
     let (_d, registry) = make_registry();
     registry
@@ -5495,7 +5515,7 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
             is_observer: false,
             observed_agent_id: None,
             base,
-            agent_id: protocol::AgentId::nil(),
+            agent_id: lingxi_core::types::AgentId::nil(),
             subagent_type: String::new(),
             prompt: String::new(),
             error: None,
@@ -5518,7 +5538,7 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
         .mark_task_rested(
             "a-rest-1",
             Some("final answer".to_string()),
-            Some(platform_api::task_registry::AgentRunUsage {
+            Some(lingxi_core::host::task_registry::AgentRunUsage {
                 subagent_tokens: 42,
                 tool_uses: 3,
                 duration_ms: 1500,
@@ -5582,7 +5602,7 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
 async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying() {
     use crate::state::{LocalAgentTaskState, LocalWorkflowTaskState, TaskState, TaskStateBase};
     let (_d, registry) = make_registry();
-    let parent_agent_id = protocol::AgentId::new();
+    let parent_agent_id = lingxi_core::types::AgentId::new();
 
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
@@ -5654,7 +5674,7 @@ async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying
         .mark_task_rested(
             "a-rest-parent",
             Some("rested".into()),
-            Some(platform_api::task_registry::AgentRunUsage {
+            Some(lingxi_core::host::task_registry::AgentRunUsage {
                 subagent_tokens: 7,
                 tool_uses: 1,
                 duration_ms: 99,
@@ -5688,7 +5708,7 @@ async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying
         .mark_task_rested(
             "a-rest-parent",
             Some("rested".into()),
-            Some(platform_api::task_registry::AgentRunUsage {
+            Some(lingxi_core::host::task_registry::AgentRunUsage {
                 subagent_tokens: 7,
                 tool_uses: 1,
                 duration_ms: 99,
@@ -5718,8 +5738,8 @@ async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying
 async fn seed_agent(
     registry: &TaskRegistry,
     id: &str,
-    agent_id: protocol::AgentId,
-    parent: Option<protocol::AgentId>,
+    agent_id: lingxi_core::types::AgentId,
+    parent: Option<lingxi_core::types::AgentId>,
     status: TaskStatus,
 ) {
     seed_agent_described(registry, id, agent_id, parent, status, id).await;
@@ -5729,8 +5749,8 @@ async fn seed_agent(
 async fn seed_agent_described(
     registry: &TaskRegistry,
     id: &str,
-    agent_id: protocol::AgentId,
-    parent: Option<protocol::AgentId>,
+    agent_id: lingxi_core::types::AgentId,
+    parent: Option<lingxi_core::types::AgentId>,
     status: TaskStatus,
     description: &str,
 ) {
@@ -5861,7 +5881,7 @@ async fn stopping_a_shell_is_silent_but_stopping_an_agent_is_not() {
     seed_agent(
         &registry,
         "a-victim",
-        protocol::AgentId::new(),
+        lingxi_core::types::AgentId::new(),
         None,
         TaskStatus::Running,
     )
@@ -6010,7 +6030,7 @@ async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents(
                 creator_team_name: None,
                 creator_agent_id: None,
             },
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             pending_messages: vec![],
         }))
         .await;
@@ -6023,7 +6043,7 @@ async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents(
     seed_agent_described(
         &registry,
         "a-bg",
-        protocol::AgentId::new(),
+        lingxi_core::types::AgentId::new(),
         None,
         TaskStatus::Running,
         "survey the crate",
@@ -6032,7 +6052,7 @@ async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents(
     seed_agent_described(
         &registry,
         "a-bare",
-        protocol::AgentId::new(),
+        lingxi_core::types::AgentId::new(),
         None,
         TaskStatus::Running,
         "",
@@ -6042,7 +6062,7 @@ async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents(
     seed_agent_described(
         &registry,
         "a-named",
-        protocol::AgentId::new(),
+        lingxi_core::types::AgentId::new(),
         None,
         TaskStatus::Running,
         "named one",
@@ -6071,10 +6091,10 @@ async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents(
 #[tokio::test]
 async fn stopping_a_resting_parent_cascades_to_its_whole_subtree_silently() {
     let (_d, registry) = make_registry();
-    let parent = protocol::AgentId::new();
-    let child = protocol::AgentId::new();
-    let grandchild = protocol::AgentId::new();
-    let stranger = protocol::AgentId::new();
+    let parent = lingxi_core::types::AgentId::new();
+    let child = lingxi_core::types::AgentId::new();
+    let grandchild = lingxi_core::types::AgentId::new();
+    let stranger = lingxi_core::types::AgentId::new();
 
     seed_agent(&registry, "a-parent", parent, None, TaskStatus::Running).await;
     seed_agent(
@@ -6136,8 +6156,8 @@ async fn stopping_a_resting_parent_cascades_to_its_whole_subtree_silently() {
 #[tokio::test]
 async fn stopping_an_actively_running_parent_does_not_cascade() {
     let (_d, registry) = make_registry();
-    let parent = protocol::AgentId::new();
-    let child = protocol::AgentId::new();
+    let parent = lingxi_core::types::AgentId::new();
+    let child = lingxi_core::types::AgentId::new();
     seed_agent(&registry, "a-busy", parent, None, TaskStatus::Running).await;
     seed_agent(&registry, "a-kid", child, Some(parent), TaskStatus::Running).await;
 
@@ -6160,9 +6180,9 @@ async fn stopping_an_actively_running_parent_does_not_cascade() {
 #[tokio::test]
 async fn a_cyclic_parent_chain_terminates() {
     let (_d, registry) = make_registry();
-    let a = protocol::AgentId::new();
-    let b = protocol::AgentId::new();
-    let target = protocol::AgentId::new();
+    let a = lingxi_core::types::AgentId::new();
+    let b = lingxi_core::types::AgentId::new();
+    let target = lingxi_core::types::AgentId::new();
     seed_agent(&registry, "a-target", target, None, TaskStatus::Running).await;
     seed_agent(&registry, "a-loop-a", a, Some(b), TaskStatus::Running).await;
     seed_agent(&registry, "a-loop-b", b, Some(a), TaskStatus::Running).await;
@@ -6206,7 +6226,7 @@ async fn named_rested_agent_waits_for_live_background_children_before_notifying(
                 creator_team_name: None,
                 creator_agent_id: None,
             },
-            agent_id: protocol::AgentId::nil(),
+            agent_id: lingxi_core::types::AgentId::nil(),
             subagent_type: String::new(),
             prompt: String::new(),
             error: None,
@@ -6250,7 +6270,7 @@ async fn named_rested_agent_waits_for_live_background_children_before_notifying(
         .mark_task_rested(
             "a-rest-parent",
             Some("rested".into()),
-            Some(platform_api::task_registry::AgentRunUsage {
+            Some(lingxi_core::host::task_registry::AgentRunUsage {
                 subagent_tokens: 7,
                 tool_uses: 1,
                 duration_ms: 99,
@@ -6313,7 +6333,7 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
                 creator_team_name: None,
                 creator_agent_id: None,
             },
-            agent_id: protocol::AgentId::nil(),
+            agent_id: lingxi_core::types::AgentId::nil(),
             subagent_type: String::new(),
             prompt: String::new(),
             error: None,
@@ -6357,7 +6377,7 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
         .mark_task_rested(
             "a-rest-parent",
             Some("stale".into()),
-            Some(platform_api::task_registry::AgentRunUsage {
+            Some(lingxi_core::host::task_registry::AgentRunUsage {
                 subagent_tokens: 1,
                 tool_uses: 1,
                 duration_ms: 10,
@@ -6378,7 +6398,7 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
         .mark_task_rested(
             "a-rest-parent",
             Some("fresh".into()),
-            Some(platform_api::task_registry::AgentRunUsage {
+            Some(lingxi_core::host::task_registry::AgentRunUsage {
                 subagent_tokens: 9,
                 tool_uses: 2,
                 duration_ms: 20,
@@ -6410,8 +6430,8 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
 async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
     use crate::state::{LocalAgentTaskState, LocalBashTaskState, TaskState, TaskStateBase};
     let (_d, registry) = make_registry();
-    let owner_a = protocol::AgentId::new();
-    let owner_b = protocol::AgentId::new();
+    let owner_a = lingxi_core::types::AgentId::new();
+    let owner_b = lingxi_core::types::AgentId::new();
 
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
@@ -6658,12 +6678,12 @@ async fn take_pending_skips_already_notified_and_non_terminal() {
 struct ExitZeroRunner;
 
 #[async_trait]
-impl platform_api::ProcessRunner for ExitZeroRunner {
+impl lingxi_core::host::ProcessRunner for ExitZeroRunner {
     async fn run(
         &self,
-        _cmd: &platform_api::SandboxedCommand,
-    ) -> Result<platform_api::ProcessOutput, platform_api::ProcessError> {
-        Ok(platform_api::ProcessOutput {
+        _cmd: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<lingxi_core::host::ProcessOutput, lingxi_core::host::ProcessError> {
+        Ok(lingxi_core::host::ProcessOutput {
             stdout: "done\n".into(),
             stderr: String::new(),
             exit_code: 0,
@@ -6672,14 +6692,14 @@ impl platform_api::ProcessRunner for ExitZeroRunner {
     }
     async fn spawn_background(
         &self,
-        _cmd: &platform_api::SandboxedCommand,
-    ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
-        Err(platform_api::ProcessError::Unsupported)
+        _cmd: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<lingxi_core::host::ProcessHandle, lingxi_core::host::ProcessError> {
+        Err(lingxi_core::host::ProcessError::Unsupported)
     }
     async fn kill(
         &self,
-        _handle: &platform_api::ProcessHandle,
-    ) -> Result<(), platform_api::ProcessError> {
+        _handle: &lingxi_core::host::ProcessHandle,
+    ) -> Result<(), lingxi_core::host::ProcessError> {
         Ok(())
     }
     fn is_available(&self) -> bool {
@@ -6687,47 +6707,47 @@ impl platform_api::ProcessRunner for ExitZeroRunner {
     }
 }
 
-/// Pass-through [`platform_api::Sandbox`] stub (audited bypass tag, like the
+/// Pass-through [`lingxi_core::host::Sandbox`] stub (audited bypass tag, like the
 /// local_bash unit tests').
 struct PassSandbox;
 
 #[async_trait]
-impl platform_api::Sandbox for PassSandbox {
+impl lingxi_core::host::Sandbox for PassSandbox {
     fn is_available(&self) -> bool {
         true
     }
-    fn backend(&self) -> platform_api::SandboxBackend {
-        platform_api::SandboxBackend::None
+    fn backend(&self) -> lingxi_core::host::SandboxBackend {
+        lingxi_core::host::SandboxBackend::None
     }
     fn prepare(
         &self,
-        cmd: platform_api::ProcessCommand,
-        _policy: &platform_api::SandboxPolicy,
-    ) -> Result<platform_api::SandboxedCommand, platform_api::SandboxError> {
-        Ok(platform_api::SandboxedCommand::__new_sandboxed(
+        cmd: lingxi_core::host::ProcessCommand,
+        _policy: &lingxi_core::host::SandboxPolicy,
+    ) -> Result<lingxi_core::host::SandboxedCommand, lingxi_core::host::SandboxError> {
+        Ok(lingxi_core::host::SandboxedCommand::__new_sandboxed(
             cmd,
-            platform_api::SandboxedTag::BypassAuditedWithReason {
+            lingxi_core::host::SandboxedTag::BypassAuditedWithReason {
                 reason: "test".into(),
             },
         ))
     }
     fn bypass_with_audit(
         &self,
-        cmd: platform_api::ProcessCommand,
+        cmd: lingxi_core::host::ProcessCommand,
         reason: &str,
-    ) -> platform_api::SandboxedCommand {
-        platform_api::SandboxedCommand::__new_sandboxed(
+    ) -> lingxi_core::host::SandboxedCommand {
+        lingxi_core::host::SandboxedCommand::__new_sandboxed(
             cmd,
-            platform_api::SandboxedTag::BypassAuditedWithReason {
+            lingxi_core::host::SandboxedTag::BypassAuditedWithReason {
                 reason: reason.into(),
             },
         )
     }
-    async fn probe_capability(&self) -> platform_api::SandboxCapability {
-        platform_api::SandboxCapability {
+    async fn probe_capability(&self) -> lingxi_core::host::SandboxCapability {
+        lingxi_core::host::SandboxCapability {
             available: true,
             reason: None,
-            features: platform_api::SandboxFeatures::default(),
+            features: lingxi_core::host::SandboxFeatures::default(),
         }
     }
 }
@@ -6759,7 +6779,7 @@ async fn finished_background_bash_task_does_not_stay_running() {
         Arc::new(PassSandbox),
         Arc::new(mcp::McpRegistry::new(
             Arc::new(test_harness::mocks::MockMcpTransport::default())
-                as Arc<dyn platform_api::McpTransport>,
+                as Arc<dyn lingxi_core::host::McpTransport>,
         )),
         bash_sink.clone() as Arc<dyn crate::handlers::TaskStatusSink>,
     );
@@ -7205,7 +7225,7 @@ async fn plan_review_flag_preserves_task_lifecycle_and_clears_on_terminal() {
 async fn teammate_idle_sink_projects_idle_and_wake_without_ending_task() {
     use crate::handlers::TaskStatusSink;
     use crate::registry_status_sink::RegistryStatusSink;
-    use platform_api::task_registry::TaskRegistryHandle;
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
 
     let (_tmp, registry) = make_registry();
     let registry = Arc::new(registry);
@@ -7251,8 +7271,8 @@ async fn teammate_idle_sink_projects_idle_and_wake_without_ending_task() {
 #[tokio::test]
 async fn owner_scoped_drain_preserves_other_owners_and_wakes_on_completion() {
     let (_dir, registry) = make_registry();
-    let owner = protocol::AgentId::new();
-    let other = protocol::AgentId::new();
+    let owner = lingxi_core::types::AgentId::new();
+    let other = lingxi_core::types::AgentId::new();
     for (id, agent_id) in [("aownerparent", owner), ("aotherparent", other)] {
         let mut parent = agent_state(id, TaskStatus::Running);
         if let TaskState::LocalAgent(agent) = &mut parent {
@@ -7322,7 +7342,7 @@ async fn owner_scoped_drain_preserves_other_owners_and_wakes_on_completion() {
 #[tokio::test]
 async fn owner_scoped_rest_is_not_consumed_by_main() {
     let (_dir, registry) = make_registry();
-    let owner = protocol::AgentId::new();
+    let owner = lingxi_core::types::AgentId::new();
     let mut parent = agent_state("arestparent", TaskStatus::Running);
     if let TaskState::LocalAgent(agent) = &mut parent {
         agent.agent_id = owner;
@@ -7356,7 +7376,7 @@ async fn owner_scoped_rest_is_not_consumed_by_main() {
 
 #[tokio::test]
 async fn auto_mode_scan_is_visible_cancellable_and_never_notifies_chat() {
-    use platform_api::task_registry::TaskRegistryHandle;
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
     let (_dir, registry) = make_registry();
     let cancel = tokio_util::sync::CancellationToken::new();
     let id = registry
@@ -7390,7 +7410,7 @@ async fn auto_mode_scan_is_visible_cancellable_and_never_notifies_chat() {
 
 #[tokio::test]
 async fn command_monitor_registry_reports_shell_kind_and_retains_stop_handler() {
-    use platform_api::task_registry::{MonitorRegistration, TaskRegistryHandle};
+    use lingxi_core::host::task_registry::{MonitorRegistration, TaskRegistryHandle};
     let (_dir, mut registry) = make_registry();
     let handler = RecordingHandler::new(TaskType::Monitor, "bmonitor1");
     registry.register_handler(TaskType::Monitor, handler.clone());
@@ -7419,7 +7439,7 @@ async fn command_monitor_registry_reports_shell_kind_and_retains_stop_handler() 
 #[tokio::test]
 async fn terminated_owner_returns_child_notification_to_main_session() {
     let (_dir, registry) = make_registry();
-    let owner = protocol::AgentId::new();
+    let owner = lingxi_core::types::AgentId::new();
     let mut parent = agent_state("adeadowner", TaskStatus::Completed);
     if let TaskState::LocalAgent(agent) = &mut parent {
         agent.agent_id = owner;
@@ -7552,7 +7572,7 @@ async fn shell_stop_does_not_leak_model_notification_between_handler_and_stamp()
 
 #[tokio::test]
 async fn notification_activation_clears_teammate_idle_using_its_runner_identity() {
-    use platform_api::task_registry::TaskRegistryHandle;
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
     let (_dir, registry) = make_registry();
     let id = registry
         .create(
@@ -7664,31 +7684,33 @@ async fn websocket_stop_separates_sdk_receipt_from_optional_housekeeping() {
 
 struct ForegroundOwnerFixture {
     registry: Arc<TaskRegistry>,
-    owner: StdMutex<Option<protocol::AgentId>>,
+    owner: StdMutex<Option<lingxi_core::types::AgentId>>,
     child: StdMutex<Option<String>>,
     calls: AtomicUsize,
     backgrounded: Arc<tokio::sync::Notify>,
 }
 struct ForegroundOwnerBackgrounder(Arc<tokio::sync::Notify>);
 #[async_trait]
-impl platform_api::task_registry::TaskBackgrounder for ForegroundOwnerBackgrounder {
+impl lingxi_core::host::task_registry::TaskBackgrounder for ForegroundOwnerBackgrounder {
     async fn background(&self) {
         self.0.notify_one();
     }
 }
 #[async_trait]
-impl platform_api::subagent_spawn::SubagentSpawnObserver for ForegroundOwnerFixture {
+impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for ForegroundOwnerFixture {
     async fn before_start(
         &self,
-        event: &platform_api::subagent_spawn::SubagentObservation,
-    ) -> Result<(), platform_api::SubagentSpawnError> {
-        if let platform_api::subagent_spawn::SubagentObservation::Allocated { agent_id, .. } = event
+        event: &lingxi_core::host::subagent_spawn::SubagentObservation,
+    ) -> Result<(), lingxi_core::host::SubagentSpawnError> {
+        if let lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
+            agent_id, ..
+        } = event
         {
             *self.owner.lock().unwrap() = Some(*agent_id);
             let owner = self
                 .registry
                 .register_foreground_agent(
-                    platform_api::task_registry::ForegroundAgentRegistration {
+                    lingxi_core::host::task_registry::ForegroundAgentRegistration {
                         agent_id: *agent_id,
                         agent_type: "general-purpose".into(),
                         description: "foreground owner".into(),
@@ -7711,16 +7733,16 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for ForegroundOwnerFixt
         }
         Ok(())
     }
-    async fn on_event(&self, _: platform_api::subagent_spawn::SubagentObservation) {}
+    async fn on_event(&self, _: lingxi_core::host::subagent_spawn::SubagentObservation) {}
 }
 #[async_trait]
-impl platform_api::ToolInvoker for ForegroundOwnerFixture {
+impl lingxi_core::host::ToolInvoker for ForegroundOwnerFixture {
     async fn invoke(
         &self,
         _: &str,
         _: serde_json::Value,
-        context: platform_api::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        context: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         assert_eq!(context.parent_agent_id, *self.owner.lock().unwrap());
         let (child, _) = self.registry.allocate_bash_output().await.unwrap();
         self.registry
@@ -7742,8 +7764,8 @@ impl platform_api::ToolInvoker for ForegroundOwnerFixture {
     }
 }
 #[async_trait]
-impl platform_api::budget::BudgetEnforcerHandle for ForegroundOwnerFixture {
-    async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::budget::BudgetError> {
+impl lingxi_core::host::budget::BudgetEnforcerHandle for ForegroundOwnerFixture {
+    async fn check_and_charge(&self, _: u64) -> Result<(), lingxi_core::host::budget::BudgetError> {
         Ok(())
     }
     async fn snapshot_total_nano_usd(&self) -> u64 {
@@ -7756,13 +7778,13 @@ impl agent::api::SubagentApiClient for ForegroundOwnerFixture {
         &self,
         _: &str,
         _: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         _: Vec<serde_json::Value>,
     ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let content = if call == 0 {
             vec![llm_runtime::ContentBlock::ToolCall {
-                id: protocol::ToolUseId::new().to_string(),
+                id: lingxi_core::types::ToolUseId::new().to_string(),
                 name: "SpawnOwnedTask".into(),
                 input: serde_json::json!({}),
             }]
@@ -7802,7 +7824,7 @@ impl agent::api::SubagentApiClient for ForegroundOwnerFixture {
 
 #[tokio::test]
 async fn foreground_owner_really_parks_and_folds_owned_child_completion_before_deallocation() {
-    use platform_api::SubagentSpawner;
+    use lingxi_core::host::SubagentSpawner;
     let (_dir, registry) = make_registry();
     let registry = Arc::new(registry);
     let fixture = Arc::new(ForegroundOwnerFixture {
@@ -7825,13 +7847,13 @@ async fn foreground_owner_really_parks_and_folds_owned_child_completion_before_d
     let worker = tokio::spawn(async move {
         worker_spawner
             .spawn_with_observer(
-                platform_api::SubagentSpawnRequest {
+                lingxi_core::host::SubagentSpawnRequest {
                     subagent_type: "general-purpose".into(),
                     prompt: "spawn child then report".into(),
                     max_turns_override: Some(8),
                     ..Default::default()
                 },
-                platform_api::SubagentInheritance {
+                lingxi_core::host::SubagentInheritance {
                     tool_invoker: worker_fixture.clone(),
                     budget: worker_fixture.clone(),
                 },
@@ -7891,7 +7913,7 @@ async fn foreground_owner_really_parks_and_folds_owned_child_completion_before_d
         .unwrap();
     assert!(matches!(
         worker.await.unwrap().unwrap(),
-        platform_api::SubagentResult::Killed { .. }
+        lingxi_core::host::SubagentResult::Killed { .. }
     ));
     assert_eq!(pool.slot_count().await, 0);
 }
@@ -7900,8 +7922,8 @@ async fn foreground_owner_really_parks_and_folds_owned_child_completion_before_d
 async fn queued_memory_stop_keeps_nested_owners_alive_until_delivery_or_cascade() {
     for cascade in [false, true] {
         let (_dir, registry) = make_registry();
-        let a = protocol::AgentId::new();
-        let b = protocol::AgentId::new();
+        let a = lingxi_core::types::AgentId::new();
+        let b = lingxi_core::types::AgentId::new();
         seed_agent(&registry, "aqueueparent", a, None, TaskStatus::Running).await;
         seed_agent(&registry, "bqueueowner", b, Some(a), TaskStatus::Running).await;
         let (child, _) = registry.allocate_bash_output().await.unwrap();
@@ -8062,9 +8084,9 @@ async fn natural_sdk_receipt_preserves_usage_and_scan_gates() {
     registry
         .set_agent_outcome(
             "asdkusage",
-            platform_api::task_registry::AgentTerminalOutcome {
+            lingxi_core::host::task_registry::AgentTerminalOutcome {
                 result: Some("agent final text".into()),
-                usage: Some(platform_api::task_registry::AgentRunUsage {
+                usage: Some(lingxi_core::host::task_registry::AgentRunUsage {
                     subagent_tokens: 42,
                     tool_uses: 3,
                     duration_ms: 900,
@@ -8124,7 +8146,7 @@ async fn workflow_error_projects_to_sdk_patch_and_terminal_correction_is_not_a_n
     registry
         .set_workflow_outcome(
             "wsdkerror",
-            platform_api::task_registry::WorkflowTerminalOutcome {
+            lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                 error: Some("workflow failed".into()),
                 ..Default::default()
             },
@@ -8163,10 +8185,10 @@ async fn workflow_error_projects_to_sdk_patch_and_terminal_correction_is_not_a_n
 
 #[tokio::test]
 async fn permission_prompt_wait_updates_teammate_and_sdk_even_on_cancel() {
-    use platform_api::permission_gate::{
+    use lingxi_core::host::permission_gate::{
         PermissionCheckContext, PermissionDecision, PermissionGate, PermissionPauseObserver,
     };
-    use platform_api::task_registry::TaskRegistryHandle;
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
     struct Prompt;
     #[async_trait]
     impl PermissionGate for Prompt {
@@ -8202,7 +8224,7 @@ async fn permission_prompt_wait_updates_teammate_and_sdk_even_on_cancel() {
     };
     let rules = permission::loader::permission_rules_from_settings_json(
         r#"{"permissions":{}}"#,
-        permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+        permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
     )
     .unwrap();
     let policy =
@@ -8235,8 +8257,8 @@ async fn permission_prompt_wait_updates_teammate_and_sdk_even_on_cancel() {
 }
 
 struct HandoffProbeRunner {
-    records: StdMutex<HashMap<String, platform_api::process::ShellProcessHandoff>>,
-    sinks: StdMutex<HashMap<String, Arc<dyn platform_api::process::BackgroundExitSink>>>,
+    records: StdMutex<HashMap<String, lingxi_core::host::process::ShellProcessHandoff>>,
+    sinks: StdMutex<HashMap<String, Arc<dyn lingxi_core::host::process::BackgroundExitSink>>>,
     fail_attach: Option<String>,
     complete_on_adopt: bool,
     attach_gate: StdMutex<Option<Arc<tokio::sync::Notify>>>,
@@ -8245,20 +8267,20 @@ struct HandoffProbeRunner {
 impl ProcessRunner for HandoffProbeRunner {
     async fn run(
         &self,
-        _: &platform_api::SandboxedCommand,
-    ) -> Result<platform_api::ProcessOutput, platform_api::ProcessError> {
-        Err(platform_api::ProcessError::Unsupported)
+        _: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<lingxi_core::host::ProcessOutput, lingxi_core::host::ProcessError> {
+        Err(lingxi_core::host::ProcessError::Unsupported)
     }
     async fn spawn_background(
         &self,
-        _: &platform_api::SandboxedCommand,
-    ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
-        Err(platform_api::ProcessError::Unsupported)
+        _: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<lingxi_core::host::ProcessHandle, lingxi_core::host::ProcessError> {
+        Err(lingxi_core::host::ProcessError::Unsupported)
     }
     async fn kill(
         &self,
-        _: &platform_api::ProcessHandle,
-    ) -> Result<(), platform_api::ProcessError> {
+        _: &lingxi_core::host::ProcessHandle,
+    ) -> Result<(), lingxi_core::host::ProcessError> {
         Ok(())
     }
     fn is_available(&self) -> bool {
@@ -8266,34 +8288,37 @@ impl ProcessRunner for HandoffProbeRunner {
     }
     async fn export_shell(
         &self,
-        handle: &platform_api::ProcessHandle,
-    ) -> Result<platform_api::process::ShellProcessHandoff, platform_api::ProcessError> {
+        handle: &lingxi_core::host::ProcessHandle,
+    ) -> Result<lingxi_core::host::process::ShellProcessHandoff, lingxi_core::host::ProcessError>
+    {
         self.records
             .lock()
             .unwrap()
             .get(&handle.task_id)
             .filter(|record| record.pid == handle.pid)
             .cloned()
-            .ok_or_else(|| platform_api::ProcessError::Io("identity mismatch".into()))
+            .ok_or_else(|| lingxi_core::host::ProcessError::Io("identity mismatch".into()))
     }
     async fn validate_shell(
         &self,
-        handoff: &platform_api::process::ShellProcessHandoff,
-    ) -> Result<(), platform_api::ProcessError> {
+        handoff: &lingxi_core::host::process::ShellProcessHandoff,
+    ) -> Result<(), lingxi_core::host::ProcessError> {
         if self.records.lock().unwrap().get(&handoff.task_id) == Some(handoff) {
             Ok(())
         } else {
-            Err(platform_api::ProcessError::Io("capability mismatch".into()))
+            Err(lingxi_core::host::ProcessError::Io(
+                "capability mismatch".into(),
+            ))
         }
     }
     async fn adopt_shell(
         &self,
-        handoff: &platform_api::process::ShellProcessHandoff,
-        sink: Arc<dyn platform_api::process::BackgroundExitSink>,
-    ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
+        handoff: &lingxi_core::host::process::ShellProcessHandoff,
+        sink: Arc<dyn lingxi_core::host::process::BackgroundExitSink>,
+    ) -> Result<lingxi_core::host::ProcessHandle, lingxi_core::host::ProcessError> {
         self.validate_shell(handoff).await?;
         if self.fail_attach.as_deref() == Some(&handoff.task_id) {
-            return Err(platform_api::ProcessError::Io("attach failed".into()));
+            return Err(lingxi_core::host::ProcessError::Io("attach failed".into()));
         }
         self.sinks
             .lock()
@@ -8312,15 +8337,15 @@ impl ProcessRunner for HandoffProbeRunner {
                 sink.on_exit(&id, Some(0)).await;
             });
         }
-        Ok(platform_api::ProcessHandle {
+        Ok(lingxi_core::host::ProcessHandle {
             task_id: handoff.task_id.clone(),
             pid: handoff.pid,
         })
     }
     async fn release_shell(
         &self,
-        handoff: &platform_api::process::ShellProcessHandoff,
-    ) -> Result<(), platform_api::ProcessError> {
+        handoff: &lingxi_core::host::process::ShellProcessHandoff,
+    ) -> Result<(), lingxi_core::host::ProcessError> {
         self.sinks.lock().unwrap().remove(&handoff.task_id);
         Ok(())
     }
@@ -8329,8 +8354,8 @@ impl ProcessRunner for HandoffProbeRunner {
 fn handoff_fixture(
     registry: &TaskRegistry,
     id: &str,
-) -> platform_api::shell_handoff::ShellTaskHandoff {
-    platform_api::shell_handoff::ShellTaskHandoff {
+) -> lingxi_core::host::shell_handoff::ShellTaskHandoff {
+    lingxi_core::host::shell_handoff::ShellTaskHandoff {
         task_id: id.into(),
         command: "printf adopted".into(),
         description: "adopted shell".into(),
@@ -8339,7 +8364,7 @@ fn handoff_fixture(
         cwd: Some("/tmp".into()),
         caller: Some("turn".into()),
         output_offset: 17,
-        process: platform_api::process::ShellProcessHandoff {
+        process: lingxi_core::host::process::ShellProcessHandoff {
             supervisor_directory_identity: None,
             output_root_identity: None,
             output_file_identity: None,
@@ -8440,7 +8465,7 @@ async fn adopted_shell_bad_identity_and_failed_batch_leave_no_completion_owner()
     forged.process.pid += 1;
     assert!(registry.prepare_shell_handoff(&[forged]).await.is_err());
     let mut orphan = first.clone();
-    orphan.creator_agent_id = Some(protocol::AgentId::new());
+    orphan.creator_agent_id = Some(lingxi_core::types::AgentId::new());
     assert!(registry.prepare_shell_handoff(&[orphan]).await.is_err());
     let mut sdk = registry.subscribe_task_lifecycle();
     assert!(registry
@@ -8494,7 +8519,7 @@ async fn shell_handoff_exports_only_restorable_roots_and_never_loses_unbound_roo
             "child".into(),
             None,
             None,
-            Some(protocol::AgentId::new()),
+            Some(lingxi_core::types::AgentId::new()),
         )
         .await
         .unwrap();
@@ -8592,7 +8617,7 @@ async fn supervised_shell_has_one_terminal_writer_even_when_stopped_before_exit(
 
 #[tokio::test]
 async fn task_output_cannot_consume_completion_inside_shell_transfer_fence() {
-    use platform_api::task_registry::TaskRegistryHandle;
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
     let (_dir, mut registry) = make_registry();
     let record = handoff_fixture(&registry, "badopt006");
     let process = Arc::new(HandoffProbeRunner {
@@ -8765,7 +8790,7 @@ async fn adopted_shell_observer_preserves_stall_pressure_and_failure_semantics()
 async fn shell_exit_before_registration_is_replayed_once_and_never_installs_stale_killer() {
     struct Killer(Arc<AtomicUsize>);
     #[async_trait]
-    impl platform_api::task_registry::TaskKiller for Killer {
+    impl lingxi_core::host::task_registry::TaskKiller for Killer {
         async fn kill(&self) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
@@ -8982,7 +9007,7 @@ async fn completed_foreground_spool_retires_registration_reservation_without_del
 async fn every_shell_terminal_transition_releases_the_process_killer() {
     struct Killer;
     #[async_trait]
-    impl platform_api::task_registry::TaskKiller for Killer {
+    impl lingxi_core::host::task_registry::TaskKiller for Killer {
         async fn kill(&self) {}
     }
     let (_dir, registry) = make_registry();
@@ -9032,7 +9057,7 @@ async fn background_reregistration_preserves_armed_shell_terminal_identity_and_c
         .with_task_created_firer(created.clone())
         .with_task_completed_firer(completed.clone());
     let (id, _) = registry.allocate_bash_output().await.unwrap();
-    let registration = platform_api::task_registry::BackgroundBashRegistration {
+    let registration = lingxi_core::host::task_registry::BackgroundBashRegistration {
         command: "sleep 60".into(),
         description: "armed command".into(),
         tool_use_id: Some("toolu_armed".into()),
@@ -9233,7 +9258,10 @@ impl Task for SinkFlippingBashHandler {
         _input: TaskSpawnInput,
         _ctx: TaskContext,
     ) -> Result<TaskHandle, TaskError> {
-        Ok(TaskHandle::new(protocol::AgentId::new().to_string(), None))
+        Ok(TaskHandle::new(
+            lingxi_core::types::AgentId::new().to_string(),
+            None,
+        ))
     }
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
         use crate::handlers::TaskStatusSink;
@@ -9341,7 +9369,7 @@ fn agent_row(id: &str) -> crate::state::LocalAgentTaskState {
             creator_team_name: None,
             creator_agent_id: None,
         },
-        agent_id: protocol::AgentId::new(),
+        agent_id: lingxi_core::types::AgentId::new(),
         subagent_type: "researcher".into(),
         prompt: String::new(),
         error: None,

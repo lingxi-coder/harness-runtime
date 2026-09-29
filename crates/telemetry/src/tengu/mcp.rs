@@ -853,7 +853,7 @@ pub struct ReconcilePayload {
 ///   names, `OH`@155370892 / `F6`@155377771) — this port has neither
 ///   built-in server, so no configured name can match.
 /// - `"url" in t && X7e(t.url) && ln(e)===uy` — same two fixed names.
-/// - `$M`'s `type === "claudeai-proxy"` — [`platform_api::McpTransportSpec`] has
+/// - `$M`'s `type === "claudeai-proxy"` — [`lingxi_core::host::McpTransportSpec`] has
 ///   no `claudeai-proxy` variant (`kind()` yields only `stdio`/`sse`/`http`/
 ///   `websocket`/`inprocess`/`sse-ide`/`sdk-control`), so no live spec can
 ///   produce that string.

@@ -33,7 +33,7 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 pub fn register_with_fusion(
     reg: &mut tool_api::ToolRegistry,
     ctx: tool_api::BuiltinToolContext,
-    fusion: Option<std::sync::Arc<dyn platform_api::FusionExecutor>>,
+    fusion: Option<std::sync::Arc<dyn lingxi_core::host::FusionExecutor>>,
 ) {
     register_with_fusion_and_recorder(reg, ctx, fusion, None);
 }
@@ -42,8 +42,8 @@ pub fn register_with_fusion(
 pub fn register_with_fusion_and_recorder(
     reg: &mut tool_api::ToolRegistry,
     ctx: tool_api::BuiltinToolContext,
-    fusion: Option<std::sync::Arc<dyn platform_api::FusionExecutor>>,
-    recorder: Option<std::sync::Arc<dyn platform_api::FusionRunRecorder>>,
+    fusion: Option<std::sync::Arc<dyn lingxi_core::host::FusionExecutor>>,
+    recorder: Option<std::sync::Arc<dyn lingxi_core::host::FusionRunRecorder>>,
 ) {
     register_with_fusion_and_recorder_factory(reg, ctx, fusion, recorder, None);
 }
@@ -53,9 +53,9 @@ pub fn register_with_fusion_and_recorder(
 pub fn register_with_fusion_and_recorder_factory(
     reg: &mut tool_api::ToolRegistry,
     ctx: tool_api::BuiltinToolContext,
-    fusion: Option<std::sync::Arc<dyn platform_api::FusionExecutor>>,
-    recorder: Option<std::sync::Arc<dyn platform_api::FusionRunRecorder>>,
-    factory: Option<std::sync::Arc<dyn platform_api::FusionRunRecorderFactory>>,
+    fusion: Option<std::sync::Arc<dyn lingxi_core::host::FusionExecutor>>,
+    recorder: Option<std::sync::Arc<dyn lingxi_core::host::FusionRunRecorder>>,
+    factory: Option<std::sync::Arc<dyn lingxi_core::host::FusionRunRecorderFactory>>,
 ) {
     use std::sync::Arc;
     let mut tool = AgentTool::new(ctx);

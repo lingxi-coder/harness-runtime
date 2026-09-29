@@ -5,6 +5,7 @@
 //! conversion + the didOpen-gating + the file-size cap.
 
 use jsonrpc::Connection;
+use lingxi_core::host::LspServerConfig;
 use lsp::client::LspClient;
 use lsp::tool_operations::{
     document_symbol, find_references, go_to_definition, go_to_implementation, hover,
@@ -13,7 +14,6 @@ use lsp::tool_operations::{
     MAX_LSP_FILE_SIZE_BYTES,
 };
 use lsp::{OpenFileTracker, MAX_OPEN_DOCUMENTS};
-use platform_api::LspServerConfig;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -470,7 +470,7 @@ async fn hover_rejects_a_stale_client_after_server_clear() {
         .expect_err("stale client must not recreate tracker state after clear");
     assert!(matches!(
         error,
-        LspOperationError::Lsp(platform_api::LspError::Unavailable)
+        LspOperationError::Lsp(lingxi_core::host::LspError::Unavailable)
     ));
     assert!(!tracker.is_open("rust-analyzer", &uri).await);
 }

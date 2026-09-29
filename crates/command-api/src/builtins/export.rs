@@ -19,8 +19,8 @@
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::OrchestratorHandle;
-use protocol::{ContentBlock, ConversationMessage};
+use lingxi_core::host::OrchestratorHandle;
+use lingxi_core::types::{ContentBlock, ConversationMessage};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -269,7 +269,7 @@ fn civil_timestamp(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::MessageId;
+    use lingxi_core::types::MessageId;
 
     fn user(text: &str) -> ConversationMessage {
         ConversationMessage::user(MessageId::new(), text.to_string())
@@ -301,7 +301,7 @@ mod tests {
                     text: "running".to_string(),
                 },
                 ContentBlock::ToolUse {
-                    id: protocol::ToolUseId::new(),
+                    id: lingxi_core::types::ToolUseId::new(),
                     name: "Read".to_string(),
                     input: serde_json::json!({"file_path": "/x"}),
                     provider_id: None,
@@ -323,7 +323,7 @@ mod tests {
                     text: "hello".to_string(),
                 },
                 ContentBlock::MediaAnalysis {
-                    analysis: protocol::MediaAnalysis {
+                    analysis: lingxi_core::types::MediaAnalysis {
                         question_key: "internal-question-key".to_string(),
                         media_fingerprints: vec!["fp".to_string()],
                         model: "delegate".to_string(),
@@ -411,9 +411,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lingxi-export-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mock = Arc::new(MockOrchestratorHandle::new());
-        mock.set_status_snapshot(platform_api::StatusSnapshot {
+        mock.set_status_snapshot(lingxi_core::host::StatusSnapshot {
             cwd: dir.clone(),
-            ..platform_api::StatusSnapshot::default()
+            ..lingxi_core::host::StatusSnapshot::default()
         });
         let h = ExportHandler::new(mock);
         let args = ParsedSlashCommand {

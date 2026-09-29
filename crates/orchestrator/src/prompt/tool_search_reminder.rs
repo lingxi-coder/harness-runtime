@@ -143,7 +143,7 @@ reminder - ignore if not applicable to the current work."
 /// [`super::silent_turn::scan_silent_stretch`] uses.
 #[must_use]
 pub fn count_turns(
-    history: &[protocol::ConversationMessage],
+    history: &[lingxi_core::types::ConversationMessage],
     reminder_marks: &[usize],
     tool_search_name: &str,
 ) -> (u32, u32) {
@@ -163,12 +163,12 @@ pub fn count_turns(
         if found_tool_search && !after_last_reminder(idx) {
             break;
         }
-        let protocol::ConversationMessage::Assistant { content, .. } = msg else {
+        let lingxi_core::types::ConversationMessage::Assistant { content, .. } = msg else {
             continue;
         };
         if !found_tool_search
             && content.iter().any(|b| {
-                matches!(b, protocol::ContentBlock::ToolUse { name, .. } if name == tool_search_name)
+                matches!(b, lingxi_core::types::ContentBlock::ToolUse { name, .. } if name == tool_search_name)
             })
         {
             found_tool_search = true;
@@ -208,21 +208,23 @@ mod tests {
         );
     }
 
-    fn assistant(blocks: Vec<protocol::ContentBlock>) -> protocol::ConversationMessage {
-        protocol::ConversationMessage::Assistant {
-            id: protocol::MessageId::new(),
+    fn assistant(
+        blocks: Vec<lingxi_core::types::ContentBlock>,
+    ) -> lingxi_core::types::ConversationMessage {
+        lingxi_core::types::ConversationMessage::Assistant {
+            id: lingxi_core::types::MessageId::new(),
             content: blocks,
             stop_reason: None,
         }
     }
 
-    fn text(s: &str) -> protocol::ContentBlock {
-        protocol::ContentBlock::Text { text: s.into() }
+    fn text(s: &str) -> lingxi_core::types::ContentBlock {
+        lingxi_core::types::ContentBlock::Text { text: s.into() }
     }
 
-    fn tool_search() -> protocol::ContentBlock {
-        protocol::ContentBlock::ToolUse {
-            id: protocol::ToolUseId::new(),
+    fn tool_search() -> lingxi_core::types::ContentBlock {
+        lingxi_core::types::ContentBlock::ToolUse {
+            id: lingxi_core::types::ToolUseId::new(),
             name: "ToolSearch".into(),
             input: serde_json::json!({}),
             provider_id: None,

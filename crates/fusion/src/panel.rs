@@ -1,4 +1,4 @@
-//! Parallel Fusion panel execution via [`platform_api::SubagentSpawner`].
+//! Parallel Fusion panel execution via [`lingxi_core::host::SubagentSpawner`].
 
 use crate::budget::FusionPriceBook;
 use crate::config::FusionRuntimeConfig;
@@ -7,12 +7,12 @@ use crate::orchestrator::price_realized_usage;
 use crate::progress;
 use crate::snapshot::CatalogSnapshot;
 use async_trait::async_trait;
-use platform_api::subagent_output_guard::sanitize_blocks;
-use platform_api::subagent_spawn::{
+use lingxi_core::host::subagent_output_guard::sanitize_blocks;
+use lingxi_core::host::subagent_spawn::{
     StructuredOutputMode, SubagentObservation, SubagentResult, SubagentSpawnObserver,
     SubagentSpawnRequest, SubagentSpawner, SubagentUsage, SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
 };
-use platform_api::{
+use lingxi_core::host::{
     validate_panel_report, EvidenceCheckStatus, FusionError, FusionInheritance, FusionProgress,
     FusionRunFactsRecorder, FusionStage, FusionUsage, PanelReport, PanelRunStatus,
     WorkflowQueryWatchdog, FUSION_MIN_PANEL, FUSION_PANEL_TYPE,
@@ -137,7 +137,7 @@ impl RealizedSpendSink<'_> {
         }) {
             self.facts.add_confirmed_egress(panel.profile.clone());
         }
-        self.facts.set_timing(platform_api::FusionTiming {
+        self.facts.set_timing(lingxi_core::host::FusionTiming {
             total_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
             ..Default::default()
         });
@@ -216,13 +216,13 @@ fn dispatched_profiles_so_far(
 /// other category describes a panel for which a subagent provably existed,
 /// and which may therefore have been billed.
 ///
-/// A thin crate-local alias for [`platform_api::fusion::panel_never_dispatched`],
+/// A thin crate-local alias for [`lingxi_core::host::fusion::panel_never_dispatched`],
 /// which is the SINGLE SOURCE OF TRUTH: `tool-agent` reads the same predicate
 /// from there to decide how much of the session spawn reservation to release,
 /// and round-6 blocking B2 was these two lists drifting apart when they were
 /// independent `matches!` arms. Add a new value in platform-api, never here.
 pub(crate) fn is_never_dispatched_category(category: Option<&str>) -> bool {
-    platform_api::fusion::panel_never_dispatched(category)
+    lingxi_core::host::fusion::panel_never_dispatched(category)
 }
 
 /// One synthetic [`PanelInternal`] per panel that has reached the spawner
@@ -594,14 +594,14 @@ type PanelTaskOutput = (usize, ResolvedPanel, String, Duration, PanelFinish);
 #[derive(Clone, Default)]
 pub(crate) struct PanelTaskBarrier {
     inner: Arc<PanelTaskBarrierInner>,
-    pub(crate) attempt_run: Option<Arc<platform_api::ModelAttemptRun>>,
+    pub(crate) attempt_run: Option<Arc<lingxi_core::host::ModelAttemptRun>>,
     pub(crate) panel_fence: Option<Arc<dyn crate::FusionPanelAttemptFence>>,
 }
 
 #[derive(Default)]
 struct PanelTaskBarrierInner {
     abort_handles: Mutex<Vec<AbortHandle>>,
-    producer_drain: Mutex<Option<Arc<dyn platform_api::panel_pool::PanelPoolDrain>>>,
+    producer_drain: Mutex<Option<Arc<dyn lingxi_core::host::panel_pool::PanelPoolDrain>>>,
     active: AtomicUsize,
     drained: Notify,
 }
@@ -619,7 +619,7 @@ impl Drop for PanelTaskDone {
 impl PanelTaskBarrier {
     pub(crate) fn set_producer_drain(
         &self,
-        drain: Arc<dyn platform_api::panel_pool::PanelPoolDrain>,
+        drain: Arc<dyn lingxi_core::host::panel_pool::PanelPoolDrain>,
     ) {
         *self
             .inner
@@ -688,7 +688,7 @@ mod producer_drain_test {
 
     struct Gate(tokio::sync::Semaphore);
     #[async_trait::async_trait]
-    impl platform_api::panel_pool::PanelPoolDrain for Gate {
+    impl lingxi_core::host::panel_pool::PanelPoolDrain for Gate {
         async fn wait(&self) {
             self.0.acquire().await.unwrap().forget();
         }
@@ -710,7 +710,7 @@ mod producer_drain_test {
         let mut barrier = PanelTaskBarrier::default();
         barrier.panel_fence = Some(Arc::new(PanicClose));
         {
-            let local: Arc<dyn platform_api::panel_pool::PanelPoolDrain> = gate.clone();
+            let local: Arc<dyn lingxi_core::host::panel_pool::PanelPoolDrain> = gate.clone();
             barrier.set_producer_drain(local);
         }
         assert_eq!(barrier.inner.active.load(Ordering::SeqCst), 0);
@@ -801,10 +801,10 @@ fn spawn_panel_tasks(
     dispatch: &Arc<PanelDispatch>,
     facts: Option<&FusionRunFactsRecorder>,
     task_barrier: &PanelTaskBarrier,
-    admission: Option<platform_api::PanelPoolLease>,
+    admission: Option<lingxi_core::host::PanelPoolLease>,
 ) -> (JoinSet<PanelTaskOutput>, HashMap<tokio::task::Id, usize>) {
     let mut permits = admission
-        .map(platform_api::PanelPoolLease::into_permits)
+        .map(lingxi_core::host::PanelPoolLease::into_permits)
         .unwrap_or_default()
         .into_iter();
     let mut join_set = JoinSet::new();
@@ -863,7 +863,7 @@ fn spawn_panel_tasks(
             .as_ref()
             .map(|run| {
                 u32::try_from(index).map_err(|_| ()).and_then(|slot| {
-                    run.context(platform_api::ModelAttemptStage::Panel, Some(slot))
+                    run.context(lingxi_core::host::ModelAttemptStage::Panel, Some(slot))
                         .map_err(|_| ())
                 })
             })
@@ -882,7 +882,7 @@ fn spawn_panel_tasks(
                 index,
                 name_index,
             );
-            let inherit = platform_api::subagent_spawn::SubagentInheritance {
+            let inherit = lingxi_core::host::subagent_spawn::SubagentInheritance {
                 tool_invoker: subagent.tool_invoker,
                 budget: subagent.budget,
             };
@@ -1051,7 +1051,7 @@ pub(crate) async fn run_panels_supervised(
     // `RealizedSpendSink`.
     sink: Option<&RealizedSpendSink<'_>>,
     task_barrier: &PanelTaskBarrier,
-    admission: Option<platform_api::PanelPoolLease>,
+    admission: Option<lingxi_core::host::PanelPoolLease>,
 ) -> Result<Vec<PanelInternal>, FusionError> {
     if admission
         .as_ref()
@@ -1921,7 +1921,7 @@ fn usage_from_failed_subagent(usage: &SubagentUsage) -> FusionUsage {
 }
 
 /// Cap and neutralize a source error string before it is surfaced as
-/// [`platform_api::PanelOutcome::error_detail`] (G011): the same NUL-strip +
+/// [`lingxi_core::host::PanelOutcome::error_detail`] (G011): the same NUL-strip +
 /// prompt-injection guard [`sanitize_text`] applies to panel report fields,
 /// plus a hard byte cap so a verbose provider error body cannot balloon the
 /// spool/telemetry payload.
@@ -2137,7 +2137,7 @@ mod usage_from_subagent_tests {
 #[cfg(test)]
 mod missing_usage_settlement_fallback_tests {
     use super::*;
-    use platform_api::PanelRunStatus;
+    use lingxi_core::host::PanelRunStatus;
 
     fn panel() -> ResolvedPanel {
         ResolvedPanel {
@@ -2326,7 +2326,7 @@ estimated usage, not None",
 #[cfg(test)]
 mod missing_structured_output_reason_tests {
     use super::*;
-    use platform_api::{PanelRunStatus, SubagentUsage};
+    use lingxi_core::host::{PanelRunStatus, SubagentUsage};
 
     fn panel() -> ResolvedPanel {
         ResolvedPanel {
@@ -2362,7 +2362,7 @@ mod missing_structured_output_reason_tests {
             "panel prompt".into(),
             Duration::from_secs(5),
             PanelFinish::Done(SubagentResult::Failed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 reason: "agent({schema}): subagent completed without calling StructuredOutput \
 (after in-conversation nudge)"
                     .to_string(),
@@ -2403,7 +2403,7 @@ usage_from_failed_subagent), not a prompt-length estimate"
             "panel prompt".into(),
             Duration::from_secs(1),
             PanelFinish::Done(SubagentResult::Failed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 reason: "upstream 503".to_string(),
                 usage: SubagentUsage::default(),
             }),
@@ -2415,7 +2415,7 @@ usage_from_failed_subagent), not a prompt-length estimate"
 #[cfg(test)]
 mod structured_retry_cap_exceeded_tests {
     use super::*;
-    use platform_api::{PanelRunStatus, SubagentUsage};
+    use lingxi_core::host::{PanelRunStatus, SubagentUsage};
 
     fn panel() -> ResolvedPanel {
         ResolvedPanel {
@@ -2447,7 +2447,7 @@ mod structured_retry_cap_exceeded_tests {
             "panel prompt".into(),
             Duration::from_secs(5),
             PanelFinish::Done(SubagentResult::Failed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 reason: "agent({schema}): StructuredOutput retry cap (5) exceeded \u{2014} 5 \
 failed calls with no valid output"
                     .to_string(),
@@ -2486,7 +2486,7 @@ calls with no valid output"
             "panel prompt".into(),
             Duration::from_secs(1),
             PanelFinish::Done(SubagentResult::Failed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 reason: "agent({schema}): StructuredOutput retry cap (1) exceeded \u{2014} 1 \
 failed call with no valid output"
                     .to_string(),
@@ -2503,7 +2503,7 @@ failed call with no valid output"
 #[cfg(test)]
 mod api_error_cutoff_tests {
     use super::*;
-    use platform_api::{PanelRunStatus, SubagentUsage};
+    use lingxi_core::host::{PanelRunStatus, SubagentUsage};
 
     fn panel() -> ResolvedPanel {
         ResolvedPanel {
@@ -2522,7 +2522,7 @@ Everything below is PARTIAL output recovered from the agent before it was cut of
 did NOT finish its task \u{2014} treat these results as incomplete."
         );
         SubagentResult::Completed {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             content: serde_json::json!({
                 "content": [{"type": "text", "text": cutoff_note}],
                 "text": cutoff_note,
@@ -2603,7 +2603,7 @@ being silently discarded"
             "panel prompt".into(),
             Duration::from_secs(1),
             PanelFinish::Done(SubagentResult::Completed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 content: serde_json::json!({"not": "a valid panel report"}),
                 usage: SubagentUsage::default(),
                 total_tool_use_count: 0,
@@ -2674,9 +2674,11 @@ protection"
 mod panels_dispatched_emission_tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-    use platform_api::subagent_spawn::{SubagentInheritance, SubagentSpawnError};
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+    use lingxi_core::host::subagent_spawn::{SubagentInheritance, SubagentSpawnError};
+    use lingxi_core::host::tool_invoker::{
+        SubagentInvocationContext, ToolInvoker, ToolInvokerError,
+    };
     use tokio_util::sync::CancellationToken;
 
     struct InertInvoker;
@@ -2906,15 +2908,15 @@ emitted — got {stages:?}"
                 _request: SubagentSpawnRequest,
                 _inherit: SubagentInheritance,
                 _progress: Option<tokio::sync::mpsc::Sender<String>>,
-                observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+                observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
             ) -> Result<SubagentResult, SubagentSpawnError> {
                 let nth = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if nth == 0 {
                     if let Some(observer) = observer {
                         observer
                             .on_event(
-                                platform_api::subagent_spawn::SubagentObservation::Allocated {
-                                    agent_id: protocol::AgentId::new(),
+                                lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
+                                    agent_id: lingxi_core::types::AgentId::new(),
                                     agent_type: FUSION_PANEL_TYPE.to_string(),
                                     name: None,
                                     model: "claude-sonnet-5".into(),
@@ -3168,15 +3170,15 @@ reservation is released for subagents that really exist — got {stages:?}"
                 _request: SubagentSpawnRequest,
                 _inherit: SubagentInheritance,
                 _progress: Option<tokio::sync::mpsc::Sender<String>>,
-                observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+                observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
             ) -> Result<SubagentResult, SubagentSpawnError> {
                 // Let run_panels publish its reached-spawner snapshot before
                 // the allocation receipt arrives.
                 tokio::task::yield_now().await;
                 if let Some(observer) = observer {
                     observer.on_allocated(
-                        &platform_api::subagent_spawn::SubagentObservation::Allocated {
-                            agent_id: protocol::AgentId::new(),
+                        &lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
+                            agent_id: lingxi_core::types::AgentId::new(),
                             agent_type: FUSION_PANEL_TYPE.to_string(),
                             name: None,
                             model: "claude-sonnet-5".into(),
@@ -3264,13 +3266,13 @@ reservation is released for subagents that really exist — got {stages:?}"
                 _request: SubagentSpawnRequest,
                 _inherit: SubagentInheritance,
                 _progress: Option<tokio::sync::mpsc::Sender<String>>,
-                observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+                observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
             ) -> Result<SubagentResult, SubagentSpawnError> {
                 tokio::task::yield_now().await;
                 if let Some(observer) = observer {
                     observer.on_allocated(
-                        &platform_api::subagent_spawn::SubagentObservation::Allocated {
-                            agent_id: protocol::AgentId::new(),
+                        &lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
+                            agent_id: lingxi_core::types::AgentId::new(),
                             agent_type: FUSION_PANEL_TYPE.to_string(),
                             name: None,
                             model: "claude-sonnet-5".into(),
@@ -3357,12 +3359,12 @@ reservation is released for subagents that really exist — got {stages:?}"
 #[cfg(test)]
 mod dispatch_flag_tests {
     use super::*;
-    use platform_api::subagent_spawn::SubagentObservation;
+    use lingxi_core::host::subagent_spawn::SubagentObservation;
 
     fn observation(kind: &str) -> SubagentObservation {
         match kind {
             "allocated" => SubagentObservation::Allocated {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 agent_type: FUSION_PANEL_TYPE.to_string(),
                 name: None,
                 model: "claude-sonnet-5".into(),
@@ -3372,7 +3374,7 @@ mod dispatch_flag_tests {
                 origin_session_id: None,
             },
             _ => SubagentObservation::Progress {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 tool_use_count: 1,
                 token_count: 10,
             },
@@ -3488,9 +3490,11 @@ mod cancel_drain_settlement_tests {
     use crate::budget::ModelRates;
     use crate::model_resolver::CatalogModel;
     use async_trait::async_trait;
-    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-    use platform_api::subagent_spawn::{SubagentInheritance, SubagentSpawnError};
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+    use lingxi_core::host::subagent_spawn::{SubagentInheritance, SubagentSpawnError};
+    use lingxi_core::host::tool_invoker::{
+        SubagentInvocationContext, ToolInvoker, ToolInvokerError,
+    };
     use tokio_util::sync::CancellationToken;
 
     struct QuorumSpawner {
@@ -3751,7 +3755,7 @@ mod cancel_drain_settlement_tests {
             reasoning_output_tokens: 0,
         };
         SubagentResult::Completed {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             content,
             usage: usage.clone(),
             total_tool_use_count: 0,

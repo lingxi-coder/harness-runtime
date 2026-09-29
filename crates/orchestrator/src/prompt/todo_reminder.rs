@@ -60,7 +60,7 @@ pub trait TodoReminderTaskProvider: Send + Sync {
     /// the store's `list()` already returns). `session_id` is the live
     /// orchestrator session, so providers can mirror the task tools' standalone
     /// session fallback after env/team precedence is exhausted.
-    async fn task_items(&self, session_id: protocol::SessionId) -> Vec<TaskReminderItem>;
+    async fn task_items(&self, session_id: lingxi_core::types::SessionId) -> Vec<TaskReminderItem>;
 }
 
 #[cfg(test)]
@@ -70,7 +70,10 @@ mod tests {
     struct StaticTasks(Vec<TaskReminderItem>);
     #[async_trait]
     impl TodoReminderTaskProvider for StaticTasks {
-        async fn task_items(&self, _session_id: protocol::SessionId) -> Vec<TaskReminderItem> {
+        async fn task_items(
+            &self,
+            _session_id: lingxi_core::types::SessionId,
+        ) -> Vec<TaskReminderItem> {
             self.0.clone()
         }
     }
@@ -82,6 +85,11 @@ mod tests {
             status: TodoState::Pending,
             subject: "x".into(),
         }]);
-        assert_eq!(p.task_items(protocol::SessionId::new()).await.len(), 1);
+        assert_eq!(
+            p.task_items(lingxi_core::types::SessionId::new())
+                .await
+                .len(),
+            1
+        );
     }
 }

@@ -14,7 +14,7 @@
 //! line, so it must not run beside other `append` tests. Everything is one
 //! sequential test function for the same reason.
 
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::{json, Map};
 use session::jsonl::schema::{JsonlMessage, SESSION_KIND_ENV};

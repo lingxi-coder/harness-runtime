@@ -13,5 +13,5 @@ fn constants_match_spec_wire_identifiers() {
 
 #[test]
 fn memory_entry_re_exported_from_protocol() {
-    fn _accepts(_: protocol::MemoryEntry) {}
+    fn _accepts(_: lingxi_core::types::MemoryEntry) {}
 }

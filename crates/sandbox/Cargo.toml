@@ -6,8 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
+core = { path = "../core" }
 permission = { path = "../permission" }
 # Reuse the byte-faithful k0d SBPL profile builder (the macOS sandbox profile
 # generator) instead of duplicating a minimal template here. `sandbox-runtime`

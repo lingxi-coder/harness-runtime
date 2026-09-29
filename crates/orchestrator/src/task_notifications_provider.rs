@@ -4,7 +4,7 @@
 //! T35: the orchestrator folds a `<task-notification>` reminder into each turn
 //! (see [`ConversationOrchestrator::task_notification_reminder_messages`]) by
 //! draining the registry's terminal-not-notified tasks. The orchestrator names
-//! the registry only through the narrow `platform_api::task_registry::TaskRegistryHandle`
+//! the registry only through the narrow `lingxi_core::host::task_registry::TaskRegistryHandle`
 //! seam (it has no dependency on the `tasks` crate), so this adapter closes the
 //! seam from the orchestrator side: it owns an `Arc<dyn TaskRegistryHandle>` —
 //! the SAME registry handle the composition root hands the tool context — and
@@ -28,7 +28,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use platform_api::task_registry::{TaskNotification, TaskRegistryHandle};
+use lingxi_core::host::task_registry::{TaskNotification, TaskRegistryHandle};
 
 use crate::prompt::task_notification::TaskNotificationProvider;
 
@@ -73,7 +73,7 @@ impl TaskNotificationProvider for RegistryTaskNotifications {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use platform_api::task_registry::{
+    use lingxi_core::host::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskUpdatePatch,
     };
@@ -104,7 +104,7 @@ mod tests {
         }
         async fn has_pending_task_notifications_for(
             &self,
-            recipient: Option<protocol::AgentId>,
+            recipient: Option<lingxi_core::types::AgentId>,
         ) -> bool {
             recipient.is_none() && !self.0.lock().unwrap().is_empty()
         }
@@ -281,8 +281,8 @@ mod tests {
             .map(|m| m.text_content())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(content.contains(platform_api::task_notification::NON_USER_INPUT_HEADER));
-        assert!(!content.contains(platform_api::task_notification::IN_HUMAN_TURN_HEADER));
+        assert!(content.contains(lingxi_core::host::task_notification::NON_USER_INPUT_HEADER));
+        assert!(!content.contains(lingxi_core::host::task_notification::IN_HUMAN_TURN_HEADER));
         assert!(calls[0]
             .messages
             .iter()
@@ -343,8 +343,8 @@ mod tests {
             .map(|m| m.text_content())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(texts.contains(platform_api::task_notification::IN_HUMAN_TURN_HEADER));
-        assert!(!texts.contains(platform_api::task_notification::NON_USER_INPUT_HEADER));
+        assert!(texts.contains(lingxi_core::host::task_notification::IN_HUMAN_TURN_HEADER));
+        assert!(!texts.contains(lingxi_core::host::task_notification::NON_USER_INPUT_HEADER));
         assert!(texts.contains("a genuine user message"));
         let activity = registry.1.lock().unwrap();
         assert!(activity.first().unwrap().1 && activity.first().unwrap().2);

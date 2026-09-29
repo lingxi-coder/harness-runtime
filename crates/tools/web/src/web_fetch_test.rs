@@ -313,7 +313,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     // ---- async impl Tool tests using MockHttpTransport ---------------------
 
-    use platform_api::http::HttpTransport;
+    use lingxi_core::host::http::HttpTransport;
     use std::sync::Arc;
     use telemetry::sinks::InMemorySink;
     use telemetry::AnalyticsBus;
@@ -347,7 +347,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     }
 
     fn ok_response(status: u16, body: &str) -> ScriptedResponse {
-        ScriptedResponse::Sync(protocol::HttpResponse {
+        ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
             status,
             headers: vec![],
             body: body.to_string(),
@@ -501,7 +501,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         crate::blocklist::clear_domain_check_cache();
         let (ctx, http, _sink) = make_web_ctx();
         http.enqueue(preflight_allow());
-        http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+        http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
             status: 429,
             headers: vec![("Retry-After".into(), "30".into())],
             body: String::new(),
@@ -647,7 +647,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             ua_value,
             &format!(
                 "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
-                platform_api::CLAUDE_CODE_VERSION
+                lingxi_core::host::CLAUDE_CODE_VERSION
             ),
             "WebFetch UA must be claude-code's `Claude-User (...)` form with the parity version"
         );
@@ -1159,13 +1159,13 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     /// (held under `SKIP_ENV_LOCK`) so the only transport traffic is the fetch
     /// loop itself — keeping the call counts unambiguous.
     struct NoFollowMock {
-        queue: std::sync::Mutex<std::collections::VecDeque<protocol::HttpResponse>>,
+        queue: std::sync::Mutex<std::collections::VecDeque<lingxi_core::types::HttpResponse>>,
         request_calls: std::sync::atomic::AtomicUsize,
         no_follow_calls: std::sync::atomic::AtomicUsize,
     }
 
     impl NoFollowMock {
-        fn new(responses: Vec<protocol::HttpResponse>) -> Arc<Self> {
+        fn new(responses: Vec<lingxi_core::types::HttpResponse>) -> Arc<Self> {
             Arc::new(Self {
                 queue: std::sync::Mutex::new(responses.into()),
                 request_calls: std::sync::atomic::AtomicUsize::new(0),
@@ -1176,13 +1176,16 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[async_trait]
     impl HttpTransport for NoFollowMock {
-        async fn request(&self, _req: HttpRequest) -> Result<protocol::HttpResponse, HttpError> {
+        async fn request(
+            &self,
+            _req: HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, HttpError> {
             // The WebFetch redirect loop must NOT reach this path. Count it and
             // return a harmless 200 so a regression is visible via the counter
             // (and the redirect/body the test scripted goes unconsumed).
             self.request_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(protocol::HttpResponse {
+            Ok(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![],
                 body: "WRONG-PATH: plain request was called".into(),
@@ -1192,7 +1195,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         async fn request_no_follow(
             &self,
             _req: HttpRequest,
-        ) -> Result<protocol::HttpResponse, HttpError> {
+        ) -> Result<lingxi_core::types::HttpResponse, HttpError> {
             self.no_follow_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match self.queue.lock().unwrap().pop_front() {
@@ -1203,15 +1206,15 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         async fn stream_sse(
             &self,
             _req: HttpRequest,
-        ) -> Result<platform_api::http::SseStream, HttpError> {
+        ) -> Result<lingxi_core::host::http::SseStream, HttpError> {
             Err(HttpError::InvalidRequest(
                 "sse not used in this mock".into(),
             ))
         }
     }
 
-    fn redirect_resp(status: u16, location: &str) -> protocol::HttpResponse {
-        protocol::HttpResponse {
+    fn redirect_resp(status: u16, location: &str) -> lingxi_core::types::HttpResponse {
+        lingxi_core::types::HttpResponse {
             status,
             headers: vec![("location".into(), location.to_string())],
             body: String::new(),
@@ -1293,7 +1296,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         // First hop: same-host redirect (only the path changes). Second hop: 200.
         let http = NoFollowMock::new(vec![
             redirect_resp(301, "https://follow.example/final"),
-            protocol::HttpResponse {
+            lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![],
                 body: "final body".into(),
@@ -1375,7 +1378,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _skip_guard = crate::testsupport::PreflightSkipGuard::set("1");
 
         // 301 with NO Location header.
-        let http = NoFollowMock::new(vec![protocol::HttpResponse {
+        let http = NoFollowMock::new(vec![lingxi_core::types::HttpResponse {
             status: 301,
             headers: vec![],
             body: String::new(),
@@ -1421,7 +1424,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 let user_text = request
                     .messages
                     .last()
-                    .map(protocol::ConversationMessage::text_content);
+                    .map(lingxi_core::types::ConversationMessage::text_content);
                 *self.captured.lock().unwrap() = user_text;
                 Ok(SideQueryResponse {
                     text: Some(self.reply.clone()),
@@ -1501,14 +1504,14 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             crate::blocklist::clear_domain_check_cache();
             let (ctx, http, _sink) = make_web_ctx();
             http.enqueue(preflight_allow());
-            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>Deterministic</h1><p>Body</p>".into(),
                 body_bytes: Vec::new(),
             }));
             http.enqueue(preflight_allow());
-            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>Deterministic</h1><p>Body</p>".into(),
@@ -1637,7 +1640,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             crate::blocklist::clear_domain_check_cache();
             let (ctx, http, _sink) = make_web_ctx();
             http.enqueue(preflight_allow());
-            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>Doc</h1>".into(),
@@ -1682,7 +1685,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             crate::blocklist::clear_domain_check_cache();
             let (ctx, http, _sink) = make_web_ctx();
             http.enqueue(preflight_allow());
-            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>NoPrompt</h1>".into(),
@@ -1719,7 +1722,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             crate::blocklist::clear_domain_check_cache();
             let (ctx, http, _sink) = make_web_ctx();
             http.enqueue(preflight_allow());
-            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![("content-type".into(), "text/markdown".into())],
                 body: "# Raw markdown".into(),
@@ -1758,7 +1761,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             let (ctx, http, _sink) = make_web_ctx();
             http.enqueue(preflight_allow());
             let big = "a".repeat(WEBFETCH_MAX_MARKDOWN_LEN + 1);
-            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![("content-type".into(), "text/markdown".into())],
                 body: big,
@@ -1792,7 +1795,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             crate::blocklist::clear_domain_check_cache();
             let (ctx, http, _sink) = make_web_ctx();
             http.enqueue(preflight_allow());
-            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![("content-type".into(), "text/markdown".into())],
                 body: "# md".into(),
@@ -1824,7 +1827,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             crate::blocklist::clear_domain_check_cache();
             let (ctx, http, _sink) = make_web_ctx();
             http.enqueue(preflight_allow());
-            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>Fallback</h1>".into(),
@@ -1849,7 +1852,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             crate::blocklist::clear_domain_check_cache();
             let (ctx, http, _sink) = make_web_ctx();
             http.enqueue(preflight_allow());
-            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>Recovered</h1>".into(),
@@ -1878,7 +1881,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         crate::blocklist::clear_domain_check_cache();
         let (ctx, http, _sink) = make_web_ctx();
         http.enqueue(preflight_allow());
-        http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+        http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
             status: 200,
             headers: vec![("content-type".into(), "text/html".into())],
             body: "<h1>Title</h1><p>Body text</p>".into(),
@@ -1916,7 +1919,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         crate::blocklist::clear_domain_check_cache();
         let (ctx, http, _sink) = make_web_ctx();
         http.enqueue(preflight_allow());
-        http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+        http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
             status: 200,
             headers: vec![("content-type".into(), "text/html".into())],
             body: "<h1>Hi</h1>".into(),
@@ -2032,7 +2035,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let (ctx, http, _sink) = make_web_ctx_with_workspace(tmp.path().to_path_buf());
         let body = "%PDF-1.4 fake pdf bytes";
         http.enqueue(preflight_allow());
-        http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+        http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
             status: 200,
             headers: vec![("content-type".into(), "application/pdf".into())],
             body: body.to_string(),
@@ -2110,7 +2113,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             "sanity: lossy String must differ from the raw wire bytes"
         );
         http.enqueue(preflight_allow());
-        http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+        http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
             status: 200,
             headers: vec![("content-type".into(), "application/pdf".into())],
             body: lossy,
@@ -2164,7 +2167,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tmp = tempfile::tempdir().expect("tempdir");
         let (ctx, http, _sink) = make_web_ctx_with_workspace(tmp.path().to_path_buf());
         http.enqueue(preflight_allow());
-        http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+        http.enqueue(ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
             status: 200,
             headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
             body: "<p>hi</p>".into(),

@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use platform_api::subagent_spawn::{
+use lingxi_core::host::subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnRequest, SubagentSpawner,
 };
 
@@ -234,10 +234,12 @@ mod tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::HookEventType;
     use async_trait::async_trait;
-    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-    use platform_api::subagent_spawn::{SubagentResult, SubagentSpawnError, SubagentUsage};
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use protocol::HookId;
+    use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+    use lingxi_core::host::subagent_spawn::{SubagentResult, SubagentSpawnError, SubagentUsage};
+    use lingxi_core::host::tool_invoker::{
+        SubagentInvocationContext, ToolInvoker, ToolInvokerError,
+    };
+    use lingxi_core::types::HookId;
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -278,7 +280,7 @@ mod tests {
                 prompt: "vet this".into(),
                 model: None,
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -319,7 +321,7 @@ mod tests {
     async fn happy_path_completed_parses_response_json() {
         let spawner = Arc::new(MockSpawner {
             result: Mutex::new(Some(Ok(SubagentResult::Completed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 content: json!(r#"{"decision":"approve"}"#),
                 usage: SubagentUsage::default(),
                 total_tool_use_count: 0,
@@ -378,9 +380,9 @@ mod tests {
     async fn subagent_failed_returns_error() {
         let spawner = Arc::new(MockSpawner {
             result: Mutex::new(Some(Ok(SubagentResult::Failed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 reason: "no API key".into(),
-                usage: platform_api::subagent_spawn::SubagentUsage::default(),
+                usage: lingxi_core::host::subagent_spawn::SubagentUsage::default(),
             }))),
         });
         let exec = AgentExecutor::new(Some(spawner.clone()), Duration::from_secs(5));

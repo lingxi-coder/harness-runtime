@@ -1,9 +1,9 @@
 //! Property tests for `reduce`. These run with proptest at 256 cases by
 //! default; the CI `--features 10k-iterations` profile bumps to 10K.
 
+use lingxi_core::types::{MessageId, RequestId, SessionId};
 use lingxi_core::{reduce, ConversationState, Event, SessionState};
 use proptest::prelude::*;
-use protocol::{MessageId, RequestId, SessionId};
 
 fn arb_event() -> impl Strategy<Value = Event> {
     prop_oneof![

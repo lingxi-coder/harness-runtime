@@ -11,7 +11,7 @@
 //! string, and the `bwrap` / `sandbox-exec` argv shape.
 
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     NetworkPolicy, ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
     SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
@@ -356,7 +356,7 @@ fn runtime_config_from_policy(policy: &SandboxPolicy) -> SandboxRuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::{runtime_config_from_policy, split_bare_repo_paths};
-    use platform_api::{NetworkPolicy, ResourceLimits, SandboxPolicy};
+    use lingxi_core::host::{NetworkPolicy, ResourceLimits, SandboxPolicy};
 
     /// Build a minimal `SandboxPolicy` literal for net-mapping tests.
     /// `SandboxPolicy` does not derive `Default`, so construct each field.

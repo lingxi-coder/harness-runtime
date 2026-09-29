@@ -1,7 +1,7 @@
 //! Stub [`WorktreeManager`] — real `git worktree` shell-out lands in Plan 17.
 
 use async_trait::async_trait;
-use platform_api::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
+use lingxi_core::host::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 use std::path::PathBuf;
 use std::time::Duration;
 

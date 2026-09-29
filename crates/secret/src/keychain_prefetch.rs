@@ -15,8 +15,8 @@
 //! (`service = ""`). When the backend is the plaintext fallback, the same
 //! call still works — the storage layer just hits the disk.
 
-use platform_api::{RuntimeError, RuntimeSpawner, SecureStorage, SecureStorageError};
-use protocol::SecureStorageData;
+use lingxi_core::host::{RuntimeError, RuntimeSpawner, SecureStorage, SecureStorageError};
+use lingxi_core::types::SecureStorageData;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -77,8 +77,8 @@ impl KeychainPrefetch {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::{BackgroundTaskHandle, SecureStorageBackend};
-    use protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
+    use lingxi_core::host::{BackgroundTaskHandle, SecureStorageBackend};
+    use lingxi_core::types::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
     use std::sync::Mutex;
     use std::time::Duration;
 

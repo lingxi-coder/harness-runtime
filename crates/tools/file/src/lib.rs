@@ -261,7 +261,7 @@ pub fn read_requirement_waived(model: Option<&str>, canon: &std::path::Path) -> 
     if !model_waives_read_requirement(model) {
         return false;
     }
-    platform_api::read_auto_allow::read_auto_allowed(&canon.to_string_lossy())
+    lingxi_core::host::read_auto_allow::read_auto_allowed(&canon.to_string_lossy())
 }
 
 pub fn check_read_before_write(

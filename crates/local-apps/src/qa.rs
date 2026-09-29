@@ -11,8 +11,8 @@ use crate::error::AppError;
 use crate::ids;
 use crate::manifest::{AppLayout, AppRuntimeProfileBinding};
 use crate::types::AppRuntimeProfile;
-use platform_api::rooted_fs::{self, AtomicWriteOptions};
-use platform_api::FsError;
+use lingxi_core::host::rooted_fs::{self, AtomicWriteOptions};
+use lingxi_core::host::FsError;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -723,7 +723,9 @@ fn ledger_lock_path(layout: &AppLayout, workflow_run_id: &str) -> Result<PathBuf
         .join(format!("{workflow_run_id}{LEDGER_LOCK_SUFFIX}")))
 }
 
-fn lock_sessions(layout: &AppLayout) -> Result<platform_api::rooted_fs::RootedFileLock, AppError> {
+fn lock_sessions(
+    layout: &AppLayout,
+) -> Result<lingxi_core::host::rooted_fs::RootedFileLock, AppError> {
     layout.initialize()?;
     let parent = qa_root(layout);
     rooted_fs::ensure_private_directory(layout.root(), &parent, 0o700)
@@ -735,7 +737,7 @@ fn lock_sessions(layout: &AppLayout) -> Result<platform_api::rooted_fs::RootedFi
 fn lock_session(
     layout: &AppLayout,
     handle: &str,
-) -> Result<platform_api::rooted_fs::RootedFileLock, AppError> {
+) -> Result<lingxi_core::host::rooted_fs::RootedFileLock, AppError> {
     ids::validate_qa_handle(handle)?;
     lock_sessions(layout)
 }
@@ -743,7 +745,7 @@ fn lock_session(
 fn lock_ledger(
     layout: &AppLayout,
     workflow_run_id: &str,
-) -> Result<platform_api::rooted_fs::RootedFileLock, AppError> {
+) -> Result<lingxi_core::host::rooted_fs::RootedFileLock, AppError> {
     layout.initialize()?;
     let parent = qa_root(layout).join(LEDGERS_DIR);
     rooted_fs::ensure_private_directory(layout.root(), &parent, 0o700)
@@ -757,7 +759,9 @@ fn lock_ledger(
     .map_err(|error| AppError::from_fs("lock QA finding ledger", &error))
 }
 
-fn lock_history(layout: &AppLayout) -> Result<platform_api::rooted_fs::RootedFileLock, AppError> {
+fn lock_history(
+    layout: &AppLayout,
+) -> Result<lingxi_core::host::rooted_fs::RootedFileLock, AppError> {
     layout.initialize()?;
     let parent = qa_root(layout);
     rooted_fs::ensure_private_directory(layout.root(), &parent, 0o700)

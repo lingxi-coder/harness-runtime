@@ -27,14 +27,14 @@
 //!
 //! This module also implements the separate project-`.mcp.json` approval
 //! gate (`enabledMcpjsonServers` / `disabledMcpjsonServers` /
-//! `enableAllProjectMcpServers`, applied only to `ConfigScope::Settings(protocol::SettingsScope::Project)` in
+//! `enableAllProjectMcpServers`, applied only to `ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)` in
 //! [`McpPolicyContext::decide`]). A now-deleted `mcp/src/approval.rs`
 //! (§25b) duplicated this with its own `McpApprovalPolicy`/`ApprovalStatus`
 //! and zero external callers; **do not revive it**. Its
 //! `ConfigScope::Dynamic -> PendingApproval` mapping would regress §27a,
 //! which made `--mcp-config` entries `Dynamic` specifically so they are
 //! NEVER approval-gated — `decide` below correctly gates only
-//! `ConfigScope::Settings(protocol::SettingsScope::Project)`, and `project_approval_is_scope_aware`'s
+//! `ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)`, and `project_approval_is_scope_aware`'s
 //! `ConfigScope::Dynamic` case pins that.
 
 use crate::connection::{ConfigScope, McpServerConfig};
@@ -157,7 +157,7 @@ impl McpPolicyContext {
         {
             return McpServerDecision::Block(McpServerBlockReason::NameDenied);
         }
-        if server.scope == ConfigScope::Settings(protocol::SettingsScope::Project) {
+        if server.scope == ConfigScope::Settings(lingxi_core::types::SettingsScope::Project) {
             if self
                 .rejected_project_servers
                 .iter()
@@ -215,21 +215,21 @@ pub const PROJECT_UNRESOLVED_ENV_REF_REFUSAL: &str = "Its url, command or args r
 ///
 /// `env` and `headers` are deliberately NOT tested — upstream counts those
 /// separately, for the approval prompt, and never refuses on them.
-fn project_entry_has_unresolved_env_ref(spec: &platform_api::McpTransportSpec) -> bool {
+fn project_entry_has_unresolved_env_ref(spec: &lingxi_core::host::McpTransportSpec) -> bool {
     let unresolved = |value: &str| {
         crate::env_expansion::expand_env_vars_in_string(value)
             .expanded
             .contains("${")
     };
     match spec {
-        platform_api::McpTransportSpec::Stdio { command, args, .. } => {
+        lingxi_core::host::McpTransportSpec::Stdio { command, args, .. } => {
             unresolved(command) || args.iter().any(|a| unresolved(a))
         }
-        platform_api::McpTransportSpec::Sse { url, .. }
-        | platform_api::McpTransportSpec::Http { url, .. }
-        | platform_api::McpTransportSpec::WebSocket { url, .. }
-        | platform_api::McpTransportSpec::SseIde { url, .. }
-        | platform_api::McpTransportSpec::WsIde { url, .. } => unresolved(url),
+        lingxi_core::host::McpTransportSpec::Sse { url, .. }
+        | lingxi_core::host::McpTransportSpec::Http { url, .. }
+        | lingxi_core::host::McpTransportSpec::WebSocket { url, .. }
+        | lingxi_core::host::McpTransportSpec::SseIde { url, .. }
+        | lingxi_core::host::McpTransportSpec::WsIde { url, .. } => unresolved(url),
         // No url/command/args to smuggle anything through.
         _ => false,
     }
@@ -386,7 +386,7 @@ mod tests {
     fn stdio(name: &str, scope: ConfigScope, command: &str, args: &[&str]) -> McpServerConfig {
         McpServerConfig {
             name: name.to_string(),
-            spec: platform_api::McpTransportSpec::Stdio {
+            spec: lingxi_core::host::McpTransportSpec::Stdio {
                 command: command.to_string(),
                 args: args.iter().map(|a| (*a).to_string()).collect(),
                 env: Default::default(),
@@ -422,7 +422,7 @@ mod tests {
         assert_eq!(
             policy.decide(&stdio(
                 "a",
-                ConfigScope::Settings(protocol::SettingsScope::Project),
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
                 "${LINGXI_TEST_NEVER_SET_XYZ}/bin/srv",
                 &[]
             )),
@@ -435,7 +435,7 @@ mod tests {
         assert_eq!(
             policy.decide(&stdio(
                 "b",
-                ConfigScope::Settings(protocol::SettingsScope::Project),
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
                 "/bin/srv",
                 &["--token", "${LINGXI_TEST_NEVER_SET_XYZ}"]
             )),
@@ -448,7 +448,7 @@ mod tests {
         assert_eq!(
             policy.decide(&stdio(
                 "c",
-                ConfigScope::Settings(protocol::SettingsScope::Project),
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
                 "${LINGXI_TEST_NEVER_SET_XYZ:-/bin/srv}",
                 &[]
             )),
@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(
             policy.decide(&stdio(
                 "d",
-                ConfigScope::Settings(protocol::SettingsScope::Project),
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
                 "/bin/srv",
                 &[]
             )),
@@ -476,7 +476,7 @@ mod tests {
         assert_eq!(
             policy.decide(&stdio(
                 "u",
-                ConfigScope::Settings(protocol::SettingsScope::User),
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
                 "${LINGXI_TEST_NEVER_SET_XYZ}/bin/srv",
                 &[]
             )),
@@ -588,7 +588,7 @@ mod tests {
     #[test]
     fn apply_gate_marks_disabled_servers() {
         use crate::connection::ConfigScope;
-        use platform_api::McpTransportSpec;
+        use lingxi_core::host::McpTransportSpec;
         use std::collections::HashMap;
 
         let stdio = |name: &str| McpServerConfig {
@@ -598,7 +598,7 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
             },
-            scope: ConfigScope::Settings(protocol::SettingsScope::Project),
+            scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -676,7 +676,7 @@ mod tests {
     #[test]
     fn apply_gate_rejects_disabled_mcpjson_project_server() {
         use crate::connection::ConfigScope;
-        use platform_api::McpTransportSpec;
+        use lingxi_core::host::McpTransportSpec;
         use std::collections::HashMap;
 
         let stdio = |name: &str, scope: ConfigScope| McpServerConfig {
@@ -711,17 +711,17 @@ mod tests {
         let mut servers = vec![
             stdio(
                 "context7",
-                ConfigScope::Settings(protocol::SettingsScope::Project),
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
             ),
             // Same name but NON-project scope ⇒ the jsonServers reject list
             // (a `.mcp.json` trust model) must NOT touch it.
             stdio(
                 "context7",
-                ConfigScope::Settings(protocol::SettingsScope::User),
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             ),
             stdio(
                 "linear",
-                ConfigScope::Settings(protocol::SettingsScope::Project),
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
             ),
         ];
         apply_project_server_gate(&mut servers, &global, &cwd);
@@ -779,7 +779,7 @@ mod tests {
     #[test]
     fn apply_gate_missing_config_gates_only_builtin() {
         use crate::connection::ConfigScope;
-        use platform_api::McpTransportSpec;
+        use lingxi_core::host::McpTransportSpec;
         use std::collections::HashMap;
 
         let stdio = |name: &str| McpServerConfig {
@@ -789,7 +789,7 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
             },
-            scope: ConfigScope::Settings(protocol::SettingsScope::Project),
+            scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -832,7 +832,7 @@ mod tests {
         };
         let server = McpServerConfig {
             name: "docs".into(),
-            spec: platform_api::McpTransportSpec::Stdio {
+            spec: lingxi_core::host::McpTransportSpec::Stdio {
                 command: "docs".into(),
                 args: Vec::new(),
                 env: std::collections::HashMap::new(),
@@ -858,7 +858,7 @@ mod tests {
         let policy = McpPolicyContext::default();
         let make = |scope| McpServerConfig {
             name: "docs".into(),
-            spec: platform_api::McpTransportSpec::Stdio {
+            spec: lingxi_core::host::McpTransportSpec::Stdio {
                 command: "docs".into(),
                 args: Vec::new(),
                 env: std::collections::HashMap::new(),
@@ -875,12 +875,14 @@ mod tests {
         };
         assert_eq!(
             policy.decide(&make(ConfigScope::Settings(
-                protocol::SettingsScope::Project
+                lingxi_core::types::SettingsScope::Project
             ))),
             McpServerDecision::Block(McpServerBlockReason::ProjectPendingApproval)
         );
         assert_eq!(
-            policy.decide(&make(ConfigScope::Settings(protocol::SettingsScope::User))),
+            policy.decide(&make(ConfigScope::Settings(
+                lingxi_core::types::SettingsScope::User
+            ))),
             McpServerDecision::Allow
         );
         assert_eq!(

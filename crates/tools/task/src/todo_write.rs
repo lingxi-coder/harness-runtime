@@ -508,8 +508,8 @@ impl Tool for TodoWriteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lingxi_core::types::SessionId;
     use lingxi_core::SessionState;
-    use protocol::SessionId;
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tokio::sync::Mutex;
@@ -1068,7 +1068,7 @@ mod tests {
     async fn result_is_bare_base_for_subagent() {
         let (tool, sink, _session, mut use_ctx) = make_tool_and_session();
         tool.ctx.bus.attach_sink(sink.clone()).await;
-        use_ctx.agent_id = Some(protocol::AgentId::new());
+        use_ctx.agent_id = Some(lingxi_core::types::AgentId::new());
         let input = json!({
             "todos": [
                 completed("1", "Implement parser"),

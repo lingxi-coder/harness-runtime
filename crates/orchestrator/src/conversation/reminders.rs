@@ -10,7 +10,7 @@ impl ConversationOrchestrator {
     /// next response uses the newly selected output channel. Startup
     /// `--brief` does not queue a reminder; only the interactive toggle does.
     pub(crate) fn brief_mode_reminder_message(&self) -> Option<ConversationMessage> {
-        platform_api::session_flags::take_brief_mode_reminder()
+        lingxi_core::host::session_flags::take_brief_mode_reminder()
             .map(|content| ConversationMessage::user_meta(MessageId::new(), content.to_string()))
     }
 
@@ -163,7 +163,7 @@ impl ConversationOrchestrator {
                         ..
                     } => !content
                         .iter()
-                        .any(|b| matches!(b, protocol::ContentBlock::ToolResult { .. })),
+                        .any(|b| matches!(b, lingxi_core::types::ContentBlock::ToolResult { .. })),
                     _ => false,
                 })
                 .count();
@@ -416,7 +416,7 @@ impl ConversationOrchestrator {
     /// / `killed` dream is skipped: nothing was consolidated.
     pub(super) fn enqueue_memory_updates_from(
         &self,
-        notifications: &[platform_api::task_registry::TaskNotification],
+        notifications: &[lingxi_core::host::task_registry::TaskNotification],
     ) {
         let fresh: Vec<crate::prompt::memory_update::PendingMemoryUpdate> = notifications
             .iter()
@@ -690,7 +690,7 @@ impl ConversationOrchestrator {
     /// (never `session.history` / JSONL).
     pub(crate) fn date_change_reminder_message(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
     ) -> Option<ConversationMessage> {
         let today = crate::prompt::env_meta::current_date_string();
         let session_date = self.session_start_date(session_id);
@@ -731,7 +731,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
             Some(ConversationMessage::User { content, .. })
                 if content
                     .iter()
-                    .any(|b| matches!(b, protocol::ContentBlock::ToolResult { .. }))
+                    .any(|b| matches!(b, lingxi_core::types::ContentBlock::ToolResult { .. }))
         )
     }
 
@@ -857,7 +857,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// line that carried the `tool_use` block.
     pub(super) async fn tool_name_for_use_id(
         &self,
-        tool_use_id: &protocol::ToolUseId,
+        tool_use_id: &lingxi_core::types::ToolUseId,
     ) -> Option<String> {
         let s = self.session.lock().await;
         s.history.iter().rev().find_map(|msg| {
@@ -865,7 +865,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
                 return None;
             };
             content.iter().find_map(|b| match b {
-                protocol::ContentBlock::ToolUse { id, name, .. } if id == tool_use_id => {
+                lingxi_core::types::ContentBlock::ToolUse { id, name, .. } if id == tool_use_id => {
                     Some(name.clone())
                 }
                 _ => None,
@@ -877,7 +877,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     ///
     /// Both the leading `# currentDate` context and the midnight reminder use
     /// this producer, so call order cannot create two independent date memos.
-    pub(super) fn session_start_date(&self, session_id: protocol::SessionId) -> String {
+    pub(super) fn session_start_date(&self, session_id: lingxi_core::types::SessionId) -> String {
         let today = crate::prompt::env_meta::current_date_string();
         let mut state = self
             .prompt_runtime
@@ -996,11 +996,11 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     ///   `showConcurrencyNote = Cc()!=="pro" && DZ()==="default"` (producer
     ///   @296530704) — i.e. NOT a Pro subscription and the subagent steer left at
     ///   `default`. Both signals exist in the port:
-    ///   [`platform_api::subscription::is_pro_plan`] and
-    ///   [`platform_api::live_sessions::subagent_steer_is_default`].
+    ///   [`lingxi_core::host::subscription::is_pro_plan`] and
+    ///   [`lingxi_core::host::live_sessions::subagent_steer_is_default`].
     ///
     /// NOT inert: `LINGXI_AGENT_LIST_IN_MESSAGES` defaults **ON** since 2.1.193
-    /// (`platform_api::subagent_spawn::should_inject_agent_list_in_messages` returns
+    /// (`lingxi_core::host::subagent_spawn::should_inject_agent_list_in_messages` returns
     /// `true` when unset), so a stock session that has the Agent tool now sends
     /// the concurrency note on its FIRST agent listing — which is exactly what
     /// 2.1.238 does for a non-Pro plan on the default steer. The removal branch
@@ -1039,7 +1039,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         // `is_initial` is captured BEFORE inserting (TS `announced.size === 0`).
         let (is_initial, new_entries, removed_types): (
             bool,
-            Vec<platform_api::subagent_spawn::SubagentListingEntry>,
+            Vec<lingxi_core::host::subagent_spawn::SubagentListingEntry>,
             Vec<String>,
         ) = {
             let mut sent = self.prompt_runtime.sent_agent_names.lock().await;
@@ -1115,8 +1115,8 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         //    (`showConcurrencyNote:Cc()!=="pro"&&DZ()==="default"`, @296530704).
         if !new_entries.is_empty()
             && is_initial
-            && !platform_api::subscription::is_pro_plan()
-            && platform_api::live_sessions::subagent_steer_is_default()
+            && !lingxi_core::host::subscription::is_pro_plan()
+            && lingxi_core::host::live_sessions::subagent_steer_is_default()
         {
             sections.push(
                 "When you launch multiple agents for independent work, send them in a single \
@@ -1672,7 +1672,7 @@ message with multiple tool uses so they run concurrently."
                 .display()
                 .to_string();
             self.output
-                .emit_attachment(platform_api::AttachmentKind::NestedMemory { display_path })
+                .emit_attachment(lingxi_core::host::AttachmentKind::NestedMemory { display_path })
                 .await;
         }
         self.seed_nested_memory_read_state(&surfaced).await;
@@ -1728,7 +1728,7 @@ message with multiple tool uses so they run concurrently."
                     let text = content
                         .iter()
                         .filter_map(|block| match block {
-                            protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                            lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
                             _ => None,
                         })
                         .collect::<Vec<_>>()
@@ -1745,12 +1745,14 @@ message with multiple tool uses so they run concurrently."
         let last_assistant_tools = history
             .iter()
             .rev()
-            .find(|m| matches!(m.role(), protocol::MessageRole::Assistant))
+            .find(|m| matches!(m.role(), lingxi_core::types::MessageRole::Assistant))
             .map(|m| {
                 m.tool_calls()
                     .into_iter()
                     .filter_map(|b| match b {
-                        protocol::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                        lingxi_core::types::ContentBlock::ToolUse { name, .. } => {
+                            Some(name.clone())
+                        }
                         _ => None,
                     })
                     .collect::<Vec<String>>()
@@ -2026,8 +2028,8 @@ message with multiple tool uses so they run concurrently."
 #[cfg(test)]
 mod prefetch_history_tests {
     use super::*;
+    use lingxi_core::types::{ConversationMessage, MessageId, SessionId};
     use lingxi_core::SessionState;
-    use protocol::{ConversationMessage, MessageId, SessionId};
 
     fn user(text: &str) -> ConversationMessage {
         ConversationMessage::user(MessageId::new(), text.to_string())

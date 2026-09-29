@@ -16,10 +16,10 @@
 //! No provider is contacted and nothing leaves the machine.
 
 use crate::panel::PanelInternal;
-use platform_api::tool_invoker::{
+use lingxi_core::host::tool_invoker::{
     SubagentInvocationContext, ToolExecutionPolicy, ToolInvoker, ToolInvokerError,
 };
-use platform_api::{EvidenceCheckStatus, EvidenceKind, PanelReport};
+use lingxi_core::host::{EvidenceCheckStatus, EvidenceKind, PanelReport};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -342,7 +342,7 @@ fn host_context() -> SubagentInvocationContext {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::{PanelClaim, PanelEvidence, PanelRunStatus};
+    use lingxi_core::host::{PanelClaim, PanelEvidence, PanelRunStatus};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -451,7 +451,7 @@ mod tests {
             anonymous_id: id.into(),
             status: PanelRunStatus::Completed,
             report: Some(PanelReport {
-                schema_version: platform_api::FUSION_SCHEMA_VERSION,
+                schema_version: lingxi_core::host::FUSION_SCHEMA_VERSION,
                 summary: "s".into(),
                 candidate_answer: "a".into(),
                 claims,

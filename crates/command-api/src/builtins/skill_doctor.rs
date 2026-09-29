@@ -7,7 +7,7 @@
 //! The filesystem loader remains only as an embedding/test fallback when no
 //! live registry was supplied.
 //!
-//! ## Why this handler bypasses [`platform_api::OrchestratorHandle`]
+//! ## Why this handler bypasses [`lingxi_core::host::OrchestratorHandle`]
 //!
 //! `OrchestratorHandle` (see `platform-api/src/orchestrator.rs`) has no
 //! command-dispatch-history or skill-invocation-history surface — nothing
@@ -177,20 +177,20 @@ pub fn record_skill_usage(lingxi_home: &Path, name: &str) -> Result<(), String> 
 fn is_countable_source(source: CommandSource) -> bool {
     matches!(
         source,
-        CommandSource::Settings(protocol::SettingsScope::User)
-            | CommandSource::Settings(protocol::SettingsScope::Project)
-            | CommandSource::Settings(protocol::SettingsScope::Local)
+        CommandSource::Settings(lingxi_core::types::SettingsScope::User)
+            | CommandSource::Settings(lingxi_core::types::SettingsScope::Project)
+            | CommandSource::Settings(lingxi_core::types::SettingsScope::Local)
     )
 }
 
 fn source_label(source: CommandSource) -> &'static str {
     match source {
         CommandSource::Builtin => "builtin",
-        CommandSource::Settings(protocol::SettingsScope::User) => "user",
-        CommandSource::Settings(protocol::SettingsScope::Project) => "project",
-        CommandSource::Settings(protocol::SettingsScope::Local) => "local",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::User) => "user",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Project) => "project",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Local) => "local",
         CommandSource::Plugin => "plugin",
-        CommandSource::Settings(protocol::SettingsScope::Managed) => "managed",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Managed) => "managed",
         CommandSource::Mcp => "mcp",
         CommandSource::Bundled => "bundled",
     }
@@ -347,9 +347,9 @@ async fn load_registry_entries(
             SlashCommandKind::Markdown { .. }
                 if matches!(
                     command.source,
-                    CommandSource::Settings(protocol::SettingsScope::User)
-                        | CommandSource::Settings(protocol::SettingsScope::Project)
-                        | CommandSource::Settings(protocol::SettingsScope::Local)
+                    CommandSource::Settings(lingxi_core::types::SettingsScope::User)
+                        | CommandSource::Settings(lingxi_core::types::SettingsScope::Project)
+                        | CommandSource::Settings(lingxi_core::types::SettingsScope::Local)
                 ) =>
             {
                 (
@@ -765,7 +765,7 @@ fn append_owner_warning(entries: &[SkillDoctorEntry], plugin: bool, lines: &mut 
 mod tests {
     use super::*;
     use crate::model::{CommandFrontmatter, SlashCommandKind};
-    use protocol::{McpConnectionId, PluginId};
+    use lingxi_core::types::{McpConnectionId, PluginId};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -817,7 +817,7 @@ mod tests {
         SlashCommand {
             name: name.to_string(),
             description: format!("Run {name}"),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Mcp {
                 connection_id: McpConnectionId::new(),
                 prompt_name: name.split_once(':').unwrap().1.to_string(),

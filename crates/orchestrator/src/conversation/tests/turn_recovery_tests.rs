@@ -39,9 +39,9 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::HookRegistry;
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
+use lingxi_core::host::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
+use lingxi_core::types::{HookId, HttpRequest, HttpResponse};
 use llm_runtime::ContentBlock as LlmContentBlock;
-use platform_api::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
-use protocol::{HookId, HttpRequest, HttpResponse};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
@@ -146,7 +146,7 @@ impl HttpTransport for UnusedHttp {
     async fn stream_sse(
         &self,
         _r: HttpRequest,
-    ) -> Result<platform_api::http::SseStream, HttpError> {
+    ) -> Result<lingxi_core::host::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -157,11 +157,14 @@ impl RuntimeSpawner for UnusedRuntime {
         &self,
         _n: &str,
         _t: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, RuntimeError> {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _d: Duration) {}
-    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+    async fn cancel(
+        &self,
+        _h: &lingxi_core::host::BackgroundTaskHandle,
+    ) -> Result<(), RuntimeError> {
         Ok(())
     }
 }
@@ -287,7 +290,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         executor: DefHookExecutor::Builtin {
             handler_id: handler_id.into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -644,10 +647,10 @@ async fn recov1_streaming_blocking_limit_does_not_trigger_budget_continuation() 
     assert!(
         !history.iter().any(|m| matches!(
             m,
-            protocol::ConversationMessage::User { content, .. }
+            lingxi_core::types::ConversationMessage::User { content, .. }
                 if matches!(
                     content.first(),
-                    Some(protocol::ContentBlock::Text { text }) if text.starts_with("Stopped at ")
+                    Some(lingxi_core::types::ContentBlock::Text { text }) if text.starts_with("Stopped at ")
                 )
         )),
         "terminal API-error ends must not inject a budget-continuation nudge"
@@ -831,10 +834,10 @@ async fn recov2_batched_blocking_limit_does_not_trigger_budget_continuation() {
     assert!(
         !history.iter().any(|m| matches!(
             m,
-            protocol::ConversationMessage::User { content, .. }
+            lingxi_core::types::ConversationMessage::User { content, .. }
                 if matches!(
                     content.first(),
-                    Some(protocol::ContentBlock::Text { text }) if text.starts_with("Stopped at ")
+                    Some(lingxi_core::types::ContentBlock::Text { text }) if text.starts_with("Stopped at ")
                 )
         )),
         "terminal API-error ends must not inject a budget-continuation nudge"
@@ -915,7 +918,7 @@ async fn system_prompt_model_identity_follows_switch_model() {
         "launch identity present: {before}"
     );
 
-    <ConversationOrchestrator as platform_api::OrchestratorHandle>::switch_model(
+    <ConversationOrchestrator as lingxi_core::host::OrchestratorHandle>::switch_model(
         &orch,
         "claude-fable-5-1",
         None,
@@ -958,7 +961,7 @@ async fn non_claude_switch_uses_the_named_identity_form_not_id_only() {
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
     );
-    <ConversationOrchestrator as platform_api::OrchestratorHandle>::switch_model(
+    <ConversationOrchestrator as lingxi_core::host::OrchestratorHandle>::switch_model(
         &orch,
         "deepseek-v4-pro",
         Some("deepseek"),
@@ -1241,7 +1244,7 @@ async fn clear_session_aborts_startup_prewarm_and_closes_responses_websocket_ses
         },
     );
     orch.spawn_startup_responses_websocket_prewarm();
-    <ConversationOrchestrator as platform_api::OrchestratorHandle>::clear_session(&*orch)
+    <ConversationOrchestrator as lingxi_core::host::OrchestratorHandle>::clear_session(&*orch)
         .await
         .expect("clear session");
 
@@ -1314,7 +1317,7 @@ async fn session_start_additional_context_becomes_persistent_meta_history_messag
         ConversationMessage::User { content, .. } => content
             .iter()
             .filter_map(|b| match b {
-                protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -1476,7 +1479,7 @@ async fn fix_c_stop_prevent_continuation_persists_stopped_message() {
         "the Stop hook_stopped_continuation meta message must be in history: {:#?}",
         s.history
             .iter()
-            .map(protocol::ConversationMessage::text_content)
+            .map(lingxi_core::types::ConversationMessage::text_content)
             .collect::<Vec<_>>()
     );
 }
@@ -1497,9 +1500,9 @@ async fn stop_prevent_continuation_persists_a_stopped_continuation_attachment() 
     );
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("session.jsonl");
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
-        dir.path().to_path_buf(),
-    ));
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+        platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+    );
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -1606,13 +1609,13 @@ async fn fix_c_stop_prevent_continuation_default_reason() {
 struct EmptyTaskRegistry;
 
 #[async_trait::async_trait]
-impl platform_api::task_registry::TaskRegistryHandle for EmptyTaskRegistry {
+impl lingxi_core::host::task_registry::TaskRegistryHandle for EmptyTaskRegistry {
     async fn create(
         &self,
-        _input: platform_api::task_registry::TaskCreateInput,
+        _input: lingxi_core::host::task_registry::TaskCreateInput,
     ) -> Result<
-        platform_api::task_registry::TaskRecord,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!("the pre-check returns before any registry mutation")
     }
@@ -1620,27 +1623,27 @@ impl platform_api::task_registry::TaskRegistryHandle for EmptyTaskRegistry {
         &self,
         _id: &str,
     ) -> Result<
-        Option<platform_api::task_registry::TaskRecord>,
-        platform_api::task_registry::TaskRegistryError,
+        Option<lingxi_core::host::task_registry::TaskRecord>,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         Ok(None)
     }
     async fn list(
         &self,
-        _filter: platform_api::task_registry::TaskListFilter,
+        _filter: lingxi_core::host::task_registry::TaskListFilter,
     ) -> Result<
-        Vec<platform_api::task_registry::TaskRecord>,
-        platform_api::task_registry::TaskRegistryError,
+        Vec<lingxi_core::host::task_registry::TaskRecord>,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         Ok(Vec::new())
     }
     async fn update(
         &self,
         _id: &str,
-        _patch: platform_api::task_registry::TaskUpdatePatch,
+        _patch: lingxi_core::host::task_registry::TaskUpdatePatch,
     ) -> Result<
-        platform_api::task_registry::TaskRecord,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!("the pre-check returns before any registry mutation")
     }
@@ -1649,8 +1652,8 @@ impl platform_api::task_registry::TaskRegistryHandle for EmptyTaskRegistry {
         _id: &str,
         _status: &str,
     ) -> Result<
-        platform_api::task_registry::TaskRecord,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!("the pre-check returns before any registry mutation")
     }
@@ -1658,8 +1661,8 @@ impl platform_api::task_registry::TaskRegistryHandle for EmptyTaskRegistry {
         &self,
         _id: &str,
     ) -> Result<
-        platform_api::task_registry::TaskRecord,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!("the pre-check returns before any registry mutation")
     }
@@ -1668,8 +1671,8 @@ impl platform_api::task_registry::TaskRegistryHandle for EmptyTaskRegistry {
         _id: &str,
         _offset: Option<u64>,
     ) -> Result<
-        platform_api::task_registry::TaskOutputChunk,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskOutputChunk,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!("the pre-check returns before any registry mutation")
     }
@@ -1681,7 +1684,9 @@ async fn rewake_end_events(output: &MockOutputStream) -> Vec<String> {
         .await
         .iter()
         .filter_map(|e| match e {
-            platform_api::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason.clone()),
+            lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } => {
+                Some(stop_reason.clone())
+            }
             _ => None,
         })
         .collect()

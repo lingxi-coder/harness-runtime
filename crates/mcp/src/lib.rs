@@ -2,7 +2,7 @@
 //!
 //! Owns the per-connection state machine (`connection.rs`), the
 //! [`registry::McpRegistry`] that drives transitions through a
-//! platform-supplied [`platform_api::McpTransport`], the OAuth 2.1
+//! platform-supplied [`lingxi_core::host::McpTransport`], the OAuth 2.1
 //! handshake skeleton (`oauth.rs`), the per-project MCP-server enable/
 //! disable and project-`.mcp.json`-approval gate (`server_gate.rs`), and the
 //! `client::McpClient` JSON-RPC client built on top of `lingxi-jsonrpc`
@@ -127,14 +127,14 @@ pub use json_config::{
     parse_local_config_mcp_servers, parse_mcp_json_string, parse_plugin_mcp_json_string, role_flag,
     role_is_schema_key_for, server_entry_shape_is_valid, McpJsonError,
 };
+pub use lingxi_core::host::{
+    McpConnectOptions, McpConnectResult, McpNegotiatedProtocol, McpNotificationDto,
+    McpNotificationStream, McpProtocolEra,
+};
 pub use mcp_output_storage::{
     binary_blob_saved_message, decode_base64, extension_for_mime_type, format_file_size,
     map_resource_contents, persist_binary_content, Base64Error, PersistBinaryResult,
     RawResourceContent as RawResourceContentRich,
-};
-pub use platform_api::{
-    McpConnectOptions, McpConnectResult, McpNegotiatedProtocol, McpNotificationDto,
-    McpNotificationStream, McpProtocolEra,
 };
 pub use raw_conn::RawConnectionProvider;
 pub use registry::{

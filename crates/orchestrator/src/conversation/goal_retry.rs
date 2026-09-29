@@ -359,7 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn retries_require_interactive_host_delivery() {
-        use platform_api::OrchestratorHandle;
+        use lingxi_core::host::OrchestratorHandle;
         for (interactive, wire) in [(false, true), (true, false)] {
             let (orch, _, queue) = fixture_config(interactive, wire);
             orch.set_active_goal("finish").await;
@@ -375,7 +375,7 @@ mod tests {
     #[tokio::test]
     async fn retry_delivers_a_real_meta_turn_and_stale_goal_does_not() {
         let (orch, api, queue) = fixture();
-        use platform_api::OrchestratorHandle;
+        use lingxi_core::host::OrchestratorHandle;
         orch.set_active_goal("finish").await;
         let goal = orch.session.lock().await.active_goal.clone().unwrap();
         let cancel = CancellationToken::new();
@@ -427,7 +427,7 @@ mod tests {
     #[tokio::test]
     async fn retry_streak_dedupes_caps_and_resets() {
         let (orch, _, _) = fixture();
-        use platform_api::OrchestratorHandle;
+        use lingxi_core::host::OrchestratorHandle;
         orch.set_active_goal("finish").await;
         for expected in 1..=3 {
             orch.handle_goal_interruption(GoalInterruption::Retry(RetryCause::ApiUnavailable))
@@ -452,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn checkin_queues_separately_and_is_cancelled_by_new_goal() {
         let (orch, _, queue) = fixture();
-        use platform_api::OrchestratorHandle;
+        use lingxi_core::host::OrchestratorHandle;
         orch.set_active_goal("finish").await;
         let goal = orch.session.lock().await.active_goal.clone().unwrap();
         assert!(
@@ -482,7 +482,7 @@ mod tests {
     #[tokio::test]
     async fn human_input_invalidates_dequeued_retry_before_admission() {
         let (orch, api, queue) = fixture();
-        use platform_api::OrchestratorHandle;
+        use lingxi_core::host::OrchestratorHandle;
         orch.set_active_goal("finish").await;
         let goal = orch.session.lock().await.active_goal.clone().unwrap();
         assert!(orch.queue_goal_checkin("same body".into(), &goal).await);

@@ -1,10 +1,10 @@
 //! Restored sessions can answer /btw without a preceding live turn.
+use lingxi_core::host::{OrchestratorHandle, RecapOutcome};
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::{OrchestratorHandle, RecapOutcome};
-use protocol::{ContentBlock, ConversationMessage, MessageId};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]

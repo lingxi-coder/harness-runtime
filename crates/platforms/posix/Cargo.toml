@@ -6,8 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-protocol = { path = "../../protocol" }
-platform-api = { path = "../../platform-api" }
+core = { path = "../../core" }
 branding.workspace = true
 jsonrpc = { path = "../../jsonrpc" }
 # `mcp::RawConnectionProvider` is implemented on `PosixMcpTransport` so the

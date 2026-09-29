@@ -1,11 +1,11 @@
 //! Per-agent live process groups (`Dbr`/`YOe`), independent of task records.
-pub(super) use platform_api::agent_processes::register;
+pub(super) use lingxi_core::host::agent_processes::register;
 
 #[cfg(test)]
 mod tests {
     use super::super::runner::PosixProcess;
     use super::*;
-    use platform_api::ProcessRunner;
+    use lingxi_core::host::ProcessRunner;
     #[tokio::test]
     async fn owner_scoped_group_kill_excludes_other_agents_and_unregisters() {
         fn spawn() -> tokio::process::Child {

@@ -1,7 +1,7 @@
 //! Single-spawn foreground/background capture shared by Windows Bash paths.
 use super::runner::{StreamingProcessTreeGuard, WindowsProcess, DEFAULT_TIMEOUT};
-use platform_api::task_output::Utf8StreamDecoder;
-use platform_api::{
+use lingxi_core::host::task_output::Utf8StreamDecoder;
+use lingxi_core::host::{
     BackgroundTaskBinding, ForegroundOutcome, ForegroundRunResult, ProcessError, ProcessHandle,
     ProcessOutput, ProcessOutputFile, SandboxedCommand,
 };
@@ -23,7 +23,7 @@ impl Capture {
         let binding = cmd.background_task().cloned().unwrap_or_else(|| {
             let task_id = super::runner::generate_task_id();
             BackgroundTaskBinding {
-                output_path: platform_api::task_output::legacy_output_path(&task_id),
+                output_path: lingxi_core::host::task_output::legacy_output_path(&task_id),
                 task_id,
                 on_exit: None,
                 on_demand: None,
@@ -61,7 +61,7 @@ impl Capture {
                     .file_name()
                     .ok_or_else(|| ProcessError::Io("output path has no name".into()))?;
                 tokio::fs::create_dir_all(parent).await.map_err(io_error)?;
-                let file = platform_api::rooted_fs::open_append_file_pinned(
+                let file = lingxi_core::host::rooted_fs::open_append_file_pinned(
                     parent,
                     std::path::Path::new(name),
                     None,
@@ -153,7 +153,7 @@ impl Capture {
         if !self.spilled {
             return Ok(());
         }
-        let cap = platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES;
+        let cap = lingxi_core::host::task_output::MAX_PERSISTED_OUTPUT_BYTES;
         if let Some(sink) = self
             .binding
             .on_exit
@@ -182,7 +182,7 @@ impl Capture {
                 .file_name()
                 .ok_or_else(|| ProcessError::Io("output path has no name".into()))?;
             tokio::fs::File::from_std(
-                platform_api::rooted_fs::open_append_file_pinned(
+                lingxi_core::host::rooted_fs::open_append_file_pinned(
                     parent,
                     std::path::Path::new(name),
                     None,
@@ -288,7 +288,7 @@ pub(super) async fn run(
     }
 
     let agent_registration =
-        platform_api::agent_processes::register(cmd.process_owner(), Some(pid));
+        lingxi_core::host::agent_processes::register(cmd.process_owner(), Some(pid));
     let mut stdout = child
         .stdout
         .take()
@@ -417,7 +417,7 @@ pub(super) async fn run(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use platform_api::{BackgroundExitSink, ProcessRunner};
+    use lingxi_core::host::{BackgroundExitSink, ProcessRunner};
     use std::sync::{Arc, Mutex};
     #[derive(Default)]
     struct Sink {
@@ -504,7 +504,7 @@ mod tests {
         );
         assert!(WindowsProcess::new().spawn_background(&cmd).await.is_err());
         let pid = rejected.spawned.lock().unwrap()[0].1;
-        assert!(platform_api::live_sessions::process_start_identity(pid).is_none());
+        assert!(lingxi_core::host::live_sessions::process_start_identity(pid).is_none());
         assert!(rejected.exits.lock().unwrap().is_empty());
     }
 
@@ -516,7 +516,7 @@ mod tests {
         demand: Arc<tokio::sync::Notify>,
     ) -> SandboxedCommand {
         SandboxedCommand::__new_sandboxed(
-            platform_api::sandbox::ProcessCommand {
+            lingxi_core::host::sandbox::ProcessCommand {
                 command: "/bin/sh".into(),
                 args: vec!["-c".into(), script.into()],
                 cwd: None,
@@ -524,7 +524,7 @@ mod tests {
                 stdin: None,
                 timeout: Some(std::time::Duration::from_millis(timeout)),
             },
-            platform_api::sandbox::SandboxedTag::BypassAuditedWithReason {
+            lingxi_core::host::sandbox::SandboxedTag::BypassAuditedWithReason {
                 reason: "portable Windows runner test".into(),
             },
         )
@@ -658,7 +658,7 @@ mod tests {
     async fn windows_completed_copy_cap_keeps_pretruncate_size() {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
-        let cap = platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES as usize;
+        let cap = lingxi_core::host::task_output::MAX_PERSISTED_OUTPUT_BYTES as usize;
         *sink.content.lock().unwrap() = "a".repeat(cap + 3);
         let command = command(
             "true",
@@ -764,13 +764,13 @@ mod tests {
             vec![first_handle.pid]
         );
         assert_eq!(
-            platform_api::agent_processes::snapshot(&other_owner),
+            lingxi_core::host::agent_processes::snapshot(&other_owner),
             vec![second_handle.pid]
         );
         finished(&first).await;
         finished(&second).await;
-        assert!(platform_api::agent_processes::snapshot(&owner).is_empty());
-        assert!(platform_api::agent_processes::snapshot(&other_owner).is_empty());
+        assert!(lingxi_core::host::agent_processes::snapshot(&owner).is_empty());
+        assert!(lingxi_core::host::agent_processes::snapshot(&other_owner).is_empty());
     }
 
     #[tokio::test]

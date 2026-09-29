@@ -1,11 +1,11 @@
-//! [`platform_api::Sandbox`] impl for Android — validation + plan construction only;
+//! [`lingxi_core::host::Sandbox`] impl for Android — validation + plan construction only;
 //! never spawns (spec r3 §`AndroidMinijailSandbox`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     BackendPlanHandle, ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
     SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
@@ -223,7 +223,9 @@ mod tests {
     use super::*;
     use crate::capabilities::AndroidSandboxCapabilities;
     use crate::policy::{AndroidSandboxPlan, NetProfile}; // not in the impl's imports — tests need it explicitly
-    use platform_api::{NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxPolicy};
+    use lingxi_core::host::{
+        NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxPolicy,
+    };
     use std::collections::HashMap;
 
     fn ready_caps() -> AndroidSandboxCapabilities {
@@ -325,8 +327,8 @@ mod tests {
         let sc = sb.prepare(cmd(None), &deny_net_policy()).expect("prepare");
         assert!(matches!(
             sc.tag(),
-            platform_api::SandboxedTag::Wrapped {
-                backend: platform_api::SandboxBackend::AndroidMinijail
+            lingxi_core::host::SandboxedTag::Wrapped {
+                backend: lingxi_core::host::SandboxBackend::AndroidMinijail
             }
         ));
         let plan = sc
@@ -417,7 +419,10 @@ mod tests {
             AndroidSandboxCapabilities::unavailable("no device probe"),
         );
         let err = sb.prepare(cmd(None), &deny_net_policy()).unwrap_err();
-        assert!(matches!(err, platform_api::SandboxError::Unavailable(_)));
+        assert!(matches!(
+            err,
+            lingxi_core::host::SandboxError::Unavailable(_)
+        ));
     }
 
     #[test]
@@ -428,7 +433,10 @@ mod tests {
         let err = sb
             .prepare(cmd(Some(outside.path().to_path_buf())), &deny_net_policy())
             .unwrap_err();
-        assert!(matches!(err, platform_api::SandboxError::SymlinkEscape(_)));
+        assert!(matches!(
+            err,
+            lingxi_core::host::SandboxError::SymlinkEscape(_)
+        ));
     }
 
     #[test]
@@ -439,7 +447,10 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), &link).expect("symlink");
         let sb = sandbox_with(tmp.path(), ready_caps());
         let err = sb.prepare(cmd(Some(link)), &deny_net_policy()).unwrap_err();
-        assert!(matches!(err, platform_api::SandboxError::SymlinkEscape(_)));
+        assert!(matches!(
+            err,
+            lingxi_core::host::SandboxError::SymlinkEscape(_)
+        ));
     }
 
     #[test]
@@ -460,7 +471,7 @@ mod tests {
         let sc = sb.bypass_with_audit(cmd(None), "test-reason");
         assert!(matches!(
             sc.tag(),
-            platform_api::SandboxedTag::BypassAuditedWithReason { .. }
+            lingxi_core::host::SandboxedTag::BypassAuditedWithReason { .. }
         ));
         assert!(sc.backend_plan().is_none());
     }
@@ -506,7 +517,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             err,
-            platform_api::SandboxError::PathCanonicalize(_)
+            lingxi_core::host::SandboxError::PathCanonicalize(_)
         ));
     }
 

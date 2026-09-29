@@ -94,7 +94,7 @@ const GLOB_DESCRIPTION_BASE: &str = r#"- Fast file pattern matching tool that wo
 /// `BJb = `${znp}\n- When you are doing an open ended search … (if available)``
 /// and `ISa(e){if(qk(e))return SHORT; return DZ()==="default"?BJb:znp}` — so
 /// under a NON-default subagent steer (`DZ()!=="default"`, port
-/// `platform_api::live_sessions::subagent_steer_is_default()`) the whole bullet is
+/// `lingxi_core::host::live_sessions::subagent_steer_is_default()`) the whole bullet is
 /// dropped, not shortened. Grep gates its own Agent bullet the same way.
 const GLOB_DESCRIPTION_AGENT_BULLET: &str = "\n- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead (if available)";
 
@@ -279,7 +279,7 @@ impl Tool for GlobTool {
     /// false, so this is the LONG arm, itself gated on the subagent steer
     /// (ST-03).
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        glob_description(platform_api::live_sessions::subagent_steer_is_default())
+        glob_description(lingxi_core::host::live_sessions::subagent_steer_is_default())
     }
 
     async fn prompt(&self, opts: &PromptOptions) -> String {
@@ -290,7 +290,7 @@ impl Tool for GlobTool {
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
             GLOB_PROMPT_SHORT.to_string()
         } else {
-            glob_description(platform_api::live_sessions::subagent_steer_is_default())
+            glob_description(lingxi_core::host::live_sessions::subagent_steer_is_default())
         }
     }
 
@@ -409,7 +409,7 @@ impl Tool for GlobTool {
             if let Some(directory) = registry.task_output_directory().await {
                 // Keep session task outputs out of directory listings.
                 if !canon_base.is_file() {
-                    let exclusions = platform_api::task_output::search_exclusions(
+                    let exclusions = lingxi_core::host::task_output::search_exclusions(
                         Path::new(&directory),
                         &canon_base,
                     );

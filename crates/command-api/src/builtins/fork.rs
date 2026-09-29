@@ -9,7 +9,7 @@
 //!   moved to [`crate::builtins::SubtaskHandler`] (`/subtask`, `RAd`).
 //!
 //! [`crate::builtins::register_core_batch_8`](crate::builtins::register_core_batch_8) selects
-//! the surface with `platform_api::agent_view::is_enabled()` exactly like the binary
+//! the surface with `lingxi_core::host::agent_view::is_enabled()` exactly like the binary
 //! command list `Blr` (`...vO()&&!IS_DEMO ? [vAd,RAd] : [SAd]`).
 //!
 //! ---
@@ -54,12 +54,12 @@
 //!
 //! ## Trait surface (integration pass — now LANDED)
 //!
-//! The two [`platform_api::OrchestratorHandle`] methods below are now real:
+//! The two [`lingxi_core::host::OrchestratorHandle`] methods below are now real:
 //! `is_coordinator_session` (default) + a live `fork_conversation` override on
 //! `ConversationOrchestrator` that spawns the fork via the `SubagentSpawner`.
 //! The historical gap note is retained for design rationale.
 //!
-//! Two [`platform_api::OrchestratorHandle`] methods this handler calls do not
+//! Two [`lingxi_core::host::OrchestratorHandle`] methods this handler calls do not
 //! exist on the trait yet:
 //!
 //!   * `async fn is_coordinator_session(&self) -> bool` — new additive
@@ -73,12 +73,12 @@
 //!     implementations don't need to override"). The concrete override
 //!     belongs in the composition roots (`apps/engine-desktop`,
 //!     `apps/engine-mobile`), delegating to the already-ported
-//!     `platform_api::fork_subagent::build_forked_messages` /
+//!     `lingxi_core::host::fork_subagent::build_forked_messages` /
 //!     `build_child_message` plus the existing `BackgroundAgentSpawner` /
 //!     `SubagentSpawner::spawn_async` lifecycle — this handler intentionally
 //!     does not touch either (composition-root concern, not `commands/core`).
-//!   * `platform_api::ForkOutcome { name: String, agent_id: String }` — new plain
-//!     struct alongside `HandleError` in `platform_api::orchestrator`, re-exported
+//!   * `lingxi_core::host::ForkOutcome { name: String, agent_id: String }` — new plain
+//!     struct alongside `HandleError` in `lingxi_core::host::orchestrator`, re-exported
 //!     from the crate root next to it.
 //!
 //! Until those three land this module will not compile on its own — by
@@ -94,8 +94,8 @@
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::{ForkOutcome, OrchestratorHandle};
-use protocol::ConversationMessage;
+use lingxi_core::host::{ForkOutcome, OrchestratorHandle};
+use lingxi_core::types::ConversationMessage;
 use std::sync::Arc;
 
 /// `${Hnt}` — the fork-success icon, U+2442 (OCR-FORK control-picture
@@ -210,7 +210,7 @@ impl BuiltinCommandHandler for ForkHandler {
 /// so — unlike the legacy handler — there is no "Usage:" gate on empty input.
 ///
 /// This handler drives that seam via
-/// [`platform_api::OrchestratorHandle::fork_to_background_session`], which returns the
+/// [`lingxi_core::host::OrchestratorHandle::fork_to_background_session`], which returns the
 /// system line to display in the live session (the composition root owns the
 /// exact text, since it knows the newly-minted background session id). Until a
 /// composition root overrides that seam it returns `Unimplemented`, and this

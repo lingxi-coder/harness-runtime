@@ -3,13 +3,13 @@
 //! attached, then reads the file back via `JsonlReader` and asserts the
 //! `parentUuid` chain — proves on-disk persistence is wired correctly and
 //! the chain is monotonic.
+use lingxi_core::host::FileSystem;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use session::jsonl::reader::JsonlReader;
 use session::jsonl::writer::JsonlWriter;
@@ -123,7 +123,7 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     let snap = output.snapshot().await;
     let end_turns = snap
         .iter()
-        .filter(|e| matches!(e, platform_api::OutputEvent::EndTurn { .. }))
+        .filter(|e| matches!(e, lingxi_core::host::OutputEvent::EndTurn { .. }))
         .count();
     assert_eq!(end_turns, 2, "expected 2 EndTurn events; got snap {snap:?}");
 }

@@ -12,7 +12,7 @@
 //! The suite is parameterized over a `&C: Clock`; drivers in `tests/`
 //! exercise it against the mock impl, the posix impl, and the windows impl.
 
-use platform_api::Clock;
+use lingxi_core::host::Clock;
 use std::time::Duration;
 
 /// Run the standard [`Clock`] contract against an impl.

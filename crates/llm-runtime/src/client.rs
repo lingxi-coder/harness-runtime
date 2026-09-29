@@ -952,9 +952,9 @@ fn route_allows_first_party_fast_mode(route: &crate::ResolvedRoute, entry: &Rout
     route.provider_id == ProviderId::AnthropicFirstParty
         && entry.protocol == ProtocolFamily::AnthropicMessages
         && entry.base_url.trim_end_matches('/') == "https://api.anthropic.com"
-        && platform_api::model_capabilities::has_capability(
+        && lingxi_core::host::model_capabilities::has_capability(
             &route.request_model,
-            platform_api::model_capabilities::ModelCapability::FastMode,
+            lingxi_core::host::model_capabilities::ModelCapability::FastMode,
         )
 }
 

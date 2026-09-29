@@ -15,9 +15,11 @@
 //! the on-disk provenance marker is the only witness to the fork's identity.
 
 use async_trait::async_trait;
-use platform_api::fork_resume_gate::ForkResumeGate;
-use platform_api::parked_agent_store::ParkedAgentStore;
-use platform_api::subagent_spawn::{SubagentInheritance, SubagentSpawnRequest, SubagentSpawner};
+use lingxi_core::host::fork_resume_gate::ForkResumeGate;
+use lingxi_core::host::parked_agent_store::ParkedAgentStore;
+use lingxi_core::host::subagent_spawn::{
+    SubagentInheritance, SubagentSpawnRequest, SubagentSpawner,
+};
 
 /// Writes and erases parked-agent rows under this session's `subagents/` dir.
 pub struct DesktopParkedAgentStore {
@@ -30,7 +32,7 @@ impl ParkedAgentStore for DesktopParkedAgentStore {
     async fn park(
         &self,
         task_id: &str,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         description: &str,
         request: &SubagentSpawnRequest,
     ) {
@@ -47,7 +49,7 @@ impl ParkedAgentStore for DesktopParkedAgentStore {
         }
     }
 
-    async fn unpark(&self, agent_id: protocol::AgentId) {
+    async fn unpark(&self, agent_id: lingxi_core::types::AgentId) {
         if let Err(e) =
             session::agent_rows::remove_row(&self.subagents_dir, &agent_id.to_string()).await
         {
@@ -60,7 +62,7 @@ impl ParkedAgentStore for DesktopParkedAgentStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestoreOutcome {
     /// Re-spawned under the persisted stable agent id.
-    Restored(protocol::AgentId),
+    Restored(lingxi_core::types::AgentId),
     /// The forked-skill resume gate refused it. Carries the refusal, which is
     /// the same byte-exact message a live resume would surface.
     Refused(String),
@@ -72,7 +74,7 @@ pub enum RestoreOutcome {
 }
 
 struct RestoredTranscript {
-    history: Vec<protocol::ConversationMessage>,
+    history: Vec<lingxi_core::types::ConversationMessage>,
     /// Concrete model/profile recorded by the runner. `None` means a legacy
     /// transcript, in which case the parked launch row remains the fallback.
     resolved_selection: Option<(String, Option<String>)>,
@@ -137,7 +139,7 @@ pub async fn restore_parked_agents(
     spawner: &dyn SubagentSpawner,
     gate: &dyn ForkResumeGate,
     inherit: &SubagentInheritance,
-) -> Vec<(protocol::AgentId, RestoreOutcome)> {
+) -> Vec<(lingxi_core::types::AgentId, RestoreOutcome)> {
     let rows = session::agent_rows::list_restorable(subagents_dir).await;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -188,7 +190,7 @@ pub async fn restore_parked_agents(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::subagent_spawn::{
+    use lingxi_core::host::subagent_spawn::{
         AsyncLaunch, SelectedAgentMeta, SubagentListingEntry, SubagentResult, SubagentSpawnError,
     };
     use session::agent_rows::{write_row, ParkedAgentRow};
@@ -275,14 +277,14 @@ mod tests {
                 return Err(SubagentSpawnError::Runtime("pool full".into()));
             }
             Ok(AsyncLaunch {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 output_file: "/tmp/a.output".into(),
             })
         }
 
         async fn restore_async(
             &self,
-            agent_id: protocol::AgentId,
+            agent_id: lingxi_core::types::AgentId,
             request: SubagentSpawnRequest,
             _i: SubagentInheritance,
         ) -> Result<AsyncLaunch, SubagentSpawnError> {
@@ -302,7 +304,7 @@ mod tests {
     impl ForkResumeGate for Gate {
         async fn check_resume(
             &self,
-            _agent_id: protocol::AgentId,
+            _agent_id: lingxi_core::types::AgentId,
             _task_forked_skill_name: Option<&str>,
         ) -> Result<(), String> {
             match self.0 {
@@ -314,13 +316,13 @@ mod tests {
 
     struct NoInvoker;
     #[async_trait]
-    impl platform_api::tool_invoker::ToolInvoker for NoInvoker {
+    impl lingxi_core::host::tool_invoker::ToolInvoker for NoInvoker {
         async fn invoke(
             &self,
             _n: &str,
             _i: serde_json::Value,
-            _c: platform_api::tool_invoker::SubagentInvocationContext,
-        ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+            _c: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
             Ok(serde_json::Value::Null)
         }
         fn as_any(&self) -> &dyn std::any::Any {
@@ -329,8 +331,11 @@ mod tests {
     }
     struct NoBudget;
     #[async_trait]
-    impl platform_api::budget::BudgetEnforcerHandle for NoBudget {
-        async fn check_and_charge(&self, _n: u64) -> Result<(), platform_api::budget::BudgetError> {
+    impl lingxi_core::host::budget::BudgetEnforcerHandle for NoBudget {
+        async fn check_and_charge(
+            &self,
+            _n: u64,
+        ) -> Result<(), lingxi_core::host::budget::BudgetError> {
             Ok(())
         }
         async fn snapshot_total_nano_usd(&self) -> u64 {
@@ -344,7 +349,7 @@ mod tests {
         }
     }
 
-    async fn seed(dir: &std::path::Path, id: protocol::AgentId, transcript: &[&str]) {
+    async fn seed(dir: &std::path::Path, id: lingxi_core::types::AgentId, transcript: &[&str]) {
         write_row(
             dir,
             &ParkedAgentRow {
@@ -370,8 +375,10 @@ mod tests {
         }
         let mut body = String::new();
         for t in transcript {
-            let msg =
-                protocol::ConversationMessage::user(protocol::MessageId::new(), (*t).to_string());
+            let msg = lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                (*t).to_string(),
+            );
             body.push_str(
                 &serde_json::to_string(&serde_json::json!({
                     "agent_id": id.to_string(),
@@ -397,7 +404,7 @@ mod tests {
     #[tokio::test]
     async fn a_parked_agent_is_rebuilt_from_its_transcript() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         seed(dir.path(), id, &["first", "second"]).await;
 
         let spawner = RecordingSpawner::default();
@@ -431,7 +438,7 @@ mod tests {
     #[tokio::test]
     async fn restore_pins_the_resolved_transcript_model_and_profile() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         write_row(
             dir.path(),
             &ParkedAgentRow {
@@ -443,8 +450,8 @@ mod tests {
         )
         .await
         .unwrap();
-        let message = protocol::ConversationMessage::user(
-            protocol::MessageId::new(),
+        let message = lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
             "already completed setup".to_string(),
         );
         let entry = serde_json::json!({
@@ -474,7 +481,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_transcript_keeps_the_parked_row_model_fallback() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         seed(dir.path(), id, &["legacy message"]).await;
 
         let spawner = RecordingSpawner::default();
@@ -492,7 +499,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_fork_is_not_rebuilt() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         seed(dir.path(), id, &["first"]).await;
 
         let spawner = RecordingSpawner::default();
@@ -523,7 +530,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_transcript_is_not_rebuilt() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         seed(dir.path(), id, &[]).await;
 
         let spawner = RecordingSpawner::default();
@@ -535,7 +542,7 @@ mod tests {
     #[tokio::test]
     async fn a_spawn_failure_is_reported_not_swallowed() {
         let dir = tempfile::tempdir().unwrap();
-        seed(dir.path(), protocol::AgentId::new(), &["first"]).await;
+        seed(dir.path(), lingxi_core::types::AgentId::new(), &["first"]).await;
         let spawner = RecordingSpawner {
             fail: true,
             ..Default::default()
@@ -549,7 +556,7 @@ mod tests {
     #[tokio::test]
     async fn park_then_unpark_leaves_nothing_to_restore() {
         let dir = tempfile::tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         let store = DesktopParkedAgentStore {
             subagents_dir: dir.path().to_path_buf(),
         };

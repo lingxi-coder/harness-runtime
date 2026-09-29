@@ -20,7 +20,7 @@ use axum::{routing::post, Json};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use platform_api::{McpError, McpTransport, McpTransportSpec};
+use lingxi_core::host::{McpError, McpTransport, McpTransportSpec};
 use platform_posix::mcp::PosixMcpTransport;
 
 /// Literal `WWW-Authenticate` challenge carrying an RFC 6750 `insufficient_scope`
@@ -58,7 +58,7 @@ async fn spawn_mock() -> String {
 fn http_spec(url: String) -> McpTransportSpec {
     McpTransportSpec::Http {
         url,
-        headers: platform_api::McpHeaders::new(),
+        headers: lingxi_core::host::McpHeaders::new(),
         headers_helper: None,
         oauth: None,
     }

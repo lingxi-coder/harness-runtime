@@ -289,7 +289,7 @@ mod tests {
     };
 
     struct TestLease(String);
-    impl platform_api::live_sessions::SessionWriterLease for TestLease {
+    impl lingxi_core::host::live_sessions::SessionWriterLease for TestLease {
         fn session_id(&self) -> &str {
             &self.0
         }
@@ -438,7 +438,7 @@ mod tests {
         let coordinator = open(root.path(), session);
         coordinator.hydrate_blocking().unwrap();
         let mut authorization = intent(session, "interrupted");
-        let generation = protocol::MessageId::new();
+        let generation = lingxi_core::types::MessageId::new();
         authorization.output_scope = Some(cost::AttemptOutputScope {
             generation_id: generation,
             max_output_tokens: Some(100),

@@ -10,7 +10,7 @@ use crate::desktop::session_state::{
     SessionStateManager,
 };
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     FusionPublicationReceipt, FusionRunOutcome, FusionRunRecorder, FusionRunRecorderFactory,
     FusionSlashPublicationTarget, FusionStatus, OrchestratorHandle,
 };
@@ -32,7 +32,7 @@ pub type LiveHistoryLink = Arc<RwLock<Option<Weak<orchestrator::ConversationOrch
 pub struct FusionTranscriptTarget {
     writer: Arc<JsonlWriter>,
     history: LiveHistoryLink,
-    session_id: Option<protocol::SessionId>,
+    session_id: Option<lingxi_core::types::SessionId>,
 }
 
 impl FusionTranscriptTarget {
@@ -58,7 +58,7 @@ impl FusionTranscriptTarget {
     /// Pin this target to its originating session. Late terminal work then
     /// cannot follow a newer active session's writer after a hot switch.
     #[must_use]
-    pub fn for_session(mut self, session_id: protocol::SessionId) -> Self {
+    pub fn for_session(mut self, session_id: lingxi_core::types::SessionId) -> Self {
         self.session_id = Some(session_id);
         self
     }
@@ -89,7 +89,7 @@ pub struct DesktopFusionRecorder {
     delivery_locks: DeliveryLocks,
 }
 
-type DeliveryLocks = Arc<Mutex<HashMap<(protocol::SessionId, String), Arc<Mutex<()>>>>>;
+type DeliveryLocks = Arc<Mutex<HashMap<(lingxi_core::types::SessionId, String), Arc<Mutex<()>>>>>;
 
 /// How long a delivery owner waits for the foreground turn gate before giving
 /// up on the in-memory history projection. The durable transcript row is
@@ -132,7 +132,7 @@ pub struct DesktopFusionRecorderFactory {
     manager: Arc<SessionStateManager>,
     transcript: FusionTranscriptTarget,
     delivery_locks: DeliveryLocks,
-    recorders: std::sync::Mutex<HashMap<protocol::SessionId, Arc<DesktopFusionRecorder>>>,
+    recorders: std::sync::Mutex<HashMap<lingxi_core::types::SessionId, Arc<DesktopFusionRecorder>>>,
 }
 
 impl DesktopFusionRecorderFactory {
@@ -211,7 +211,7 @@ impl DesktopFusionRecorderFactory {
     #[must_use]
     pub fn recorder_for_session(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
     ) -> Option<Arc<DesktopFusionRecorder>> {
         let coordinator = self.manager.coordinator_core(session_id)?;
         // Acquire the external capability before publishing a cache core.
@@ -244,7 +244,7 @@ impl DesktopFusionRecorderFactory {
 
     pub(crate) async fn retire_cache(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         coordinator: &SessionStateCoordinator,
     ) -> Result<(), cost::CostPersistError> {
         {
@@ -276,7 +276,7 @@ impl DesktopFusionRecorderFactory {
     /// Fusion executor or provider.
     pub async fn retry_publication(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         run_id: &str,
     ) -> FusionPublicationReceipt {
         let Some(recorder) = self.recorder_for_session(session_id) else {
@@ -289,7 +289,10 @@ impl DesktopFusionRecorderFactory {
 }
 
 impl FusionRunRecorderFactory for DesktopFusionRecorderFactory {
-    fn recorder_for(&self, session_id: protocol::SessionId) -> Option<Arc<dyn FusionRunRecorder>> {
+    fn recorder_for(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+    ) -> Option<Arc<dyn FusionRunRecorder>> {
         let Some(recorder) = self.recorder_for_session(session_id) else {
             // The pure factory cannot hydrate or claim here. Return an
             // explicit terminal StorageFailure so an entrypoint never falls
@@ -308,7 +311,10 @@ impl FusionRunRecorderFactory for DesktopFusionRecorderFactory {
 pub struct UnavailableFusionRecorderFactory;
 
 impl FusionRunRecorderFactory for UnavailableFusionRecorderFactory {
-    fn recorder_for(&self, _session_id: protocol::SessionId) -> Option<Arc<dyn FusionRunRecorder>> {
+    fn recorder_for(
+        &self,
+        _session_id: lingxi_core::types::SessionId,
+    ) -> Option<Arc<dyn FusionRunRecorder>> {
         Some(Arc::new(UnavailableFusionRecorder))
     }
 }
@@ -397,14 +403,14 @@ impl DesktopFusionRecorder {
     /// successful result reaches here: `record_terminal` suppresses the outbox
     /// for anything else, so there is no error body to render.
     fn transcript_payload(
-        result: &platform_api::FusionResult,
-        facts: &platform_api::FusionRunFacts,
+        result: &lingxi_core::host::FusionResult,
+        facts: &lingxi_core::host::FusionRunFacts,
         target: FusionSlashPublicationTarget,
         message_uuid: &str,
         cwd: &std::path::Path,
     ) -> serde_json::Value {
         let mut body = tasks::fusion_result_xml(result);
-        if let Some(platform_api::FusionAttemptSettlementStatus::Failed { reason }) =
+        if let Some(lingxi_core::host::FusionAttemptSettlementStatus::Failed { reason }) =
             &facts.attempt_settlement
         {
             body.push_str(&format!(
@@ -447,7 +453,7 @@ impl DesktopFusionRecorder {
         outbox: &DurableFusionOutboxRecord,
     ) -> Result<TranscriptAppendOutcome, TranscriptWriterError> {
         let Some(target) = self.transcript.clone() else {
-            return Err(TranscriptWriterError::Fs(platform_api::FsError::Io(
+            return Err(TranscriptWriterError::Fs(lingxi_core::host::FsError::Io(
                 "no trusted transcript target".into(),
             )));
         };
@@ -580,13 +586,14 @@ impl DesktopFusionRecorder {
                 || latest.retry_cycle_end != outbox.retry_cycle_end
                 || latest.attempt > outbox.attempt
                 || (latest.attempt == outbox.attempt
-                    && latest.receipt.status == platform_api::FusionPublicationStatus::OutboxFailed)
+                    && latest.receipt.status
+                        == lingxi_core::host::FusionPublicationStatus::OutboxFailed)
             {
                 return latest.receipt;
             }
             if latest.attempt != outbox.attempt
                 || outbox.attempt > outbox.retry_cycle_end
-                || latest.receipt.status != platform_api::FusionPublicationStatus::Queued
+                || latest.receipt.status != lingxi_core::host::FusionPublicationStatus::Queued
             {
                 return FusionPublicationReceipt::storage_failure(
                     "Fusion outbox dispatch does not own the durable queued generation",
@@ -677,7 +684,8 @@ impl DesktopFusionRecorder {
         for outbox in pending {
             if outbox.receipt.is_published()
                 || (!include_dead_letters
-                    && outbox.receipt.status == platform_api::FusionPublicationStatus::OutboxFailed
+                    && outbox.receipt.status
+                        == lingxi_core::host::FusionPublicationStatus::OutboxFailed
                     && outbox.attempt >= outbox.retry_cycle_end)
             {
                 continue;
@@ -702,7 +710,7 @@ impl DesktopFusionRecorder {
         if outbox.receipt.is_published() {
             return outbox.receipt;
         }
-        if outbox.receipt.status == platform_api::FusionPublicationStatus::OutboxFailed {
+        if outbox.receipt.status == lingxi_core::host::FusionPublicationStatus::OutboxFailed {
             let exhausted = outbox.attempt >= outbox.retry_cycle_end;
             if exhausted && !explicit_local_retry {
                 return outbox.receipt;
@@ -712,7 +720,7 @@ impl DesktopFusionRecorder {
                 Err(receipt) => return receipt,
             };
         }
-        if outbox.receipt.status != platform_api::FusionPublicationStatus::Queued
+        if outbox.receipt.status != lingxi_core::host::FusionPublicationStatus::Queued
             || outbox.attempt > outbox.retry_cycle_end
         {
             return FusionPublicationReceipt::storage_failure(
@@ -728,8 +736,8 @@ impl DesktopFusionRecorder {
         loop {
             let receipt = self.deliver(outbox.clone()).await;
             if receipt.is_published()
-                || receipt.status == platform_api::FusionPublicationStatus::StorageFailure
-                || receipt.status == platform_api::FusionPublicationStatus::Queued
+                || receipt.status == lingxi_core::host::FusionPublicationStatus::StorageFailure
+                || receipt.status == lingxi_core::host::FusionPublicationStatus::Queued
             {
                 return receipt;
             }
@@ -746,7 +754,7 @@ impl DesktopFusionRecorder {
             if latest.receipt.is_published() || latest.attempt >= owned_cycle_end {
                 return latest.receipt;
             }
-            if latest.receipt.status != platform_api::FusionPublicationStatus::OutboxFailed {
+            if latest.receipt.status != lingxi_core::host::FusionPublicationStatus::OutboxFailed {
                 return latest.receipt;
             }
             let Some(delay_seconds) = retry_delay_seconds(latest.attempt, cycle_start) else {
@@ -764,7 +772,7 @@ impl DesktopFusionRecorder {
             if after_delay.retry_cycle_end != owned_cycle_end
                 || after_delay.attempt != failed_attempt
                 || after_delay.receipt.is_published()
-                || after_delay.receipt.status == platform_api::FusionPublicationStatus::Queued
+                || after_delay.receipt.status == lingxi_core::host::FusionPublicationStatus::Queued
             {
                 return after_delay.receipt;
             }
@@ -954,7 +962,7 @@ impl FusionRunRecorder for DesktopFusionRecorder {
 mod tests {
     use super::*;
     use cost::CostHydrator as _;
-    use platform_api::{
+    use lingxi_core::host::{
         DurableFusionTerminalRecord, FusionError, FusionOrigin, FusionResult, FusionRunFacts,
         FusionRunId, FusionRunIdentity, FusionStatus, FusionTiming, FusionUsage,
         SessionWriterLease,
@@ -972,10 +980,10 @@ mod tests {
     async fn started_coordinator() -> (
         tempfile::TempDir,
         Arc<SessionStateCoordinator>,
-        protocol::SessionId,
+        lingxi_core::types::SessionId,
     ) {
         let directory = tempfile::tempdir().unwrap();
-        let session_id = protocol::SessionId::new();
+        let session_id = lingxi_core::types::SessionId::new();
         let coordinator = SessionStateCoordinator::open(
             directory.path(),
             session_id,
@@ -988,7 +996,7 @@ mod tests {
 
     async fn exhausted_outbox(
         coordinator: &SessionStateCoordinator,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         exhausted_at: u64,
     ) -> DurableFusionOutboxRecord {
         let identity = FusionRunIdentity::new(
@@ -997,7 +1005,7 @@ mod tests {
             FusionOrigin::Slash,
             None,
         );
-        let message_uuid = protocol::MessageId::new().as_uuid().to_string();
+        let message_uuid = lingxi_core::types::MessageId::new().as_uuid().to_string();
         let mut outbox = DurableFusionOutboxRecord {
             delivery_id: format!("fusion-delivery:{}", identity.run_id),
             session_id,
@@ -1019,7 +1027,7 @@ mod tests {
                     status: FusionStatus::Analyzed,
                     analysis_failure: None,
                     analysis: None,
-                    responses: vec![platform_api::PanelMaterial {
+                    responses: vec![lingxi_core::host::PanelMaterial {
                         panel_id: "P1".into(),
                         summary: "summary".into(),
                         candidate_answer: "answer".into(),
@@ -1067,7 +1075,7 @@ mod tests {
                 if let Some(outbox) = coordinator.fusion_outbox(delivery_id) {
                     if outbox.attempt == attempt
                         && outbox.receipt.status
-                            == platform_api::FusionPublicationStatus::OutboxFailed
+                            == lingxi_core::host::FusionPublicationStatus::OutboxFailed
                     {
                         return outbox;
                     }
@@ -1095,18 +1103,18 @@ mod tests {
         .expect("outbox publication")
     }
 
-    fn completed_outcome(session_id: protocol::SessionId) -> FusionRunOutcome {
+    fn completed_outcome(session_id: lingxi_core::types::SessionId) -> FusionRunOutcome {
         let identity = FusionRunIdentity::new(
             FusionRunId::generated(),
             Some(session_id),
             FusionOrigin::Slash,
             None,
         );
-        let control = platform_api::FusionRunControl::new(
+        let control = lingxi_core::host::FusionRunControl::new(
             identity.clone(),
             1_000,
             tokio_util::sync::CancellationToken::new(),
-            platform_api::FusionRunFactsRecorder::default(),
+            lingxi_core::host::FusionRunFactsRecorder::default(),
         );
         let mut outcome = FusionRunOutcome::from_control(
             &control,
@@ -1116,7 +1124,7 @@ mod tests {
                 status: FusionStatus::Analyzed,
                 analysis_failure: None,
                 analysis: None,
-                responses: vec![platform_api::PanelMaterial {
+                responses: vec![lingxi_core::host::PanelMaterial {
                     panel_id: "P1".into(),
                     summary: "summary".into(),
                     candidate_answer: "answer".into(),
@@ -1137,10 +1145,10 @@ mod tests {
 
     #[test]
     fn accounting_failure_is_disclosed_without_erasing_the_answer() {
-        let session = protocol::SessionId::new();
+        let session = lingxi_core::types::SessionId::new();
         let mut outcome = completed_outcome(session);
         outcome.facts.attempt_settlement =
-            Some(platform_api::FusionAttemptSettlementStatus::Failed {
+            Some(lingxi_core::host::FusionAttemptSettlementStatus::Failed {
                 reason: "ledger <unavailable>".into(),
             });
         let payload = DesktopFusionRecorder::transcript_payload(
@@ -1166,18 +1174,18 @@ mod tests {
 
     #[test]
     fn slash_payload_is_a_loadable_meta_user_transcript_row() {
-        let session_id = protocol::SessionId::new();
+        let session_id = lingxi_core::types::SessionId::new();
         let identity = FusionRunIdentity::new(
             FusionRunId::generated(),
             Some(session_id),
             FusionOrigin::Slash,
             None,
         );
-        let control = platform_api::FusionRunControl::new(
+        let control = lingxi_core::host::FusionRunControl::new(
             identity.clone(),
             1_000,
             tokio_util::sync::CancellationToken::new(),
-            platform_api::FusionRunFactsRecorder::default(),
+            lingxi_core::host::FusionRunFactsRecorder::default(),
         );
         let mut outcome = FusionRunOutcome::from_control(
             &control,
@@ -1187,7 +1195,7 @@ mod tests {
                 status: FusionStatus::Analyzed,
                 analysis_failure: None,
                 analysis: None,
-                responses: vec![platform_api::PanelMaterial {
+                responses: vec![lingxi_core::host::PanelMaterial {
                     panel_id: "P1".into(),
                     summary: "summary".into(),
                     candidate_answer: "answer".into(),
@@ -1234,7 +1242,7 @@ mod tests {
                     &session_id.as_uuid().to_string(),
                 )
             };
-            let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+            let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
                 platform_posix::fs::PosixFileSystem::new(directory.path().to_path_buf()),
             );
             let durable = Arc::new(session::jsonl::DurableTranscriptWriter::from_pinned(
@@ -1329,19 +1337,19 @@ mod tests {
             );
             assert_eq!(
                 recorder.record_terminal(outcome.clone(), None).await.status,
-                platform_api::FusionPublicationStatus::StorageFailure,
+                lingxi_core::host::FusionPublicationStatus::StorageFailure,
             );
             assert_eq!(
                 recorder
                     .record_terminal(
                         outcome.clone(),
                         Some(FusionSlashPublicationTarget {
-                            session_id: protocol::SessionId::new(),
+                            session_id: lingxi_core::types::SessionId::new(),
                         })
                     )
                     .await
                     .status,
-                platform_api::FusionPublicationStatus::StorageFailure,
+                lingxi_core::host::FusionPublicationStatus::StorageFailure,
             );
             let mut fact_conflict = outcome.clone();
             fact_conflict.facts.allocated_panels = Some(99);
@@ -1350,7 +1358,7 @@ mod tests {
                     .record_terminal(fact_conflict, Some(target))
                     .await
                     .status,
-                platform_api::FusionPublicationStatus::StorageFailure,
+                lingxi_core::host::FusionPublicationStatus::StorageFailure,
             );
             let mut conflict = outcome;
             conflict.result.as_mut().unwrap().responses[0]
@@ -1361,7 +1369,7 @@ mod tests {
                     .record_terminal(conflict, Some(target))
                     .await
                     .status,
-                platform_api::FusionPublicationStatus::StorageFailure
+                lingxi_core::host::FusionPublicationStatus::StorageFailure
             );
             coordinator.close_and_drain().await.unwrap();
         }
@@ -1381,7 +1389,7 @@ mod tests {
             coordinator.journal().root().to_path_buf(),
             coordinator.journal().root_identity(),
         ));
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix::fs::PosixFileSystem::new(directory.path().to_path_buf()),
         );
         let writer =
@@ -1544,7 +1552,7 @@ mod tests {
             coordinator.journal().root().to_path_buf(),
             coordinator.journal().root_identity(),
         ));
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix::fs::PosixFileSystem::new(directory.path().to_path_buf()),
         );
         let writer =
@@ -1589,7 +1597,7 @@ mod tests {
             let receipt = recorder.deliver(outbox.clone()).await;
             assert_eq!(
                 receipt.status,
-                platform_api::FusionPublicationStatus::OutboxFailed
+                lingxi_core::host::FusionPublicationStatus::OutboxFailed
             );
             outbox = coordinator
                 .fusion_outbox(&outbox.delivery_id)
@@ -1616,7 +1624,7 @@ mod tests {
         let receipt = recorder.deliver(local.clone()).await;
         assert_eq!(
             receipt.status,
-            platform_api::FusionPublicationStatus::OutboxFailed
+            lingxi_core::host::FusionPublicationStatus::OutboxFailed
         );
         let persisted = coordinator.fusion_outbox(&local.delivery_id).unwrap();
         assert_eq!((persisted.attempt, persisted.retry_cycle_end), (5, 9));
@@ -1686,7 +1694,7 @@ mod tests {
         let transcript_path = directory
             .path()
             .join(format!("{}.jsonl", session_id.as_uuid()));
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix::fs::PosixFileSystem::new(directory.path().to_path_buf()),
         );
         let writer = Arc::new(
@@ -1729,7 +1737,7 @@ mod tests {
                 .expect("terminal waiter is bounded")
                 .expect("terminal task")
                 .status,
-            platform_api::FusionPublicationStatus::Queued
+            lingxi_core::host::FusionPublicationStatus::Queued
         );
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_secs(1), retry)
@@ -1737,7 +1745,7 @@ mod tests {
                 .expect("overlapping retry shares the same five-second window")
                 .expect("retry task")
                 .status,
-            platform_api::FusionPublicationStatus::Queued
+            lingxi_core::host::FusionPublicationStatus::Queued
         );
 
         drop(transaction);
@@ -1749,7 +1757,7 @@ mod tests {
         let latest = coordinator.fusion_outbox(&delivery_id).unwrap();
         assert_eq!(
             latest.receipt.status,
-            platform_api::FusionPublicationStatus::Published
+            lingxi_core::host::FusionPublicationStatus::Published
         );
         assert_eq!(
             latest.attempt, 0,
@@ -1773,7 +1781,7 @@ mod tests {
             coordinator.journal().root_identity(),
         ));
         let transcript_path = directory.path().join("deadline.jsonl");
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix::fs::PosixFileSystem::new(directory.path().to_path_buf()),
         );
         let writer = Arc::new(
@@ -1808,7 +1816,7 @@ mod tests {
             .expect("delivery task");
         assert_eq!(
             receipt.status,
-            platform_api::FusionPublicationStatus::Queued
+            lingxi_core::host::FusionPublicationStatus::Queued
         );
         assert!(
             started.elapsed() < std::time::Duration::from_secs(6),
@@ -1826,7 +1834,7 @@ mod tests {
                 .expect("latest outbox")
                 .receipt
                 .status,
-            platform_api::FusionPublicationStatus::Published
+            lingxi_core::host::FusionPublicationStatus::Published
         );
     }
 
@@ -1865,7 +1873,7 @@ mod tests {
             coordinator,
             Some(FusionTranscriptTarget::with_history(writer, history).for_session(session_id)),
         );
-        let message_id = protocol::MessageId::new();
+        let message_id = lingxi_core::types::MessageId::new();
         let message_uuid = message_id.as_uuid().to_string();
         let outbox = DurableFusionOutboxRecord {
             delivery_id: "fusion-delivery:projection".into(),

@@ -5,14 +5,14 @@
 //! its disposition arm (before the generic terminal): while the recovery count
 //! is below the limit it appends the byte-exact meta nudge and continues; on
 //! exhaustion it ends the turn with `stop_reason = "max_tokens"`.
+use lingxi_core::host::OutputEvent;
+use lingxi_core::types::{ContentBlock, ConversationMessage};
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use platform_api::OutputEvent;
-use protocol::{ContentBlock, ConversationMessage};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;

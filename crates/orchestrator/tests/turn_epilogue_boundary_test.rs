@@ -19,6 +19,7 @@
 //! mock writer, because "was a snapshot persisted" is a question about the
 //! JSONL, and the line carries its own marker (`"type":"file-history-snapshot"`).
 
+use lingxi_core::host::FileSystem;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
@@ -26,7 +27,6 @@ use orchestrator::test_support::{
     MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
-use platform_api::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use session::jsonl::JsonlWriter;
 use std::future::Future;
@@ -267,7 +267,7 @@ fn streamed_tool_round(id: &str, tool: &str) -> Vec<llm_runtime::HistoryEvent> {
         message_start(id, "claude-opus-4-7"),
         orchestrator::test_support_stream::content_block_start_tool_use(
             0,
-            protocol::ToolUseId::new(),
+            lingxi_core::types::ToolUseId::new(),
             tool,
         ),
         orchestrator::test_support::input_json_delta(0, "{}"),
@@ -478,7 +478,9 @@ fn the_loop_top_guard_emits_aborted_streaming_and_runs_the_epilogue() {
             .await
             .iter()
             .filter_map(|e| match e {
-                platform_api::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason.clone()),
+                lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } => {
+                    Some(stop_reason.clone())
+                }
                 _ => None,
             })
             .collect();
@@ -554,7 +556,9 @@ fn the_post_drive_abort_emits_aborted_streaming_and_runs_the_epilogue() {
             .await
             .iter()
             .filter_map(|e| match e {
-                platform_api::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason.clone()),
+                lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } => {
+                    Some(stop_reason.clone())
+                }
                 _ => None,
             })
             .collect();

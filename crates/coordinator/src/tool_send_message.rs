@@ -41,13 +41,13 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
+use lingxi_core::types::AgentId;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use protocol::AgentId;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use platform_api::team_spawn::TeamSpawnSeam;
+use lingxi_core::host::team_spawn::TeamSpawnSeam;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -137,7 +137,7 @@ pub fn parse_address(to: &str) -> Address {
         return Address::Bridge(rest.to_string());
     }
     if let Some(rest) = trimmed.strip_prefix("session:") {
-        if let Some(id) = protocol::SessionId::parse_prefixed(rest) {
+        if let Some(id) = lingxi_core::types::SessionId::parse_prefixed(rest) {
             return Address::SessionId(id.as_uuid().to_string());
         }
         return Address::InvalidSession(trimmed.to_string());
@@ -231,22 +231,22 @@ impl SendMessageTool {
         summary: Option<&str>,
         ctx: &ToolUseContext,
     ) -> Result<(), ToolError> {
-        if platform_api::live_sessions::process_session_id().as_deref() == Some(session_id) {
+        if lingxi_core::host::live_sessions::process_session_id().as_deref() == Some(session_id) {
             return Err(ToolError::InvalidInput(
                 "SendMessage: cannot send a message to the current session".into(),
             ));
         }
-        let dir = platform_api::live_sessions::process_dir()
-            .unwrap_or_else(platform_api::live_sessions::LiveSessionDir::process_default);
+        let dir = lingxi_core::host::live_sessions::process_dir()
+            .unwrap_or_else(lingxi_core::host::live_sessions::LiveSessionDir::process_default);
         let peer = dir
             .find_by_session_id(
                 session_id,
-                platform_api::live_sessions::process_session_id().as_deref(),
+                lingxi_core::host::live_sessions::process_session_id().as_deref(),
             )
             .ok_or_else(|| ToolError::InvalidInput("SendMessage: no such live session".into()))?;
         let from_name = self.sender_name(ctx).await;
-        let from_sid = platform_api::live_sessions::process_session_id().unwrap_or_default();
-        let message = platform_api::live_sessions::outbound_peer_message(
+        let from_sid = lingxi_core::host::live_sessions::process_session_id().unwrap_or_default();
+        let message = lingxi_core::host::live_sessions::outbound_peer_message(
             &from_name, &from_sid, content, summary,
         );
         // Two transports, one message id. The inbox is the delivery of record:
@@ -268,9 +268,9 @@ impl SendMessageTool {
             .as_deref()
             .filter(|path| !path.is_empty())
             .map(std::path::PathBuf::from)
-            .filter(|path| platform_api::uds_inbox::is_canonical_inbox_sock(path))
+            .filter(|path| lingxi_core::host::uds_inbox::is_canonical_inbox_sock(path))
         {
-            let _ = platform_api::uds_inbox::send_peer_message(&socket, &message, peer.sid());
+            let _ = lingxi_core::host::uds_inbox::send_peer_message(&socket, &message, peer.sid());
         }
         Ok(())
     }
@@ -700,8 +700,8 @@ impl Tool for SendMessageTool {
 
     fn input_schema(&self) -> &Value {
         tool_api::send_message_contract::schema(
-            platform_api::live_sessions::cross_session_messaging_enabled(),
-            platform_api::env::agent_swarms_enabled(),
+            lingxi_core::host::live_sessions::cross_session_messaging_enabled(),
+            lingxi_core::host::env::agent_swarms_enabled(),
         )
     }
 
@@ -769,8 +769,8 @@ impl Tool for SendMessageTool {
 
     async fn prompt(&self, _: &PromptOptions) -> String {
         tool_api::send_message_contract::prompt(
-            platform_api::live_sessions::cross_session_messaging_enabled(),
-            platform_api::env::agent_swarms_enabled(),
+            lingxi_core::host::live_sessions::cross_session_messaging_enabled(),
+            lingxi_core::host::env::agent_swarms_enabled(),
         )
         .into()
     }
@@ -786,7 +786,7 @@ impl Tool for SendMessageTool {
     ) -> Result<(), tool_api::tool_trait::ValidationError> {
         tool_api::send_message_contract::validate(
             input,
-            platform_api::env::agent_swarms_enabled(),
+            lingxi_core::host::env::agent_swarms_enabled(),
             ctx.agent_id.is_some() || ctx.agent_name.is_some(),
         )
         .map_err(tool_api::tool_trait::ValidationError)
@@ -851,7 +851,8 @@ impl Tool for SendMessageTool {
             ));
         }
         if let Address::SessionId(session_id) = &addr {
-            if platform_api::live_sessions::process_session_id().as_deref() == Some(session_id) {
+            if lingxi_core::host::live_sessions::process_session_id().as_deref() == Some(session_id)
+            {
                 return Err(ToolError::InvalidInput(
                     "SendMessage: cannot send a message to the current session".into(),
                 ));
@@ -1134,7 +1135,7 @@ mod tests {
             observer_pairings: None,
             team_name: None,
             origin_session_id: None,
-            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+            tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,
@@ -1192,7 +1193,7 @@ mod tests {
         team.mailbox_router
             .register_alias("task-ordinary", id)
             .await;
-        let uuid_alias = protocol::SessionId::new().as_uuid().to_string();
+        let uuid_alias = lingxi_core::types::SessionId::new().as_uuid().to_string();
         team.mailbox_router.register_alias(&uuid_alias, id).await;
         let tool = SendMessageTool::new(team, preview_ascii);
         for address in ["ordinary-agent", "task-ordinary", uuid_alias.as_str()] {
@@ -1224,8 +1225,8 @@ mod tests {
         assert_eq!(
             tool.input_schema(),
             tool_api::send_message_contract::schema(
-                platform_api::live_sessions::cross_session_messaging_enabled(),
-                platform_api::env::agent_swarms_enabled()
+                lingxi_core::host::live_sessions::cross_session_messaging_enabled(),
+                lingxi_core::host::env::agent_swarms_enabled()
             )
         );
     }
@@ -1602,13 +1603,14 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        let dir =
+            lingxi_core::host::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
         let self_session = "22222222-3333-4444-8555-666666666666";
         let target_session = "11111111-2222-4333-8444-555555555555";
-        platform_api::live_sessions::set_process_dir(dir.clone());
-        platform_api::live_sessions::set_process_session_id(self_session);
-        platform_api::live_sessions::set_process_name("team-lead");
-        let stale_socket = platform_api::uds_inbox::default_socket_path(424_242);
+        lingxi_core::host::live_sessions::set_process_dir(dir.clone());
+        lingxi_core::host::live_sessions::set_process_session_id(self_session);
+        lingxi_core::host::live_sessions::set_process_name("team-lead");
+        let stale_socket = lingxi_core::host::uds_inbox::default_socket_path(424_242);
         dir.upsert_identity(
             424_242,
             target_session,
@@ -1635,7 +1637,7 @@ mod tests {
         let messages = dir.drain_inbox(target_session).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(
-            platform_api::live_sessions::extract_cross_session_inner(&messages[0].content),
+            lingxi_core::host::live_sessions::extract_cross_session_inner(&messages[0].content),
             "hello after stale UDS"
         );
         assert!(messages[0].msg_id.is_some());
@@ -1657,18 +1659,20 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        let dir =
+            lingxi_core::host::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
         let self_session = "22222222-3333-4444-8555-666666666666";
         let target_session = "11111111-2222-4333-8444-555555555555";
-        platform_api::live_sessions::set_process_dir(dir.clone());
-        platform_api::live_sessions::set_process_session_id(self_session);
-        platform_api::live_sessions::set_process_name("team-lead");
+        lingxi_core::host::live_sessions::set_process_dir(dir.clone());
+        lingxi_core::host::live_sessions::set_process_session_id(self_session);
+        lingxi_core::host::live_sessions::set_process_name("team-lead");
 
         // Stand in for the peer's listener on a canonical socket, so the tool's
         // `is_canonical_inbox_sock` gate admits it and the accept loop is live.
-        let socket = platform_api::uds_inbox::default_socket_path(std::process::id());
-        platform_api::uds_inbox::stop_process_inbox();
-        platform_api::uds_inbox::start_process_inbox_for_session(&socket, target_session).unwrap();
+        let socket = lingxi_core::host::uds_inbox::default_socket_path(std::process::id());
+        lingxi_core::host::uds_inbox::stop_process_inbox();
+        lingxi_core::host::uds_inbox::start_process_inbox_for_session(&socket, target_session)
+            .unwrap();
         dir.upsert_identity(
             std::process::id(),
             target_session,
@@ -1695,14 +1699,14 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut woken = Vec::new();
         while std::time::Instant::now() < deadline {
-            woken = platform_api::uds_inbox::take_accepted_peer_reminders(false);
+            woken = lingxi_core::host::uds_inbox::take_accepted_peer_reminders(false);
             if !woken.is_empty() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let inbox = dir.drain_inbox(target_session).unwrap();
-        platform_api::uds_inbox::stop_process_inbox();
+        lingxi_core::host::uds_inbox::stop_process_inbox();
 
         assert_eq!(woken.len(), 1, "an idle peer must be woken: {woken:?}");
         assert!(woken[0].contains("hello over the socket"), "{woken:?}");
@@ -1712,7 +1716,7 @@ mod tests {
             "the durable copy must be written even when the socket answered"
         );
         assert_eq!(
-            platform_api::live_sessions::extract_cross_session_inner(&inbox[0].content),
+            lingxi_core::host::live_sessions::extract_cross_session_inner(&inbox[0].content),
             "hello over the socket"
         );
     }
@@ -1807,15 +1811,15 @@ mod tests {
                 _name: String,
                 _team_name: String,
                 _description: String,
-            ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
+            ) -> Result<String, lingxi_core::host::team_spawn::TeamSpawnError> {
                 Ok(String::new())
             }
             async fn pane_metadata(
                 &self,
                 task_id: &str,
-            ) -> Option<platform_api::team_spawn::PaneLaunchMetadata> {
+            ) -> Option<lingxi_core::host::team_spawn::PaneLaunchMetadata> {
                 assert_eq!(task_id, "task-worker");
-                Some(platform_api::team_spawn::PaneLaunchMetadata {
+                Some(lingxi_core::host::team_spawn::PaneLaunchMetadata {
                     session_name: "lingxi-test".into(),
                     window_name: "worker".into(),
                     pane_id: "%42".into(),
@@ -1825,7 +1829,7 @@ mod tests {
             async fn kill(
                 &self,
                 task_id: &str,
-            ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+            ) -> Result<(), lingxi_core::host::team_spawn::TeamSpawnError> {
                 self.killed.store(true, Ordering::SeqCst);
                 *self.killed_task.lock().unwrap() = Some(task_id.to_string());
                 Ok(())
@@ -2011,15 +2015,15 @@ mod tests {
                     _: String,
                     _: String,
                     _: String,
-                ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
+                ) -> Result<String, lingxi_core::host::team_spawn::TeamSpawnError> {
                     unreachable!("shutdown-only seam")
                 }
                 async fn kill(
                     &self,
                     _: &str,
-                ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+                ) -> Result<(), lingxi_core::host::team_spawn::TeamSpawnError> {
                     if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                        Err(platform_api::team_spawn::TeamSpawnError::Internal(
+                        Err(lingxi_core::host::team_spawn::TeamSpawnError::Internal(
                             "backend termination not confirmed".into(),
                         ))
                     } else {
@@ -2068,13 +2072,13 @@ mod tests {
                     _: String,
                     _: String,
                     _: String,
-                ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
+                ) -> Result<String, lingxi_core::host::team_spawn::TeamSpawnError> {
                     unreachable!("shutdown-only seam")
                 }
                 async fn kill(
                     &self,
                     _: &str,
-                ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+                ) -> Result<(), lingxi_core::host::team_spawn::TeamSpawnError> {
                     self.0.lock().unwrap().as_ref().unwrap().abort();
                     // Force a suspension after stopping the tool's caller.
                     tokio::task::yield_now().await;
@@ -2153,9 +2157,9 @@ mod tests {
     async fn plan_approval_reads_live_leader_mode_and_preserves_optional_feedback() {
         struct LiveGate(std::sync::Mutex<String>);
         #[async_trait]
-        impl platform_api::PermissionGate for LiveGate {
-            async fn check(&self, _: &str, _: &Value) -> platform_api::PermissionDecision {
-                platform_api::PermissionDecision::Deny {
+        impl lingxi_core::host::PermissionGate for LiveGate {
+            async fn check(&self, _: &str, _: &Value) -> lingxi_core::host::PermissionDecision {
+                lingxi_core::host::PermissionDecision::Deny {
                     reason: "unused by direct envelope test".into(),
                 }
             }

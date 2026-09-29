@@ -38,7 +38,7 @@ use crate::types::{
     AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppMcpIntent,
     AppRecord, AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, APPS_SCHEMA_VERSION,
 };
-use platform_api::Clock;
+use lingxi_core::host::Clock;
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};

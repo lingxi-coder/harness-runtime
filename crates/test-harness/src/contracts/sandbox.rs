@@ -16,7 +16,7 @@
 //! on macOS, the Windows `Unsupported` branch) belong in platform-local
 //! tests; this contract is the trait-level surface only.
 
-use platform_api::sandbox::{
+use lingxi_core::host::sandbox::{
     NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxError, SandboxPolicy,
     SandboxedTag,
 };

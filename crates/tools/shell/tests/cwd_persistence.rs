@@ -12,8 +12,8 @@
 
 use async_trait::async_trait;
 use hooks::{CwdChangedFire, CwdChangedFirer};
-use platform_api::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
-use platform_api::sandbox::SandboxedCommand;
+use lingxi_core::host::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
+use lingxi_core::host::sandbox::SandboxedCommand;
 use serde_json::json;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -332,7 +332,7 @@ async fn subagent_does_not_mutate_shared_cwd() {
     let tool = tool_with(workspace.path(), runner.clone());
 
     let mut sub_ctx = fresh_ctx();
-    sub_ctx.agent_id = Some(protocol::AgentId::new());
+    sub_ctx.agent_id = Some(lingxi_core::types::AgentId::new());
 
     tool.call(
         json!({ "command": format!("cd {}", target.path().display()) }),
@@ -639,7 +639,7 @@ async fn subagent_cd_does_not_advance_the_shared_live_cwd_cell() {
     let tool = tool_with_live_cwd(&workspace_canon, runner, cell.clone());
 
     let mut sub_ctx = fresh_ctx();
-    sub_ctx.agent_id = Some(protocol::AgentId::new());
+    sub_ctx.agent_id = Some(lingxi_core::types::AgentId::new());
     tool.call(
         json!({ "command": format!("cd {}", sub_canon.display()) }),
         sub_ctx,
@@ -844,7 +844,7 @@ async fn subagent_is_unaffected_by_reset() {
     let tool = tool_with(&workspace_canon, runner.clone());
 
     let mut sub_ctx = fresh_ctx();
-    sub_ctx.agent_id = Some(protocol::AgentId::new());
+    sub_ctx.agent_id = Some(lingxi_core::types::AgentId::new());
 
     let res = tool
         .call(

@@ -113,7 +113,7 @@ async fn midstream_529_triggers_nonstreaming_fallback() {
     let texts: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            platform_api::OutputEvent::Text { text } => Some(text.as_str()),
+            lingxi_core::host::OutputEvent::Text { text } => Some(text.as_str()),
             _ => None,
         })
         .collect();
@@ -146,7 +146,7 @@ async fn midstream_529_triggers_nonstreaming_fallback() {
     let persisted_texts: Vec<&str> = final_assistant
         .iter()
         .filter_map(|blk| match blk {
-            protocol::ContentBlock::Text { text } => Some(text.as_str()),
+            lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
             _ => None,
         })
         .collect();

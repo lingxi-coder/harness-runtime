@@ -17,10 +17,10 @@
 //!    RFC 6749 / the MCP SDK).
 //! 7. **Refresh** — `refresh_token` grant, run on token expiry / a 401.
 //!
-//! Tokens are persisted via `lingxi-secret`'s [`platform_api::SecureStorage`] seam
+//! Tokens are persisted via `lingxi-secret`'s [`lingxi_core::host::SecureStorage`] seam
 //! keyed by a `getServerKey`-equivalent (`name|sha256({type,url,headers})[..16]`,
 //! auth.ts:325-341), the inner access/refresh strings wrapped in
-//! [`protocol::Secret`].
+//! [`lingxi_core::types::Secret`].
 //!
 //! The [`OAuthState`] enum models the handshake stages; [`perform_oauth_flow`]
 //! drives discovery → (DCR) → PKCE → listener → URL → exchange.
@@ -52,8 +52,8 @@
 //!   events.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use platform_api::{Clock, HttpTransport, McpTransportSpec};
-use protocol::{HttpMethod, HttpRequest, Secret};
+use lingxi_core::host::{Clock, HttpTransport, McpTransportSpec};
+use lingxi_core::types::{HttpMethod, HttpRequest, Secret};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -316,16 +316,16 @@ pub enum OAuthState {
     /// Tokens acquired and ready for use.
     Authenticated {
         /// Bearer access token.
-        access_token: protocol::Secret<String>,
+        access_token: lingxi_core::types::Secret<String>,
         /// Optional long-lived refresh token.
-        refresh_token: Option<protocol::Secret<String>>,
+        refresh_token: Option<lingxi_core::types::Secret<String>>,
         /// Expiry of the current access token.
         expires_at: SystemTime,
     },
     /// Refreshing the access token using the refresh token.
     Refreshing {
         /// Refresh token being exchanged.
-        refresh_token: protocol::Secret<String>,
+        refresh_token: lingxi_core::types::Secret<String>,
     },
 }
 
@@ -349,9 +349,9 @@ pub enum OAuthError {
     RefreshRejected(String),
 }
 
-impl From<OAuthError> for platform_api::McpError {
+impl From<OAuthError> for lingxi_core::host::McpError {
     fn from(e: OAuthError) -> Self {
-        platform_api::McpError::OAuth(e.to_string())
+        lingxi_core::host::McpError::OAuth(e.to_string())
     }
 }
 
@@ -1189,7 +1189,7 @@ fn authorize_url_scope(
 pub async fn perform_oauth_flow(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
-    oauth: &platform_api::McpOAuthConfigDto,
+    oauth: &lingxi_core::host::McpOAuthConfigDto,
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
@@ -1219,7 +1219,7 @@ pub async fn perform_oauth_flow(
 pub async fn perform_oauth_flow_with_manual_input(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
-    oauth: &platform_api::McpOAuthConfigDto,
+    oauth: &lingxi_core::host::McpOAuthConfigDto,
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
@@ -1251,7 +1251,7 @@ pub async fn perform_oauth_flow_with_manual_input(
 pub(crate) async fn perform_oauth_flow_for_reauth(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
-    oauth: &platform_api::McpOAuthConfigDto,
+    oauth: &lingxi_core::host::McpOAuthConfigDto,
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
@@ -1278,7 +1278,7 @@ pub(crate) async fn perform_oauth_flow_for_reauth(
 async fn perform_oauth_flow_inner(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
-    oauth: &platform_api::McpOAuthConfigDto,
+    oauth: &lingxi_core::host::McpOAuthConfigDto,
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
@@ -1480,7 +1480,7 @@ pub const MCP_OAUTH_SERVICE: &str = "mcp-oauth";
 /// headers}` (headers default to `{}`), hex, first 16 chars.
 #[must_use]
 pub fn server_key(name: &str, spec: &McpTransportSpec) -> String {
-    let empty: platform_api::McpHeaders = platform_api::McpHeaders::new();
+    let empty: lingxi_core::host::McpHeaders = lingxi_core::host::McpHeaders::new();
     let (kind, url, headers) = match spec {
         McpTransportSpec::Sse { url, headers, .. } => ("sse", url.as_str(), headers),
         McpTransportSpec::Http { url, headers, .. } => ("http", url.as_str(), headers),
@@ -1508,7 +1508,7 @@ pub fn server_key(name: &str, spec: &McpTransportSpec) -> String {
 }
 
 /// On-disk JSON shape for a stored MCP OAuth token set. The secret strings are
-/// the byte payload of a [`protocol::SecureStorageData`].
+/// the byte payload of a [`lingxi_core::types::SecureStorageData`].
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StoredTokens {
     /// Bearer access token (plain string inside the encrypted blob).
@@ -1583,7 +1583,7 @@ impl StoredTokens {
 /// # Errors
 /// [`OAuthError::Token`] on a storage backend error.
 pub async fn load_tokens(
-    storage: &Arc<dyn platform_api::SecureStorage>,
+    storage: &Arc<dyn lingxi_core::host::SecureStorage>,
     key: &str,
 ) -> Result<Option<StoredTokens>, OAuthError> {
     let data = storage
@@ -1605,7 +1605,7 @@ pub(crate) fn discovery_cache_refresh_grant_token(refresh_token: &str) -> String
 }
 
 pub(crate) async fn discovery_cache_grant_token(
-    storage: &Arc<dyn platform_api::SecureStorage>,
+    storage: &Arc<dyn lingxi_core::host::SecureStorage>,
     key: &str,
 ) -> Result<Option<String>, OAuthError> {
     let Some(stored) = load_tokens(storage, key).await? else {
@@ -1624,7 +1624,7 @@ pub(crate) async fn discovery_cache_grant_token(
 /// # Errors
 /// [`OAuthError::Token`] on encode or a storage backend error.
 pub async fn store_tokens(
-    storage: &Arc<dyn platform_api::SecureStorage>,
+    storage: &Arc<dyn lingxi_core::host::SecureStorage>,
     clock: &Arc<dyn Clock>,
     key: &str,
     stored: &StoredTokens,
@@ -1633,7 +1633,7 @@ pub async fn store_tokens(
 }
 
 pub async fn store_tokens_with_telemetry(
-    storage: &Arc<dyn platform_api::SecureStorage>,
+    storage: &Arc<dyn lingxi_core::host::SecureStorage>,
     clock: &Arc<dyn Clock>,
     key: &str,
     stored: &StoredTokens,
@@ -1641,12 +1641,12 @@ pub async fn store_tokens_with_telemetry(
 ) -> Result<(), OAuthError> {
     let bytes =
         serde_json::to_vec(stored).map_err(|e| OAuthError::Token(format!("encode tokens: {e}")))?;
-    let metadata = protocol::SecureStorageMetadata {
+    let metadata = lingxi_core::types::SecureStorageMetadata {
         created_at: clock.now(),
         last_accessed: None,
-        kind: protocol::SecretKindDto("mcp_oauth_tokens".into()),
+        kind: lingxi_core::types::SecretKindDto("mcp_oauth_tokens".into()),
     };
-    let data = protocol::SecureStorageData::new(bytes, metadata);
+    let data = lingxi_core::types::SecureStorageData::new(bytes, metadata);
     storage
         .store(MCP_OAUTH_SERVICE, key, data)
         .await
@@ -1664,7 +1664,7 @@ pub async fn store_tokens_with_telemetry(
 /// # Errors
 /// [`OAuthError::Token`] on encode or a storage backend error.
 pub async fn save_tokens(
-    storage: &Arc<dyn platform_api::SecureStorage>,
+    storage: &Arc<dyn lingxi_core::host::SecureStorage>,
     clock: &Arc<dyn Clock>,
     key: &str,
     tokens: &Tokens,
@@ -1673,7 +1673,7 @@ pub async fn save_tokens(
 }
 
 pub async fn save_tokens_with_telemetry(
-    storage: &Arc<dyn platform_api::SecureStorage>,
+    storage: &Arc<dyn lingxi_core::host::SecureStorage>,
     clock: &Arc<dyn Clock>,
     key: &str,
     tokens: &Tokens,
@@ -1839,11 +1839,11 @@ pub async fn revoke_token(
 /// `preserveStepUpState` (auth.ts:578-617) is a re-auth-only variant — not the
 /// logout/disconnect path wired here — and is a noted residual.
 pub async fn revoke_server_tokens(
-    storage: &Arc<dyn platform_api::SecureStorage>,
+    storage: &Arc<dyn lingxi_core::host::SecureStorage>,
     http: &Arc<dyn HttpTransport>,
     key: &str,
     server_url: &str,
-    oauth_cfg: &platform_api::McpOAuthConfigDto,
+    oauth_cfg: &lingxi_core::host::McpOAuthConfigDto,
 ) {
     let stored = match load_tokens(storage, key).await {
         Ok(Some(s)) => Some(s),
@@ -1915,7 +1915,7 @@ fn record_test_oauth_telemetry_event<T: serde::Serialize>(name: &'static str, pa
 async fn revoke_at_endpoint(
     http: &Arc<dyn HttpTransport>,
     server_url: &str,
-    oauth_cfg: &platform_api::McpOAuthConfigDto,
+    oauth_cfg: &lingxi_core::host::McpOAuthConfigDto,
     stored: &StoredTokens,
 ) -> Result<(), OAuthError> {
     let meta = discover_auth_server_metadata(
@@ -2032,7 +2032,7 @@ mod tests {
         // name|sha256({type,url,headers})[..16]; headers default {}.
         let spec = McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         };
@@ -2047,7 +2047,7 @@ mod tests {
         assert_eq!(key, key2);
         let spec_other = McpTransportSpec::Http {
             url: "https://mcp.example.com/v2".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         };
@@ -2063,13 +2063,13 @@ mod tests {
 
         let first = McpTransportSpec::Http {
             url: "https://one.example/mcp".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         };
         let second = McpTransportSpec::Http {
             url: "https://two.example/mcp".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         };
@@ -2286,7 +2286,7 @@ mod tests {
     /// hash the BTreeMap path produced.
     #[test]
     fn server_key_uses_insertion_order_not_sorted() {
-        let mut headers = platform_api::McpHeaders::new();
+        let mut headers = lingxi_core::host::McpHeaders::new();
         headers.insert("Z-Header".to_string(), "z".to_string());
         headers.insert("A-Header".to_string(), "a".to_string());
         let spec = McpTransportSpec::Http {
@@ -2308,7 +2308,7 @@ mod tests {
     fn server_key_empty_headers_matches_reference() {
         let spec = McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         };
@@ -2372,19 +2372,19 @@ mod tests {
     #[derive(Default)]
     struct DiscoveryCacheTestStorage {
         rows: std::sync::Mutex<
-            std::collections::HashMap<(String, String), protocol::SecureStorageData>,
+            std::collections::HashMap<(String, String), lingxi_core::types::SecureStorageData>,
         >,
         fail_retrieve: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait::async_trait]
-    impl platform_api::SecureStorage for DiscoveryCacheTestStorage {
+    impl lingxi_core::host::SecureStorage for DiscoveryCacheTestStorage {
         async fn store(
             &self,
             service: &str,
             account: &str,
-            data: protocol::SecureStorageData,
-        ) -> Result<(), platform_api::SecureStorageError> {
+            data: lingxi_core::types::SecureStorageData,
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
             self.rows
                 .lock()
                 .unwrap()
@@ -2396,9 +2396,12 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
+        ) -> Result<
+            Option<lingxi_core::types::SecureStorageData>,
+            lingxi_core::host::SecureStorageError,
+        > {
             if self.fail_retrieve.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(platform_api::SecureStorageError::BackendUnavailable(
+                return Err(lingxi_core::host::SecureStorageError::BackendUnavailable(
                     "storage failed".to_string(),
                 ));
             }
@@ -2414,7 +2417,7 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<(), platform_api::SecureStorageError> {
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
             self.rows
                 .lock()
                 .unwrap()
@@ -2425,7 +2428,7 @@ mod tests {
         async fn list(
             &self,
             service: &str,
-        ) -> Result<Vec<String>, platform_api::SecureStorageError> {
+        ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
             Ok(self
                 .rows
                 .lock()
@@ -2440,8 +2443,8 @@ mod tests {
             false
         }
 
-        fn backend(&self) -> platform_api::SecureStorageBackend {
-            platform_api::SecureStorageBackend::PlainText
+        fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
+            lingxi_core::host::SecureStorageBackend::PlainText
         }
     }
 
@@ -2450,7 +2453,7 @@ mod tests {
         let storage = Arc::new(DiscoveryCacheTestStorage::default());
         let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
         store_tokens(
-            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
+            &(storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>),
             &clock,
             "key",
             &StoredTokens {
@@ -2469,7 +2472,7 @@ mod tests {
             "grant:0eb17643d4e92611"
         );
         let first = discovery_cache_grant_token(
-            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
+            &(storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>),
             "key",
         )
         .await
@@ -2478,7 +2481,7 @@ mod tests {
         assert_eq!(first, "grant:0eb17643d4e92611");
 
         store_tokens(
-            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
+            &(storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>),
             &clock,
             "key",
             &StoredTokens {
@@ -2493,7 +2496,7 @@ mod tests {
         .await
         .expect("overwrite tokens");
         let second = discovery_cache_grant_token(
-            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
+            &(storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>),
             "key",
         )
         .await
@@ -2507,7 +2510,7 @@ mod tests {
         let storage = Arc::new(DiscoveryCacheTestStorage::default());
         let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
         store_tokens(
-            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
+            &(storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>),
             &clock,
             "key",
             &StoredTokens {
@@ -2522,7 +2525,7 @@ mod tests {
         .await
         .expect("store tokens");
         let first = discovery_cache_grant_token(
-            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
+            &(storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>),
             "key",
         )
         .await
@@ -2530,7 +2533,7 @@ mod tests {
         .expect("grant token present");
 
         store_tokens(
-            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
+            &(storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>),
             &clock,
             "key",
             &StoredTokens {
@@ -2545,7 +2548,7 @@ mod tests {
         .await
         .expect("rotate refresh");
         let second = discovery_cache_grant_token(
-            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
+            &(storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>),
             "key",
         )
         .await
@@ -2560,7 +2563,7 @@ mod tests {
         let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
         assert_eq!(
             discovery_cache_grant_token(
-                &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
+                &(storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>),
                 "key"
             )
             .await
@@ -2569,7 +2572,7 @@ mod tests {
         );
 
         store_tokens(
-            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
+            &(storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>),
             &clock,
             "key",
             &StoredTokens {
@@ -2585,7 +2588,7 @@ mod tests {
         .expect("store access-only");
         assert_eq!(
             discovery_cache_grant_token(
-                &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
+                &(storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>),
                 "key"
             )
             .await
@@ -2597,7 +2600,7 @@ mod tests {
             .fail_retrieve
             .store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(discovery_cache_grant_token(
-            &(storage.clone() as Arc<dyn platform_api::SecureStorage>),
+            &(storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>),
             "key"
         )
         .await
@@ -2770,12 +2773,12 @@ mod tests {
     impl HttpTransport for MockPrmHttp {
         async fn request(
             &self,
-            req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
             self.requested.lock().unwrap().push(req.url.clone());
             for (pat, status, body) in &self.routes {
                 if req.url == *pat {
-                    return Ok(protocol::HttpResponse {
+                    return Ok(lingxi_core::types::HttpResponse {
                         status: *status,
                         headers: vec![],
                         body: body.clone(),
@@ -2783,7 +2786,7 @@ mod tests {
                     });
                 }
             }
-            Ok(protocol::HttpResponse {
+            Ok(lingxi_core::types::HttpResponse {
                 status: 404,
                 headers: vec![],
                 body: String::new(),
@@ -2792,9 +2795,9 @@ mod tests {
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::Connection("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::Connection("unused".into()))
         }
     }
 
@@ -2936,7 +2939,7 @@ mod tests {
     /// can assert on the CREDENTIAL BYTES on the wire, which is the only
     /// place a wrong client-auth method or a mangled secret is observable.
     struct RecordingTokenHttp {
-        seen: std::sync::Mutex<Vec<protocol::HttpRequest>>,
+        seen: std::sync::Mutex<Vec<lingxi_core::types::HttpRequest>>,
     }
     impl RecordingTokenHttp {
         fn new() -> Arc<Self> {
@@ -2944,7 +2947,7 @@ mod tests {
                 seen: std::sync::Mutex::new(Vec::new()),
             })
         }
-        fn last(&self) -> protocol::HttpRequest {
+        fn last(&self) -> lingxi_core::types::HttpRequest {
             self.seen
                 .lock()
                 .unwrap()
@@ -2957,10 +2960,10 @@ mod tests {
     impl HttpTransport for RecordingTokenHttp {
         async fn request(
             &self,
-            req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
             self.seen.lock().unwrap().push(req);
-            Ok(protocol::HttpResponse {
+            Ok(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![],
                 body: r#"{"access_token":"new-at","expires_in":3600}"#.to_string(),
@@ -2969,9 +2972,9 @@ mod tests {
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::Connection("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::Connection("unused".into()))
         }
     }
 
@@ -3217,12 +3220,12 @@ mod tests {
         let clock: Arc<dyn Clock> = Arc::new(TestClock::new(0));
         let spec = McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         };
         let telemetry = McpOAuthTelemetryContext::for_server("srv", &spec);
-        let oauth_cfg = platform_api::McpOAuthConfigDto {
+        let oauth_cfg = lingxi_core::host::McpOAuthConfigDto {
             client_id: Some("client".into()),
             callback_port: None,
             auth_server_metadata_url: None,
@@ -3260,14 +3263,14 @@ mod tests {
         struct FailingStorage;
 
         #[async_trait::async_trait]
-        impl platform_api::SecureStorage for FailingStorage {
+        impl lingxi_core::host::SecureStorage for FailingStorage {
             async fn store(
                 &self,
                 _service: &str,
                 _account: &str,
-                _data: protocol::SecureStorageData,
-            ) -> Result<(), platform_api::SecureStorageError> {
-                Err(platform_api::SecureStorageError::BackendUnavailable(
+                _data: lingxi_core::types::SecureStorageData,
+            ) -> Result<(), lingxi_core::host::SecureStorageError> {
+                Err(lingxi_core::host::SecureStorageError::BackendUnavailable(
                     "store failed".into(),
                 ))
             }
@@ -3276,8 +3279,10 @@ mod tests {
                 &self,
                 _service: &str,
                 _account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError>
-            {
+            ) -> Result<
+                Option<lingxi_core::types::SecureStorageData>,
+                lingxi_core::host::SecureStorageError,
+            > {
                 Ok(None)
             }
 
@@ -3285,14 +3290,14 @@ mod tests {
                 &self,
                 _service: &str,
                 _account: &str,
-            ) -> Result<(), platform_api::SecureStorageError> {
+            ) -> Result<(), lingxi_core::host::SecureStorageError> {
                 Ok(())
             }
 
             async fn list(
                 &self,
                 _service: &str,
-            ) -> Result<Vec<String>, platform_api::SecureStorageError> {
+            ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
                 Ok(Vec::new())
             }
 
@@ -3300,17 +3305,17 @@ mod tests {
                 false
             }
 
-            fn backend(&self) -> platform_api::SecureStorageBackend {
-                platform_api::SecureStorageBackend::PlainText
+            fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
+                lingxi_core::host::SecureStorageBackend::PlainText
             }
         }
 
         clear_test_oauth_telemetry_events();
-        let storage: Arc<dyn platform_api::SecureStorage> = Arc::new(FailingStorage);
+        let storage: Arc<dyn lingxi_core::host::SecureStorage> = Arc::new(FailingStorage);
         let clock: Arc<dyn Clock> = Arc::new(TestClock::new(0));
         let spec = McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         };

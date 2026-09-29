@@ -120,8 +120,8 @@ pub fn gather_reach(answers: &ProposeAnswers) -> GatherOptions {
 #[must_use]
 pub fn propose_messages_to_conversation(
     messages: &[permission::auto_mode_propose::ProposeMessage],
-) -> Vec<protocol::ConversationMessage> {
-    use protocol::{ContentBlock, ConversationMessage, MessageId};
+) -> Vec<lingxi_core::types::ConversationMessage> {
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
     messages
         .iter()
         .filter_map(|m| match m.role {
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn roles_map_to_their_own_turns() {
-        use protocol::ConversationMessage;
+        use lingxi_core::types::ConversationMessage;
         let out = propose_messages_to_conversation(&[
             msg("user", "recon"),
             msg("assistant", "draft"),
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn message_text_survives_the_mapping() {
-        use protocol::{ContentBlock, ConversationMessage};
+        use lingxi_core::types::{ContentBlock, ConversationMessage};
         let out = propose_messages_to_conversation(&[msg("user", "hello recon")]);
         match &out[0] {
             ConversationMessage::User {

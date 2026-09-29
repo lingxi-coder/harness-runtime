@@ -58,18 +58,18 @@ fn orchestrator_with(interactive_session: bool) -> ConversationOrchestrator {
 
 #[tokio::test]
 async fn composition_publishes_session_mode_from_interactive_session() {
-    let prior = platform_api::session_flags::is_non_interactive_session();
+    let prior = lingxi_core::host::session_flags::is_non_interactive_session();
 
     // Both polarities, so the assertion cannot pass by the flag happening to
     // already hold the expected value. Sequential, single-threaded: this file
     // has exactly one test for exactly this reason.
     let _interactive = orchestrator_with(true);
-    let published_when_interactive = platform_api::session_flags::is_non_interactive_session();
+    let published_when_interactive = lingxi_core::host::session_flags::is_non_interactive_session();
 
     let _headless = orchestrator_with(false);
-    let published_when_headless = platform_api::session_flags::is_non_interactive_session();
+    let published_when_headless = lingxi_core::host::session_flags::is_non_interactive_session();
 
-    platform_api::session_flags::set_non_interactive_session(prior);
+    lingxi_core::host::session_flags::set_non_interactive_session(prior);
 
     assert!(
         !published_when_interactive,

@@ -97,10 +97,10 @@ fn prepend_bullets(items: &[Bullet]) -> Vec<String> {
 /// Port of `isEnvTruthy` for the one env var this module gates on. claude-code's
 /// `isEnvTruthy` (`envUtils.ts:32-37`) is a strict allowlist: unset/empty ⇒
 /// false; otherwise the lowercased, trimmed value must be one of
-/// `1`/`true`/`yes`/`on`. Delegates to the canonical [`platform_api::env::is_env_truthy`]
+/// `1`/`true`/`yes`/`on`. Delegates to the canonical [`lingxi_core::host::env::is_env_truthy`]
 /// so the gating cannot drift from the single shared allowlist.
 fn is_env_truthy(name: &str) -> bool {
-    platform_api::env::is_env_truthy(std::env::var(name).ok().as_deref())
+    lingxi_core::host::env::is_env_truthy(std::env::var(name).ok().as_deref())
 }
 
 /// Port of claude-code 2.1.263 `Dl()`: the runtime disable latch OR
@@ -111,7 +111,7 @@ fn is_env_truthy(name: &str) -> bool {
 pub(crate) fn background_tasks_disabled() -> bool {
     // Single source of truth: the SDK `background_tasks` control request in
     // `apps/cli` reads the same gate and cannot reach this crate.
-    platform_api::env::background_tasks_disabled()
+    lingxi_core::host::env::background_tasks_disabled()
 }
 
 /// Port of `getBackgroundUsageNote` (`prompt.ts:35`). Returns `None` when
@@ -170,7 +170,7 @@ fn cheap_commands_bullet_enabled() -> bool {
 fn should_include_git_instructions() -> bool {
     include_git_instructions_from(
         env_tristate("LINGXI_DISABLE_GIT_INSTRUCTIONS"),
-        platform_api::session_flags::include_git_instructions(),
+        lingxi_core::host::session_flags::include_git_instructions(),
     )
 }
 
@@ -193,7 +193,7 @@ fn include_git_instructions_from(disable_env: Option<bool>, setting: Option<bool
 fn env_tristate(name: &str) -> Option<bool> {
     std::env::var(name)
         .ok()
-        .map(|raw| platform_api::env::is_env_truthy(Some(raw.as_str())))
+        .map(|raw| lingxi_core::host::env::is_env_truthy(Some(raw.as_str())))
 }
 
 // ===== Commit / PR attribution ==============================================
@@ -241,11 +241,11 @@ const PR_ATTRIBUTION: &str = "🤖 Generated with [LingXi](https://claude.com/cl
 /// `hvt()`'s outer session-URL decoration (`ecT(e, url, …)`, gated on
 /// `I_l()` — remote/teleport sessions only) is EXCLUDED surface.
 fn attribution_texts() -> (String, String) {
-    let (commit, pr) = platform_api::session_flags::attribution();
+    let (commit, pr) = lingxi_core::host::session_flags::attribution();
     resolve_attribution(
         commit,
         pr,
-        platform_api::session_flags::include_co_authored_by(),
+        lingxi_core::host::session_flags::include_co_authored_by(),
         COMMIT_ATTRIBUTION,
         PR_ATTRIBUTION,
     )
@@ -681,7 +681,7 @@ fn commit_and_pr_instructions() -> String {
     // task tools are enabled (default) and `TodoWrite` when
     // `LINGXI_ENABLE_TASKS` is a defined-falsy value — the same `tH()`/`TE()`
     // gate `is_todo_v2_enabled` uses. The agent tool (`gi`) is always `Agent`.
-    let task_tool = if platform_api::env::is_env_defined_falsy(
+    let task_tool = if lingxi_core::host::env::is_env_defined_falsy(
         std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref(),
     ) {
         "TodoWrite"

@@ -13,16 +13,16 @@
 use async_trait::async_trait;
 use futures_util::FutureExt;
 use jsonrpc::Connection;
-use platform_api::{
+use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
     McpNegotiatedProtocol, McpNotificationStream, McpPromptDto, McpProtocolEra, McpRawConnection,
     McpResourceContentDto, McpResourceContentsRich, McpResourceDto, McpResourceTemplateDto,
     McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
     ServerCapabilitiesDto,
 };
+use lingxi_core::types::McpConnectionId;
 use platform_common::mcp_stdio::{StderrRing, StdioConfig};
 use platform_common::RemoteMcpTransport;
-use protocol::McpConnectionId;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;

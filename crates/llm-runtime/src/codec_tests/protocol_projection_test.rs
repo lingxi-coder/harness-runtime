@@ -93,7 +93,7 @@ fn switching_away_from_anthropic_keeps_native_text_without_hosted_tool_state() {
 fn exact_tool_result(cache_control: Option<CacheControl>) -> ContentBlock {
     ContentBlock::ToolResult {
         tool_call_id: "call-1".into(),
-        output: Value::Array(protocol::js_utf16::tool_result_sidecar(vec![
+        output: Value::Array(lingxi_core::types::js_utf16::tool_result_sidecar(vec![
             65, 0xd83d, 10,
         ])),
         is_error: false,

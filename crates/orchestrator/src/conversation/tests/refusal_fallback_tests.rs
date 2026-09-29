@@ -3,7 +3,7 @@ use crate::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use crate::OrchestratorConfig;
-use protocol::SessionId;
+use lingxi_core::types::SessionId;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
@@ -242,7 +242,7 @@ async fn clear_session_resets_refusal_fallback_latch() {
         "first session swaps"
     );
 
-    <ConversationOrchestrator as platform_api::OrchestratorHandle>::clear_session(&orch)
+    <ConversationOrchestrator as lingxi_core::host::OrchestratorHandle>::clear_session(&orch)
         .await
         .expect("clear_session succeeds");
 
@@ -264,13 +264,13 @@ async fn resume_session_resets_refusal_fallback_latch() {
         "first session swaps"
     );
 
-    <ConversationOrchestrator as platform_api::OrchestratorHandle>::resume_session(
+    <ConversationOrchestrator as lingxi_core::host::OrchestratorHandle>::resume_session(
         &orch,
         SessionId::new(),
         vec![],
         None,
         None,
-        platform_api::ResumeRuntimeSnapshot::default(),
+        lingxi_core::host::ResumeRuntimeSnapshot::default(),
     )
     .await
     .expect("resume_session succeeds");
@@ -294,14 +294,16 @@ async fn resume_session_resets_refusal_fallback_latch() {
 // notices a later hop superseded.
 
 /// Every `model_refusal_fallback` system message in `history`, in order.
-async fn refusal_frames(orch: &ConversationOrchestrator) -> Vec<protocol::RefusalFallbackMetadata> {
+async fn refusal_frames(
+    orch: &ConversationOrchestrator,
+) -> Vec<lingxi_core::types::RefusalFallbackMetadata> {
     orch.session
         .lock()
         .await
         .history
         .iter()
         .filter_map(|m| match m {
-            protocol::ConversationMessage::System {
+            lingxi_core::types::ConversationMessage::System {
                 subtype: Some(subtype),
                 refusal_fallback: Some(meta),
                 ..
@@ -369,7 +371,7 @@ async fn the_frame_never_reaches_the_wire() {
     assert!(
         history
             .iter()
-            .any(|m| matches!(m, protocol::ConversationMessage::System { .. })),
+            .any(|m| matches!(m, lingxi_core::types::ConversationMessage::System { .. })),
         "precondition: the frame is in history"
     );
 
@@ -377,7 +379,7 @@ async fn the_frame_never_reaches_the_wire() {
     assert!(
         !wire
             .iter()
-            .any(|m| matches!(m, protocol::ConversationMessage::System { .. })),
+            .any(|m| matches!(m, lingxi_core::types::ConversationMessage::System { .. })),
         "a System message on the wire is an InvalidRequest: {wire:?}"
     );
     // And the stronger statement: the real encoder accepts what survives.

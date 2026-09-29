@@ -17,11 +17,11 @@
 use crate::conversation::StreamingApiClient;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
+use lingxi_core::types::{ConversationMessage, ToolUseId};
 use llm_runtime::{
     ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryContentDelta, HistoryEvent,
     HistoryMessageDelta, HistoryResponse, LlmError,
 };
-use protocol::{ConversationMessage, ToolUseId};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Instant;

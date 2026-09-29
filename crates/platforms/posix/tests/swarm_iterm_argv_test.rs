@@ -1,7 +1,7 @@
 //! Exercise the real process boundary with a deterministic it2 executable.
-use platform_api::{PanePosition, SwarmBackend, SwarmLayout};
+use lingxi_core::host::{PanePosition, SwarmBackend, SwarmLayout};
+use lingxi_core::types::AgentId;
 use platform_posix::swarm::ITermSwarmBackend;
-use protocol::AgentId;
 use std::os::unix::fs::PermissionsExt;
 
 #[tokio::test]

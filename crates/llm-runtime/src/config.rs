@@ -340,7 +340,7 @@ pub struct ModelProfile {
     /// Provider-published display metadata. This is informational and never
     /// participates in model routing.
     #[serde(default)]
-    pub metadata: platform_api::ModelMetadata,
+    pub metadata: lingxi_core::host::ModelMetadata,
     /// Model capabilities used for preflight validation.
     #[serde(default)]
     pub capabilities: Capabilities,
@@ -393,7 +393,7 @@ pub struct PricingConfig {
     /// Whether this provider charges per token, via subscription, or is
     /// explicitly free. Unknown is distinct from free.
     #[serde(default, rename = "billingMode")]
-    pub billing_mode: platform_api::ModelBillingMode,
+    pub billing_mode: lingxi_core::host::ModelBillingMode,
     /// Whether missing pricing must fail instead of returning unestimated cost.
     #[serde(default)]
     pub require_priced: bool,

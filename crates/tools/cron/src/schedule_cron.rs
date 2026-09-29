@@ -810,7 +810,7 @@ impl Tool for CronCreateTool {
                 // read error (EIO, EACCES, the rooted-fs symlink rejection) is not
                 // evidence that there are no tasks, and starting from `default()`
                 // would write the new task over every existing one.
-                Err(platform_api::FsError::NotFound(_)) => {
+                Err(lingxi_core::host::FsError::NotFound(_)) => {
                     cron::tasks_file::ScheduledTasks::default()
                 }
                 Err(e) => {
@@ -838,7 +838,7 @@ impl Tool for CronCreateTool {
                         // `sess:` prefix, which would never match.
                         .map(|id| id.as_uuid().to_string()),
                     created_by_pid: Some(std::process::id()),
-                    created_by_proc_start: platform_api::live_sessions::process_start_identity(
+                    created_by_proc_start: lingxi_core::host::live_sessions::process_start_identity(
                         std::process::id(),
                     ),
                 },
@@ -988,7 +988,7 @@ mod tests {
         assert!(on.contains(&format!("{SECTION}\n## Runtime behavior")));
     }
 
-    use platform_api::process::ProcessOutput;
+    use lingxi_core::host::process::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx_in};
 
     fn dummy_out() -> ProcessOutput {
@@ -1038,7 +1038,7 @@ mod tests {
         let _serial = cron::autonomous_loop::TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        use platform_api::process::ProcessOutput;
+        use lingxi_core::host::process::ProcessOutput;
         use tool_api::test_support::shell_test_ctx_in;
         let tool = CronCreateTool::new(shell_test_ctx_in(
             ProcessOutput {
@@ -1140,7 +1140,7 @@ mod tests {
         ctx.session_cwd.swap(nested.clone(), vec![]);
         let tool = CronCreateTool::new(ctx);
         let mut call_ctx = fresh_ctx();
-        let owner = protocol::SessionId::new();
+        let owner = lingxi_core::types::SessionId::new();
         call_ctx.origin_session_id = Some(owner);
         let out = tool
             .call(

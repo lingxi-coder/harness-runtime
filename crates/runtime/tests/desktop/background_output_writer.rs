@@ -1,11 +1,11 @@
 //! Real child → managed output callback → TaskOutputManager failure recovery.
 #![cfg(unix)]
 use async_trait::async_trait;
-use platform_api::filesystem::{
+use lingxi_core::host::filesystem::{
     FileAppendError, FileAppendStage, FileContent, FileEvent, FlockGuard, FsError,
 };
-use platform_api::task_registry::TaskRegistryHandle;
-use platform_api::{
+use lingxi_core::host::task_registry::TaskRegistryHandle;
+use lingxi_core::host::{
     BackgroundExitSink, BackgroundTaskBinding, FileSystem, ProcessCommand, ProcessError,
     ProcessRunner, SandboxedCommand, SandboxedTag,
 };
@@ -73,7 +73,7 @@ impl FileSystem for FaultFs {
         root: &Path,
         relative: &Path,
         content: &str,
-        identity: Option<&platform_api::rooted_fs::RootIdentity>,
+        identity: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
     ) -> Result<(), FileAppendError> {
         if self
             .failures
@@ -176,7 +176,7 @@ async fn real_background_writer_recovers(auto: bool) {
             .unwrap()
             .outcome
         {
-            platform_api::ForegroundOutcome::MovedToBackground(handle) => handle,
+            lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => handle,
             other => panic!("must background: {other:?}"),
         }
     } else {
@@ -276,7 +276,7 @@ async fn supervised_spill_process_helper() {
         .unwrap();
     assert!(matches!(
         result.outcome,
-        platform_api::ForegroundOutcome::Completed(_)
+        lingxi_core::host::ForegroundOutcome::Completed(_)
     ));
     std::fs::write(
         directory.join("result.json"),
@@ -312,7 +312,7 @@ async fn supervised_real_manager_caps_completed_spill_and_preserves_original_siz
     .unwrap()
     .unwrap();
     assert!(status.success());
-    let result: platform_api::ForegroundRunResult =
+    let result: lingxi_core::host::ForegroundRunResult =
         serde_json::from_slice(&std::fs::read(directory.path().join("result.json")).unwrap())
             .unwrap();
     let file = result.output_file.expect("real managed output must spill");
@@ -351,7 +351,7 @@ fn supervised_registry(
         fs.clone(),
         output,
     );
-    let mut ctx = tool_api::test_support::shell_test_ctx(platform_api::ProcessOutput {
+    let mut ctx = tool_api::test_support::shell_test_ctx(lingxi_core::host::ProcessOutput {
         stdout: String::new(),
         stderr: String::new(),
         exit_code: 0,
@@ -419,7 +419,7 @@ async fn supervised_real_bash_registry_exports_after_source_exit_and_adopts() {
     .unwrap()
     .unwrap();
     assert!(status.success());
-    let handoff: Vec<platform_api::shell_handoff::ShellTaskHandoff> =
+    let handoff: Vec<lingxi_core::host::shell_handoff::ShellTaskHandoff> =
         serde_json::from_slice(&std::fs::read(source.path().join("bash-handoff.json")).unwrap())
             .unwrap();
     let target = tempfile::tempdir().unwrap();

@@ -13,9 +13,9 @@
 //! `test-harness/src/parity/fixtures/cc_2_1_270_observer_agent.json`.
 
 use async_trait::async_trait;
+use lingxi_core::host::observer_pairing::ObserverPairing;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::observer_pairing::ObserverPairing;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 use tool_api::context::ToolUseContext;
@@ -57,7 +57,7 @@ pub fn err_target_not_running(report_target_name: &str) -> String {
 /// than safe.
 pub trait ReportTargetLiveness: Send + Sync {
     /// Whether `target` can still receive a report.
-    fn is_running(&self, target: &protocol::AgentId) -> bool;
+    fn is_running(&self, target: &lingxi_core::types::AgentId) -> bool;
 }
 
 /// Delivers a report into the target agent's inbox.
@@ -88,7 +88,7 @@ impl ObserverReportTool {
     fn resolve<'a>(
         &self,
         ctx: &'a ToolUseContext,
-    ) -> Result<(ObserverPairing, &'a protocol::AgentId), String> {
+    ) -> Result<(ObserverPairing, &'a lingxi_core::types::AgentId), String> {
         // Oracle: `let c = e.agentId; if (c === undefined) return …`
         let Some(agent) = ctx.agent_id.as_ref() else {
             return Err(ERR_NOT_AN_OBSERVER.to_string());
@@ -227,9 +227,9 @@ impl Tool for ObserverReportTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::observer_pairing::{ObserverPairings, PairingState, MAIN_PAIRING_KEY};
-    use platform_api::subagent_spawn::ObserverSpec;
-    use protocol::AgentId;
+    use lingxi_core::host::observer_pairing::{ObserverPairings, PairingState, MAIN_PAIRING_KEY};
+    use lingxi_core::host::subagent_spawn::ObserverSpec;
+    use lingxi_core::types::AgentId;
     use std::sync::Arc;
 
     fn fixture() -> Value {
@@ -248,7 +248,7 @@ mod tests {
 
     fn armed_table(observer: AgentId, target: Option<AgentId>) -> Arc<ObserverPairings> {
         let table = Arc::new(ObserverPairings::new());
-        let mut p = platform_api::observer_pairing::ObserverPairing::armed(
+        let mut p = lingxi_core::host::observer_pairing::ObserverPairing::armed(
             observer,
             &ObserverSpec::new("reviewer"),
             "worker-1".into(),
@@ -347,7 +347,7 @@ mod tests {
 
     struct Dead;
     impl ReportTargetLiveness for Dead {
-        fn is_running(&self, _: &protocol::AgentId) -> bool {
+        fn is_running(&self, _: &lingxi_core::types::AgentId) -> bool {
             false
         }
     }

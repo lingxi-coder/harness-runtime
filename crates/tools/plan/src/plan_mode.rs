@@ -651,7 +651,7 @@ impl Tool for ExitPlanModeTool {
         if let Some(requester) = ctx
             .agent_id
             .as_ref()
-            .and_then(platform_api::teammate_plan::requester)
+            .and_then(lingxi_core::host::teammate_plan::requester)
         {
             let mut data = match requester.submit(input).await {
                 Ok(data) => data,
@@ -729,7 +729,7 @@ impl Tool for ExitPlanModeTool {
             .map(str::to_owned)
             .or_else(|| plan_on_disk.clone());
         let plan = plan_for_approval.as_deref().unwrap_or_default();
-        let permission_ctx = platform_api::permission_gate::PermissionCheckContext {
+        let permission_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
             tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
             is_agent_context: ctx.agent_id.is_some(),
             is_non_interactive_session: ctx.options.is_non_interactive_session,
@@ -738,13 +738,15 @@ impl Tool for ExitPlanModeTool {
         };
         let outcome = gate.check_exit_plan_mode(plan, &permission_ctx).await;
         match outcome {
-            platform_api::permission_gate::PermissionOutcome::Allow { updated_input, .. }
-            | platform_api::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+            lingxi_core::host::permission_gate::PermissionOutcome::Allow {
+                updated_input, ..
+            }
+            | lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
                 if let Some(updated) = updated_input {
                     input = updated;
                 }
             }
-            platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
+            lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => {
                 let dur = started_at.elapsed().as_millis() as u64;
                 self.emit_failed(&invocation_id, "permission_denied", dur)
                     .await;
@@ -852,8 +854,8 @@ impl Tool for ExitPlanModeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lingxi_core::types::{AgentId, SessionId};
     use lingxi_core::SessionState;
-    use protocol::{AgentId, SessionId};
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
     use telemetry::{AnalyticsBus, InMemorySink};
@@ -865,28 +867,28 @@ mod tests {
             StdMutex<
                 Vec<(
                     String,
-                    platform_api::permission_gate::PermissionCheckContext,
+                    lingxi_core::host::permission_gate::PermissionCheckContext,
                 )>,
             >,
         >,
-        outcome: platform_api::permission_gate::PermissionOutcome,
+        outcome: lingxi_core::host::permission_gate::PermissionOutcome,
     }
 
     #[async_trait]
-    impl platform_api::permission_gate::PermissionGate for ScriptedExitGate {
+    impl lingxi_core::host::permission_gate::PermissionGate for ScriptedExitGate {
         async fn check(
             &self,
             _name: &str,
             _input: &Value,
-        ) -> platform_api::permission_gate::PermissionDecision {
-            platform_api::permission_gate::PermissionDecision::Allow
+        ) -> lingxi_core::host::permission_gate::PermissionDecision {
+            lingxi_core::host::permission_gate::PermissionDecision::Allow
         }
 
         async fn check_exit_plan_mode(
             &self,
             plan: &str,
-            ctx: &platform_api::permission_gate::PermissionCheckContext,
-        ) -> platform_api::permission_gate::PermissionOutcome {
+            ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+        ) -> lingxi_core::host::permission_gate::PermissionOutcome {
             self.seen
                 .lock()
                 .unwrap()
@@ -895,10 +897,10 @@ mod tests {
         }
     }
 
-    fn allowing_exit_gate() -> Arc<dyn platform_api::permission_gate::PermissionGate> {
+    fn allowing_exit_gate() -> Arc<dyn lingxi_core::host::permission_gate::PermissionGate> {
         Arc::new(ScriptedExitGate {
             seen: Arc::new(StdMutex::new(Vec::new())),
-            outcome: platform_api::permission_gate::PermissionOutcome::AllowAuto {
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
                 updated_input: None,
             },
         })
@@ -1320,7 +1322,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(Vec::new()));
         bctx.permission_gate = Some(Arc::new(ScriptedExitGate {
             seen: seen.clone(),
-            outcome: platform_api::permission_gate::PermissionOutcome::AllowAuto {
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
                 updated_input: None,
             },
         }));
@@ -1342,7 +1344,7 @@ mod tests {
         session.lock().await.plan_mode = true;
         bctx.permission_gate = Some(Arc::new(ScriptedExitGate {
             seen: Arc::new(StdMutex::new(Vec::new())),
-            outcome: platform_api::permission_gate::PermissionOutcome::Deny {
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Deny {
                 reason: "user denied".to_string(),
             },
         }));
@@ -1356,7 +1358,7 @@ mod tests {
     }
     struct RegisteredReviewRequester;
     #[async_trait]
-    impl platform_api::teammate_plan::TeammatePlanRequester for RegisteredReviewRequester {
+    impl lingxi_core::host::teammate_plan::TeammatePlanRequester for RegisteredReviewRequester {
         async fn submit(&self, _: Value) -> Result<Value, String> {
             Ok(
                 json!({"awaitingLeaderApproval":true,"requestId":"review-1","model_content":"Your plan has been submitted to the team lead for approval."}),
@@ -1372,9 +1374,9 @@ mod tests {
         let tool = ExitPlanModeTool::new(bctx);
         let id = AgentId::new();
         context.agent_id = Some(id);
-        let requester: Arc<dyn platform_api::teammate_plan::TeammatePlanRequester> =
+        let requester: Arc<dyn lingxi_core::host::teammate_plan::TeammatePlanRequester> =
             Arc::new(RegisteredReviewRequester);
-        platform_api::teammate_plan::register(id, &requester);
+        lingxi_core::host::teammate_plan::register(id, &requester);
         let result = tool.call(json!({}), context, fresh_tx()).await.unwrap();
         assert_eq!(
             result.model_content.as_deref(),
@@ -1396,13 +1398,13 @@ mod tests {
     /// supplies a user approval for ordinary file writes.
     struct UnattendedPlanGate;
     #[async_trait]
-    impl platform_api::permission_gate::PermissionGate for UnattendedPlanGate {
+    impl lingxi_core::host::permission_gate::PermissionGate for UnattendedPlanGate {
         async fn check(
             &self,
             _: &str,
             _: &Value,
-        ) -> platform_api::permission_gate::PermissionDecision {
-            platform_api::permission_gate::PermissionDecision::Deny {
+        ) -> lingxi_core::host::permission_gate::PermissionDecision {
+            lingxi_core::host::permission_gate::PermissionDecision::Deny {
                 reason: "No unattended permission approval".into(),
             }
         }
@@ -1410,7 +1412,7 @@ mod tests {
 
     struct DiskPlanRequester(String);
     #[async_trait]
-    impl platform_api::teammate_plan::TeammatePlanRequester for DiskPlanRequester {
+    impl lingxi_core::host::teammate_plan::TeammatePlanRequester for DiskPlanRequester {
         fn writable_plan_path(&self) -> Option<&str> {
             Some(&self.0)
         }
@@ -1474,7 +1476,7 @@ mod tests {
     }
     #[tokio::test]
     async fn registry_plan_file_write_then_exit_keeps_submission_text_and_data() {
-        use platform_api::ToolInvoker;
+        use lingxi_core::host::ToolInvoker;
         let id = AgentId::new();
         let root = std::env::temp_dir()
             .canonicalize()
@@ -1482,9 +1484,9 @@ mod tests {
             .join(format!("lingxi-plan-invoker-{}", id.as_uuid()));
         std::fs::create_dir(&root).unwrap();
         let path = root.join("plan.md");
-        let owner: Arc<dyn platform_api::teammate_plan::TeammatePlanRequester> =
+        let owner: Arc<dyn lingxi_core::host::teammate_plan::TeammatePlanRequester> =
             Arc::new(DiskPlanRequester(path.to_string_lossy().into_owned()));
-        platform_api::teammate_plan::register(id, &owner);
+        lingxi_core::host::teammate_plan::register(id, &owner);
         let (bctx, _, _, _) = make_ctx();
         let mut registry = tool_api::registry::ToolRegistry::new();
         registry.register_builtin(Arc::new(PlanDiskWrite));
@@ -1496,9 +1498,9 @@ mod tests {
         ));
         let invoker = tool_api::tool_invoker_impl::RegistryToolInvoker::new(Arc::new(registry))
             .with_gate(gate);
-        let context = || platform_api::tool_invoker::SubagentInvocationContext {
+        let context = || lingxi_core::host::tool_invoker::SubagentInvocationContext {
             permission_pause_observer: None,
-            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+            tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             parent_agent_id: Some(id),
             origin_session_id: None,
             agent_name: Some("planner".into()),

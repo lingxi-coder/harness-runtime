@@ -529,7 +529,7 @@ fn parse_observer_frontmatter(
         "[agentObserver] Agent {owner} declares observer {agent} (observeSubagents={observe_subagents})"
     );
     Some(ObserverSpec {
-        schema_version: platform_api::subagent_spawn::OBSERVER_SCHEMA_VERSION,
+        schema_version: lingxi_core::host::subagent_spawn::OBSERVER_SCHEMA_VERSION,
         agent,
         message,
         observe_subagents,
@@ -699,7 +699,10 @@ fn parse_background(value: Option<&serde_yaml::Value>, path: &Path) -> bool {
 }
 
 /// claude memory coercion: validate against VALID_MEMORY_SCOPES; invalid -> log.
-fn parse_memory(value: Option<&serde_yaml::Value>, path: &Path) -> Option<protocol::WritableScope> {
+fn parse_memory(
+    value: Option<&serde_yaml::Value>,
+    path: &Path,
+) -> Option<lingxi_core::types::WritableScope> {
     let Some(raw) = value.and_then(yaml_as_string) else {
         // A non-string (or absent) value: claude reads `as string | undefined`,
         // so a non-string is treated as defined-but-invalid only when it is a
@@ -708,9 +711,9 @@ fn parse_memory(value: Option<&serde_yaml::Value>, path: &Path) -> Option<protoc
         return None;
     };
     match raw.as_str() {
-        "user" => Some(protocol::WritableScope::User),
-        "project" => Some(protocol::WritableScope::Project),
-        "local" => Some(protocol::WritableScope::Local),
+        "user" => Some(lingxi_core::types::WritableScope::User),
+        "project" => Some(lingxi_core::types::WritableScope::Project),
+        "local" => Some(lingxi_core::types::WritableScope::Local),
         _ => {
             tracing::debug!(
                 path = %path.display(),
@@ -1081,9 +1084,9 @@ pub fn parse_agent_from_json(
     let memory = match obj.get("memory") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(s)) => match s.as_str() {
-            "user" => Some(protocol::WritableScope::User),
-            "project" => Some(protocol::WritableScope::Project),
-            "local" => Some(protocol::WritableScope::Local),
+            "user" => Some(lingxi_core::types::WritableScope::User),
+            "project" => Some(lingxi_core::types::WritableScope::Project),
+            "local" => Some(lingxi_core::types::WritableScope::Local),
             _ => {
                 tracing::debug!("Error parsing agent '{name}' from JSON: invalid memory");
                 return None;
@@ -1169,7 +1172,7 @@ pub fn parse_agent_from_json(
                 }
             };
             Some(ObserverSpec {
-                schema_version: platform_api::subagent_spawn::OBSERVER_SCHEMA_VERSION,
+                schema_version: lingxi_core::host::subagent_spawn::OBSERVER_SCHEMA_VERSION,
                 agent: agent.trim().to_string(),
                 message,
                 observe_subagents,
@@ -1891,7 +1894,7 @@ pub fn project_agent_dirs(cwd: &Path, home: &Path, project_root: Option<&Path>) 
 /// DIRECTORY helper, only `managed-settings.json` content handling.
 ///
 /// Answers: which agent directory wins a name clash. One of several orderings
-/// over these rungs; `protocol::scope`'s module docs index them all and say
+/// over these rungs; `lingxi_core::types::scope`'s module docs index them all and say
 /// which question each answers.
 #[must_use]
 pub fn agent_dir_precedence(
@@ -1906,7 +1909,7 @@ pub fn agent_dir_precedence(
 
     let mut dirs = vec![(
         user_agents_dir,
-        AgentSource::Settings(protocol::SettingsScope::User),
+        AgentSource::Settings(lingxi_core::types::SettingsScope::User),
     )];
     let mut seen_additional: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for extra in additional_dirs {
@@ -1916,11 +1919,12 @@ pub fn agent_dir_precedence(
         }
         dirs.push((dir, AgentSource::AdditionalDirectory));
     }
-    dirs.extend(
-        project
-            .into_iter()
-            .map(|d| (d, AgentSource::Settings(protocol::SettingsScope::Project))),
-    );
+    dirs.extend(project.into_iter().map(|d| {
+        (
+            d,
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
+        )
+    }));
     dirs
 }
 
@@ -1962,7 +1966,7 @@ mod tests {
         let raw = format!("---\nname: \"{name}\"\ndescription: d\n---\nBody");
         parse_agent_markdown(
             &raw,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("a.md"),
         )
@@ -2027,7 +2031,7 @@ mod tests {
         let raw = "---\nname: reviewer\ndescription: review code\n---\nBody";
         let def = parse_agent_markdown(
             raw,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("reviewer.md"),
         )
@@ -2042,7 +2046,7 @@ mod tests {
         let raw = "\u{feff}---\nname: reviewer\ndescription: review code\n---\nBody";
         let def = parse_agent_markdown(
             raw,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("reviewer.md"),
         )
@@ -2057,7 +2061,7 @@ mod tests {
         let raw = "---\nname: worker\ndescription: work\nobserver: reviewer\nobserverMessage: watch for unsupported claims\n---\nBody";
         let def = parse_agent_markdown(
             raw,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("worker.md"),
         )
@@ -2077,7 +2081,7 @@ mod tests {
         let raw = "---\nname: worker\ndescription: work\nobserver: reviewer\nobserveSubagents: false\n---\nBody";
         let def = parse_agent_markdown(
             raw,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("worker.md"),
         )
@@ -2125,7 +2129,7 @@ mod tests {
         let raw = "no frontmatter here";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )
@@ -2191,7 +2195,7 @@ mod tests {
         let raw = "---\nname: \"\"\ndescription: d\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )
@@ -2206,7 +2210,7 @@ mod tests {
         let raw = "---\nname: \"a:b\"\ndescription: d\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )
@@ -2221,7 +2225,7 @@ mod tests {
         let raw = "---\nname: \"a\u{FF1A}b\"\ndescription: d\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )
@@ -2236,7 +2240,7 @@ mod tests {
         let raw = "---\nname: \"-x\"\ndescription: d\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )
@@ -2261,7 +2265,7 @@ mod tests {
         .unwrap();
         let defs = load_agents_from_dirs(&[(
             dir.path().to_path_buf(),
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
         )])
         .await;
         assert_eq!(defs.len(), 1);
@@ -2282,7 +2286,7 @@ mod tests {
         let raw = "---\nname: a\ndescription: \"\"\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )
@@ -2295,7 +2299,7 @@ mod tests {
         let raw = "---\nname: r\ndescription: d\ntools: [Read, Grep]\n---\n";
         let def = parse_agent_markdown(
             raw,
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
             PathBuf::from("/tmp"),
             Path::new("r.md"),
         )
@@ -2349,7 +2353,7 @@ mod tests {
 
         let loaded = load_agents_from_dirs(&[(
             agents,
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         )])
         .await;
         let names: Vec<&str> = loaded.iter().map(|a| a.agent_type.as_str()).collect();
@@ -2380,7 +2384,7 @@ mod tests {
 
         let loaded = load_agents_from_dirs(&[(
             agents,
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         )])
         .await;
         assert_eq!(loaded.len(), 1, "the cycle must not duplicate or hang");
@@ -2406,17 +2410,20 @@ mod tests {
         std::os::unix::fs::symlink(&real, project.join("shared.md")).unwrap();
 
         let loaded = load_agents_from_dirs(&[
-            (user, AgentSource::Settings(protocol::SettingsScope::User)),
+            (
+                user,
+                AgentSource::Settings(lingxi_core::types::SettingsScope::User),
+            ),
             (
                 project,
-                AgentSource::Settings(protocol::SettingsScope::Project),
+                AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
             ),
         ])
         .await;
         assert_eq!(loaded.len(), 1, "one inode, one definition: {loaded:?}");
         assert_eq!(
             loaded[0].source,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             "the FIRST occurrence is kept, matching `wQr`'s scan order",
         );
     }
@@ -2444,10 +2451,13 @@ mod tests {
         .unwrap();
 
         let loaded = load_agents_from_dirs(&[
-            (user, AgentSource::Settings(protocol::SettingsScope::User)),
+            (
+                user,
+                AgentSource::Settings(lingxi_core::types::SettingsScope::User),
+            ),
             (
                 project,
-                AgentSource::Settings(protocol::SettingsScope::Project),
+                AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
             ),
         ])
         .await;
@@ -2474,7 +2484,7 @@ mod tests {
             named(
                 "other",
                 "PROJECT",
-                AgentSource::Settings(protocol::SettingsScope::Project),
+                AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
             ),
         ];
         merge_agents_later_wins(
@@ -2483,12 +2493,12 @@ mod tests {
                 named(
                     "keeper",
                     "POLICY",
-                    AgentSource::Settings(protocol::SettingsScope::Managed),
+                    AgentSource::Settings(lingxi_core::types::SettingsScope::Managed),
                 ),
                 named(
                     "fresh",
                     "POLICY",
-                    AgentSource::Settings(protocol::SettingsScope::Managed),
+                    AgentSource::Settings(lingxi_core::types::SettingsScope::Managed),
                 ),
             ],
         );
@@ -2497,7 +2507,7 @@ mod tests {
         assert_eq!(keeper.when_to_use, "POLICY");
         assert_eq!(
             keeper.source,
-            AgentSource::Settings(protocol::SettingsScope::Managed)
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Managed)
         );
         assert_eq!(
             agents[1].agent_type, "other",
@@ -2587,11 +2597,11 @@ mod tests {
         );
         assert_eq!(
             got[0].1,
-            AgentSource::Settings(protocol::SettingsScope::User)
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User)
         );
         assert!(got[1..]
             .iter()
-            .all(|(_, s)| *s == AgentSource::Settings(protocol::SettingsScope::Project)));
+            .all(|(_, s)| *s == AgentSource::Settings(lingxi_core::types::SettingsScope::Project)));
     }
 
     /// `--add-dir` agents rank between the user tier and the ordinary project
@@ -2614,12 +2624,12 @@ mod tests {
             vec![
                 (
                     d("/home/u/.lingxi/agents"),
-                    AgentSource::Settings(protocol::SettingsScope::User)
+                    AgentSource::Settings(lingxi_core::types::SettingsScope::User)
                 ),
                 (agents("/other"), AgentSource::AdditionalDirectory),
                 (
                     agents("/home/u/repo"),
-                    AgentSource::Settings(protocol::SettingsScope::Project)
+                    AgentSource::Settings(lingxi_core::types::SettingsScope::Project)
                 ),
             ],
             "user < additionalDirectory < projectSettings, deduped",
@@ -2692,11 +2702,11 @@ mod tests {
         let defs = load_agents_from_dirs(&[
             (
                 user.clone(),
-                AgentSource::Settings(protocol::SettingsScope::User),
+                AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             ),
             (
                 project.clone(),
-                AgentSource::Settings(protocol::SettingsScope::Project),
+                AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
             ),
         ])
         .await;
@@ -2712,7 +2722,7 @@ mod tests {
     async fn load_agents_from_missing_dir_yields_empty() {
         let defs = load_agents_from_dirs(&[(
             PathBuf::from("/does/not/exist"),
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
         )])
         .await;
         assert!(defs.is_empty());
@@ -2723,7 +2733,7 @@ mod tests {
     fn md(body: &str) -> AgentDefinition {
         parse_agent_markdown(
             body,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("a.md"),
         )
@@ -2735,7 +2745,7 @@ mod tests {
         let raw = "---\ndescription: d\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("notes.md"),
         )
@@ -2748,7 +2758,7 @@ mod tests {
         let raw = "---\nname: x\n---\nBody";
         let err = parse_agent_markdown(
             raw,
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             PathBuf::from("/tmp"),
             Path::new("x.md"),
         )
@@ -2806,7 +2816,7 @@ mod tests {
     fn memory_valid_and_invalid() {
         assert_eq!(
             md("---\nname: a\ndescription: d\nmemory: project\n---\n").memory,
-            Some(protocol::WritableScope::Project)
+            Some(lingxi_core::types::WritableScope::Project)
         );
         assert_eq!(
             md("---\nname: a\ndescription: d\nmemory: bogus\n---\n").memory,
@@ -3004,7 +3014,7 @@ mod tests {
         assert_eq!(def.max_turns, 5);
         assert_eq!(def.skills, vec!["alpha"]);
         assert_eq!(def.initial_prompt.as_deref(), Some("  start"));
-        assert_eq!(def.memory, Some(protocol::WritableScope::Project));
+        assert_eq!(def.memory, Some(lingxi_core::types::WritableScope::Project));
         assert!(def.background);
         assert_eq!(def.isolation, Some(AgentIsolation::Worktree));
         assert_eq!(def.source, AgentSource::Flag);
@@ -3198,7 +3208,7 @@ mod tests {
         assert_eq!(def.effort, Some(AgentEffort::Numeric(7)));
         assert_eq!(def.max_turns, 3);
         assert!(!def.background);
-        assert_eq!(def.memory, Some(protocol::WritableScope::User));
+        assert_eq!(def.memory, Some(lingxi_core::types::WritableScope::User));
         assert_eq!(def.mcp_servers.len(), 2);
         assert!(matches!(&def.mcp_servers[0], AgentMcpServerSpec::ByName(n) if n == "slack"));
         assert!(matches!(&def.mcp_servers[1], AgentMcpServerSpec::ByName(n) if n == "github"));

@@ -4,6 +4,7 @@
 //! the cancel token and returns `TurnOutcome::{EndTurn, Cancelled}`.
 
 use async_trait::async_trait;
+use lingxi_core::types::{ContentBlock, ConversationMessage, ToolUseId};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -12,7 +13,6 @@ use orchestrator::test_support_stream::{
     message_start, message_stop, text_delta, MockStreamingApiClient,
 };
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig, TurnOutcome};
-use protocol::{ContentBlock, ConversationMessage, ToolUseId};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -99,14 +99,14 @@ async fn handle_trait_run_turn_streaming_with_cancel_pre_cancelled_returns_cance
     ];
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![stream]));
     let orch = Arc::new(build_orch(api));
-    let handle: Arc<dyn platform_api::OrchestratorHandle> = orch;
+    let handle: Arc<dyn lingxi_core::host::OrchestratorHandle> = orch;
     let cancel = CancellationToken::new();
     cancel.cancel();
     let outcome = handle
         .run_turn_streaming_with_cancel("hi", cancel)
         .await
         .unwrap();
-    assert!(matches!(outcome, platform_api::TurnOutcome::Cancelled));
+    assert!(matches!(outcome, lingxi_core::host::TurnOutcome::Cancelled));
 }
 
 // ============================================================================

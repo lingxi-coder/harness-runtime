@@ -40,7 +40,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use crate::registry::SkillRegistry;
-use platform_api::RuntimeSpawner;
+use lingxi_core::host::RuntimeSpawner;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -371,9 +371,10 @@ mod tests {
             &self,
             name: &str,
             task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
             tokio::spawn(task);
-            Ok(platform_api::BackgroundTaskHandle {
+            Ok(lingxi_core::host::BackgroundTaskHandle {
                 task_name: name.to_string(),
                 task_id: 0,
             })
@@ -381,8 +382,8 @@ mod tests {
         async fn sleep(&self, _d: std::time::Duration) {}
         async fn cancel(
             &self,
-            _h: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _h: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }

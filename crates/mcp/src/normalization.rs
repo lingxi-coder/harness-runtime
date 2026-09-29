@@ -30,7 +30,7 @@
 //! `ConversationOrchestrator::build_wire_tools` serializes each tool under its
 //! normalized FQN. The model-facing FQN normalizes BOTH the server AND the tool
 //! segment (matching claude-code `buildMcpToolName`, `client.ts:1768`); the raw
-//! wire tool name is kept on [`platform_api::McpToolDto::tool_name`] and recovered for
+//! wire tool name is kept on [`lingxi_core::host::McpToolDto::tool_name`] and recovered for
 //! dispatch by [`crate::registry::McpRegistry::resolve_wire_tool_name`].
 
 /// Normalize a server name to the API pattern `^[a-zA-Z0-9_-]{1,64}$` by
@@ -45,7 +45,7 @@
 /// here.
 #[must_use]
 pub fn normalize_name_for_mcp(name: &str) -> String {
-    protocol::normalize_name_for_mcp(name)
+    lingxi_core::types::normalize_name_for_mcp(name)
 }
 
 /// Whether `name` is a reserved MCP server name — claude-code 2.1.206's `TEt`

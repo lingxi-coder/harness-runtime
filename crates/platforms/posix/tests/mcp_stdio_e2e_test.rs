@@ -11,7 +11,7 @@
 //! resource template, one `greet` prompt).
 
 use futures::StreamExt;
-use platform_api::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
+use lingxi_core::host::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 use platform_posix::mcp::PosixMcpTransport;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -143,7 +143,7 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     .await
     .expect("call_tool(unknown) timed out");
     assert!(
-        matches!(not_found, Err(platform_api::McpError::ToolNotFound(ref t)) if t == "nope"),
+        matches!(not_found, Err(lingxi_core::host::McpError::ToolNotFound(ref t)) if t == "nope"),
         "unknown tool must map to ToolNotFound(\"nope\"), got {not_found:?}"
     );
 
@@ -239,7 +239,7 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     // ping must fail with a connection error rather than hang.
     let after = transport.ping(conn.connection_id).await;
     assert!(
-        matches!(after, Err(platform_api::McpError::Connection(_))),
+        matches!(after, Err(lingxi_core::host::McpError::Connection(_))),
         "ping after disconnect should report a connection error, got {after:?}"
     );
 }
@@ -249,10 +249,10 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ping_unknown_connection_errors() {
     let transport = PosixMcpTransport::new();
-    let bogus = protocol::McpConnectionId::new();
+    let bogus = lingxi_core::types::McpConnectionId::new();
     let res = transport.ping(bogus).await;
     assert!(
-        matches!(res, Err(platform_api::McpError::Connection(_))),
+        matches!(res, Err(lingxi_core::host::McpError::Connection(_))),
         "ping on an unknown id should be a connection error, got {res:?}"
     );
 }

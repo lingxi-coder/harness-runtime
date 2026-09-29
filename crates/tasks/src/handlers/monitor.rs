@@ -6,7 +6,7 @@ use crate::output_manager::TaskOutputManager;
 use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     BackgroundTaskHandle, ProcessCommand, ProcessError, ProcessRunner, ProcessStreamSink,
     RuntimeSpawner, Sandbox,
 };
@@ -56,7 +56,7 @@ pub fn bounded_monitors_enabled() -> bool {
 
 /// 2.1.270 `Vye()`: ten minutes for single-shot print, thirty otherwise.
 pub fn bounded_monitor_timeout_ms() -> u64 {
-    if platform_api::session_flags::is_single_shot_print_session() {
+    if lingxi_core::host::session_flags::is_single_shot_print_session() {
         600_000
     } else {
         1_800_000
@@ -65,7 +65,7 @@ pub fn bounded_monitor_timeout_ms() -> u64 {
 
 /// Upstream `Lt(ms, {hideTrailingZeros:true})` formatting.
 pub fn monitor_duration(ms: u64) -> String {
-    let text = platform_api::shell_support::format_duration_ms(ms);
+    let text = lingxi_core::host::shell_support::format_duration_ms(ms);
     let mut parts: Vec<_> = text.split(' ').collect();
     while parts.len() > 1 && parts.last().is_some_and(|part| part.starts_with('0')) {
         parts.pop();
@@ -379,7 +379,7 @@ impl MonitorHandler {
         self
     }
 
-    fn classify(result: &Result<platform_api::ProcessOutput, ProcessError>) -> TaskStatus {
+    fn classify(result: &Result<lingxi_core::host::ProcessOutput, ProcessError>) -> TaskStatus {
         match result {
             Ok(output) if output.exit_code == 0 => TaskStatus::Completed,
             Ok(_) => TaskStatus::Failed,
@@ -406,7 +406,7 @@ impl MonitorHandler {
     ///   monitor stopped by the high-volume rule already said why.
     fn timeout_marker_due(
         had_deadline: bool,
-        result: &Result<platform_api::ProcessOutput, ProcessError>,
+        result: &Result<lingxi_core::host::ProcessOutput, ProcessError>,
         cancelled: bool,
     ) -> bool {
         had_deadline && matches!(result, Err(ProcessError::Timeout)) && !cancelled
@@ -414,7 +414,7 @@ impl MonitorHandler {
 
     fn terminal_status(
         cancelled: bool,
-        result: &Result<platform_api::ProcessOutput, ProcessError>,
+        result: &Result<lingxi_core::host::ProcessOutput, ProcessError>,
     ) -> TaskStatus {
         if cancelled {
             TaskStatus::Killed
@@ -430,7 +430,7 @@ impl MonitorHandler {
         source: crate::task_trait::WebSocketMonitorInput,
         ctx: TaskContext,
     ) -> Result<TaskHandle, TaskError> {
-        use platform_api::http::MonitorWebSocketFrame;
+        use lingxi_core::host::http::MonitorWebSocketFrame;
         let task_id = crate::id::generate_task_id(TaskType::Monitor);
         let output_file = self
             .output_manager
@@ -485,7 +485,7 @@ impl MonitorHandler {
                 match result {
                     Err(error) => {
                         let event = match error {
-                            platform_api::HttpError::Status { status, .. } => {
+                            lingxi_core::host::HttpError::Status { status, .. } => {
                                 format!("[WebSocket upgrade rejected: HTTP {status}]")
                             }
                             other => format!("[WebSocket error: {other}]"),
@@ -827,9 +827,9 @@ impl Task for MonitorHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use platform_api::{
+    use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use lingxi_core::host::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use lingxi_core::host::{
         ProcessCommand, ProcessHandle, ProcessOutput, SandboxError, SandboxPolicy, SandboxedCommand,
     };
     use std::collections::HashMap as StdHashMap;
@@ -1082,7 +1082,8 @@ mod tests {
     /// even though they do meet the process runner's own default deadline.
     #[test]
     fn the_timeout_marker_is_owed_only_by_a_real_deadline() {
-        let timeout: Result<platform_api::ProcessOutput, ProcessError> = Err(ProcessError::Timeout);
+        let timeout: Result<lingxi_core::host::ProcessOutput, ProcessError> =
+            Err(ProcessError::Timeout);
         assert!(MonitorHandler::timeout_marker_due(true, &timeout, false));
 
         // Persistent monitor: the runner still times it out, the oracle is silent.
@@ -1277,7 +1278,7 @@ mod tests {
             SandboxCapability {
                 available: true,
                 reason: None,
-                features: platform_api::SandboxFeatures::default(),
+                features: lingxi_core::host::SandboxFeatures::default(),
             }
         }
     }
@@ -1509,36 +1510,39 @@ mod tests {
     }
     struct SocketHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for SocketHttp {
+    impl lingxi_core::host::HttpTransport for SocketHttp {
         async fn request(
             &self,
-            _: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            _: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
             unreachable!()
         }
         async fn stream_sse(
             &self,
-            _: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            _: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
             unreachable!()
         }
         async fn monitor_websocket(
             &self,
             url: String,
             protocols: Vec<String>,
-        ) -> Result<platform_api::http::MonitorWebSocketReceiver, platform_api::HttpError> {
+        ) -> Result<lingxi_core::host::http::MonitorWebSocketReceiver, lingxi_core::host::HttpError>
+        {
             assert_eq!(url, "wss://events.example.com/feed");
             assert_eq!(protocols, vec!["v1"]);
             let (tx, rx) = tokio::sync::mpsc::channel(4);
-            tx.send(Ok(platform_api::http::MonitorWebSocketFrame::Text(
+            tx.send(Ok(lingxi_core::host::http::MonitorWebSocketFrame::Text(
                 "one\ntwo".into(),
             )))
             .await
             .unwrap();
-            tx.send(Ok(platform_api::http::MonitorWebSocketFrame::Binary(17)))
-                .await
-                .unwrap();
-            tx.send(Ok(platform_api::http::MonitorWebSocketFrame::Closed(
+            tx.send(Ok(lingxi_core::host::http::MonitorWebSocketFrame::Binary(
+                17,
+            )))
+            .await
+            .unwrap();
+            tx.send(Ok(lingxi_core::host::http::MonitorWebSocketFrame::Closed(
                 1000,
                 "done".into(),
             )))
@@ -1555,10 +1559,10 @@ mod tests {
         let mut handle = handler
             .spawn(
                 TaskSpawnInput::MonitorWs(crate::task_trait::WebSocketMonitorInput {
-                    registration: platform_api::task_registry::WebSocketMonitorRegistration {
+                    registration: lingxi_core::host::task_registry::WebSocketMonitorRegistration {
                         url: "wss://events.example.com/feed".into(),
                         protocols: vec!["v1".into()],
-                        task: platform_api::task_registry::MonitorRegistration {
+                        task: lingxi_core::host::task_registry::MonitorRegistration {
                             persistent: true,
                             ..Default::default()
                         },

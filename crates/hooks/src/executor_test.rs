@@ -36,7 +36,7 @@ mod session_end_timeout_tests {
     use super::{max_per_hook_timeout_ms, session_end_batch_timeout_ms};
     use crate::definition::{HookDefinition, HookExecutor, HookSource};
     use crate::events::HookEventType;
-    use protocol::HookId;
+    use lingxi_core::types::HookId;
     use std::time::Duration;
 
     fn hook_with_timeout(timeout: Option<Duration>) -> HookDefinition {
@@ -48,7 +48,7 @@ mod session_end_timeout_tests {
             executor: HookExecutor::Builtin {
                 handler_id: "noop".into(),
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout,
             priority: 0,
@@ -146,8 +146,8 @@ mod session_end_batch_deadline_tests {
     use crate::events::{HookEvent, HookEventType};
     use crate::registry::{HookContext, HookRegistry};
     use crate::response::{HookOutcome, HookResult};
-    use platform_api::RuntimeError;
-    use protocol::HookId;
+    use lingxi_core::host::RuntimeError;
+    use lingxi_core::types::HookId;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// `HttpTransport` stub — the Builtin arm never touches HTTP.
@@ -156,15 +156,19 @@ mod session_end_batch_deadline_tests {
     impl HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
@@ -175,13 +179,13 @@ mod session_end_batch_deadline_tests {
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, RuntimeError> {
             Err(RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
         async fn cancel(
             &self,
-            _handle: &platform_api::BackgroundTaskHandle,
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
         ) -> Result<(), RuntimeError> {
             Ok(())
         }
@@ -222,7 +226,7 @@ mod session_end_batch_deadline_tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: handler_id.into(),
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -236,7 +240,7 @@ mod session_end_batch_deadline_tests {
 
     fn session_end_event() -> HookEvent {
         HookEvent::SessionEnd {
-            session_id: protocol::SessionId::nil(),
+            session_id: lingxi_core::types::SessionId::nil(),
             reason: "logout".into(),
         }
     }
@@ -345,11 +349,11 @@ mod command_arm_tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::{HookEvent, HookEventType};
     use crate::response::HookDecision;
-    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use platform_api::{
+    use lingxi_core::host::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use lingxi_core::host::{
         ProcessHandle, ProcessOutput, RuntimeError, SandboxPolicy, SandboxedCommand,
     };
-    use protocol::{HookId, ToolUseId};
+    use lingxi_core::types::{HookId, ToolUseId};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -439,7 +443,7 @@ mod command_arm_tests {
             &self,
             cmd: ProcessCommand,
             _policy: &SandboxPolicy,
-        ) -> Result<SandboxedCommand, platform_api::SandboxError> {
+        ) -> Result<SandboxedCommand, lingxi_core::host::SandboxError> {
             Ok(SandboxedCommand::__new_sandboxed(
                 cmd,
                 SandboxedTag::BypassAuditedWithReason {
@@ -459,7 +463,7 @@ mod command_arm_tests {
             SandboxCapability {
                 available: true,
                 reason: None,
-                features: platform_api::SandboxFeatures::default(),
+                features: lingxi_core::host::SandboxFeatures::default(),
             }
         }
     }
@@ -472,13 +476,13 @@ mod command_arm_tests {
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, RuntimeError> {
             Err(RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
         async fn cancel(
             &self,
-            _handle: &platform_api::BackgroundTaskHandle,
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
         ) -> Result<(), RuntimeError> {
             Ok(())
         }
@@ -490,15 +494,19 @@ mod command_arm_tests {
     impl HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
@@ -524,7 +532,7 @@ mod command_arm_tests {
                 cwd: None,
                 shell: None,
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -742,7 +750,7 @@ mod command_arm_tests {
     /// survives.
     #[test]
     fn eval_confined_matches_only_the_literal_true() {
-        use platform_api::env::is_eval_confined_value;
+        use lingxi_core::host::env::is_eval_confined_value;
         assert!(!is_eval_confined_value(None));
         for spelling in ["1", "yes", "on", "TRUE", ""] {
             assert!(
@@ -1531,7 +1539,7 @@ mod command_arm_tests {
 
     #[tokio::test]
     async fn subagent_stop_event_serializes_agent_id() {
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         let stdin = dispatch_and_capture(
             HookEventType::SubagentStop,
             HookEvent::SubagentStop {
@@ -1602,7 +1610,7 @@ mod command_arm_tests {
 
     #[tokio::test]
     async fn subagent_stop_serializes_live_context_fields() {
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         let stdin = dispatch_and_capture_with_ctx(
             HookEventType::SubagentStop,
             HookEvent::SubagentStop {
@@ -1685,7 +1693,7 @@ mod command_arm_tests {
         let stdin = dispatch_and_capture(
             HookEventType::SessionStart,
             HookEvent::SessionStart {
-                session_id: protocol::SessionId::nil(),
+                session_id: lingxi_core::types::SessionId::nil(),
                 source: "startup".into(),
             },
         )
@@ -1734,7 +1742,7 @@ mod command_arm_tests {
         let stdin = dispatch_and_capture(
             HookEventType::SessionEnd,
             HookEvent::SessionEnd {
-                session_id: protocol::SessionId::nil(),
+                session_id: lingxi_core::types::SessionId::nil(),
                 reason: "logout".into(),
             },
         )
@@ -1971,7 +1979,7 @@ mod command_arm_tests {
 
     #[tokio::test]
     async fn subagent_start_event_serializes_agent() {
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         let stdin = dispatch_and_capture(
             HookEventType::SubagentStart,
             HookEvent::SubagentStart {
@@ -2209,7 +2217,7 @@ mod command_arm_tests {
             (HookEvent::Stop { reason: "r".into() }, "Stop"),
             (
                 HookEvent::SubagentStop {
-                    agent_id: protocol::AgentId::new(),
+                    agent_id: lingxi_core::types::AgentId::new(),
                     status: "completed".into(),
                     agent_type: String::new(),
                 },
@@ -2249,7 +2257,7 @@ mod command_arm_tests {
             ),
             (
                 HookEvent::SessionStart {
-                    session_id: protocol::SessionId::nil(),
+                    session_id: lingxi_core::types::SessionId::nil(),
                     source: "startup".into(),
                 },
                 "SessionStart",
@@ -2273,7 +2281,7 @@ mod command_arm_tests {
             ),
             (
                 HookEvent::SessionEnd {
-                    session_id: protocol::SessionId::nil(),
+                    session_id: lingxi_core::types::SessionId::nil(),
                     reason: "logout".into(),
                 },
                 "SessionEnd",
@@ -2312,7 +2320,7 @@ mod command_arm_tests {
                 HookEvent::PermissionDenied {
                     tool_name: "Bash".into(),
                     tool_input: json!({ "command": "git push" }),
-                    tool_use_id: protocol::ToolUseId::new(),
+                    tool_use_id: lingxi_core::types::ToolUseId::new(),
                     reason: "denied".into(),
                 },
                 "PermissionDenied",
@@ -2325,7 +2333,7 @@ mod command_arm_tests {
             ),
             (
                 HookEvent::SubagentStart {
-                    agent_id: protocol::AgentId::new(),
+                    agent_id: lingxi_core::types::AgentId::new(),
                     agent_type: "general-purpose".into(),
                     parent_agent_id: None,
                 },
@@ -2463,7 +2471,7 @@ mod command_arm_tests {
         // SubagentStop: same two arrays.
         let (_, sa_body) = build_envelope_body(
             &HookEvent::SubagentStop {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 status: "completed".into(),
                 agent_type: "general-purpose".into(),
             },
@@ -2562,12 +2570,12 @@ mod async_path_tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::{HookEvent, HookEventType};
     use crate::response::HookDecision;
-    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use platform_api::{
+    use lingxi_core::host::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use lingxi_core::host::{
         BackgroundTaskHandle, ProcessError, ProcessHandle, ProcessOutput, RuntimeError,
         RuntimeSpawner, SandboxPolicy, SandboxedCommand,
     };
-    use protocol::{HookId, ToolUseId};
+    use lingxi_core::types::{HookId, ToolUseId};
     use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
@@ -2678,7 +2686,7 @@ mod async_path_tests {
             &self,
             cmd: ProcessCommand,
             _policy: &SandboxPolicy,
-        ) -> Result<SandboxedCommand, platform_api::SandboxError> {
+        ) -> Result<SandboxedCommand, lingxi_core::host::SandboxError> {
             Ok(SandboxedCommand::__new_sandboxed(
                 cmd,
                 SandboxedTag::BypassAuditedWithReason {
@@ -2698,7 +2706,7 @@ mod async_path_tests {
             SandboxCapability {
                 available: true,
                 reason: None,
-                features: platform_api::SandboxFeatures::default(),
+                features: lingxi_core::host::SandboxFeatures::default(),
             }
         }
     }
@@ -2709,15 +2717,19 @@ mod async_path_tests {
     impl HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
@@ -2750,7 +2762,7 @@ mod async_path_tests {
                 cwd: None,
                 shell: None,
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking,
             timeout: None,
             priority,
@@ -3208,7 +3220,7 @@ mod async_path_tests {
     /// A `ProcessRunner` whose `run_hook_with_async_detection` BACKGROUNDS the
     /// hook (mirroring the posix runner when it sees the `{"async":true}` marker
     /// on the child's first stdout line): it hands back a
-    /// [`platform_api::HookRunOutcome::Backgrounded`] with an eventual-output handle
+    /// [`lingxi_core::host::HookRunOutcome::Backgrounded`] with an eventual-output handle
     /// pre-loaded with `eventual`. Its plain `run` is never taken on this path.
     struct MarkerBackgroundingRunner {
         eventual: StdMutex<Option<ProcessOutput>>,
@@ -3231,12 +3243,12 @@ mod async_path_tests {
             &self,
             _cmd: &SandboxedCommand,
             _default_async_timeout: Duration,
-        ) -> Result<platform_api::HookRunOutcome, ProcessError> {
+        ) -> Result<lingxi_core::host::HookRunOutcome, ProcessError> {
             let (tx, rx) = tokio::sync::oneshot::channel();
             // Deliver the eventual (post-marker) output immediately, as a real
             // detached drain would once the child finished.
             let _ = tx.send(self.eventual.lock().unwrap().take().expect("one call"));
-            Ok(platform_api::HookRunOutcome::Backgrounded {
+            Ok(lingxi_core::host::HookRunOutcome::Backgrounded {
                 async_timeout: self.async_timeout,
                 output: Some(rx),
             })
@@ -3292,10 +3304,10 @@ mod async_path_tests {
             &self,
             _cmd: &SandboxedCommand,
             _default_async_timeout: Duration,
-        ) -> Result<platform_api::HookRunOutcome, ProcessError> {
+        ) -> Result<lingxi_core::host::HookRunOutcome, ProcessError> {
             let (tx, rx) = tokio::sync::oneshot::channel();
             *self.sender.lock().unwrap() = Some(tx);
-            Ok(platform_api::HookRunOutcome::Backgrounded {
+            Ok(lingxi_core::host::HookRunOutcome::Backgrounded {
                 async_timeout: self.async_timeout,
                 output: Some(rx),
             })
@@ -3323,12 +3335,12 @@ mod async_path_tests {
     }
 
     #[async_trait]
-    impl platform_api::OutputStream for AsyncProgressObserver {
+    impl lingxi_core::host::OutputStream for AsyncProgressObserver {
         async fn emit_text(&self, _text: &str) {}
 
         async fn emit_tool_call(
             &self,
-            _id: &protocol::ToolUseId,
+            _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
             _input: &serde_json::Value,
         ) {
@@ -3336,14 +3348,15 @@ mod async_path_tests {
 
         async fn emit_tool_result(
             &self,
-            _id: &protocol::ToolUseId,
+            _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
             _model_text: &str,
             _result: &serde_json::Value,
         ) {
         }
 
-        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &platform_api::CostSnapshot) {}
+        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &lingxi_core::host::CostSnapshot) {
+        }
 
         async fn emit_hook_progress_started(
             &self,
@@ -3665,7 +3678,7 @@ mod once_and_status_message_tests {
     use super::*;
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::{HookEvent, HookEventType};
-    use protocol::{HookId, ToolUseId};
+    use lingxi_core::types::{HookId, ToolUseId};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
 
@@ -3675,12 +3688,12 @@ mod once_and_status_message_tests {
     }
 
     #[async_trait]
-    impl platform_api::OutputStream for ProgressObserver {
+    impl lingxi_core::host::OutputStream for ProgressObserver {
         async fn emit_text(&self, _text: &str) {}
 
         async fn emit_tool_call(
             &self,
-            _id: &protocol::ToolUseId,
+            _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
             _input: &serde_json::Value,
         ) {
@@ -3688,14 +3701,15 @@ mod once_and_status_message_tests {
 
         async fn emit_tool_result(
             &self,
-            _id: &protocol::ToolUseId,
+            _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
             _model_text: &str,
             _result: &serde_json::Value,
         ) {
         }
 
-        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &platform_api::CostSnapshot) {}
+        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &lingxi_core::host::CostSnapshot) {
+        }
 
         async fn emit_hook_progress_started(
             &self,
@@ -3725,15 +3739,19 @@ mod once_and_status_message_tests {
     impl HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
@@ -3745,14 +3763,15 @@ mod once_and_status_message_tests {
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-            Err(platform_api::RuntimeError::Internal("unused".into()))
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
         async fn cancel(
             &self,
-            _handle: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
@@ -3897,7 +3916,7 @@ mod once_and_status_message_tests {
     /// orchestrator chokepoint owns those), so the in-child fire can't double-run.
     #[tokio::test]
     async fn execute_agent_scoped_fires_only_agent_frontmatter() {
-        let agent = protocol::AgentId::new();
+        let agent = lingxi_core::types::AgentId::new();
         let agent_runs = Arc::new(AtomicU32::new(0));
         let session_runs = Arc::new(AtomicU32::new(0));
 
@@ -3911,7 +3930,7 @@ mod once_and_status_message_tests {
         let mut sess = builtin_hook("session-stop", false, None);
         sess.events = vec![HookEventType::SubagentStop];
         sess.name = "session-stop".into();
-        sess.source = HookSource::Settings(protocol::SettingsScope::User);
+        sess.source = HookSource::Settings(lingxi_core::types::SettingsScope::User);
         registry.register(sess);
 
         let reg = Arc::new(RwLock::new(registry));
@@ -3981,7 +4000,7 @@ mod once_and_status_message_tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: "rewrite".into(),
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4043,7 +4062,7 @@ mod once_and_status_message_tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: "ctx".into(),
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4120,7 +4139,7 @@ mod once_and_status_message_tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: "rewrite_all".into(),
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4178,7 +4197,7 @@ mod once_and_status_message_tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: "term".into(),
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4216,7 +4235,7 @@ mod once_and_status_message_tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: "observe".into(),
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4330,13 +4349,15 @@ mod http_agent_dispatch_tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::{HookEvent, HookEventType};
     use crate::response::HookDecision;
-    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-    use platform_api::subagent_spawn::{
+    use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+    use lingxi_core::host::subagent_spawn::{
         SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest,
         SubagentUsage,
     };
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use protocol::{HookId, HttpResponse, ToolUseId};
+    use lingxi_core::host::tool_invoker::{
+        SubagentInvocationContext, ToolInvoker, ToolInvokerError,
+    };
+    use lingxi_core::types::{HookId, HttpResponse, ToolUseId};
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -4348,14 +4369,15 @@ mod http_agent_dispatch_tests {
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-            Err(platform_api::RuntimeError::Internal("unused".into()))
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
         async fn cancel(
             &self,
-            _handle: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
@@ -4363,7 +4385,7 @@ mod http_agent_dispatch_tests {
     /// `HttpTransport` mock that records each request and returns a canned body
     /// — so a test can prove the HTTP arm reached it with the right URL.
     struct RecordingHttp {
-        recorded: Mutex<Vec<protocol::HttpRequest>>,
+        recorded: Mutex<Vec<lingxi_core::types::HttpRequest>>,
         body: String,
         status: u16,
     }
@@ -4371,8 +4393,8 @@ mod http_agent_dispatch_tests {
     impl HttpTransport for RecordingHttp {
         async fn request(
             &self,
-            req: protocol::HttpRequest,
-        ) -> Result<HttpResponse, platform_api::HttpError> {
+            req: lingxi_core::types::HttpRequest,
+        ) -> Result<HttpResponse, lingxi_core::host::HttpError> {
             self.recorded.lock().unwrap().push(req);
             Ok(HttpResponse {
                 status: self.status,
@@ -4383,9 +4405,11 @@ mod http_agent_dispatch_tests {
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
@@ -4411,7 +4435,7 @@ mod http_agent_dispatch_tests {
                 allowed_env_vars: Vec::new(),
                 timeout: Duration::from_secs(5),
             },
-            source: HookSource::Settings(protocol::SettingsScope::Project),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4496,15 +4520,19 @@ mod http_agent_dispatch_tests {
     impl HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
@@ -4543,7 +4571,7 @@ mod http_agent_dispatch_tests {
                 prompt: "vet this".into(),
                 model: None,
             },
-            source: HookSource::Settings(protocol::SettingsScope::Project),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4560,7 +4588,7 @@ mod http_agent_dispatch_tests {
         let spawner = Arc::new(RecordingSpawner {
             recorded: Mutex::new(Vec::new()),
             result: Mutex::new(Some(Ok(SubagentResult::Completed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 content: json!(r#"{"decision":"approve"}"#),
                 usage: SubagentUsage::default(),
                 total_tool_use_count: 0,
@@ -4628,7 +4656,7 @@ mod prompt_dispatch_tests {
     use crate::mcp_invoker::{HookMcpInvocation, HookMcpInvocationResult, HookMcpInvoker};
     use crate::prompt_executor::{HookPromptRunner, PromptHookError, PromptHookRequest};
     use crate::response::HookDecision;
-    use protocol::{HookId, SessionId, ToolUseId};
+    use lingxi_core::types::{HookId, SessionId, ToolUseId};
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -4640,14 +4668,15 @@ mod prompt_dispatch_tests {
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-            Err(platform_api::RuntimeError::Internal("unused".into()))
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
         async fn cancel(
             &self,
-            _handle: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
@@ -4658,15 +4687,19 @@ mod prompt_dispatch_tests {
     impl HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
@@ -4726,7 +4759,7 @@ mod prompt_dispatch_tests {
                 model: Some("claude-sonnet-4-6".into()),
                 continue_on_block: false,
             },
-            source: HookSource::Settings(protocol::SettingsScope::Project),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4754,12 +4787,12 @@ mod prompt_dispatch_tests {
             Arc::new(UnusedRuntime),
         )
         .with_prompt_runner(runner.clone());
-        let session = protocol::SessionId::new();
-        let child = protocol::AgentId::new();
-        let other = protocol::AgentId::new();
+        let session = lingxi_core::types::SessionId::new();
+        let child = lingxi_core::types::AgentId::new();
+        let other = lingxi_core::types::AgentId::new();
         let snapshot = |text: &str| crate::PromptHookTranscript {
-            messages: vec![protocol::ConversationMessage::user(
-                protocol::MessageId::new(),
+            messages: vec![lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
                 text.into(),
             )],
             last_usage_tokens: 321,
@@ -4791,7 +4824,7 @@ mod prompt_dispatch_tests {
         drop(calls);
         assert!(exec.take_agent_prompt_transcript(session, child).is_none());
         assert!(exec
-            .take_agent_prompt_transcript(protocol::SessionId::new(), other)
+            .take_agent_prompt_transcript(lingxi_core::types::SessionId::new(), other)
             .is_none());
         exec.clear_session_hooks(session).await;
         assert!(exec.take_agent_prompt_transcript(session, other).is_none());
@@ -4875,7 +4908,7 @@ mod prompt_dispatch_tests {
                 source: source.into(),
                 budget_ms: Some(500),
             },
-            source: HookSource::Settings(protocol::SettingsScope::Project),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -5048,7 +5081,7 @@ mod prompt_dispatch_tests {
                 tool: "format_file".into(),
                 input: std::collections::HashMap::new(),
             },
-            source: HookSource::Settings(protocol::SettingsScope::Project),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -5098,7 +5131,7 @@ mod prompt_dispatch_tests {
                     ("event".into(), json!("hook:${hook_event_name}")),
                 ]),
             },
-            source: HookSource::Settings(protocol::SettingsScope::Project),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             blocking: true,
             timeout: Some(Duration::from_secs(12)),
             priority: 0,
@@ -5155,7 +5188,7 @@ mod prompt_dispatch_tests {
                 tool: "lint".into(),
                 input: std::collections::HashMap::new(),
             },
-            source: HookSource::Settings(protocol::SettingsScope::Project),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -5332,11 +5365,11 @@ mod sh01_classifier_context_tests {
 #[test]
 fn teammate_idle_uses_bare_session_uuid_and_omits_tool_context_only_fields() {
     let ctx = HookContext {
-        session_id: protocol::SessionId::nil(),
+        session_id: lingxi_core::types::SessionId::nil(),
         transcript_path: "/workspace/session.jsonl".into(),
         cwd: "/workspace".into(),
         permission_mode: Some("plan".into()),
-        agent_id: Some(protocol::AgentId::new()),
+        agent_id: Some(lingxi_core::types::AgentId::new()),
         effort: Some(crate::hook_payload::EffortLevel {
             level: "high".into(),
         }),

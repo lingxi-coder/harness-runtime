@@ -13,12 +13,12 @@ use hooks::{
     BuiltinHookHandler, HookContext, HookDefinition, HookEvent, HookEventType, HookExecutor,
     HookExecutorImpl, HookOutcome, HookRegistry, HookResult, HookSource,
 };
-use platform_api::{
+use lingxi_core::host::{
     ProcessCommand, ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, Sandbox,
     SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy,
     SandboxedCommand, SandboxedTag,
 };
-use protocol::{HookId, HttpResponse, SessionId, ToolUseId};
+use lingxi_core::types::{HookId, HttpResponse, SessionId, ToolUseId};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -191,7 +191,7 @@ async fn builtin_arm_pretooluse_returns_success() {
         executor: HookExecutor::Builtin {
             handler_id: "noop-builtin".into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -241,7 +241,7 @@ async fn http_arm_pretooluse_with_mock_transport_succeeds() {
             allowed_env_vars: Vec::new(),
             timeout: std::time::Duration::from_secs(5),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -304,7 +304,7 @@ async fn http_arm_ssrf_guard_blocks_loopback_url() {
             allowed_env_vars: Vec::new(),
             timeout: std::time::Duration::from_secs(5),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -445,7 +445,7 @@ fn command_hook_definition() -> HookDefinition {
             cwd: None,
             shell: None,
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -517,7 +517,7 @@ async fn command_arm_without_runner_returns_structured_error() {
             cwd: None,
             shell: None,
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -564,7 +564,7 @@ async fn agent_arm_without_spawner_returns_error() {
             prompt: "check the user's action".into(),
             model: None,
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -608,7 +608,7 @@ async fn builtin_arm_posttooluse_fires_correctly() {
         executor: HookExecutor::Builtin {
             handler_id: "noop-builtin".into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,

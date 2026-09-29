@@ -10,10 +10,10 @@
 //! 4. `run_device_code_login` exchanges the code with the SDK and returns tokens.
 
 use crate::auth::openai::login::{exchange_error, into_login_tokens, LoginTokens, OAuthError};
+use lingxi_core::host::Clock;
 use lingxi_llm_client::auth::oauth::openai as sdk;
 use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
 use lingxi_llm_client::Transport;
-use platform_api::Clock;
 use std::sync::Arc;
 use std::time::Duration;
 

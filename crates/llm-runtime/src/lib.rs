@@ -75,6 +75,10 @@ pub mod types;
 pub mod unicode_repair;
 mod upstream;
 
+pub use crate::protocol::{
+    stream_content_order, stream_provider_metadata_from_headers, validate_capabilities, LlmRequest,
+    ProviderRequest, ProviderResponse, ProviderStreamTransport, ReasoningConfig, RequestMetadata,
+};
 pub use auth::external_aws::{
     AwsAuthProcess, AwsAuthRefresh, AwsAuthRefresher, AwsAuthSettings, ShellAwsAuthProcess,
 };
@@ -104,6 +108,7 @@ pub use error::{
     api_error_detail, api_error_status, error_display_text, LlmError, MediaDelegationAccounting,
 };
 pub use fusion_hints::hints_for;
+pub use lingxi_core::host::ModelBillingMode;
 pub use lingxi_llm_client::framing::eventstream::{crc32, EventStreamMessage, EventStreamSplitter};
 pub use lingxi_llm_client::protocol::TokenPricing;
 pub use lingxi_llm_client::protocol::{
@@ -115,11 +120,6 @@ pub use lingxi_llm_client::providers::google::files_wire::GeminiFile;
 pub use lingxi_llm_client::SseFrameSplitter;
 pub use model_attempt::{
     ModelAttemptHooks, ModelAttemptLease, ModelAttemptSettlement, ModelAttemptUsageCompleteness,
-};
-pub use platform_api::ModelBillingMode;
-pub use protocol::{
-    stream_content_order, stream_provider_metadata_from_headers, validate_capabilities, LlmRequest,
-    ProviderRequest, ProviderResponse, ProviderStreamTransport, ReasoningConfig, RequestMetadata,
 };
 pub use provider_settings::{
     anthropic_model_profiles, anthropic_provider_profile, parse_provider_profiles_lenient,

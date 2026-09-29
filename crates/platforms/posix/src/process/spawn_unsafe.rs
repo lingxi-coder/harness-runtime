@@ -60,9 +60,9 @@ pub(super) fn effective_uid() -> u32 {
 /// drops the parent socket; the child sees EOF and leaves without running it.
 pub(super) async fn spawn_with_capability(
     mut command: Command,
-    binding: Option<&platform_api::process::BackgroundTaskBinding>,
-) -> Result<tokio::process::Child, platform_api::ProcessError> {
-    use platform_api::ProcessError;
+    binding: Option<&lingxi_core::host::process::BackgroundTaskBinding>,
+) -> Result<tokio::process::Child, lingxi_core::host::ProcessError> {
+    use lingxi_core::host::ProcessError;
     use std::os::fd::AsRawFd;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let sink = binding.and_then(|binding| binding.on_exit.as_ref());

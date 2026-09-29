@@ -9,8 +9,6 @@ license.workspace = true
 # SC-06: the product noun in the unknown-model auto-compact notice
 # (`branding::PRODUCT_NAME`).
 branding.workspace = true
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
 core = { path = "../core" }
 llm-runtime = { path = "../llm-runtime" }
 cost = { path = "../cost" }

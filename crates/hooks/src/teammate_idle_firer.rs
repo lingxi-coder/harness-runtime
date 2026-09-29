@@ -42,7 +42,7 @@ use async_trait::async_trait;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeammateIdleFire {
     /// Trusted session owning the teammate, shared with its transcript.
-    pub session_id: protocol::SessionId,
+    pub session_id: lingxi_core::types::SessionId,
     /// Effective live permission mode when the teammate becomes idle.
     pub permission_mode: String,
     /// Name of the teammate going idle (wire `teammate_name`, required).

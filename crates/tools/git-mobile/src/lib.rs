@@ -455,7 +455,7 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::process::ProcessOutput;
+    use lingxi_core::host::process::ProcessOutput;
     use tool_api::test_support::shell_test_ctx;
     use tool_api::{AndroidGitToolCtx, ToolRegistry};
 

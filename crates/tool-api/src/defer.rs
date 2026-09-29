@@ -102,7 +102,7 @@ pub fn mode_from_values(enable: Option<&str>, disable_experimental_betas: bool) 
     }
     // `if(Jt(e))return"tst"` and the final `return"tst"` are the same outcome;
     // only a defined-falsy value (`nu`) diverges to "standard".
-    if platform_api::env::is_env_defined_falsy(enable) {
+    if lingxi_core::host::env::is_env_defined_falsy(enable) {
         return ToolSearchMode::Standard;
     }
     ToolSearchMode::Enabled
@@ -116,8 +116,8 @@ fn parse_auto_percentage(e: &str) -> Option<u8> {
     let rest = e.strip_prefix("auto:")?;
     // `Yos(e)`: `Ld(e.slice(5))` = the full `WLm(t) ?? parseInt(t,10)` coercion
     // (scientific-notation + digit-separator forms, NOT just a leading
-    // `parseInt`), via the already-ported `platform_api::env::parse_int_env`.
-    let r = platform_api::env::parse_int_env(rest);
+    // `parseInt`), via the already-ported `lingxi_core::host::env::parse_int_env`.
+    let r = lingxi_core::host::env::parse_int_env(rest);
     if r.is_nan() {
         // Yos: `if(isNaN(r)) return null`.
         return None;
@@ -135,7 +135,7 @@ pub fn mode_from_env() -> ToolSearchMode {
     let enable = std::env::var("LINGXI_ENABLE_TOOL_SEARCH")
         .ok()
         .or_else(|| std::env::var("ENABLE_TOOL_SEARCH").ok());
-    let disable_betas = platform_api::env::is_env_truthy(
+    let disable_betas = lingxi_core::host::env::is_env_truthy(
         std::env::var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
             .ok()
             .as_deref(),

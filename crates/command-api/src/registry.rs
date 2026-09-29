@@ -1,7 +1,7 @@
 //! In-memory registry of slash commands with alias and plugin-scoped lookup.
 
 use crate::model::{BuiltinCommandHandler, CommandSource, SlashCommand, SlashCommandKind};
-use protocol::PluginId;
+use lingxi_core::types::PluginId;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -31,7 +31,7 @@ impl CommandRegistry {
     /// `name` + `aliases` (`claude-code/src/commands.ts:690`).
     /// Answers: may a later load replace an already-registered command.
     ///
-    /// One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
+    /// One of several orderings over these rungs; `lingxi_core::types::scope`'s module docs index them all and say which question each answers.
     pub fn register_command(&mut self, cmd: SlashCommand) {
         // Plugin names are qualified namespaces. A later project/user reload
         // must not replace the live owner behind `plugin:skill`; otherwise a
@@ -249,7 +249,7 @@ mod tests {
         SlashCommand {
             name: name.to_string(),
             description: format!("{name} cmd"),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Builtin {
                 handler_id: name.to_string(),
             },

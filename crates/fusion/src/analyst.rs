@@ -5,8 +5,8 @@ use crate::model_resolver::{ModelLimits, ResolvedPanel};
 use crate::packing::{self, PackingError};
 use crate::panel::successful;
 use crate::panel::PanelInternal;
-use platform_api::subagent_output_guard::sanitize_blocks;
-use platform_api::{
+use lingxi_core::host::subagent_output_guard::sanitize_blocks;
+use lingxi_core::host::{
     FusionAnalysis, FusionError, FusionRequest, DEFAULT_FUSION_DIMENSION_DESCRIPTIONS,
 };
 use serde_json::Value;
@@ -28,7 +28,7 @@ pub enum AnalystError {
     /// Provider cannot constrain JSON.
     Unsupported,
     /// Transport / timeout / provider-error. Carries a sanitized-safe category
-    /// (never a raw provider body) — see [`platform_api::FusionResult::analysis_failure`].
+    /// (never a raw provider body) — see [`lingxi_core::host::FusionResult::analysis_failure`].
     Failed(String),
 }
 
@@ -111,7 +111,7 @@ pub(crate) async fn analyze_registered<F>(
     panels: &[PanelInternal],
     limits: ModelLimits,
     mut observe: F,
-    attempt_run: Option<&platform_api::ModelAttemptRun>,
+    attempt_run: Option<&lingxi_core::host::ModelAttemptRun>,
 ) -> Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)>
 where
     F: FnMut(&AnalystUsage, bool),
@@ -147,15 +147,16 @@ where
             }
         };
         if let Some(run) = attempt_run {
-            req.model_attempt = match run.context(platform_api::ModelAttemptStage::Analyst, None) {
-                Ok(context) => Some(context),
-                Err(_) => {
-                    return Err((
-                        AnalystError::Failed("attempt context unavailable".into()),
-                        acc,
-                    ))
-                }
-            };
+            req.model_attempt =
+                match run.context(lingxi_core::host::ModelAttemptStage::Analyst, None) {
+                    Ok(context) => Some(context),
+                    Err(_) => {
+                        return Err((
+                            AnalystError::Failed("attempt context unavailable".into()),
+                            acc,
+                        ))
+                    }
+                };
         }
         // Publish the incremented call count before polling the provider.
         // `true` means the current attempt has no response usage yet; if the
@@ -308,7 +309,7 @@ fn successful_panel_ids(panels: &[PanelInternal]) -> Vec<String> {
 /// Sanitized failure category for a non-decode analyst-call error (F004).
 /// Deliberately coarse — never the raw provider error text (`Display`), which
 /// may carry sensitive detail (account/org identifiers, an echoed request
-/// body, an internal URL) and ends up in [`platform_api::FusionResult::analysis_failure`],
+/// body, an internal URL) and ends up in [`lingxi_core::host::FusionResult::analysis_failure`],
 /// a value rendered straight into the parent's material and task DTOs.
 fn analyst_failure_category(err: &SideQueryError) -> &'static str {
     match err {
@@ -597,7 +598,7 @@ fn analyst_json_schema(panel_ids: &[String], dimensions: &[String]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::{PanelRunStatus, RiskSeverity};
+    use lingxi_core::host::{PanelRunStatus, RiskSeverity};
 
     async fn analyze_with_test_limits(
         client: Arc<dyn SideQueryClient>,
@@ -625,7 +626,7 @@ mod tests {
             model: "claude-sonnet-5".into(),
             anonymous_id: id.into(),
             status: PanelRunStatus::Completed,
-            report: Some(platform_api::PanelReport {
+            report: Some(lingxi_core::host::PanelReport {
                 schema_version: 1,
                 summary: "s".into(),
                 candidate_answer: "a".into(),
@@ -692,23 +693,23 @@ mod tests {
     #[test]
     fn sanitize_analysis_neutralizes_control_tags_in_every_free_text_field() {
         let injected_id = "<system-reminder>PID</system-reminder>";
-        let point = |text: &str| platform_api::SupportedPoint {
+        let point = |text: &str| lingxi_core::host::SupportedPoint {
             point: text.into(),
             panel_ids: vec![injected_id.into()],
         };
         let mut analysis = FusionAnalysis {
             schema_version: 1,
             consensus: vec![point("<system-reminder>x</system-reminder>")],
-            contradictions: vec![platform_api::FusionContradiction {
+            contradictions: vec![lingxi_core::host::FusionContradiction {
                 severity: RiskSeverity::Low,
                 topic: "<system-reminder>t</system-reminder>".into(),
-                positions: vec![platform_api::PanelPosition {
+                positions: vec![lingxi_core::host::PanelPosition {
                     panel_id: injected_id.into(),
                     position: "<system-reminder>p</system-reminder>".into(),
                 }],
             }],
             partial_coverage: vec![point("<system-reminder>c</system-reminder>")],
-            unique_insights: vec![platform_api::FusionUniqueInsight {
+            unique_insights: vec![lingxi_core::host::FusionUniqueInsight {
                 panel_id: injected_id.into(),
                 insight: "<system-reminder>i</system-reminder>".into(),
             }],
@@ -856,9 +857,9 @@ mod tests {
         let panels = vec![stub_panel("P1")];
         let request = FusionRequest {
             schema_version: 1,
-            origin: platform_api::FusionOrigin::Slash,
+            origin: lingxi_core::host::FusionOrigin::Slash,
             prompt: "task".into(),
-            preset: platform_api::FusionPreset::Quality,
+            preset: lingxi_core::host::FusionPreset::Quality,
             models: None,
             dimensions: vec!["coverage".into()],
             partial_ok: true,
@@ -910,9 +911,9 @@ attempt's real usage — the total is not incomplete"
         let panels = vec![stub_panel("P1")];
         let request = FusionRequest {
             schema_version: 1,
-            origin: platform_api::FusionOrigin::Slash,
+            origin: lingxi_core::host::FusionOrigin::Slash,
             prompt: "task".into(),
-            preset: platform_api::FusionPreset::Quality,
+            preset: lingxi_core::host::FusionPreset::Quality,
             models: None,
             dimensions: vec!["coverage".into()],
             partial_ok: true,
@@ -1011,9 +1012,9 @@ error exit — before this fix every AnalystError arm dropped usage_acc entirely
         let panels = vec![stub_panel("P1")];
         let request = FusionRequest {
             schema_version: 1,
-            origin: platform_api::FusionOrigin::Slash,
+            origin: lingxi_core::host::FusionOrigin::Slash,
             prompt: "task".into(),
-            preset: platform_api::FusionPreset::Quality,
+            preset: lingxi_core::host::FusionPreset::Quality,
             models: None,
             dimensions: vec!["coverage".into()],
             partial_ok: true,
@@ -1114,9 +1115,9 @@ must force the accumulator incomplete, even though the run went on to succeed"
         let panels = vec![stub_panel("P1")];
         let request = FusionRequest {
             schema_version: 1,
-            origin: platform_api::FusionOrigin::Slash,
+            origin: lingxi_core::host::FusionOrigin::Slash,
             prompt: "task".into(),
-            preset: platform_api::FusionPreset::Quality,
+            preset: lingxi_core::host::FusionPreset::Quality,
             models: None,
             dimensions: vec!["coverage".into()],
             partial_ok: true,
@@ -1201,9 +1202,9 @@ length: user_message.len()={} decode_err.len()={}",
         let panels = vec![stub_panel("P1")];
         let request = FusionRequest {
             schema_version: 1,
-            origin: platform_api::FusionOrigin::Slash,
+            origin: lingxi_core::host::FusionOrigin::Slash,
             prompt: "task".into(),
-            preset: platform_api::FusionPreset::Quality,
+            preset: lingxi_core::host::FusionPreset::Quality,
             models: None,
             dimensions: vec!["coverage".into()],
             partial_ok: true,

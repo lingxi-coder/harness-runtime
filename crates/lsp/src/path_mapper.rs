@@ -1,5 +1,5 @@
+use lingxi_core::host::LspError;
 use lsp_types::Url;
-use platform_api::LspError;
 use std::path::{Path, PathBuf};
 
 /// One document's dual identity: host path for local file I/O and server path

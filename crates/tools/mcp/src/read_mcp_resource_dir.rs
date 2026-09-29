@@ -35,7 +35,7 @@
 //!
 //! Production capability flow is now explicit: POSIX `initialize` decodes the
 //! oracle's `io.modelcontextprotocol/skills.directoryRead === true` extension
-//! into [`platform_api::ServerCapabilitiesDto::directory_read`], discovery cache
+//! into [`lingxi_core::host::ServerCapabilitiesDto::directory_read`], discovery cache
 //! persists that DTO bit, and this tool resolves cached/live registry state,
 //! lazy-dials if needed, then re-verifies the CURRENT live `Connected` DTO
 //! before issuing `resources/directory/read`.
@@ -756,7 +756,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_server_ignores_scoped_only_entries() {
         let (registry, _transport) = new_cached_registry().await;
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         let scoped_key = mcp::registry::agent_scope_table_key(agent_id, "cached");
         registry.connections.write().await.insert(
             scoped_key,
@@ -764,10 +764,10 @@ mod tests {
                 config: crate::mcp_tool::cached_resource_test_support::cached_server_config(
                     "cached",
                 ),
-                connection_id: protocol::McpConnectionId::new(),
+                connection_id: lingxi_core::types::McpConnectionId::new(),
                 capabilities: resource_caps(true),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -859,7 +859,7 @@ mod tests {
             "my_server",
             CachedServerBehavior {
                 cached_capabilities: resource_caps(true),
-                live_capabilities: platform_api::ServerCapabilitiesDto {
+                live_capabilities: lingxi_core::host::ServerCapabilitiesDto {
                     directory_read: false,
                     ..resource_caps(false)
                 },
@@ -1001,7 +1001,7 @@ mod tests {
             "cached",
             CachedServerBehavior {
                 cached_capabilities: resource_caps(true),
-                live_capabilities: platform_api::ServerCapabilitiesDto {
+                live_capabilities: lingxi_core::host::ServerCapabilitiesDto {
                     resources: false,
                     directory_read: true,
                     ..resource_caps(false)

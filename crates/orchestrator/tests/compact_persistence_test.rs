@@ -9,14 +9,14 @@
 use llm_runtime::ContentBlock as LlmContentBlock;
 
 use compaction::CompactionOrchestrator;
+use lingxi_core::host::{FileSystem, OrchestratorHandle};
+use lingxi_core::types::ConversationMessage;
 use orchestrator::test_support::{
     mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use orchestrator::{state_from_messages, ConversationOrchestrator, OrchestratorConfig};
-use platform_api::{FileSystem, OrchestratorHandle};
 use platform_posix::fs::PosixFileSystem;
-use protocol::ConversationMessage;
 use serde_json::Value;
 use session::jsonl::loader::build_conversation_chain;
 use session::jsonl::reader::JsonlReader;

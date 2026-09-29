@@ -1,6 +1,6 @@
 //! `platform-android` (M8-P10) — the Android platform skeleton.
 //!
-//! [`AndroidPlatform`] implements the [`platform_api::Platform`] aggregate. The core
+//! [`AndroidPlatform`] implements the [`lingxi_core::host::Platform`] aggregate. The core
 //! OS handles (filesystem/clock/process/sandbox/worktree) are currently reused
 //! from `platform-posix-minimal` (portable Rust, valid on Android). The `http`
 //! handle is the shared real client ([`http_client::ReqwestHttp`],
@@ -42,7 +42,7 @@ pub use process::AndroidMinijailProcessRunner;
 pub use receipt::AndroidSandboxReceipt;
 pub use sandbox::AndroidMinijailSandbox;
 
-use platform_api::{
+use lingxi_core::host::{
     AndroidUiAutomation, AudioService, CalendarProvider, CameraControl, Clipboard, Clock,
     ContactsProvider, DeepLinkOpener, DeviceStatusProvider, FileSystem, HapticService,
     HttpTransport, LocationProvider, MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose,
@@ -417,7 +417,7 @@ impl Platform for AndroidPlatform {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::{
+    use lingxi_core::host::{
         CameraControl, CameraError, CapturePhotoOpts, CapturedImage, LocationError, LocationFix,
         Platform, SandboxBackend, ShareError, SharePayload, ShareResult, SharingService,
         UnavailableMobileLinuxRuntime,
@@ -436,8 +436,8 @@ mod tests {
     struct NoAudio;
     #[async_trait]
     impl AudioService for NoAudio {
-        fn capabilities(&self) -> platform_api::AudioCapabilitySnapshot {
-            platform_api::AudioCapabilitySnapshot {
+        fn capabilities(&self) -> lingxi_core::host::AudioCapabilitySnapshot {
+            lingxi_core::host::AudioCapabilitySnapshot {
                 service_epoch: 0,
                 support_revision: 0,
                 supported_operations: Vec::new(),
@@ -447,18 +447,19 @@ mod tests {
         }
         async fn execute(
             &self,
-            _context: platform_api::AudioOperationContext,
-            _operation: platform_api::AudioOperation,
-        ) -> Result<platform_api::AudioOperationSuccess, platform_api::AudioError> {
-            Err(platform_api::AudioError::new(
-                platform_api::AudioErrorKind::Unavailable,
+            _context: lingxi_core::host::AudioOperationContext,
+            _operation: lingxi_core::host::AudioOperation,
+        ) -> Result<lingxi_core::host::AudioOperationSuccess, lingxi_core::host::AudioError>
+        {
+            Err(lingxi_core::host::AudioError::new(
+                lingxi_core::host::AudioErrorKind::Unavailable,
                 "audio service not wired",
             ))
         }
         async fn cancel(
             &self,
-            _identity: platform_api::AudioOperationId,
-        ) -> Result<(), platform_api::AudioError> {
+            _identity: lingxi_core::host::AudioOperationId,
+        ) -> Result<(), lingxi_core::host::AudioError> {
             Ok(())
         }
     }

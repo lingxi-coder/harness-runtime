@@ -2,8 +2,8 @@
 //! `platforms/posix` (Plan 17).
 
 use async_trait::async_trait;
-use platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
-use protocol::AgentId;
+use lingxi_core::host::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+use lingxi_core::types::AgentId;
 
 /// Stub swarm backend.
 #[derive(Default)]

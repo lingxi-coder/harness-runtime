@@ -6,8 +6,8 @@ use crate::events::{HookEvent, HookEventType};
 use crate::matcher::{
     comma_mode_for, is_bare_mcp_server_matcher, matches_if_condition, matches_pattern_with,
 };
-use platform_api::SubagentInheritance;
-use protocol::{AgentId, HookId, PluginId, SessionId};
+use lingxi_core::host::SubagentInheritance;
+use lingxi_core::types::{AgentId, HookId, PluginId, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use telemetry::otel::SerializedTraceContext;
@@ -883,7 +883,7 @@ mod all_hooks_tests {
     use super::*;
     use crate::definition::{HookCondition, HookExecutor, HookSource};
     use crate::events::HookEventType;
-    use protocol::{HookId, PluginId};
+    use lingxi_core::types::{HookId, PluginId};
 
     fn hk(name: &str, event: HookEventType, source: HookSource) -> HookDefinition {
         HookDefinition {
@@ -910,7 +910,7 @@ mod all_hooks_tests {
         let mut h = hk(
             name,
             event,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         h.executor = HookExecutor::Http {
             url: "https://example.com/hook".into(),
@@ -937,14 +937,14 @@ mod all_hooks_tests {
         r.register(hk(
             "builtin-ss",
             HookEventType::SessionStart,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         ));
         r.register(hk_http("http-setup", HookEventType::Setup));
         r.register(hk_http("http-pre", HookEventType::PreToolUse));
 
         let ss = r.match_event(
             &HookEvent::SessionStart {
-                session_id: protocol::SessionId::new(),
+                session_id: lingxi_core::types::SessionId::new(),
                 source: "cli".into(),
             },
             &HookContext::default(),
@@ -972,7 +972,7 @@ mod all_hooks_tests {
             &HookEvent::PreToolUse {
                 tool_name: "Bash".into(),
                 tool_input: serde_json::json!({}),
-                tool_use_id: protocol::ToolUseId::new(),
+                tool_use_id: lingxi_core::types::ToolUseId::new(),
             },
             &HookContext::default(),
         );
@@ -989,12 +989,12 @@ mod all_hooks_tests {
         let keep = hk(
             "keep",
             HookEventType::PostToolUse,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         let drop = hk(
             "drop",
             HookEventType::PostToolUse,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         let drop_id = drop.id;
         let absent = HookId::new();
@@ -1016,7 +1016,7 @@ mod all_hooks_tests {
         let mut r = HookRegistry::new();
         let h = hk("plugin-once", HookEventType::PreToolUse, HookSource::Plugin);
         let id = h.id;
-        r.register_plugin_hooks(protocol::PluginId::new(), vec![h]);
+        r.register_plugin_hooks(lingxi_core::types::PluginId::new(), vec![h]);
         assert!(r.remove_once_hook(id));
         assert!(r.all_hooks().is_empty());
     }
@@ -1103,17 +1103,17 @@ mod all_hooks_tests {
         r.register(hk(
             "user-stop",
             HookEventType::Stop,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         ));
         r.register(hk(
             "project-stop",
             HookEventType::Stop,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         ));
         r.register(hk(
             "local-stop",
             HookEventType::Stop,
-            HookSource::Settings(protocol::SettingsScope::Local),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Local),
         ));
         r.register_plugin_hooks(
             PluginId::new(),
@@ -1121,11 +1121,11 @@ mod all_hooks_tests {
         );
 
         let result = r.replace_source_hooks(
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             vec![hk(
                 "project-new",
                 HookEventType::Stop,
-                HookSource::Settings(protocol::SettingsScope::Project),
+                HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             )],
         );
 
@@ -1148,7 +1148,7 @@ mod all_hooks_tests {
         let mut user = hk(
             "watch-user",
             HookEventType::FileChanged,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         user.if_condition = Some(HookCondition {
             pattern: ".env".into(),
@@ -1159,7 +1159,7 @@ mod all_hooks_tests {
         let mut project = hk(
             "watch-project",
             HookEventType::FileChanged,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         project.if_condition = Some(HookCondition {
             pattern: ".envrc".into(),
@@ -1173,7 +1173,7 @@ mod all_hooks_tests {
         let mut replacement = hk(
             "watch-project-new",
             HookEventType::FileChanged,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         replacement.if_condition = Some(HookCondition {
             pattern: ".mise.toml".into(),
@@ -1182,7 +1182,7 @@ mod all_hooks_tests {
             if_pattern: None,
         });
         let result = r.replace_source_hooks(
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             vec![replacement],
         );
         let mut before = result.file_changed_matchers_before;
@@ -1202,17 +1202,17 @@ mod all_hooks_tests {
         let first = hk(
             "old-name",
             HookEventType::Stop,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         let replaced = hk(
             "other-name",
             HookEventType::Stop,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         let keep = hk(
             "keep",
             HookEventType::Stop,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         );
 
         assert!(r
@@ -1279,7 +1279,7 @@ mod all_hooks_tests {
             &HookEvent::PreToolUse {
                 tool_name: "Bash".into(),
                 tool_input: serde_json::json!({}),
-                tool_use_id: protocol::ToolUseId::new(),
+                tool_use_id: lingxi_core::types::ToolUseId::new(),
             },
             &HookContext {
                 agent_id: Some(agent),
@@ -1292,7 +1292,7 @@ mod all_hooks_tests {
             &HookEvent::PreToolUse {
                 tool_name: "Bash".into(),
                 tool_input: serde_json::json!({}),
-                tool_use_id: protocol::ToolUseId::new(),
+                tool_use_id: lingxi_core::types::ToolUseId::new(),
             },
             &HookContext::default(),
         );
@@ -1302,7 +1302,7 @@ mod all_hooks_tests {
             &HookEvent::PreToolUse {
                 tool_name: "Bash".into(),
                 tool_input: serde_json::json!({}),
-                tool_use_id: protocol::ToolUseId::new(),
+                tool_use_id: lingxi_core::types::ToolUseId::new(),
             },
             &HookContext {
                 agent_id: Some(AgentId::new()),
@@ -1336,7 +1336,7 @@ mod all_hooks_tests {
         r.register(hk(
             "session-stop",
             HookEventType::SubagentStop,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         ));
 
         let ev = HookEvent::SubagentStop {
@@ -1390,7 +1390,7 @@ mod all_hooks_tests {
         r.register(hk(
             "session-stop",
             HookEventType::SubagentStop,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         ));
 
         let ev = HookEvent::SubagentStop {
@@ -1432,7 +1432,7 @@ mod all_hooks_tests {
         r.register(hk(
             "session-stop",
             HookEventType::SubagentStop,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         ));
         let unknown = AgentId::new();
         let ev = HookEvent::SubagentStop {
@@ -1477,15 +1477,15 @@ mod all_hooks_tests {
         r.register(hk(
             "user-fmt",
             HookEventType::PostToolUse,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         ));
         r.register(hk(
             "project-lint",
             HookEventType::Stop,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         ));
         r.register_plugin_hooks(
-            protocol::PluginId::new(),
+            lingxi_core::types::PluginId::new(),
             vec![hk(
                 "plugin-x",
                 HookEventType::PreToolUse,
@@ -1509,7 +1509,7 @@ mod match_event_matcher_tests {
     use super::*;
     use crate::definition::{HookCondition, HookExecutor, HookSource};
     use crate::events::HookEventType;
-    use protocol::{HookId, ToolUseId};
+    use lingxi_core::types::{HookId, ToolUseId};
 
     fn hook_with(name: &str, event: HookEventType, matcher: Option<&str>) -> HookDefinition {
         HookDefinition {
@@ -1525,7 +1525,7 @@ mod match_event_matcher_tests {
             executor: HookExecutor::Builtin {
                 handler_id: "noop".into(),
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -1563,7 +1563,7 @@ mod match_event_matcher_tests {
                 cwd: None,
                 shell: None,
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -1774,7 +1774,7 @@ mod match_event_matcher_tests {
     fn matcher_filter_applies_to_plugin_hooks_too() {
         let mut reg = HookRegistry::new();
         reg.register_plugin_hooks(
-            protocol::PluginId::new(),
+            lingxi_core::types::PluginId::new(),
             vec![hook_with(
                 "plugin-write",
                 HookEventType::PreToolUse,

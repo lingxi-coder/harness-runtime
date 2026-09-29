@@ -3,7 +3,7 @@
 pub(crate) struct ScheduledSettings {
     pub model: String,
     pub provider: String,
-    pub reasoning: platform_api::ReasoningSelection,
+    pub reasoning: lingxi_core::host::ReasoningSelection,
     pub thinking: llm_runtime::model::thinking::ThinkingConfig,
     pub effort: Option<serde_json::Value>,
 }

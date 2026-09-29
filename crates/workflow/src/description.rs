@@ -197,7 +197,7 @@ pub fn authoring_skill_body(model_forced: bool) -> String {
 /// `set_var`, which flakes the moment the suite runs in parallel.
 #[must_use]
 pub fn subagent_model_forced() -> bool {
-    platform_api::env::is_env_truthy(
+    lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_SUBAGENT_MODEL_FORCE")
             .or_else(|_| std::env::var("CLAUDE_CODE_SUBAGENT_MODEL_FORCE"))
             .ok()

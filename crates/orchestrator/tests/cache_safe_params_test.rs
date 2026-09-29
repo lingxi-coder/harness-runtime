@@ -10,12 +10,12 @@
 //! strict no-op.
 use llm_runtime::ContentBlock as LlmContentBlock;
 
+use lingxi_core::types::{ConversationMessage, MessageId};
 use orchestrator::test_support::{
     mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use protocol::{ConversationMessage, MessageId};
 use sidequery::CacheSafeParamsSlot;
 use std::sync::Arc;
 

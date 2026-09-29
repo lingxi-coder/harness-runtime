@@ -19,7 +19,7 @@
 //! ```
 //!
 //! When `USE_BUILTIN_RIPGREP` is EXPLICITLY falsy (`0`/`false`/`no`/`off` —
-//! [`platform_api::env::is_env_defined_falsy`], the byte-faithful `ou()` port) AND a
+//! [`lingxi_core::host::env::is_env_defined_falsy`], the byte-faithful `ou()` port) AND a
 //! system `rg` resolves on `$PATH` to a concrete path (`MYn("rg",[])` returning
 //! a `cmd !== "rg"`), claude-code switches Grep to that system binary. Otherwise
 //! it uses the embedded ripgrep. The env var keeps its un-prefixed
@@ -70,7 +70,7 @@ pub fn resolve_ripgrep_mode() -> RipgrepMode {
 /// The pure `A3r` core: given the captured `USE_BUILTIN_RIPGREP` value and a
 /// `$PATH` `rg` resolver, decide the mode.
 ///
-/// `opt_out` (binary `ou()`) is [`platform_api::env::is_env_defined_falsy`]: undefined
+/// `opt_out` (binary `ou()`) is [`lingxi_core::host::env::is_env_defined_falsy`]: undefined
 /// or empty ⇒ not opted out; otherwise the lowercased/trimmed value must be one
 /// of `0`/`false`/`no`/`off`. Only when opted out is `$PATH` consulted (`MYn`);
 /// a concrete resolved path yields [`RipgrepMode::System`], else
@@ -80,7 +80,7 @@ pub fn resolve_ripgrep_mode_from(
     env_value: Option<&str>,
     resolve_rg: impl FnOnce() -> Option<PathBuf>,
 ) -> RipgrepMode {
-    if platform_api::env::is_env_defined_falsy(env_value) {
+    if lingxi_core::host::env::is_env_defined_falsy(env_value) {
         // `MYn("rg",[])` → `{cmd:r}`; `if(r!=="rg")` ⇒ a concrete path was found.
         if let Some(command) = resolve_rg() {
             return RipgrepMode::System { command };

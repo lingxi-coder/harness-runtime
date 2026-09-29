@@ -1,7 +1,7 @@
 //! Message and transcript conversion.
 use super::value_to_json_string;
 use crate::protocol::message::{MessageBlockDto, MessageDto, MessageImageDto};
-use protocol::ConversationMessage;
+use lingxi_core::types::ConversationMessage;
 
 /// Lower one [`ConversationMessage`] to a [`MessageDto`] — the resumed-scrollback
 /// twin of the per-turn [`crate::adapter::turn::synthesize_message`].
@@ -116,11 +116,11 @@ pub fn lower_conversation_message_with(
 /// only echoed the original slash line in the live client. Recover the exact
 /// user arguments for resumed scrollback without changing the history that is
 /// sent back to the model.
-fn legacy_cron_slash_line(content: &[protocol::ContentBlock]) -> Option<String> {
+fn legacy_cron_slash_line(content: &[lingxi_core::types::ContentBlock]) -> Option<String> {
     const PREFIX: &str = "The user explicitly invoked `/cron` to manage scheduled prompts.";
     const ARGUMENTS_MARKER: &str = "\nArguments: ";
 
-    let [protocol::ContentBlock::Text { text }] = content else {
+    let [lingxi_core::types::ContentBlock::Text { text }] = content else {
         return None;
     };
     if !text.starts_with(PREFIX) {
@@ -139,16 +139,16 @@ fn legacy_cron_slash_line(content: &[protocol::ContentBlock]) -> Option<String> 
 /// Keep persisted image bytes renderable across every client. The engine's
 /// session history is already durable, so inline data becomes a URL-shaped
 /// transcript value; a source that was already a URL remains a URL.
-fn lower_message_image(block: &protocol::ContentBlock) -> Option<MessageImageDto> {
-    let protocol::ContentBlock::Image { source } = block else {
+fn lower_message_image(block: &lingxi_core::types::ContentBlock) -> Option<MessageImageDto> {
+    let lingxi_core::types::ContentBlock::Image { source } = block else {
         return None;
     };
     match source {
-        protocol::ImageSource::Base64 { media_type, data } => Some(MessageImageDto {
+        lingxi_core::types::ImageSource::Base64 { media_type, data } => Some(MessageImageDto {
             media_type: media_type.clone(),
             url: format!("data:{media_type};base64,{data}"),
         }),
-        protocol::ImageSource::Url { url } => Some(MessageImageDto {
+        lingxi_core::types::ImageSource::Url { url } => Some(MessageImageDto {
             media_type: String::new(),
             url: url.clone(),
         }),
@@ -233,7 +233,7 @@ fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
                 let text = content
                     .iter()
                     .filter_map(|block| match block {
-                        protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                        lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -262,7 +262,7 @@ fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
                 let summary = content
                     .iter()
                     .filter_map(|block| match block {
-                        protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                        lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -298,7 +298,9 @@ fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
                 // visible calls and must retain the shared transcript index.
                 let blocks: Vec<_> = content
                     .iter()
-                    .filter(|block| matches!(block, protocol::ContentBlock::ToolResult { .. }))
+                    .filter(|block| {
+                        matches!(block, lingxi_core::types::ContentBlock::ToolResult { .. })
+                    })
                     .filter_map(|block| {
                         crate::adapter::turn::lower_content_block_with(block, &mut tool_uses)
                     })

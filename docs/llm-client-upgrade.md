@@ -147,7 +147,7 @@ runtime 将 SDK 的 HTTP/Responses 空闲读取期限设为 `None`，由宿主�
 
 ```sh
 CARGO_INCREMENTAL=0 cargo check --offline --locked -p harness-runtime --all-features
-CARGO_INCREMENTAL=0 cargo test --offline --locked -p llm-runtime -p http-client -p platform-api --all-features --no-fail-fast
+CARGO_INCREMENTAL=0 cargo test --offline --locked -p llm-runtime -p http-client -p core --all-features --no-fail-fast
 cargo metadata --offline --locked --all-features --format-version 1 | python3 scripts/check_deps.py
 git diff --check
 ```

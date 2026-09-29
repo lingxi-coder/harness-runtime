@@ -12,7 +12,7 @@ use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 
 /// Handle-free `/brief` command. The live state is shared by the CLI, command
-/// dispatcher, and tool registry through `platform_api::session_flags`.
+/// dispatcher, and tool registry through `lingxi_core::host::session_flags`.
 #[derive(Debug, Default)]
 pub struct BriefHandler;
 
@@ -27,7 +27,7 @@ impl BriefHandler {
 #[async_trait]
 impl BuiltinCommandHandler for BriefHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        let enabled = platform_api::session_flags::toggle_brief_mode_enabled();
+        let enabled = lingxi_core::host::session_flags::toggle_brief_mode_enabled();
         let display = if enabled {
             "Brief-only mode enabled"
         } else {
@@ -61,8 +61,8 @@ mod tests {
 
     #[tokio::test]
     async fn toggles_live_mode_and_reports_state() {
-        let prior = platform_api::session_flags::brief_mode_enabled();
-        platform_api::session_flags::set_brief_mode_enabled(false);
+        let prior = lingxi_core::host::session_flags::brief_mode_enabled();
+        lingxi_core::host::session_flags::set_brief_mode_enabled(false);
         let handler = BriefHandler::new();
 
         assert!(matches!(
@@ -71,16 +71,16 @@ mod tests {
                 display: Some(ref display)
             } if display == "Brief-only mode enabled"
         ));
-        assert!(platform_api::session_flags::brief_mode_enabled());
+        assert!(lingxi_core::host::session_flags::brief_mode_enabled());
         assert!(matches!(
             handler.handle(&args()).await,
             CommandResult::Done {
                 display: Some(ref display)
             } if display == "Brief-only mode disabled"
         ));
-        assert!(!platform_api::session_flags::brief_mode_enabled());
+        assert!(!lingxi_core::host::session_flags::brief_mode_enabled());
 
-        platform_api::session_flags::set_brief_mode_enabled(prior);
+        lingxi_core::host::session_flags::set_brief_mode_enabled(prior);
     }
 
     #[test]

@@ -669,7 +669,7 @@ mod tests {
             .enumerate()
             .filter(|(_, case)| case["success"] == false)
         {
-            let id = protocol::ToolUseId::new();
+            let id = lingxi_core::types::ToolUseId::new();
             let uses = vec![(
                 id.clone(),
                 case["tool"].as_str().unwrap().into(),
@@ -680,7 +680,7 @@ mod tests {
                 crate::turn_loop::dispatch_tool_uses_tracked(&orch, &uses, None)
                     .await
                     .unwrap();
-            let protocol::ContentBlock::ToolResult {
+            let lingxi_core::types::ContentBlock::ToolResult {
                 content, is_error, ..
             } = &blocks[0]
             else {
@@ -723,7 +723,7 @@ mod tests {
         ))
         .unwrap();
         let context =
-            tool_api::test_support::shell_test_ctx(platform_api::process::ProcessOutput {
+            tool_api::test_support::shell_test_ctx(lingxi_core::host::process::ProcessOutput {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
@@ -755,13 +755,13 @@ mod tests {
                 );
                 continue;
             }
-            let id = protocol::ToolUseId::new();
+            let id = lingxi_core::types::ToolUseId::new();
             let uses = vec![(id.clone(), "Monitor".into(), case["input"].clone(), None)];
             let (blocks, _, _, _) =
                 crate::turn_loop::dispatch_tool_uses_tracked(&orch, &uses, None)
                     .await
                     .unwrap();
-            let protocol::ContentBlock::ToolResult {
+            let lingxi_core::types::ContentBlock::ToolResult {
                 content, is_error, ..
             } = &blocks[0]
             else {

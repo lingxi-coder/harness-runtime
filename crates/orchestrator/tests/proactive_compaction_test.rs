@@ -13,13 +13,13 @@
 use llm_runtime::ContentBlock as LlmContentBlock;
 
 use compaction::CompactionOrchestrator;
+use lingxi_core::host::OutputEvent;
+use lingxi_core::types::{ConversationMessage, MessageId};
 use orchestrator::test_support::{
     mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::OutputEvent;
-use protocol::{ConversationMessage, MessageId};
 use std::sync::Arc;
 
 /// Build an orchestrator with a `MockApiClient` (single `end_turn` response)

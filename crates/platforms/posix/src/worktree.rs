@@ -17,7 +17,7 @@
 //! stays flat. `+` is outside the allowlist so the mapping is injective.
 
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     WorktreeChangeSummary, WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager,
 };
 use std::path::PathBuf;
@@ -612,7 +612,7 @@ mod slug_tests {
 #[cfg(test)]
 mod create_tests {
     use super::*;
-    use platform_api::WorktreeManager;
+    use lingxi_core::host::WorktreeManager;
     use tempfile::TempDir;
     use tokio::process::Command;
 
@@ -874,7 +874,7 @@ Removing worktrees/topic+area: gitdir file points to non-existent location
 #[cfg(test)]
 mod change_summary_tests {
     use super::*;
-    use platform_api::WorktreeManager;
+    use lingxi_core::host::WorktreeManager;
     use tempfile::TempDir;
     use tokio::process::Command;
 

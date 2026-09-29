@@ -6,13 +6,13 @@
 //! spawner and asserting the trait-object Arcs match the originals.
 
 use async_trait::async_trait;
-use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-use platform_api::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
-use platform_api::subagent_spawn::{
+use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+use lingxi_core::host::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
+use lingxi_core::host::subagent_spawn::{
     SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnError,
     SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
 };
-use platform_api::task_registry::{
+use lingxi_core::host::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
 };
@@ -47,10 +47,10 @@ pub struct MockSubagentSpawner {
     required_mcp_servers: Mutex<Vec<String>>,
     /// Optional scripted `SelectedAgentMeta` for `resolve_selection` (G11 — the
     /// `tengu_agent_tool_selected` event). `None` ⇒ the default minimal meta.
-    selection: Mutex<Option<platform_api::subagent_spawn::SelectedAgentMeta>>,
+    selection: Mutex<Option<lingxi_core::host::subagent_spawn::SelectedAgentMeta>>,
     /// Captured `register_name(name, agent_id)` calls (G14) so tests can assert
     /// that a name-carrying spawn registered the mapping.
-    registered_names: Mutex<Vec<(String, protocol::AgentId)>>,
+    registered_names: Mutex<Vec<(String, lingxi_core::types::AgentId)>>,
     /// When `true`, `spawn_async` behaves as the DEFAULT unwired stub (returns a
     /// clear `Internal` error, no invocation recorded) so the "unwired async
     /// surfaces an error, not a silent sync fallback" invariant stays testable.
@@ -75,7 +75,7 @@ enum MockSpawnResponse {
     /// terminal result JSON), usage, and result-level totals — used by the `#3`
     /// return-shape / `model_content` golden tests.
     CompletedWith {
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         content: serde_json::Value,
         usage: SubagentUsage,
         total_tool_use_count: u64,
@@ -136,13 +136,13 @@ impl MockSubagentSpawner {
     }
 
     /// Script the `SelectedAgentMeta` the next `resolve_selection` returns (G11).
-    pub fn script_selection(&self, meta: platform_api::subagent_spawn::SelectedAgentMeta) {
+    pub fn script_selection(&self, meta: lingxi_core::host::subagent_spawn::SelectedAgentMeta) {
         *self.selection.lock().unwrap() = Some(meta);
     }
 
     /// Drain and return the captured `register_name` calls (G14).
     #[must_use]
-    pub fn registered_names(&self) -> Vec<(String, protocol::AgentId)> {
+    pub fn registered_names(&self) -> Vec<(String, lingxi_core::types::AgentId)> {
         self.registered_names.lock().unwrap().clone()
     }
 
@@ -162,7 +162,7 @@ impl MockSubagentSpawner {
     #[allow(clippy::too_many_arguments)]
     pub fn script_completed_with(
         &self,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         content: serde_json::Value,
         usage: SubagentUsage,
         total_tool_use_count: u64,
@@ -189,7 +189,7 @@ impl MockSubagentSpawner {
     #[allow(clippy::too_many_arguments)]
     pub fn script_completed_full(
         &self,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         content: serde_json::Value,
         usage: SubagentUsage,
         total_tool_use_count: u64,
@@ -245,12 +245,12 @@ impl SubagentSpawner for MockSubagentSpawner {
         &self,
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
-    ) -> Result<platform_api::team_spawn::TeammateLaunch, SubagentSpawnError> {
+    ) -> Result<lingxi_core::host::team_spawn::TeammateLaunch, SubagentSpawnError> {
         self.invocations.lock().unwrap().push(MockSpawnInvocation {
             request: request.clone(),
             inherit,
         });
-        Ok(platform_api::team_spawn::TeammateLaunch {
+        Ok(lingxi_core::host::team_spawn::TeammateLaunch {
             teammate_id: "scout@session".into(),
             agent_id: "scout@session".into(),
             agent_type: request.subagent_type,
@@ -279,7 +279,7 @@ impl SubagentSpawner for MockSubagentSpawner {
         Ok(match resp {
             // Mock: no real child exists, so a fresh AgentId is acceptable HERE.
             MockSpawnResponse::Completed => SubagentResult::Completed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 content: json!({ "mock": true }),
                 usage: SubagentUsage::default(),
                 total_tool_use_count: 0,
@@ -315,12 +315,12 @@ impl SubagentSpawner for MockSubagentSpawner {
                 usage_complete: true,
             },
             MockSpawnResponse::Failed(reason) => SubagentResult::Failed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 reason,
                 usage: SubagentUsage::default(),
             },
             MockSpawnResponse::Killed => SubagentResult::Killed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
             },
             MockSpawnResponse::PoolFull => return Err(SubagentSpawnError::PoolFull),
         })
@@ -331,14 +331,14 @@ impl SubagentSpawner for MockSubagentSpawner {
     }
 
     /// Records the spawn request (so tests can assert the threaded
-    /// `tool_use_id`) and returns a fixed [`platform_api::subagent_spawn::AsyncLaunch`]
+    /// `tool_use_id`) and returns a fixed [`lingxi_core::host::subagent_spawn::AsyncLaunch`]
     /// — overriding the defaulted "not wired" stub so the async dispatch path is
     /// exercisable in tests.
     async fn spawn_async(
         &self,
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
-    ) -> Result<platform_api::subagent_spawn::AsyncLaunch, SubagentSpawnError> {
+    ) -> Result<lingxi_core::host::subagent_spawn::AsyncLaunch, SubagentSpawnError> {
         if *self.async_unwired.lock().unwrap() {
             // Mirror the default trait stub — no invocation recorded (no silent
             // sync fallback).
@@ -353,8 +353,8 @@ impl SubagentSpawner for MockSubagentSpawner {
             .lock()
             .unwrap()
             .push(MockSpawnInvocation { request, inherit });
-        Ok(platform_api::subagent_spawn::AsyncLaunch {
-            agent_id: protocol::AgentId::new(),
+        Ok(lingxi_core::host::subagent_spawn::AsyncLaunch {
+            agent_id: lingxi_core::types::AgentId::new(),
             output_file: "/tmp/mock-agent.output".to_string(),
         })
     }
@@ -409,24 +409,24 @@ impl SubagentSpawner for MockSubagentSpawner {
         &self,
         subagent_type: &str,
         _model: Option<&str>,
-    ) -> platform_api::subagent_spawn::SelectedAgentMeta {
+    ) -> lingxi_core::host::subagent_spawn::SelectedAgentMeta {
         self.selection.lock().unwrap().clone().unwrap_or(
-            platform_api::subagent_spawn::SelectedAgentMeta {
+            lingxi_core::host::subagent_spawn::SelectedAgentMeta {
                 agent_type: subagent_type.to_string(),
-                ..platform_api::subagent_spawn::SelectedAgentMeta::default()
+                ..lingxi_core::host::subagent_spawn::SelectedAgentMeta::default()
             },
         )
     }
 
     /// Capture `register_name` calls (G14) so tests can assert the registration.
-    async fn register_name(&self, name: &str, agent_id: protocol::AgentId) {
+    async fn register_name(&self, name: &str, agent_id: lingxi_core::types::AgentId) {
         self.registered_names
             .lock()
             .unwrap()
             .push((name.to_string(), agent_id));
     }
 
-    async fn resolve_name(&self, name: &str) -> Option<protocol::AgentId> {
+    async fn resolve_name(&self, name: &str) -> Option<lingxi_core::types::AgentId> {
         self.registered_names
             .lock()
             .unwrap()
@@ -445,10 +445,12 @@ impl SubagentSpawner for MockSubagentSpawner {
 pub struct MockTaskRegistryHandle {
     resume_recipes: Mutex<HashMap<String, (SubagentSpawnRequest, SubagentInheritance)>>,
     reject_resume_recipe: std::sync::atomic::AtomicBool,
-    killers: Mutex<HashMap<String, Arc<dyn platform_api::task_registry::TaskKiller>>>,
-    receivers: Mutex<HashMap<String, Arc<dyn platform_api::task_registry::TaskMessageReceiver>>>,
-    backgrounders: Mutex<HashMap<String, Arc<dyn platform_api::task_registry::TaskBackgrounder>>>,
-    outcomes: Mutex<HashMap<String, platform_api::task_registry::AgentTerminalOutcome>>,
+    killers: Mutex<HashMap<String, Arc<dyn lingxi_core::host::task_registry::TaskKiller>>>,
+    receivers:
+        Mutex<HashMap<String, Arc<dyn lingxi_core::host::task_registry::TaskMessageReceiver>>>,
+    backgrounders:
+        Mutex<HashMap<String, Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>>>,
+    outcomes: Mutex<HashMap<String, lingxi_core::host::task_registry::AgentTerminalOutcome>>,
     records: Mutex<HashMap<String, TaskRecord>>,
     counter: AtomicU64,
     /// Per-session subagent-spawn counter backing `get_total_agent_spawns` /
@@ -554,7 +556,7 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
     async fn bind_agent_message_receiver(
         &self,
         id: &str,
-        receiver: Arc<dyn platform_api::task_registry::TaskMessageReceiver>,
+        receiver: Arc<dyn lingxi_core::host::task_registry::TaskMessageReceiver>,
     ) -> Result<(), TaskRegistryError> {
         self.receivers
             .lock()
@@ -565,8 +567,8 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
 
     async fn register_foreground_agent(
         &self,
-        registration: platform_api::task_registry::ForegroundAgentRegistration,
-    ) -> Result<platform_api::task_registry::ForegroundAgentHandle, TaskRegistryError> {
+        registration: lingxi_core::host::task_registry::ForegroundAgentRegistration,
+    ) -> Result<lingxi_core::host::task_registry::ForegroundAgentHandle, TaskRegistryError> {
         let id = self.fresh_id("local_agent");
         self.records.lock().unwrap().insert(
             id.clone(),
@@ -579,7 +581,7 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
                 ..Default::default()
             },
         );
-        Ok(platform_api::task_registry::ForegroundAgentHandle {
+        Ok(lingxi_core::host::task_registry::ForegroundAgentHandle {
             task_id: id.clone(),
             output_path: format!("/tmp/{id}.output"),
         })
@@ -596,7 +598,7 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
     async fn bind_background_killer(
         &self,
         id: &str,
-        killer: Arc<dyn platform_api::task_registry::TaskKiller>,
+        killer: Arc<dyn lingxi_core::host::task_registry::TaskKiller>,
     ) -> Result<(), TaskRegistryError> {
         self.killers.lock().unwrap().insert(id.to_string(), killer);
         Ok(())
@@ -604,7 +606,7 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
     async fn bind_background_requester(
         &self,
         id: &str,
-        requester: Arc<dyn platform_api::task_registry::TaskBackgrounder>,
+        requester: Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>,
     ) -> Result<(), TaskRegistryError> {
         self.backgrounders
             .lock()
@@ -630,7 +632,7 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
     async fn set_agent_outcome(
         &self,
         id: &str,
-        outcome: platform_api::task_registry::AgentTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::AgentTerminalOutcome,
     ) {
         self.outcomes.lock().unwrap().insert(id.into(), outcome);
     }

@@ -288,7 +288,7 @@ pub fn vertex_codec_base_url_from_env(model: &str) -> Option<String> {
 /// `CLAUDE_CODE_SKIP_VERTEX_AUTH` truthiness.
 #[must_use]
 pub fn skip_vertex_auth() -> bool {
-    platform_api::env::is_env_truthy(
+    lingxi_core::host::env::is_env_truthy(
         std::env::var("CLAUDE_CODE_SKIP_VERTEX_AUTH")
             .ok()
             .as_deref(),
@@ -298,7 +298,7 @@ pub fn skip_vertex_auth() -> bool {
 /// `CLAUDE_CODE_SKIP_FOUNDRY_AUTH` truthiness.
 #[must_use]
 pub fn skip_foundry_auth() -> bool {
-    platform_api::env::is_env_truthy(
+    lingxi_core::host::env::is_env_truthy(
         std::env::var("CLAUDE_CODE_SKIP_FOUNDRY_AUTH")
             .ok()
             .as_deref(),
@@ -308,7 +308,7 @@ pub fn skip_foundry_auth() -> bool {
 /// `CLAUDE_CODE_SKIP_BEDROCK_AUTH` truthiness.
 #[must_use]
 pub fn skip_bedrock_auth() -> bool {
-    platform_api::env::is_env_truthy(
+    lingxi_core::host::env::is_env_truthy(
         std::env::var("CLAUDE_CODE_SKIP_BEDROCK_AUTH")
             .ok()
             .as_deref(),

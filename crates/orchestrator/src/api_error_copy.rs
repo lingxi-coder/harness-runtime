@@ -77,7 +77,7 @@ pub(crate) const AUTH_TRANSIENT: &str =
 /// variables, which keep their names.
 #[must_use]
 pub(crate) fn is_remote_session() -> bool {
-    platform_api::env::is_env_truthy(std::env::var("LINGXI_REMOTE").ok().as_deref())
+    lingxi_core::host::env::is_env_truthy(std::env::var("LINGXI_REMOTE").ok().as_deref())
 }
 
 /// Where the Anthropic credential came from — the oracle's `e1().source`,

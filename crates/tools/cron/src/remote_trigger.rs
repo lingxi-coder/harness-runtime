@@ -31,7 +31,7 @@ use telemetry::tengu::tool::{
 };
 use telemetry::AnalyticsBus;
 
-use protocol::{HttpMethod, HttpRequest};
+use lingxi_core::types::{HttpMethod, HttpRequest};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -1117,12 +1117,14 @@ impl Tool for RemoteTriggerTool {
         // `validateStatus: () => true` — every status is a result, not an error.
         let resp = match self.ctx.http.request(req).await {
             Ok(r) => r,
-            Err(platform_api::http::HttpError::Status { status, body }) => protocol::HttpResponse {
-                status,
-                headers: vec![],
-                body,
-                body_bytes: Vec::new(),
-            },
+            Err(lingxi_core::host::http::HttpError::Status { status, body }) => {
+                lingxi_core::types::HttpResponse {
+                    status,
+                    headers: vec![],
+                    body,
+                    body_bytes: Vec::new(),
+                }
+            }
             Err(e) => {
                 emit_failed(&bus, "transport", started.elapsed().as_millis() as u64).await;
                 return Err(ToolError::Io(format!("Remote triggers unavailable: {e}")));
@@ -1232,8 +1234,8 @@ impl Tool for RemoteTriggerTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::http::{HttpError, HttpTransport, SseStream};
-    use platform_api::process::ProcessOutput;
+    use lingxi_core::host::http::{HttpError, HttpTransport, SseStream};
+    use lingxi_core::host::process::ProcessOutput;
     use std::sync::Mutex;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
@@ -1336,9 +1338,12 @@ mod tests {
     }
     #[async_trait]
     impl HttpTransport for RecordingHttp {
-        async fn request(&self, req: HttpRequest) -> Result<protocol::HttpResponse, HttpError> {
+        async fn request(
+            &self,
+            req: HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, HttpError> {
             *self.last.lock().unwrap() = Some(req);
-            Ok(protocol::HttpResponse {
+            Ok(lingxi_core::types::HttpResponse {
                 status: self.status,
                 headers: vec![],
                 body: self.body.clone(),

@@ -6,7 +6,7 @@
 //! - When the sandbox is actually available on the host, `prepare()` wraps the
 //!   inner command in `/bin/sh -c "<bwrap … | sandbox-exec …>"`.
 
-use platform_api::{
+use lingxi_core::host::{
     NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend, SandboxPolicy,
     SandboxedTag,
 };

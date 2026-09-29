@@ -5,7 +5,7 @@
 //! `SecureStorageMetadata`. The pair avoids a circular dependency between the
 //! protocol crate and this crate.
 
-use protocol::SecretKindDto;
+use lingxi_core::types::SecretKindDto;
 use serde::{Deserialize, Serialize};
 
 /// Typed label for every secret persisted via `SecureStorage`.

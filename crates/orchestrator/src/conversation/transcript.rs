@@ -4,7 +4,7 @@ use super::*;
 
 /// Metadata of the exact task whose scheduled fire is being recorded.
 pub struct ScheduledLoopFire {
-    pub fire_id: protocol::MessageId,
+    pub fire_id: lingxi_core::types::MessageId,
     /// Identity assigned when the task was scheduled.
     pub task_id: String,
     /// Exact cron expression of the fired task.
@@ -25,7 +25,7 @@ impl ConversationOrchestrator {
         streak: u32,
         since_ms: u64,
         fire: ScheduledLoopFire,
-    ) -> Result<(), platform_api::HandleError> {
+    ) -> Result<(), lingxi_core::host::HandleError> {
         let _turn = self.turn_gate.lock().await;
         let session_id = self.session.lock().await.session_id;
         let mut payload = serde_json::json!({"message": message, "companion": companion,
@@ -73,7 +73,7 @@ impl ConversationOrchestrator {
             session.history.push(record);
         }
         if let Some(text) = companion {
-            let row = ConversationMessage::user_meta(protocol::MessageId::new(), text);
+            let row = ConversationMessage::user_meta(lingxi_core::types::MessageId::new(), text);
             let companion_result = if result.is_ok() {
                 self.persist_scheduled_record(&row, session_id, true).await
             } else {
@@ -91,9 +91,9 @@ impl ConversationOrchestrator {
     async fn persist_scheduled_record(
         &self,
         record: &ConversationMessage,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         companion: bool,
-    ) -> Result<(), platform_api::HandleError> {
+    ) -> Result<(), lingxi_core::host::HandleError> {
         let Some(writer) = &self.transcript.jsonl_writer else {
             return Ok(());
         };
@@ -117,7 +117,7 @@ impl ConversationOrchestrator {
                 let text = content
                     .iter()
                     .filter_map(|block| match block {
-                        protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                        lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -126,7 +126,7 @@ impl ConversationOrchestrator {
             }
         }
         writer.append(&row).await.map_err(|error| {
-            platform_api::HandleError::ActionFailed(format!(
+            lingxi_core::host::HandleError::ActionFailed(format!(
                 "could not persist scheduled fire: {error}"
             ))
         })?;
@@ -146,7 +146,7 @@ impl ConversationOrchestrator {
         turn_id: &str,
         block_index: usize,
         parent_uuid: Option<&str>,
-        block: &protocol::ContentBlock,
+        block: &lingxi_core::types::ContentBlock,
     ) -> String {
         let block_index = u64::try_from(block_index).unwrap_or(u64::MAX);
         let parent_uuid = parent_uuid.unwrap_or("root");
@@ -170,7 +170,7 @@ impl ConversationOrchestrator {
         uuid::Uuid::from_bytes(bytes).to_string()
     }
 
-    fn assistant_block_signature(block: &protocol::ContentBlock) -> String {
+    fn assistant_block_signature(block: &lingxi_core::types::ContentBlock) -> String {
         let mut payload = serde_json::to_value(block).unwrap_or(serde_json::Value::Null);
         Self::sort_json_object_keys(&mut payload);
         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
@@ -211,7 +211,7 @@ impl ConversationOrchestrator {
     /// has ordering active. Every dispatch-side emission goes through here.
     pub(crate) async fn emit_tool_result_frame(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         tool: &str,
         model_text: &str,
         result: &serde_json::Value,
@@ -281,7 +281,7 @@ impl ConversationOrchestrator {
     /// emitted nothing at all.
     pub(crate) async fn release_tool_frame(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         tool: &str,
         content: &str,
         is_error: bool,
@@ -348,7 +348,11 @@ impl ConversationOrchestrator {
     /// Values are claude's: `user-rejected`, `permission-rule`,
     /// `automode-blocked`, `automode-unavailable`, `automode-parsing-error`,
     /// plus the abort kinds `cancelled` / `interrupted`.
-    pub(crate) async fn record_tool_denial_kind(&self, id: &protocol::ToolUseId, kind: &str) {
+    pub(crate) async fn record_tool_denial_kind(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        kind: &str,
+    ) {
         // The `/loop` fold's `tool_denial` / `tool_abort` vetoes. This is the
         // single funnel every denial passes through, so counting here cannot
         // miss one the way a per-call-site count could.
@@ -374,14 +378,14 @@ impl ConversationOrchestrator {
     pub(crate) async fn record_permission_denial(
         &self,
         tool_name: &str,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         tool_input: &serde_json::Value,
     ) {
         self.transcript
             .permission_denials
             .lock()
             .await
-            .push(platform_api::PermissionDenial {
+            .push(lingxi_core::host::PermissionDenial {
                 tool_name: tool_name.to_string(),
                 tool_use_id: id.to_string(),
                 tool_input: tool_input.clone(),
@@ -390,7 +394,7 @@ impl ConversationOrchestrator {
 
     /// Every tool call refused this session, in order — read by the stream-json
     /// result builders.
-    pub async fn permission_denials(&self) -> Vec<platform_api::PermissionDenial> {
+    pub async fn permission_denials(&self) -> Vec<lingxi_core::host::PermissionDenial> {
         self.transcript.permission_denials.lock().await.clone()
     }
 
@@ -400,7 +404,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn permission_denials_handle(
         &self,
-    ) -> std::sync::Arc<tokio::sync::Mutex<Vec<platform_api::PermissionDenial>>> {
+    ) -> std::sync::Arc<tokio::sync::Mutex<Vec<lingxi_core::host::PermissionDenial>>> {
         std::sync::Arc::clone(&self.transcript.permission_denials)
     }
 
@@ -423,7 +427,7 @@ impl ConversationOrchestrator {
             return None;
         };
         let mut results = content.iter().filter_map(|b| match b {
-            protocol::ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id),
+            lingxi_core::types::ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id),
             _ => None,
         });
         match (results.next(), results.next()) {
@@ -440,7 +444,7 @@ impl ConversationOrchestrator {
     /// (BIN off 235424595 / 235400200 / 232972524 / …).
     pub(crate) async fn record_tool_use_result(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         data: serde_json::Value,
     ) {
         self.transcript
@@ -454,7 +458,7 @@ impl ConversationOrchestrator {
     /// (2.1.220 BIN off 232969604 — verbatim on the main chain).
     pub(crate) async fn record_tool_use_mcp_meta(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         meta: serde_json::Value,
     ) {
         self.transcript
@@ -468,7 +472,7 @@ impl ConversationOrchestrator {
     /// its persisted/tool-hook boundary has completed.
     pub(crate) async fn record_pending_tool_result_turn_end(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         turn_end: tool_api::tool_trait::ToolResultTurnEnd,
     ) {
         self.transcript
@@ -481,7 +485,10 @@ impl ConversationOrchestrator {
     /// Drop result metadata whose real tool outcome was replaced by a
     /// streaming synthetic. The synthetic is an error result and therefore
     /// carries neither the real MCP metadata nor its turn-end request.
-    pub(crate) async fn clear_discarded_tool_result_metadata(&self, id: &protocol::ToolUseId) {
+    pub(crate) async fn clear_discarded_tool_result_metadata(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+    ) {
         let key = id.to_string();
         self.transcript.tool_use_mcp_meta.lock().await.remove(&key);
         self.transcript
@@ -496,7 +503,7 @@ impl ConversationOrchestrator {
     /// `sourceToolAssistantUUID`.
     pub(crate) async fn source_tool_assistant_uuid(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
     ) -> Option<String> {
         self.transcript
             .tool_source_assistant_uuids
@@ -513,7 +520,7 @@ impl ConversationOrchestrator {
     /// puts it.
     pub(crate) async fn queue_hook_attachment(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         payload: serde_json::Value,
     ) {
         self.transcript
@@ -526,7 +533,7 @@ impl ConversationOrchestrator {
     }
 
     /// Persist (and drain) every attachment queued for `id`.
-    pub(crate) async fn flush_hook_attachments(&self, id: &protocol::ToolUseId) {
+    pub(crate) async fn flush_hook_attachments(&self, id: &lingxi_core::types::ToolUseId) {
         for payload in self.take_queued_hook_attachments(id).await {
             self.persist_hook_attachment_to_jsonl(payload).await;
         }
@@ -569,7 +576,7 @@ impl ConversationOrchestrator {
     /// telemetry cardinality for concurrent batches.
     pub(crate) async fn take_pending_tool_result_turn_ends(
         &self,
-        ids: &[protocol::ToolUseId],
+        ids: &[lingxi_core::types::ToolUseId],
     ) -> Option<tool_api::tool_trait::ToolResultTurnEnd> {
         let mut pending = self.transcript.pending_tool_result_turn_end.lock().await;
         let mut selected = None;
@@ -893,7 +900,7 @@ impl ConversationOrchestrator {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            if !matches!(selection, platform_api::ReasoningSelection::Automatic) {
+            if !matches!(selection, lingxi_core::host::ReasoningSelection::Automatic) {
                 if let Ok(value) = serde_json::to_value(selection) {
                     extra.insert("reasoningSelection".to_string(), value);
                 }
@@ -1064,7 +1071,7 @@ impl ConversationOrchestrator {
         };
         let is_tool_result_carrier = content
             .iter()
-            .any(|b| matches!(b, protocol::ContentBlock::ToolResult { .. }));
+            .any(|b| matches!(b, lingxi_core::types::ContentBlock::ToolResult { .. }));
         let mut slot = self.prompt_runtime.current_prompt_id.lock().await;
         if is_tool_result_carrier {
             // Continuation of the in-flight turn — reuse the current id. If none
@@ -1257,7 +1264,7 @@ impl ConversationOrchestrator {
         writer: Arc<JsonlWriter>,
         last_uuid: Arc<Mutex<Option<String>>>,
         session: Arc<Mutex<SessionState>>,
-        expected_session: protocol::SessionId,
+        expected_session: lingxi_core::types::SessionId,
         cwd: std::path::PathBuf,
         git_branch: Option<String>,
         mut ranges: std::collections::HashMap<MessageId, usize>,
@@ -1347,13 +1354,13 @@ impl ConversationOrchestrator {
         let absolute = config_home.join(&relative);
         let bytes = text.as_bytes().to_vec();
         let write = tokio::task::spawn_blocking(move || {
-            platform_api::rooted_fs::atomic_write(
+            lingxi_core::host::rooted_fs::atomic_write(
                 &config_home,
                 &relative,
                 &bytes,
-                platform_api::AtomicWriteOptions {
+                lingxi_core::host::AtomicWriteOptions {
                     overwrite: false,
-                    ..platform_api::AtomicWriteOptions::default()
+                    ..lingxi_core::host::AtomicWriteOptions::default()
                 },
             )
         })
@@ -1400,9 +1407,9 @@ impl ConversationOrchestrator {
         active_goal: Option<&lingxi_core::session::ActiveGoalState>,
     ) {
         let status = if active_goal.is_some() {
-            platform_api::GoalStatusKind::Set
+            lingxi_core::host::GoalStatusKind::Set
         } else {
-            platform_api::GoalStatusKind::Cleared
+            lingxi_core::host::GoalStatusKind::Cleared
         };
         self.persist_goal_status_attachment(status, active_goal)
             .await;
@@ -1410,7 +1417,7 @@ impl ConversationOrchestrator {
 
     pub(super) async fn persist_goal_status_attachment(
         &self,
-        status: platform_api::GoalStatusKind,
+        status: lingxi_core::host::GoalStatusKind,
         active_goal: Option<&lingxi_core::session::ActiveGoalState>,
     ) {
         let Some(goal) = active_goal else {
@@ -1422,7 +1429,7 @@ impl ConversationOrchestrator {
             .unwrap_or_default()
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
-        let snapshot = platform_api::ActiveGoalSnapshot {
+        let snapshot = lingxi_core::host::ActiveGoalSnapshot {
             condition: goal.condition.clone(),
             set_at: goal.set_at,
             last_reason: goal.last_reason.clone(),
@@ -1433,30 +1440,34 @@ impl ConversationOrchestrator {
         let reason = goal.last_reason.clone();
         let tokens = total_tokens.saturating_sub(goal.tokens_at_start);
         let attachment = match status {
-            platform_api::GoalStatusKind::Set => {
-                platform_api::GoalStatusAttachment::sentinel_set(condition, Some(snapshot))
+            lingxi_core::host::GoalStatusKind::Set => {
+                lingxi_core::host::GoalStatusAttachment::sentinel_set(condition, Some(snapshot))
             }
-            platform_api::GoalStatusKind::Cleared => {
-                platform_api::GoalStatusAttachment::sentinel_cleared(condition)
+            lingxi_core::host::GoalStatusKind::Cleared => {
+                lingxi_core::host::GoalStatusAttachment::sentinel_cleared(condition)
             }
-            platform_api::GoalStatusKind::Achieved => platform_api::GoalStatusAttachment::achieved(
-                condition,
-                reason,
-                goal.iterations,
-                duration_ms,
-                tokens,
-            ),
-            platform_api::GoalStatusKind::Failed => platform_api::GoalStatusAttachment::failed(
-                condition,
-                reason,
-                goal.iterations,
-                duration_ms,
-                tokens,
-            ),
+            lingxi_core::host::GoalStatusKind::Achieved => {
+                lingxi_core::host::GoalStatusAttachment::achieved(
+                    condition,
+                    reason,
+                    goal.iterations,
+                    duration_ms,
+                    tokens,
+                )
+            }
+            lingxi_core::host::GoalStatusKind::Failed => {
+                lingxi_core::host::GoalStatusAttachment::failed(
+                    condition,
+                    reason,
+                    goal.iterations,
+                    duration_ms,
+                    tokens,
+                )
+            }
             // The goal survives a not-met turn, so the resume snapshot rides
             // along with it; upstream's record carries only condition+reason.
-            platform_api::GoalStatusKind::NotMet => {
-                platform_api::GoalStatusAttachment::not_met(condition, reason, Some(snapshot))
+            lingxi_core::host::GoalStatusKind::NotMet => {
+                lingxi_core::host::GoalStatusAttachment::not_met(condition, reason, Some(snapshot))
             }
         };
         match serde_json::to_value(attachment) {
@@ -1636,19 +1647,19 @@ impl ConversationOrchestrator {
     /// as excluded from model context. This never retargets the live writer.
     pub(crate) async fn persist_model_excluded_meta_to_session(
         &self,
-        target_session: protocol::SessionId,
+        target_session: lingxi_core::types::SessionId,
         msg: &ConversationMessage,
-    ) -> Result<Option<String>, platform_api::HandleError> {
+    ) -> Result<Option<String>, lingxi_core::host::HandleError> {
         self.persist_conversation_message_to_session(target_session, msg, true)
             .await
     }
 
     pub(crate) async fn persist_conversation_message_to_session(
         &self,
-        target_session: protocol::SessionId,
+        target_session: lingxi_core::types::SessionId,
         msg: &ConversationMessage,
         exclude_from_model: bool,
-    ) -> Result<Option<String>, platform_api::HandleError> {
+    ) -> Result<Option<String>, lingxi_core::host::HandleError> {
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             return Ok(None);
         };
@@ -1659,7 +1670,7 @@ impl ConversationOrchestrator {
         let durable = writer.durable_transcript_enabled();
         let target_path = if durable {
             writer.session_target_path(target_session).ok_or_else(|| {
-                platform_api::HandleError::ActionFailed(format!(
+                lingxi_core::host::HandleError::ActionFailed(format!(
                     "durable transcript target is not bound for session {target_bare}"
                 ))
             })?
@@ -1679,7 +1690,7 @@ impl ConversationOrchestrator {
                             | session::jsonl::LoaderError::EmptyDirectory,
                         ) => session::jsonl::session_path(home, &cwd, &target_bare),
                         Err(error) => {
-                            return Err(platform_api::HandleError::ActionFailed(format!(
+                            return Err(lingxi_core::host::HandleError::ActionFailed(format!(
                                 "could not resolve target session transcript: {error}"
                             )))
                         }
@@ -1688,7 +1699,7 @@ impl ConversationOrchestrator {
                 None => {
                     let current = self.session.lock().await.session_id;
                     if current != target_session {
-                        return Err(platform_api::HandleError::ActionFailed(
+                        return Err(lingxi_core::host::HandleError::ActionFailed(
                             "target-session persistence requires a configured session store".into(),
                         ));
                     }
@@ -1715,7 +1726,7 @@ impl ConversationOrchestrator {
                             | session::jsonl::LoaderError::EmptyDirectory,
                         ) => None,
                         Err(error) => {
-                            return Err(platform_api::HandleError::ActionFailed(format!(
+                            return Err(lingxi_core::host::HandleError::ActionFailed(format!(
                                 "could not read target session transcript: {error}"
                             )))
                         }
@@ -1770,7 +1781,7 @@ impl ConversationOrchestrator {
             .append_to_path(&target_path, &persisted)
             .await
             .map_err(|error| {
-                platform_api::HandleError::ActionFailed(format!(
+                lingxi_core::host::HandleError::ActionFailed(format!(
                     "could not append target session transcript: {error}"
                 ))
             })?;
@@ -1815,9 +1826,9 @@ impl ConversationOrchestrator {
         // the adapter recorded no request-id (e.g. a mock that does not surface
         // headers) — the line then omits `requestId`, like claude-code.
         request_id: Option<&str>,
-    ) -> std::collections::HashMap<protocol::ToolUseId, String> {
+    ) -> std::collections::HashMap<lingxi_core::types::ToolUseId, String> {
         self.note_assistant_commit(msg).await;
-        let mut map: std::collections::HashMap<protocol::ToolUseId, String> =
+        let mut map: std::collections::HashMap<lingxi_core::types::ToolUseId, String> =
             std::collections::HashMap::new();
         let ConversationMessage::Assistant {
             id: turn_id,
@@ -1905,7 +1916,7 @@ impl ConversationOrchestrator {
                     continue;
                 }
             }
-            if let protocol::ContentBlock::ToolUse { id, .. } = block {
+            if let lingxi_core::types::ContentBlock::ToolUse { id, .. } = block {
                 // O1: the SAME uuid claude stamps as `sourceToolAssistantUUID`
                 // on this tool's `tool_result` user line (and from which its
                 // `parentUuid` is derived — BIN off 237862200). Recording it
@@ -1994,7 +2005,7 @@ impl ConversationOrchestrator {
                 // `sourceToolAssistantUUID`.
                 if let ConversationMessage::Assistant { content, .. } = msg {
                     for block in content {
-                        if let protocol::ContentBlock::ToolUse { id, .. } = block {
+                        if let lingxi_core::types::ContentBlock::ToolUse { id, .. } = block {
                             self.record_source_tool_assistant_uuid(id, line_uuid.clone())
                                 .await;
                         }

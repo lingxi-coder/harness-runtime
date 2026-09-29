@@ -15,9 +15,9 @@ use cost::{
     CostPersistPermit, CostPersistRequest, CostPersistResult, CostPersistence, CostState,
     CostStateVector, CostTracker,
 };
-pub use platform_api::{DurableFusionOutboxRecord, DurableFusionTerminalRecord};
-use platform_api::{FusionPublicationReceipt, FusionPublicationStatus, FusionRunIdentity};
-use protocol::SessionId;
+pub use lingxi_core::host::{DurableFusionOutboxRecord, DurableFusionTerminalRecord};
+use lingxi_core::host::{FusionPublicationReceipt, FusionPublicationStatus, FusionRunIdentity};
+use lingxi_core::types::SessionId;
 use session::jsonl::{DurableJournal, JournalError};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
@@ -169,7 +169,7 @@ struct QueuedMutation {
     mutation: SessionMutation,
     // Accepted work, not its possibly cancelled caller, owns this pin until
     // the writer has completed the blocking mutation and sent its ACK.
-    _pin: Option<platform_api::SessionRetentionPin>,
+    _pin: Option<lingxi_core::host::SessionRetentionPin>,
 }
 
 fn publication_rank(status: FusionPublicationStatus) -> u8 {
@@ -278,7 +278,7 @@ fn validate_terminal_record(
     }
     match record.outbox.as_ref() {
         Some(outbox) => {
-            if record.identity.origin != platform_api::FusionOrigin::Slash {
+            if record.identity.origin != lingxi_core::host::FusionOrigin::Slash {
                 return Err("only a Slash terminal may contain a parent outbox".into());
             }
             if outbox.delivery_id != fusion_delivery_id(&record.identity) {
@@ -377,7 +377,7 @@ pub struct SessionStateCoordinator {
     admission_closed: Arc<AtomicBool>,
     close_tx: watch::Sender<bool>,
     worker_completion: Arc<WorkerCompletion>,
-    _retention_pin: Option<platform_api::SessionRetentionPin>,
+    _retention_pin: Option<lingxi_core::host::SessionRetentionPin>,
     #[cfg(test)]
     start_hydration_block: Arc<Mutex<Option<Arc<TestHydrationBlock>>>>,
 }
@@ -505,7 +505,7 @@ struct CoordinatorState {
     attempts: Mutex<AttemptProjection>,
     /// Stable mutation outcomes retained after ack receivers are dropped.
     results: Mutex<std::collections::HashMap<CostMutationId, CachedCostResult>>,
-    writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+    writer_lease: lingxi_core::host::live_sessions::SharedSessionWriterLease,
     durability_gate: CostDurabilityGate,
     /// Highest journal revision this coordinator has appended or hydrated.
     /// Kept here because the journal exposes no cheap accessor and a barrier
@@ -725,13 +725,14 @@ impl SessionStateManager {
             self.touch(session_id);
             return existing.pinned_view();
         }
-        let lease =
-            platform_api::live_sessions::LiveSessionDir::at_live(self.lingxi_home.join("sessions"))
-                .claim_session_id(&session_id.to_string(), std::process::id())
-                .map_err(|error| {
-                    CostPersistError::Rejected(format!("session writer claim failed: {error}"))
-                })?
-                .into_shared();
+        let lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
+            self.lingxi_home.join("sessions"),
+        )
+        .claim_session_id(&session_id.to_string(), std::process::id())
+        .map_err(|error| {
+            CostPersistError::Rejected(format!("session writer claim failed: {error}"))
+        })?
+        .into_shared();
         let coordinator = SessionStateCoordinator::open_core(&self.lingxi_home, session_id, lease)?;
         #[cfg(test)]
         if let Some(block) = self
@@ -861,7 +862,7 @@ impl SessionStateCoordinator {
     pub fn open(
         lingxi_home: impl AsRef<Path>,
         session_id: SessionId,
-        writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+        writer_lease: lingxi_core::host::live_sessions::SharedSessionWriterLease,
     ) -> Result<Arc<Self>, CostPersistError> {
         Self::open_core(lingxi_home, session_id, writer_lease)?.pinned_view()
     }
@@ -869,7 +870,7 @@ impl SessionStateCoordinator {
     fn open_core(
         lingxi_home: impl AsRef<Path>,
         session_id: SessionId,
-        writer_lease: platform_api::live_sessions::SharedSessionWriterLease,
+        writer_lease: lingxi_core::host::live_sessions::SharedSessionWriterLease,
     ) -> Result<Arc<Self>, CostPersistError> {
         if writer_lease.canonical_session_id() != Some(session_id) {
             return Err(CostPersistError::Rejected(
@@ -905,7 +906,7 @@ impl SessionStateCoordinator {
         }))
     }
 
-    fn view(&self, pin: Option<platform_api::SessionRetentionPin>) -> Arc<Self> {
+    fn view(&self, pin: Option<lingxi_core::host::SessionRetentionPin>) -> Arc<Self> {
         Arc::new(Self {
             state: self.state.clone(),
             queue_tx: self.queue_tx.clone(),
@@ -919,7 +920,7 @@ impl SessionStateCoordinator {
         })
     }
 
-    fn retention_pin(&self) -> Result<platform_api::SessionRetentionPin, CostPersistError> {
+    fn retention_pin(&self) -> Result<lingxi_core::host::SessionRetentionPin, CostPersistError> {
         self.state
             .durability_gate
             .retention_gate()
@@ -937,18 +938,18 @@ impl SessionStateCoordinator {
 
     pub(crate) fn writer_lease_core(
         &self,
-    ) -> platform_api::live_sessions::SharedSessionWriterLease {
+    ) -> lingxi_core::host::live_sessions::SharedSessionWriterLease {
         self.state.writer_lease.clone()
     }
 
     /// Keep the writer claim alive while returning a scoped clone.
     #[must_use]
-    pub fn writer_lease(&self) -> platform_api::live_sessions::SharedSessionWriterLease {
+    pub fn writer_lease(&self) -> lingxi_core::host::live_sessions::SharedSessionWriterLease {
         let pin = self._retention_pin.clone().unwrap_or_else(|| {
             self.retention_pin()
                 .expect("external writer lease requires a live authority")
         });
-        platform_api::live_sessions::pin_writer_lease(self.writer_lease_core(), pin)
+        lingxi_core::host::live_sessions::pin_writer_lease(self.writer_lease_core(), pin)
     }
 
     /// Per-session latch shared by ordinary and Fusion paid prechecks.
@@ -1363,7 +1364,7 @@ impl SessionStateCoordinator {
     ) -> Result<
         (
             mpsc::OwnedPermit<QueuedMutation>,
-            platform_api::SessionRetentionPin,
+            lingxi_core::host::SessionRetentionPin,
         ),
         CostPersistError,
     > {
@@ -2519,8 +2520,8 @@ fn map_journal_error(error: JournalError) -> CostPersistError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::live_sessions::{SessionWriterLease, SharedSessionWriterLease};
-    use platform_api::{FusionError, FusionResult, FusionRunFacts};
+    use lingxi_core::host::live_sessions::{SessionWriterLease, SharedSessionWriterLease};
+    use lingxi_core::host::{FusionError, FusionResult, FusionRunFacts};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct TestLease(String);
@@ -2554,10 +2555,10 @@ mod tests {
 
     fn fusion_identity(
         session_id: SessionId,
-        origin: platform_api::FusionOrigin,
+        origin: lingxi_core::host::FusionOrigin,
     ) -> FusionRunIdentity {
         FusionRunIdentity::new(
-            platform_api::FusionRunId::generated(),
+            lingxi_core::host::FusionRunId::generated(),
             Some(session_id),
             origin,
             None,
@@ -2597,7 +2598,7 @@ mod tests {
         }
     }
 
-    fn completed_result(run_id: &platform_api::FusionRunId) -> FusionResult {
+    fn completed_result(run_id: &lingxi_core::host::FusionRunId) -> FusionResult {
         serde_json::from_value(serde_json::json!({
             "run_id": run_id.to_string(),
             "status": "analyzed",
@@ -3076,7 +3077,7 @@ mod tests {
     fn invalid_fusion_terminal_semantics_are_rejected_before_the_wal() {
         let (_directory, coordinator, session_id) = coordinator();
 
-        let agent = fusion_identity(session_id, platform_api::FusionOrigin::Agent);
+        let agent = fusion_identity(session_id, lingxi_core::host::FusionOrigin::Agent);
         let agent_outbox = fusion_outbox(&agent, serde_json::json!({"body": "not trusted"}));
         let record = fusion_terminal(agent, Some(agent_outbox));
         assert!(matches!(
@@ -3087,7 +3088,7 @@ mod tests {
         ));
         assert_eq!(coordinator.journal().replay().unwrap().last_revision, 0);
 
-        let slash = fusion_identity(session_id, platform_api::FusionOrigin::Slash);
+        let slash = fusion_identity(session_id, lingxi_core::host::FusionOrigin::Slash);
         let mut foreign = fusion_outbox(&slash, serde_json::json!({"body": "foreign"}));
         foreign.session_id = SessionId::new();
         let record = fusion_terminal(slash, Some(foreign));
@@ -3099,9 +3100,11 @@ mod tests {
         ));
         assert_eq!(coordinator.journal().replay().unwrap().last_revision, 0);
 
-        let identity = fusion_identity(session_id, platform_api::FusionOrigin::Agent);
+        let identity = fusion_identity(session_id, lingxi_core::host::FusionOrigin::Agent);
         let mut record = fusion_terminal(identity, None);
-        record.result = Ok(completed_result(&platform_api::FusionRunId::generated()));
+        record.result = Ok(completed_result(
+            &lingxi_core::host::FusionRunId::generated(),
+        ));
         assert!(matches!(
             coordinator
                 .state
@@ -3110,7 +3113,7 @@ mod tests {
         ));
         assert_eq!(coordinator.journal().replay().unwrap().last_revision, 0);
 
-        let slash = fusion_identity(session_id, platform_api::FusionOrigin::Slash);
+        let slash = fusion_identity(session_id, lingxi_core::host::FusionOrigin::Slash);
         let mut invalid_cycle = fusion_outbox(&slash, serde_json::json!({"body": "answer"}));
         invalid_cycle.retry_cycle_end = 5;
         let record = fusion_terminal(slash, Some(invalid_cycle));
@@ -3126,7 +3129,7 @@ mod tests {
     #[test]
     fn string_payload_fusion_errors_are_durable_terminal_records() {
         let (_directory, coordinator, session_id) = coordinator();
-        let identity = fusion_identity(session_id, platform_api::FusionOrigin::Slash);
+        let identity = fusion_identity(session_id, lingxi_core::host::FusionOrigin::Slash);
         let mut record = fusion_terminal(identity, None);
         record.result = Err(FusionError::InvalidConfiguration(
             "a configuration value is invalid".into(),
@@ -3144,9 +3147,11 @@ mod tests {
     #[test]
     fn replay_reuses_the_same_terminal_semantic_validator() {
         let (_directory, coordinator, session_id) = coordinator();
-        let identity = fusion_identity(session_id, platform_api::FusionOrigin::Agent);
+        let identity = fusion_identity(session_id, lingxi_core::host::FusionOrigin::Agent);
         let mut invalid = fusion_terminal(identity, None);
-        invalid.result = Ok(completed_result(&platform_api::FusionRunId::generated()));
+        invalid.result = Ok(completed_result(
+            &lingxi_core::host::FusionRunId::generated(),
+        ));
         let event = encode_session_event(&SessionEvent::FusionTerminal(invalid.clone())).unwrap();
         coordinator
             .journal()
@@ -3162,7 +3167,7 @@ mod tests {
     #[test]
     fn retry_cycle_semantics_are_rejected_before_wal_and_during_replay() {
         let (_directory, primary, session_id) = coordinator();
-        let identity = fusion_identity(session_id, platform_api::FusionOrigin::Slash);
+        let identity = fusion_identity(session_id, lingxi_core::host::FusionOrigin::Slash);
         let queued = fusion_outbox(&identity, serde_json::json!({"body": "answer"}));
         let terminal = fusion_terminal(identity, Some(queued.clone()));
         primary
@@ -3181,7 +3186,8 @@ mod tests {
         assert_eq!(primary.journal().replay().unwrap().last_revision, 1);
 
         let (_replay_directory, replay, replay_session_id) = coordinator();
-        let replay_identity = fusion_identity(replay_session_id, platform_api::FusionOrigin::Slash);
+        let replay_identity =
+            fusion_identity(replay_session_id, lingxi_core::host::FusionOrigin::Slash);
         let replay_queued = fusion_outbox(
             &replay_identity,
             serde_json::json!({"body": "replay answer"}),
@@ -3213,7 +3219,7 @@ mod tests {
         let cost_one = persist_cost(&coordinator, session_id, 1, 10).await;
         assert_eq!(cost_one.journal_revision, 1);
 
-        let identity = fusion_identity(session_id, platform_api::FusionOrigin::Slash);
+        let identity = fusion_identity(session_id, lingxi_core::host::FusionOrigin::Slash);
         let queued = fusion_outbox(&identity, serde_json::json!({"body": "stable"}));
         let terminal = fusion_terminal(identity, Some(queued.clone()));
         let terminal_ack = coordinator
@@ -3275,7 +3281,7 @@ mod tests {
     #[test]
     fn published_outbox_is_absorbing_and_retry_generations_are_wide_and_contiguous() {
         let (_directory, coordinator, session_id) = coordinator();
-        let identity = fusion_identity(session_id, platform_api::FusionOrigin::Slash);
+        let identity = fusion_identity(session_id, lingxi_core::host::FusionOrigin::Slash);
         let queued = fusion_outbox(&identity, serde_json::json!({"body": "stable"}));
         let terminal = fusion_terminal(identity, Some(queued.clone()));
         coordinator
@@ -3341,7 +3347,7 @@ mod tests {
     #[test]
     fn outbox_retry_cycle_changes_only_at_an_exhausted_failed_boundary() {
         let (_directory, _coordinator, session_id) = coordinator();
-        let identity = fusion_identity(session_id, platform_api::FusionOrigin::Slash);
+        let identity = fusion_identity(session_id, lingxi_core::host::FusionOrigin::Slash);
         let queued = fusion_outbox(&identity, serde_json::json!({"body": "stable"}));
 
         let mut changed_same_attempt = queued.clone();
@@ -3383,7 +3389,7 @@ mod tests {
     #[test]
     fn terminal_outbox_conflict_cannot_poison_the_authoritative_wal() {
         let (_directory, coordinator, session_id) = coordinator();
-        let identity = fusion_identity(session_id, platform_api::FusionOrigin::Slash);
+        let identity = fusion_identity(session_id, lingxi_core::host::FusionOrigin::Slash);
         let original = fusion_outbox(&identity, serde_json::json!({"body": "original"}));
         coordinator
             .state
@@ -3412,7 +3418,7 @@ mod tests {
     async fn mixed_replay_keeps_cost_and_journal_revisions_independent() {
         let (_directory, coordinator, session_id) = coordinator();
         persist_cost(&coordinator, session_id, 1, 10).await;
-        let identity = fusion_identity(session_id, platform_api::FusionOrigin::Slash);
+        let identity = fusion_identity(session_id, lingxi_core::host::FusionOrigin::Slash);
         let queued = fusion_outbox(&identity, serde_json::json!({"body": "stable"}));
         let terminal = fusion_terminal(identity, Some(queued.clone()));
         coordinator
@@ -3761,8 +3767,9 @@ mod tests {
         assert!(manager.session_ids().is_empty());
         assert!(coordinator.acquire_permit(session_id).await.is_err());
 
-        let live =
-            platform_api::live_sessions::LiveSessionDir::at_live(directory.path().join("sessions"));
+        let live = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
+            directory.path().join("sessions"),
+        );
         assert!(
             live.claim_session_id(&session_id.to_string(), std::process::id())
                 .is_err(),
@@ -3846,7 +3853,7 @@ mod tests {
             coordinator_a.shares_authority(&manager.ensure_coordinator(session_a).await.unwrap())
         );
 
-        let live = platform_api::live_sessions::LiveSessionDir::at_live(home.join("sessions"));
+        let live = lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"));
         live.claim_session_id(&session_b.to_string(), std::process::id())
             .expect("failed B initialization must synchronously release B's claim");
         manager.close_and_drain().await.unwrap();

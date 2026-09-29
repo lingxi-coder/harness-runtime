@@ -558,9 +558,9 @@ pub fn loop_usage_row(
     is_dynamic: bool,
     last_run: Option<SystemTime>,
     now: SystemTime,
-) -> platform_api::LoopUsageRow {
+) -> lingxi_core::host::LoopUsageRow {
     let fired = last_run.is_some();
-    platform_api::LoopUsageRow {
+    lingxi_core::host::LoopUsageRow {
         prompt: prompt.to_string(),
         every: loop_every_label(cron, is_dynamic),
         runs: u64::from(fired),

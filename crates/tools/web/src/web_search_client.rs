@@ -3,7 +3,7 @@
 //! The hosted [`crate::web_search::WebSearchTool`] path only works on Anthropic's
 //! first-party API (its `web_search_20250305` server tool). On other providers
 //! (GitHub Copilot, OpenAI, …) `WebSearchTool` falls back to THIS module, which
-//! runs the search itself over the injected [`platform_api::http::HttpTransport`] and
+//! runs the search itself over the injected [`lingxi_core::host::http::HttpTransport`] and
 //! returns markdown result blocks the model can read — no provider hosting.
 //!
 //! Provider selection prefers credentials explicitly saved through LingXi's
@@ -13,8 +13,8 @@
 //!   `LINGXI_SEARXNG_URL` → DuckDuckGo Lite.
 
 use crate::web_search_config::{WebSearchConfig, WebSearchProvider};
-use platform_api::http::HttpTransport;
-use protocol::{HttpMethod, HttpRequest};
+use lingxi_core::host::http::HttpTransport;
+use lingxi_core::types::{HttpMethod, HttpRequest};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;

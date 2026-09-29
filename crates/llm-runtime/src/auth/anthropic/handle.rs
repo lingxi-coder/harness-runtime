@@ -17,6 +17,8 @@
 use crate::auth::anthropic::callback::{CallbackError, CallbackListener};
 use crate::auth::anthropic::login::{prepare_exchanged_tokens, ExchangedTokens, OAuthError};
 use async_trait::async_trait;
+use lingxi_core::host::Clock;
+use lingxi_core::host::{AuthError, AuthHandle, LoginInfo};
 use lingxi_llm_client::auth::oauth::anthropic::{
     self as sdk, AuthorizeOptions, ClaudeAiOAuthConfig,
 };
@@ -24,8 +26,6 @@ use lingxi_llm_client::auth::oauth::anthropic::{
     CLAUDE_CODE_INFERENCE_SCOPE, LONG_LIVED_OAUTH_TOKEN_TTL_SECONDS,
 };
 use lingxi_llm_client::transport::Transport;
-use platform_api::Clock;
-use platform_api::{AuthError, AuthHandle, LoginInfo};
 use secret::CredentialManager;
 use std::sync::Arc;
 use std::time::Duration;
@@ -357,7 +357,7 @@ impl OAuthHandle {
         // persist it into the stored credential (claude-code keeps
         // `subscriptionType`/`rateLimitTier` INSIDE `claudeAiOauth`, so a fresh
         // process has correct enterprise/tier state on its FIRST request) and
-        // publish it to the process-global `platform_api::subscription` cache for
+        // publish it to the process-global `lingxi_core::host::subscription` cache for
         // subscription-gated prompt logic (e.g. the `AgentTool` pro-plan gate).
         // Best-effort + scope-gated (`hasProfileScope`): a token without
         // `user:profile`, or any fetch failure, leaves both unchanged.
@@ -379,7 +379,7 @@ impl OAuthHandle {
             {
                 tracing::warn!(%error, "could not persist subscription tier into the credential store");
             }
-            platform_api::subscription::set_current_subscription(Some(snapshot));
+            lingxi_core::host::subscription::set_current_subscription(Some(snapshot));
         }
 
         // (7) Return the resolved identity.
@@ -391,7 +391,7 @@ impl OAuthHandle {
     pub async fn mint_long_lived_token(
         &self,
         org_uuid: Option<String>,
-    ) -> Result<protocol::Secret<String>, AuthError> {
+    ) -> Result<lingxi_core::types::Secret<String>, AuthError> {
         let tokens = self
             .run_code_flow(
                 AuthorizeOptions {
@@ -881,7 +881,7 @@ mod tests {
             tokens.rate_limit_tier.as_deref(),
             Some("default_claude_max_20x")
         );
-        platform_api::subscription::set_current_subscription(None);
+        lingxi_core::host::subscription::set_current_subscription(None);
     }
 
     /// M8: with NO manual channel and a dead opener the flow still waits on

@@ -20,12 +20,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use lingxi_core::host::{McpPermissionCeiling, McpTransportSpec};
 use mcp::registry::McpRegistry;
 use mcp::McpClientError;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{McpToolMaxPermission, PermissionDecisionReason, PermissionResult};
-use platform_api::{McpPermissionCeiling, McpTransportSpec};
 use serde_json::{json, Value};
 use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -549,7 +549,7 @@ async fn emit(bus: &Arc<AnalyticsBus>, event: &'static str, fields: &[(&str, Ana
 async fn emit_mcp_input_missing_required(
     bus: &Arc<AnalyticsBus>,
     tool_use_id: Option<&str>,
-    message_id: &protocol::MessageId,
+    message_id: &lingxi_core::types::MessageId,
     tool_input_size_bytes: u64,
     preflight: &MissingRequiredInputPreflight,
 ) {
@@ -900,7 +900,10 @@ impl MCPTool {
     /// crate while allowing a registry/client integration to pass through the
     /// resolved `allow`/`ask`/`deny` value directly.
     #[must_use]
-    pub fn with_mcp_permission_ceiling(self, ceiling: platform_api::McpPermissionCeiling) -> Self {
+    pub fn with_mcp_permission_ceiling(
+        self,
+        ceiling: lingxi_core::host::McpPermissionCeiling,
+    ) -> Self {
         self.with_effective_max_permission(max_permission_from_ceiling(ceiling))
     }
 
@@ -1064,10 +1067,10 @@ async fn process_mcp_call_result(
     output_schema: Option<Value>,
     server: String,
     tool: String,
-    tool_use_id: Option<protocol::ToolUseId>,
+    tool_use_id: Option<lingxi_core::types::ToolUseId>,
     progress: ToolProgressSender,
     started: Instant,
-    res: Result<platform_api::McpToolResultDto, McpClientError>,
+    res: Result<lingxi_core::host::McpToolResultDto, McpClientError>,
 ) -> Result<ToolCallResult, ToolError> {
     match res {
         Ok(dto) => {
@@ -1385,7 +1388,7 @@ impl Tool for MCPTool {
         &self,
         input: &Value,
         tool_use_id: Option<&str>,
-        assistant_message_id: Option<&protocol::MessageId>,
+        assistant_message_id: Option<&lingxi_core::types::MessageId>,
     ) {
         let Some(preflight) = inspect_missing_required_input(input, Some(self.input_schema()))
         else {
@@ -1481,7 +1484,7 @@ impl Tool for MCPTool {
     /// row to be missing from.
     ///
     /// `suppressAlwaysAllowRule` is not a field here — the port carries it as
-    /// [`platform_api::permission_gate::PermissionCheckContext::requires_user_interaction`],
+    /// [`lingxi_core::host::permission_gate::PermissionCheckContext::requires_user_interaction`],
     /// which `turn_loop` fills from [`Self::requires_user_interaction`] and
     /// `TuiPermissionGate` reads to hide the persistent-grant row.
     ///
@@ -1921,7 +1924,7 @@ impl Tool for MCPTool {
         // (already threaded into the call task above) is handed to the registry
         // so `TaskStop` fires it (the port equivalent of the state's
         // `abortController`), which now genuinely cancels the in-flight call.
-        let registration = platform_api::task_registry::McpTaskRegistration {
+        let registration = lingxi_core::host::task_registry::McpTaskRegistration {
             server_name: server.clone(),
             tool_name: tool.clone(),
             tool_use_id: tool_use_id_str.clone(),
@@ -2754,12 +2757,12 @@ async fn resource_capable_server_names(registry: &McpRegistry) -> Vec<String> {
     names
 }
 
-/// Shape one [`platform_api::McpResourceDto`] into the output row, adding the
+/// Shape one [`lingxi_core::host::McpResourceDto`] into the output row, adding the
 /// `server` tag. In-tool JSON shaping (NOT a `traits` DTO widen) so the
 /// frozen `McpResourceDto` is untouched. Field names mirror
 /// `ListMcpResourcesTool.ts:26-34` (`uri`, `name`, `mimeType`, `server`); a
 /// `None` `mime_type` is omitted (the TS field is `optional`).
-fn tag_resource_with_server(r: &platform_api::McpResourceDto, server: &str) -> Value {
+fn tag_resource_with_server(r: &lingxi_core::host::McpResourceDto, server: &str) -> Value {
     let mut obj = serde_json::Map::new();
     obj.insert("uri".into(), json!(r.uri));
     obj.insert("name".into(), json!(r.name));
@@ -3079,7 +3082,7 @@ impl Tool for ReadMcpResourceTool {
 /// [`tool_api::ToolRegistry::register_mcp_tools`] (and drop them en masse on
 /// disconnect via the matching `conn_id`).
 ///
-/// For each `Connected` server we map each [`platform_api::McpToolDto`] →
+/// For each `Connected` server we map each [`lingxi_core::host::McpToolDto`] →
 /// `Arc::new(MCPTool::new_for_tool(ctx, dto.full_name, dto.description,
 /// dto.input_schema, dto.search_hint, dto.always_load,
 /// dto.requires_user_interaction))`. The resulting tool's wire `name()` is the real
@@ -3116,7 +3119,7 @@ impl Tool for ReadMcpResourceTool {
 pub fn configured_permission_ceiling(
     config: &mcp::McpServerConfig,
     tool_name: &str,
-) -> Option<platform_api::McpPermissionCeiling> {
+) -> Option<lingxi_core::host::McpPermissionCeiling> {
     let mut ceiling = config.tool_permissions.get(tool_name).copied();
     for configured in config
         .tools
@@ -3125,14 +3128,14 @@ pub fn configured_permission_ceiling(
     {
         if let Some(policy) = configured.permission_policy {
             let policy_ceiling = match policy {
-                platform_api::McpToolPermissionPolicy::AlwaysAllow => {
-                    platform_api::McpPermissionCeiling::Allow
+                lingxi_core::host::McpToolPermissionPolicy::AlwaysAllow => {
+                    lingxi_core::host::McpPermissionCeiling::Allow
                 }
-                platform_api::McpToolPermissionPolicy::AlwaysAsk => {
-                    platform_api::McpPermissionCeiling::Ask
+                lingxi_core::host::McpToolPermissionPolicy::AlwaysAsk => {
+                    lingxi_core::host::McpPermissionCeiling::Ask
                 }
-                platform_api::McpToolPermissionPolicy::AlwaysDeny => {
-                    platform_api::McpPermissionCeiling::Deny
+                lingxi_core::host::McpToolPermissionPolicy::AlwaysDeny => {
+                    lingxi_core::host::McpPermissionCeiling::Deny
                 }
             };
             ceiling =
@@ -3146,23 +3149,23 @@ pub fn configured_permission_ceiling(
 }
 
 fn max_permission_from_ceiling(
-    ceiling: platform_api::McpPermissionCeiling,
+    ceiling: lingxi_core::host::McpPermissionCeiling,
 ) -> McpToolMaxPermission {
     match ceiling {
-        platform_api::McpPermissionCeiling::Allow => McpToolMaxPermission::Allow,
-        platform_api::McpPermissionCeiling::Ask => McpToolMaxPermission::Ask,
-        platform_api::McpPermissionCeiling::Deny => McpToolMaxPermission::Blocked,
+        lingxi_core::host::McpPermissionCeiling::Allow => McpToolMaxPermission::Allow,
+        lingxi_core::host::McpPermissionCeiling::Ask => McpToolMaxPermission::Ask,
+        lingxi_core::host::McpPermissionCeiling::Deny => McpToolMaxPermission::Blocked,
     }
 }
 
 pub async fn build_registered_mcp_tools(
     registry: &McpRegistry,
     ctx: tool_api::BuiltinToolContext,
-) -> Vec<(protocol::McpConnectionId, Vec<Arc<dyn Tool>>)> {
+) -> Vec<(lingxi_core::types::McpConnectionId, Vec<Arc<dyn Tool>>)> {
     use mcp::McpConnectionState;
 
     let conns = registry.connections.read().await;
-    let mut out: Vec<(protocol::McpConnectionId, Vec<Arc<dyn Tool>>)> = Vec::new();
+    let mut out: Vec<(lingxi_core::types::McpConnectionId, Vec<Arc<dyn Tool>>)> = Vec::new();
     // Oracle `k` in the dial round at `cc-238.js @243875044`
     // (`if(fe.capabilities?.resources&&!k)k=!0,ne=[...ne,K8,Z8,Yme]`): the three
     // resource tools are pushed ONCE, onto the first connected server that
@@ -3368,7 +3371,7 @@ mod tests {
             false,
             false,
         )
-        .with_mcp_permission_ceiling(platform_api::McpPermissionCeiling::Deny);
+        .with_mcp_permission_ceiling(lingxi_core::host::McpPermissionCeiling::Deny);
         assert!(matches!(
             tool.check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
                 .await,
@@ -3530,9 +3533,9 @@ mod tests {
     fn auth_kind_sse_with_oauth() {
         let spec = McpTransportSpec::Sse {
             url: "https://x".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
-            oauth: Some(platform_api::McpOAuthConfigDto {
+            oauth: Some(lingxi_core::host::McpOAuthConfigDto {
                 client_id: Some("cid".into()),
                 callback_port: Some(8080),
                 auth_server_metadata_url: Some("https://m".into()),
@@ -3547,7 +3550,7 @@ mod tests {
     fn auth_kind_sse_headers_helper() {
         let spec = McpTransportSpec::Sse {
             url: "https://x".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: Some("/usr/bin/h".into()),
             oauth: None,
         };
@@ -3556,7 +3559,7 @@ mod tests {
 
     #[test]
     fn auth_kind_sse_static_headers() {
-        let mut h = platform_api::McpHeaders::new();
+        let mut h = lingxi_core::host::McpHeaders::new();
         h.insert("Authorization".into(), "Bearer x".into());
         let spec = McpTransportSpec::Sse {
             url: "https://x".into(),
@@ -3571,9 +3574,9 @@ mod tests {
     fn auth_kind_http_with_oauth() {
         let spec = McpTransportSpec::Http {
             url: "https://x".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
-            oauth: Some(platform_api::McpOAuthConfigDto {
+            oauth: Some(lingxi_core::host::McpOAuthConfigDto {
                 client_id: None,
                 callback_port: None,
                 auth_server_metadata_url: None,
@@ -3586,7 +3589,7 @@ mod tests {
 
     #[test]
     fn auth_kind_websocket_static_headers() {
-        let mut h = platform_api::McpHeaders::new();
+        let mut h = lingxi_core::host::McpHeaders::new();
         h.insert("X-Token".into(), "abc".into());
         let spec = McpTransportSpec::WebSocket {
             url: "wss://x".into(),
@@ -3981,14 +3984,14 @@ pub(crate) mod cached_resource_test_support {
     use super::*;
     use bytes::Bytes;
     use jsonrpc::{Connection, Mode};
-    use mcp::{ConfigScope, McpConnectionState, McpServerConfig, RawConnectionProvider};
-    use platform_api::{
+    use lingxi_core::host::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto,
         McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
         ServerCapabilitiesDto,
     };
-    use protocol::McpConnectionId;
+    use lingxi_core::types::McpConnectionId;
+    use mcp::{ConfigScope, McpConnectionState, McpServerConfig, RawConnectionProvider};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
@@ -4346,7 +4349,7 @@ pub(crate) mod cached_resource_test_support {
             spec: McpTransportSpec::InProcess {
                 registry_key: name.into(),
             },
-            scope: ConfigScope::Settings(protocol::SettingsScope::User),
+            scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -4403,8 +4406,8 @@ pub(crate) mod cached_resource_test_support {
                 config: cached_server_config(name),
                 connection_id: McpConnectionId::new(),
                 capabilities: behavior.cached_capabilities,
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -4436,7 +4439,7 @@ mod input_missing_required_preflight_tests {
     use super::*;
     use bytes::Bytes;
     use jsonrpc::{Connection, Mode};
-    use platform_api::{
+    use lingxi_core::host::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport,
         McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
@@ -4474,7 +4477,7 @@ mod input_missing_required_preflight_tests {
             _c: &McpRawConnection,
             _t: &str,
             _i: Value,
-        ) -> Result<platform_api::McpToolResultDto, McpError> {
+        ) -> Result<lingxi_core::host::McpToolResultDto, McpError> {
             unreachable!()
         }
         async fn read_resource(
@@ -4484,7 +4487,7 @@ mod input_missing_required_preflight_tests {
         ) -> Result<McpResourceContentDto, McpError> {
             unreachable!()
         }
-        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+        async fn ping(&self, _id: lingxi_core::types::McpConnectionId) -> Result<(), McpError> {
             unreachable!()
         }
         async fn notifications(
@@ -4500,7 +4503,10 @@ mod input_missing_required_preflight_tests {
         ) -> Result<ElicitResultDto, McpError> {
             unreachable!()
         }
-        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+        async fn disconnect(
+            &self,
+            _id: lingxi_core::types::McpConnectionId,
+        ) -> Result<(), McpError> {
             unreachable!()
         }
         fn supported_transports(&self) -> Vec<McpTransportKind> {
@@ -4594,8 +4600,8 @@ mod input_missing_required_preflight_tests {
         );
 
         let mut use_ctx = tool_api::test_support::fresh_ctx();
-        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-missing"));
-        let assistant_message_id = protocol::MessageId::new();
+        use_ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::from("tu-missing"));
+        let assistant_message_id = lingxi_core::types::MessageId::new();
         use_ctx.assistant_message_id = Some(assistant_message_id);
 
         let responder = tokio::spawn(async move {
@@ -4716,7 +4722,7 @@ mod input_missing_required_preflight_tests {
             false,
             false,
         );
-        let assistant_message_id = protocol::MessageId::new();
+        let assistant_message_id = lingxi_core::types::MessageId::new();
 
         tool.on_input_schema_rejected(
             &json!({ "note": "😀" }),
@@ -4810,11 +4816,11 @@ mod auto_background_race_tests {
     use super::*;
     use bytes::Bytes;
     use jsonrpc::{Connection, Mode};
-    use platform_api::task_registry::{
+    use lingxi_core::host::task_registry::{
         McpTaskRegistration, TaskCreateInput, TaskListFilter, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
     };
-    use platform_api::{
+    use lingxi_core::host::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport,
         McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
@@ -4855,7 +4861,7 @@ mod auto_background_race_tests {
             _c: &McpRawConnection,
             _t: &str,
             _i: Value,
-        ) -> Result<platform_api::McpToolResultDto, McpError> {
+        ) -> Result<lingxi_core::host::McpToolResultDto, McpError> {
             unreachable!()
         }
         async fn read_resource(
@@ -4865,7 +4871,7 @@ mod auto_background_race_tests {
         ) -> Result<McpResourceContentDto, McpError> {
             unreachable!()
         }
-        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+        async fn ping(&self, _id: lingxi_core::types::McpConnectionId) -> Result<(), McpError> {
             unreachable!()
         }
         async fn notifications(
@@ -4881,7 +4887,10 @@ mod auto_background_race_tests {
         ) -> Result<ElicitResultDto, McpError> {
             unreachable!()
         }
-        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+        async fn disconnect(
+            &self,
+            _id: lingxi_core::types::McpConnectionId,
+        ) -> Result<(), McpError> {
             unreachable!()
         }
         fn supported_transports(&self) -> Vec<McpTransportKind> {
@@ -4974,7 +4983,7 @@ mod auto_background_race_tests {
             &self,
             _id: &str,
             _o: Option<u64>,
-        ) -> Result<platform_api::task_registry::TaskOutputChunk, TaskRegistryError> {
+        ) -> Result<lingxi_core::host::task_registry::TaskOutputChunk, TaskRegistryError> {
             unreachable!()
         }
         async fn register_mcp_task(
@@ -5085,10 +5094,10 @@ mod auto_background_race_tests {
         let tool = MCPTool::new(ctx);
 
         let mut use_ctx = tool_api::test_support::fresh_ctx();
-        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-slow"));
+        use_ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::from("tu-slow"));
         use_ctx.agent_name = Some("builder".into());
         use_ctx.team_name = Some("alpha".into());
-        let creator_agent_id = protocol::AgentId::new();
+        let creator_agent_id = lingxi_core::types::AgentId::new();
         use_ctx.agent_id = Some(creator_agent_id);
         // Interactive session → default 120000ms threshold (flag default on).
 
@@ -5137,7 +5146,7 @@ mod auto_background_race_tests {
         let tool = MCPTool::new(ctx);
 
         let mut use_ctx = tool_api::test_support::fresh_ctx();
-        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-x"));
+        use_ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::from("tu-x"));
         // Non-interactive with no opt-in → getMcpAutoBackgroundMs == 0.
         use_ctx.options.is_non_interactive_session = true;
 
@@ -5196,7 +5205,7 @@ mod auto_background_race_tests {
         .with_bound_server_key(scoped_key.to_string());
 
         let mut use_ctx = tool_api::test_support::fresh_ctx();
-        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-scoped"));
+        use_ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::from("tu-scoped"));
 
         let result = tool
             .call(json!({}), use_ctx, tool_api::test_support::fresh_tx())
@@ -5237,7 +5246,7 @@ mod auto_background_race_tests {
         // No `.with_bound_server_key(..)` — legacy path.
 
         let mut use_ctx = tool_api::test_support::fresh_ctx();
-        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-plain"));
+        use_ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::from("tu-plain"));
 
         let result = tool
             .call(json!({}), use_ctx, tool_api::test_support::fresh_tx())
@@ -5262,7 +5271,7 @@ mod auto_background_race_tests {
         let tool = MCPTool::new(ctx);
 
         let mut use_ctx = tool_api::test_support::fresh_ctx();
-        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-y"));
+        use_ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::from("tu-y"));
         // Interactive → threshold WOULD be 120000, but the unwired seam forces
         // the direct-await path regardless.
 
@@ -5303,7 +5312,7 @@ mod auto_background_race_tests {
         let tool = MCPTool::new(ctx);
 
         let mut use_ctx = tool_api::test_support::fresh_ctx();
-        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-cancel"));
+        use_ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::from("tu-cancel"));
 
         // Auto-backgrounds (peer has not answered) and registers the mcp_task.
         let result = tool
@@ -5465,7 +5474,7 @@ mod auto_background_race_tests {
         let tool = MCPTool::new(ctx);
 
         let mut use_ctx = tool_api::test_support::fresh_ctx();
-        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-ok"));
+        use_ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::from("tu-ok"));
 
         let result = tool
             .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
@@ -5521,7 +5530,7 @@ mod auto_background_race_tests {
         let output_dir = ctx.tool_results_dir();
         let tool = MCPTool::new(ctx);
         let mut use_ctx = tool_api::test_support::fresh_ctx();
-        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-saved"));
+        use_ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::from("tu-saved"));
         tool.call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
             .await
             .unwrap();
@@ -5579,7 +5588,7 @@ mod auto_background_race_tests {
         let tool = MCPTool::new(ctx);
 
         let mut use_ctx = tool_api::test_support::fresh_ctx();
-        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-toolerr"));
+        use_ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::from("tu-toolerr"));
 
         let result = tool
             .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
@@ -5639,13 +5648,13 @@ mod auto_background_race_tests {
 #[cfg(test)]
 mod resource_tool_gating_tests {
     use super::*;
-    use mcp::{ConfigScope, McpConnectionState, McpServerConfig};
-    use platform_api::{
+    use lingxi_core::host::{
         ElicitRequestDto, ElicitResultDto, McpConfiguredToolPolicyDto, McpError,
         McpNotificationStream, McpPermissionCeiling, McpPromptDto, McpRawConnection,
         McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport, McpTransportKind,
         McpTransportSpec, ServerCapabilitiesDto,
     };
+    use mcp::{ConfigScope, McpConnectionState, McpServerConfig};
 
     struct NeverDialled;
 
@@ -5677,7 +5686,7 @@ mod resource_tool_gating_tests {
             _c: &McpRawConnection,
             _t: &str,
             _i: Value,
-        ) -> Result<platform_api::McpToolResultDto, McpError> {
+        ) -> Result<lingxi_core::host::McpToolResultDto, McpError> {
             unreachable!()
         }
         async fn read_resource(
@@ -5687,7 +5696,7 @@ mod resource_tool_gating_tests {
         ) -> Result<McpResourceContentDto, McpError> {
             unreachable!()
         }
-        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+        async fn ping(&self, _id: lingxi_core::types::McpConnectionId) -> Result<(), McpError> {
             unreachable!()
         }
         async fn notifications(
@@ -5703,7 +5712,10 @@ mod resource_tool_gating_tests {
         ) -> Result<ElicitResultDto, McpError> {
             unreachable!()
         }
-        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+        async fn disconnect(
+            &self,
+            _id: lingxi_core::types::McpConnectionId,
+        ) -> Result<(), McpError> {
             unreachable!()
         }
         fn supported_transports(&self) -> Vec<McpTransportKind> {
@@ -5717,7 +5729,7 @@ mod resource_tool_gating_tests {
             spec: McpTransportSpec::InProcess {
                 registry_key: name.into(),
             },
-            scope: ConfigScope::Settings(protocol::SettingsScope::User),
+            scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -5765,7 +5777,7 @@ mod resource_tool_gating_tests {
     #[tokio::test]
     async fn shared_builder_applies_strictest_configured_permission_ceiling() {
         let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
-        let connection_id = protocol::McpConnectionId::new();
+        let connection_id = lingxi_core::types::McpConnectionId::new();
         let mut server_config = config("srv");
         server_config.tools = vec![
             McpConfiguredToolPolicyDto {
@@ -5795,8 +5807,8 @@ mod resource_tool_gating_tests {
                 config: server_config,
                 connection_id,
                 capabilities: caps(false),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("srv", "allow"), dto("srv", "ask"), dto("srv", "deny")],
@@ -5841,7 +5853,7 @@ mod resource_tool_gating_tests {
     #[tokio::test]
     async fn shared_builder_preserves_output_schema_and_retrieval_hints() {
         let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
-        let connection_id = protocol::McpConnectionId::new();
+        let connection_id = lingxi_core::types::McpConnectionId::new();
         let mut server_config = config("srv");
         server_config.always_load = true;
         let mut advertised = dto("srv", "structured");
@@ -5861,8 +5873,8 @@ mod resource_tool_gating_tests {
                 config: server_config,
                 connection_id,
                 capabilities: caps(false),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![advertised],
@@ -5890,12 +5902,12 @@ mod resource_tool_gating_tests {
     #[tokio::test]
     async fn generic_dispatcher_resolves_discovered_metadata_before_allowing_call() {
         let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
-        let connection_id = protocol::McpConnectionId::new();
+        let connection_id = lingxi_core::types::McpConnectionId::new();
         let mut server_config = config("srv");
         server_config.tools = vec![
             McpConfiguredToolPolicyDto {
                 name: "write".into(),
-                permission_policy: Some(platform_api::McpToolPermissionPolicy::AlwaysAllow),
+                permission_policy: Some(lingxi_core::host::McpToolPermissionPolicy::AlwaysAllow),
                 org_max_permission: Some(McpPermissionCeiling::Ask),
             },
             McpConfiguredToolPolicyDto {
@@ -5914,8 +5926,8 @@ mod resource_tool_gating_tests {
                 config: server_config,
                 connection_id,
                 capabilities: caps(false),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("srv", "write"), interactive],
@@ -5975,7 +5987,7 @@ mod resource_tool_gating_tests {
 
     async fn build_names_by_connection(
         registry: &Arc<McpRegistry>,
-    ) -> Vec<(protocol::McpConnectionId, Vec<String>)> {
+    ) -> Vec<(lingxi_core::types::McpConnectionId, Vec<String>)> {
         let mut ctx = tool_api::test_support::ctx_for_file_tools(
             tool_api::test_support::make_dummy_fs(),
             Arc::new(telemetry::AnalyticsBus::new()),
@@ -6005,10 +6017,10 @@ mod resource_tool_gating_tests {
             "srv".into(),
             McpConnectionState::Connected {
                 config: config("srv"),
-                connection_id: protocol::McpConnectionId::new(),
+                connection_id: lingxi_core::types::McpConnectionId::new(),
                 capabilities: caps(resources),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -6042,10 +6054,10 @@ mod resource_tool_gating_tests {
             "connected".into(),
             McpConnectionState::Connected {
                 config: connected_config,
-                connection_id: protocol::McpConnectionId::new(),
+                connection_id: lingxi_core::types::McpConnectionId::new(),
                 capabilities: caps(false),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("connected", "send")],
@@ -6059,10 +6071,10 @@ mod resource_tool_gating_tests {
             "cached".into(),
             McpConnectionState::Cached {
                 config: cached_config,
-                connection_id: protocol::McpConnectionId::new(),
+                connection_id: lingxi_core::types::McpConnectionId::new(),
                 capabilities: caps(false),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("cached", "send")],
@@ -6132,10 +6144,10 @@ mod resource_tool_gating_tests {
                 name.into(),
                 McpConnectionState::Connected {
                     config: config(name),
-                    connection_id: protocol::McpConnectionId::new(),
+                    connection_id: lingxi_core::types::McpConnectionId::new(),
                     capabilities: caps(true),
-                    negotiated: platform_api::McpNegotiatedProtocol {
-                        era: platform_api::McpProtocolEra::Legacy,
+                    negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                        era: lingxi_core::host::McpProtocolEra::Legacy,
                         version: "2025-11-25".into(),
                     },
                     tools: vec![],
@@ -6171,9 +6183,9 @@ mod resource_tool_gating_tests {
     #[tokio::test]
     async fn shared_builder_ignores_agent_scoped_entries_and_keeps_trio_for_shared_server() {
         let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
-        let shared_connection_id = protocol::McpConnectionId::new();
-        let scoped_connection_id = protocol::McpConnectionId::new();
-        let agent_id = protocol::AgentId::new();
+        let shared_connection_id = lingxi_core::types::McpConnectionId::new();
+        let scoped_connection_id = lingxi_core::types::McpConnectionId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         let scoped_key = mcp::registry::agent_scope_table_key(agent_id, "shared");
 
         let mut conns = registry.connections.write().await;
@@ -6183,8 +6195,8 @@ mod resource_tool_gating_tests {
                 config: config("shared"),
                 connection_id: scoped_connection_id,
                 capabilities: caps(true),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("shared", "scoped_only")],
@@ -6200,8 +6212,8 @@ mod resource_tool_gating_tests {
                 config: config("shared"),
                 connection_id: shared_connection_id,
                 capabilities: caps(true),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("shared", "shared_only")],
@@ -6237,16 +6249,16 @@ mod resource_tool_gating_tests {
     #[tokio::test]
     async fn rebuild_reassigns_resource_trio_to_remaining_shared_owner_after_removal() {
         let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
-        let a_id = protocol::McpConnectionId::new();
-        let b_id = protocol::McpConnectionId::new();
+        let a_id = lingxi_core::types::McpConnectionId::new();
+        let b_id = lingxi_core::types::McpConnectionId::new();
         registry.connections.write().await.insert(
             "a".into(),
             McpConnectionState::Connected {
                 config: config("a"),
                 connection_id: a_id,
                 capabilities: caps(true),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("a", "a_only")],
@@ -6262,8 +6274,8 @@ mod resource_tool_gating_tests {
                 config: config("b"),
                 connection_id: b_id,
                 capabilities: caps(true),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![dto("b", "b_only")],
@@ -6380,7 +6392,7 @@ mod cached_resource_tool_tests {
             &transport,
             "my.server",
             CachedServerBehavior {
-                resources: vec![platform_api::McpResourceDto {
+                resources: vec![lingxi_core::host::McpResourceDto {
                     uri: "cached://guide".into(),
                     name: "guide.md".into(),
                     description: None,
@@ -6396,7 +6408,7 @@ mod cached_resource_tool_tests {
             &transport,
             "claude.ai Linear",
             CachedServerBehavior {
-                resources: vec![platform_api::McpResourceDto {
+                resources: vec![lingxi_core::host::McpResourceDto {
                     uri: "cached://linear".into(),
                     name: "linear.md".into(),
                     description: None,
@@ -6493,7 +6505,7 @@ mod cached_resource_tool_tests {
             "cached",
             CachedServerBehavior {
                 cached_capabilities: resource_caps(false),
-                live_capabilities: platform_api::ServerCapabilitiesDto {
+                live_capabilities: lingxi_core::host::ServerCapabilitiesDto {
                     resources: false,
                     ..resource_caps(false)
                 },
@@ -6522,7 +6534,7 @@ mod cached_resource_tool_tests {
             &transport,
             "alpha",
             CachedServerBehavior {
-                resources: vec![platform_api::McpResourceDto {
+                resources: vec![lingxi_core::host::McpResourceDto {
                     uri: "live://a".into(),
                     name: "alpha.txt".into(),
                     description: None,
@@ -6538,7 +6550,7 @@ mod cached_resource_tool_tests {
             &transport,
             "beta",
             CachedServerBehavior {
-                resources: vec![platform_api::McpResourceDto {
+                resources: vec![lingxi_core::host::McpResourceDto {
                     uri: "cached://b".into(),
                     name: "beta.txt".into(),
                     description: None,
@@ -6599,7 +6611,7 @@ mod cached_resource_tool_tests {
             &transport,
             "alpha",
             CachedServerBehavior {
-                resources: vec![platform_api::McpResourceDto {
+                resources: vec![lingxi_core::host::McpResourceDto {
                     uri: "live://a".into(),
                     name: "alpha.txt".into(),
                     description: None,
@@ -6616,7 +6628,7 @@ mod cached_resource_tool_tests {
             "beta",
             CachedServerBehavior {
                 cached_capabilities: resource_caps(false),
-                live_capabilities: platform_api::ServerCapabilitiesDto {
+                live_capabilities: lingxi_core::host::ServerCapabilitiesDto {
                     resources: false,
                     ..resource_caps(false)
                 },
@@ -6643,16 +6655,16 @@ mod cached_resource_tool_tests {
     #[tokio::test]
     async fn list_resources_named_and_read_ignore_scoped_only_entries() {
         let (registry, _transport) = new_cached_registry().await;
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         let scoped_key = mcp::registry::agent_scope_table_key(agent_id, "shared");
         registry.connections.write().await.insert(
             scoped_key,
             mcp::McpConnectionState::Cached {
                 config: cached_resource_test_support::cached_server_config("shared"),
-                connection_id: protocol::McpConnectionId::new(),
+                connection_id: lingxi_core::types::McpConnectionId::new(),
                 capabilities: resource_caps(true),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -6686,7 +6698,7 @@ mod cached_resource_tool_tests {
             &transport,
             "my.server",
             CachedServerBehavior {
-                resources: vec![platform_api::McpResourceDto {
+                resources: vec![lingxi_core::host::McpResourceDto {
                     uri: "cached://dot".into(),
                     name: "dot.md".into(),
                     description: None,
@@ -6702,7 +6714,7 @@ mod cached_resource_tool_tests {
             &transport,
             "my_server",
             CachedServerBehavior {
-                resources: vec![platform_api::McpResourceDto {
+                resources: vec![lingxi_core::host::McpResourceDto {
                     uri: "cached://underscore".into(),
                     name: "underscore.md".into(),
                     description: None,
@@ -6771,7 +6783,7 @@ mod cached_resource_tool_tests {
             &transport,
             "shared",
             CachedServerBehavior {
-                resources: vec![platform_api::McpResourceDto {
+                resources: vec![lingxi_core::host::McpResourceDto {
                     uri: "cached://shared".into(),
                     name: "shared.md".into(),
                     description: None,
@@ -6782,20 +6794,20 @@ mod cached_resource_tool_tests {
             },
         )
         .await;
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         let scoped_key = mcp::registry::agent_scope_table_key(agent_id, "shared");
         registry.connections.write().await.insert(
             scoped_key,
             mcp::McpConnectionState::Cached {
                 config: cached_resource_test_support::cached_server_config("shared"),
-                connection_id: protocol::McpConnectionId::new(),
+                connection_id: lingxi_core::types::McpConnectionId::new(),
                 capabilities: resource_caps(true),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
-                resources: vec![platform_api::McpResourceDto {
+                resources: vec![lingxi_core::host::McpResourceDto {
                     uri: "cached://scoped".into(),
                     name: "scoped.md".into(),
                     description: None,
@@ -6990,7 +7002,7 @@ mod cached_resource_tool_tests {
             "cached",
             CachedServerBehavior {
                 cached_capabilities: resource_caps(false),
-                live_capabilities: platform_api::ServerCapabilitiesDto {
+                live_capabilities: lingxi_core::host::ServerCapabilitiesDto {
                     resources: false,
                     ..resource_caps(false)
                 },

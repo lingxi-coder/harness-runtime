@@ -6,6 +6,7 @@
 //! `tool_use` block STARTING flips that flag, this also guarantees a
 //! non-idempotent tool that already started is never re-run.
 
+use lingxi_core::types::ToolUseId;
 use llm_runtime::{HistoryEvent, LlmError};
 use orchestrator::test_support::{
     content_block_start_text, content_block_start_thinking, content_block_start_tool_use,
@@ -13,7 +14,6 @@ use orchestrator::test_support::{
     MockOutputStream, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use protocol::ToolUseId;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
@@ -85,7 +85,7 @@ async fn thinking_only_transient_reset_retries_and_succeeds() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            platform_api::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "end_turn"
+            lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "end_turn"
         )),
         "retry must succeed with end_turn; events={events:#?}"
     );
@@ -146,7 +146,7 @@ async fn tool_started_then_transient_reset_does_not_retry() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            platform_api::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
+            lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
         )),
         "turn must end model_error (no retry); events={events:#?}"
     );

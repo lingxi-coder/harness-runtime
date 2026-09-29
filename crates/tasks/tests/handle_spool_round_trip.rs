@@ -11,8 +11,8 @@
     clippy::map_unwrap_or
 )]
 
-use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-use platform_api::task_registry::{TaskCreateInput, TaskRegistryError, TaskRegistryHandle};
+use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use lingxi_core::host::task_registry::{TaskCreateInput, TaskRegistryError, TaskRegistryHandle};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

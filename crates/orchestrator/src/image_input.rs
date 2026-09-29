@@ -1,11 +1,11 @@
-//! Load a pasted image file into a canonical [`protocol::ImageSource::Base64`].
+//! Load a pasted image file into a canonical [`lingxi_core::types::ImageSource::Base64`].
 //!
 //! The TUI records pasted image *paths*; the orchestrator reads + base64-encodes
 //! them here, just before building the outgoing user message, so a read failure
 //! surfaces as a turn error (and the TUI never blocks on disk I/O during paste).
 
 use crate::error::OrchestratorError;
-use protocol::ImageSource;
+use lingxi_core::types::ImageSource;
 use std::path::Path;
 
 /// Detect the image MIME type from a file extension. `None` for unsupported

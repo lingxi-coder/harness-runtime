@@ -67,18 +67,18 @@ fn get_mcp_auto_background_ms_inner(
         return 0;
     }
     // `if(pE())return 0` — global background-task kill switch.
-    if platform_api::env::is_env_truthy(disable_background_tasks) {
+    if lingxi_core::host::env::is_env_truthy(disable_background_tasks) {
         return 0;
     }
     // `if(t&&!Z.CLAUDE_AUTO_BACKGROUND_TASKS)return 0` — non-interactive opt-in.
-    if is_non_interactive_session && !platform_api::env::is_env_truthy(auto_background_tasks) {
+    if is_non_interactive_session && !lingxi_core::host::env::is_env_truthy(auto_background_tasks) {
         return 0;
     }
     // `let r=Z.CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS; if(r!==void 0)return
     // Math.min(Math.max(0,r),qc_)` — explicit override, clamped to [0,i32::MAX].
     if let Some(raw) = mcp_auto_background_ms {
         if !raw.trim().is_empty() {
-            let parsed = platform_api::env::parse_int_env(raw);
+            let parsed = lingxi_core::host::env::parse_int_env(raw);
             if !parsed.is_nan() {
                 let clamped = parsed.max(0.0).min(MAX_AUTO_BACKGROUND_MS as f64);
                 return clamped as i64;

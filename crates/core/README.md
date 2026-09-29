@@ -1,12 +1,19 @@
-# lingxi-core
+# Internal shared core
 
-Pure-function conversation state machine for the LingXi engine. Provides:
-- `events::Event` — inputs to the reducer (user messages, API stream events, lifecycle).
-- `state_machine::ConversationState` — the state set (Idle, AssemblingPrompt, AwaitingApiResponse, StreamingResponse, Terminated).
-- `reducer::reduce(state, event) -> (state, effects)` — pure-function state transitions.
-- `prompt::assemble_request` — build the Anthropic-shape API request body.
-- `session::SessionState` — persisted session model.
+`core` is the internal dependency shared by the runtime, domain crates and
+platform implementations. Its Rust import name is `lingxi_core`.
 
-No I/O, no `tokio::spawn`. All side effects are returned as `lingxi_protocol::Effect` values for the host's `EffectHandler` to process.
+- `types`: shared IDs, messages, effects and other data that crosses crate boundaries.
+- `host`: host capability contracts and shared cross-platform primitives.
+- `settings`: settings schema, precedence, provenance and file loading.
+- `events`, `state_machine`, `reducer`, `session`, `prompt`, `token`: conversation state and rules.
 
-See `docs/superpowers/specs/2026-05-22-lingxi-core-rust-engine-design.md` §5 (D2 Engine layer).
+Put a type or interface in its owning domain crate when that dependency does
+not create a cycle. Keep concrete platform selection, product assembly,
+background services and SDK lifecycle in the owning platform/domain crate or
+`harness-runtime`. The runtime re-exports the types its consumers need; a host
+should not depend directly on this internal package.
+
+The old `protocol` and `platform-api` packages are now the `types` and `host`
+modules. Settings loading reports diagnostics through `SettingsLoadObserver`;
+the telemetry crate owns analytics event formatting and PII tagging.

@@ -137,7 +137,7 @@ const REF_SESSION_ID_PREFIX_LEN: usize = 8;
 /// resume command use the bare UUID. Centralising the conversion prevents the
 /// near-limit and hard-429 paths from occupying different latch entries.
 #[must_use]
-pub fn checkpoint_session_key(session_id: protocol::SessionId) -> String {
+pub fn checkpoint_session_key(session_id: lingxi_core::types::SessionId) -> String {
     session_id.as_uuid().to_string()
 }
 
@@ -1531,7 +1531,7 @@ mod tests {
 
     #[test]
     fn protocol_session_key_is_the_bare_uuid_for_all_checkpoint_triggers() {
-        let session_id = protocol::SessionId::new();
+        let session_id = lingxi_core::types::SessionId::new();
         assert_eq!(
             checkpoint_session_key(session_id),
             session_id.as_uuid().to_string()

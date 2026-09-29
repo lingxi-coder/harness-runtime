@@ -89,7 +89,10 @@ impl Tool for NamedTool {
 struct StaticTasks(Vec<TaskReminderItem>);
 #[async_trait]
 impl TodoReminderTaskProvider for StaticTasks {
-    async fn task_items(&self, _session_id: protocol::SessionId) -> Vec<TaskReminderItem> {
+    async fn task_items(
+        &self,
+        _session_id: lingxi_core::types::SessionId,
+    ) -> Vec<TaskReminderItem> {
         self.0.clone()
     }
 }
@@ -442,7 +445,7 @@ async fn v2_fires_base_only_without_provider() {
 
 struct ReminderCoordinatorMode(std::sync::atomic::AtomicBool);
 
-impl platform_api::coordinator_mode::CoordinatorModeHandle for ReminderCoordinatorMode {
+impl lingxi_core::host::coordinator_mode::CoordinatorModeHandle for ReminderCoordinatorMode {
     fn is_enabled(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::SeqCst)
     }

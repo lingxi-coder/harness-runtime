@@ -108,7 +108,7 @@ const GREP_DESCRIPTION_HEAD: &str = r#"A powerful search tool built on ripgrep
 /// ST-03: the oracle wraps this ONE line in `${DZ()==="default"?…:""}` (2.1.238
 /// `Wka`, source text @286224735) — under a non-default subagent steer the whole
 /// line, newline included, disappears from the middle of the bullet list. Port
-/// gate: `platform_api::live_sessions::subagent_steer_is_default()`.
+/// gate: `lingxi_core::host::live_sessions::subagent_steer_is_default()`.
 const GREP_DESCRIPTION_AGENT_BULLET: &str =
     "  - Use Agent tool (if available) for open-ended searches requiring multiple rounds\n";
 
@@ -885,7 +885,7 @@ impl Tool for GrepTool {
     /// false, so this is the LONG arm, whose Agent bullet is itself gated on the
     /// subagent steer (ST-03).
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        grep_description(platform_api::live_sessions::subagent_steer_is_default())
+        grep_description(lingxi_core::host::live_sessions::subagent_steer_is_default())
     }
 
     async fn prompt(&self, opts: &PromptOptions) -> String {
@@ -897,7 +897,7 @@ impl Tool for GrepTool {
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
             GREP_PROMPT_SHORT.to_string()
         } else {
-            grep_description(platform_api::live_sessions::subagent_steer_is_default())
+            grep_description(lingxi_core::host::live_sessions::subagent_steer_is_default())
         }
     }
 
@@ -1069,7 +1069,7 @@ impl Tool for GrepTool {
             if let Some(directory) = registry.task_output_directory().await {
                 // Single-file Grep is an explicit read, not a directory traversal.
                 if !canon_base.is_file() {
-                    let exclusions = platform_api::task_output::search_exclusions(
+                    let exclusions = lingxi_core::host::task_output::search_exclusions(
                         Path::new(&directory),
                         &canon_base,
                     );

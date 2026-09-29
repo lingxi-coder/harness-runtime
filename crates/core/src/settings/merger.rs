@@ -1211,6 +1211,7 @@ mod tests {
             // field for which every shape above already failed — which is the
             // case that used to panic.
             (json!("auto"), json!("tmux")),
+            (json!("china_mainland"), json!("international")),
         ];
 
         // Whether `{field: value}` survives a `SettingsJson` round trip

@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-use platform_api::{Clock, FileSystem};
+use lingxi_core::host::{Clock, FileSystem};
 
 use crate::schedule::parse_cron;
 use crate::scheduler::{
@@ -456,7 +456,7 @@ pub const fn default_recurring_max_age() -> Option<Duration> {
 mod tests {
     use super::*;
     use futures::Stream;
-    use platform_api::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
+    use lingxi_core::host::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
     use std::pin::Pin;
     use std::sync::Mutex as StdMutex;
     use tokio::sync::Mutex as TokioMutex;

@@ -246,10 +246,10 @@ impl ConversationOrchestrator {
     /// when `findUnresolvedToolUse` succeeds).
     pub async fn run_orphaned_permission(
         &self,
-        tool_use_id: &protocol::ToolUseId,
-        decision: platform_api::permission_gate::PermissionOutcome,
+        tool_use_id: &lingxi_core::types::ToolUseId,
+        decision: lingxi_core::host::permission_gate::PermissionOutcome,
     ) -> Result<bool, OrchestratorError> {
-        use protocol::{ContentBlock, ConversationMessage, MessageId};
+        use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
         // 1. Locate the orphaned assistant message and confirm its `tool_use` is
         //    UNRESOLVED (no matching `tool_result`) — `findUnresolvedToolUse`
@@ -339,7 +339,7 @@ impl ConversationOrchestrator {
         //    carries the host's possibly-rewritten input; a deny keeps the
         //    original (it will not run anyway).
         let (forced, final_input, permission_updates) = match decision {
-            platform_api::permission_gate::PermissionOutcome::Allow {
+            lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                 updated_input,
                 permission_updates,
                 decision_classification: _,
@@ -348,7 +348,7 @@ impl ConversationOrchestrator {
                 updated_input.unwrap_or(input),
                 permission_updates,
             ),
-            platform_api::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+            lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
                 if let Err(error) = self.perms.set_permission_mode("auto").await {
                     // The current call was explicitly approved. Keep the one-shot
                     // allow, but never claim the live mode switched when the
@@ -364,7 +364,7 @@ impl ConversationOrchestrator {
                     Vec::new(),
                 )
             }
-            platform_api::permission_gate::PermissionOutcome::Deny { reason } => (
+            lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => (
                 crate::test_support::PermissionDecision::Deny { reason },
                 input,
                 Vec::new(),
@@ -545,7 +545,7 @@ impl ConversationOrchestrator {
         // point at the `workflow-authoring` skill when this request actually
         // offers the tool that loads it, and tool filtering can drop `Skill`.
         // Name-or-alias, matching `Wt(e, o)`.
-        platform_api::session_flags::set_skill_tool_advertised(tools.iter().any(|tool| {
+        lingxi_core::host::session_flags::set_skill_tool_advertised(tools.iter().any(|tool| {
             tool.name() == tool_skill::skill::SKILL_TOOL_NAME
                 || tool.aliases().contains(&tool_skill::skill::SKILL_TOOL_NAME)
         }));
@@ -561,7 +561,7 @@ impl ConversationOrchestrator {
             model: model.clone(),
             model_profile: model_profile.clone(),
             workflow_authoring_skill_reachable:
-                platform_api::session_flags::workflow_authoring_skill_reachable(),
+                lingxi_core::host::session_flags::workflow_authoring_skill_reachable(),
         };
         let mut wire = {
             let cached = self
@@ -637,7 +637,7 @@ impl ConversationOrchestrator {
         // support — never on a present `ToolSearch` tool or deferred candidates —
         // so side queries assembled with an empty toolset take the same
         // normalization branch as the main loop.
-        platform_api::session_flags::set_tool_search_enabled(
+        lingxi_core::host::session_flags::set_tool_search_enabled(
             self.tools.deferral().mode().is_enabled()
                 && tool_search_supported_for_request(&model, model_profile.as_deref()),
         );
@@ -896,7 +896,7 @@ impl ConversationOrchestrator {
     pub(super) fn text_content(message: &ConversationMessage) -> Option<String> {
         match message {
             ConversationMessage::User { content, .. } => content.iter().find_map(|block| {
-                if let protocol::ContentBlock::Text { text } = block {
+                if let lingxi_core::types::ContentBlock::Text { text } = block {
                     Some(text.clone())
                 } else {
                     None
@@ -955,11 +955,11 @@ impl ConversationOrchestrator {
     /// result shaping. `None` identifies an unknown tool before dispatch.
     pub async fn call_tool_from_host(
         &self,
-        tool_use_id: protocol::ToolUseId,
+        tool_use_id: lingxi_core::types::ToolUseId,
         name: String,
         input: serde_json::Value,
         cancel: Option<tokio_util::sync::CancellationToken>,
-    ) -> Result<Option<protocol::ContentBlock>, OrchestratorError> {
+    ) -> Result<Option<lingxi_core::types::ContentBlock>, OrchestratorError> {
         if self.find_dispatchable_tool(&name).is_none() {
             return Ok(None);
         }
@@ -984,7 +984,7 @@ impl ConversationOrchestrator {
 /// `opusplan` / `sonnet` alias into a wire id), and `Xt(e)` strips a trailing
 /// `[1m]` long-context suffix.
 ///
-/// Deliberately NOT `platform_api::model_capabilities::normalize_model_id`:
+/// Deliberately NOT `lingxi_core::host::model_capabilities::normalize_model_id`:
 /// that additionally strips `-eap` and dated/Bedrock/Vertex wrappers, which
 /// `HR` does not. Feeding it to the gate would gate `claude-opus-5-eap`, an id
 /// the oracle's `^claude-([a-z]+)-(\d+(?:-\d+)*)$` rejects and therefore

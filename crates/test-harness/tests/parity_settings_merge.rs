@@ -1,6 +1,6 @@
 //! Parity driver for `settings_merge.json` — v3 §32.6 protocol.
 //!
-//! Loads the fixture, replays it through `Settings::load_with_telemetry`,
+//! Loads the fixture, replays it through `Settings::load_with_observer`,
 //! and asserts:
 //! - The merged `expected_effective_settings` matches byte-for-byte (after
 //!   JSON canonicalization via `serde_json::Value`).
@@ -87,13 +87,13 @@ async fn settings_merge_fixture_matches_implementation() {
     bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
         .await;
 
-    let eff = Settings::load_with_telemetry(
+    let eff = Settings::load_with_observer(
         LoadInputs {
             env: &f.input_env,
             project_dir: &tmp.path().join("project"),
             defaults,
         },
-        Some(&bus),
+        Some(bus.as_ref()),
     )
     .await
     .unwrap();

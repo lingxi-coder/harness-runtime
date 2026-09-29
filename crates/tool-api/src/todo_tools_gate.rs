@@ -55,7 +55,7 @@
 //! `LINGXI_ENABLE_TASKS` half — lives with the tools in `tool-task`. Callers
 //! compose the two.
 
-use platform_api::env::is_env_truthy;
+use lingxi_core::host::env::is_env_truthy;
 
 use crate::tool_trait::ToolStaticContext;
 
@@ -173,8 +173,8 @@ pub fn todo_tools_enabled(ctx: &ToolStaticContext) -> bool {
 pub fn todo_tools_enabled_for_model(main_loop_model: Option<&str>) -> bool {
     todo_tools_enabled_inner(
         main_loop_model,
-        platform_api::env::is_bg_session(),
-        platform_api::session_flags::todo_tools_opt_in(),
+        lingxi_core::host::env::is_bg_session(),
+        lingxi_core::host::session_flags::todo_tools_opt_in(),
         is_env_truthy(std::env::var(ENABLE_TODO_TOOLS_ENV).ok().as_deref()),
     )
 }

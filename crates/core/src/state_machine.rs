@@ -6,7 +6,7 @@
 //! `Compacting`, `HookBlocked`, `MemoryPrefetchInProgress`.
 
 use crate::session::SessionState;
-use protocol::RequestId;
+use crate::types::RequestId;
 use serde::{Deserialize, Serialize};
 
 /// One distinct moment in the agentic loop.
@@ -85,7 +85,7 @@ impl ConversationState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::SessionId;
+    use crate::types::SessionId;
 
     #[test]
     fn idle_state_holds_session() {

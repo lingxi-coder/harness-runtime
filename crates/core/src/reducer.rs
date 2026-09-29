@@ -7,7 +7,7 @@
 use crate::events::Event;
 use crate::prompt::assemble_request;
 use crate::state_machine::ConversationState;
-use protocol::{ConversationMessage, Effect};
+use crate::types::{ConversationMessage, Effect};
 
 /// Reduce one (state, event) pair to (new state, effects to emit).
 #[must_use]
@@ -169,7 +169,7 @@ mod tests {
     use crate::events::Event;
     use crate::session::SessionState;
     use crate::state_machine::ConversationState;
-    use protocol::{Effect, MessageId, RequestId, SessionId};
+    use crate::types::{Effect, MessageId, RequestId, SessionId};
 
     #[test]
     fn idle_plus_user_message_yields_awaiting_api_with_send_effect() {

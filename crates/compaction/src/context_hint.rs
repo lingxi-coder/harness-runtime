@@ -42,7 +42,7 @@
 use crate::microcompact::{
     estimate_keep_recent, Microcompactor, TimeBasedMCConfig, MICROCOMPACT_MIN_TOKENS_SAVED,
 };
-use protocol::ConversationMessage;
+use lingxi_core::types::ConversationMessage;
 use std::collections::HashSet;
 use std::time::SystemTime;
 
@@ -228,7 +228,7 @@ pub struct HintEdits {
     pub messages: Vec<ConversationMessage>,
     /// Tool-use ids whose results were cleared. EMPTY when nothing applied
     /// (oracle `Utp = new Set`).
-    pub cleared_ids: HashSet<protocol::ToolUseId>,
+    pub cleared_ids: HashSet<lingxi_core::types::ToolUseId>,
     /// Whether a microcompact ran.
     pub mc_applied: bool,
     /// Tokens the microcompact reported saving.
@@ -273,7 +273,7 @@ pub fn apply_hint_edits(messages: Vec<ConversationMessage>) -> HintEdits {
 #[must_use]
 pub fn apply_hint_edits_with_persisted(
     messages: Vec<ConversationMessage>,
-    persisted: &std::collections::HashMap<protocol::ToolUseId, String>,
+    persisted: &std::collections::HashMap<lingxi_core::types::ToolUseId, String>,
 ) -> HintEdits {
     let pre = estimate_message_tokens(&messages);
     let estimate = estimate_keep_recent(&messages, CONTEXT_HINT_KEEP_RECENT);
@@ -345,7 +345,7 @@ pub fn handle_hint_reject(
 pub fn handle_hint_reject_with_persisted(
     messages: Vec<ConversationMessage>,
     request_id: Option<String>,
-    persisted: &std::collections::HashMap<protocol::ToolUseId, String>,
+    persisted: &std::collections::HashMap<lingxi_core::types::ToolUseId, String>,
 ) -> (HintEdits, ContextHintRejectEvent) {
     let edits = apply_hint_edits_with_persisted(messages, persisted);
     let event = ContextHintRejectEvent {
@@ -473,7 +473,7 @@ impl ContextHintController {
         &mut self,
         facts: &HttpErrorFacts,
         messages: Vec<ConversationMessage>,
-        persisted: &std::collections::HashMap<protocol::ToolUseId, String>,
+        persisted: &std::collections::HashMap<lingxi_core::types::ToolUseId, String>,
     ) -> HintErrorOutcome {
         if !self.sent || self.done {
             return HintErrorOutcome::NotHandled;
@@ -546,7 +546,7 @@ impl ContextHintController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{ContentBlock, MessageId, ToolUseId};
+    use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
 
     /// `n` compactable tool_use/tool_result pairs, each result big enough that
     /// clearing all but the last 5 clears the 20 000-token floor.

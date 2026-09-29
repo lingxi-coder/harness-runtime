@@ -5,8 +5,8 @@
 //! and delivers raw scheduled prompts through the host conversation queue.
 
 use crate::schedule::{parse_cron, CronExpression};
-use platform_api::task_registry::TaskRegistryHandle;
-use platform_api::{Clock, FileSystem, FsError, RuntimeSpawner};
+use lingxi_core::host::task_registry::TaskRegistryHandle;
+use lingxi_core::host::{Clock, FileSystem, FsError, RuntimeSpawner};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -227,7 +227,7 @@ struct CachedFire {
 /// PARITY the chokidar watcher the oracle opens on `rJ(dir)`: durable state is
 /// re-read into the live schedule when the document CHANGES, not once a second.
 /// LingXi compares the bytes rather than subscribing to
-/// [`FileSystem::watch`](platform_api::FileSystem::watch) because a platform
+/// [`FileSystem::watch`](lingxi_core::host::FileSystem::watch) because a platform
 /// whose watcher yields nothing would silently stop picking up peer edits;
 /// and rather than an mtime/size stamp, which cannot tell a same-second
 /// rewrite of equal length from no write at all. Writes go through
@@ -632,7 +632,7 @@ async fn persist_automation_outcome(
 }
 
 struct TickHandle {
-    runtime_handle: platform_api::BackgroundTaskHandle,
+    runtime_handle: lingxi_core::host::BackgroundTaskHandle,
     completed: tokio::sync::oneshot::Receiver<()>,
 }
 
@@ -699,8 +699,8 @@ fn is_dynamic_loop_prompt(prompt: &str) -> bool {
 }
 
 #[async_trait::async_trait]
-impl platform_api::LoopUsageProvider for CronScheduler {
-    async fn usage_rows(&self) -> Vec<platform_api::LoopUsageRow> {
+impl lingxi_core::host::LoopUsageProvider for CronScheduler {
+    async fn usage_rows(&self) -> Vec<lingxi_core::host::LoopUsageRow> {
         self.loop_usage_rows().await
     }
 }
@@ -792,7 +792,7 @@ impl CronScheduler {
     pub async fn set_session_id(
         self: &Arc<Self>,
         id: String,
-    ) -> Result<(), platform_api::RuntimeError> {
+    ) -> Result<(), lingxi_core::host::RuntimeError> {
         if self.current_session_id().as_deref() == Some(id.as_str()) {
             return Ok(());
         }
@@ -867,7 +867,7 @@ impl CronScheduler {
             {
                 task.creator.created_by_pid = Some(pid);
                 task.creator.created_by_proc_start =
-                    platform_api::live_sessions::process_start_identity(pid);
+                    lingxi_core::host::live_sessions::process_start_identity(pid);
                 changed = true;
             }
         }
@@ -1184,7 +1184,7 @@ impl CronScheduler {
     }
 
     /// `/usage` Loops rows for every live job (session + durable).
-    pub async fn loop_usage_rows(&self) -> Vec<platform_api::LoopUsageRow> {
+    pub async fn loop_usage_rows(&self) -> Vec<lingxi_core::host::LoopUsageRow> {
         let now = self.clock.now();
         let tasks = self.tasks.read().await;
         let mut rows: Vec<_> = tasks
@@ -1228,7 +1228,7 @@ impl CronScheduler {
 
     /// Spawn the tick loop on the configured [`RuntimeSpawner`]. Safe to call
     /// repeatedly; an already-owned loop is never replaced or orphaned.
-    pub async fn start(self: Arc<Self>) -> Result<(), platform_api::RuntimeError> {
+    pub async fn start(self: Arc<Self>) -> Result<(), lingxi_core::host::RuntimeError> {
         // PARITY `Y()` → `ie(dir)`: keep the scheduler's runtime files out of
         // `git status` before the first lock/tick.
         if let Some(project_root) =
@@ -1364,7 +1364,7 @@ impl CronScheduler {
                 };
                 let (_, rollback) = claimed_job.into_parts();
                 let result = if let Some(owner) = fire.owner.as_deref() {
-                    match platform_api::team_spawn::TeamSpawnSeam::send_message(
+                    match lingxi_core::host::team_spawn::TeamSpawnSeam::send_message(
                         self.task_registry.as_ref(),
                         owner,
                         fire.prompt,
@@ -1373,8 +1373,8 @@ impl CronScheduler {
                     {
                         Ok(()) => Ok(()),
                         Err(
-                            platform_api::team_spawn::TeamSpawnError::Terminated
-                            | platform_api::team_spawn::TeamSpawnError::StoppedByUser(_),
+                            lingxi_core::host::team_spawn::TeamSpawnError::Terminated
+                            | lingxi_core::host::team_spawn::TeamSpawnError::StoppedByUser(_),
                         ) => {
                             self.unregister_job(&id, None).await;
                             continue;
@@ -1776,13 +1776,13 @@ impl CronScheduler {
     /// Cancel and join the tick future, if running. The owned completion
     /// barrier remains available if this waiter is cancelled or cancellation
     /// fails; concurrent start/stop calls cannot bypass it.
-    pub async fn stop(&self) -> Result<(), platform_api::RuntimeError> {
+    pub async fn stop(&self) -> Result<(), lingxi_core::host::RuntimeError> {
         let mut tick_handle = self.tick_handle.lock().await;
         let mut flights =
             tokio::time::timeout(TICK_DESTRUCTION_BUDGET, self.automation_runs.lock())
                 .await
                 .map_err(|_| {
-                    platform_api::RuntimeError::Internal(
+                    lingxi_core::host::RuntimeError::Internal(
                         "scheduled dispatch did not finish within the shutdown budget".into(),
                     )
                 })?;
@@ -1800,7 +1800,7 @@ impl CronScheduler {
                 .await
                 .is_err()
             {
-                return Err(platform_api::RuntimeError::Internal(
+                return Err(lingxi_core::host::RuntimeError::Internal(
                     "cron tick did not release its owners within the shutdown budget".into(),
                 ));
             }
@@ -1823,7 +1823,7 @@ impl CronScheduler {
                         .await
                         .is_err()
                     {
-                        return Err(platform_api::RuntimeError::Internal(
+                        return Err(lingxi_core::host::RuntimeError::Internal(
                             "scheduled execution did not release its owners within the shutdown budget".into()));
                     }
                 }
@@ -1832,7 +1832,7 @@ impl CronScheduler {
                 self.settle_automation_flight(root, flight)
                     .await
                     .map_err(|error| {
-                        platform_api::RuntimeError::Internal(format!(
+                        lingxi_core::host::RuntimeError::Internal(format!(
                             "Scheduled result was not safely persisted: {error}"
                         ))
                     })?;
@@ -2607,8 +2607,10 @@ mod scheduler_tick_tests {
     use super::{CronScheduler, SessionCronTask};
     use async_trait::async_trait;
     use futures::Stream;
-    use platform_api::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
-    use platform_api::{BackgroundTaskHandle, Clock, FileSystem, RuntimeError, RuntimeSpawner};
+    use lingxi_core::host::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
+    use lingxi_core::host::{
+        BackgroundTaskHandle, Clock, FileSystem, RuntimeError, RuntimeSpawner,
+    };
     use std::collections::HashMap;
     use std::future::Future;
     use std::path::{Path, PathBuf};
@@ -3780,8 +3782,8 @@ mod scheduler_tick_tests {
     async fn public_session_api_resolves_same_registry_after_trait_coercion() {
         let fs = MemFs::with(TASKS_PATH, r#"{"tasks":[]}"#);
         let concrete_registry = registry(fs.clone());
-        let trait_registry =
-            concrete_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>;
+        let trait_registry = concrete_registry.clone()
+            as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>;
         assert_eq!(
             super::task_registry_identity(&concrete_registry),
             super::task_registry_identity(&trait_registry)
@@ -3835,7 +3837,7 @@ mod scheduler_tick_tests {
             .lock()
             .unwrap()
             .insert(key, Arc::downgrade(&scheduler));
-        let registry = registry as Arc<dyn platform_api::task_registry::TaskRegistryHandle>;
+        let registry = registry as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>;
         super::register_live_job(
             &registry,
             SessionCronTask {

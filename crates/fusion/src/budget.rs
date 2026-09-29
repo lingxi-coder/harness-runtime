@@ -23,7 +23,7 @@
 
 use crate::config::FusionRuntimeConfig;
 use crate::model_resolver::{route_key, ModelLimits, ModelSource, ResolvedPanel, ResolvedSet};
-use platform_api::{
+use lingxi_core::host::{
     BudgetEnforcerHandle, BudgetError, BudgetReservationId, FusionCostClass, FusionError,
     FusionRequest,
 };
@@ -516,7 +516,7 @@ mod tests {
     use super::*;
     use crate::config::FusionRuntimeConfig;
     use crate::model_resolver::CatalogModel;
-    use platform_api::{
+    use lingxi_core::host::{
         FusionModelHints, FusionOrigin, FusionPreset, FusionRequest, DEFAULT_FUSION_DIMENSIONS,
     };
     use std::collections::HashMap;
@@ -885,7 +885,7 @@ comparator, not dead API surface and not a production fallback"
     }
 
     #[async_trait::async_trait]
-    impl platform_api::BudgetSettlementReceipt for TestSettlementReceipt {
+    impl lingxi_core::host::BudgetSettlementReceipt for TestSettlementReceipt {
         async fn finish(self: Box<Self>) -> Result<(), BudgetError> {
             self.state.started.notify_one();
             if self.state.block_finish {
@@ -928,7 +928,7 @@ comparator, not dead API surface and not a production fallback"
             &self,
             _id: BudgetReservationId,
             _actual_nano_usd: u64,
-        ) -> Result<Option<platform_api::BudgetCommitReceipt>, BudgetError> {
+        ) -> Result<Option<lingxi_core::host::BudgetCommitReceipt>, BudgetError> {
             self.state.begin_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Some(Box::new(TestSettlementReceipt {
                 state: Arc::clone(&self.state),

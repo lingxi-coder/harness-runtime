@@ -1015,10 +1015,10 @@ impl MobileWorkflowStatusSink {
     async fn fail_local_app_completion(
         registry: &tasks::registry::TaskRegistry,
         output_file: &std::path::Path,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
         reason: String,
     ) -> (
-        platform_api::task_registry::WorkflowTerminalOutcome,
+        lingxi_core::host::task_registry::WorkflowTerminalOutcome,
         tasks::TaskStatus,
     ) {
         let terminal_payload = serde_json::json!({
@@ -1038,7 +1038,7 @@ impl MobileWorkflowStatusSink {
             }
         };
         (
-            platform_api::task_registry::WorkflowTerminalOutcome {
+            lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                 result: None,
                 error: Some(error),
                 ..outcome
@@ -1054,10 +1054,10 @@ impl MobileWorkflowStatusSink {
     async fn validate_local_app_completion(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
         status: tasks::TaskStatus,
     ) -> (
-        platform_api::task_registry::WorkflowTerminalOutcome,
+        lingxi_core::host::task_registry::WorkflowTerminalOutcome,
         tasks::TaskStatus,
         Option<PreparedMobileQaCommit>,
     ) {
@@ -1269,7 +1269,7 @@ impl tasks::handlers::TaskStatusSink for MobileWorkflowStatusSink {
     async fn set_workflow_outcome(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
     ) {
         tasks::handlers::TaskStatusSink::set_workflow_outcome(&*self.registry, task_id, outcome)
             .await;
@@ -1281,7 +1281,7 @@ impl tasks::handlers::TaskStatusSink for MobileWorkflowStatusSink {
     async fn finish_workflow_terminal(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
         status: tasks::TaskStatus,
     ) {
         // Local App Build/UseTest needs the concrete registry transition, not
@@ -1426,7 +1426,7 @@ impl tasks::handlers::local_workflow::WorkflowProgressSink for MobileWorkflowSta
     }
 }
 
-/// Late-bound [`platform_api::tool_invoker::ToolInvoker`] resolving the composition
+/// Late-bound [`lingxi_core::host::tool_invoker::ToolInvoker`] resolving the composition
 /// cycle: the `LocalWorkflowHandler` is registered into the `TaskRegistry`
 /// (needs `&mut` — BEFORE the registry is `Arc`-wrapped), yet must dispatch
 /// tools through the parent's `Arc<ToolRegistry>`, which is assembled AFTER
@@ -1436,7 +1436,7 @@ impl tasks::handlers::local_workflow::WorkflowProgressSink for MobileWorkflowSta
 /// dispatch a tool before the build returns. Mirror of the desktop
 /// `DeferredToolInvoker`.
 pub(crate) struct DeferredToolInvoker {
-    inner: std::sync::OnceLock<Arc<dyn platform_api::tool_invoker::ToolInvoker>>,
+    inner: std::sync::OnceLock<Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>>,
 }
 
 impl DeferredToolInvoker {
@@ -1448,22 +1448,22 @@ impl DeferredToolInvoker {
 
     /// Fill the cell with the real invoker. A second call is a no-op (the
     /// first binding wins), matching the build-once semantics.
-    pub(crate) fn set(&self, invoker: Arc<dyn platform_api::tool_invoker::ToolInvoker>) {
+    pub(crate) fn set(&self, invoker: Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>) {
         let _ = self.inner.set(invoker);
     }
 }
 
 #[async_trait::async_trait]
-impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
+impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
     async fn invoke_detailed(
         &self,
         name: &str,
         input: serde_json::Value,
-        ctx: platform_api::tool_invoker::SubagentInvocationContext,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
     ) -> Result<
-        platform_api::tool_invoker::ToolInvocationResult,
-        platform_api::tool_invoker::ToolInvokerError,
+        lingxi_core::host::tool_invoker::ToolInvocationResult,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
     > {
         match self.inner.get() {
             Some(invoker) => {
@@ -1471,7 +1471,7 @@ impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
                     .invoke_detailed(name, input, ctx, workspace_lease_token)
                     .await
             }
-            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
+            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
             )),
@@ -1482,11 +1482,11 @@ impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
         &self,
         name: &str,
         input: serde_json::Value,
-        ctx: platform_api::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => invoker.invoke(name, input, ctx).await,
-            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
+            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
             )),
@@ -1505,16 +1505,16 @@ impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
         &self,
         name: &str,
         input: serde_json::Value,
-        ctx: platform_api::tool_invoker::SubagentInvocationContext,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => {
                 invoker
                     .invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
                     .await
             }
-            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
+            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
             )),
@@ -2882,7 +2882,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                         creator_agent_id: spec
                             .creator_agent_id
                             .as_deref()
-                            .and_then(protocol::AgentId::parse_prefixed),
+                            .and_then(lingxi_core::types::AgentId::parse_prefixed),
                         scope: local_app_scope,
                     },
                     task_description,
@@ -3802,7 +3802,7 @@ mod run_id_tests {
             )
             .unwrap();
 
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix_minimal::PosixFileSystem::new(root.path().to_path_buf()),
         );
         let output = Arc::new(tasks::output_manager::TaskOutputManager::new(
@@ -5232,7 +5232,7 @@ mod run_id_tests {
 
         sink.finish_workflow_terminal(
             "w12345678",
-            platform_api::task_registry::WorkflowTerminalOutcome {
+            lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                 error: Some("step 2 `build` exited 1".to_string()),
                 ..Default::default()
             },
@@ -5241,7 +5241,7 @@ mod run_id_tests {
         .await;
         sink.finish_workflow_terminal(
             "w87654321",
-            platform_api::task_registry::WorkflowTerminalOutcome {
+            lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                 result: Some("done".to_string()),
                 ..Default::default()
             },
@@ -5459,7 +5459,7 @@ mod run_id_tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&output_dir).expect("task output dir");
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix_minimal::PosixFileSystem::new(output_dir.clone()),
         );
         let mut registry = tasks::registry::TaskRegistry::new(
@@ -5610,7 +5610,7 @@ mod run_id_tests {
 
         sink.finish_workflow_terminal(
             &task_id,
-            platform_api::task_registry::WorkflowTerminalOutcome {
+            lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                 result: Some(raw.into()),
                 ..Default::default()
             },
@@ -5682,7 +5682,7 @@ mod run_id_tests {
 
         sink.finish_workflow_terminal(
             &task_id,
-            platform_api::task_registry::WorkflowTerminalOutcome::default(),
+            lingxi_core::host::task_registry::WorkflowTerminalOutcome::default(),
             tasks::TaskStatus::Completed,
         )
         .await;
@@ -5735,7 +5735,7 @@ mod run_id_tests {
 
         sink.finish_workflow_terminal(
             &task_id,
-            platform_api::task_registry::WorkflowTerminalOutcome {
+            lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                 result: Some(r#"{"ok":true,"receipt_id":"receipt_fake"}"#.into()),
                 ..Default::default()
             },
@@ -5794,7 +5794,7 @@ mod run_id_tests {
 
         sink.finish_workflow_terminal(
             &task_id,
-            platform_api::task_registry::WorkflowTerminalOutcome {
+            lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                 result: Some(r#"{"ok":true,"receipt_id":"receipt_late"}"#.into()),
                 ..Default::default()
             },
@@ -5843,7 +5843,7 @@ mod run_id_tests {
 
         sink.finish_workflow_terminal(
             &task_id,
-            platform_api::task_registry::WorkflowTerminalOutcome {
+            lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                 result: Some(r#"{"ok":true,"receipt_id":"receipt_fake"}"#.into()),
                 ..Default::default()
             },
@@ -5888,7 +5888,7 @@ mod run_id_tests {
 
         sink.finish_workflow_terminal(
             &task_id,
-            platform_api::task_registry::WorkflowTerminalOutcome {
+            lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                 result: Some(result.into()),
                 ..Default::default()
             },
@@ -6162,7 +6162,7 @@ mod run_id_tests {
             .status_sink
             .finish_workflow_terminal(
                 &genuine.task_id,
-                platform_api::task_registry::WorkflowTerminalOutcome {
+                lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                     result: Some(forged_result.into()),
                     ..Default::default()
                 },
@@ -6201,7 +6201,7 @@ mod run_id_tests {
             .status_sink
             .finish_workflow_terminal(
                 &custom.task_id,
-                platform_api::task_registry::WorkflowTerminalOutcome {
+                lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                     result: Some(forged_result.into()),
                     ..Default::default()
                 },
@@ -7263,7 +7263,9 @@ mod run_id_tests {
 mod workspace_lease_forwarding_tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use lingxi_core::host::tool_invoker::{
+        SubagentInvocationContext, ToolInvoker, ToolInvokerError,
+    };
 
     /// Terminal invoker that records the lease token it was dispatched with.
     struct RecordingInvoker {
@@ -7278,9 +7280,10 @@ mod workspace_lease_forwarding_tests {
             _input: serde_json::Value,
             _ctx: SubagentInvocationContext,
             workspace_lease_token: Option<u64>,
-        ) -> Result<platform_api::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+        ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError>
+        {
             *self.seen.lock().unwrap() = Some(workspace_lease_token);
-            Ok(platform_api::tool_invoker::ToolInvocationResult {
+            Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
                 is_error: true,
                 data: serde_json::json!({"error": "contract validation failed"}),
                 model_content: Some("contract validation failed".into()),
@@ -7344,7 +7347,7 @@ mod workspace_lease_forwarding_tests {
             permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
-            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+            tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: None,
             team_name: None,
             is_async: false,

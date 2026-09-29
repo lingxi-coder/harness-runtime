@@ -1,6 +1,6 @@
 //! Captured main-response participation in the host's shared output book.
 use super::*;
-use platform_api::{WorkflowOutputEventId, WorkflowOutputScope};
+use lingxi_core::host::{WorkflowOutputEventId, WorkflowOutputScope};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone)]
@@ -292,7 +292,7 @@ mod tests {
         NoOpPermissionGate, StaticMemoryProvider,
     };
     use futures::StreamExt;
-    use platform_api::{BudgetError, WorkflowOutputAccount, WorkflowOutputScopes};
+    use lingxi_core::host::{BudgetError, WorkflowOutputAccount, WorkflowOutputScopes};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -450,14 +450,14 @@ mod tests {
         let old = scopes.capture(old_session).unwrap();
         old.record_legacy(WorkflowOutputEventId::MainResponse(MessageId::new()), 13)
             .unwrap();
-        platform_api::OrchestratorHandle::clear_session(&orch)
+        lingxi_core::host::OrchestratorHandle::clear_session(&orch)
             .await
             .unwrap();
         let cleared = orch.session.lock().await.session_id;
         assert_ne!(old_session, cleared);
         assert!(orch.capture_main_output().await.unwrap().is_some());
         assert_eq!(scopes.capture(cleared).unwrap().spent(), 0);
-        platform_api::OrchestratorHandle::resume_session(
+        lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
             old_session,
             vec![],
@@ -475,10 +475,10 @@ mod tests {
         let marker = ConversationMessage::user(MessageId::new(), "preserve history".to_string());
         orch.session.lock().await.history.push(marker.clone());
         scopes.1.store(true, Ordering::Release);
-        assert!(platform_api::OrchestratorHandle::clear_session(&orch)
+        assert!(lingxi_core::host::OrchestratorHandle::clear_session(&orch)
             .await
             .is_err());
-        assert!(platform_api::OrchestratorHandle::resume_session(
+        assert!(lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
             cleared,
             vec![],

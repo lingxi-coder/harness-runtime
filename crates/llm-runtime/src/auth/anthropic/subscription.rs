@@ -83,7 +83,7 @@ pub async fn resolve_subscription_snapshot(
     access_token: &str,
     scopes: &[String],
     transport: &Arc<dyn Transport>,
-) -> Option<platform_api::subscription::SubscriptionSnapshot> {
+) -> Option<lingxi_core::host::subscription::SubscriptionSnapshot> {
     if !has_profile_scope(scopes) {
         return None;
     }
@@ -92,7 +92,7 @@ pub async fn resolve_subscription_snapshot(
     // the profile for `organizationRole`); failure leaves the role unknown.
     let roles = fetch_user_roles(access_token, transport.as_ref()).await;
     let org = profile.organization.as_ref();
-    Some(platform_api::subscription::SubscriptionSnapshot {
+    Some(lingxi_core::host::subscription::SubscriptionSnapshot {
         // `isClaudeAISubscriber` ← the `user:inference` scope.
         is_subscriber: subscription_from_scopes(scopes),
         subscription_type: subscription_type(&profile)
@@ -106,7 +106,7 @@ pub async fn resolve_subscription_snapshot(
 }
 
 /// Resolve [`resolve_subscription_snapshot`] and publish it to the process-global
-/// [`platform_api::subscription`] cache, so subscription-gated logic (e.g. the
+/// [`lingxi_core::host::subscription`] cache, so subscription-gated logic (e.g. the
 /// `AgentTool` pro-plan prompt gate) reflects the signed-in user's plan.
 /// Best-effort: a missing `user:profile` scope or a failed fetch leaves the
 /// cache unchanged (subscription stays "unknown", matching the binary default).
@@ -116,7 +116,7 @@ pub async fn publish_subscription(
     transport: &Arc<dyn Transport>,
 ) {
     if let Some(snapshot) = resolve_subscription_snapshot(access_token, scopes, transport).await {
-        platform_api::subscription::set_current_subscription(Some(snapshot));
+        lingxi_core::host::subscription::set_current_subscription(Some(snapshot));
     }
 }
 
@@ -285,13 +285,13 @@ mod tests {
         assert!(snap.has_extra_usage_enabled);
 
         // publish → the process-global cache reflects the pro plan.
-        platform_api::subscription::set_current_subscription(None);
+        lingxi_core::host::subscription::set_current_subscription(None);
         publish_subscription("tok", &scopes, &transport).await;
         assert!(
-            platform_api::subscription::is_pro_plan(),
+            lingxi_core::host::subscription::is_pro_plan(),
             "global must report pro after publish (this is what activates the F3 gate)"
         );
-        platform_api::subscription::set_current_subscription(None);
+        lingxi_core::host::subscription::set_current_subscription(None);
     }
 
     #[tokio::test]

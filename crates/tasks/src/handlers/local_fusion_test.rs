@@ -1,9 +1,9 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
-use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
-use platform_api::{
+use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
+use lingxi_core::host::{
     BudgetError, FusionOrigin, FusionPreset, FusionRequest, FusionRunOutcome, FusionRunRecorder,
     FusionSlashPublicationTarget, FusionTiming, FusionUsage,
 };
@@ -170,11 +170,11 @@ impl CancelAwareExecutor {
 impl FusionExecutor for CancelAwareExecutor {
     fn prepare(
         self: ::std::sync::Arc<Self>,
-        submission: ::platform_api::FusionSubmission,
-    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        submission: ::lingxi_core::host::FusionSubmission,
+    ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::platform_api::prepared_from_oneshot(
+        ::lingxi_core::host::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, inherit, _progress| async move {
@@ -203,11 +203,11 @@ impl ImmediateExecutor {
 impl FusionExecutor for ImmediateExecutor {
     fn prepare(
         self: ::std::sync::Arc<Self>,
-        submission: ::platform_api::FusionSubmission,
-    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        submission: ::lingxi_core::host::FusionSubmission,
+    ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::platform_api::prepared_from_oneshot(
+        ::lingxi_core::host::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, _progress| async move {
@@ -237,11 +237,11 @@ impl TimeoutSnapshotExecutor {
 impl FusionExecutor for TimeoutSnapshotExecutor {
     fn prepare(
         self: ::std::sync::Arc<Self>,
-        submission: ::platform_api::FusionSubmission,
-    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        submission: ::lingxi_core::host::FusionSubmission,
+    ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::platform_api::prepared_from_oneshot(
+        ::lingxi_core::host::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, inherit, _progress| async move {
@@ -278,25 +278,25 @@ impl ProgressEmittingExecutor {
 impl FusionExecutor for ProgressEmittingExecutor {
     fn prepare(
         self: ::std::sync::Arc<Self>,
-        submission: ::platform_api::FusionSubmission,
-    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        submission: ::lingxi_core::host::FusionSubmission,
+    ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::platform_api::prepared_from_oneshot(
+        ::lingxi_core::host::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, progress| async move {
                 this.runs.fetch_add(1, Ordering::SeqCst);
                 if let Some(tx) = progress {
                     for stage in [
-                        platform_api::FusionStage::ResolvingModels,
-                        platform_api::FusionStage::RunningPanels {
+                        lingxi_core::host::FusionStage::ResolvingModels,
+                        lingxi_core::host::FusionStage::RunningPanels {
                             completed: 2,
                             total: 3,
                         },
                     ] {
                         let _ = tx
-                            .send(platform_api::FusionProgress {
+                            .send(lingxi_core::host::FusionProgress {
                                 message: stage.label(),
                                 stage,
                                 panel_id: None,
@@ -354,11 +354,11 @@ impl NaturalAfterFinalizingExecutor {
 impl FusionExecutor for NaturalAfterFinalizingExecutor {
     fn prepare(
         self: ::std::sync::Arc<Self>,
-        submission: ::platform_api::FusionSubmission,
-    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        submission: ::lingxi_core::host::FusionSubmission,
+    ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::platform_api::prepared_from_oneshot(
+        ::lingxi_core::host::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, _progress| async move {
@@ -378,11 +378,11 @@ impl FusionExecutor for NaturalAfterFinalizingExecutor {
 impl FusionExecutor for BlockingCancelAwareExecutor {
     fn prepare(
         self: ::std::sync::Arc<Self>,
-        submission: ::platform_api::FusionSubmission,
-    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        submission: ::lingxi_core::host::FusionSubmission,
+    ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::platform_api::prepared_from_oneshot(
+        ::lingxi_core::host::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, inherit, _progress| async move {
@@ -423,20 +423,20 @@ impl RealizedProgressBlockingExecutor {
 impl FusionExecutor for RealizedProgressBlockingExecutor {
     fn prepare(
         self: ::std::sync::Arc<Self>,
-        submission: ::platform_api::FusionSubmission,
-    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        submission: ::lingxi_core::host::FusionSubmission,
+    ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::platform_api::prepared_from_oneshot(
+        ::lingxi_core::host::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, inherit, progress| async move {
                 this.runs.fetch_add(1, Ordering::SeqCst);
                 if let Some(tx) = &progress {
                     let _ = tx
-                        .send(platform_api::FusionProgress {
+                        .send(lingxi_core::host::FusionProgress {
                             message: "panels billed real usage".into(),
-                            stage: platform_api::FusionStage::Analyzing,
+                            stage: lingxi_core::host::FusionStage::Analyzing,
                             panel_id: None,
                             realized_output_tokens: Some(12),
                             egress_profiles: Some(vec!["anthropic".into(), "openai".into()]),
@@ -463,9 +463,9 @@ impl FusionCompletionSink for CountingCompletionSink {
         &self,
         _conversation_id: &str,
         _result: &FusionResult,
-    ) -> platform_api::FusionPublicationReceipt {
+    ) -> lingxi_core::host::FusionPublicationReceipt {
         self.0.fetch_add(1, Ordering::SeqCst);
-        platform_api::FusionPublicationReceipt::published()
+        lingxi_core::host::FusionPublicationReceipt::published()
     }
 }
 
@@ -474,7 +474,7 @@ impl FusionCompletionSink for CountingCompletionSink {
 /// invokes the legacy completion sink as a second publication path.
 struct RecordingTerminalRecorder {
     calls: AtomicUsize,
-    publication: platform_api::FusionPublicationReceipt,
+    publication: lingxi_core::host::FusionPublicationReceipt,
 }
 
 #[async_trait]
@@ -483,7 +483,7 @@ impl FusionRunRecorder for RecordingTerminalRecorder {
         &self,
         _outcome: FusionRunOutcome,
         _slash_target: Option<FusionSlashPublicationTarget>,
-    ) -> platform_api::FusionPublicationReceipt {
+    ) -> lingxi_core::host::FusionPublicationReceipt {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.publication.clone()
     }
@@ -684,11 +684,11 @@ struct FailingExecutor {
 impl FusionExecutor for FailingExecutor {
     fn prepare(
         self: ::std::sync::Arc<Self>,
-        submission: ::platform_api::FusionSubmission,
-    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        submission: ::lingxi_core::host::FusionSubmission,
+    ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::platform_api::prepared_from_oneshot(
+        ::lingxi_core::host::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, _progress| async move { Err(this.error.clone()) },
@@ -708,7 +708,7 @@ struct RecordingStatusSink {
         Vec<(
             String,
             Vec<String>,
-            Option<platform_api::task_registry::AgentRunUsage>,
+            Option<lingxi_core::host::task_registry::AgentRunUsage>,
         )>,
     >,
 }
@@ -739,7 +739,7 @@ impl RecordingStatusSink {
     ) -> Vec<(
         String,
         Vec<String>,
-        Option<platform_api::task_registry::AgentRunUsage>,
+        Option<lingxi_core::host::task_registry::AgentRunUsage>,
     )> {
         self.egress_and_usage.lock().unwrap().clone()
     }
@@ -770,7 +770,7 @@ impl TaskStatusSink for RecordingStatusSink {
         &self,
         task_id: &str,
         egress_profiles: Vec<String>,
-        usage: Option<platform_api::task_registry::AgentRunUsage>,
+        usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
     ) {
         self.events.lock().unwrap().push(format!(
             "egress_and_usage:{}:{}",
@@ -797,7 +797,7 @@ impl TaskStatusSink for RecordingStatusSink {
     async fn set_fusion_publication(
         &self,
         _task_id: &str,
-        receipt: platform_api::FusionPublicationReceipt,
+        receipt: lingxi_core::host::FusionPublicationReceipt,
     ) {
         self.events
             .lock()
@@ -829,9 +829,9 @@ impl FusionCompletionSink for PublishOrderCompletionSink {
         &self,
         _conversation_id: &str,
         _result: &FusionResult,
-    ) -> platform_api::FusionPublicationReceipt {
+    ) -> lingxi_core::host::FusionPublicationReceipt {
         self.0.lock().unwrap().push("publish".to_string());
-        platform_api::FusionPublicationReceipt::published()
+        lingxi_core::host::FusionPublicationReceipt::published()
     }
 }
 
@@ -855,19 +855,19 @@ impl SingleProgressExecutor {
 impl FusionExecutor for SingleProgressExecutor {
     fn prepare(
         self: ::std::sync::Arc<Self>,
-        submission: ::platform_api::FusionSubmission,
-    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        submission: ::lingxi_core::host::FusionSubmission,
+    ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::platform_api::prepared_from_oneshot(
+        ::lingxi_core::host::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, progress| async move {
                 this.runs.fetch_add(1, Ordering::SeqCst);
                 if let Some(tx) = progress {
-                    let stage = platform_api::FusionStage::ResolvingModels;
+                    let stage = lingxi_core::host::FusionStage::ResolvingModels;
                     let _ = tx
-                        .send(platform_api::FusionProgress {
+                        .send(lingxi_core::host::FusionProgress {
                             message: stage.label(),
                             stage,
                             panel_id: None,
@@ -888,7 +888,7 @@ impl FusionExecutor for SingleProgressExecutor {
 /// the shape the orchestrator sends when `check_panel_bar` fails after real
 /// panel spend — and, when `egress_profiles` is non-empty, the resolved
 /// egress profile list the orchestrator latches at the same seam (see
-/// `platform_api::FusionProgress::egress_profiles`) — then fails with the
+/// `lingxi_core::host::FusionProgress::egress_profiles`) — then fails with the
 /// given error. Used to prove the Err arm discloses both the realized
 /// tokens AND the egress profiles it already has access to via the
 /// progress forwarder.
@@ -902,23 +902,23 @@ struct PartialSpendThenFailExecutor {
 impl FusionExecutor for PartialSpendThenFailExecutor {
     fn prepare(
         self: ::std::sync::Arc<Self>,
-        submission: ::platform_api::FusionSubmission,
-    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        submission: ::lingxi_core::host::FusionSubmission,
+    ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::platform_api::prepared_from_oneshot(
+        ::lingxi_core::host::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, progress| async move {
                 if let Some(tx) = progress {
-                    let stage = platform_api::FusionStage::Failed;
+                    let stage = lingxi_core::host::FusionStage::Failed;
                     let egress_profiles = if this.egress_profiles.is_empty() {
                         None
                     } else {
                         Some(this.egress_profiles.clone())
                     };
                     let _ = tx
-                        .send(platform_api::FusionProgress {
+                        .send(lingxi_core::host::FusionProgress {
                             message: stage.label(),
                             stage,
                             panel_id: None,
@@ -973,7 +973,7 @@ impl TaskStatusSink for BlockingStageSink {
         &self,
         task_id: &str,
         egress_profiles: Vec<String>,
-        usage: Option<platform_api::task_registry::AgentRunUsage>,
+        usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
     ) {
         self.inner
             .set_fusion_egress_and_usage(task_id, egress_profiles, usage)
@@ -1009,7 +1009,7 @@ impl TaskStatusSink for BlockingStageSink {
     async fn set_fusion_publication(
         &self,
         task_id: &str,
-        receipt: platform_api::FusionPublicationReceipt,
+        receipt: lingxi_core::host::FusionPublicationReceipt,
     ) {
         self.inner.set_fusion_publication(task_id, receipt).await;
     }
@@ -1071,18 +1071,18 @@ async fn accounting_failure_retains_answer_but_does_not_report_success() {
     let status = Arc::new(RecordingStatusSink::default());
     let status_trait: Arc<dyn TaskStatusSink> = status.clone();
     let completion: Arc<dyn FusionCompletionSink> = Arc::new(CountingCompletionSink::default());
-    let control = platform_api::FusionRunControl::new_with_billing_mode(
+    let control = lingxi_core::host::FusionRunControl::new_with_billing_mode(
         FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Agent, None),
         1_000,
         CancellationToken::new(),
-        platform_api::FusionRunFactsRecorder::default(),
-        platform_api::ModelAttemptBillingMode::MeteredAttempts,
+        lingxi_core::host::FusionRunFactsRecorder::default(),
+        lingxi_core::host::ModelAttemptBillingMode::MeteredAttempts,
     );
-    control
-        .facts()
-        .set_attempt_settlement(platform_api::FusionAttemptSettlementStatus::Failed {
+    control.facts().set_attempt_settlement(
+        lingxi_core::host::FusionAttemptSettlementStatus::Failed {
             reason: "ledger unavailable".into(),
-        });
+        },
+    );
     let outcome = FusionRunOutcome::from_control(&control, Ok(dummy_result()));
     finalize_fusion_outcome(
         &outcome,
@@ -1332,7 +1332,7 @@ async fn prepared_terminal_recorder_precedes_task_completion_without_legacy_publ
     let completion_sink = Arc::new(CountingCompletionSink::default());
     let recorder = Arc::new(RecordingTerminalRecorder {
         calls: AtomicUsize::new(0),
-        publication: platform_api::FusionPublicationReceipt::published(),
+        publication: lingxi_core::host::FusionPublicationReceipt::published(),
     });
     let handler = make_handler(
         ImmediateExecutor::new(),
@@ -2197,13 +2197,15 @@ async fn a_sink_that_never_publishes_does_not_revert_a_completed_run_to_failed()
             &self,
             _conversation_id: &str,
             _result: &FusionResult,
-        ) -> platform_api::FusionPublicationReceipt {
+        ) -> lingxi_core::host::FusionPublicationReceipt {
             self.calls.fetch_add(1, Ordering::SeqCst);
             *self.status_at_publish.lock().unwrap() = self.status_sink.last_status();
             // Simulate a sink that fails to reach the client (e.g.
             // `DesktopFusionCompletionSink::publish`'s real `append_meta_..`
             // erroring) — it logs and returns, touching nothing else.
-            platform_api::FusionPublicationReceipt::storage_failure("test completion sink failure")
+            lingxi_core::host::FusionPublicationReceipt::storage_failure(
+                "test completion sink failure",
+            )
         }
     }
 
@@ -2266,10 +2268,10 @@ struct FullUsageExecutor;
 impl FusionExecutor for FullUsageExecutor {
     fn prepare(
         self: ::std::sync::Arc<Self>,
-        submission: ::platform_api::FusionSubmission,
-    ) -> Result<::platform_api::PreparedFusionRun, ::platform_api::FusionError> {
+        submission: ::lingxi_core::host::FusionSubmission,
+    ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let timeout = self.effective_timeout_ms();
-        ::platform_api::prepared_from_oneshot(
+        ::lingxi_core::host::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, _progress| async move {
@@ -2294,7 +2296,7 @@ impl FusionExecutor for FullUsageExecutor {
 
 /// Round-7 items 5+6 (one defect): `AgentRunUsage.subagent_tokens` is
 /// main-owned and documented as claude-code's `totalTokens`
-/// (`platform_api::task_registry::AgentRunUsage`), and main's only other
+/// (`lingxi_core::host::task_registry::AgentRunUsage`), and main's only other
 /// producer — `local_agent.rs`'s `input + cache_write + cache_read + output`
 /// (mirrored in `agent::handle::subagent_usage_from_llm_usage`) — fills it
 /// with all four billable buckets. `finalize_fusion_outcome` filled it with

@@ -44,7 +44,7 @@ use serde_json::{Map, Value};
 use telemetry::AnalyticsBus;
 
 use crate::plugin_settings::{parse_scope_str, scope_label, scope_path};
-use protocol::WritableScope;
+use lingxi_core::types::WritableScope;
 
 /// `<plugins>/installed_plugins.json` path.
 #[cfg(test)]

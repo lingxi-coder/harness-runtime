@@ -26,8 +26,8 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use hooks::{HookPromptRunner, PromptHookError, PromptHookRequest};
+use lingxi_core::types::{ConversationMessage, MessageId};
 use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
-use protocol::{ConversationMessage, MessageId};
 
 use crate::conversation::{ConversationOrchestrator, OrchestratorApiClient};
 
@@ -172,7 +172,7 @@ impl ApiClientHookPromptRunner {
 /// an unscoped id is judged by its `claude-` prefix.
 fn anthropic_served(model: &str, profile: Option<&str>) -> bool {
     match profile {
-        Some(profile) => platform_api::split_connection_profile(profile).0 == "anthropic",
+        Some(profile) => lingxi_core::host::split_connection_profile(profile).0 == "anthropic",
         None => model.starts_with("claude-"),
     }
 }
@@ -186,11 +186,11 @@ fn anthropic_served(model: &str, profile: Option<&str>) -> bool {
 /// carry one. An assistant message left empty keeps the placeholder the
 /// signature-recovery path uses, so no message goes out without content.
 fn strip_transcript_thinking(messages: &mut [ConversationMessage]) {
-    let is_thinking = |block: &protocol::ContentBlock| {
+    let is_thinking = |block: &lingxi_core::types::ContentBlock| {
         matches!(
             block,
-            protocol::ContentBlock::Thinking { .. }
-                | protocol::ContentBlock::RedactedThinking { .. }
+            lingxi_core::types::ContentBlock::Thinking { .. }
+                | lingxi_core::types::ContentBlock::RedactedThinking { .. }
         )
     };
     for message in messages {
@@ -202,7 +202,7 @@ fn strip_transcript_thinking(messages: &mut [ConversationMessage]) {
         }
         content.retain(|block| !is_thinking(block));
         if content.is_empty() {
-            content.push(protocol::ContentBlock::Text {
+            content.push(lingxi_core::types::ContentBlock::Text {
                 text: "[Thinking removed]".into(),
             });
         }
@@ -601,7 +601,7 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(usage, 15);
         assert!(
-            matches!(&messages[1], ConversationMessage::Assistant { content, .. } if matches!(&content[0], protocol::ContentBlock::Text { text } if text == "tests passed"))
+            matches!(&messages[1], ConversationMessage::Assistant { content, .. } if matches!(&content[0], lingxi_core::types::ContentBlock::Text { text } if text == "tests passed"))
         );
     }
 
@@ -611,7 +611,7 @@ mod tests {
             ConversationMessage::user(MessageId::new(), "old".repeat(100)),
             ConversationMessage::Assistant {
                 id: MessageId::new(),
-                content: vec![protocol::ContentBlock::Text {
+                content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "latest".into(),
                 }],
                 stop_reason: None,
@@ -625,7 +625,7 @@ mod tests {
             panic!("truncation preface")
         };
         assert!(
-            matches!(&content[0], protocol::ContentBlock::Text { text } if text.contains("1 earlier messages omitted"))
+            matches!(&content[0], lingxi_core::types::ContentBlock::Text { text } if text.contains("1 earlier messages omitted"))
         );
         assert!(bound_hook_transcript(&[], 1, &Default::default()).is_empty());
     }
@@ -635,7 +635,7 @@ mod tests {
         let id = MessageId::new();
         let assistant = |text: &str| ConversationMessage::Assistant {
             id,
-            content: vec![protocol::ContentBlock::Text { text: text.into() }],
+            content: vec![lingxi_core::types::ContentBlock::Text { text: text.into() }],
             stop_reason: None,
         };
         let messages = vec![
@@ -697,7 +697,7 @@ mod tests {
             ConversationMessage::user(MessageId::new(), "unpersisted evidence".into()),
             ConversationMessage::Assistant {
                 id: MessageId::new(),
-                content: vec![protocol::ContentBlock::Text {
+                content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "just completed".into(),
                 }],
                 stop_reason: None,
@@ -739,7 +739,7 @@ mod tests {
             ConversationMessage::User { content, .. } => {
                 assert_eq!(
                     content,
-                    &vec![protocol::ContentBlock::Text {
+                    &vec![lingxi_core::types::ContentBlock::Text {
                         text: "is this safe?".into()
                     }]
                 );
@@ -880,11 +880,11 @@ mod tests {
                     content: vec![
                         // A DeepSeek trace: no signature, which the Anthropic
                         // codec refuses outright.
-                        protocol::ContentBlock::Thinking {
+                        lingxi_core::types::ContentBlock::Thinking {
                             thinking: "let me think".into(),
                             signature: None,
                         },
-                        protocol::ContentBlock::Text {
+                        lingxi_core::types::ContentBlock::Text {
                             text: "tests passed".into(),
                         },
                     ],
@@ -894,11 +894,11 @@ mod tests {
                 ConversationMessage::Assistant {
                     id: MessageId::new(),
                     content: vec![
-                        protocol::ContentBlock::Thinking {
+                        lingxi_core::types::ContentBlock::Thinking {
                             thinking: "only thinking".into(),
                             signature: Some("sig".into()),
                         },
-                        protocol::ContentBlock::RedactedThinking {
+                        lingxi_core::types::ContentBlock::RedactedThinking {
                             data: "opaque".into(),
                         },
                     ],
@@ -924,7 +924,7 @@ mod tests {
         };
         assert_eq!(
             assistant_content(1),
-            vec![protocol::ContentBlock::Text {
+            vec![lingxi_core::types::ContentBlock::Text {
                 text: "tests passed".into()
             }]
         );
@@ -932,7 +932,7 @@ mod tests {
         // message must not go out empty.
         assert_eq!(
             assistant_content(3),
-            vec![protocol::ContentBlock::Text {
+            vec![lingxi_core::types::ContentBlock::Text {
                 text: "[Thinking removed]".into()
             }]
         );

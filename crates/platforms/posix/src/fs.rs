@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use fs2::FileExt;
 use futures_core::stream::Stream;
-use platform_api::{
+use lingxi_core::host::{
     FileContent, FileEvent, FileSystem, FileSystemCacheIdentity, FlockGuard, FsError,
 };
 use std::path::{Path, PathBuf};
@@ -41,7 +41,7 @@ async fn read_utf8_windowed(
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| FsError::Io(e.to_string()))?;
-        return Ok(platform_api::apply_line_window(content, None, None));
+        return Ok(lingxi_core::host::apply_line_window(content, None, None));
     }
     use tokio::io::AsyncBufReadExt;
     let file = tokio::fs::File::open(path)
@@ -95,7 +95,7 @@ async fn read_utf8_prefix(path: &str, max_bytes: usize) -> Result<FileContent, F
         .read(&mut buf)
         .await
         .map_err(|e| FsError::Io(e.to_string()))?;
-    platform_api::file_content_from_prefix_bytes(path, buf, n, max_bytes)
+    lingxi_core::host::file_content_from_prefix_bytes(path, buf, n, max_bytes)
 }
 
 #[async_trait]
@@ -103,8 +103,8 @@ impl FileSystem for PosixFileSystem {
     async fn root_identity_no_follow(
         &self,
         root: &Path,
-    ) -> Result<Option<platform_api::rooted_fs::RootIdentity>, FsError> {
-        platform_api::rooted_fs::root_identity(root).map(Some)
+    ) -> Result<Option<lingxi_core::host::rooted_fs::RootIdentity>, FsError> {
+        lingxi_core::host::rooted_fs::root_identity(root).map(Some)
     }
 
     fn cache_identity(&self) -> Option<FileSystemCacheIdentity> {
@@ -184,16 +184,16 @@ impl FileSystem for PosixFileSystem {
         root: &Path,
         relative: &Path,
     ) -> Result<(), FsError> {
-        platform_api::rooted_fs::create_new_file(root, relative)
+        lingxi_core::host::rooted_fs::create_new_file(root, relative)
     }
 
     async fn create_new_file_rooted_no_follow_pinned(
         &self,
         root: &Path,
         relative: &Path,
-        expected: Option<&platform_api::rooted_fs::RootIdentity>,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
     ) -> Result<(), FsError> {
-        platform_api::rooted_fs::create_new_file_pinned(root, relative, expected)
+        lingxi_core::host::rooted_fs::create_new_file_pinned(root, relative, expected)
     }
 
     async fn append_file_no_follow(&self, path: &str, content: &str) -> Result<(), FsError> {
@@ -225,7 +225,7 @@ impl FileSystem for PosixFileSystem {
         relative: &Path,
         content: &str,
     ) -> Result<(), FsError> {
-        platform_api::rooted_fs::append_file(root, relative, content)
+        lingxi_core::host::rooted_fs::append_file(root, relative, content)
     }
 
     async fn append_file_rooted_no_follow_pinned(
@@ -233,9 +233,9 @@ impl FileSystem for PosixFileSystem {
         root: &Path,
         relative: &Path,
         content: &str,
-        expected: Option<&platform_api::rooted_fs::RootIdentity>,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
     ) -> Result<(), FsError> {
-        platform_api::rooted_fs::append_file_pinned(root, relative, content, expected)
+        lingxi_core::host::rooted_fs::append_file_pinned(root, relative, content, expected)
     }
 
     async fn append_file_rooted_staged(
@@ -243,9 +243,9 @@ impl FileSystem for PosixFileSystem {
         root: &Path,
         relative: &Path,
         content: &str,
-        expected: Option<&platform_api::rooted_fs::RootIdentity>,
-    ) -> Result<(), platform_api::filesystem::FileAppendError> {
-        platform_api::rooted_fs::append_file_staged(root, relative, content, expected)
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+    ) -> Result<(), lingxi_core::host::filesystem::FileAppendError> {
+        lingxi_core::host::rooted_fs::append_file_staged(root, relative, content, expected)
     }
 
     async fn append_file_with_mode(
@@ -277,7 +277,7 @@ impl FileSystem for PosixFileSystem {
         root: &Path,
         relative: &Path,
     ) -> Result<FileContent, FsError> {
-        let content = platform_api::rooted_fs::read_to_string(root, relative)?;
+        let content = lingxi_core::host::rooted_fs::read_to_string(root, relative)?;
         Ok(FileContent {
             total_lines: content.lines().count() as u64,
             content,
@@ -292,8 +292,8 @@ impl FileSystem for PosixFileSystem {
         offset: Option<u64>,
         limit: Option<u64>,
     ) -> Result<FileContent, FsError> {
-        let content = platform_api::rooted_fs::read_to_string(root, relative)?;
-        Ok(platform_api::apply_line_window(content, offset, limit))
+        let content = lingxi_core::host::rooted_fs::read_to_string(root, relative)?;
+        Ok(lingxi_core::host::apply_line_window(content, offset, limit))
     }
 
     async fn read_file_rooted_no_follow_window_pinned(
@@ -302,21 +302,24 @@ impl FileSystem for PosixFileSystem {
         relative: &Path,
         offset: Option<u64>,
         limit: Option<u64>,
-        expected: Option<&platform_api::rooted_fs::RootIdentity>,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
     ) -> Result<FileContent, FsError> {
-        let content = platform_api::rooted_fs::read_to_string_pinned(root, relative, expected)?;
-        Ok(platform_api::apply_line_window(content, offset, limit))
+        let content =
+            lingxi_core::host::rooted_fs::read_to_string_pinned(root, relative, expected)?;
+        Ok(lingxi_core::host::apply_line_window(content, offset, limit))
     }
 
     async fn read_file_rooted_byte_window_pinned(
         &self,
         root: &Path,
         relative: &Path,
-        expected: Option<&platform_api::rooted_fs::RootIdentity>,
+        expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
         offset: u64,
         limit: u64,
     ) -> Result<Vec<u8>, FsError> {
-        platform_api::rooted_fs::read_byte_window_pinned(root, relative, expected, offset, limit)
+        lingxi_core::host::rooted_fs::read_byte_window_pinned(
+            root, relative, expected, offset, limit,
+        )
     }
 
     async fn write_file_rooted_atomic(
@@ -325,11 +328,11 @@ impl FileSystem for PosixFileSystem {
         relative: &Path,
         content: &str,
     ) -> Result<(), FsError> {
-        platform_api::rooted_fs::atomic_write(
+        lingxi_core::host::rooted_fs::atomic_write(
             root,
             relative,
             content.as_bytes(),
-            platform_api::AtomicWriteOptions::default(),
+            lingxi_core::host::AtomicWriteOptions::default(),
         )
     }
 
@@ -338,11 +341,11 @@ impl FileSystem for PosixFileSystem {
         root: &Path,
         relative: &Path,
     ) -> Result<Box<dyn FlockGuard>, FsError> {
-        platform_api::rooted_fs::lock_exclusive(
+        lingxi_core::host::rooted_fs::lock_exclusive(
             root,
             relative,
-            platform_api::rooted_fs::PRIVATE_DIR_MODE,
-            platform_api::rooted_fs::PRIVATE_FILE_MODE,
+            lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
+            lingxi_core::host::rooted_fs::PRIVATE_FILE_MODE,
         )
         .map(|guard| Box::new(guard) as Box<dyn FlockGuard>)
     }
@@ -352,7 +355,7 @@ impl FileSystem for PosixFileSystem {
         root: &Path,
         relative: &Path,
     ) -> Result<(), FsError> {
-        platform_api::rooted_fs::remove_file(root, relative)
+        lingxi_core::host::rooted_fs::remove_file(root, relative)
     }
 
     async fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {
@@ -455,7 +458,7 @@ impl FlockGuard for PosixFlockGuard {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use platform_api::FileSystem;
+    use lingxi_core::host::FileSystem;
 
     fn fs_at(root: &std::path::Path) -> PosixFileSystem {
         PosixFileSystem::new(root.to_path_buf())
@@ -471,7 +474,10 @@ mod tests {
             .append_file_rooted_staged(dir.path(), Path::new("output"), "payload", None)
             .await
             .unwrap_err();
-        assert_eq!(error.stage, platform_api::filesystem::FileAppendStage::Open);
+        assert_eq!(
+            error.stage,
+            lingxi_core::host::filesystem::FileAppendStage::Open
+        );
         assert_eq!(std::fs::read_to_string(victim).unwrap(), "unchanged");
     }
 

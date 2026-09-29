@@ -6,7 +6,7 @@
 //! [`AggregateHookResult`] consumed by the calling subsystem.
 
 use crate::events::HookProgressEvent;
-use protocol::HookId;
+use lingxi_core::types::HookId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

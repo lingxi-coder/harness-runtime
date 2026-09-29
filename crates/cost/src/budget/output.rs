@@ -1,11 +1,11 @@
 //! Output scopes share the existing reservation book. These APIs are inert
 //! until the host wires a scope provider into its turn/workflow lifecycle.
 use super::*;
-use platform_api::{
+use lingxi_core::host::{
     BudgetError, WorkflowOutputAccount, WorkflowOutputEventId, WorkflowOutputScope,
     WorkflowOutputScopes,
 };
-use protocol::{MessageId, SessionId};
+use lingxi_core::types::{MessageId, SessionId};
 use std::sync::Weak;
 
 pub(super) struct OutputScopeState {
@@ -496,7 +496,7 @@ mod tests {
     #[tokio::test]
     async fn output_scope_recovery_keeps_unknown_spend_in_original_generation() {
         struct Lease(String);
-        impl platform_api::live_sessions::SessionWriterLease for Lease {
+        impl lingxi_core::host::live_sessions::SessionWriterLease for Lease {
             fn session_id(&self) -> &str {
                 &self.0
             }

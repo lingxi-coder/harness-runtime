@@ -1,7 +1,7 @@
 //! Polymorphic task state — one variant per [`TaskType`](crate::id::TaskType).
 
 use crate::id::TaskType;
-use protocol::AgentId;
+use lingxi_core::types::AgentId;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -244,7 +244,7 @@ pub struct LocalAgentTaskState {
     /// Error message if the agent failed.
     pub error: Option<String>,
     /// Accumulated conversation messages.
-    pub messages: Vec<protocol::ConversationMessage>,
+    pub messages: Vec<lingxi_core::types::ConversationMessage>,
     /// Inbound messages queued for delivery.
     pub pending_messages: Vec<String>,
     /// Whether the agent is currently backgrounded.
@@ -261,7 +261,7 @@ pub struct LocalAgentTaskState {
     /// What the run reported when it terminated — final text, usage, and the
     /// kept-worktree coordinates — plus `killed_by` once a stop names its
     /// initiator. Populated by
-    /// [`TaskRegistryHandle::set_agent_outcome`](platform_api::task_registry::TaskRegistryHandle::set_agent_outcome)
+    /// [`TaskRegistryHandle::set_agent_outcome`](lingxi_core::host::task_registry::TaskRegistryHandle::set_agent_outcome)
     /// / `kill_with_reason` and read by the notification drain, which before
     /// this always rendered a `local_agent` completion with no `<result>`,
     /// `<usage>` or `<worktree>` and every stop as the bare `was stopped`.
@@ -274,7 +274,7 @@ pub struct LocalAgentTaskState {
 /// [`LocalAgentTaskState::outcome`] — the terminal notification payload plus
 /// the stop initiator.
 ///
-/// [`platform_api::task_registry::AgentTerminalOutcome`] is the WRITE shape (what a
+/// [`lingxi_core::host::task_registry::AgentTerminalOutcome`] is the WRITE shape (what a
 /// terminating run reports); this is the stored shape, which additionally holds
 /// `killed_by` because that arrives from the kill path rather than from the
 /// run.
@@ -291,7 +291,7 @@ pub struct AgentOutcomeState {
     pub result: Option<String>,
     /// Run usage → the `<usage>` section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<platform_api::task_registry::AgentRunUsage>,
+    pub usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
     /// Who stopped the task (`"parent"` / `"user"`) → the killed-summary verb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub killed_by: Option<String>,
@@ -317,8 +317,8 @@ impl AgentOutcomeState {
     /// Merge a terminating run's report in. A `Some` field overwrites; a `None`
     /// leaves the stored value alone, so a later partial report (e.g. a kill
     /// that only carries a worktree) never erases an earlier result.
-    pub fn merge(&mut self, incoming: platform_api::task_registry::AgentTerminalOutcome) {
-        let platform_api::task_registry::AgentTerminalOutcome {
+    pub fn merge(&mut self, incoming: lingxi_core::host::task_registry::AgentTerminalOutcome) {
+        let lingxi_core::host::task_registry::AgentTerminalOutcome {
             result,
             usage,
             error: _,
@@ -423,7 +423,7 @@ pub struct LocalWorkflowTaskState {
     pub current_step: usize,
     /// Terminal result/failure/usage payload for workflow notifications.
     #[serde(default)]
-    pub outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+    pub outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
     /// Typed Local App workflow authority for this run (design §18 Phase -1
     /// step 8 / §8.1) -- which app this task may touch, and why. Read by the
     /// workspace-lease and App-delete guards INSTEAD of `workflow_id`/`args`;
@@ -587,7 +587,7 @@ pub struct LocalFusionTaskState {
     pub egress_profiles: Vec<String>,
     /// Aggregate run usage summary for the `<usage>` notification section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<platform_api::task_registry::AgentRunUsage>,
+    pub usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
     /// Current progress-stage label (F005), e.g. "Running panels 2/3" — the
     /// SAME text `FusionStage::label()` produces for the Agent-tool path, so
     /// the `/fusion` task DTO's progress reads identically. Additive; `None`
@@ -615,7 +615,7 @@ pub struct LocalFusionTaskState {
     /// computational terminal status. New runs begin `Pending` and only a
     /// sink receipt can move this to a terminal state.
     #[serde(default)]
-    pub publication_status: platform_api::FusionPublicationStatus,
+    pub publication_status: lingxi_core::host::FusionPublicationStatus,
     /// Sanitized publication/outbox failure detail, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication_error: Option<String>,

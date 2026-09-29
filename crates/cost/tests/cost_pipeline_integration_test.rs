@@ -13,7 +13,7 @@ use cost::{
     BudgetConfig, BudgetEnforcer, BudgetExceedPolicy, CostTracker, ModelRef, PricingCatalog,
     ProviderId, TokenUsage, Usage,
 };
-use protocol::SessionId;
+use lingxi_core::types::SessionId;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use telemetry::{AnalyticsBus, AnalyticsSink, LogEventMetadata};

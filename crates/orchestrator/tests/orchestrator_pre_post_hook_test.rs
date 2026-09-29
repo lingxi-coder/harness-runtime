@@ -16,14 +16,14 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
+use lingxi_core::host::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
+use lingxi_core::types::{HookId, HttpRequest, HttpResponse, ToolUseId};
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
-use protocol::{HookId, HttpRequest, HttpResponse, ToolUseId};
 use serde_json::json;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -41,7 +41,7 @@ impl HttpTransport for UnusedHttp {
     async fn stream_sse(
         &self,
         _req: HttpRequest,
-    ) -> Result<platform_api::http::SseStream, HttpError> {
+    ) -> Result<lingxi_core::host::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -53,13 +53,13 @@ impl RuntimeSpawner for UnusedRuntime {
         &self,
         _name: &str,
         _task: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, RuntimeError> {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _duration: Duration) {}
     async fn cancel(
         &self,
-        _handle: &platform_api::BackgroundTaskHandle,
+        _handle: &lingxi_core::host::BackgroundTaskHandle,
     ) -> Result<(), RuntimeError> {
         Ok(())
     }
@@ -217,7 +217,7 @@ fn make_builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinit
         executor: DefHookExecutor::Builtin {
             handler_id: handler_id.into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,

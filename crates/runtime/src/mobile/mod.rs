@@ -32,7 +32,7 @@ use command_api::builtins::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
 };
-use platform_api::{AuthHandle, OrchestratorHandle};
+use lingxi_core::host::{AuthHandle, OrchestratorHandle};
 use skill_api::SkillRegistry;
 use std::sync::Arc;
 use tool_api::{BuiltinToolContext, ToolRegistry};
@@ -211,11 +211,11 @@ pub const MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED: bool =
 #[cfg(feature = "mobile")]
 pub const MOBILE_BUILTIN_PLUGIN_UUID: u128 = 0x6c69_6e67_7869_4c41_0000_0000_0000_0001;
 
-/// The compiled-in [`protocol::PluginId`] for [`MOBILE_BUILTIN_PLUGIN_NAME`].
+/// The compiled-in [`lingxi_core::types::PluginId`] for [`MOBILE_BUILTIN_PLUGIN_NAME`].
 #[cfg(feature = "mobile")]
 #[must_use]
-pub fn mobile_builtin_plugin_id() -> protocol::PluginId {
-    protocol::PluginId::from_uuid(uuid::Uuid::from_u128(MOBILE_BUILTIN_PLUGIN_UUID))
+pub fn mobile_builtin_plugin_id() -> lingxi_core::types::PluginId {
+    lingxi_core::types::PluginId::from_uuid(uuid::Uuid::from_u128(MOBILE_BUILTIN_PLUGIN_UUID))
 }
 
 /// Build the compiled-in Local App plugin manifest from its packaged
@@ -224,7 +224,7 @@ pub fn mobile_builtin_plugin_id() -> protocol::PluginId {
 /// rather than panicking during mobile boot. Host lifecycle fields remain
 /// owned here.
 #[cfg(feature = "mobile")]
-fn mobile_builtin_plugin_manifest() -> (protocol::PluginId, plugin::PluginManifest) {
+fn mobile_builtin_plugin_manifest() -> (lingxi_core::types::PluginId, plugin::PluginManifest) {
     let id = mobile_builtin_plugin_id();
     let manifest = plugin::PluginManifest {
         id,
@@ -262,7 +262,7 @@ fn mobile_builtin_plugin_manifest() -> (protocol::PluginId, plugin::PluginManife
 #[cfg(feature = "mobile")]
 #[must_use]
 pub fn mobile_builtin_plugins() -> Vec<(
-    protocol::PluginId,
+    lingxi_core::types::PluginId,
     plugin::PluginManifest,
     std::path::PathBuf,
 )> {
@@ -283,7 +283,7 @@ pub fn mobile_builtin_plugins() -> Vec<(
 #[cfg(feature = "mobile")]
 pub async fn register_mobile_builtin_plugin(
     manager: &plugin::PluginManager,
-    id: &protocol::PluginId,
+    id: &lingxi_core::types::PluginId,
     manifest: plugin::PluginManifest,
     install_dir: std::path::PathBuf,
 ) -> Result<(), plugin::PluginManagerError> {
@@ -380,7 +380,7 @@ pub fn materialize_mobile_builtin_plugin(
     previous_verified_root: Option<&std::path::Path>,
 ) -> Result<
     (
-        protocol::PluginId,
+        lingxi_core::types::PluginId,
         plugin::PluginManifest,
         std::path::PathBuf,
     ),
@@ -635,8 +635,9 @@ mod mobile_plugin_composition_tests {
                 name: MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
             },
         ];
-        let rogue_id =
-            protocol::PluginId::from_uuid(uuid::Uuid::from_u128(MOBILE_BUILTIN_PLUGIN_UUID + 1));
+        let rogue_id = lingxi_core::types::PluginId::from_uuid(uuid::Uuid::from_u128(
+            MOBILE_BUILTIN_PLUGIN_UUID + 1,
+        ));
         assert_ne!(
             rogue_id, builtin_id,
             "the rogue must carry an id of its own, or a successful smuggle \
@@ -701,8 +702,8 @@ impl Default for MobileEngineConfig {
             // The host's boot default for the Anthropic route. Keep it
             // provider-qualified so the shared Claude model ids exposed by
             // Copilot cannot make the fresh-session default ambiguous.
-            default_model: platform_api::qualified_model_ref(
-                platform_api::provider_default_model("anthropic").unwrap_or("claude-sonnet-5"),
+            default_model: lingxi_core::host::qualified_model_ref(
+                lingxi_core::host::provider_default_model("anthropic").unwrap_or("claude-sonnet-5"),
                 Some("anthropic"),
             ),
         }
@@ -900,7 +901,7 @@ pub(crate) fn mobile_tool_registry_with_wakeup(
 /// share the host; its in-memory active-session grants remain the security gate.
 pub fn register_android_ui_automation(
     reg: &mut ToolRegistry,
-    automation: Option<Arc<dyn platform_api::AndroidUiAutomation>>,
+    automation: Option<Arc<dyn lingxi_core::host::AndroidUiAutomation>>,
 ) {
     #[cfg(feature = "android-computer-use")]
     if let Some(automation) = automation {
@@ -914,7 +915,7 @@ pub fn register_android_ui_automation(
 mod android_ui_registration_tests {
     use super::register_android_ui_automation;
     use async_trait::async_trait;
-    use platform_api::{
+    use lingxi_core::host::{
         AndroidAccessRequest, AndroidAction, AndroidActionResult, AndroidAppInfo,
         AndroidAutomationError, AndroidAutomationStatus, AndroidNodeQuery, AndroidScreenshot,
         AndroidUiAutomation, AndroidUiNode, AndroidUiSnapshot, AndroidWaitCondition,
@@ -1061,7 +1062,7 @@ pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry)
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::process::ProcessOutput;
+    use lingxi_core::host::process::ProcessOutput;
     use std::collections::HashMap;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use tool_api::tool_trait::{ToolError, ToolStaticContext};

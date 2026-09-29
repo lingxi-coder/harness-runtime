@@ -7,7 +7,7 @@
 //! in order matters: a later collapse may use an earlier summary UUID as one of
 //! its boundaries.
 
-use protocol::{ConversationMessage, MessageId};
+use lingxi_core::types::{ConversationMessage, MessageId};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 

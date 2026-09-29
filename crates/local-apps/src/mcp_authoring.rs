@@ -4,7 +4,7 @@ use crate::{
     allowed_for_synchronous_flow, AppError, AppLayout, CapabilityId, CapabilityRegistry,
     CapabilityTransport, FlowDefinition, APPS_SCHEMA_VERSION,
 };
-use platform_api::{McpPermissionCeiling, McpToolDefinitionDto};
+use lingxi_core::host::{McpPermissionCeiling, McpToolDefinitionDto};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -987,24 +987,24 @@ pub fn save_candidate_journal(
     let mut body = serde_json::to_vec_pretty(journal)
         .map_err(|error| AppError::Io(format!("serialize candidate journal: {error}")))?;
     body.push(b'\n');
-    platform_api::rooted_fs::atomic_write(
+    lingxi_core::host::rooted_fs::atomic_write(
         layout.root(),
         &layout.mcp_authoring_journal_rel(),
         &body,
-        platform_api::rooted_fs::AtomicWriteOptions::default(),
+        lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
     )
     .map_err(|error| AppError::from_fs("write candidate journal", &error))
 }
 
 /// Load and authenticate the durable authoring journal before resume.
 pub fn load_candidate_journal(layout: &AppLayout) -> Result<McpCandidateJournal, AppError> {
-    let body = platform_api::rooted_fs::read_to_string_limited(
+    let body = lingxi_core::host::rooted_fs::read_to_string_limited(
         layout.root(),
         &layout.mcp_authoring_journal_rel(),
         256 * 1024,
     )
     .map_err(|error| match error {
-        platform_api::FsError::NotFound(_) => {
+        lingxi_core::host::FsError::NotFound(_) => {
             AppError::StorageCorrupt("candidate journal is missing".into())
         }
         other => AppError::from_fs("read candidate journal", &other),
@@ -1025,8 +1025,11 @@ pub fn load_candidate_journal(layout: &AppLayout) -> Result<McpCandidateJournal,
 /// Remove a completed create-only candidate journal. Missing files are a
 /// successful no-op so crash-recovery cleanup is idempotent.
 pub fn delete_candidate_journal(layout: &AppLayout) -> Result<(), AppError> {
-    match platform_api::rooted_fs::remove_file(layout.root(), &layout.mcp_authoring_journal_rel()) {
-        Ok(()) | Err(platform_api::FsError::NotFound(_)) => Ok(()),
+    match lingxi_core::host::rooted_fs::remove_file(
+        layout.root(),
+        &layout.mcp_authoring_journal_rel(),
+    ) {
+        Ok(()) | Err(lingxi_core::host::FsError::NotFound(_)) => Ok(()),
         Err(error) => Err(AppError::from_fs("delete candidate journal", &error)),
     }
 }
@@ -1625,7 +1628,7 @@ mod tests {
     use crate::{
         AppLayout, CapabilityId, CapabilityRegistry, FlowDefinition, FlowStep, APPS_SCHEMA_VERSION,
     };
-    use platform_api::{McpPermissionCeiling, McpToolDefinitionDto};
+    use lingxi_core::host::{McpPermissionCeiling, McpToolDefinitionDto};
     use serde_json::json;
     use std::collections::BTreeMap;
 

@@ -148,8 +148,8 @@ pub fn format(ctx: &SystemPromptContext) -> String {
     // Claude-specific lines on the active model being a recognized Claude
     // profile. Raw substring matching here previously polluted custom
     // non-Claude model ids that merely contained `claude`.
-    let is_claude = platform_api::model_capabilities::prompt_profile_for(&ctx.model)
-        != platform_api::model_capabilities::PromptProfile::FullHarness;
+    let is_claude = lingxi_core::host::model_capabilities::prompt_profile_for(&ctx.model)
+        != lingxi_core::host::model_capabilities::PromptProfile::FullHarness;
     if is_claude {
         write!(
             &mut s,

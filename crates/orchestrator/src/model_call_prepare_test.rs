@@ -8,7 +8,7 @@ use crate::test_support_stream::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockStreamingApiClient,
 };
-use protocol::{ContentBlock, MessageId};
+use lingxi_core::types::{ContentBlock, MessageId};
 use std::sync::{Arc, Mutex as StdMutex};
 use tool_api::registry::ToolRegistry;
 

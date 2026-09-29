@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use lingxi_core::host::OutputEvent;
+use lingxi_core::types::ToolUseId;
 use orchestrator::test_support::{
     content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
     message_delta_stop, message_start, message_stop, text_delta, MockApiClient, MockOutputStream,
@@ -7,8 +9,6 @@ use orchestrator::test_support::{
 use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::OutputEvent;
-use protocol::ToolUseId;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;

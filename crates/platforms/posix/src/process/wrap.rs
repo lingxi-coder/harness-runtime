@@ -55,7 +55,7 @@ pub const ENV_AI_AGENT: &str = "AI_AGENT";
 pub fn ai_agent_value() -> String {
     format!(
         "claude-code_{}_agent",
-        platform_api::CLAUDE_CODE_VERSION.replace('.', "-")
+        lingxi_core::host::CLAUDE_CODE_VERSION.replace('.', "-")
     )
 }
 
@@ -78,13 +78,13 @@ pub fn is_bash_provider_shell(command: &str) -> bool {
 /// first use by [`super::runner`].
 #[must_use]
 pub(crate) fn task_output_dir() -> PathBuf {
-    platform_api::task_output::legacy_output_dir()
+    lingxi_core::host::task_output::legacy_output_dir()
 }
 
 /// Stable path for one task output file.
 #[must_use]
 pub fn task_output_path(task_id: &str) -> PathBuf {
-    platform_api::task_output::legacy_output_path(task_id)
+    lingxi_core::host::task_output::legacy_output_path(task_id)
 }
 
 /// Wrap a user command for the bash-tool spawn so we can track cwd
@@ -193,7 +193,7 @@ mod tests {
             v,
             format!(
                 "claude-code_{}_agent",
-                platform_api::CLAUDE_CODE_VERSION.replace('.', "-")
+                lingxi_core::host::CLAUDE_CODE_VERSION.replace('.', "-")
             )
         );
     }

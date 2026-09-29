@@ -6,6 +6,7 @@
 
 use cost::pricing::PricingCatalog;
 use cost::{CostState, CostTracker};
+use lingxi_core::types::SessionId;
 use llm_runtime::ExecutionUsage as Usage;
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
@@ -15,7 +16,6 @@ use orchestrator::test_support_stream::{
     message_start_with_usage, message_stop, text_delta, MockStreamingApiClient,
 };
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
-use protocol::SessionId;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;

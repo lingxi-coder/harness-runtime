@@ -2,9 +2,9 @@
 //! test-only registrar. The durable fixture uses the real session coordinator.
 use super::*;
 use cost::CostHydrator;
-use platform_api::subagent_spawn::{SubagentInheritance, SubagentSpawner};
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-use platform_api::{FusionExecutor, ModelAttemptBillingMode};
+use lingxi_core::host::subagent_spawn::{SubagentInheritance, SubagentSpawner};
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use lingxi_core::host::{FusionExecutor, ModelAttemptBillingMode};
 
 const MODELS: [&str; 2] = ["claude-sonnet-5", "claude-opus-4-7"];
 
@@ -14,7 +14,7 @@ pub(super) struct RetirementProbe;
 impl llm_runtime::ModelAttemptHooks for RetirementProbe {
     async fn begin(
         &self,
-        _: &platform_api::ModelAttemptContext,
+        _: &lingxi_core::host::ModelAttemptContext,
         _: &llm_runtime::LlmRequest,
         _: &llm_runtime::PreparedLlmCall,
     ) -> Result<Box<dyn llm_runtime::ModelAttemptLease>, llm_runtime::LlmError> {
@@ -48,11 +48,11 @@ llm_runtime::impl_fixture_transport!(Offline);
 impl SubagentSpawner for Offline {
     async fn spawn(
         &self,
-        _: platform_api::subagent_spawn::SubagentSpawnRequest,
+        _: lingxi_core::host::subagent_spawn::SubagentSpawnRequest,
         _: SubagentInheritance,
     ) -> Result<
-        platform_api::subagent_spawn::SubagentResult,
-        platform_api::subagent_spawn::SubagentSpawnError,
+        lingxi_core::host::subagent_spawn::SubagentResult,
+        lingxi_core::host::subagent_spawn::SubagentSpawnError,
     > {
         panic!("whole-panel admission must precede spawning")
     }
@@ -141,7 +141,7 @@ fn executor(
         .map(|model| fusion::CatalogModel {
             profile: "anthropic".into(),
             model: model.into(),
-            hints: platform_api::FusionModelHints {
+            hints: lingxi_core::host::FusionModelHints {
                 eligible: true,
                 judge_eligible: true,
                 quality_rank: 90,
@@ -167,18 +167,18 @@ fn executor(
 }
 
 fn submission(
-    session: protocol::SessionId,
+    session: lingxi_core::types::SessionId,
     budget: Arc<cost::BudgetEnforcer>,
-) -> platform_api::FusionSubmission {
-    let request = platform_api::FusionRequest {
+) -> lingxi_core::host::FusionSubmission {
+    let request = lingxi_core::host::FusionRequest {
         schema_version: 1,
-        origin: platform_api::FusionOrigin::Slash,
+        origin: lingxi_core::host::FusionOrigin::Slash,
         prompt: "Review offline".into(),
-        preset: platform_api::FusionPreset::Quality,
+        preset: lingxi_core::host::FusionPreset::Quality,
         models: Some(
             MODELS
                 .into_iter()
-                .map(|model| platform_api::FusionModelRef {
+                .map(|model| lingxi_core::host::FusionModelRef {
                     profile: Some("anthropic".into()),
                     model: model.into(),
                 })
@@ -191,19 +191,19 @@ fn submission(
         parent_profile: "anthropic".into(),
         parent_model: MODELS[0].into(),
     };
-    platform_api::FusionSubmission::new(
+    lingxi_core::host::FusionSubmission::new(
         request,
-        platform_api::FusionInheritance::new(
+        lingxi_core::host::FusionInheritance::new(
             SubagentInheritance {
                 tool_invoker: Arc::new(Offline),
                 budget,
             },
             tokio_util::sync::CancellationToken::new(),
         ),
-        platform_api::FusionRunIdentity::new(
-            platform_api::FusionRunId::generated(),
+        lingxi_core::host::FusionRunIdentity::new(
+            lingxi_core::host::FusionRunId::generated(),
             Some(session),
-            platform_api::FusionOrigin::Slash,
+            lingxi_core::host::FusionOrigin::Slash,
             None,
         ),
     )
@@ -248,11 +248,12 @@ fn fusion_settings(extra: serde_json::Value) -> lingxi_core::settings::SettingsJ
 async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare() {
     let (tmp, mut cfg) = tests::test_config(true);
     cfg.flag_settings = Some(fusion_settings(serde_json::json!({})));
-    let session = protocol::SessionId::new();
-    let lease = platform_api::live_sessions::LiveSessionDir::at_live(tmp.path().join("sessions"))
-        .claim_session_id(&session.to_string(), std::process::id())
-        .unwrap()
-        .into_shared();
+    let session = lingxi_core::types::SessionId::new();
+    let lease =
+        lingxi_core::host::live_sessions::LiveSessionDir::at_live(tmp.path().join("sessions"))
+            .claim_session_id(&session.to_string(), std::process::id())
+            .unwrap()
+            .into_shared();
     let coordinator =
         session_state::SessionStateCoordinator::open(tmp.path(), session, lease).unwrap();
     let worker = coordinator.start().await.unwrap();
@@ -271,7 +272,7 @@ async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare(
     let budget = budget(tracker.clone());
     let outputs = budget.workflow_output_scopes();
     let scope = outputs
-        .ensure_current(session, protocol::MessageId::new(), Some(100_000))
+        .ensure_current(session, lingxi_core::types::MessageId::new(), Some(100_000))
         .await
         .unwrap();
     let service = service();
@@ -308,17 +309,17 @@ async fn desktop_fusion_composition_durable_uses_same_host_for_wire_and_prepare(
         "prepare cannot acquire a hold"
     );
     let outcome = prepared
-        .activate(platform_api::FusionActivation::now(), None)
+        .activate(lingxi_core::host::FusionActivation::now(), None)
         .await;
     assert!(matches!(
         outcome.result,
-        Err(platform_api::FusionError::PanelAdmissionRejected(_))
+        Err(lingxi_core::host::FusionError::PanelAdmissionRejected(_))
     ));
     assert_eq!(outcome.facts.allocated_panels, Some(0));
     assert_eq!(outcome.facts.attempts, Some(0));
     assert_eq!(
         outcome.facts.attempt_settlement,
-        Some(platform_api::FusionAttemptSettlementStatus::Settled)
+        Some(lingxi_core::host::FusionAttemptSettlementStatus::Settled)
     );
     tracker.drain_owned_settlements().await.unwrap();
     drop(executor);
@@ -346,11 +347,12 @@ async fn desktop_fusion_composition_ephemeral_still_meters_and_requires_pool_adm
     // production roots it at a temporary `LINGXI_HOME` removed at shutdown.
     cfg.session_persistence = false;
     cfg.flag_settings = Some(fusion_settings(serde_json::json!({})));
-    let session = protocol::SessionId::new();
-    let lease = platform_api::live_sessions::LiveSessionDir::at_live(tmp.path().join("sessions"))
-        .claim_session_id(&session.to_string(), std::process::id())
-        .unwrap()
-        .into_shared();
+    let session = lingxi_core::types::SessionId::new();
+    let lease =
+        lingxi_core::host::live_sessions::LiveSessionDir::at_live(tmp.path().join("sessions"))
+            .claim_session_id(&session.to_string(), std::process::id())
+            .unwrap()
+            .into_shared();
     let coordinator =
         session_state::SessionStateCoordinator::open(tmp.path(), session, lease).unwrap();
     let _worker = coordinator.start().await.unwrap();
@@ -369,7 +371,7 @@ async fn desktop_fusion_composition_ephemeral_still_meters_and_requires_pool_adm
     let budget = budget(tracker.clone());
     let outputs = budget.workflow_output_scopes();
     outputs
-        .ensure_current(session, protocol::MessageId::new(), Some(100_000))
+        .ensure_current(session, lingxi_core::types::MessageId::new(), Some(100_000))
         .await
         .unwrap();
     // The host keeps only a weak handle to the service, so this binding is
@@ -393,11 +395,11 @@ async fn desktop_fusion_composition_ephemeral_still_meters_and_requires_pool_adm
     // Offline does not implement the admitted-pool seam. Activation must fail
     // closed before reaching its panicking legacy spawn/side-query methods.
     let outcome = prepared
-        .activate(platform_api::FusionActivation::now(), None)
+        .activate(lingxi_core::host::FusionActivation::now(), None)
         .await;
     assert!(matches!(
         outcome.result,
-        Err(platform_api::FusionError::PanelAdmissionRejected(_))
+        Err(lingxi_core::host::FusionError::PanelAdmissionRejected(_))
     ));
     assert_eq!(outcome.facts.allocated_panels, Some(0));
     assert_eq!(outcome.facts.attempts, Some(0));
@@ -412,14 +414,14 @@ async fn desktop_fusion_composition_refuses_ephemeral_tracker_even_with_output_s
     // assertion below would be checking a message about a gate it never got
     // to — a green test proving nothing.
     cfg.flag_settings = Some(fusion_settings(serde_json::json!({})));
-    let session = protocol::SessionId::new();
+    let session = lingxi_core::types::SessionId::new();
     let pricing = Arc::new(cost::PricingCatalog::builtin_reference());
     let (tx, _) = tokio::sync::mpsc::channel(1);
     let tracker = Arc::new(cost::CostTracker::new(session, pricing.clone(), tx));
     let budget = budget(tracker.clone());
     let outputs = budget.workflow_output_scopes();
     outputs
-        .ensure_current(session, protocol::MessageId::new(), None)
+        .ensure_current(session, lingxi_core::types::MessageId::new(), None)
         .await
         .unwrap();
     let service = service();

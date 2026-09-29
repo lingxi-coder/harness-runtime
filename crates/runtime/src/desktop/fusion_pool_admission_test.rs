@@ -1,9 +1,9 @@
 use ::fusion as fusion_engine;
 use async_trait::async_trait;
-use platform_api::panel_pool::PanelPoolDrain;
-use platform_api::subagent_spawn::SubagentInheritance;
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-use platform_api::*;
+use lingxi_core::host::panel_pool::PanelPoolDrain;
+use lingxi_core::host::subagent_spawn::SubagentInheritance;
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use lingxi_core::host::*;
 use serde_json::{json, Value};
 use sidequery::{
     SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
@@ -71,7 +71,7 @@ impl agent::SubagentApiClient for Api {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<Value>,
         effort: Option<Value>,
         opts: agent::api::SubagentApiCallOpts,
@@ -93,7 +93,7 @@ impl agent::SubagentApiClient for Api {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<Value>,
         forced_tool: Option<&str>,
         effort: Option<Value>,
@@ -131,7 +131,7 @@ impl agent::SubagentApiClient for Api {
         &self,
         _: &str,
         _: Option<&str>,
-        _: Vec<protocol::ConversationMessage>,
+        _: Vec<lingxi_core::types::ConversationMessage>,
         _: Vec<Value>,
     ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -303,7 +303,7 @@ impl SubagentSpawner for AdmissionProbe {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
         watchdog: WorkflowQueryWatchdog,
         permit: PanelPoolPermit,
     ) -> Result<SubagentResult, SubagentSpawnError> {
@@ -375,10 +375,10 @@ impl Fixture {
             Arc::new(fusion_engine::FusionRuntimeConfig {
                 analysis_protocol_retries: 0,
                 panel_models: vec![
-                    platform_api::FusionModelChoice::new("anthropic", "claude-sonnet-5"),
-                    platform_api::FusionModelChoice::new("anthropic", "claude-opus-4-7"),
+                    lingxi_core::host::FusionModelChoice::new("anthropic", "claude-sonnet-5"),
+                    lingxi_core::host::FusionModelChoice::new("anthropic", "claude-opus-4-7"),
                 ],
-                analyst_model: Some(platform_api::FusionModelChoice::new(
+                analyst_model: Some(lingxi_core::host::FusionModelChoice::new(
                     "anthropic",
                     "claude-sonnet-5",
                 )),
@@ -504,7 +504,7 @@ async fn fusion_pool_admission_queue_cancel_and_timeout_do_not_reserve_or_call_a
         let held = fixture
             .spawner
             .reserve_fusion_panel_group(
-                platform_api::FUSION_PANEL_POOL_CAP,
+                lingxi_core::host::FUSION_PANEL_POOL_CAP,
                 tokio::time::Instant::now() + Duration::from_secs(60),
                 tokio_util::sync::CancellationToken::new(),
             )

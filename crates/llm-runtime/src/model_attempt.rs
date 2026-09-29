@@ -5,7 +5,7 @@
 //! requests without a capability keep their existing transport behavior.
 
 use async_trait::async_trait;
-use platform_api::ModelAttemptContext;
+use lingxi_core::host::ModelAttemptContext;
 
 use crate::{ExecutionUsage, LlmError, LlmRequest, PreparedLlmCall};
 

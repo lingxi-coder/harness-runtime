@@ -9,9 +9,7 @@ license.workspace = true
 url = "2"
 base64 = "0.22"
 branding.workspace = true
-protocol = { path = "../protocol" }
 core = { path = "../core" }
-platform-api = { path = "../platform-api" }
 llm-runtime = { path = "../llm-runtime" }
 tool-api = { path = "../tool-api" }
 # Finding #73: the byte-locked todo/task reminder text consts + renderers live
