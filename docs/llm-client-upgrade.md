@@ -1,8 +1,8 @@
 # llm-client 能力接入
 
 开发子模块与运行时固定 Git 依赖当前使用 `lingxi-llm-client` 0.3.0，提交
-`34c6be3e409000ffb31d6827797fe5b97a7cbfdb`，已从 canonical 远端
-`https://github.com/lingxi-coder/llm-client` 获取。该版本包含 provider 命名空间重组。
+`58740df6606d5eafa1b575fde2af940278f11d0b`，已从 canonical 远端
+`https://github.com/lingxi-coder/llm-client` 获取。该版本统一模型 HTTP/WebSocket 传输、鉴权策略、模型目录与托管搜索接口。
 该提交包含会话隔离、文件操作期限及流式上传修复，并已推送。后续子模块修改仍须先独立提交并推送，再更新父仓库记录。
 
 ## 子模块联合开发
@@ -40,7 +40,7 @@ runtime 负责宿主凭证、权限、工具执行和费用结算，并保留相
 3. 在父仓库提交 gitlink、固定依赖和必要的 runtime 修改；父仓库提交不会包含子模块内未提交的文件。
 
 CI 的 checkout 使用 `submodules: recursive`，因此使用父仓库锁定的 SDK 提交。
-本地尚未提交的 SDK 修复不属于上述远端提交；共享前需完成上述发布步骤。
+新增 SDK 修复必须先发布，父仓库只记录已可获取的提交。
 
 ## 会话请求
 
@@ -71,7 +71,7 @@ Web Fetch、远程 Skills 的模型执行使用相同的 `hosted_tools` 入口�
 
 ## 独立服务
 
-`llm::ProviderServices` 持有可复用的上游客户端和宿主传输：
+`llm::ProviderServices` 持有可复用的上游客户端和 SDK 传输：
 
 ```rust,no_run
 use std::sync::Arc;
@@ -79,7 +79,7 @@ use harness_runtime::models::llm::{ProviderServices, Transport, services::sdk};
 
 fn services(transport: Arc<dyn Transport>) -> Result<ProviderServices, Box<dyn std::error::Error>> {
     let profiles = sdk::builtin_providers()?;
-    Ok(ProviderServices::with_host_transport(
+    Ok(ProviderServices::with_transport(
         &profiles, sdk::protocol::Region::International, transport,
     )?)
 }
@@ -122,19 +122,21 @@ provider 入口；`services` 仅重导出 `providers`、`files` 和 `realtime` �
 
 ## 传输与实时连接
 
-流式文件、音频和 Skills 上传沿 `Transport::send_stream_raw` → 平台
-`HttpTransport::send_stream` → SDK `HttpTransport` 传递，保持一次性流及原始二进制响应。
+流式文件、音频和 Skills 上传直接沿 SDK `Transport::send_stream_raw` →
+SDK `HttpTransport` 传递，保持一次性流及原始二进制响应。宿主上传桥接接口已删除。
 宿主注入 mTLS 和自定义 CA 配置；上传、请求头校验和网络错误脱敏直接复用 SDK。
 自定义传输未实现流式上传时明确报不支持，不隐式收集整个输入。
 
-Responses WebSocket 继续用于聊天续传。双向音频和 Live 会话使用独立的
-`services::realtime` API，可注入上游 `RealtimeTransport`。启用
-`harness-runtime/realtime-websocket` 后，可用同模块的 `RustlsWebSocketTransport`；
-它使用独立的连接配置，不继承宿主 HTTP 代理、监控和认证策略。
+Responses WebSocket 和 Realtime 使用同一个 SDK `HttpTransport` 的网络配置。
+HTTP、文件上传、Responses 和 Realtime 共用 CA、mTLS 与代理配置；
+runtime 将 SDK 的 HTTP/Responses 空闲读取期限设为 `None`，由宿主的首响应与
+流 watchdog 控制等待，避免 SDK 默认 60 秒抢先截断长推理。SDK 独立使用时仍默认
+60 秒；`with_read_timeout_and_client_configurator` 可同时配置 HTTP/Responses 期限
+和 TLS/代理。Pong 写入仍有独立期限，并监听连接取消。
 
-上游传输要求可被异步任务长期持有，因此 `DefaultLlmClient` 的执行、流式执行、
-预热、文件上传和精确 token 计数入口接收 `Arc<dyn Transport>`。
-迁移调用方时将传输保存在 `Arc` 中并传入 `transport.clone()`。
+`responses-websocket` 启用 Responses，`realtime-websocket` 另外启用双向接口。
+`HttpTransport` 同时实现 `Transport` 和 `realtime::RealtimeTransport`，旧
+`RustlsWebSocketTransport` 已删除。Realtime 仍使用独立会话和双向流，设备录放音由宿主负责。
 
 ## 验证边界
 
@@ -154,3 +156,69 @@ HTTP/TLS/OAuth 测试需要允许绑定本机端口。为避免生成大量增�
 `CARGO_INCREMENTAL=0`。升级后的运行结果以本轮验证日志为准。
 子模块开发使用本地源码，本地追加修复仍须遵守
 上述发布顺序，才能在干净的团队或 CI 环境重现。
+
+## 统一调用边界
+
+生产模型请求直接注入 `Arc<dyn sdk::Transport>`。已删除 `LlmTransportBridge`、
+宿主 Responses WebSocket 连接及 `AnthropicRequestBuilder`，调用方不得恢复这些实现。
+`DefaultLlmClient` 按有效路由和网络配置复用 SDK client；请求鉴权通过
+`RequestOptions.authenticator` 注入，在途 draft 保留自己的账号与凭据提供者。
+缓存 scope 和显式 continuation 由 SDK 类型校验并编码，不在宿主补写协议 JSON。
+
+| 调用 | 生产路径 |
+| --- | --- |
+| 主对话、侧查询、压缩、精确 token counting | ApiService / DefaultLlmClient → SDK prepared call → SDK Transport |
+| Hosted WebSearch | HostedWebSearchClient → 会话 ApiService → SDK hosted tool；工具只展示结果和管理预算 |
+| Files、Audio、Images、Skills、Embeddings、Batches | ProviderServices → SDK provider resource → 同一 SDK Transport |
+| 移动连接测试与模型目录 | SDK directory::probe，包含鉴权、分页与总期限；宿主仅投影 UI DTO |
+| Responses / Realtime | SDK 共用 HTTP upgrade connector；取消或异常不自动重放 |
+
+普通网页下载、Brave/Tavily/SearXNG/DDG、OAuth 登录刷新、MCP、遥测及 Monitor
+继续使用宿主通用网络栈。这些不是模型请求。
+
+`scripts/check-llm-boundary.sh` 自动进入 `check-all.sh` 和 CI：检查生产模型端点拼装及
+旧适配器回流，同时禁止 provider 原始流事件解析和未声明的 WebSocket 实现。
+明确例外仅包括 MCP、Monitor、宿主 CLI 事件输出及测试夹具。
+网络 mock、回环 TLS/WS 测试和交叉编译不能替代真实 provider 或设备验证。
+
+
+## 本轮交付验证（2026-09-28）
+
+- SDK HTTP/SSE、上传期限、Responses/Realtime、鉴权、prepared calls、缓存与 failover：296 项通过；新增 connector 流聚合单测通过。
+- runtime、WebSearch、侧查询、HTTP/TLS 和工具接口集成：1750 项通过；后续清理分别重跑网络/工具 441 项、provider adapter 20 项、移动 DTO 3 项、平台装配 2 项、单轮 e2e 2 项及 Anthropic codec 43 项，全部通过。部分测试有重叠，不相加为总数。
+- runtime 全特性编译、runtime 与 llm-runtime 最小特性检查通过。
+- SDK 启用 Realtime 的 iOS arm64、Android arm64、Windows GNU x64 交叉编译通过；未执行跨平台设备测试。
+- 移除本地 SDK patch 的独立源码副本从 canonical Git 获取固定提交，runtime 全特性编译通过。
+- 架构检查自测和全仓扫描通过。未使用真实 provider 凭据，未验证真实账户、录放音或移动设备行为。
+
+
+审查后补充回归：HTTP/Responses 在虚拟时间超过 5 分钟后仍可读取，显式 SDK
+短期限仍生效；阻塞 Pong 写入可取消或超时；OpenAI hosted search 的原生调用
+产生一次进度与计数，引用及最终输出重复不重复计数。Responses 在 SDK 首次
+提供完整搜索调用时发出该次进度，不伪造 provider 尚未给出的搜索次数。
+
+审查修复的 SDK 相关测试 201 项、HTTP/TLS/上传回归 38 项、Anthropic/OpenAI
+搜索集成 2 项通过；移除本地
+patch 的独立源码副本使用远端固定 SDK 提交完成 runtime 全特性编译。
+
+
+框架审查修复：精确 token counting 的准备、鉴权、发送和响应读取统一受宿主
+120 秒总期限约束；流式请求的错误响应体也受宿主 watchdog 期限约束。
+已经发送但没有完整 usage 的请求保留 Unknown 状态及输出预算占用，不能以
+“未收到响应”推断模型没有执行。文件服务优先采用请求级 authenticator，且不把
+覆盖设置保留到后续调用；Responses 会话缓存 HTTP fallback 后仍遵守
+`allow_http=false`，重复预热不得绑定正式 HTTP 生成请求。
+
+
+普通非流式模型调用也有宿主期限：每次尝试默认 600 秒，可用正数
+`API_TIMEOUT_MS` 调整；准备与鉴权消耗同一预算，宿主准入等待不计入。
+超时仍经过未知执行结果结算。Responses 连接身份排除逐请求 `x-request-id`，
+继续保留账号、认证和连接配置校验。自动续传必须匹配上轮完整输入及最终输出；
+无法确认完整前缀时保留完整历史。搜索流中断时，独立收到的有效引用也可作为
+部分结果返回，并明确标记不完整。
+
+
+Responses 会话还保留所选 Transport 的所有权：更换 Transport 时关闭旧连接并清除
+续传及降级状态，共用同一个 Transport 的不同 client 可继续复用。
+`ResponsesSession::prepare_using` 的显式传输参数改为 `Option<Arc<dyn Transport>>`；
+准备之后再以其他 Transport 派发会在宿主准入之前被拒绝。

@@ -1,5 +1,4 @@
-//! HTTP transport abstraction. Provider-neutral; the api-client crate uses
-//! this trait so it never imports reqwest directly.
+//! General-purpose host HTTP. Model/provider networking uses llm-client directly.
 
 use async_trait::async_trait;
 use futures_core::stream::Stream;
@@ -21,42 +20,6 @@ pub type SseStream = Pin<Box<dyn Stream<Item = Result<SseEvent, HttpError>> + Se
 /// (e.g. the AWS event-stream used by Bedrock streaming); the caller frames and
 /// interprets the bytes.
 pub type RawByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, HttpError>> + Send>>;
-
-/// One-shot streaming upload. Transports must consume the body incrementally,
-/// set its declared content length, and never replay it or follow redirects.
-/// A single matching Content-Length is normalized; conflicting/duplicate lengths
-/// and Transfer-Encoding are rejected before the body is consumed.
-pub struct HttpStreamRequest {
-    /// HTTP method.
-    pub method: protocol::HttpMethod,
-    /// Destination URL.
-    pub url: String,
-    /// Request headers; an optional Content-Length must match `content_length`.
-    pub headers: Vec<(String, String)>,
-    /// Raw upload chunks. Dropping the request cancels the source stream.
-    pub body: RawByteStream,
-    /// Exact byte count of the body.
-    pub content_length: u64,
-    /// Optional deadline covering the upload and response body.
-    pub timeout: Option<std::time::Duration>,
-}
-
-impl std::fmt::Debug for HttpStreamRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpStreamRequest")
-            .field("method", &self.method)
-            .field("url", &"<redacted>")
-            .field("content_length", &self.content_length)
-            .field("timeout", &self.timeout)
-            .finish()
-    }
-}
-
-/// A pinned, boxed stream of WebSocket text-message payloads as raw bytes.
-///
-/// Returned by [`HttpTransport::stream_websocket_messages_with_meta`] for
-/// provider protocols that deliver one JSON event per WebSocket message.
-pub type WebSocketMessageStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, HttpError>> + Send>>;
 
 /// Whether a socket address is eligible for arbitrary-URL Monitor egress.
 pub fn is_public_monitor_address(ip: std::net::IpAddr) -> bool {
@@ -176,30 +139,6 @@ pub struct RawByteStreamWithMeta {
     pub stream: RawByteStream,
 }
 
-/// WebSocket message stream together with the HTTP upgrade response metadata.
-///
-/// The status and headers are captured from the successful WebSocket upgrade
-/// response before the first provider event message arrives.
-pub struct WebSocketMessageStreamWithMeta {
-    /// HTTP status of the WebSocket upgrade response (normally 101).
-    pub status: u16,
-    /// Response headers, lowercased names (e.g. `"openai-model"`).
-    pub headers: Vec<(String, String)>,
-    /// Provider event messages as raw bytes.
-    pub stream: WebSocketMessageStream,
-}
-
-/// Reusable WebSocket connection plus the HTTP upgrade metadata that opened it.
-pub struct WebSocketConnectionWithMeta {
-    /// HTTP status of the WebSocket upgrade response (normally 101).
-    pub status: u16,
-    /// Response headers, lowercased names (e.g. `"openai-model"`).
-    pub headers: Vec<(String, String)>,
-    /// Open connection. Callers may send sequential provider request messages
-    /// and drain the returned stream to a terminal event before sending again.
-    pub connection: Box<dyn WebSocketConnection>,
-}
-
 /// Vetted DNS override for a request that must connect to pre-resolved
 /// addresses instead of performing a fresh lookup inside the HTTP transport.
 ///
@@ -211,26 +150,6 @@ pub struct ResolvedAddressOverride {
     pub domain: String,
     /// Pre-vetted socket addresses the transport must use for the connection.
     pub addrs: Vec<SocketAddr>,
-}
-
-/// Reusable WebSocket connection abstraction for provider protocols that send
-/// one request text frame followed by one JSON-event stream.
-#[async_trait]
-pub trait WebSocketConnection: Send {
-    /// Send one text request message and return the provider event stream for
-    /// that request.
-    async fn send_text_with_meta(
-        &mut self,
-        text: String,
-    ) -> Result<WebSocketMessageStreamWithMeta, HttpError>;
-
-    /// Close the underlying WebSocket connection.
-    ///
-    /// Default transports may no-op because the connection is owned by the
-    /// concrete implementation and will close on drop.
-    async fn close(&mut self) -> Result<(), HttpError> {
-        Ok(())
-    }
 }
 
 /// A `Stream` that yields a single chunk then ends. Backs the default
@@ -254,18 +173,6 @@ impl Stream for OnceBytes {
 pub trait HttpTransport: Send + Sync {
     /// Send a request and await the full response.
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError>;
-
-    /// Upload a one-shot body and expose raw response bytes with metadata.
-    /// The default fails without polling the body; it never silently buffers
-    /// uploads. Production transports override this for files/audio/skills.
-    async fn send_stream(
-        &self,
-        _req: HttpStreamRequest,
-    ) -> Result<RawByteStreamWithMeta, HttpError> {
-        Err(HttpError::InvalidRequest(
-            "streaming request bodies are not supported by this transport".into(),
-        ))
-    }
 
     /// Send a request using pre-vetted DNS answers for the logical hostname.
     ///
@@ -443,31 +350,6 @@ pub trait HttpTransport: Send + Sync {
     ) -> Result<MonitorWebSocketReceiver, HttpError> {
         Err(HttpError::InvalidRequest(
             "passive websocket monitoring is unsupported".into(),
-        ))
-    }
-
-    /// Open a provider WebSocket stream, send the request body as the first
-    /// text message, and return provider event text messages as raw bytes.
-    ///
-    /// Default implementations do not support WebSocket streaming. Production
-    /// transports that can perform WebSocket handshakes override this method.
-    async fn stream_websocket_messages_with_meta(
-        &self,
-        _req: HttpRequest,
-    ) -> Result<WebSocketMessageStreamWithMeta, HttpError> {
-        Err(HttpError::InvalidRequest(
-            "websocket streaming is not supported by this transport".to_string(),
-        ))
-    }
-
-    /// Open a reusable provider WebSocket connection without sending a prompt
-    /// payload. Default transports do not support WebSocket reuse.
-    async fn open_websocket_connection_with_meta(
-        &self,
-        _req: HttpRequest,
-    ) -> Result<WebSocketConnectionWithMeta, HttpError> {
-        Err(HttpError::InvalidRequest(
-            "websocket connection reuse is not supported by this transport".to_string(),
         ))
     }
 }

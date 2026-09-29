@@ -5,10 +5,10 @@ use std::sync::{
 use std::time::Duration;
 
 use futures_util::{stream, StreamExt};
-use http_client::ReqwestHttp;
-use platform_api::http::HttpStreamRequest;
-use platform_api::{HttpError, HttpTransport};
-use protocol::{HttpMethod, HttpRequest};
+use http_client::provider_transport;
+use lingxi_llm_client::protocol::LlmError;
+use lingxi_llm_client::HttpRequest;
+use lingxi_llm_client::{HttpStreamRequest, Transport};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -54,17 +54,17 @@ async fn streaming_upload_and_error_download_are_incremental_binary_streams() {
         upload_ready.await.unwrap();
         Ok(vec![128, 1])
     }));
-    let transport = ReqwestHttp::new();
+    let transport = provider_transport().unwrap();
     let mut response = tokio::time::timeout(
         Duration::from_secs(5),
         transport.send_stream(HttpStreamRequest {
-            method: HttpMethod::Post,
+            method: "POST".into(),
             url: format!("http://{address}/files"),
             headers: vec![
                 ("content-type".into(), "application/octet-stream".into()),
                 ("Content-Length".into(), "4".into()),
             ],
-            body: body.boxed(),
+            body: body.map(|chunk| chunk.map(Into::into)).boxed(),
             content_length: 4,
             timeout: Some(Duration::from_secs(5)),
         }),
@@ -76,10 +76,16 @@ async fn streaming_upload_and_error_download_are_incremental_binary_streams() {
     assert!(response
         .headers
         .contains(&("retry-after".into(), "3".into())));
-    assert_eq!(response.stream.next().await.unwrap().unwrap(), [0, 255]);
+    assert_eq!(
+        response.body.next().await.unwrap().unwrap().as_ref(),
+        [0, 255]
+    );
     response_release.send(()).unwrap();
-    assert_eq!(response.stream.next().await.unwrap().unwrap(), [128, 1]);
-    assert!(response.stream.next().await.is_none());
+    assert_eq!(
+        response.body.next().await.unwrap().unwrap().as_ref(),
+        [128, 1]
+    );
+    assert!(response.body.next().await.is_none());
     server.await.unwrap();
 }
 
@@ -99,17 +105,18 @@ async fn streaming_upload_rejects_conflicting_framing_headers_without_polling() 
             body_polls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![255])
         });
-        let result = ReqwestHttp::new()
+        let result = provider_transport()
+            .unwrap()
             .send_stream(HttpStreamRequest {
-                method: HttpMethod::Post,
+                method: "POST".into(),
                 url: "http://127.0.0.1:9/files".into(),
                 headers,
-                body: body.boxed(),
+                body: body.map(|chunk| chunk.map(Into::into)).boxed(),
                 content_length: 1,
                 timeout: None,
             })
             .await;
-        assert!(matches!(result, Err(HttpError::InvalidRequest(_))));
+        assert!(matches!(result, Err(LlmError::InvalidRequest { .. })));
         assert_eq!(polls.load(Ordering::SeqCst), 0);
     }
 }
@@ -119,25 +126,22 @@ async fn streaming_upload_errors_do_not_expose_url_credentials() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    for transport in [
-        ReqwestHttp::new(),
-        ReqwestHttp::new_with_detailed_connection_errors(),
-    ] {
+    for transport in [provider_transport().unwrap(), provider_transport().unwrap()] {
         let error = transport
             .send_stream(HttpStreamRequest {
-                method: HttpMethod::Post,
+                method: "POST".into(),
                 url: format!(
                     "http://{address}/upload?Signature=private-signature&upload_id=private-session"
                 ),
                 headers: vec![],
                 content_length: 1,
-                body: stream::once(async { Ok(vec![255]) }).boxed(),
+                body: stream::once(async { Ok(vec![255].into()) }).boxed(),
                 timeout: Some(Duration::from_secs(1)),
             })
             .await
             .err()
             .expect("closed listener must reject the connection");
-        assert!(matches!(error, HttpError::Connection(_)));
+        assert!(matches!(error, LlmError::Transport { .. }));
         let message = error.to_string();
         assert!(!message.contains("private-signature"), "{message}");
         assert!(!message.contains("private-session"), "{message}");
@@ -158,12 +162,13 @@ async fn streaming_upload_surfaces_redirect_without_replaying_the_body() {
             .await
             .unwrap();
     });
-    let response = ReqwestHttp::new()
+    let response = provider_transport()
+        .unwrap()
         .send_stream(HttpStreamRequest {
-            method: HttpMethod::Post,
+            method: "POST".into(),
             url: format!("http://{address}/files"),
             headers: vec![],
-            body: stream::once(async { Ok(vec![255]) }).boxed(),
+            body: stream::once(async { Ok(vec![255].into()) }).boxed(),
             content_length: 1,
             timeout: Some(Duration::from_secs(5)),
         })
@@ -191,20 +196,16 @@ async fn sdk_raw_download_exposes_error_headers_before_the_body_finishes() {
         ready.await.unwrap();
         socket.write_all(&[0, 255]).await.unwrap();
     });
-    let transport = ReqwestHttp::new();
+    let transport = provider_transport().unwrap();
     let mut response = tokio::time::timeout(
         Duration::from_secs(5),
-        transport.stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(
-            HttpRequest {
-                method: HttpMethod::Get,
-                url: format!("http://{address}/files/content"),
-                headers: vec![],
-                body: None,
-                body_bytes: None,
-                timeout: None,
-            },
-            None,
-        ),
+        transport.send(HttpRequest {
+            method: "GET".into(),
+            url: format!("http://{address}/files/content"),
+            headers: vec![],
+            body: Default::default(),
+            timeout: None,
+        }),
     )
     .await
     .expect("error response headers must not wait for its body")
@@ -214,7 +215,10 @@ async fn sdk_raw_download_exposes_error_headers_before_the_body_finishes() {
         .headers
         .contains(&("retry-after".into(), "5".into())));
     release.send(()).unwrap();
-    assert_eq!(response.stream.next().await.unwrap().unwrap(), [0, 255]);
-    assert!(response.stream.next().await.is_none());
+    assert_eq!(
+        response.body.next().await.unwrap().unwrap().as_ref(),
+        [0, 255]
+    );
+    assert!(response.body.next().await.is_none());
     server.await.unwrap();
 }

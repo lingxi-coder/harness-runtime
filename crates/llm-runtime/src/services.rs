@@ -28,20 +28,6 @@ pub struct ProviderServices {
 }
 
 impl ProviderServices {
-    /// Build services over the host's HTTP transport without creating a second
-    /// HTTP client. Streaming uploads require [`crate::Transport::send_stream_raw`].
-    pub fn with_host_transport(
-        profiles: &[sdk::protocol::ProviderProfile],
-        region: sdk::protocol::Region,
-        transport: Arc<dyn crate::Transport>,
-    ) -> Result<Self, sdk::BuildError> {
-        Self::with_transport(
-            profiles,
-            region,
-            Arc::new(crate::execution::HostTransport(transport)),
-        )
-    }
-
     /// Build services over a native SDK transport. This preserves streamed
     /// request bodies and raw binary responses when the transport supports them.
     pub fn with_transport(

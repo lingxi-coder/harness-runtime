@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 struct RawOnly {
     requests: Mutex<Vec<sdk::HttpRequest>>,
 }
-impl Transport for RawOnly {
+impl llm_runtime::test_support::FixtureTransport for RawOnly {
     fn execute<'a>(
         &'a self,
         _: &'a ProviderRequest,
@@ -35,6 +35,7 @@ impl Transport for RawOnly {
         })
     }
 }
+llm_runtime::impl_fixture_transport!(RawOnly);
 fn client() -> DefaultLlmClient {
     DefaultLlmClient::from_config(ClientConfig {
         providers: vec![ProviderProfile {

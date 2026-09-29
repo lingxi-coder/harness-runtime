@@ -495,6 +495,7 @@ pub async fn accumulate_stream_salvaging(
             continue;
         }
         match event {
+            LlmEvent::WebSearch { .. } => {} // Metadata is retained by the terminal snapshot.
             LlmEvent::MessageStart { response } => {
                 // Capture id/model + the usage seed from the start snapshot.
                 id = response.id;

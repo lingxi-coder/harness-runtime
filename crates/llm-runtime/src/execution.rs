@@ -25,25 +25,6 @@ pub(crate) fn wire_error(error: LlmError) -> wire::LlmError {
     }
 }
 
-pub(crate) struct HostTransport(pub Arc<dyn Transport>);
-#[async_trait::async_trait]
-impl sdk::Transport for HostTransport {
-    async fn send(&self, request: sdk::HttpRequest) -> Result<sdk::StreamResponse, wire::LlmError> {
-        self.0.send_raw(request).await
-    }
-    async fn send_stream(
-        &self,
-        request: sdk::HttpStreamRequest,
-    ) -> Result<sdk::StreamResponse, wire::LlmError> {
-        self.0.send_stream_raw(request).await
-    }
-    async fn connect_websocket(
-        &self,
-        request: sdk::HttpRequest,
-    ) -> Result<Box<dyn sdk::transport::WebSocketConnection>, wire::LlmError> {
-        self.0.connect_raw(request).await
-    }
-}
 struct PreparationOnly;
 #[async_trait::async_trait]
 impl sdk::Transport for PreparationOnly {
@@ -54,7 +35,24 @@ impl sdk::Transport for PreparationOnly {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct ClientCache(
+    std::sync::Mutex<std::collections::BTreeMap<(String, String, String, usize), sdk::LlmClient>>,
+);
+impl ClientCache {
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+}
+impl std::fmt::Debug for ClientCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClientCache")
+    }
+}
+
 pub(crate) async fn prepare(
+    cache: &ClientCache,
     mut profile: wire::ProviderProfile,
     route: &crate::ResolvedRoute,
     request: &crate::LlmRequest,
@@ -68,26 +66,46 @@ pub(crate) async fn prepare(
     // This exact connection was already selected by the application's policy.
     // Credentials are applied by the host after its final body/header policies.
     profile.auth = wire::AuthStrategy::Bearer;
-    let transport: Arc<dyn sdk::Transport> = transport
-        .map(|t| Arc::new(HostTransport(t)) as Arc<dyn sdk::Transport>)
-        .unwrap_or_else(|| Arc::new(PreparationOnly));
+    let transport: Arc<dyn sdk::Transport> = transport.unwrap_or_else(|| {
+        static PREPARATION: std::sync::OnceLock<Arc<dyn sdk::Transport>> =
+            std::sync::OnceLock::new();
+        PREPARATION
+            .get_or_init(|| Arc::new(PreparationOnly))
+            .clone()
+    });
     let region = profile
         .regions
         .first()
         .copied()
         .unwrap_or(wire::Region::International);
-    let mut builder =
-        sdk::LlmClientBuilder::with_transport(transport, &[profile.clone()]).with_region(region);
-    builder.register_authenticator(wire::AuthStrategy::Bearer, authenticator);
-    let client = builder.build().map_err(|e| LlmError::InvalidRequest {
-        message: e.to_string(),
-    })?;
+    let key = (
+        profile.profile_name.clone(),
+        route.request_model.clone(),
+        route.display_model.clone(),
+        Arc::as_ptr(&transport) as *const () as usize,
+    );
+    let client = {
+        let mut entries = cache.0.lock().expect("SDK client cache");
+        if let Some(client) = entries.get(&key) {
+            client.clone()
+        } else {
+            let client = sdk::LlmClientBuilder::with_transport(transport, &[profile.clone()])
+                .with_region(region)
+                .build()
+                .map_err(|e| LlmError::InvalidRequest {
+                    message: e.to_string(),
+                })?;
+            entries.insert(key, client.clone());
+            client
+        }
+    };
     let mut input = crate::upstream::request(request, profile.protocol)?;
     input.model.clone_from(&route.display_model);
     let draft = Box::pin(client.prepare_draft_on(
         &profile.profile_name,
         &input,
         &sdk::RequestOptions {
+            authenticator: Some(sdk::client::options::RequestAuthenticator(authenticator)),
             account_scope: request.account_scope.clone(),
             file_account_scope: request.file_account_scope.clone(),
             ..Default::default()
@@ -110,7 +128,6 @@ pub(crate) async fn prepare(
     }
     host.json_string_overrides =
         crate::upstream::message_string_overrides(request, profile.protocol)?;
-    crate::upstream::apply_request_compatibility(request, profile.protocol, &mut host)?;
     Ok((draft, host))
 }
 
@@ -144,50 +161,9 @@ pub(crate) fn response(raw: &sdk::HttpResponse) -> ProviderResponse {
         .collect();
     ProviderResponse {
         status: raw.status,
-        request_id: crate::transport_bridge::extract_response_request_id(&headers),
+        request_id: extract_response_request_id(&headers),
         headers,
         body_json: serde_json::from_slice(&raw.body).unwrap_or_default(),
-    }
-}
-
-pub(crate) struct HostWebSocket {
-    pub connection: Box<dyn crate::ResponsesWebSocketTransportSession>,
-    pub request: ProviderRequest,
-}
-#[async_trait::async_trait]
-impl sdk::transport::WebSocketConnection for HostWebSocket {
-    async fn send(&mut self, payload: bytes::Bytes) -> Result<sdk::StreamResponse, wire::LlmError> {
-        use futures::StreamExt;
-        self.request.body_json =
-            serde_json::from_slice(&payload).map_err(|e| wire::LlmError::InvalidRequest {
-                message: e.to_string(),
-            })?;
-        self.request
-            .body_json
-            .as_object_mut()
-            .map(|body| body.remove("type"));
-        let response = self
-            .connection
-            .send(&self.request)
-            .await
-            .map_err(wire_error)?;
-        let body = futures::stream::unfold(Some(response.frames), |frames| async move {
-            let mut frames = frames?;
-            match frames.next_frame().await {
-                Ok(Some(frame)) => Some((Ok(frame.bytes.into()), Some(frames))),
-                Ok(None) => None,
-                Err(e) => Some((Err(wire_error(e)), None)),
-            }
-        })
-        .boxed();
-        Ok(sdk::StreamResponse {
-            status: response.status,
-            headers: response.headers.into_iter().collect(),
-            body,
-        })
-    }
-    async fn close(&mut self) -> Result<(), wire::LlmError> {
-        self.connection.close().await.map_err(wire_error)
     }
 }
 
@@ -263,6 +239,35 @@ impl sdk::Authenticator for HostAuthenticator {
     }
 }
 
+/// Finite host deadline for non-stream model work, excluding budget admission.
+pub(crate) fn non_stream_timeout() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        std::env::var("API_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(crate::model::stream_watchdog::API_TIMEOUT_DEFAULT_MS),
+    )
+}
+
+pub(crate) fn non_stream_bound<'a, T: Send + 'a>(
+    timeout: std::time::Duration,
+    future: impl std::future::Future<Output = Result<T, LlmError>> + Send + 'a,
+) -> crate::BoxFuture<'a, Result<T, LlmError>> {
+    let future = Box::pin(future);
+    Box::pin(async move {
+        let expired = || LlmError::TransportTimeout {
+            message: "Non-stream model request deadline exceeded".into(),
+        };
+        if timeout.is_zero() {
+            return Err(expired());
+        }
+        tokio::time::timeout(timeout, future)
+            .await
+            .map_err(|_| expired())?
+    })
+}
+
 pub(crate) fn first_byte_bound<'a, T: Send + 'a>(
     timeout: Option<std::time::Duration>,
     future: impl std::future::Future<Output = Result<T, LlmError>> + Send + 'a,
@@ -330,26 +335,6 @@ mod tests {
             })
         }
     }
-    impl crate::Transport for Heartbeats {
-        fn execute<'a>(
-            &'a self,
-            _: &'a crate::ProviderRequest,
-        ) -> crate::BoxFuture<'a, Result<crate::ProviderResponse, LlmError>> {
-            panic!("legacy transport")
-        }
-        fn open_stream<'a>(
-            &'a self,
-            _: &'a crate::ProviderRequest,
-        ) -> crate::BoxFuture<'a, Result<crate::StreamingResponse, LlmError>> {
-            panic!("legacy transport")
-        }
-        fn send_raw(
-            &self,
-            request: sdk::HttpRequest,
-        ) -> crate::BoxFuture<'_, Result<sdk::StreamResponse, wire::LlmError>> {
-            Box::pin(sdk::Transport::send(self, request))
-        }
-    }
     #[tokio::test(start_paused = true)]
     async fn transport_heartbeats_do_not_reset_the_provider_progress_watchdog() {
         let profile:crate::ProviderProfile=serde_json::from_value(serde_json::json!({
@@ -381,4 +366,21 @@ mod tests {
             Some(Err(LlmError::StreamInterrupted { .. }))
         ));
     }
+}
+
+pub(crate) fn extract_response_request_id(
+    headers: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    [
+        "request-id",
+        "x-request-id",
+        "apim-request-id",
+        "x-ms-request-id",
+        "x-amzn-requestid",
+        "x-amzn-request-id",
+        "x-goog-request-id",
+    ]
+    .iter()
+    .find_map(|name| headers.get(*name))
+    .cloned()
 }

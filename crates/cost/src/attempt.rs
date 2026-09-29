@@ -123,8 +123,9 @@ pub enum AttemptDisposition {
     ProvenNotSent,
     /// Dispatch was marked, but no provider response was ever accepted: the
     /// transport failed, or the request was refused before any usage report.
-    /// Distinct from `Unknown`, which means a response arrived with incomplete
-    /// usage. Neither one licenses charging the authorization as if spent.
+    /// Like `Unknown`, this retains conservative output and monetary occupancy;
+    /// absence of a response does not establish absence of remote execution.
+    /// Neither licenses charging the authorization as if spent.
     NoProviderResponse,
 }
 
@@ -766,11 +767,11 @@ fn receipt_contribution(
             }
             return Ok(AttemptContribution::default());
         }
-        // A physical send was attempted and nothing came back. No output
-        // tokens can exist, so occupancy stays zero, but the attempt is real
-        // and its whole authorization is unaccounted for.
+        // No response is not proof of no execution. Retain the output
+        // reservation as well as the unverified monetary authorization.
         return Ok(AttemptContribution {
             unverified_nano_usd: intent.authorized_nano_usd,
+            output_occupancy: intent.authorized_output_tokens,
             request_count: 1,
             unknown_count: 1,
             api_duration_ms: receipt.api_duration_ms,
@@ -1647,7 +1648,7 @@ mod tests {
     }
 
     #[test]
-    fn an_attempt_with_no_provider_response_contributes_nothing() {
+    fn an_attempt_with_no_provider_response_retains_unknown_occupancy() {
         // The transport failed after the dispatch marker. Nothing was
         // observed, so nothing is charged and nothing is guessed.
         let (mut ledger, mut state, intent) = fixture();
@@ -1661,8 +1662,8 @@ mod tests {
         let ack = ledger.fold_receipt(&mut state, receipt, None).unwrap();
         assert_eq!(ack.contribution.nano_usd, 0, "nothing was reported");
         assert_eq!(
-            ack.contribution.output_occupancy, 0,
-            "no response means no output tokens exist to hold"
+            ack.contribution.output_occupancy, intent.authorized_output_tokens,
+            "no response cannot prove no remote output was generated"
         );
         // The send was still attempted, so it is one request and one
         // incomplete attempt, with its whole authorization unaccounted for.

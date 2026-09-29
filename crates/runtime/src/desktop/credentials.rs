@@ -3,7 +3,6 @@ use llm_runtime::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use llm_runtime::oauth::anthropic::handle::OAuthHandle;
 use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
 use llm_runtime::oauth::openai as openai_oauth;
-use llm_runtime::LlmTransportBridge;
 use llm_runtime::{DefaultLlmClient, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
@@ -388,11 +387,11 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         }
     }
 
-    // (2a) Task 10: LlmTransportBridge wraps the PosixHttp transport for
-    //      `DefaultLlmClient`. A second `PosixHttp` instance is used so the
-    //      bridge owns its own (stateless) handle; the original `http` Arc
-    //      continues to serve MCP / hooks / side-query.
-    let llm_transport: Arc<dyn Transport> = Arc::new(LlmTransportBridge::new(PosixHttp::new()));
+    // The shared SDK transport owns provider networking. The original `http`
+    // handle continues to serve MCP and hooks.
+    let llm_transport: Arc<dyn Transport> = Arc::new(
+        platform_common::provider_transport().map_err(|e| BuildError::ApiBase(e.to_string()))?,
+    );
     // Defer client construction to step 3.1 where we know whether OAuth is
     // active (determines auth strategy + credential config). Placeholder: the
     // resolved OAuth `AuthState` (`Some` only for an OAuth-effective subscriber

@@ -77,7 +77,7 @@ impl FrameStream for Frames {
     }
 }
 
-impl Transport for ProbeTransport {
+impl llm_runtime::test_support::FixtureTransport for ProbeTransport {
     fn execute<'a>(
         &'a self,
         request: &'a ProviderRequest,
@@ -129,6 +129,7 @@ impl Transport for ProbeTransport {
         Box::pin(async move { result })
     }
 }
+llm_runtime::impl_fixture_transport!(ProbeTransport);
 
 fn service(transport: Arc<dyn Transport>, with_connection_failover: bool) -> ApiService {
     service_on(

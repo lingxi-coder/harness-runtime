@@ -2,11 +2,11 @@
 //! against `MockHttpTransport`. This is the M1.1 acceptance test.
 
 use lingxi_core::{reduce, ConversationState, Event, SessionState, Usage};
+use llm_runtime::services::sdk;
 use platform_api::HttpTransport;
 use protocol::{ConversationMessage, Effect, HttpResponse, MessageId, RequestId, SessionId};
 use std::sync::Arc;
 use test_harness::mocks::{MockHttpTransport, ScriptedResponse};
-use tool_api::anthropic_request::AnthropicRequestBuilder;
 
 #[tokio::test]
 async fn single_turn_conversation_against_mock_http() {
@@ -108,13 +108,44 @@ async fn anthropic_provider_against_mock_http_does_one_roundtrip() {
         body_bytes: Vec::new(),
     }));
 
-    let builder = AnthropicRequestBuilder::new("sk-ant-test", None);
-    let body = serde_json::json!({"model":"claude-opus-4-6","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]});
-    let req = builder.build_request(&body);
-    let resp = transport
-        .request(req)
+    struct SdkFixture(Arc<MockHttpTransport>);
+    #[async_trait::async_trait]
+    impl sdk::Transport for SdkFixture {
+        async fn send(
+            &self,
+            request: sdk::HttpRequest,
+        ) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
+            llm_runtime::test_support::send_http_fixture(self.0.as_ref(), request).await
+        }
+    }
+    let profile:sdk::protocol::ProviderProfile=serde_json::from_value(serde_json::json!({"provider_id":"anthropic","profile_name":"test","base_url":"https://api.anthropic.com","protocol":"anthropic_messages","auth":"api_key","models":[{"request_model":"claude-opus-4-6","display_model":"claude-opus-4-6","billing_model":"claude-opus-4-6"}]})).unwrap();
+    let client =
+        sdk::LlmClientBuilder::with_transport(Arc::new(SdkFixture(transport.clone())), &[profile])
+            .with_region(sdk::protocol::Region::International)
+            .build()
+            .unwrap();
+    let request=serde_json::from_value(serde_json::json!({"model":"claude-opus-4-6","max_tokens":1024,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]})).unwrap();
+    let response = client
+        .prepare_on(
+            "test",
+            &request,
+            &sdk::RequestOptions {
+                credential: Some("sk-ant-test".to_string().into()),
+                ..Default::default()
+            },
+            sdk::RequestMode::Complete,
+        )
         .await
-        .expect("request should succeed");
-    assert_eq!(resp.status, 200);
+        .unwrap()
+        .dispatch_once()
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.decode().unwrap().usage.usage.unwrap().input_tokens,
+        3
+    );
     transport.assert_drained();
 }

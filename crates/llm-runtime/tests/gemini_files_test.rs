@@ -272,7 +272,7 @@ impl ScriptedTransport {
     }
 }
 
-impl Transport for ScriptedTransport {
+impl llm_runtime::test_support::FixtureTransport for ScriptedTransport {
     fn execute<'a>(
         &'a self,
         request: &'a ProviderRequest,
@@ -297,6 +297,7 @@ impl Transport for ScriptedTransport {
         })
     }
 }
+llm_runtime::impl_fixture_transport!(ScriptedTransport);
 
 fn gemini_client() -> DefaultLlmClient {
     std::env::set_var("LLM_CLIENT_GEMINI_FILES_TEST_KEY", "gemini-files-key");

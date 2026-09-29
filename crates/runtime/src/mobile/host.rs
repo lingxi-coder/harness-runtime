@@ -61,12 +61,11 @@ use linux_runtime::{
     mobile_typescript_lsp_ready, model_visible_mobile_cwd,
 };
 pub(crate) use provider_services::LOCAL_APPS_MCP_TIMEOUT_MS;
-use provider_services::PROVIDER_CONNECTION_TIMEOUT;
 use provider_services::{
     anthropic_models, apply_mobile_profile_allowlist, builtin_provider_catalog,
     classify_provider_connection_response, lower_auth_state, mobile_provider_settings,
-    model_listings, provider_connection_failure, provider_connection_headers, provider_id_is_valid,
-    provider_model_catalog_from_listings, provider_models_endpoint, resolve_default_model_ref,
+    model_listings, probe_provider, provider_connection_failure, provider_id_is_valid,
+    provider_model_catalog_from_listings, resolve_default_model_ref,
 };
 pub use provider_services::{
     MobileOAuthManager, MobileOAuthSessionDto, MobileOAuthStateDto, ProviderCatalogEntryDto,
@@ -144,13 +143,7 @@ use platform_api::audio::{
     AudioError, AudioErrorKind, AudioOperation, AudioOperationContext, AudioOperationId,
     AudioOperationSuccess, AudioOwner, AudioService,
 };
-use platform_api::http::{
-    HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta,
-    WebSocketConnectionWithMeta, WebSocketMessageStreamWithMeta,
-};
-use platform_api::{
-    AuthHandle, HttpTransport, OrchestratorHandle, Platform, SlashCommandDispatcher,
-};
+use platform_api::{AuthHandle, OrchestratorHandle, Platform, SlashCommandDispatcher};
 use secret::CredentialManager;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -217,90 +210,6 @@ use crate::mobile::{
     skill_loader::command_visible_in_session_mode,
     turn_durability::{DurableTurnStore, DurableTurnStoreError, ResumeDisposition},
 };
-
-/// A sized newtype over the platform's `Arc<dyn HttpTransport>`.
-///
-/// [`LlmTransportBridge`] requires a `Sized` `HttpTransport` implementor.
-/// Mobile reads its transport from the aggregate `Platform` as an
-/// `Arc<dyn HttpTransport>` (unsized), so we wrap it in this thin delegating
-/// newtype to satisfy the bound WITHOUT bypassing the device's HTTP backend —
-/// every call forwards verbatim to the platform transport.
-struct DynHttp(Arc<dyn HttpTransport>);
-
-#[async_trait::async_trait]
-impl HttpTransport for DynHttp {
-    async fn send_stream(
-        &self,
-        req: platform_api::http::HttpStreamRequest,
-    ) -> Result<RawByteStreamWithMeta, HttpError> {
-        self.0.send_stream(req).await
-    }
-
-    async fn stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(
-        &self,
-        req: protocol::HttpRequest,
-        resolved: Option<platform_api::ResolvedAddressOverride>,
-    ) -> Result<RawByteStreamWithMeta, HttpError> {
-        self.0
-            .stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(req, resolved)
-            .await
-    }
-
-    async fn request(
-        &self,
-        req: protocol::HttpRequest,
-    ) -> Result<protocol::HttpResponse, HttpError> {
-        self.0.request(req).await
-    }
-    async fn request_with_resolved_addrs(
-        &self,
-        req: protocol::HttpRequest,
-        resolved: Option<platform_api::ResolvedAddressOverride>,
-    ) -> Result<protocol::HttpResponse, HttpError> {
-        self.0.request_with_resolved_addrs(req, resolved).await
-    }
-    async fn stream_sse(&self, req: protocol::HttpRequest) -> Result<SseStream, HttpError> {
-        self.0.stream_sse(req).await
-    }
-    /// Forward to the inner transport so the device backend's real headers are
-    /// preserved (the default would silently drop them via the `stream_sse` path).
-    async fn stream_sse_with_meta(
-        &self,
-        req: protocol::HttpRequest,
-    ) -> Result<SseStreamWithMeta, HttpError> {
-        self.0.stream_sse_with_meta(req).await
-    }
-    async fn stream_raw_bytes(
-        &self,
-        req: protocol::HttpRequest,
-    ) -> Result<RawByteStream, HttpError> {
-        self.0.stream_raw_bytes(req).await
-    }
-    /// Forward to the inner transport so the device backend's real status and
-    /// headers are preserved on binary (AWS event-stream) responses.
-    async fn stream_raw_bytes_with_meta(
-        &self,
-        req: protocol::HttpRequest,
-    ) -> Result<RawByteStreamWithMeta, HttpError> {
-        self.0.stream_raw_bytes_with_meta(req).await
-    }
-    /// Forward WebSocket streaming so device transports that support Responses
-    /// WebSocket are not hidden behind this sized wrapper.
-    async fn stream_websocket_messages_with_meta(
-        &self,
-        req: protocol::HttpRequest,
-    ) -> Result<WebSocketMessageStreamWithMeta, HttpError> {
-        self.0.stream_websocket_messages_with_meta(req).await
-    }
-    /// Forward reusable WebSocket connections so Responses sessions can reuse
-    /// the device backend connection inside a turn.
-    async fn open_websocket_connection_with_meta(
-        &self,
-        req: protocol::HttpRequest,
-    ) -> Result<WebSocketConnectionWithMeta, HttpError> {
-        self.0.open_websocket_connection_with_meta(req).await
-    }
-}
 
 /// Everything a mobile host needs to drive a conversation, built deterministically
 /// by [`build_mobile`] from a [`MobileConfig`] + an `Arc<dyn Platform>`.
@@ -785,8 +694,8 @@ mod mobile_tool_gate_tests;
 // `builtin_anthropic_config` / `apply_settings_providers` /
 // `parse_routing_overrides` helpers from `platform_common::llm_config` are no
 // longer wired here; they remain in `platform_common` (the desktop e2e tests
-// still reach them via fully-qualified paths). `LlmTransportBridge` is still
-// imported at the top of the module.
+// still reach them via fully-qualified paths). Provider networking uses the
+// shared SDK transport.
 
 fn mobile_skill_listing_provider(
     registry: Arc<RwLock<command_api::CommandRegistry>>,
@@ -6694,29 +6603,24 @@ impl MobileEngineHandle {
             );
         }
 
-        let endpoint = match provider_models_endpoint(&api_base, &provider_preset) {
-            Ok(endpoint) => endpoint,
-            Err(message) => {
-                return provider_connection_failure(
-                    message,
-                    false,
-                    false,
-                    None,
-                    0,
-                    used_stored_credential,
-                );
-            }
-        };
-        let request = protocol::HttpRequest {
-            method: protocol::HttpMethod::Get,
-            url: endpoint,
-            headers: provider_connection_headers(&provider_preset, &credential),
-            body: None,
-            body_bytes: None,
-            timeout: Some(PROVIDER_CONNECTION_TIMEOUT),
+        use llm_runtime::services::sdk::directory::probe::{ProbeCredential, ProbeProtocol};
+        let kind = match provider_preset.as_str() {
+            "anthropic" => ProbeProtocol::Anthropic,
+            "google" => ProbeProtocol::Google,
+            _ => ProbeProtocol::OpenAi,
         };
         let started = std::time::Instant::now();
-        let response = self.firer_platform.http().request(request).await;
+        let response = probe_provider(
+            &api_base,
+            kind,
+            ProbeCredential {
+                token: credential.into(),
+                bearer: false,
+                account_id: None,
+                fedramp: false,
+            },
+        )
+        .await;
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         classify_provider_connection_response(
             response,

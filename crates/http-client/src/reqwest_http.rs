@@ -12,22 +12,15 @@
 use async_trait::async_trait;
 use bytes::BytesMut;
 use futures_core::stream::Stream;
-use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
 use platform_api::http::{
-    HttpStreamRequest, RawByteStream, RawByteStreamWithMeta, ResolvedAddressOverride, SseStream,
-    SseStreamWithMeta, WebSocketConnection, WebSocketConnectionWithMeta, WebSocketMessageStream,
-    WebSocketMessageStreamWithMeta,
+    RawByteStream, RawByteStreamWithMeta, ResolvedAddressOverride, SseStream, SseStreamWithMeta,
 };
 use platform_api::{HttpError, HttpTransport};
 use protocol::{HttpRequest, HttpResponse, SseEvent};
 use std::error::Error as StdError;
-use std::sync::{Arc, Mutex};
-use url::Url;
+use std::sync::Arc;
 
-const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
-const RESPONSES_WEBSOCKETS_V2_BETA: &str = "responses_websockets=2026-02-06";
-const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
 /// TCP/TLS connect budget. Applied on the `reqwest::Client`, never as a
 /// request-level timeout (that would kill long-lived SSE bodies).
 const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -41,9 +34,6 @@ const MAX_HTTP_RESPONSE_BODY: usize = 16 * 1024 * 1024;
 /// cross-compiles to `aarch64-apple-ios` and Android targets. Shared by all
 /// native platforms.
 pub struct ReqwestHttp {
-    /// Provider uploads use the SDK's streaming, redaction and replay policies,
-    /// with the same host TLS material as the general-purpose clients below.
-    provider_http: lingxi_llm_client::HttpTransport,
     /// Default client — follows redirects (reqwest's default policy). Backs
     /// [`HttpTransport::request`] / `stream_sse` / `stream_raw_bytes`.
     client: reqwest::Client,
@@ -95,10 +85,6 @@ impl ReqwestHttp {
         let tls = crate::tls_config::TlsSettings::from_env();
         let websocket_tls = tls.websocket_client_config();
         Self {
-            provider_http: lingxi_llm_client::HttpTransport::with_client_configurator(|builder| {
-                tls.apply_to_builder(builder.connect_timeout(DEFAULT_CONNECT_TIMEOUT))
-            })
-            .expect("provider HTTP client init"),
             client: tls
                 .apply_to_builder(
                     reqwest::Client::builder().connect_timeout(DEFAULT_CONNECT_TIMEOUT),
@@ -284,279 +270,10 @@ fn map_reqwest_connection_error(error: reqwest::Error, detailed: bool) -> HttpEr
     HttpError::Connection(message)
 }
 
-fn map_provider_http_error(error: lingxi_llm_client::protocol::LlmError) -> HttpError {
-    use lingxi_llm_client::protocol::LlmError;
-    match error {
-        LlmError::InvalidRequest { message } => HttpError::InvalidRequest(message),
-        LlmError::StreamInterrupted { message } => HttpError::InvalidResponse(message),
-        // The SDK already removes URL credentials and nested proxy errors.
-        // Preserve its safe description rather than recreating reqwest errors.
-        other => HttpError::Connection(other.to_string()),
-    }
-}
-
-fn websocket_url_for(url: &str) -> Result<Url, HttpError> {
-    let mut url = Url::parse(url).map_err(|err| HttpError::InvalidRequest(err.to_string()))?;
-    let scheme = match url.scheme() {
-        "http" => "ws",
-        "https" => "wss",
-        "ws" | "wss" => return Ok(url),
-        other => {
-            return Err(HttpError::InvalidRequest(format!(
-                "unsupported websocket URL scheme: {other}"
-            )));
-        }
-    };
-    url.set_scheme(scheme).map_err(|_| {
-        HttpError::InvalidRequest(format!("failed to set websocket URL scheme: {url}"))
-    })?;
-    Ok(url)
-}
-
-fn should_forward_websocket_header(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    !matches!(
-        lower.as_str(),
-        "content-length" | "content-type" | "connection" | "host" | "transfer-encoding" | "upgrade"
-    ) && !lower.starts_with("sec-websocket-")
-}
-
-fn append_openai_beta(headers: &mut ::http::HeaderMap) -> Result<(), HttpError> {
-    let next = match headers
-        .get(OPENAI_BETA_HEADER)
-        .and_then(|value| value.to_str().ok())
-    {
-        Some(existing)
-            if existing
-                .split(',')
-                .any(|segment| segment.trim() == RESPONSES_WEBSOCKETS_V2_BETA) =>
-        {
-            existing.to_string()
-        }
-        Some(existing) if !existing.trim().is_empty() => {
-            format!("{existing},{RESPONSES_WEBSOCKETS_V2_BETA}")
-        }
-        _ => RESPONSES_WEBSOCKETS_V2_BETA.to_string(),
-    };
-    let value = ::http::HeaderValue::from_str(&next)
-        .map_err(|err| HttpError::InvalidRequest(err.to_string()))?;
-    headers.insert(OPENAI_BETA_HEADER, value);
-    Ok(())
-}
-
-fn build_websocket_request(req: &HttpRequest) -> Result<::http::Request<()>, HttpError> {
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-
-    let url = websocket_url_for(&req.url)?;
-    let mut request = url
-        .as_str()
-        .into_client_request()
-        .map_err(|err| HttpError::InvalidRequest(err.to_string()))?;
-
-    for (name, value) in &req.headers {
-        if !should_forward_websocket_header(name) {
-            continue;
-        }
-        let header_name = ::http::HeaderName::from_bytes(name.as_bytes())
-            .map_err(|err| HttpError::InvalidRequest(err.to_string()))?;
-        let header_value = ::http::HeaderValue::from_str(value)
-            .map_err(|err| HttpError::InvalidRequest(err.to_string()))?;
-        request.headers_mut().insert(header_name, header_value);
-    }
-    append_openai_beta(request.headers_mut())?;
-    Ok(request)
-}
-
-fn map_websocket_error(error: tokio_tungstenite::tungstenite::Error) -> HttpError {
-    use tokio_tungstenite::tungstenite::Error as WsError;
-    match error {
-        WsError::Http(response) => {
-            let status = response.status().as_u16();
-            let body = response
-                .body()
-                .as_ref()
-                .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
-                .unwrap_or_default();
-            HttpError::Status { status, body }
-        }
-        WsError::ConnectionClosed | WsError::AlreadyClosed => {
-            HttpError::Connection("websocket closed".to_string())
-        }
-        WsError::Io(err) => HttpError::Connection(err.to_string()),
-        other => HttpError::Connection(other.to_string()),
-    }
-}
-
-fn is_responses_terminal_message(text: &str) -> bool {
-    let trimmed = text.trim();
-    if trimmed == "[DONE]" {
-        return true;
-    }
-    serde_json::from_str::<serde_json::Value>(trimmed)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .is_some_and(|kind| kind == "response.completed" || kind == "response.incomplete")
-}
-
-type ProviderWebSocketStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-struct ReusableResponsesWebSocketState {
-    slot: Arc<Mutex<Option<ProviderWebSocketStream>>>,
-    stream: Option<ProviderWebSocketStream>,
-    terminal_seen: bool,
-}
-
-fn responses_websocket_reusable_stream(
-    stream: ProviderWebSocketStream,
-    slot: Arc<Mutex<Option<ProviderWebSocketStream>>>,
-) -> WebSocketMessageStream {
-    Box::pin(futures_util::stream::try_unfold(
-        ReusableResponsesWebSocketState {
-            slot,
-            stream: Some(stream),
-            terminal_seen: false,
-        },
-        |mut state| async move {
-            if state.terminal_seen {
-                return Ok(None);
-            }
-
-            loop {
-                let Some(stream) = state.stream.as_mut() else {
-                    return Ok(None);
-                };
-                let Some(message) = stream.next().await else {
-                    return Err(HttpError::Connection(
-                        "websocket closed before response.completed".to_string(),
-                    ));
-                };
-                match message {
-                    Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                        state.terminal_seen = is_responses_terminal_message(&text);
-                        if state.terminal_seen {
-                            let stream = state.stream.take().expect("stream present");
-                            *state.slot.lock().expect("websocket slot") = Some(stream);
-                        }
-                        return Ok(Some((text.into_bytes(), state)));
-                    }
-                    Ok(tokio_tungstenite::tungstenite::Message::Binary(_)) => {
-                        return Err(HttpError::InvalidResponse(
-                            "unexpected binary websocket event".to_string(),
-                        ));
-                    }
-                    Ok(tokio_tungstenite::tungstenite::Message::Ping(payload)) => {
-                        stream
-                            .send(tokio_tungstenite::tungstenite::Message::Pong(payload))
-                            .await
-                            .map_err(map_websocket_error)?;
-                    }
-                    Ok(tokio_tungstenite::tungstenite::Message::Pong(_))
-                    | Ok(tokio_tungstenite::tungstenite::Message::Frame(_)) => {}
-                    Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
-                        return Err(HttpError::Connection(
-                            "websocket closed by server before response.completed".to_string(),
-                        ));
-                    }
-                    Err(error) => return Err(map_websocket_error(error)),
-                }
-            }
-        },
-    ))
-}
-
-struct ReqwestResponsesWebSocketConnection {
-    status: u16,
-    headers: Vec<(String, String)>,
-    slot: Arc<Mutex<Option<ProviderWebSocketStream>>>,
-}
-
-#[async_trait]
-impl WebSocketConnection for ReqwestResponsesWebSocketConnection {
-    async fn send_text_with_meta(
-        &mut self,
-        text: String,
-    ) -> Result<WebSocketMessageStreamWithMeta, HttpError> {
-        let stream = self
-            .slot
-            .lock()
-            .expect("websocket slot")
-            .take()
-            .ok_or_else(|| {
-                HttpError::Connection(
-                    "websocket request already in flight or connection closed".to_string(),
-                )
-            })?;
-        let mut stream = stream;
-        stream
-            .send(tokio_tungstenite::tungstenite::Message::Text(text))
-            .await
-            .map_err(map_websocket_error)?;
-
-        Ok(WebSocketMessageStreamWithMeta {
-            status: self.status,
-            headers: self.headers.clone(),
-            stream: responses_websocket_reusable_stream(stream, Arc::clone(&self.slot)),
-        })
-    }
-
-    async fn close(&mut self) -> Result<(), HttpError> {
-        let Some(mut stream) = self.slot.lock().expect("websocket slot").take() else {
-            return Ok(());
-        };
-        stream.close(None).await.map_err(map_websocket_error)
-    }
-}
-
 #[async_trait]
 impl HttpTransport for ReqwestHttp {
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
         self.send_request(req, None, false).await
-    }
-
-    async fn send_stream(
-        &self,
-        req: HttpStreamRequest,
-    ) -> Result<RawByteStreamWithMeta, HttpError> {
-        use lingxi_llm_client::Transport as _;
-        let response = self
-            .provider_http
-            .send_stream(lingxi_llm_client::HttpStreamRequest {
-                method: to_reqwest_method(req.method).to_string(),
-                url: req.url,
-                headers: req.headers,
-                body: req
-                    .body
-                    .map(|chunk| {
-                        chunk.map(bytes::Bytes::from).map_err(|_| {
-                            lingxi_llm_client::protocol::LlmError::Transport {
-                                message: "upload body source failed".into(),
-                            }
-                        })
-                    })
-                    .boxed(),
-                content_length: req.content_length,
-                timeout: req.timeout,
-            })
-            .await
-            .map_err(map_provider_http_error)?;
-        Ok(RawByteStreamWithMeta {
-            status: response.status,
-            headers: response.headers,
-            stream: response
-                .body
-                .map(|chunk| {
-                    chunk
-                        .map(|bytes| bytes.to_vec())
-                        .map_err(map_provider_http_error)
-                })
-                .boxed(),
-        })
     }
 
     async fn request_with_resolved_addrs(
@@ -813,80 +530,6 @@ impl HttpTransport for ReqwestHttp {
             .clone();
         crate::monitor_websocket::connect(url, protocols, tls, self.monitor_proxy.clone()).await
     }
-
-    async fn stream_websocket_messages_with_meta(
-        &self,
-        req: HttpRequest,
-    ) -> Result<WebSocketMessageStreamWithMeta, HttpError> {
-        let request_text = req.body.clone().ok_or_else(|| {
-            HttpError::InvalidRequest(
-                "websocket provider request requires a JSON text body".to_string(),
-            )
-        })?;
-        if req.body_bytes.is_some() {
-            return Err(HttpError::InvalidRequest(
-                "websocket provider request does not support body_bytes".to_string(),
-            ));
-        }
-
-        let mut connection = self.open_websocket_connection_with_meta(req).await?;
-        connection
-            .connection
-            .send_text_with_meta(request_text)
-            .await
-    }
-
-    async fn open_websocket_connection_with_meta(
-        &self,
-        req: HttpRequest,
-    ) -> Result<WebSocketConnectionWithMeta, HttpError> {
-        if req.body_bytes.is_some() {
-            return Err(HttpError::InvalidRequest(
-                "websocket provider request does not support body_bytes".to_string(),
-            ));
-        }
-
-        let request = build_websocket_request(&req)?;
-        let connect_timeout = req.timeout.unwrap_or_else(|| {
-            std::time::Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS)
-        });
-        let tls = self
-            .websocket_tls
-            .as_ref()
-            .map_err(|error| HttpError::InvalidRequest(error.clone()))?
-            .clone();
-        let connector = tokio_tungstenite::Connector::Rustls(tls);
-        let (stream, response) = tokio::time::timeout(
-            connect_timeout,
-            tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector)),
-        )
-        .await
-        .map_err(|_| HttpError::Timeout(connect_timeout))?
-        .map_err(map_websocket_error)?;
-
-        let status = response.status().as_u16();
-        let headers: Vec<(String, String)> = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_ascii_lowercase(),
-                    value.to_str().unwrap_or("").to_string(),
-                )
-            })
-            .collect();
-        let slot = Arc::new(Mutex::new(Some(stream)));
-
-        Ok(WebSocketConnectionWithMeta {
-            status,
-            headers: headers.clone(),
-            connection: Box::new(ReqwestResponsesWebSocketConnection {
-                status,
-                headers,
-                slot,
-            }),
-        })
-    }
 }
 
 /// Parse one or more complete SSE events out of a raw chunk.
@@ -1032,6 +675,7 @@ mod tests {
     use super::*;
     use platform_api::http::SseStreamWithMeta;
     use std::fmt;
+    use std::sync::Mutex;
 
     #[derive(Debug)]
     struct TestError {
@@ -1428,7 +1072,7 @@ mod tests {
         use axum::routing::post;
         use axum::Router;
         use protocol::HttpMethod;
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
         use tokio::net::TcpListener;
 
         type Captured = Arc<Mutex<Option<Vec<u8>>>>;
@@ -1474,7 +1118,7 @@ mod tests {
         use axum::routing::post;
         use axum::Router;
         use protocol::HttpMethod;
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
         use tokio::net::TcpListener;
 
         type Captured = Arc<Mutex<Option<Vec<u8>>>>;

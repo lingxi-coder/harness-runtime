@@ -1144,7 +1144,7 @@ mod tests {
         }
     }
 
-    impl Transport for FakeTransport {
+    impl llm_runtime::test_support::FixtureTransport for FakeTransport {
         fn execute<'a>(
             &'a self,
             request: &'a ProviderRequest,
@@ -1196,6 +1196,7 @@ mod tests {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(FakeTransport);
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -1326,7 +1327,7 @@ mod tests {
             noop_hook_executor, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
         };
         struct RetryTransport(tokio::sync::Notify);
-        impl Transport for RetryTransport {
+        impl llm_runtime::test_support::FixtureTransport for RetryTransport {
             fn execute<'a>(
                 &'a self,
                 request: &'a ProviderRequest,
@@ -1362,6 +1363,7 @@ mod tests {
                 })
             }
         }
+        llm_runtime::impl_fixture_transport!(RetryTransport);
         let transport = Arc::new(RetryTransport(tokio::sync::Notify::new()));
         let adapter = Arc::new(make_adapter(transport.clone()));
         let dir = tempfile::tempdir().unwrap();
@@ -1460,7 +1462,7 @@ mod tests {
         struct ScopedTransport {
             seen: Mutex<Vec<ProviderRequest>>,
         }
-        impl Transport for ScopedTransport {
+        impl llm_runtime::test_support::FixtureTransport for ScopedTransport {
             fn execute<'a>(
                 &'a self,
                 request: &'a ProviderRequest,
@@ -1502,6 +1504,7 @@ mod tests {
                 })
             }
         }
+        llm_runtime::impl_fixture_transport!(ScopedTransport);
         // Use the same production adapter and service for both query owners.
         let transport = Arc::new(ScopedTransport {
             seen: Mutex::new(Vec::new()),
@@ -1720,7 +1723,7 @@ mod tests {
         let auto_transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let auto_seam: Arc<dyn agent::SubagentApiClient> =
             Arc::new(make_adapter(auto_transport.clone()));
-        let _ = auto_seam
+        let auto_error = auto_seam
             .messages_create_stream_in_opts(
                 "claude-sonnet-4-20250514",
                 None,
@@ -1734,11 +1737,12 @@ mod tests {
                     query_source_label: Some("fusion_panel".to_string()),
                 },
             )
-            .await;
+            .await
+            .err();
         let auto_seen = auto_transport.seen.lock().unwrap();
         let auto_request = auto_seen
             .last()
-            .expect("the auto opts-aware call reached the transport");
+            .unwrap_or_else(|| panic!("auto request did not dispatch: {auto_error:?}"));
         assert_eq!(
             auto_request.body_json.get("max_tokens").and_then(serde_json::Value::as_u64),
             Some(777),
@@ -1757,7 +1761,7 @@ mod tests {
                 None,
                 None,
                 Vec::new(),
-                Vec::new(),
+                vec![serde_json::json!({"name":"StructuredOutput","description":"Return structured output","input_schema":{"type":"object","properties":{}}})],
                 Some("StructuredOutput"),
                 None,
                 agent::api::SubagentApiCallOpts {
@@ -2207,5 +2211,525 @@ mod tests {
 
         OrchestratorApiClient::set_effort(&adapter, None);
         assert_eq!(adapter.current_effort(), None);
+    }
+    struct HostedSdkTransport {
+        seen: Mutex<Vec<llm_runtime::services::sdk::HttpRequest>>,
+        partial: bool,
+    }
+    #[async_trait::async_trait]
+    impl llm_runtime::Transport for HostedSdkTransport {
+        async fn send(
+            &self,
+            request: llm_runtime::services::sdk::HttpRequest,
+        ) -> Result<
+            llm_runtime::services::sdk::StreamResponse,
+            llm_runtime::services::sdk::protocol::LlmError,
+        > {
+            use futures::StreamExt;
+            use serde_json::json;
+            self.seen.lock().unwrap().push(request);
+            let mut events = vec![
+                json!({"type":"message_start","message":{"id":"msg_search","model":"claude-sonnet-4-20250514","role":"assistant","content":[],"usage":{"input_tokens":7,"output_tokens":0}}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srv","name":"web_search","input":{"query":"Rust"}}}),
+                json!({"type":"content_block_stop","index":0}),
+                json!({"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srv","content":[{"type":"web_search_result","title":"Rust","url":"https://rust-lang.org","encrypted_content":"opaque"}]}}),
+                json!({"type":"content_block_stop","index":1}),
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":7,"output_tokens":3,"server_tool_use":{"web_search_requests":1}}}),
+                json!({"type":"message_stop"}),
+            ];
+            if self.partial {
+                events.truncate(5);
+            }
+            let mut chunks = events
+                .into_iter()
+                .map(|event| Ok(format!("data: {event}\n\n").into()))
+                .collect::<Vec<_>>();
+            if self.partial {
+                chunks.push(Err(
+                    llm_runtime::services::sdk::protocol::LlmError::StreamInterrupted {
+                        message: "connection lost".into(),
+                    },
+                ));
+            }
+            Ok(llm_runtime::services::sdk::StreamResponse {
+                status: 200,
+                headers: vec![],
+                body: futures::stream::iter(chunks).boxed(),
+            })
+        }
+    }
+    #[tokio::test]
+    async fn hosted_search_executes_through_sdk_and_preserves_partial_results_without_replay() {
+        use tool_api::HostedWebSearchClient;
+        for partial in [false, true] {
+            let transport = Arc::new(HostedSdkTransport {
+                seen: Mutex::new(vec![]),
+                partial,
+            });
+            let adapter = make_adapter(transport.clone());
+            let request = tool_api::HostedSearchRequest {
+                model: "claude-sonnet-4-20250514".into(),
+                profile: Some("anthropic".into()),
+                query: "Rust".into(),
+                allowed_domains: vec!["rust-lang.org".into()],
+                blocked_domains: vec![],
+            };
+            assert!(adapter.supports_request(&request));
+            let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
+            let output = adapter.search(request, progress).await.unwrap();
+            assert!(output.results.iter().any(|entry|matches!(entry,tool_api::hosted_search::SearchResultEntry::Hit(value) if value.to_string().contains("rust-lang.org"))));
+            assert!(updates.try_recv().is_ok());
+            if partial {
+                assert!(output.results.iter().any(|entry|matches!(entry,tool_api::hosted_search::SearchResultEntry::Text(text) if text.contains("incomplete"))));
+            } else {
+                assert_eq!(output.input_tokens, 7);
+                assert_eq!(output.output_tokens, 3);
+                assert_eq!(output.searches, 1);
+            }
+            let requests = transport.seen.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0]
+                .headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("x-api-key") && v == "test-key"));
+            let wire: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(wire["tools"][0]["allowed_domains"][0], "rust-lang.org");
+            assert_eq!(wire["model"], "claude-sonnet-4-20250514");
+        }
+    }
+    #[tokio::test]
+    async fn hosted_search_openai_reports_one_call_not_one_per_citation() {
+        use llm_runtime::services::sdk;
+        use serde_json::json;
+        use tool_api::HostedWebSearchClient;
+        struct SearchTransport {
+            partial: bool,
+            sends: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl llm_runtime::Transport for SearchTransport {
+            async fn send(
+                &self,
+                request: sdk::HttpRequest,
+            ) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
+                use futures::StreamExt;
+                self.sends
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(body["model"], "gpt-search");
+                assert_eq!(body["tools"][0]["type"], "web_search");
+                let call = json!({"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"Rust"}});
+                let citation = json!({"type":"url_citation","url":"https://rust-lang.org","title":"Rust","start_index":0,"end_index":4});
+                let mut events = vec![
+                    json!({"type":"response.created","response":{"id":"resp_1","model":"gpt-search"}}),
+                    json!({"type":"response.output_item.added","output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"in_progress"}}),
+                    json!({"type":"response.output_item.done","output_index":0,"item":call}),
+                    json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"Rust"}),
+                    json!({"type":"response.output_text.annotation.added","output_index":1,"content_index":0,"annotation":citation}),
+                    json!({"type":"response.completed","response":{"id":"resp_1","model":"gpt-search","status":"completed","output":[call,{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Rust","annotations":[citation]}]}],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}),
+                ];
+                if self.partial {
+                    events.pop(); // No response.completed snapshot arrives.
+                    events.push(json!({"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Rust","annotations":[citation]}]}}));
+                }
+                let mut chunks = events
+                    .into_iter()
+                    .map(|event| Ok(format!("data: {event}\n\n").into()))
+                    .collect::<Vec<_>>();
+                if self.partial {
+                    chunks.push(Err(sdk::protocol::LlmError::StreamInterrupted {
+                        message: "connection lost after citation".into(),
+                    }));
+                }
+                Ok(sdk::StreamResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: futures::stream::iter(chunks).boxed(),
+                })
+            }
+        }
+        for partial in [false, true] {
+            let mut profile: ProviderProfile = serde_json::from_value(json!({
+            "provider_id":"open_ai","profile_name":"search-openai","base_url":"https://api.openai.com/v1","protocol":"open_ai_responses","auth":"none","credential":{"type":"none"},
+            "models":[{"display_model":"gpt-search","request_model":"gpt-search","billing_model":"gpt-search","capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
+        })).unwrap();
+            profile.protocol = ProtocolFamily::OpenAiResponses;
+            let mut wire: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
+            "provider_id":"openai","profile_name":"search-openai","base_url":"https://api.openai.com/v1","protocol":"open_ai_responses","auth":"none","models":[],"extra":{"web_search":"openai_responses"}
+        })).unwrap();
+            wire.regions = sdk::protocol::Region::all();
+            profile.wire_profile = Some(wire);
+            let client = Arc::new(
+                DefaultLlmClient::from_config(ClientConfig {
+                    providers: vec![profile],
+                })
+                .unwrap(),
+            );
+            let transport = Arc::new(SearchTransport {
+                partial,
+                sends: Default::default(),
+            });
+            let adapter = ProviderApiAdapter::new(Arc::new(ApiService::new(
+                client,
+                transport.clone(),
+                SubscriberState::default(),
+                UserAgentEnv::default(),
+                "test",
+                None,
+                None,
+            )));
+            let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
+            let request = tool_api::HostedSearchRequest {
+                model: "gpt-search".into(),
+                profile: Some("search-openai".into()),
+                query: "Rust".into(),
+                allowed_domains: vec![],
+                blocked_domains: vec![],
+            };
+            assert!(adapter.supports_request(&request));
+            let result = adapter.search(request, progress).await.unwrap();
+            assert_eq!(result.searches, 1);
+            assert!(updates.try_recv().is_ok());
+            assert!(
+                updates.try_recv().is_err(),
+                "duplicated final output counted twice"
+            );
+            assert_eq!(
+                transport.sends.load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "interrupted search must not be resent"
+            );
+            if !partial {
+                assert_eq!((result.input_tokens, result.output_tokens), (7, 3));
+            }
+            let hits = result
+                .results
+                .iter()
+                .filter_map(|entry| match entry {
+                    tool_api::hosted_search::SearchResultEntry::Hit(value) => {
+                        value["content"].as_array()
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                hits.len(),
+                1,
+                "stream and terminal citations must be deduplicated"
+            );
+            assert_eq!(hits[0]["url"], "https://rust-lang.org");
+            assert!(result.results.iter().any(|entry| matches!(entry, tool_api::hosted_search::SearchResultEntry::Text(text) if text == "Rust")));
+            assert_eq!(result.results.iter().any(|entry| matches!(entry, tool_api::hosted_search::SearchResultEntry::Text(text) if text.contains("incomplete"))), partial);
+        }
+    }
+    #[tokio::test]
+    async fn hosted_search_gemini_reports_queries_once_per_grounding_snapshot() {
+        use llm_runtime::services::sdk;
+        use serde_json::json;
+        use tool_api::HostedWebSearchClient;
+        struct SearchTransport {
+            interrupted: bool,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl llm_runtime::Transport for SearchTransport {
+            async fn send(
+                &self,
+                request: sdk::HttpRequest,
+            ) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
+                use futures::StreamExt;
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                assert!(request.url.contains("gemini-search"));
+                assert!(body["tools"][0].get("googleSearch").is_some());
+                let grounding = json!({"webSearchQueries":["Rust","Rust docs"],"groundingChunks":[{"web":{"uri":"https://rust-lang.org","title":"Rust"}}]});
+                let mut events = vec![
+                    json!({"modelVersion":"gemini-search","candidates":[{"content":{"role":"model","parts":[{"text":"Rust"}]},"groundingMetadata":grounding}]}),
+                    json!({"candidates":[{"content":{"role":"model","parts":[]},"groundingMetadata":grounding,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10}}),
+                ];
+                if self.interrupted {
+                    events.pop();
+                }
+                let mut chunks = events
+                    .into_iter()
+                    .map(|event| Ok(format!("data: {event}\n\n").into()))
+                    .collect::<Vec<_>>();
+                if self.interrupted {
+                    chunks.push(Err(sdk::protocol::LlmError::StreamInterrupted {
+                        message: "lost after grounding".into(),
+                    }));
+                }
+                Ok(sdk::StreamResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: futures::stream::iter(chunks).boxed(),
+                })
+            }
+        }
+        for interrupted in [false, true] {
+            let mut profile: ProviderProfile = serde_json::from_value(json!({
+            "provider_id":"gemini","profile_name":"search-google","base_url":"https://generativelanguage.googleapis.com/v1beta","protocol":"gemini_generate_content","auth":"none","credential":{"type":"none"},
+            "models":[{"display_model":"gemini-search","request_model":"gemini-search","billing_model":"gemini-search","capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
+        })).unwrap();
+            profile.protocol = ProtocolFamily::GeminiGenerateContent;
+            let mut wire: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
+            "provider_id":"gemini","profile_name":"search-google","base_url":"https://generativelanguage.googleapis.com/v1beta","protocol":"gemini_generate_content","auth":"none","models":[],"extra":{"web_search":"gemini"}
+        })).unwrap();
+            wire.regions = sdk::protocol::Region::all();
+            profile.wire_profile = Some(wire);
+            let client = Arc::new(
+                DefaultLlmClient::from_config(ClientConfig {
+                    providers: vec![profile],
+                })
+                .unwrap(),
+            );
+            let transport = Arc::new(SearchTransport {
+                interrupted,
+                calls: Default::default(),
+            });
+            let adapter = ProviderApiAdapter::new(Arc::new(ApiService::new(
+                client,
+                transport.clone(),
+                SubscriberState::default(),
+                UserAgentEnv::default(),
+                "test",
+                None,
+                None,
+            )));
+            let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
+            let request = tool_api::HostedSearchRequest {
+                model: "gemini-search".into(),
+                profile: Some("search-google".into()),
+                query: "Rust".into(),
+                allowed_domains: vec![],
+                blocked_domains: vec![],
+            };
+            assert!(adapter.supports_request(&request));
+            let result = adapter.search(request, progress).await.unwrap();
+            assert_eq!(result.searches, 2);
+            assert!(updates.try_recv().is_ok());
+            assert!(updates.try_recv().is_ok());
+            assert!(
+                updates.try_recv().is_err(),
+                "duplicated final output counted twice"
+            );
+            if !interrupted {
+                assert_eq!((result.input_tokens, result.output_tokens), (7, 3));
+            }
+            assert_eq!(transport.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(result.results.iter().any(|entry| matches!(entry, tool_api::hosted_search::SearchResultEntry::Text(text) if text.contains("incomplete"))), interrupted);
+            assert!(result.results.iter().any(|entry|matches!(entry,tool_api::hosted_search::SearchResultEntry::Hit(value) if value.to_string().contains("rust-lang.org"))));
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
+    fn supports(&self, model: &str, profile: Option<&str>) -> bool {
+        self.service.supports_hosted_search(model, profile)
+    }
+    fn supports_request(&self, request: &tool_api::HostedSearchRequest) -> bool {
+        self.service.supports_hosted_search_config(
+            &request.model,
+            request.profile.as_deref(),
+            &llm_runtime::services::sdk::protocol::WebSearchConfig {
+                allowed_domains: request.allowed_domains.clone(),
+                blocked_domains: request.blocked_domains.clone(),
+                max_uses: self
+                    .service
+                    .hosted_search_max_uses(&request.model, request.profile.as_deref()),
+            },
+        )
+    }
+    async fn search(
+        &self,
+        input: tool_api::HostedSearchRequest,
+        progress: tokio::sync::mpsc::UnboundedSender<()>,
+    ) -> Result<tool_api::HostedSearchOutput, tool_api::HostedSearchError> {
+        use futures::StreamExt;
+        use llm_runtime::services::sdk;
+        use llm_runtime::{ContentBlock, LlmEvent};
+        let mut request = llm_runtime::LlmRequest::new(input.model);
+        request.profile = input.profile;
+        request.max_tokens = Some(4096);
+        request.query_source = Some("web_search_tool".into());
+        request.system = vec![llm_runtime::SystemBlock {
+            text: "You are an assistant for performing a web search tool use".into(),
+            cache_control: None,
+        }];
+        request.messages = vec![llm_runtime::Message {
+            role: "user".into(),
+            content: vec![ContentBlock::Text {
+                text: format!("Perform a web search for the query: {}", input.query),
+                cache_control: None,
+            }],
+        }];
+        request.hosted_tools = vec![sdk::protocol::HostedTool::WebSearch(
+            sdk::protocol::WebSearchConfig {
+                allowed_domains: input.allowed_domains,
+                blocked_domains: input.blocked_domains,
+                max_uses: self
+                    .service
+                    .hosted_search_max_uses(&request.model, request.profile.as_deref()),
+            },
+        )];
+        let usage = Arc::new(std::sync::Mutex::new(llm_runtime::Usage::default()));
+        let searches = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // A failed stream may never deliver its terminal metadata snapshot.
+        // Retain normalized citations independently of completed text blocks.
+        let citations = Arc::new(std::sync::Mutex::new(
+            sdk::protocol::WebSearchResult::default(),
+        ));
+        let observed_citations = citations.clone();
+        let u = usage.clone();
+        let n = searches.clone();
+        let mut search_progress = sdk::hosted_search::SearchProgress::default();
+        let stream = self
+            .service
+            .stream_request(request)
+            .await
+            .map_err(hosted_search_error)?
+            .inspect(move |event| match event {
+                Ok(LlmEvent::WebSearch { result }) => {
+                    observed_citations
+                        .lock()
+                        .expect("search citations")
+                        .citations
+                        .extend(result.citations.iter().cloned());
+                    let added = search_progress.observe(result);
+                    n.fetch_add(added, std::sync::atomic::Ordering::Relaxed);
+                    for _ in 0..added {
+                        let _ = progress.send(());
+                    }
+                }
+                Ok(LlmEvent::ContentBlockStart { content_block, .. }) => {
+                    if sdk::hosted_search::search_started(
+                        &serde_json::to_value(content_block).unwrap_or_default(),
+                    ) {
+                        n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let _ = progress.send(());
+                    }
+                }
+                Ok(LlmEvent::MessageStart { response }) | Ok(LlmEvent::Completed { response }) => {
+                    *u.lock().expect("search usage") = response.usage.clone();
+                }
+                Ok(LlmEvent::MessageDelta {
+                    usage: Some(usage), ..
+                }) => {
+                    *u.lock().expect("search usage") = usage.clone();
+                }
+                _ => {}
+            })
+            .boxed();
+        let (blocks, metadata, partial) =
+            match llm_runtime::stream_accumulator::accumulate_stream_salvaging(stream).await {
+                Ok(response) => (response.content, response.provider_metadata, None),
+                Err((partial, error))
+                    if !partial.is_empty()
+                        || !citations
+                            .lock()
+                            .expect("search citations")
+                            .citations
+                            .is_empty() =>
+                {
+                    (partial, serde_json::Value::Null, Some(error.to_string()))
+                }
+                Err((_, error)) => return Err(hosted_search_error(error)),
+            };
+        let native = blocks
+            .iter()
+            .map(|block| serde_json::to_value(block).unwrap_or_default())
+            .collect::<Vec<_>>();
+        let mut results = sdk::hosted_search::parse_response_content(&native);
+        let mut observations = metadata
+            .get("llm_client")
+            .and_then(|v| v.get("web_search"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let captured = std::mem::take(&mut *citations.lock().expect("search citations"));
+        if !captured.citations.is_empty() {
+            observations.push(serde_json::to_value(captured).expect("normalized search citations"));
+        }
+        // The SDK projects both sources together and deduplicates their URLs.
+        sdk::hosted_search::append_citations(
+            &mut results,
+            Some(&serde_json::Value::Array(observations)),
+        );
+        if partial.is_some() {
+            results.push(sdk::hosted_search::SearchResultEntry::Text(
+                "Search response was interrupted; these results are incomplete.".into(),
+            ));
+        }
+        let usage = usage.lock().expect("search usage");
+        Ok(tool_api::HostedSearchOutput {
+            results,
+            searches: usage
+                .server_tool_use
+                .as_ref()
+                .map(|u| u.web_search_requests)
+                .unwrap_or_else(|| searches.load(std::sync::atomic::Ordering::Relaxed)),
+            input_tokens: usage.billable_tokens.input,
+            output_tokens: usage.billable_tokens.output,
+        })
+    }
+}
+
+fn hosted_search_error(error: llm_runtime::LlmError) -> tool_api::HostedSearchError {
+    use llm_runtime::LlmError;
+    let http_status = error.http_status().or(match &error {
+        LlmError::RateLimited { .. } => Some(429),
+        LlmError::Overloaded { .. } => Some(529),
+        LlmError::RequestTooLarge => Some(413),
+        _ => None,
+    });
+    tool_api::HostedSearchError {
+        http_status,
+        timeout: matches!(error, LlmError::TransportTimeout { .. }),
+        message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod hosted_error_tests {
+    use super::*;
+    #[test]
+    fn hosted_search_errors_keep_status_and_timeout() {
+        for (error, status, timeout) in [
+            (
+                llm_runtime::LlmError::RateLimited {
+                    retry_after: None,
+                    scope: None,
+                },
+                Some(429),
+                false,
+            ),
+            (
+                llm_runtime::LlmError::Authentication {
+                    message: "401 unauthorized".into(),
+                },
+                Some(401),
+                false,
+            ),
+            (
+                llm_runtime::LlmError::TransportTimeout {
+                    message: "deadline".into(),
+                },
+                None,
+                true,
+            ),
+            (
+                llm_runtime::LlmError::Transport {
+                    message: "disconnected".into(),
+                },
+                None,
+                false,
+            ),
+        ] {
+            let mapped = hosted_search_error(error);
+            assert_eq!(mapped.http_status, status);
+            assert_eq!(mapped.timeout, timeout);
+        }
     }
 }

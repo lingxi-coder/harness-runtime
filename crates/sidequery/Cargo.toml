@@ -27,6 +27,7 @@ tokio = { version = "1", features = ["sync"] }
 tracing.workspace = true
 
 [dev-dependencies]
+llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 # Test-only: asserts the Session-backend `query_json_schema` path emits the
 # `tengu_api_query_source` telemetry event (F003) with an in-memory sink.
 telemetry = { path = "../telemetry" }

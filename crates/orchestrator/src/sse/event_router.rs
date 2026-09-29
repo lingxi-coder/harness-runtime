@@ -88,6 +88,9 @@ pub async fn dispatch_event(
     suppress_live_text: bool,
 ) -> Result<RouterAction, StreamingError> {
     match event {
+        // Hosted search consumers inspect this semantic event separately. Main
+        // conversation attribution remains in the terminal metadata snapshot.
+        LlmEvent::WebSearch { .. } => Ok(RouterAction::Continue),
         LlmEvent::MessageStart { response } => {
             // No-op for state; the loop already knows the model + id from
             // the turn invocation. claude-code captures `partialMessage`

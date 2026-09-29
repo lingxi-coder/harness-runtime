@@ -4,7 +4,7 @@ use super::*;
 /// carries an attempt registrar, so build a real one over an unreachable
 /// service rather than reintroducing an unregistered executor shape.
 struct UnreachableTransport;
-impl llm_runtime::Transport for UnreachableTransport {
+impl llm_runtime::test_support::FixtureTransport for UnreachableTransport {
     fn execute<'a>(
         &'a self,
         _: &'a llm_runtime::ProviderRequest,
@@ -19,11 +19,12 @@ impl llm_runtime::Transport for UnreachableTransport {
         _: &'a llm_runtime::ProviderRequest,
     ) -> llm_runtime::transport::BoxFuture<
         'a,
-        Result<llm_runtime::transport::StreamingResponse, llm_runtime::LlmError>,
+        Result<llm_runtime::test_support::StreamingResponse, llm_runtime::LlmError>,
     > {
         Box::pin(async { panic!("preflight_error() must not stream") })
     }
 }
+llm_runtime::impl_fixture_transport!(UnreachableTransport);
 
 fn unreachable_attempts() -> Arc<fusion_attempts::DesktopFusionAttempts> {
     let pricing = Arc::new(cost::PricingCatalog::builtin_reference());

@@ -797,6 +797,38 @@ fn extra_metadata_object_uncached() -> Option<serde_json::Map<String, serde_json
 }
 
 impl ApiService {
+    pub fn supports_hosted_search(&self, model: &str, profile: Option<&str>) -> bool {
+        self.client
+            .search_profile(model, profile)
+            .is_some_and(lingxi_llm_client::hosted_search::supports)
+    }
+    pub fn supports_hosted_search_config(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        config: &lingxi_llm_client::protocol::WebSearchConfig,
+    ) -> bool {
+        self.client
+            .search_profile(model, profile)
+            .is_some_and(|profile| {
+                lingxi_llm_client::hosted_search::supports_with_config(profile, config)
+            })
+    }
+    pub fn hosted_search_max_uses(&self, model: &str, profile: Option<&str>) -> Option<u32> {
+        self.client
+            .search_profile(model, profile)
+            .filter(|p| {
+                p.extra
+                    .get("web_search")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("anthropic")
+            })
+            .map(|_| 8)
+    }
+
+    pub fn transport(&self) -> Arc<dyn Transport> {
+        self.transport.clone()
+    }
     /// Execute a canonical side-query request through the same host hooks and
     /// retry driver as the high-level side-query entry points.
     pub async fn execute_side_query_request(
@@ -1809,31 +1841,11 @@ impl ApiService {
         if allowed {
             return;
         }
-        if let Some(body) = prepared.provider_request.body_json.as_object_mut() {
-            body.remove("speed");
-        }
-        let Some(header) = prepared
-            .provider_request
-            .headers
-            .get("anthropic-beta")
-            .cloned()
-        else {
-            return;
-        };
-        let retained = header
-            .split(',')
-            .map(str::trim)
-            .filter(|part| !part.is_empty() && *part != FAST_MODE)
-            .collect::<Vec<_>>()
-            .join(",");
-        if retained.is_empty() {
-            prepared.provider_request.headers.remove("anthropic-beta");
-        } else {
-            prepared
-                .provider_request
-                .headers
-                .insert("anthropic-beta".to_string(), retained);
-        }
+        lingxi_llm_client::providers::anthropic::request_policy::remove_fast(
+            &mut prepared.provider_request.body_json,
+            &mut prepared.provider_request.headers,
+            FAST_MODE,
+        );
     }
 
     /// `true` for protocols that speak to Anthropic models (first-party or via
@@ -1887,39 +1899,10 @@ impl ApiService {
     /// `CLAUDE_CODE_EXTRA_METADATA` at [`ApiService::build_api_metadata_user_id`])
     /// — these are wire-parity vars preserved verbatim through the `LINGXI_` rename.
     fn parse_extra_body(betas: &[String]) -> serde_json::Map<String, serde_json::Value> {
-        let mut r = serde_json::Map::new();
-        // claude-code enters the parse branch only when the env var is truthy; an
-        // empty string is falsy in JS, so an empty value is a silent no-op.
-        if let Some(map) = extra_body_object() {
-            r = map;
-        }
-        if !betas.is_empty() {
-            match r.get_mut("anthropic_beta") {
-                // Extra body already carries the array → append only the missing
-                // entries, preserving the extra body's order (claude-code's
-                // `[...o, ...n.filter((s)=>!o.includes(s))]`).
-                Some(serde_json::Value::Array(existing)) => {
-                    for b in betas {
-                        if !existing.iter().any(|v| v.as_str() == Some(b.as_str())) {
-                            existing.push(serde_json::Value::String(b.clone()));
-                        }
-                    }
-                }
-                _ => {
-                    r.insert(
-                        "anthropic_beta".to_string(),
-                        serde_json::Value::Array(
-                            betas
-                                .iter()
-                                .cloned()
-                                .map(serde_json::Value::String)
-                                .collect(),
-                        ),
-                    );
-                }
-            }
-        }
-        r
+        lingxi_llm_client::providers::anthropic::request_policy::beta_body(
+            extra_body_object().unwrap_or_default(),
+            betas,
+        )
     }
 
     /// Merge `CLAUDE_CODE_EXTRA_BODY` into a prepared Anthropic-family request body
@@ -1954,47 +1937,11 @@ impl ApiService {
         } else {
             Vec::new()
         };
-        let mut extra = Self::parse_extra_body(&body_betas);
-        if extra.is_empty() {
-            return;
-        }
-        let Some(body) = prepared.provider_request.body_json.as_object_mut() else {
-            return;
-        };
-        // Peel the extra body's output_config (claude-code `delete _i.output_config`).
-        let extra_output_config = extra.remove("output_config");
-        // Capture the codec-computed top-level `speed` so the generic extra spread
-        // can't clobber it: claude-code spreads the extra body (`...Vs`) BEFORE the
-        // computed `...ze!==void 0&&{speed:ze}`, so a computed speed wins over an
-        // extra one. When no speed was computed (`ze` undefined) the spread is
-        // skipped and an extra-body `speed` survives.
-        let computed_speed = body.get("speed").cloned();
-        // Spread the remaining keys first (claude-code `...va, ..._i`).
-        for (k, v) in extra {
-            body.insert(k, v);
-        }
-        // Re-apply the computed speed on top (computed wins, position preserved).
-        if let Some(speed) = computed_speed {
-            body.insert("speed".to_string(), speed);
-        }
-        // Then merge/emit output_config last (claude-code `...{output_config:Ii}`):
-        // start from the extra body's copy, overlay the computed one (computed wins).
-        if let Some(serde_json::Value::Object(extra_oc)) = extra_output_config {
-            let mut merged = extra_oc;
-            if let Some(serde_json::Value::Object(computed)) = body.get("output_config") {
-                for (k, v) in computed {
-                    merged.insert(k.clone(), v.clone());
-                }
-            }
-            if merged.is_empty() {
-                body.remove("output_config");
-            } else {
-                body.insert(
-                    "output_config".to_string(),
-                    serde_json::Value::Object(merged),
-                );
-            }
-        }
+        let extra = Self::parse_extra_body(&body_betas);
+        lingxi_llm_client::providers::anthropic::request_policy::merge_extra(
+            &mut prepared.provider_request.body_json,
+            extra,
+        );
     }
 
     /// (cc 2.1.219) Opt-in `anthropic-dispatch-id: v2s` resolver —
@@ -2549,7 +2496,7 @@ impl ApiService {
         // provider-side lookups. `None` only when both are absent (so a stale id
         // never leaks onto a later line).
         *self.last_request_id.lock().unwrap() =
-            match crate::transport_bridge::extract_response_request_id(headers) {
+            match crate::execution::extract_response_request_id(headers) {
                 Some(server_id) => Some((server_id, RequestIdOrigin::Server)),
                 None if !client_request_id.is_empty() => {
                     tracing::debug!(
@@ -2985,19 +2932,28 @@ impl ApiService {
             // Strip rejected thinking before encode so Gemini / OpenAI-compat
             // thinking models can prepare. DeepSeek / Kimi skip this.
             // prepare → inject headers → execute.
-            let mut prepared = match self.client.prepare_on(&req, self.transport.clone()).await {
-                Ok(p) => p,
-                Err(e) => {
-                    // prepare() errors (auth, capability, encoding) are always terminal.
+            let timeout = crate::execution::non_stream_timeout();
+            let preparing = tokio::time::Instant::now();
+            let prepared = crate::execution::non_stream_bound(timeout, async {
+                let mut prepared = self.client.prepare_on(&req, self.transport.clone()).await?;
+                Self::log_deepseek_prepared_request(&req.model, &prepared, false);
+                self.inject_headers(&mut prepared, &request_id, dispatch);
+                self.client.seal_prepared(&mut prepared).await?;
+                Ok(prepared)
+            })
+            .await;
+            let mut prepared = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
                     telemetry::emit_failed(
                         &self.analytics,
                         &req.model,
                         &request_id,
-                        Self::error_kind(&e),
-                        Self::status_of(&e),
+                        Self::error_kind(&error),
+                        Self::status_of(&error),
                     )
                     .await;
-                    return Err(e);
+                    return Err(error);
                 }
             };
             if !connections_captured {
@@ -3005,9 +2961,8 @@ impl ApiService {
                 connection_chain.clone_from(&prepared.route.resolved_route.connection_chain);
                 failover = prepared.route.resolved_route.failover;
             }
-            Self::log_deepseek_prepared_request(&req.model, &prepared, false);
-            self.inject_headers(&mut prepared, &request_id, dispatch);
-            self.client.seal_prepared(&mut prepared).await?;
+            // Pause the provider deadline while waiting for host admission.
+            let remaining = timeout.saturating_sub(preparing.elapsed());
             let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
             let call = prepared.wire_call.take().expect("sealed call");
             let pricing = (self.estimator.is_some() || req.model_attempt.is_some()).then(|| {
@@ -3022,17 +2977,18 @@ impl ApiService {
                     },
                 )
             });
-            let resp_result = match call
-                .dispatch_once_with(|| {
-                    attempt
-                        .mark_dispatched()
-                        .map_err(crate::execution::wire_error)
-                })
-                .await
-            {
-                Ok(received) => received.collect().await.map_err(crate::upstream::error),
-                Err(error) => Err(crate::upstream::error(error)),
-            };
+            let resp_result = crate::execution::non_stream_bound(remaining, async {
+                let received = call
+                    .dispatch_once_with(|| {
+                        attempt
+                            .mark_dispatched()
+                            .map_err(crate::execution::wire_error)
+                    })
+                    .await
+                    .map_err(crate::upstream::error)?;
+                received.collect().await.map_err(crate::upstream::error)
+            })
+            .await;
 
             match resp_result {
                 Err(transport_err) => {
@@ -4260,11 +4216,29 @@ impl ApiService {
                     );
                     // Connect-phase status ≥ 400: drain and decode as error.
                     if streaming.status() >= 400 {
-                        let collected = match streaming.collect().await {
+                        // Error responses do not enter the event watchdog below.
+                        // Bound their body collection too, respecting the host's
+                        // explicit watchdog-disable setting.
+                        let timeout = self
+                            .stream_idle_timeout_override
+                            .or_else(crate::model::stream_watchdog::resolve_stream_idle_timeout);
+                        let collect =
+                            async { streaming.collect().await.map_err(crate::upstream::error) };
+                        let result = match timeout {
+                            Some(timeout) => tokio::time::timeout(timeout, collect)
+                                .await
+                                .unwrap_or_else(|_| {
+                                    Err(LlmError::TransportTimeout {
+                                        message: "Timed out reading provider error response".into(),
+                                    })
+                                }),
+                            None => collect.await,
+                        };
+                        let collected = match result {
                             Ok(collected) => collected,
                             Err(error) => {
                                 attempt.finish().await?;
-                                return Err(crate::upstream::error(error));
+                                return Err(error);
                             }
                         };
                         let body_json = crate::execution::response(collected.response()).body_json;

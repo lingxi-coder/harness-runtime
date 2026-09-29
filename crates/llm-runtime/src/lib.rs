@@ -24,7 +24,12 @@
 // which records two near-misses where it said "dead" about live code.
 #![allow(dead_code)]
 
+extern crate self as llm_runtime;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub use lingxi_llm_client::protocol::Region;
+#[cfg(any(test, feature = "test-support"))]
+pub use test_support::{FrameStream, ResponsesWebSocketTransportSession, StreamingResponse};
 mod attempt_pricing;
 pub use attempt_pricing::{AttemptPriceBounds, AttemptTokenRates};
 
@@ -66,7 +71,6 @@ pub mod stream_accumulator;
 pub mod strict_schema;
 pub mod thinking_scope;
 pub mod transport;
-pub mod transport_bridge;
 pub mod types;
 pub mod unicode_repair;
 mod upstream;
@@ -144,10 +148,7 @@ pub use route::Route;
 pub use service::{ApiService, RetryInfo, RetryReporter, SubscriberState};
 pub use services::{ProviderServiceSnapshot, ProviderServices};
 pub use ssl::{detect_ssl_code, is_ssl_code, ssl_hint};
-pub use transport::{
-    BoxFuture, FrameStream, ResponsesWebSocketTransportSession, StreamingResponse, Transport,
-};
-pub use transport_bridge::{from_http, LlmTransportBridge};
+pub use transport::{BoxFuture, Transport};
 pub use types::{CostEstimate, PricingModelRef, ProviderId, ServerToolUsage, TokenUsage, Usage};
 
 tokio::task_local! {

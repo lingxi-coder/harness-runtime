@@ -34,7 +34,7 @@ impl cost::CostPersistence for DurableQueue {
 }
 
 struct Frames(std::collections::VecDeque<llm_runtime::RawStreamFrame>);
-impl llm_runtime::transport::FrameStream for Frames {
+impl llm_runtime::test_support::FrameStream for Frames {
     fn next_frame(
         &mut self,
     ) -> llm_runtime::transport::BoxFuture<'_, Result<Option<llm_runtime::RawStreamFrame>, LlmError>>
@@ -46,7 +46,7 @@ struct Wire {
     calls: Arc<AtomicUsize>,
     complete: bool,
 }
-impl llm_runtime::Transport for Wire {
+impl llm_runtime::test_support::FixtureTransport for Wire {
     fn execute<'a>(
         &'a self,
         _: &'a ProviderRequest,
@@ -73,7 +73,7 @@ impl llm_runtime::Transport for Wire {
         _: &'a ProviderRequest,
     ) -> llm_runtime::transport::BoxFuture<
         'a,
-        Result<llm_runtime::transport::StreamingResponse, LlmError>,
+        Result<llm_runtime::test_support::StreamingResponse, LlmError>,
     > {
         Box::pin(async {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -84,7 +84,7 @@ impl llm_runtime::Transport for Wire {
                 usage["total_tokens"] = json!(13);
             }
             let chunk = json!({"id":"fake","model":"wire","choices":[{"index":0,"delta":{"role":"assistant","content":"answer"},"finish_reason":"stop"}],"usage":usage});
-            Ok(llm_runtime::transport::StreamingResponse {
+            Ok(llm_runtime::test_support::StreamingResponse {
                 status: 200,
                 headers: Default::default(),
                 frames: Box::new(Frames(
@@ -98,6 +98,7 @@ impl llm_runtime::Transport for Wire {
         })
     }
 }
+llm_runtime::impl_fixture_transport!(Wire);
 
 struct DurableHarness {
     service: Arc<llm_runtime::ApiService>,
@@ -965,7 +966,7 @@ async fn desktop_attempt_default_run_cap_keeps_session_and_output_limits() {
 }
 
 struct NoTransport;
-impl llm_runtime::Transport for NoTransport {
+impl llm_runtime::test_support::FixtureTransport for NoTransport {
     fn execute<'a>(
         &'a self,
         _: &'a ProviderRequest,
@@ -978,11 +979,12 @@ impl llm_runtime::Transport for NoTransport {
         _: &'a ProviderRequest,
     ) -> llm_runtime::transport::BoxFuture<
         'a,
-        Result<llm_runtime::transport::StreamingResponse, LlmError>,
+        Result<llm_runtime::test_support::StreamingResponse, LlmError>,
     > {
         Box::pin(async { panic!("offline host test must not stream") })
     }
 }
+llm_runtime::impl_fixture_transport!(NoTransport);
 
 fn tracker_and_budget() -> (Arc<cost::CostTracker>, Arc<cost::BudgetEnforcer>) {
     let (tx, _) = tokio::sync::mpsc::channel(1);

@@ -20,7 +20,6 @@ use llm_runtime::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use llm_runtime::oauth::anthropic::handle::OAuthHandle;
 use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
 use llm_runtime::oauth::openai as openai_oauth;
-use llm_runtime::LlmTransportBridge;
 use llm_runtime::{CredentialProvider, DefaultLlmClient, Transport};
 use mcp::registry::OAuthDeps;
 use mcp::{ConfigScope as McpConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
@@ -40,7 +39,6 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{Mutex, RwLock};
-use tool_api::AnthropicRequestBuilder;
 use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 
@@ -55,8 +53,8 @@ use super::{
     mobile_typescript_lsp_mode, mobile_typescript_lsp_ready, model_listings, model_preference,
     model_visible_mobile_cwd, permission_preference, provider_model_catalog_from_listings,
     resolve_default_model_ref, run_app_boot_backfill_sweep, settings_commands,
-    settle_mobile_loop_turn, ActiveTurn, DynHttp, MobileAppAgentExecutor, MobileBuildError,
-    MobileConfig, MobileEngineError, MobileEngineHandle, MobileMcpReloadJob, MobileMsgQueueInput,
+    settle_mobile_loop_turn, ActiveTurn, MobileAppAgentExecutor, MobileBuildError, MobileConfig,
+    MobileEngineError, MobileEngineHandle, MobileMcpReloadJob, MobileMsgQueueInput,
     MobileOAuthManager, MobileRuntime, MobileSessionAgentObserver, MobileWakeupDelivery,
     TurnLifecycleListener, LOCAL_APPS_MCP_TIMEOUT_MS, MOBILE_CRON_HANDLES,
 };
@@ -432,9 +430,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // the ApiService got `None`. Mirrors the desktop root's single logEvent sink.
     let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
 
-    // (2a) Task 10: DefaultLlmClient over LlmTransportBridge.
-    //      Mobile uses the platform's `Arc<dyn HttpTransport>` wrapped in `DynHttp`
-    //      so the device backend is preserved; no desktop-only deps are pulled.
+    // Model networking is owned by the shared SDK.
     //
     //      Phase 2a-mobile: assemble the FULL multi-provider client config
     //      (Anthropic + builtin catalog presets + settings `providers`) + chains
@@ -443,8 +439,10 @@ pub(super) async fn build_mobile_inner_with_ask(
     //      through the provider credential ids below. Anthropic's API-key flag
     //      intentionally remains true when both credentials exist because the
     //      shared assembler gives API Key precedence over OAuth.
-    let llm_transport: Arc<dyn Transport> =
-        Arc::new(LlmTransportBridge::new(DynHttp(http.clone())));
+    let llm_transport: Arc<dyn Transport> = Arc::new(
+        platform_common::provider_transport()
+            .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
+    );
     let stored_anthropic_key = credentials.get_anthropic_api_key().await.ok().flatten();
     let has_api_key = !cfg.api_key.trim().is_empty() || stored_anthropic_key.is_some();
     let has_anthropic_oauth = anthropic_oauth_state.is_some();
@@ -692,13 +690,6 @@ pub(super) async fn build_mobile_inner_with_ask(
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =
         streaming_override.unwrap_or(provider_adapter.clone() as Arc<dyn StreamingApiClient>);
-    // WebSearch builds Anthropic `POST /v1/messages` requests via its own
-    // provider (server-side web search is Anthropic-only in v1).
-    let tool_provider = Arc::new(
-        AnthropicRequestBuilder::new(cfg.api_key.clone(), Some(cfg.api_base.clone()))
-            .with_mcp_token_counter(provider_adapter.clone()),
-    );
-
     // `/login` remains the Anthropic trait-shaped command. Provider settings
     // use `oauth` above so ChatGPT's account-shaped identity stays separate.
     let auth: Arc<dyn AuthHandle> = anthropic_oauth_handle.clone();
@@ -1782,7 +1773,8 @@ pub(super) async fn build_mobile_inner_with_ask(
             SandboxPlatform::Linux
         },
         http: http.clone(),
-        provider: tool_provider,
+        hosted_search: Some(provider_adapter.clone()),
+        mcp_token_counter: Some(provider_adapter.clone()),
         default_model: orch_cfg.model.clone(),
         // Mobile has no settings.json-backed WebSearch config provider (desktop
         // injects `DesktopWebSearchConfigProvider`); WebSearch falls back to its
@@ -2224,7 +2216,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         Some(orchestrator::prompt::build_memdir_prefetch_from_anthropic(
             cfg.api_key.clone(),
             Some(cfg.api_base.clone()),
-            http.clone(),
+            api_service.transport(),
             Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
                 as Arc<dyn platform_api::RuntimeSpawner>,
             &home,
