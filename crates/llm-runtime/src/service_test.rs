@@ -256,7 +256,7 @@ mod tests {
     impl crate::ModelAttemptHooks for Arc<AttemptProbe> {
         async fn begin(
             &self,
-            _: &platform_api::ModelAttemptContext,
+            _: &lingxi_core::host::ModelAttemptContext,
             request: &LlmRequest,
             prepared: &crate::PreparedLlmCall,
         ) -> Result<Box<dyn crate::ModelAttemptLease>, LlmError> {
@@ -486,8 +486,8 @@ mod tests {
             LlmRequest::new("claude-sonnet-4-20250514").with_user_text("fake request");
         request.input.max_tokens = Some(100);
         request.execution.model_attempt = Some(
-            platform_api::ModelAttemptRun::new(Arc::new(()))
-                .context(platform_api::ModelAttemptStage::Panel, Some(0))
+            lingxi_core::host::ModelAttemptRun::new(Arc::new(()))
+                .context(lingxi_core::host::ModelAttemptStage::Panel, Some(0))
                 .unwrap(),
         );
         request
@@ -769,7 +769,7 @@ mod tests {
     impl crate::ModelAttemptHooks for HookRetirementProbe {
         async fn begin(
             &self,
-            _: &platform_api::ModelAttemptContext,
+            _: &lingxi_core::host::ModelAttemptContext,
             _: &LlmRequest,
             _: &crate::PreparedLlmCall,
         ) -> Result<Box<dyn crate::ModelAttemptLease>, LlmError> {
@@ -1394,8 +1394,8 @@ mod tests {
 
     #[test]
     fn api_service_interactivity_is_session_local() {
-        let prior = platform_api::session_flags::is_non_interactive_session();
-        platform_api::session_flags::set_non_interactive_session(false);
+        let prior = lingxi_core::host::session_flags::is_non_interactive_session();
+        lingxi_core::host::session_flags::set_non_interactive_session(false);
         let transport = FakeTransport::always(ProviderResponse {
             status: 200,
             headers: BTreeMap::new(),
@@ -1408,7 +1408,7 @@ mod tests {
 
         assert!(!headless.interactive_session_for_test());
         assert!(interactive.interactive_session_for_test());
-        platform_api::session_flags::set_non_interactive_session(prior);
+        lingxi_core::host::session_flags::set_non_interactive_session(prior);
     }
 
     fn make_adapter_for_protocol(
@@ -1535,7 +1535,7 @@ mod tests {
 
     fn text_user_msg(s: &str) -> ConversationMessage {
         ConversationMessage::User {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: s.to_string(),
             }],
@@ -1666,9 +1666,9 @@ mod tests {
         let convo = || {
             vec![
                 ConversationMessage::Assistant {
-                    id: protocol::MessageId::new(),
+                    id: lingxi_core::types::MessageId::new(),
                     content: vec![ContentBlock::ToolUse {
-                        id: protocol::ToolUseId::from("toolu_ref"),
+                        id: lingxi_core::types::ToolUseId::from("toolu_ref"),
                         name: "ToolSearch".to_string(),
                         input: serde_json::json!({}),
                         provider_id: Some("toolu_ref".to_string()),
@@ -1676,9 +1676,9 @@ mod tests {
                     stop_reason: None,
                 },
                 ConversationMessage::User {
-                    id: protocol::MessageId::new(),
+                    id: lingxi_core::types::MessageId::new(),
                     content: vec![ContentBlock::ToolResult {
-                        tool_use_id: protocol::ToolUseId::from("toolu_ref"),
+                        tool_use_id: lingxi_core::types::ToolUseId::from("toolu_ref"),
                         content: String::new(),
                         is_error: false,
                         provider_tool_use_id: Some("toolu_ref".to_string()),
@@ -1717,12 +1717,12 @@ mod tests {
 
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
-        let prior = platform_api::session_flags::tool_search_enabled();
+        let prior = lingxi_core::host::session_flags::tool_search_enabled();
 
         // Session gate ON, EMPTY toolset (no `ToolSearch` declaration present):
         // the ENABLED branch filters the unavailable reference against the empty
         // availability set and emits the "tools no longer available" placeholder.
-        platform_api::session_flags::set_tool_search_enabled(true);
+        lingxi_core::host::session_flags::set_tool_search_enabled(true);
         let req = adapter
             .build_request(
                 "claude-sonnet-4-20250514",
@@ -1742,7 +1742,7 @@ mod tests {
 
         // Session gate OFF: the DISABLED branch strips every reference with the
         // "tool search not enabled" placeholder, regardless of the toolset.
-        platform_api::session_flags::set_tool_search_enabled(false);
+        lingxi_core::host::session_flags::set_tool_search_enabled(false);
         let req = adapter
             .build_request(
                 "claude-sonnet-4-20250514",
@@ -1760,7 +1760,7 @@ mod tests {
             "a tool-search-disabled session must take the disabled branch"
         );
 
-        platform_api::session_flags::set_tool_search_enabled(prior);
+        lingxi_core::host::session_flags::set_tool_search_enabled(prior);
     }
 
     #[test]
@@ -2042,7 +2042,9 @@ mod tests {
     /// carries the cache_control marker, so the tool_result (in an earlier user
     /// message) is strictly within the cached prefix.
     fn tool_result_conversation() -> Vec<ConversationMessage> {
-        use protocol::{ContentBlock as PB, ConversationMessage as CM, MessageId, ToolUseId};
+        use lingxi_core::types::{
+            ContentBlock as PB, ConversationMessage as CM, MessageId, ToolUseId,
+        };
         let tool_id = ToolUseId::new();
         vec![
             CM::Assistant {
@@ -3069,7 +3071,7 @@ mod tests {
 
     #[tokio::test]
     async fn bedrock_tool_search_beta_is_in_request_body() {
-        if platform_api::env::is_env_truthy(
+        if lingxi_core::host::env::is_env_truthy(
             std::env::var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
                 .ok()
                 .as_deref(),
@@ -3124,8 +3126,8 @@ mod tests {
     // ── effective_subscriber (batch-5 Task 3: live SharedSubscription) ───────
 
     fn shared_slot(
-        snap: Option<platform_api::subscription::SubscriptionSnapshot>,
-    ) -> platform_api::subscription::SharedSubscription {
+        snap: Option<lingxi_core::host::subscription::SubscriptionSnapshot>,
+    ) -> lingxi_core::host::subscription::SharedSubscription {
         Arc::new(std::sync::RwLock::new(snap))
     }
 
@@ -3134,7 +3136,7 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter_with_subscriber(transport, SubscriberState::default())
             .with_subscription(shared_slot(Some(
-                platform_api::subscription::SubscriptionSnapshot {
+                lingxi_core::host::subscription::SubscriptionSnapshot {
                     is_subscriber: true,
                     subscription_type: Some("enterprise".to_string()),
                     ..Default::default()
@@ -3173,7 +3175,7 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter_with_subscriber(transport, SubscriberState::default())
             .with_subscription(shared_slot(Some(
-                platform_api::subscription::SubscriptionSnapshot {
+                lingxi_core::host::subscription::SubscriptionSnapshot {
                     is_subscriber: true,
                     subscription_type: Some("team".to_string()),
                     ..Default::default()
@@ -3254,7 +3256,7 @@ mod tests {
 
     #[tokio::test]
     async fn image_to_vision_model_is_allowed() {
-        use protocol::{ContentBlock, ConversationMessage, ImageSource, MessageId};
+        use lingxi_core::types::{ContentBlock, ConversationMessage, ImageSource, MessageId};
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let msgs = vec![ConversationMessage::User {
@@ -4102,9 +4104,9 @@ mod tests {
 
     // ---- MULTIMODAL.6: per-request media cap (stripExcessMediaItems) ----
 
-    fn img(n: usize) -> protocol::ContentBlock {
-        protocol::ContentBlock::Image {
-            source: protocol::ImageSource::Base64 {
+    fn img(n: usize) -> lingxi_core::types::ContentBlock {
+        lingxi_core::types::ContentBlock::Image {
+            source: lingxi_core::types::ImageSource::Base64 {
                 media_type: "image/png".to_string(),
                 data: format!("img{n}"),
             },
@@ -4117,7 +4119,7 @@ mod tests {
         }];
         content.extend(range.map(img));
         ConversationMessage::User {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content,
             is_meta: false,
             is_compact_summary: false,
@@ -4133,7 +4135,7 @@ mod tests {
             {
                 for b in content {
                     if let ContentBlock::Image {
-                        source: protocol::ImageSource::Base64 { data, .. },
+                        source: lingxi_core::types::ImageSource::Base64 { data, .. },
                     } = b
                     {
                         out.push(data.clone());
@@ -4153,10 +4155,10 @@ mod tests {
     #[test]
     fn tool_result_string_content_contributes_no_media() {
         let msgs = vec![ConversationMessage::User {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content: vec![
                 ContentBlock::ToolResult {
-                    tool_use_id: protocol::ToolUseId::new(),
+                    tool_use_id: lingxi_core::types::ToolUseId::new(),
                     content: "lots of text, no media".to_string(),
                     is_error: false,
                     provider_tool_use_id: None,
@@ -4177,9 +4179,9 @@ mod tests {
         // values; these MUST count toward the media cap (claude.ts:965-969), or an
         // image-heavy MCP transcript silently exceeds the API limit and 400s.
         let msgs = vec![ConversationMessage::User {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                tool_use_id: protocol::ToolUseId::new(),
+                tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "see images".to_string(),
                 is_error: false,
                 provider_tool_use_id: None,
@@ -4199,9 +4201,9 @@ mod tests {
     #[test]
     fn count_media_includes_nested_openai_image_url_media() {
         let msgs = vec![ConversationMessage::User {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                tool_use_id: protocol::ToolUseId::new(),
+                tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "see image".to_string(),
                 is_error: false,
                 provider_tool_use_id: None,
@@ -4222,9 +4224,9 @@ mod tests {
         // Over the cap, nested tool_result media is stripped oldest-first
         // (claude.ts:982-999), leaving the text + the most-recent nested image.
         let msgs = vec![ConversationMessage::User {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                tool_use_id: protocol::ToolUseId::new(),
+                tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "imgs".to_string(),
                 is_error: false,
                 provider_tool_use_id: None,
@@ -4298,7 +4300,7 @@ mod tests {
     #[test]
     fn strip_excess_media_no_images_is_noop() {
         let msgs = vec![ConversationMessage::User {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "no media here".to_string(),
             }],
@@ -4737,7 +4739,7 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter_with_subscriber(transport, SubscriberState::default())
             .with_subscription(shared_slot(Some(
-                platform_api::subscription::SubscriptionSnapshot {
+                lingxi_core::host::subscription::SubscriptionSnapshot {
                     is_subscriber: true,
                     subscription_type: Some("max".to_string()),
                     rate_limit_tier: Some("default_claude_max_20x".to_string()),
@@ -4817,7 +4819,7 @@ mod tests {
             SubscriberState::default(),
         )
         .with_subscription(shared_slot(Some(
-            platform_api::subscription::SubscriptionSnapshot {
+            lingxi_core::host::subscription::SubscriptionSnapshot {
                 rate_limit_tier: Some("default_claude_max_5x".to_string()),
                 ..Default::default()
             },
@@ -5249,7 +5251,7 @@ mod tests {
             },
         )
         .with_subscription(shared_slot(Some(
-            platform_api::subscription::SubscriptionSnapshot {
+            lingxi_core::host::subscription::SubscriptionSnapshot {
                 is_subscriber: true,
                 subscription_type: Some("pro".to_string()),
                 ..Default::default()
@@ -5438,15 +5440,15 @@ mod tests {
         assert_eq!(transport.seen_count(), 2);
     }
 
-    fn assistant_with_thinking() -> protocol::ConversationMessage {
-        protocol::ConversationMessage::Assistant {
-            id: protocol::MessageId::new(),
+    fn assistant_with_thinking() -> lingxi_core::types::ConversationMessage {
+        lingxi_core::types::ConversationMessage::Assistant {
+            id: lingxi_core::types::MessageId::new(),
             content: vec![
-                protocol::ContentBlock::Thinking {
+                lingxi_core::types::ContentBlock::Thinking {
                     thinking: "secret".into(),
                     signature: Some("sig".into()),
                 },
-                protocol::ContentBlock::Text {
+                lingxi_core::types::ContentBlock::Text {
                     text: "hello".into(),
                 },
             ],
@@ -5572,8 +5574,8 @@ mod tests {
                 None,
                 vec![
                     old,
-                    protocol::ConversationMessage::user(
-                        protocol::MessageId::new(),
+                    lingxi_core::types::ConversationMessage::user(
+                        lingxi_core::types::MessageId::new(),
                         "continue".into(),
                     ),
                     fresh.clone(),

@@ -377,7 +377,7 @@ impl SkillTool {
         ) else {
             return Ok(None);
         };
-        let background_tasks_disabled = platform_api::env::is_env_truthy(
+        let background_tasks_disabled = lingxi_core::host::env::is_env_truthy(
             std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
                 .ok()
                 .as_deref(),
@@ -390,7 +390,7 @@ impl SkillTool {
         );
 
         let tasks = registry
-            .list(platform_api::task_registry::TaskListFilter::default())
+            .list(lingxi_core::host::task_registry::TaskListFilter::default())
             .await
             .unwrap_or_default();
         let frozen_command_denies = frozen_command_denies(&self.ctx.permission_policy);
@@ -412,7 +412,7 @@ impl SkillTool {
             // ahead of whatever is live then.
             frozen_command_denies: frozen_command_denies.clone(),
             depth: ctx.depth as usize + 1,
-            depth_limit: platform_api::subagent_spawn::max_subagent_spawn_depth() as usize,
+            depth_limit: lingxi_core::host::subagent_spawn::max_subagent_spawn_depth() as usize,
             total_spawns: registry.get_total_agent_spawns(),
             spawn_cap,
             tasks: &tasks,
@@ -436,7 +436,7 @@ impl SkillTool {
         } else {
             ctx.origin_session_id
         };
-        let request = platform_api::subagent_spawn::SubagentSpawnRequest {
+        let request = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
             teammate_color: None,
             subagent_type: desc
                 .agent
@@ -512,7 +512,7 @@ impl SkillTool {
         let budget = origin_session_id
             .and_then(|session_id| budget.scoped_for_session(session_id))
             .unwrap_or(budget);
-        let inherit = platform_api::subagent_spawn::SubagentInheritance {
+        let inherit = lingxi_core::host::subagent_spawn::SubagentInheritance {
             tool_invoker: Arc::new(invoker_impl),
             budget,
         };
@@ -534,7 +534,7 @@ impl SkillTool {
         }
         if crate::fork::has_live_fork(
             &registry
-                .list(platform_api::task_registry::TaskListFilter::default())
+                .list(lingxi_core::host::task_registry::TaskListFilter::default())
                 .await
                 .unwrap_or_default(),
             command_name,
@@ -569,7 +569,7 @@ impl SkillTool {
             // policy clone on every one of its tool calls.
             sync_request.frozen_command_denies = Vec::new();
             let (agent_id, result) = match spawner.spawn(sync_request, inherit).await {
-                Ok(platform_api::subagent_spawn::SubagentResult::Completed {
+                Ok(lingxi_core::host::subagent_spawn::SubagentResult::Completed {
                     agent_id,
                     content,
                     ..
@@ -586,14 +586,16 @@ impl SkillTool {
                 }
                 // A failed or killed fork surfaces as a tool error rather than
                 // silently reporting success with an empty result.
-                Ok(platform_api::subagent_spawn::SubagentResult::Failed { reason, .. }) => {
+                Ok(lingxi_core::host::subagent_spawn::SubagentResult::Failed {
+                    reason, ..
+                }) => {
                     // The spawn HAPPENED, so the reservation is correctly
                     // consumed — only a fork that never launched releases it.
                     return Err(ToolError::Internal(format!(
                         "Skill {command_name} (forked execution) failed: {reason}"
                     )));
                 }
-                Ok(platform_api::subagent_spawn::SubagentResult::Killed { .. }) => {
+                Ok(lingxi_core::host::subagent_spawn::SubagentResult::Killed { .. }) => {
                     return Err(ToolError::Internal(format!(
                         "Skill {command_name} (forked execution) was stopped"
                     )));
@@ -936,7 +938,7 @@ present this turn, the skill is loaded — follow it directly rather than callin
         // 2.1.266 `a0`: refuse while THIS agent's own stop is still completing
         // (see `agent_processes::mark_stop_pending`).
         if let Some(agent_id) = ctx.agent_id {
-            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+            if lingxi_core::host::agent_processes::is_stop_pending(&agent_id.to_string()) {
                 emit_failed(
                     &bus,
                     "skill_fork_spawner_stop_pending",
@@ -944,7 +946,7 @@ present this turn, the skill is loaded — follow it directly rather than callin
                 )
                 .await;
                 return Err(ToolError::InvalidInput(
-                    platform_api::agent_processes::stop_pending_refusal("launch skills."),
+                    lingxi_core::host::agent_processes::stop_pending_refusal("launch skills."),
                 ));
             }
         }
@@ -1279,8 +1281,8 @@ present this turn, the skill is loaded — follow it directly rather than callin
             ),
         );
 
-        let new_messages = vec![protocol::ConversationMessage::user(
-            protocol::MessageId::new(),
+        let new_messages = vec![lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
             expanded_prompt,
         )];
 

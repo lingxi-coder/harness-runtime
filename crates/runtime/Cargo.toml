@@ -9,14 +9,13 @@ autotests = false
 [features]
 realtime-websocket = ["llm-runtime/realtime-websocket"]
 default = [
-    "core",
+    "engine",
 ]
-core = [
+engine = [
+    "dep:core",
     "dep:orchestrator",
     "dep:agent",
-    "dep:platform-api",
-    "dep:protocol",
-    "dep:tool-api",
+            "dep:tool-api",
     "dep:session",
     "dep:permission",
     "dep:hooks",
@@ -29,11 +28,10 @@ core = [
     "dep:command-api",
 ]
 desktop = [
-    "core",
+    "engine",
     "dep:branding",
     "command-api/builtin-handlers",
     "dep:cron",
-    "dep:core",
     "dep:memory",
     "dep:migrations",
     "dep:provider-config",
@@ -86,8 +84,7 @@ desktop = [
     "dep:platform-windows",
 ]
 mobile = [
-    "core",
-    "dep:core",
+    "engine",
     "dep:configuration-admin",
     "dep:migrations",
     "dep:branding",
@@ -155,17 +152,17 @@ android-computer-use = [
 ]
 
 fusion = [
-    "core",
+    "engine",
     "dep:fusion",
 ]
 
 workflow = [
-    "core",
+    "engine",
     "dep:workflow",
 ]
 
 collaboration = [
-    "core",
+    "engine",
     "dep:coordinator",
 ]
 
@@ -202,13 +199,11 @@ msgqueue = { path = "../msgqueue", optional = true }
 orchestrator = { path = "../orchestrator", optional = true }
 outputstyles = { path = "../outputstyles", optional = true }
 permission = { path = "../permission", optional = true }
-platform-api = { path = "../platform-api", optional = true }
 platform-common = { path = "../platforms/common", optional = true }
 platform-macos-computer-control = { path = "../platforms/macos-computer-control", optional = true }
 platform-posix = { path = "../platforms/posix", optional = true }
 platform-posix-minimal = { path = "../platforms/posix-minimal", optional = true }
 plugin = { path = "../plugin", optional = true }
-protocol = { path = "../protocol", optional = true }
 provider-config = { path = "../provider-config", optional = true }
 reqwest = { version = "=0.12.28", default-features = false, optional = true }
 sandbox = { path = "../sandbox", optional = true }
@@ -284,6 +279,10 @@ tool-api = { path = "../tool-api", features = ["test-support"] }
 [[test]]
 name = "decision_contract"
 path = "tests/decision_contract.rs"
+
+[[test]]
+name = "sdk_surface"
+path = "tests/sdk_surface.rs"
 
 [[test]]
 name = "audio_injection"

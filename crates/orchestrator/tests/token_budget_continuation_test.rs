@@ -3,12 +3,12 @@
 //! AND a budget is configured, keeps nudging the model past `end_turn` until
 //! ~90% of the budget is spent — and that with the gate OFF (the parity
 //! default) the loop stops at the first `end_turn` (NO-OP).
+use lingxi_core::types::ConversationMessage;
 use llm_runtime::{ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use protocol::ConversationMessage;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
@@ -65,9 +65,9 @@ fn count_nudge_user_messages(snapshot: &[ConversationMessage]) -> usize {
     snapshot
         .iter()
         .filter(|m| match m {
-            ConversationMessage::User { content, .. } => content
-                .iter()
-                .any(|b| matches!(b, protocol::ContentBlock::Text { text } if text == NUDGE)),
+            ConversationMessage::User { content, .. } => content.iter().any(
+                |b| matches!(b, lingxi_core::types::ContentBlock::Text { text } if text == NUDGE),
+            ),
             _ => false,
         })
         .count()
@@ -223,7 +223,7 @@ async fn budget_on_resets_recovery_count_on_continuation() {
                 ConversationMessage::User { content, .. }
                     if content.iter().any(|b| matches!(
                         b,
-                        protocol::ContentBlock::Text { text }
+                        lingxi_core::types::ContentBlock::Text { text }
                             if text.starts_with("Stopped at")
                                 && text.contains('\u{2014}')
                     ))

@@ -19,8 +19,8 @@ pub fn assemble_request(session: &SessionState, user_message: &str) -> Value {
     })
 }
 
-fn message_to_api_shape(m: &protocol::ConversationMessage) -> Value {
-    use protocol::ConversationMessage;
+fn message_to_api_shape(m: &crate::types::ConversationMessage) -> Value {
+    use crate::types::ConversationMessage;
     match m {
         ConversationMessage::User { content, .. } => {
             json!({"role": "user", "content": content_blocks_to_api(content)})
@@ -34,8 +34,8 @@ fn message_to_api_shape(m: &protocol::ConversationMessage) -> Value {
     }
 }
 
-fn content_blocks_to_api(blocks: &[protocol::ContentBlock]) -> Value {
-    use protocol::ContentBlock;
+fn content_blocks_to_api(blocks: &[crate::types::ContentBlock]) -> Value {
+    use crate::types::ContentBlock;
     let arr: Vec<Value> = blocks
         .iter()
         .map(|b| match b {
@@ -118,7 +118,7 @@ fn content_blocks_to_api(blocks: &[protocol::ContentBlock]) -> Value {
 mod tests {
     use super::*;
     use crate::session::SessionState;
-    use protocol::SessionId;
+    use crate::types::SessionId;
 
     #[test]
     fn assemble_includes_history_and_new_user_message() {
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn assemble_appends_prior_history() {
-        use protocol::{ConversationMessage, MessageId};
+        use crate::types::{ConversationMessage, MessageId};
         let mut session = SessionState::empty(SessionId::nil(), "claude-opus-4-6".into());
         session.history.push(ConversationMessage::user(
             MessageId::nil(),
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn image_block_encodes_to_anthropic_image_shape() {
-        use protocol::{ContentBlock, ImageSource};
+        use crate::types::{ContentBlock, ImageSource};
         let v = content_blocks_to_api(&[ContentBlock::Image {
             source: ImageSource::Base64 {
                 media_type: "image/png".to_string(),

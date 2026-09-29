@@ -11,7 +11,7 @@ use crate::thresholds::{
     POST_COMPACT_MAX_TOKENS_PER_SKILL, POST_COMPACT_SKILLS_TOKEN_BUDGET, POST_COMPACT_TOKEN_BUDGET,
 };
 use crate::warning_state::clear_compact_warning_suppression;
-use protocol::{ContentBlock, ConversationMessage};
+use lingxi_core::types::{ContentBlock, ConversationMessage};
 
 /// Marker appended to skill content truncated to fit the per-skill budget.
 ///
@@ -272,7 +272,7 @@ pub const INVOKED_SKILLS_ATTACHMENT_PREAMBLE: &str = "The following skills were 
 /// `\n\n---\n\n` delimiter, each block puts a blank line before its content, and
 /// the preamble is joined to the blocks by a blank line. Emitted as a single
 /// `isMeta` user message (the caller wraps it in
-/// [`protocol::ConversationMessage::user_meta`]).
+/// [`lingxi_core::types::ConversationMessage::user_meta`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedInvokedSkillsAttachment {
     /// Display-safe attachment body.
@@ -696,7 +696,7 @@ impl PostCompactBuilder {
     ) -> PostCompactMessages {
         PostCompactMessages {
             summary_messages: vec![ConversationMessage::compact_summary(
-                protocol::MessageId::new(),
+                lingxi_core::types::MessageId::new(),
                 summary_text.to_string(),
             )],
             files: restore_post_compact_files(file_candidates, already_attached),

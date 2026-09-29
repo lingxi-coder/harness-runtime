@@ -1,7 +1,7 @@
 //! What the 2.1.267 sweep established, pinned against the port.
 //!
 //! Unlike its `parity_claude_2_1_252.rs` sibling this file does NOT pin
-//! version-facing identifiers: `platform_api::CLAUDE_CODE_VERSION` is
+//! version-facing identifiers: `lingxi_core::host::CLAUDE_CODE_VERSION` is
 //! deliberately still `2.1.252`, because this port is not wholly at 2.1.267 and
 //! advertising that it is would be a false claim. What is pinned here is the
 //! set of ORACLE FACTS the sweep read out of the 2.1.267 binary and then built
@@ -88,21 +88,21 @@ fn the_allowlist_exempt_scopes_match_the_ported_rule() {
     for (scope, want) in [
         (mcp::connection::ConfigScope::Enterprise, true),
         (
-            mcp::connection::ConfigScope::Settings(protocol::SettingsScope::Managed),
+            mcp::connection::ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
             true,
         ),
         (
-            mcp::connection::ConfigScope::Settings(protocol::SettingsScope::User),
+            mcp::connection::ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             false,
         ),
         (
-            mcp::connection::ConfigScope::Settings(protocol::SettingsScope::Project),
+            mcp::connection::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
             false,
         ),
     ] {
         let config = mcp::connection::McpServerConfig {
             name: "org-tool".to_string(),
-            spec: platform_api::McpTransportSpec::Http {
+            spec: lingxi_core::host::McpTransportSpec::Http {
                 url: "https://x.test/mcp".to_string(),
                 headers: Default::default(),
                 headers_helper: None,
@@ -162,7 +162,7 @@ fn the_project_scope_refusal_copy_is_byte_exact() {
 
 #[test]
 fn the_goal_cleared_reasons_are_the_six_upstream_passes() {
-    use platform_api::GoalClearedReason::*;
+    use lingxi_core::host::GoalClearedReason::*;
     let f = facts();
     let recorded: Vec<&str> = f["goal_cleared_reasons"]["values"]
         .as_array()

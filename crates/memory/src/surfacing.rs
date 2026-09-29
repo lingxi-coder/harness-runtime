@@ -48,7 +48,7 @@ use std::time::SystemTime;
 
 /// One memory selected for surfacing this turn, in the shape
 /// [`render_surfacing_block`] renders. Produced by the orchestrator from the
-/// prefetch/selector result (a `memory::file::MemoryFile` or a `protocol::
+/// prefetch/selector result (a `memory::file::MemoryFile` or a `lingxi_core::types::
 /// MemoryEntry` carries the same data; see
 /// [`crate::selector::memory_entry_to_memory_file`]).
 #[derive(Debug, Clone, PartialEq, Eq)]

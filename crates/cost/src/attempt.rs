@@ -5,23 +5,23 @@
 use crate::{
     CostStateVector, ModelPricing, ModelRef, ModelUsage, NonTokenBillableUnit, TokenClass, Usage,
 };
-use protocol::SessionId;
+use lingxi_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use thiserror::Error;
 
 /// Shared immutable contract; persisted variant names remain unchanged.
-pub use platform_api::ModelAttemptBillingMode as AttemptBillingMode;
+pub use lingxi_core::host::ModelAttemptBillingMode as AttemptBillingMode;
 
 /// Shared platform stage metadata; it grants no dispatch authority.
-pub use platform_api::ModelAttemptStage as AttemptStage;
+pub use lingxi_core::host::ModelAttemptStage as AttemptStage;
 
 /// Original output generation retained for restart reconciliation, never the
 /// currently selected turn. Live admission stamps this from its bound account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptOutputScope {
     /// Captured turn or command-only generation.
-    pub generation_id: protocol::MessageId,
+    pub generation_id: lingxi_core::types::MessageId,
     /// Immutable ceiling of that generation.
     pub max_output_tokens: Option<u64>,
 }

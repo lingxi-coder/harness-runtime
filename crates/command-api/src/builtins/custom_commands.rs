@@ -373,7 +373,7 @@ mod tests {
         let cmd = reg.resolve("dup").expect("/dup should resolve");
         assert_eq!(
             cmd.source,
-            crate::CommandSource::Settings(protocol::SettingsScope::Managed)
+            crate::CommandSource::Settings(lingxi_core::types::SettingsScope::Managed)
         );
         assert_eq!(cmd.description, "Managed skill");
         assert_eq!(cmd.skill_root.as_deref(), Some(managed_skill_dir.as_path()));

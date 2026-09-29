@@ -5,7 +5,7 @@
 //! offset and the recovered prefix is returned.
 
 use crate::transcript::TranscriptEntry;
-use platform_api::{FileSystem, FsError};
+use lingxi_core::host::{FileSystem, FsError};
 use thiserror::Error;
 
 /// Failure modes for session storage operations.

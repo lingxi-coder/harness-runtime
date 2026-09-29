@@ -6,13 +6,13 @@
 //! stdio or remote transport surface.
 
 use async_trait::async_trait;
-use local_apps::{AppError, AppService};
-use platform_api::{
+use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
-use protocol::McpConnectionId;
+use lingxi_core::types::McpConnectionId;
+use local_apps::{AppError, AppService};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1005,7 +1005,9 @@ impl LocalAppsMcpTransport {
         Some(resource_sha256.to_string())
     }
 
-    fn tool_meta_resource_uri(definition: &platform_api::McpToolDefinitionDto) -> Option<String> {
+    fn tool_meta_resource_uri(
+        definition: &lingxi_core::host::McpToolDefinitionDto,
+    ) -> Option<String> {
         let meta = definition.meta.as_ref()?;
         meta.get("ui")
             .and_then(Value::as_object)
@@ -1062,7 +1064,7 @@ impl LocalAppsMcpTransport {
             })?;
         for entry in entries {
             let definition_value = entry.get("definition").unwrap_or(entry);
-            let definition: platform_api::McpToolDefinitionDto =
+            let definition: lingxi_core::host::McpToolDefinitionDto =
                 serde_json::from_value(definition_value.clone()).map_err(|error| {
                     McpError::Internal(format!(
                         "active Local App tool definition is invalid: {error}"
@@ -1966,7 +1968,7 @@ impl LocalAppsMcpTransport {
         let mut tools = Vec::with_capacity(entries.len());
         for entry in entries {
             let definition_value = entry.get("definition").unwrap_or(entry);
-            let definition: platform_api::McpToolDefinitionDto =
+            let definition: lingxi_core::host::McpToolDefinitionDto =
                 serde_json::from_value(definition_value.clone()).map_err(|error| {
                     McpError::Internal(format!(
                         "active Local App tool definition is invalid: {error}"
@@ -1984,14 +1986,14 @@ impl LocalAppsMcpTransport {
             let Some(ceiling) = entry
                 .get("ceiling")
                 .and_then(Value::as_str)
-                .and_then(platform_api::McpPermissionCeiling::from_policy_str)
+                .and_then(lingxi_core::host::McpPermissionCeiling::from_policy_str)
             else {
                 return Err(McpError::Internal(format!(
                     "active Local App tool {} has no valid permission ceiling",
                     definition.name
                 )));
             };
-            if ceiling == platform_api::McpPermissionCeiling::Deny {
+            if ceiling == lingxi_core::host::McpPermissionCeiling::Deny {
                 return Err(McpError::Internal(format!(
                     "active Local App tool {} has a denied permission ceiling",
                     definition.name
@@ -2009,7 +2011,7 @@ impl LocalAppsMcpTransport {
                 full_name,
                 search_hint: Some("local app".into()),
                 always_load: None,
-                requires_user_interaction: ceiling == platform_api::McpPermissionCeiling::Ask,
+                requires_user_interaction: ceiling == lingxi_core::host::McpPermissionCeiling::Ask,
             };
             tools.push(tool);
         }
@@ -2045,7 +2047,7 @@ impl LocalAppsMcpTransport {
             })?;
         for entry in entries {
             let definition_value = entry.get("definition").unwrap_or(entry);
-            let definition: platform_api::McpToolDefinitionDto =
+            let definition: lingxi_core::host::McpToolDefinitionDto =
                 serde_json::from_value(definition_value.clone()).map_err(|error| {
                     McpError::Internal(format!(
                         "active Local App tool definition is invalid: {error}"
@@ -2159,7 +2161,7 @@ impl LocalAppsMcpTransport {
     }
 
     fn validate_export_input(
-        definition: &platform_api::McpToolDefinitionDto,
+        definition: &lingxi_core::host::McpToolDefinitionDto,
         input: &Value,
     ) -> Result<(), McpToolResultDto> {
         let object = input
@@ -2251,7 +2253,7 @@ impl LocalAppsMcpTransport {
             return Err(McpError::ToolNotFound(tool.into()));
         };
         let definition_value = entry.get("definition").unwrap_or(&entry);
-        let definition: platform_api::McpToolDefinitionDto =
+        let definition: lingxi_core::host::McpToolDefinitionDto =
             serde_json::from_value(definition_value.clone()).map_err(|error| {
                 McpError::Internal(format!(
                     "active Local App tool definition is invalid: {error}"
@@ -3265,7 +3267,7 @@ impl LocalAppsMcpTransport {
                     .join(format!("{log}.log"));
                 let root = self.root.clone();
                 let body = match tokio::task::spawn_blocking(move || {
-                    platform_api::rooted_fs::read_to_string_limited(
+                    lingxi_core::host::rooted_fs::read_to_string_limited(
                         &root,
                         &relative,
                         16 * 1024 * 1024,
@@ -3275,7 +3277,7 @@ impl LocalAppsMcpTransport {
                 .map_err(|error| McpError::Internal(format!("log reader failed: {error}")))?
                 {
                     Ok(body) => body,
-                    Err(platform_api::FsError::NotFound(_)) => String::new(),
+                    Err(lingxi_core::host::FsError::NotFound(_)) => String::new(),
                     Err(error) => {
                         return Ok(Self::tool_error(format!("failed to read app log: {error}")))
                     }
@@ -3564,11 +3566,12 @@ impl McpTransport for LocalAppsMcpTransport {
             .join(local_apps::manifest::MCP_DIR)
             .join(LOCAL_APP_WIDGET_DIR)
             .join(format!("{}.html", resource.resource_sha256));
-        let content =
-            platform_api::rooted_fs::read_to_string_limited(&self.root, &relative, 4 * 1024 * 1024)
-                .map_err(|error| {
-                    McpError::Internal(format!("failed to read Local App widget: {error}"))
-                })?;
+        let content = lingxi_core::host::rooted_fs::read_to_string_limited(
+            &self.root,
+            &relative,
+            4 * 1024 * 1024,
+        )
+        .map_err(|error| McpError::Internal(format!("failed to read Local App widget: {error}")))?;
         let actual_sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
         if actual_sha256 != resource.resource_sha256 {
             return Err(McpError::Internal(

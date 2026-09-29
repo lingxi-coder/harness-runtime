@@ -18,9 +18,9 @@ mod reasoning_preference_tests {
                 command_api::builtins::effort::load_reasoning_default_selection_at(
                     &cfg.lingxi_home.join("settings.json")
                 ),
-                Some(platform_api::ReasoningSelection::Level { id: "high".into() })
+                Some(lingxi_core::host::ReasoningSelection::Level { id: "high".into() })
             );
-            let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 handle.inner().orchestrator.clone();
             assert_eq!(
                 orchestrator
@@ -28,14 +28,14 @@ mod reasoning_preference_tests {
                     .await
                     .unwrap()
                     .requested_reasoning_selection,
-                platform_api::ReasoningSelection::Level { id: "high".into() }
+                lingxi_core::host::ReasoningSelection::Level { id: "high".into() }
             );
         });
         drop(handle);
 
         let (restarted, _) = build_submit_handle(tmp.path());
         restarted.runtime().block_on(async {
-            let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 restarted.inner().orchestrator.clone();
             assert_eq!(
                 orchestrator
@@ -43,7 +43,7 @@ mod reasoning_preference_tests {
                     .await
                     .unwrap()
                     .requested_reasoning_selection,
-                platform_api::ReasoningSelection::Level { id: "high".into() }
+                lingxi_core::host::ReasoningSelection::Level { id: "high".into() }
             );
             restarted
                 .submit(ClientCommand::NewSession {
@@ -58,7 +58,7 @@ mod reasoning_preference_tests {
                     .await
                     .unwrap()
                     .requested_reasoning_selection,
-                platform_api::ReasoningSelection::Level { id: "high".into() }
+                lingxi_core::host::ReasoningSelection::Level { id: "high".into() }
             );
         });
     }

@@ -8,12 +8,12 @@
 
 use crate::model_resolver::{ModelLimits, ResolvedPanel};
 use crate::panel::PanelInternal;
-use platform_api::subagent_output_guard::sanitize_blocks;
-use platform_api::{
+use lingxi_core::host::subagent_output_guard::sanitize_blocks;
+use lingxi_core::host::{
     truncate_tail, FusionRequest, PanelPatch, PanelReport, PanelVerification, RiskSeverity,
     VerificationOutcome,
 };
-use protocol::{ConversationMessage, MessageId};
+use lingxi_core::types::{ConversationMessage, MessageId};
 use serde_json::{json, Value};
 use sidequery::{
     CanonicalSideQueryRequest, QuerySource, SideQueryClient, SideQueryError,
@@ -22,7 +22,7 @@ use sidequery::{
 const RETRY_HINT_BYTE_CAP: usize = 512;
 /// Diff bytes shared by every implement-mode panel in the analyst's full
 /// request. Each panel's own diff is already capped at
-/// [`platform_api::FUSION_MATERIAL_DIFF_BYTE_CAP`]; this keeps N panels from
+/// [`lingxi_core::host::FUSION_MATERIAL_DIFF_BYTE_CAP`]; this keeps N panels from
 /// multiplying it.
 const ANALYST_DIFF_TOTAL_BYTE_CAP: usize = 48 * 1024;
 /// Changed files listed per panel in the analyst's full request.
@@ -899,7 +899,7 @@ fn truncate_bytes(value: &str, cap: usize) -> String {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::{
+    use lingxi_core::host::{
         FusionOrigin, FusionPanelMode, FusionPreset, PanelRunStatus, PatchFile, PatchFileStatus,
         VerificationRun, WorktreeHandle,
     };
@@ -949,7 +949,7 @@ mod tests {
                 claims: vec![],
                 evidence: vec![],
                 assumptions: vec![],
-                risks: vec![platform_api::PanelRisk {
+                risks: vec![lingxi_core::host::PanelRisk {
                     severity: RiskSeverity::Critical,
                     description: "do not ignore".into(),
                 }],
@@ -979,7 +979,7 @@ mod tests {
         content
             .iter()
             .find_map(|block| match block {
-                protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
                 _ => None,
             })
             .expect("user text")
@@ -1108,14 +1108,14 @@ mod tests {
         let mut four_groups = panel("P2", 8_000);
         let report = four_groups.report.as_mut().unwrap();
         report.summary = "summary".repeat(1_000);
-        report.claims.push(platform_api::PanelClaim {
+        report.claims.push(lingxi_core::host::PanelClaim {
             statement: "claim".repeat(1_000),
             evidence_refs: vec!["e1".into()],
             confidence: 80,
         });
-        report.evidence.push(platform_api::PanelEvidence {
+        report.evidence.push(lingxi_core::host::PanelEvidence {
             id: "e1".into(),
-            kind: platform_api::EvidenceKind::File,
+            kind: lingxi_core::host::EvidenceKind::File,
             locator: "src/lib.rs".into(),
             excerpt: Some("evidence".repeat(1_000)),
         });

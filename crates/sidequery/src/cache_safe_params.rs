@@ -10,7 +10,7 @@
 //! avoid clobbering a newer snapshot use [`CacheSafeParamsSlot::save_if_generation_matches`]
 //! (see spec §B10 anti-stale rule).
 
-use protocol::ConversationMessage;
+use lingxi_core::types::ConversationMessage;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

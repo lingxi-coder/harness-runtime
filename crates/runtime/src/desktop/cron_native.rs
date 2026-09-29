@@ -2,7 +2,7 @@
 use crate::desktop::{ConversationOrchestrator, DesktopConfig};
 use async_trait::async_trait;
 use futures::FutureExt as _;
-use platform_api::OrchestratorHandle;
+use lingxi_core::host::OrchestratorHandle;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -46,13 +46,13 @@ const NATIVE_CLEANUP_WAIT: std::time::Duration = std::time::Duration::from_milli
 /// The scheduler owns the waiter; this supervisor owns runtime destruction.
 /// Dropping a waiter requests cancellation without aborting child cleanup.
 struct NativeRunSupervisor {
-    runtime: Arc<dyn platform_api::RuntimeSpawner>,
+    runtime: Arc<dyn lingxi_core::host::RuntimeSpawner>,
     runs: std::sync::Mutex<std::collections::HashMap<String, Arc<NativeRunControl>>>,
 }
 struct NativeRunControl {
     cancel: CancellationToken,
     finished: tokio::sync::watch::Receiver<bool>,
-    handle: std::sync::Mutex<Option<platform_api::BackgroundTaskHandle>>,
+    handle: std::sync::Mutex<Option<lingxi_core::host::BackgroundTaskHandle>>,
     cleanup_error: std::sync::Mutex<Option<String>>,
 }
 struct CancelNativeWaiter(CancellationToken);
@@ -245,13 +245,19 @@ where
 
 struct QuietOutput;
 #[async_trait]
-impl platform_api::OutputStream for QuietOutput {
+impl lingxi_core::host::OutputStream for QuietOutput {
     async fn emit_text(&self, _: &str) {}
-    async fn emit_end_turn(&self, _: &str, _: &platform_api::CostSnapshot) {}
-    async fn emit_tool_call(&self, _: &protocol::ToolUseId, _: &str, _: &serde_json::Value) {}
+    async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
+    async fn emit_tool_call(
+        &self,
+        _: &lingxi_core::types::ToolUseId,
+        _: &str,
+        _: &serde_json::Value,
+    ) {
+    }
     async fn emit_tool_result(
         &self,
-        _: &protocol::ToolUseId,
+        _: &lingxi_core::types::ToolUseId,
         _: &str,
         _: &str,
         _: &serde_json::Value,
@@ -322,19 +328,19 @@ impl NativeCronFirer {
                 .map_err(|e| format!("paused:Invalid reasoning: {e}"))?;
         let reasoning = match reasoning {
             client::protocol::controls::ReasoningSelectionDto::Automatic => {
-                platform_api::ReasoningSelection::Automatic
+                lingxi_core::host::ReasoningSelection::Automatic
             }
             client::protocol::controls::ReasoningSelectionDto::Disabled => {
-                platform_api::ReasoningSelection::Disabled
+                lingxi_core::host::ReasoningSelection::Disabled
             }
             client::protocol::controls::ReasoningSelectionDto::Enabled => {
-                platform_api::ReasoningSelection::Enabled
+                lingxi_core::host::ReasoningSelection::Enabled
             }
             client::protocol::controls::ReasoningSelectionDto::Level { id } => {
-                platform_api::ReasoningSelection::Level { id }
+                lingxi_core::host::ReasoningSelection::Level { id }
             }
             client::protocol::controls::ReasoningSelectionDto::TokenBudget { tokens } => {
-                platform_api::ReasoningSelection::TokenBudget { tokens }
+                lingxi_core::host::ReasoningSelection::TokenBudget { tokens }
             }
             _ => return Err("paused:Unsupported reasoning".into()),
         };
@@ -343,10 +349,11 @@ impl NativeCronFirer {
             return Err("paused:Workspace is not trusted".into());
         }
         if let Some(target) = target {
-            if protocol::SessionId::parse_prefixed(target) == Some(owner.current_session_id().await)
+            if lingxi_core::types::SessionId::parse_prefixed(target)
+                == Some(owner.current_session_id().await)
             {
                 let fs = platform_posix::PosixFileSystem::new(self.config.cwd.clone());
-                let expected = protocol::SessionId::parse_prefixed(target)
+                let expected = lingxi_core::types::SessionId::parse_prefixed(target)
                     .ok_or("paused:Invalid session ID")?;
                 let (outcome, captured_session, summary) = owner
                     .run_scheduled_turn_in_session(
@@ -372,10 +379,9 @@ impl NativeCronFirer {
             }
         }
         let id = match target {
-            Some(id) => {
-                protocol::SessionId::parse_prefixed(id).ok_or("paused:Invalid session ID")?
-            }
-            None => protocol::SessionId::new(),
+            Some(id) => lingxi_core::types::SessionId::parse_prefixed(id)
+                .ok_or("paused:Invalid session ID")?,
+            None => lingxi_core::types::SessionId::new(),
         };
         let (lease, replayed) = claim_and_replay_target(&self.config, id, target.is_some()).await?;
         let mut cfg = self.config.clone();
@@ -447,11 +453,11 @@ fn child_build_error(error: crate::desktop::BuildError) -> String {
 
 async fn claim_and_replay_target(
     config: &DesktopConfig,
-    id: protocol::SessionId,
+    id: lingxi_core::types::SessionId,
     resume: bool,
 ) -> Result<
     (
-        platform_api::live_sessions::SharedSessionWriterLease,
+        lingxi_core::host::live_sessions::SharedSessionWriterLease,
         Option<orchestrator::resume::ReplayedSession>,
     ),
     String,
@@ -459,21 +465,22 @@ async fn claim_and_replay_target(
     // The same lease protects both the history snapshot and the subsequent
     // runtime. Reading before claiming would let a foreground writer append
     // between replay and construction, leaving the scheduled turn on an old parent.
-    let lease =
-        platform_api::live_sessions::LiveSessionDir::at_live(config.lingxi_home.join("sessions"))
-            .claim_session_id(&id.as_uuid().to_string(), std::process::id())
-            .map_err(|error| {
-                let prefix = if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::WouldBlock
-                ) {
-                    "busy"
-                } else {
-                    "paused"
-                };
-                format!("{prefix}:Cannot acquire scheduled session: {error}")
-            })?
-            .into_shared();
+    let lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
+        config.lingxi_home.join("sessions"),
+    )
+    .claim_session_id(&id.as_uuid().to_string(), std::process::id())
+    .map_err(|error| {
+        let prefix = if matches!(
+            error.kind(),
+            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::WouldBlock
+        ) {
+            "busy"
+        } else {
+            "paused"
+        };
+        format!("{prefix}:Cannot acquire scheduled session: {error}")
+    })?
+    .into_shared();
     let replayed = if resume {
         let fs = Arc::new(platform_posix::PosixFileSystem::new(config.cwd.clone()));
         Some(
@@ -502,8 +509,13 @@ async fn finish(
         .await
         .iter()
         .rev()
-        .find(|message| matches!(message, protocol::ConversationMessage::Assistant { .. }))
-        .map(protocol::ConversationMessage::text_content)
+        .find(|message| {
+            matches!(
+                message,
+                lingxi_core::types::ConversationMessage::Assistant { .. }
+            )
+        })
+        .map(lingxi_core::types::ConversationMessage::text_content)
         .unwrap_or_default();
     Ok(cron::automation::AutomationRunResult {
         session_id: orch.current_session_id().await.as_uuid().to_string(),
@@ -533,8 +545,8 @@ mod tests {
             ..DesktopConfig::default()
         };
         std::fs::create_dir_all(&config.cwd).unwrap();
-        let id = protocol::SessionId::new();
-        let writers = platform_api::live_sessions::LiveSessionDir::at_live(
+        let id = lingxi_core::types::SessionId::new();
+        let writers = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
             config.lingxi_home.join("sessions"),
         );
         let foreground = writers
@@ -547,7 +559,7 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.starts_with("busy:"), "{error}");
-        let message_id = protocol::SessionId::new().as_uuid();
+        let message_id = lingxi_core::types::SessionId::new().as_uuid();
         let path = orchestrator::transcript_paths::main_transcript_path(
             &config.lingxi_home,
             &config.cwd.to_string_lossy(),
@@ -784,7 +796,7 @@ mod supervision_tests {
             cwd: temp.path().to_path_buf(),
             ..Default::default()
         };
-        let error = claim_and_replay_target(&config, protocol::SessionId::new(), false)
+        let error = claim_and_replay_target(&config, lingxi_core::types::SessionId::new(), false)
             .await
             .err()
             .unwrap();

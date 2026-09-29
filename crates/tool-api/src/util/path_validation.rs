@@ -104,7 +104,7 @@ pub fn resolve_against_cwd(path: PathBuf, cwd: &Path) -> PathBuf {
 /// filesystem's fence message (unbacked guest space, read-only mount) for the
 /// tool to surface to the model.
 pub fn translate_model_path(
-    fs: &std::sync::Arc<dyn platform_api::FileSystem>,
+    fs: &std::sync::Arc<dyn lingxi_core::host::FileSystem>,
     path: PathBuf,
     write: bool,
 ) -> Result<PathBuf, String> {

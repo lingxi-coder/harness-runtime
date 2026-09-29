@@ -302,11 +302,11 @@ pub fn web_fetch_agent_enabled_from(feature_flag: Option<&str>, simple: Option<&
     // `Rgi()`: `CLAUDE_CODE_WEB_FETCH_AGENT ?? gate("tengu_clever_orbit", false)`
     // — the GrowthBook default is `false`, so an undefined OR falsy env value
     // both land on `false`.
-    if !platform_api::env::is_env_truthy(feature_flag) {
+    if !lingxi_core::host::env::is_env_truthy(feature_flag) {
         return false;
     }
     // `|| V.CLAUDE_CODE_SIMPLE` ⇒ not registered.
-    if platform_api::env::is_env_truthy(simple) {
+    if lingxi_core::host::env::is_env_truthy(simple) {
         return false;
     }
     web_fetch_policy_allowed()
@@ -627,7 +627,7 @@ fn def(
 /// registered them unconditionally.
 #[must_use]
 pub fn explore_plan_agents_enabled() -> bool {
-    !platform_api::env::is_env_truthy(
+    !lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_DISABLE_EXPLORE_PLAN_AGENTS")
             .or_else(|_| std::env::var("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS"))
             .ok()
@@ -642,7 +642,7 @@ pub fn explore_plan_agents_enabled() -> bool {
 /// `statusLine` command into settings.
 #[must_use]
 pub fn safe_mode_enabled() -> bool {
-    platform_api::env::is_env_truthy(
+    lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_SAFE_MODE")
             .or_else(|_| std::env::var("CLAUDE_CODE_SAFE_MODE"))
             .ok()
@@ -773,12 +773,12 @@ pub fn builtin_agent_definitions_with_gates(
 /// - `getSystemPrompt: () => ''` → `system_prompt: None`: it is UNUSED on the
 ///   fork path — the child's system prompt is the parent's already-rendered
 ///   bytes threaded via
-///   [`platform_api::subagent_spawn::SubagentSpawnRequest::fork_parent_system_prompt`].
+///   [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::fork_parent_system_prompt`].
 #[must_use]
 pub fn fork_agent_definition() -> AgentDefinition {
     AgentDefinition {
         cache_ttl: None,
-        agent_type: platform_api::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
+        agent_type: lingxi_core::host::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
         when_to_use:
             "Implicit fork — inherits full conversation context. Not selectable via subagent_type; triggered by omitting subagent_type when the fork experiment is active.".to_string(),
         tools: AgentToolPolicy::All {
@@ -819,7 +819,7 @@ pub fn fork_agent_definition() -> AgentDefinition {
 pub fn fusion_panel_definition() -> AgentDefinition {
     AgentDefinition {
         cache_ttl: None,
-        agent_type: platform_api::FUSION_PANEL_TYPE.to_string(),
+        agent_type: lingxi_core::host::FUSION_PANEL_TYPE.to_string(),
         when_to_use:
             "Hidden Fusion panel — independent read-only deliberation. Not selectable via subagent_type."
                 .to_string(),
@@ -877,7 +877,7 @@ For file evidence, set locator to the workspace-relative path (optionally with :
 #[must_use]
 pub fn fusion_implementer_definition() -> AgentDefinition {
     AgentDefinition {
-        agent_type: platform_api::FUSION_IMPLEMENTER_TYPE.to_string(),
+        agent_type: lingxi_core::host::FUSION_IMPLEMENTER_TYPE.to_string(),
         when_to_use:
             "Hidden Fusion implementer — implements a task in its own worktree. Not selectable via subagent_type."
                 .to_string(),
@@ -924,7 +924,7 @@ For file evidence about existing code, set locator to the path relative to the c
 #[must_use]
 pub fn fusion_analyst_definition() -> AgentDefinition {
     AgentDefinition {
-        agent_type: platform_api::FUSION_ANALYST_TYPE.to_string(),
+        agent_type: lingxi_core::host::FUSION_ANALYST_TYPE.to_string(),
         when_to_use:
             "Hidden Fusion analyst — compares panel reports and checks their claims with read-only tools. Not selectable via subagent_type."
                 .to_string(),
@@ -955,7 +955,7 @@ mod tests {
     fn the_analyst_reads_but_cannot_write_delegate_or_reach_the_network() {
         let def = fusion_analyst_definition();
         assert_eq!(def.agent_type, "fusion-analyst");
-        assert!(platform_api::is_fusion_panel_type(&def.agent_type));
+        assert!(lingxi_core::host::is_fusion_panel_type(&def.agent_type));
         let AgentToolPolicy::Explicit(tools) = &def.tools else {
             panic!("explicit allow-list expected");
         };
@@ -970,7 +970,7 @@ mod tests {
     fn the_implementer_writes_but_cannot_delegate_or_leave_its_worktree() {
         let def = fusion_implementer_definition();
         assert_eq!(def.agent_type, "fusion-implementer");
-        assert!(platform_api::is_fusion_panel_type(&def.agent_type));
+        assert!(lingxi_core::host::is_fusion_panel_type(&def.agent_type));
         let AgentToolPolicy::Explicit(tools) = &def.tools else {
             panic!("explicit allow-list expected");
         };

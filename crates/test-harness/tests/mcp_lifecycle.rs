@@ -4,8 +4,8 @@
 //! state machine walks `Disconnected → Connecting → Connected` and
 //! discovers the canned tool catalog.
 
+use lingxi_core::host::{McpTransport, McpTransportSpec};
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
-use platform_api::{McpTransport, McpTransportSpec};
 use std::sync::Arc;
 use test_harness::mocks::MockMcpTransport;
 
@@ -15,7 +15,7 @@ fn mock_config() -> McpServerConfig {
         spec: McpTransportSpec::InProcess {
             registry_key: "mock".into(),
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::User),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         disabled: false,
         timeout_ms: None,
         always_load: false,

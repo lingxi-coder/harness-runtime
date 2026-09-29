@@ -7,8 +7,8 @@
 //! transport-agnostic [`ClientEventSink`]. The SAME stream therefore feeds both
 //! transports (bridge-server WS and mobile `UniFFI`) — governing decision §0.1.
 //!
-//! It implements the [`platform_api::OutputStream`] callbacks
-//! (`platform-api/src/orchestrator.rs:448-516`), including the two §0.7
+//! It implements the [`lingxi_core::host::OutputStream`] callbacks
+//! (`crates/core/src/host/orchestrator.rs:448-516`), including the two §0.7
 //! "light up thinking/usage" follow-up callbacks (`emit_thinking`/`emit_usage`):
 //!
 //! | callback                    | emitted `ClientEvent`(s)            |
@@ -31,9 +31,9 @@
 //!
 //! ## `is_error` derivation
 //!
-//! [`platform_api::OutputStream::emit_tool_result`] carries `(id, tool, model_text,
+//! [`lingxi_core::host::OutputStream::emit_tool_result`] carries `(id, tool, model_text,
 //! &Value)` — it has NO separate `is_error` flag (verified
-//! `platform-api/src/orchestrator.rs:436`). The `model_text` (the model-facing string)
+//! `crates/core/src/host/orchestrator.rs:436`). The `model_text` (the model-facing string)
 //! is ignored by this adapter because the `client::protocol` DTO is wire-frozen;
 //! `result_json` carries the full metadata `data`.
 //! The orchestrator signals a failed tool by shaping the emitted payload as
@@ -56,12 +56,12 @@ use std::sync::Arc;
 use crate::protocol::events::{ClientEvent, TurnOutcomeDto};
 use crate::protocol::message::{MessageBlockDto, MessageDto};
 use async_trait::async_trait;
-use platform_api::{CostSnapshot, OutputStream};
+use lingxi_core::host::{CostSnapshot, OutputStream};
 
 use crate::adapter::lowering::{lower_cost_snapshot, value_to_json_string};
 use crate::adapter::sink::ClientEventSink;
 
-/// An [`platform_api::OutputStream`] that lowers every live-turn callback into a
+/// An [`lingxi_core::host::OutputStream`] that lowers every live-turn callback into a
 /// [`ClientEvent`] DTO and forwards it through an [`Arc<dyn ClientEventSink>`].
 ///
 /// Connection-scoped: one stream per transport connection, holding the same
@@ -125,7 +125,12 @@ impl AdapterOutputStream {
     /// `clear()`, which cost EVERY in-flight call its structured diff and
     /// headline — one overflow blanked the whole batch instead of the single
     /// longest-waiting call.
-    fn remember_call(&self, id: &protocol::ToolUseId, tool: &str, input: &serde_json::Value) {
+    fn remember_call(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        tool: &str,
+        input: &serde_json::Value,
+    ) {
         let Ok(mut pending) = self.pending.lock() else {
             return;
         };
@@ -140,7 +145,7 @@ impl AdapterOutputStream {
     }
 
     /// Take back a dispatched call's input, if it is still pending.
-    fn take_call(&self, id: &protocol::ToolUseId) -> Option<(String, serde_json::Value)> {
+    fn take_call(&self, id: &lingxi_core::types::ToolUseId) -> Option<(String, serde_json::Value)> {
         let mut pending = self.pending.lock().ok()?;
         let key = id.to_string();
         let at = pending
@@ -161,7 +166,7 @@ impl AdapterOutputStream {
 
     async fn emit_tool_result_event(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         tool: &str,
         result: &serde_json::Value,
     ) {
@@ -264,7 +269,7 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
-    async fn emit_assistant_message_identity(&self, message_id: &protocol::MessageId) {
+    async fn emit_assistant_message_identity(&self, message_id: &lingxi_core::types::MessageId) {
         self.sink
             .emit(ClientEvent::MessageIdentity {
                 message_id: message_id.as_uuid().to_string(),
@@ -272,7 +277,7 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
-    async fn emit_message_retracted(&self, message_id: &protocol::MessageId) {
+    async fn emit_message_retracted(&self, message_id: &lingxi_core::types::MessageId) {
         self.message_blocks.lock().await.clear();
         self.sink
             .emit(ClientEvent::MessageRetracted {
@@ -292,7 +297,7 @@ impl OutputStream for AdapterOutputStream {
 
     async fn emit_tool_call(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         tool: &str,
         input: &serde_json::Value,
     ) {
@@ -321,7 +326,12 @@ impl OutputStream for AdapterOutputStream {
         }
     }
 
-    async fn emit_tool_heartbeat(&self, id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) {
+    async fn emit_tool_heartbeat(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        tool: &str,
+        elapsed_ms: u64,
+    ) {
         self.sink
             .emit(ClientEvent::ToolHeartbeat {
                 id: id.to_string(),
@@ -333,7 +343,7 @@ impl OutputStream for AdapterOutputStream {
 
     async fn emit_tool_result(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         tool: &str,
         _model_text: &str,
         result: &serde_json::Value,
@@ -349,7 +359,7 @@ impl OutputStream for AdapterOutputStream {
 
     async fn emit_tool_result_denied(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         tool: &str,
         _model_text: &str,
         result: &serde_json::Value,
@@ -457,7 +467,7 @@ impl OutputStream for AdapterOutputStream {
     /// §0.7 "light up thinking/usage": lower each live reasoning delta into a
     /// [`ClientEvent::ThinkingDelta`]. `signature` is `None` for live deltas
     /// (the cryptographic signature only arrives on the completed thinking
-    /// block, not per-delta) — see `platform_api::OutputStream::emit_thinking`.
+    /// block, not per-delta) — see `lingxi_core::host::OutputStream::emit_thinking`.
     async fn emit_thinking(&self, thinking: &str, signature: Option<&str>) {
         let mut blocks = self.message_blocks.lock().await;
         if let Some(MessageBlockDto::Thinking {
@@ -499,7 +509,7 @@ impl OutputStream for AdapterOutputStream {
 
     /// §0.7 "light up thinking/usage": lower each incremental token-usage
     /// update into a [`ClientEvent::UsageUpdate`]. The four counters map
-    /// field-for-field from `platform_api::OutputStream::emit_usage` (which itself
+    /// field-for-field from `lingxi_core::host::OutputStream::emit_usage` (which itself
     /// mirrors `cost::TokenUsage` on the orchestrator side).
     async fn emit_usage(
         &self,
@@ -527,7 +537,7 @@ impl OutputStream for AdapterOutputStream {
     /// so there is NO transport change — only the trait override lights up the
     /// previously-no-op (T08) default. `team` maps `Option<&str>` →
     /// `Option<String>` 1:1 (no placeholder substitution).
-    async fn emit_coordinator_worker(&self, worker: &platform_api::team_registry::WorkerInfo) {
+    async fn emit_coordinator_worker(&self, worker: &lingxi_core::host::team_registry::WorkerInfo) {
         self.sink
             .emit(ClientEvent::CoordinatorWorker {
                 worker: crate::adapter::lowering::lower_worker_agent(worker),
@@ -544,9 +554,9 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
-    async fn emit_attachment(&self, attachment: platform_api::AttachmentKind) {
+    async fn emit_attachment(&self, attachment: lingxi_core::host::AttachmentKind) {
         let dto = match attachment {
-            platform_api::AttachmentKind::NestedMemory { display_path } => {
+            lingxi_core::host::AttachmentKind::NestedMemory { display_path } => {
                 crate::protocol::events::AttachmentDto::NestedMemory { display_path }
             }
             // `AttachmentKind` is `#[non_exhaustive]`: a kind added upstream
@@ -612,7 +622,7 @@ mod tests {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
 
-        platform_api::OutputStream::emit_turn_started(&stream).await;
+        lingxi_core::host::OutputStream::emit_turn_started(&stream).await;
 
         assert_eq!(
             sink.events().await,
@@ -644,7 +654,7 @@ mod tests {
     async fn retry_retraction_carries_identity_and_clears_partial_blocks() {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
-        let id = protocol::MessageId::new();
+        let id = lingxi_core::types::MessageId::new();
         stream.emit_text("rejected").await;
         stream.emit_assistant_message_identity(&id).await;
         stream.emit_message_retracted(&id).await;
@@ -705,7 +715,7 @@ mod tests {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
 
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         let input = serde_json::json!({"file_path": "/tmp/x"});
         stream.emit_tool_call(&id, "Read", &input).await;
 
@@ -735,7 +745,7 @@ mod tests {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
 
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         let result = serde_json::json!({"content": "ok", "lines": 3});
         stream.emit_tool_result(&id, "Read", "ok", &result).await;
 
@@ -766,7 +776,7 @@ mod tests {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
 
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         let result = serde_json::json!({"error": "file not found"});
         stream
             .emit_tool_result(&id, "Read", "file not found", &result)
@@ -787,7 +797,7 @@ mod tests {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
 
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         let result = serde_json::json!({"error": "interrupted"});
         stream
             .emit_tool_result_denied(&id, "Bash", "interrupted", &result, "interrupted")
@@ -1094,7 +1104,7 @@ mod tests {
     async fn message_boundary_emits_ordered_complete_before_turn_ended() {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
 
         stream.emit_text("A").await;
         stream.emit_thinking("reason", Some("sig")).await;
@@ -1160,9 +1170,9 @@ mod tests {
     #[tokio::test]
     async fn live_and_resumed_paths_produce_identical_tool_result_displays() {
         use crate::protocol::message::MessageBlockDto;
-        use protocol::{ContentBlock, ConversationMessage, MessageId};
+        use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         let tool = "Edit";
         let input = serde_json::json!({
             "file_path": "/tmp/x.rs",
@@ -1256,8 +1266,8 @@ mod tests {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
 
-        let ids: Vec<protocol::ToolUseId> = (0..=MAX_PENDING_TOOL_CALLS)
-            .map(|_| protocol::ToolUseId::new())
+        let ids: Vec<lingxi_core::types::ToolUseId> = (0..=MAX_PENDING_TOOL_CALLS)
+            .map(|_| lingxi_core::types::ToolUseId::new())
             .collect();
         for id in &ids {
             let input = serde_json::json!({

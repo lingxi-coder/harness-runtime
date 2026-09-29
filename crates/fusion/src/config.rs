@@ -1,11 +1,11 @@
 //! Runtime Fusion settings with defaults applied.
 
-pub use lingxi_core::settings::schema::FusionCompletionPolicy;
-use lingxi_core::settings::schema::FusionSettingsJson;
-use platform_api::{
+use lingxi_core::host::{
     FusionError, FusionModelChoice, FusionModelRole, FusionPanelMode, FusionPreset,
     FUSION_MAX_PANEL, FUSION_MIN_PANEL,
 };
+pub use lingxi_core::settings::schema::FusionCompletionPolicy;
+use lingxi_core::settings::schema::FusionSettingsJson;
 
 /// Implement-mode knobs with defaults applied. See
 /// [`FusionRuntimeConfig::for_mode`] for how they reshape a run.
@@ -150,12 +150,12 @@ impl FusionRuntimeConfig {
     /// its evidence. Otherwise the setting applies to the `quality` preset,
     /// and a `/fusion --verify-claims` request turns it on for any preset.
     #[must_use]
-    pub fn analyst_uses_tools(&self, request: &platform_api::FusionRequest) -> bool {
-        if request.mode != platform_api::FusionPanelMode::Analysis {
+    pub fn analyst_uses_tools(&self, request: &lingxi_core::host::FusionRequest) -> bool {
+        if request.mode != lingxi_core::host::FusionPanelMode::Analysis {
             return false;
         }
         request.verify_claims
-            || (self.analyst_tools && request.preset == platform_api::FusionPreset::Quality)
+            || (self.analyst_tools && request.preset == lingxi_core::host::FusionPreset::Quality)
     }
     /// Documented defaults (enabled stays false).
     #[must_use]
@@ -769,11 +769,11 @@ mod tests {
 
     /// `core` and `platform-api` cannot depend on each other, so the settings
     /// READER (`FusionSettingsJson`) and the settings WRITER the UIs use
-    /// (`platform_api::fusion_setup`) spell the same keys twice. This crate is
+    /// (`lingxi_core::host::fusion_setup`) spell the same keys twice. This crate is
     /// the one that sees both: it fails the moment either side is renamed.
     #[test]
     fn the_settings_reader_and_the_setup_writer_agree() {
-        use platform_api::fusion_setup::FusionModelRoles;
+        use lingxi_core::host::fusion_setup::FusionModelRoles;
 
         let roles = FusionModelRoles {
             panels: vec![
@@ -814,7 +814,7 @@ mod tests {
 
     #[test]
     fn the_enabled_switch_and_the_roles_are_independent_settings() {
-        use platform_api::fusion_setup;
+        use lingxi_core::host::fusion_setup;
 
         let mut written = serde_json::json!({"fusion": {"enabled": true}});
         fusion_setup::FusionModelRoles {

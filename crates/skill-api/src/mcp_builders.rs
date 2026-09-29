@@ -1,7 +1,7 @@
 //! Helpers for synthesizing [`Skill`]s from MCP server tool descriptions.
 
 use crate::model::{LoadedFrom, Skill, SkillFrontmatter, SkillSource};
-use platform_api::McpToolDto;
+use lingxi_core::host::McpToolDto;
 
 /// Build a [`Skill`] whose triggers are derived from an MCP tool's name and
 /// whose content mirrors the tool's description.

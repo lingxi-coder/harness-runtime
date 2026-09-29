@@ -17,7 +17,7 @@ license.workspace = true
 # compiles + is verified on the host build.
 
 [dependencies]
-platform-api = { path = "../../platform-api" }
+core = { path = "../../core" }
 platform-posix-minimal = { path = "../posix-minimal" }
 platform-common = { path = "../common" }
 http-client = { path = "../../http-client" }

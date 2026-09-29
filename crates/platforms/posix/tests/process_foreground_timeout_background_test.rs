@@ -4,7 +4,7 @@
 
 #![cfg(unix)]
 
-use platform_api::{
+use lingxi_core::host::{
     ForegroundOutcome, ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand,
     SandboxedTag,
 };

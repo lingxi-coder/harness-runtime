@@ -198,7 +198,7 @@ mod tests {
         });
         let r = scan_settings_tier(
             &settings,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         );
         assert_eq!(r.auto_mode_entry_count, 3);
         assert!(r.dangerous_allow.is_empty());
@@ -208,13 +208,13 @@ mod tests {
     fn no_automode_block_is_zero() {
         let r = scan_settings_tier(
             &json!({"model": "opus"}),
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         assert_eq!(r.auto_mode_entry_count, 0);
         // A non-object autoMode also counts as zero (nothing to observe).
         let r2 = scan_settings_tier(
             &json!({"autoMode": "nope"}),
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         assert_eq!(r2.auto_mode_entry_count, 0);
     }
@@ -226,7 +226,7 @@ mod tests {
         });
         let r = scan_settings_tier(
             &settings,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         let displays: Vec<&str> = r
             .dangerous_allow
@@ -244,11 +244,11 @@ mod tests {
     fn removal_offer_dedups_across_tiers() {
         let user = scan_settings_tier(
             &json!({"permissions": {"allow": ["Bash(*)"]}}),
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         let project = scan_settings_tier(
             &json!({"permissions": {"allow": ["Bash(*)", "Bash(curl:*)"]}}),
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         let offer = removal_offer(&[user, project]);
         // `Bash(*)` appears in both tiers but is offered once, first-seen order.
@@ -260,7 +260,7 @@ mod tests {
     fn empty_and_missing_sections_are_safe() {
         let r = scan_settings_tier(
             &json!({}),
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         assert_eq!(r.auto_mode_entry_count, 0);
         assert!(r.dangerous_allow.is_empty());

@@ -325,7 +325,7 @@ fn register_workflow_authoring_skill(reg: &mut CommandRegistry) {
     // The Workflow tool description trades 17 KB of hook documentation for a
     // pointer to this skill. It may only do that once the skill actually
     // exists, so the registrar is what says so.
-    platform_api::session_flags::set_workflow_authoring_skill_registered(true);
+    lingxi_core::host::session_flags::set_workflow_authoring_skill_registered(true);
 }
 
 fn register_simplify_skill(reg: &mut CommandRegistry) {

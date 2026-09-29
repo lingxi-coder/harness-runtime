@@ -2,7 +2,7 @@
 
 use super::*;
 use base64::Engine;
-use platform_api::rooted_fs::{self, AtomicWriteOptions};
+use lingxi_core::host::rooted_fs::{self, AtomicWriteOptions};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -2028,7 +2028,7 @@ impl LocalAppsHostBroker {
         let pointer =
             match rooted_fs::read_to_string_limited(layout.root(), &pointer_path, 16 * 1024) {
                 Ok(pointer) => pointer,
-                Err(platform_api::FsError::NotFound(_)) => return Ok(None),
+                Err(lingxi_core::host::FsError::NotFound(_)) => return Ok(None),
                 Err(error) => return Err(format!("read active QA receipt pointer: {error}")),
             };
         let pointer: QaActiveReceiptPointer = serde_json::from_str(&pointer)
@@ -2252,7 +2252,7 @@ impl LocalAppsHostBroker {
                     .map_err(|error| error.to_string())?;
                 vec![receipt.result_id]
             }
-            Err(platform_api::FsError::NotFound(_)) => Vec::new(),
+            Err(lingxi_core::host::FsError::NotFound(_)) => Vec::new(),
             Err(error) => return Err(format!("read active QA receipt pointer: {error}")),
         };
         local_apps::prune_qa_history(&layout, &retained)

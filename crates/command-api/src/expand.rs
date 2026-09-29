@@ -153,7 +153,7 @@ mod tests {
         SlashCommand {
             name: name.to_string(),
             description: String::new(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from(format!("/x/{name}.md")),
                 frontmatter: CommandFrontmatter {
@@ -234,11 +234,11 @@ mod tests {
             base_dir: PathBuf::from("/x/.lingxi/commands"),
             frontmatter: CommandFrontmatter::default(),
             content: "Hello $0".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
         let cmd = build_markdown_command(
             &file,
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert_eq!(cmd.name, "foo");
         let parsed = parse_slash_command("/foo world").unwrap();

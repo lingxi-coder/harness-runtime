@@ -7,7 +7,7 @@
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::OrchestratorHandle;
+use lingxi_core::host::OrchestratorHandle;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
 
@@ -21,7 +21,7 @@ use telemetry::tengu::command as cmd_evt;
 pub const EXIT_DISPLAY: &str = "Exiting.";
 
 /// `/exit` handler — calls
-/// [`OrchestratorHandle::request_exit`](platform_api::OrchestratorHandle::request_exit)
+/// [`OrchestratorHandle::request_exit`](lingxi_core::host::OrchestratorHandle::request_exit)
 /// and renders `"Exiting."`.
 ///
 /// `request_exit` is infallible — the `_failed` telemetry slot is reserved

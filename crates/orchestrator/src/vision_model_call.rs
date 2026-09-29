@@ -2,8 +2,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use lingxi_core::types::{
+    ContentBlock, ConversationMessage, MediaAnalysis, MessageId, MessageRole,
+};
 use llm_runtime::LlmError;
-use protocol::{ContentBlock, ConversationMessage, MediaAnalysis, MessageId, MessageRole};
 use sidequery::{
     filter_messages_to_fingerprints, prepare_media_for_nonvision, PreparedDelegation, VisionPacket,
     PROMPT_VERSION,
@@ -321,13 +323,13 @@ impl ModelCallPreparer for VisionModelCallPreparer {
 }
 
 struct VisionProgressGuard {
-    output: Arc<dyn platform_api::OutputStream>,
+    output: Arc<dyn lingxi_core::host::OutputStream>,
     id: String,
     armed: bool,
 }
 
 impl VisionProgressGuard {
-    fn new(output: Arc<dyn platform_api::OutputStream>, id: String) -> Self {
+    fn new(output: Arc<dyn lingxi_core::host::OutputStream>, id: String) -> Self {
         Self {
             output,
             id,
@@ -743,7 +745,7 @@ mod tests {
         let user_message = ConversationMessage::user_with_images(
             MessageId::new(),
             "look".to_string(),
-            vec![protocol::ImageSource::Url {
+            vec![lingxi_core::types::ImageSource::Url {
                 url: "https://example.com/cancel.png".to_string(),
             }],
         );
@@ -797,7 +799,7 @@ mod tests {
         let user_message = ConversationMessage::user_with_images(
             MessageId::new(),
             "look".to_string(),
-            vec![protocol::ImageSource::Url {
+            vec![lingxi_core::types::ImageSource::Url {
                 url: "https://example.com/a.png".to_string(),
             }],
         );
@@ -806,7 +808,7 @@ mod tests {
             sidequery::collect_media_fingerprints(&[ConversationMessage::user_with_images(
                 MessageId::new(),
                 String::new(),
-                vec![protocol::ImageSource::Url {
+                vec![lingxi_core::types::ImageSource::Url {
                     url: "https://example.com/a.png".to_string(),
                 }],
             )])

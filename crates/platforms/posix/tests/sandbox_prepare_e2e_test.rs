@@ -7,7 +7,7 @@
 
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
-use platform_api::{
+use lingxi_core::host::{
     NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxPolicy, SandboxedTag,
 };
 use platform_posix::sandbox::PosixSandbox;

@@ -1,4 +1,4 @@
-//! Fusion state machine. Implements [`platform_api::FusionExecutor`].
+//! Fusion state machine. Implements [`lingxi_core::host::FusionExecutor`].
 
 use crate::analyst::{AnalystError, AnalystUsage};
 use crate::budget::{self, FusionPriceBook, FusionQuote, ReservationLease};
@@ -10,8 +10,8 @@ use crate::panel::{self, successful, PanelInternal};
 use crate::progress;
 use crate::snapshot::{CatalogSnapshot, FusionRuntimeSnapshot};
 use async_trait::async_trait;
-use platform_api::subagent_spawn::SubagentSpawner;
-use platform_api::{
+use lingxi_core::host::subagent_spawn::SubagentSpawner;
+use lingxi_core::host::{
     normalize_dimensions_for, validate_verify_commands, EvidenceCheckCounts, EvidenceCheckStatus,
     FusionActivation, FusionAgentSurface, FusionAnalysis, FusionError, FusionExecutor,
     FusionInheritance, FusionOrigin, FusionPanelMode, FusionPreparedSummary, FusionPreset,
@@ -25,7 +25,7 @@ use sidequery::SideQueryClient;
 // lib target carries no unused import (which `clippy --fix` deletes) while the
 // test module still reaches it through `use super::*`.
 #[cfg(test)]
-use platform_api::FusionRunId;
+use lingxi_core::host::FusionRunId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -107,10 +107,10 @@ pub struct FusionOrchestrator {
     prices: Arc<dyn FusionPriceBook>,
     bus: Arc<AnalyticsBus>,
     attempt_registrar: Option<Arc<dyn crate::FusionAttemptRegistrar>>,
-    attempt_run: Option<Arc<platform_api::ModelAttemptRun>>,
+    attempt_run: Option<Arc<lingxi_core::host::ModelAttemptRun>>,
     panel_admission: bool,
     panel_fence: Option<Arc<dyn crate::FusionPanelAttemptFence>>,
-    implement_host: Option<Arc<dyn platform_api::FusionImplementHost>>,
+    implement_host: Option<Arc<dyn lingxi_core::host::FusionImplementHost>>,
 }
 
 /// Return value of [`FusionOrchestrator::run_analysis`]: the analysis (or
@@ -172,7 +172,10 @@ impl FusionOrchestrator {
     /// Attach the host services implement mode needs (worktrees, sandbox
     /// preflight, verification). Without them implement runs are refused.
     #[must_use]
-    pub fn with_implement_host(mut self, host: Arc<dyn platform_api::FusionImplementHost>) -> Self {
+    pub fn with_implement_host(
+        mut self,
+        host: Arc<dyn lingxi_core::host::FusionImplementHost>,
+    ) -> Self {
         self.implement_host = Some(host);
         self
     }
@@ -232,7 +235,7 @@ impl FusionOrchestrator {
 
     fn prepared_config(
         &self,
-        mode: platform_api::FusionPanelMode,
+        mode: lingxi_core::host::FusionPanelMode,
         effective_timeout_ms: Option<u64>,
     ) -> Result<FusionRuntimeConfig, FusionError> {
         let mut config = self.config_source.load()?.for_mode(mode);
@@ -586,7 +589,7 @@ impl FusionOrchestrator {
         operational_deadline: Instant,
         facts: &FusionRunFactsRecorder,
         panel_tasks: &panel::PanelTaskBarrier,
-        admission: Option<platform_api::PanelPoolLease>,
+        admission: Option<lingxi_core::host::PanelPoolLease>,
         // [Round-4 rework, item 2] The three survives-a-drop cells, threaded
         // all the way down into `panel::run_panels` so a cancel landing
         // mid-fan-out — after some panels have already finished with real,
@@ -659,7 +662,7 @@ impl FusionOrchestrator {
         let (admission, producer_drain) = match admission {
             Some(lease) => {
                 let (permits, drain) = lease.into_parts();
-                (Some(platform_api::PanelPoolLease::new(permits)), drain)
+                (Some(lingxi_core::host::PanelPoolLease::new(permits)), drain)
             }
             None => (None, None),
         };
@@ -696,9 +699,11 @@ impl FusionOrchestrator {
         }
         if let Some(fence) = &self.panel_fence {
             if let Err(error) = fence.wait().await {
-                facts.set_attempt_settlement(platform_api::FusionAttemptSettlementStatus::Failed {
-                    reason: error.to_string(),
-                });
+                facts.set_attempt_settlement(
+                    lingxi_core::host::FusionAttemptSettlementStatus::Failed {
+                        reason: error.to_string(),
+                    },
+                );
                 // Panels have already executed. A host diagnostic such as
                 // InvalidConfiguration must not regain a preflight/zero-call
                 // meaning and refund their lifetime spawn quota.
@@ -1443,7 +1448,7 @@ impl FusionOrchestrator {
         };
         facts.set_timing(timing.clone());
         let result = FusionResult {
-            schema_version: platform_api::FUSION_SCHEMA_VERSION,
+            schema_version: lingxi_core::host::FUSION_SCHEMA_VERSION,
             run_id,
             mode: request.mode,
             status,
@@ -2022,18 +2027,20 @@ impl FusionOrchestrator {
         let (summary, status) = match settled {
             Ok(Ok(summary)) => (
                 summary,
-                platform_api::FusionAttemptSettlementStatus::Settled,
+                lingxi_core::host::FusionAttemptSettlementStatus::Settled,
             ),
             Ok(Err(failure)) => (
                 failure.summary,
-                platform_api::FusionAttemptSettlementStatus::Failed {
+                lingxi_core::host::FusionAttemptSettlementStatus::Failed {
                     reason: failure.error.to_string(),
                 },
             ),
             Err(()) => {
-                facts.set_attempt_settlement(platform_api::FusionAttemptSettlementStatus::Failed {
-                    reason: "attempt settlement owner panicked".into(),
-                });
+                facts.set_attempt_settlement(
+                    lingxi_core::host::FusionAttemptSettlementStatus::Failed {
+                        reason: "attempt settlement owner panicked".into(),
+                    },
+                );
                 return None;
             }
         };
@@ -2314,9 +2321,9 @@ impl FusionExecutor for FusionOrchestrator {
             inherit.cancel.clone(),
             FusionRunFactsRecorder::default(),
             if self.attempt_registrar.is_some() {
-                platform_api::ModelAttemptBillingMode::MeteredAttempts
+                lingxi_core::host::ModelAttemptBillingMode::MeteredAttempts
             } else {
-                platform_api::ModelAttemptBillingMode::LegacyAggregate
+                lingxi_core::host::ModelAttemptBillingMode::LegacyAggregate
             },
         );
         let facts = control.facts();
@@ -2519,7 +2526,7 @@ impl FusionOrchestrator {
     pub(crate) async fn run_scoped(
         &self,
         request: FusionRequest,
-        session_id: Option<protocol::SessionId>,
+        session_id: Option<lingxi_core::types::SessionId>,
         inherit: FusionInheritance,
         progress: Option<Sender<FusionProgress>>,
     ) -> Result<FusionResult, FusionError> {
@@ -3793,8 +3800,8 @@ classified as preflight"
         let mut panels = vec![panel_with_category(None), panel_with_category(None)];
         for panel in &mut panels {
             panel.status = PanelRunStatus::Completed;
-            panel.report = Some(platform_api::PanelReport {
-                schema_version: platform_api::FUSION_SCHEMA_VERSION,
+            panel.report = Some(lingxi_core::host::PanelReport {
+                schema_version: lingxi_core::host::FUSION_SCHEMA_VERSION,
                 summary: "ok".into(),
                 candidate_answer: "answer".into(),
                 claims: Vec::new(),
@@ -3831,13 +3838,15 @@ classified as preflight"
 mod outer_err_arm_realized_tokens_tests {
     use super::*;
     use crate::model_resolver::CatalogModel;
-    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-    use platform_api::subagent_spawn::{
+    use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+    use lingxi_core::host::subagent_spawn::{
         SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest,
         SubagentUsage,
     };
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use platform_api::{
+    use lingxi_core::host::tool_invoker::{
+        SubagentInvocationContext, ToolInvoker, ToolInvokerError,
+    };
+    use lingxi_core::host::{
         EvidenceKind, FusionModelHints, FusionModelRef, FusionOrigin, FusionPreset, PanelClaim,
         PanelEvidence, PanelReport, DEFAULT_FUSION_DIMENSIONS,
     };
@@ -3905,7 +3914,7 @@ mod outer_err_arm_realized_tokens_tests {
                 unresolved_questions: vec![],
             };
             Ok(SubagentResult::Completed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 content: serde_json::to_value(&report).unwrap(),
                 usage: SubagentUsage {
                     total_tokens: 12,
@@ -4022,7 +4031,7 @@ mod outer_err_arm_realized_tokens_tests {
         // The panels come from this fixture's explicit `models` list; the
         // analyst role is configuration and have no
         // automatic fallback.
-        cfg.analyst_model = Some(platform_api::FusionModelChoice::new(
+        cfg.analyst_model = Some(lingxi_core::host::FusionModelChoice::new(
             "anthropic",
             "claude-sonnet-5",
         ));
@@ -4145,7 +4154,7 @@ were genuinely dispatched before cancellation, not None or a subset — got \
                 unresolved_questions: vec![],
             };
             Ok(SubagentResult::Completed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 content: serde_json::to_value(&report).unwrap(),
                 usage: SubagentUsage {
                     total_tokens: 12,

@@ -34,8 +34,8 @@
 
 use crate::oauth::{self, OnAuthorizationUrl};
 use crate::registry::{XaaConfigProvider, XaaInputs};
-use platform_api::{Clock, HttpTransport, McpError, McpTransportSpec, SecureStorage};
-use protocol::{HttpMethod, HttpRequest};
+use lingxi_core::host::{Clock, HttpTransport, McpError, McpTransportSpec, SecureStorage};
+use lingxi_core::types::{HttpMethod, HttpRequest};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -310,12 +310,12 @@ async fn set_cached_id_token(
     };
     let bytes = serde_json::to_vec(&cached)
         .map_err(|e| McpError::OAuth(format!("XAA IdP: encode id_token: {e}")))?;
-    let metadata = protocol::SecureStorageMetadata {
+    let metadata = lingxi_core::types::SecureStorageMetadata {
         created_at: clock.now(),
         last_accessed: None,
-        kind: protocol::SecretKindDto("xaa_idp_id_token".into()),
+        kind: lingxi_core::types::SecretKindDto("xaa_idp_id_token".into()),
     };
-    let data = protocol::SecureStorageData::new(bytes, metadata);
+    let data = lingxi_core::types::SecureStorageData::new(bytes, metadata);
     storage
         .store(XAA_IDP_SERVICE, &issuer_key(issuer), data)
         .await
@@ -405,12 +405,12 @@ pub async fn save_idp_client_secret(
 ) -> Result<(), McpError> {
     let bytes = serde_json::to_vec(&serde_json::json!({ "clientSecret": client_secret }))
         .map_err(|e| McpError::OAuth(format!("XAA IdP: encode secret: {e}")))?;
-    let metadata = protocol::SecureStorageMetadata {
+    let metadata = lingxi_core::types::SecureStorageMetadata {
         created_at: clock.now(),
         last_accessed: None,
-        kind: protocol::SecretKindDto("xaa_idp_client_secret".into()),
+        kind: lingxi_core::types::SecretKindDto("xaa_idp_client_secret".into()),
     };
-    let data = protocol::SecureStorageData::new(bytes, metadata);
+    let data = lingxi_core::types::SecureStorageData::new(bytes, metadata);
     storage
         .store(XAA_IDP_CONFIG_SERVICE, &issuer_key(issuer), data)
         .await
@@ -1050,8 +1050,8 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-            data: protocol::SecureStorageData,
-        ) -> Result<(), platform_api::SecureStorageError> {
+            data: lingxi_core::types::SecureStorageData,
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
             self.map.lock().await.insert(
                 (service.into(), account.into()),
                 data.expose_secret_bytes().to_vec(),
@@ -1062,15 +1062,18 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
+        ) -> Result<
+            Option<lingxi_core::types::SecureStorageData>,
+            lingxi_core::host::SecureStorageError,
+        > {
             let map = self.map.lock().await;
             Ok(map.get(&(service.into(), account.into())).map(|bytes| {
-                protocol::SecureStorageData::new(
+                lingxi_core::types::SecureStorageData::new(
                     bytes.clone(),
-                    protocol::SecureStorageMetadata {
+                    lingxi_core::types::SecureStorageMetadata {
                         created_at: UNIX_EPOCH,
                         last_accessed: None,
-                        kind: protocol::SecretKindDto("test".into()),
+                        kind: lingxi_core::types::SecretKindDto("test".into()),
                     },
                 )
             }))
@@ -1079,7 +1082,7 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<(), platform_api::SecureStorageError> {
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
             self.map
                 .lock()
                 .await
@@ -1089,7 +1092,7 @@ mod tests {
         async fn list(
             &self,
             service: &str,
-        ) -> Result<Vec<String>, platform_api::SecureStorageError> {
+        ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
             let map = self.map.lock().await;
             Ok(map
                 .keys()
@@ -1100,8 +1103,8 @@ mod tests {
         fn is_encrypted(&self) -> bool {
             false
         }
-        fn backend(&self) -> platform_api::SecureStorageBackend {
-            platform_api::SecureStorageBackend::PlainText
+        fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
+            lingxi_core::host::SecureStorageBackend::PlainText
         }
     }
 
@@ -1114,10 +1117,10 @@ mod tests {
         async fn request(
             &self,
             req: HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
             for (method, needle, status, body) in &self.routes {
                 if *method == req.method && req.url.contains(needle.as_str()) {
-                    return Ok(protocol::HttpResponse {
+                    return Ok(lingxi_core::types::HttpResponse {
                         status: *status,
                         headers: vec![],
                         body: body.clone(),
@@ -1125,7 +1128,7 @@ mod tests {
                     });
                 }
             }
-            Err(platform_api::HttpError::Connection(format!(
+            Err(lingxi_core::host::HttpError::Connection(format!(
                 "no route for {}",
                 req.url
             )))
@@ -1133,7 +1136,7 @@ mod tests {
         async fn stream_sse(
             &self,
             _req: HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
             unreachable!("XAA IdP tests never stream SSE")
         }
     }

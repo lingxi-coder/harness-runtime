@@ -83,7 +83,7 @@ pub trait ShellPermissionGate: Send + Sync {
 /// dependency). Mirrors the TS `shellTool.call({ command }, context)`.
 ///
 /// `run` is `async` so adapters can drive an `async` process runner (the
-/// production `tool-skill` adapter spawns through `platform_api::process::ProcessRunner`,
+/// production `tool-skill` adapter spawns through `lingxi_core::host::process::ProcessRunner`,
 /// whose `run` is `async`). The public [`execute_shell_commands_in_prompt`] is
 /// already `async`, so this only adds a `.await` at its single call site.
 #[async_trait]

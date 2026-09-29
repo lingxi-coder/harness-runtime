@@ -1,5 +1,5 @@
 //! The policy-backed answer to oracle `kq` — see
-//! [`platform_api::read_auto_allow`] for what it means and why its unset case
+//! [`lingxi_core::host::read_auto_allow`] for what it means and why its unset case
 //! is `false`.
 //!
 //! Both halves are pure functions taking their inputs, so the polarity is
@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use platform_api::read_auto_allow::ReadAutoAllow;
+use lingxi_core::host::read_auto_allow::ReadAutoAllow;
 use serde_json::json;
 
 use crate::policy::PermissionPolicy;
@@ -209,7 +209,9 @@ mod tests {
                 rule_content: Some("./secret/**".into()),
             },
             behavior: PermissionBehavior::Ask,
-            source: crate::rule::PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            source: crate::rule::PermissionRuleSource::Settings(
+                lingxi_core::types::SettingsScope::User,
+            ),
         };
         let by_rule = ask(PermissionDecisionReason::MatchedRule { rule: rule.clone() });
         assert!(

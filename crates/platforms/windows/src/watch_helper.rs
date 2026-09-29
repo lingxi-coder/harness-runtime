@@ -15,9 +15,9 @@
 //! `src/utils/hooks/fileChangedWatcher.ts:69-77`.
 
 use futures_core::stream::Stream;
+use lingxi_core::host::{FileEvent, FileEventKind, FsError};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEvent, DebouncedEventKind, Debouncer};
-use platform_api::{FileEvent, FileEventKind, FsError};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;

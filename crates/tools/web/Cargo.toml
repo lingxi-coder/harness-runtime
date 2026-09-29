@@ -6,10 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+core = { path = "../../core" }
 branding.workspace = true
 tool-api = { path = "../../tool-api" }
-platform-api = { path = "../../platform-api" }
-protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
 # Side-query seam for the WebFetch "apply" step (process fetched markdown with

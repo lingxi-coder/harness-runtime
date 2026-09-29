@@ -302,9 +302,9 @@ mod read_file_state_tests {
     use crate::turn_loop::{dispatch_tool_uses, execute_one_turn};
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
-    use platform_api::coordinator_mode::CoordinatorModeHandle;
-    use platform_api::OrchestratorHandle;
-    use protocol::ToolUseId;
+    use lingxi_core::host::coordinator_mode::CoordinatorModeHandle;
+    use lingxi_core::host::OrchestratorHandle;
+    use lingxi_core::types::ToolUseId;
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -487,10 +487,10 @@ mod read_file_state_tests {
         tuid: &ToolUseId,
         name: &str,
         input: serde_json::Value,
-    ) -> protocol::ConversationMessage {
-        protocol::ConversationMessage::Assistant {
-            id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::ToolUse {
+    ) -> lingxi_core::types::ConversationMessage {
+        lingxi_core::types::ConversationMessage::Assistant {
+            id: lingxi_core::types::MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::ToolUse {
                 id: tuid.clone(),
                 name: name.to_string(),
                 input,
@@ -500,11 +500,11 @@ mod read_file_state_tests {
         }
     }
 
-    fn last_tool_result(history: &[protocol::ConversationMessage]) -> (String, bool) {
+    fn last_tool_result(history: &[lingxi_core::types::ConversationMessage]) -> (String, bool) {
         for m in history.iter().rev() {
-            if let protocol::ConversationMessage::User { content, .. } = m {
+            if let lingxi_core::types::ConversationMessage::User { content, .. } = m {
                 for b in content {
-                    if let protocol::ContentBlock::ToolResult {
+                    if let lingxi_core::types::ContentBlock::ToolResult {
                         content, is_error, ..
                     } = b
                     {
@@ -544,7 +544,7 @@ mod read_file_state_tests {
         let recovered = orch
             .run_orphaned_permission(
                 &tuid,
-                platform_api::permission_gate::PermissionOutcome::Allow {
+                lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                     updated_input: Some(json!({"file_path":"real.txt"})),
                     permission_updates: vec![],
                     decision_classification: None,
@@ -559,7 +559,7 @@ mod read_file_state_tests {
         let assistants = s
             .history
             .iter()
-            .filter(|m| matches!(m, protocol::ConversationMessage::Assistant { .. }))
+            .filter(|m| matches!(m, lingxi_core::types::ConversationMessage::Assistant { .. }))
             .count();
         assert_eq!(
             assistants, 1,
@@ -608,7 +608,7 @@ mod read_file_state_tests {
         assert!(orch
             .run_orphaned_permission(
                 &tool_use_id,
-                platform_api::permission_gate::PermissionOutcome::Allow {
+                lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
                     permission_updates: vec![update.clone()],
                     decision_classification: None,
@@ -658,7 +658,7 @@ mod read_file_state_tests {
         assert!(orch
             .run_orphaned_permission(
                 &tool_use_id,
-                platform_api::permission_gate::PermissionOutcome::AllowAuto {
+                lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
                     updated_input: Some(json!({"file_path":"real.txt"})),
                 },
             )
@@ -703,7 +703,7 @@ mod read_file_state_tests {
         let recovered = orch
             .run_orphaned_permission(
                 &tuid,
-                platform_api::permission_gate::PermissionOutcome::Deny {
+                lingxi_core::host::permission_gate::PermissionOutcome::Deny {
                     reason: "Permission to use Read has been denied.".into(),
                 },
             )
@@ -741,25 +741,26 @@ mod read_file_state_tests {
                 json!({"file_path":"x.txt"}),
             ));
             // A matching tool_result already exists ⇒ resolved.
-            s.history.push(protocol::ConversationMessage::User {
-                id: protocol::MessageId::new(),
-                content: vec![protocol::ContentBlock::ToolResult {
-                    tool_use_id: tuid.clone(),
-                    content: "prior".into(),
-                    is_error: false,
-                    provider_tool_use_id: None,
-                    content_blocks: None,
-                }],
-                is_meta: false,
-                is_compact_summary: false,
-                is_visible_in_transcript_only: false,
-            });
+            s.history
+                .push(lingxi_core::types::ConversationMessage::User {
+                    id: lingxi_core::types::MessageId::new(),
+                    content: vec![lingxi_core::types::ContentBlock::ToolResult {
+                        tool_use_id: tuid.clone(),
+                        content: "prior".into(),
+                        is_error: false,
+                        provider_tool_use_id: None,
+                        content_blocks: None,
+                    }],
+                    is_meta: false,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                });
         }
         let before = orch.session().lock().await.history.len();
         let recovered = orch
             .run_orphaned_permission(
                 &tuid,
-                platform_api::permission_gate::PermissionOutcome::Allow {
+                lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
                     permission_updates: vec![],
                     decision_classification: None,
@@ -786,7 +787,7 @@ mod read_file_state_tests {
         let recovered = orch
             .run_orphaned_permission(
                 &ToolUseId::new(),
-                platform_api::permission_gate::PermissionOutcome::Allow {
+                lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
                     permission_updates: vec![],
                     decision_classification: None,
@@ -821,7 +822,7 @@ mod read_file_state_tests {
         let recovered = orch
             .run_orphaned_permission(
                 &tuid,
-                platform_api::permission_gate::PermissionOutcome::Allow {
+                lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
                     permission_updates: vec![],
                     decision_classification: None,
@@ -870,7 +871,7 @@ mod read_file_state_tests {
                 json!({"file_path":"b.txt"}),
             ));
         }
-        let allow = || platform_api::permission_gate::PermissionOutcome::Allow {
+        let allow = || lingxi_core::host::permission_gate::PermissionOutcome::Allow {
             updated_input: None,
             permission_updates: vec![],
             decision_classification: None,
@@ -884,9 +885,9 @@ mod read_file_state_tests {
             .history
             .iter()
             .filter_map(|m| match m {
-                protocol::ConversationMessage::User { content, .. } => {
+                lingxi_core::types::ConversationMessage::User { content, .. } => {
                     content.iter().find_map(|b| match b {
-                        protocol::ContentBlock::ToolResult { content, .. } => {
+                        lingxi_core::types::ContentBlock::ToolResult { content, .. } => {
                             Some(content.as_str())
                         }
                         _ => None,
@@ -924,7 +925,7 @@ mod read_file_state_tests {
                 json!({"file_path":"real.txt"}),
             ));
         }
-        let allow = || platform_api::permission_gate::PermissionOutcome::Allow {
+        let allow = || lingxi_core::host::permission_gate::PermissionOutcome::Allow {
             updated_input: None,
             permission_updates: vec![],
             decision_classification: None,
@@ -941,9 +942,9 @@ mod read_file_state_tests {
     // parity only — the message bytes intentionally differ from claude-code's
     // Zod `formatZodValidationError` output (unportable).
 
-    fn schema_gate_tool_result(block: &protocol::ContentBlock) -> (&str, bool) {
+    fn schema_gate_tool_result(block: &lingxi_core::types::ContentBlock) -> (&str, bool) {
         match block {
-            protocol::ContentBlock::ToolResult {
+            lingxi_core::types::ContentBlock::ToolResult {
                 content, is_error, ..
             } => (content.as_str(), *is_error),
             other => panic!("expected ToolResult, got {other:?}"),
@@ -997,7 +998,7 @@ mod read_file_state_tests {
             &self,
             _input: &serde_json::Value,
             _tool_use_id: Option<&str>,
-            assistant_message_id: Option<&protocol::MessageId>,
+            assistant_message_id: Option<&lingxi_core::types::MessageId>,
         ) {
             if let Some(slot) = &self.rejected_message_id {
                 *slot.lock().unwrap() = assistant_message_id.map(ToString::to_string);
@@ -1145,7 +1146,9 @@ mod read_file_state_tests {
             let session_handle = orch.session();
             let session = session_handle.lock().await;
             match session.history.first() {
-                Some(protocol::ConversationMessage::Assistant { id, .. }) => id.to_string(),
+                Some(lingxi_core::types::ConversationMessage::Assistant { id, .. }) => {
+                    id.to_string()
+                }
                 other => panic!("expected assistant message first, got {other:?}"),
             }
         };
@@ -1283,7 +1286,7 @@ mod read_file_state_tests {
             registry.register_builtin(t);
         }
         if !mcp_tools.is_empty() {
-            registry.register_mcp_tools(protocol::McpConnectionId::new(), mcp_tools);
+            registry.register_mcp_tools(lingxi_core::types::McpConnectionId::new(), mcp_tools);
         }
         let rules = deny.iter().map(|d| PermissionRule {
             value: PermissionRuleValue {
@@ -1291,13 +1294,13 @@ mod read_file_state_tests {
                 rule_content: None,
             },
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         });
         let policy = Arc::new(PermissionPolicy::from_rules(
             permission::PermissionMode::Default,
             rules,
         ));
-        let gate: Arc<dyn platform_api::permission_gate::PermissionGate> = Arc::new(
+        let gate: Arc<dyn lingxi_core::host::permission_gate::PermissionGate> = Arc::new(
             PolicyPermissionGate::new(policy, Arc::new(NoOpPermissionGate)),
         );
         ConversationOrchestrator::new(
@@ -1576,8 +1579,8 @@ mod read_file_state_tests {
 
     #[tokio::test]
     async fn force_compact_restores_recent_files_and_rebuilds_read_state() {
-        use platform_api::OrchestratorHandle;
-        use protocol::{ConversationMessage, MessageId};
+        use lingxi_core::host::OrchestratorHandle;
+        use lingxi_core::types::{ConversationMessage, MessageId};
 
         // Compaction with a tiny threshold so a small seeded history compacts.
         let (compactor, slot) = wired_compaction(10);
@@ -1600,7 +1603,7 @@ mod read_file_state_tests {
                 } else {
                     s.history.push(ConversationMessage::Assistant {
                         id: MessageId::new(),
-                        content: vec![protocol::ContentBlock::Text {
+                        content: vec![lingxi_core::types::ContentBlock::Text {
                             text: format!("reply-{i}"),
                         }],
                         stop_reason: Some("end_turn".into()),
@@ -1741,8 +1744,8 @@ mod read_file_state_tests {
         // orchestrator, a tool's read feeds the post-compact file restore. Before
         // P1-06 the orchestrator held a THIRD, unshared map, so this restore was
         // always empty in production.
-        use platform_api::OrchestratorHandle;
-        use protocol::{ConversationMessage, MessageId};
+        use lingxi_core::host::OrchestratorHandle;
+        use lingxi_core::types::{ConversationMessage, MessageId};
 
         // The composition-root-owned map (also handed to `BuiltinToolContext`).
         let shared = tool_api::read_file_state::new_read_file_state_map();
@@ -1767,7 +1770,7 @@ mod read_file_state_tests {
                 } else {
                     s.history.push(ConversationMessage::Assistant {
                         id: MessageId::new(),
-                        content: vec![protocol::ContentBlock::Text {
+                        content: vec![lingxi_core::types::ContentBlock::Text {
                             text: format!("reply-{i}"),
                         }],
                         stop_reason: Some("end_turn".into()),
@@ -1892,8 +1895,8 @@ mod max_output_tokens_recovery_tests {
         MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
     };
     use crate::OrchestratorConfig;
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
     use llm_runtime::HistoryResponse;
-    use protocol::{ContentBlock, ConversationMessage};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
@@ -2053,7 +2056,7 @@ mod max_output_tokens_recovery_tests {
     async fn max_tokens_recovery_nudge_persists_with_top_level_is_meta() {
         let dir = tempfile::tempdir().expect("tempdir");
         let session_path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
         );
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
@@ -2472,8 +2475,8 @@ mod malformed_and_thinking_only_tests {
         MALFORMED_TOOL_USE_RETRY_NUDGE, STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
     };
     use crate::OrchestratorConfig;
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
     use llm_runtime::HistoryResponse;
-    use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
@@ -3009,7 +3012,7 @@ mod pre_tool_hook_tests {
     use hooks::registry::{HookContext, HookRegistry};
     use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
     use hooks::HookExecutorImpl;
-    use protocol::{ContentBlock, ConversationMessage, HookId, MessageId, ToolUseId};
+    use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, MessageId, ToolUseId};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -3024,35 +3027,40 @@ mod pre_tool_hook_tests {
     // ----- unused transport/runtime stubs for the builtin-only executor -----
     struct UnusedHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for UnusedHttp {
+    impl lingxi_core::host::HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
     struct UnusedRuntime;
     #[async_trait]
-    impl platform_api::RuntimeSpawner for UnusedRuntime {
+    impl lingxi_core::host::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-            Err(platform_api::RuntimeError::Internal("unused".into()))
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _d: std::time::Duration) {}
         async fn cancel(
             &self,
-            _h: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _h: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
@@ -3252,7 +3260,7 @@ mod pre_tool_hook_tests {
         // context, dispatch a tool, and assert the fields are populated.
         let dir = tempfile::tempdir().expect("tempdir");
         let session_path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
         );
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
@@ -3339,7 +3347,7 @@ mod pre_tool_hook_tests {
         // — claude-code `getTranscriptPathForSession`, which `createBaseHookInput`
         // ALWAYS stamps — instead of the empty string the old `unwrap_or_default()`
         // produced.
-        use protocol::SessionId;
+        use lingxi_core::types::SessionId;
 
         let config_home = std::path::PathBuf::from("/home/user/.lingxi");
         let cwd = std::path::PathBuf::from("/Users/me/proj");
@@ -3509,8 +3517,9 @@ mod pre_tool_hook_tests {
             &self,
             _t: &str,
             _i: &serde_json::Value,
-            _ctx: &platform_api::permission_gate::PermissionCheckContext,
-        ) -> Result<PermissionResolution, platform_api::permission_gate::PermissionAbort> {
+            _ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+        ) -> Result<PermissionResolution, lingxi_core::host::permission_gate::PermissionAbort>
+        {
             Ok(PermissionResolution::Deny {
                 reason: "via-plan-mode".into(),
                 source: PermissionDecisionSource::Unspecified,
@@ -3549,9 +3558,10 @@ mod pre_tool_hook_tests {
     }
 
     struct PlanAskProbeGate {
-        saw_ctx: std::sync::Mutex<Option<platform_api::permission_gate::PermissionCheckContext>>,
+        saw_ctx:
+            std::sync::Mutex<Option<lingxi_core::host::permission_gate::PermissionCheckContext>>,
         transport_calls: std::sync::atomic::AtomicUsize,
-        transport_outcome: platform_api::permission_gate::PermissionOutcome,
+        transport_outcome: lingxi_core::host::permission_gate::PermissionOutcome,
     }
 
     #[async_trait]
@@ -3564,8 +3574,8 @@ mod pre_tool_hook_tests {
             &self,
             _name: &str,
             _input: &serde_json::Value,
-            _ctx: &platform_api::permission_gate::PermissionCheckContext,
-        ) -> platform_api::permission_gate::PermissionOutcome {
+            _ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+        ) -> lingxi_core::host::permission_gate::PermissionOutcome {
             self.transport_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.transport_outcome.clone()
@@ -3575,8 +3585,9 @@ mod pre_tool_hook_tests {
             &self,
             _name: &str,
             _input: &serde_json::Value,
-            ctx: &platform_api::permission_gate::PermissionCheckContext,
-        ) -> Result<PermissionResolution, platform_api::permission_gate::PermissionAbort> {
+            ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+        ) -> Result<PermissionResolution, lingxi_core::host::permission_gate::PermissionAbort>
+        {
             *self.saw_ctx.lock().unwrap() = Some(ctx.clone());
             Ok(PermissionResolution::Ask)
         }
@@ -3596,13 +3607,14 @@ mod pre_tool_hook_tests {
             &self,
             _name: &str,
             _input: &serde_json::Value,
-            ctx: &platform_api::permission_gate::PermissionCheckContext,
-        ) -> Result<PermissionResolution, platform_api::permission_gate::PermissionAbort> {
+            ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+        ) -> Result<PermissionResolution, lingxi_core::host::permission_gate::PermissionAbort>
+        {
             self.saw_non_interactive.store(
                 ctx.is_non_interactive_session,
                 std::sync::atomic::Ordering::SeqCst,
             );
-            Err(platform_api::permission_gate::PermissionAbort {
+            Err(lingxi_core::host::permission_gate::PermissionAbort {
                 message: "Agent aborted: too many classifier denials in headless mode".into(),
             })
         }
@@ -3781,7 +3793,7 @@ mod pre_tool_hook_tests {
 
     struct RefreshMcpToolsTool {
         registry: Arc<std::sync::Mutex<Option<Arc<ToolRegistry>>>>,
-        conn_id: protocol::McpConnectionId,
+        conn_id: lingxi_core::types::McpConnectionId,
         replacement_count: usize,
     }
     #[async_trait]
@@ -4229,7 +4241,7 @@ mod pre_tool_hook_tests {
     ) -> ConversationOrchestrator {
         let registry_slot = Arc::new(std::sync::Mutex::new(None));
         let mut registry = ToolRegistry::new();
-        let replacement_conn = protocol::McpConnectionId::new();
+        let replacement_conn = lingxi_core::types::McpConnectionId::new();
         registry.register_builtin(Arc::new(RefreshMcpToolsTool {
             registry: registry_slot.clone(),
             conn_id: replacement_conn,
@@ -4237,7 +4249,7 @@ mod pre_tool_hook_tests {
         }) as Arc<dyn Tool>);
         let registry = Arc::new(registry);
         *registry_slot.lock().unwrap() = Some(registry.clone());
-        let existing_conn = protocol::McpConnectionId::new();
+        let existing_conn = lingxi_core::types::McpConnectionId::new();
         if initial_mcp_count > 0 {
             let existing = (0..initial_mcp_count)
                 .map(|index| {
@@ -5530,7 +5542,7 @@ mod pre_tool_hook_tests {
         let gate = Arc::new(PlanAskProbeGate {
             saw_ctx: std::sync::Mutex::new(None),
             transport_calls: std::sync::atomic::AtomicUsize::new(0),
-            transport_outcome: platform_api::permission_gate::PermissionOutcome::Allow {
+            transport_outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -5576,7 +5588,7 @@ mod pre_tool_hook_tests {
         let gate = Arc::new(PlanAskProbeGate {
             saw_ctx: std::sync::Mutex::new(None),
             transport_calls: std::sync::atomic::AtomicUsize::new(0),
-            transport_outcome: platform_api::permission_gate::PermissionOutcome::Deny {
+            transport_outcome: lingxi_core::host::permission_gate::PermissionOutcome::Deny {
                 reason: "transport should not be consulted".into(),
             },
         });
@@ -6088,7 +6100,7 @@ mod pre_cancel_tests {
     use crate::turn_loop::{dispatch_tool_uses_tracked, CANCEL_MESSAGE};
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
-    use protocol::{ContentBlock, ToolUseId};
+    use lingxi_core::types::{ContentBlock, ToolUseId};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -6581,7 +6593,7 @@ mod memdir_index_cap_tests {
     use crate::turn_loop::dispatch_tool_uses_tracked;
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
-    use protocol::{ContentBlock, ToolUseId};
+    use lingxi_core::types::{ContentBlock, ToolUseId};
     use serde_json::json;
     use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
     use std::path::{Path, PathBuf};
@@ -6630,14 +6642,15 @@ mod memdir_index_cap_tests {
     struct InlineRuntime;
 
     #[async_trait]
-    impl platform_api::RuntimeSpawner for InlineRuntime {
+    impl lingxi_core::host::RuntimeSpawner for InlineRuntime {
         async fn spawn(
             &self,
             name: &str,
             task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
             tokio::spawn(task);
-            Ok(platform_api::BackgroundTaskHandle {
+            Ok(lingxi_core::host::BackgroundTaskHandle {
                 task_name: name.to_string(),
                 task_id: 0,
             })
@@ -6647,8 +6660,8 @@ mod memdir_index_cap_tests {
 
         async fn cancel(
             &self,
-            _handle: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
@@ -6984,9 +6997,9 @@ mod compaction_failure_hint_tests {
         let first = history
             .iter()
             .find_map(|m| match m {
-                protocol::ConversationMessage::Assistant { content, .. } => {
+                lingxi_core::types::ConversationMessage::Assistant { content, .. } => {
                     content.iter().find_map(|b| match b {
-                        protocol::ContentBlock::Text { text } => Some(text.clone()),
+                        lingxi_core::types::ContentBlock::Text { text } => Some(text.clone()),
                         _ => None,
                     })
                 }

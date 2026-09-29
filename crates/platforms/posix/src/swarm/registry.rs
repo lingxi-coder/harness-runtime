@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use platform_api::SwarmBackend;
+use lingxi_core::host::SwarmBackend;
 
 use super::detection::{
     detect_terminal_env, pick_backend, select_backend, BackendChoice, TeammateMode, TerminalEnv,

@@ -1,8 +1,8 @@
 //! Session-owned provider binding for the loop permission classifier.
 use crate::ConversationOrchestrator;
+use lingxi_core::types::{ContentBlock, ConversationMessage};
 use permission::classifier::{AutoModeClassifierVerdict, LoopPermissionClassifier};
 use permission::loop_llm::{self, Query, QueryError, Reply, Transport};
-use protocol::{ContentBlock, ConversationMessage};
 use serde_json::{json, Value};
 use std::sync::{Arc, Weak};
 
@@ -463,7 +463,7 @@ impl Transport for ProviderTransport {
                 self.profile.as_deref(),
                 Some(&self.system),
                 vec![ConversationMessage::user(
-                    protocol::MessageId::new(),
+                    lingxi_core::types::MessageId::new(),
                     String::new(),
                 )],
                 vec![],
@@ -609,13 +609,13 @@ mod tests {
                                     text: block["text"].as_str().unwrap().into(),
                                 },
                                 "tool_use" => ContentBlock::ToolUse {
-                                    id: protocol::ToolUseId::new(),
+                                    id: lingxi_core::types::ToolUseId::new(),
                                     name: block["name"].as_str().unwrap().into(),
                                     input: block["input"].clone(),
                                     provider_id: block["id"].as_str().map(str::to_string),
                                 },
                                 "tool_result" => ContentBlock::ToolResult {
-                                    tool_use_id: protocol::ToolUseId::new(),
+                                    tool_use_id: lingxi_core::types::ToolUseId::new(),
                                     content: block["content"].as_str().unwrap().into(),
                                     is_error: false,
                                     provider_tool_use_id: block["tool_use_id"]
@@ -629,13 +629,13 @@ mod tests {
                     };
                     if message["type"] == "assistant" {
                         ConversationMessage::Assistant {
-                            id: protocol::MessageId::new(),
+                            id: lingxi_core::types::MessageId::new(),
                             content,
                             stop_reason: None,
                         }
                     } else {
                         ConversationMessage::User {
-                            id: protocol::MessageId::new(),
+                            id: lingxi_core::types::MessageId::new(),
                             content,
                             is_meta: message["isMeta"].as_bool().unwrap_or(false),
                             is_compact_summary: false,
@@ -699,7 +699,7 @@ mod tests {
         let jsonl = |message: &ConversationMessage| format!("{}\n", json!({ "message": message }));
         let mut body = String::new();
         body.push_str(&jsonl(&ConversationMessage::user(
-            protocol::MessageId::new(),
+            lingxi_core::types::MessageId::new(),
             "ship the release".into(),
         )));
         for (name, input) in [
@@ -707,9 +707,9 @@ mod tests {
             ("Bash", json!({"command": "./deploy.sh prod"})),
         ] {
             body.push_str(&jsonl(&ConversationMessage::Assistant {
-                id: protocol::MessageId::new(),
+                id: lingxi_core::types::MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
-                    id: protocol::ToolUseId::new(),
+                    id: lingxi_core::types::ToolUseId::new(),
                     name: name.into(),
                     input,
                     provider_id: None,

@@ -1,7 +1,7 @@
 //! Automatic and explicit Fusion panel selection.
 
 use crate::config::FusionRuntimeConfig;
-use platform_api::{
+use lingxi_core::host::{
     FusionCostClass, FusionError, FusionLatencyClass, FusionModelChoice, FusionModelHints,
     FusionModelRef, FusionModelRole, FusionOrigin, FusionPreset, FusionRequest, FUSION_MAX_PANEL,
     FUSION_MIN_PANEL,
@@ -36,7 +36,7 @@ impl ModelLimits {
 
     /// Build route limits from provider-neutral model metadata.
     #[must_use]
-    pub const fn from_metadata(metadata: &platform_api::ModelMetadata) -> Self {
+    pub const fn from_metadata(metadata: &lingxi_core::host::ModelMetadata) -> Self {
         Self {
             context_window_tokens: metadata.context_window_tokens,
             max_input_tokens: metadata.max_input_tokens,

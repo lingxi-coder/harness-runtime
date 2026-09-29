@@ -64,7 +64,7 @@ fn model_pricing_from_token_pricing(mr: &ModelRef, tp: &TokenPricing) -> Option<
 /// unknown-price policy only if that bucket actually appears in usage.
 fn partial_published_pricing(
     mr: &ModelRef,
-    published: &platform_api::ModelPricing,
+    published: &lingxi_core::host::ModelPricing,
     conditional: bool,
 ) -> Option<ModelPricing> {
     if published.billing_mode != ModelBillingMode::PerToken {

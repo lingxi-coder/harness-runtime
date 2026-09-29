@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 /// Plain-UUID thread identifier.
 ///
-/// Unlike `protocol::SessionId` (which serializes with a `"sess:"` prefix),
+/// Unlike `lingxi_core::types::SessionId` (which serializes with a `"sess:"` prefix),
 /// `ThreadId` serializes as a bare UUID string — matching codex's on-disk
 /// rollout bytes and the `rollout-<ts>-<uuid>.jsonl` filename.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]

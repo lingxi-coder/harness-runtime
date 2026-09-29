@@ -108,8 +108,8 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 #[cfg(test)]
-use platform_api::ActiveGoalSnapshot;
-use platform_api::OrchestratorHandle;
+use lingxi_core::host::ActiveGoalSnapshot;
+use lingxi_core::host::OrchestratorHandle;
 use std::sync::Arc;
 #[cfg(test)]
 use std::time::SystemTime;

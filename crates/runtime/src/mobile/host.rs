@@ -76,6 +76,18 @@ use local_apps::{AppError, AppService};
 use mcp::registry::OAuthDeps;
 use mcp::{ConfigScope as McpConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 
+use lingxi_core::host::audio::{
+    AudioError, AudioErrorKind, AudioOperation, AudioOperationContext, AudioOperationId,
+    AudioOperationSuccess, AudioOwner, AudioService,
+};
+use lingxi_core::host::http::HttpError;
+#[cfg(test)]
+use lingxi_core::host::http::{RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta};
+use lingxi_core::host::{
+    AuthHandle, Clock, FileSystem, HttpTransport, MobileLinuxCapability, MobileLinuxRuntime,
+    MobileLinuxRuntimeMode, OrchestratorHandle, OutputStream, Platform, RootfsState, RootfsStatus,
+    SlashCommandDispatcher,
+};
 use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use llm_runtime::auth::anthropic::handle::OAuthHandle;
 use llm_runtime::auth::anthropic::{OAuthCredentialProvider, RefreshDriver};
@@ -93,18 +105,6 @@ use orchestrator::{
 };
 use permission::gate::PermissionGate;
 use permission::PermissionMode;
-use platform_api::audio::{
-    AudioError, AudioErrorKind, AudioOperation, AudioOperationContext, AudioOperationId,
-    AudioOperationSuccess, AudioOwner, AudioService,
-};
-use platform_api::http::HttpError;
-#[cfg(test)]
-use platform_api::http::{RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta};
-use platform_api::{
-    AuthHandle, Clock, FileSystem, HttpTransport, MobileLinuxCapability, MobileLinuxRuntime,
-    MobileLinuxRuntimeMode, OrchestratorHandle, OutputStream, Platform, RootfsState, RootfsStatus,
-    SlashCommandDispatcher,
-};
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
@@ -119,7 +119,7 @@ const MOBILE_AUDIO_OWNER_TEARDOWN_BUDGET: std::time::Duration = std::time::Durat
 async fn end_mobile_audio_owner(
     service: &Arc<dyn AudioService>,
     recording_handles: &Arc<
-        tokio::sync::Mutex<HashMap<AudioOwner, platform_api::audio::AudioRecordingHandle>>,
+        tokio::sync::Mutex<HashMap<AudioOwner, lingxi_core::host::audio::AudioRecordingHandle>>,
     >,
     owner: AudioOwner,
 ) -> Result<(), AudioError> {
@@ -248,7 +248,7 @@ pub struct MobileConfig {
     /// Stable native host facts used to render the fixed mobile runtime
     /// reminder. `None` keeps desktop-style prompt assembly semantics for host
     /// tests and non-mobile embedder scenarios.
-    pub host_environment: Option<platform_api::MobileHostEnvironment>,
+    pub host_environment: Option<lingxi_core::host::MobileHostEnvironment>,
     /// Whether non-vision primary models may delegate image analysis to an
     /// internal vision model. Defaults to `true` across mobile hosts.
     pub vision_delegation_enabled: bool,
@@ -480,7 +480,7 @@ pub struct MobileRuntime {
     /// preload silently warn-and-skip on mobile.
     #[cfg(test)]
     pub(crate) wired_subagent_skill_loader_cell:
-        Arc<agent::RuntimeLink<Arc<dyn platform_api::skill_loader::SkillLoader>>>,
+        Arc<agent::RuntimeLink<Arc<dyn lingxi_core::host::skill_loader::SkillLoader>>>,
     /// Auth handle for `/login` and `/logout`.
     pub auth: Arc<dyn AuthHandle>,
     /// Native mobile OAuth coordinator. It owns the provider-specific handles
@@ -574,7 +574,7 @@ pub struct MobileRuntime {
     ///
     /// Desktop needs no equivalent: its picker gates the same static catalog on
     /// per-provider availability maps that mobile does not have.
-    pub routable_listings: Vec<platform_api::ModelListing>,
+    pub routable_listings: Vec<lingxi_core::host::ModelListing>,
     /// Settings-visible provider model directory generated before the mobile
     /// routing allowlist is applied.
     pub provider_model_catalog: Vec<ProviderModelCatalogEntryDto>,
@@ -696,14 +696,15 @@ impl MobileAppAgentExecutor {
         let call_budget = scoped
             .call_budget()
             .ok_or_else(|| "app Agent MCP budget was not attached".to_string())?;
-        let registry = McpRegistry::new(Arc::new(scoped) as Arc<dyn platform_api::McpTransport>);
+        let registry =
+            McpRegistry::new(Arc::new(scoped) as Arc<dyn lingxi_core::host::McpTransport>);
         registry
             .connect(McpServerConfig {
                 name: LOCAL_APPS_REGISTRY_KEY.into(),
-                spec: platform_api::McpTransportSpec::InProcess {
+                spec: lingxi_core::host::McpTransportSpec::InProcess {
                     registry_key: LOCAL_APPS_REGISTRY_KEY.into(),
                 },
-                scope: McpConfigScope::Settings(protocol::SettingsScope::Managed),
+                scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
                 disabled: false,
                 timeout_ms: Some(LOCAL_APPS_MCP_TIMEOUT_MS),
                 always_load: true,
@@ -766,14 +767,14 @@ impl MobileAppAgentExecutor {
                 Arc::new(StaticMemoryProvider::empty()),
                 layout.root().join(layout.workspace_rel()),
             )
-            .with_session_id(protocol::SessionId::new())
+            .with_session_id(lingxi_core::types::SessionId::new())
             .with_config_home(self.config_home.clone())
             .with_hooks_restricted(true),
         );
         let history = local_apps::load_agent_history(&layout, session_id)
             .map_err(|error| error.to_string())?
             .into_iter()
-            .map(serde_json::from_value::<protocol::ConversationMessage>)
+            .map(serde_json::from_value::<lingxi_core::types::ConversationMessage>)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("invalid persisted Agent history: {error}"))?;
         agent
@@ -848,7 +849,7 @@ struct SlashAuthoritySnapshot {
 }
 
 fn lower_controls(
-    controls: platform_api::ConversationControls,
+    controls: lingxi_core::host::ConversationControls,
     requested_permission: String,
 ) -> ConversationControlsDto {
     let mut controls = lower_conversation_controls(controls);
@@ -861,7 +862,7 @@ fn lower_controls(
     controls
 }
 
-fn lower_model_details(listing: &platform_api::ModelListing) -> ModelDetailsDto {
+fn lower_model_details(listing: &lingxi_core::host::ModelListing) -> ModelDetailsDto {
     client::adapter::lowering::lower_model_details(listing)
 }
 
@@ -949,8 +950,8 @@ fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
         let curated = listings
             .into_iter()
             .filter(|listing| {
-                platform_api::is_curated_model(&listing.provider_id, &listing.request_model)
-                    || !platform_api::provider_has_curated_list(&listing.provider_id)
+                lingxi_core::host::is_curated_model(&listing.provider_id, &listing.request_model)
+                    || !lingxi_core::host::provider_has_curated_list(&listing.provider_id)
             })
             .collect::<Vec<_>>();
         ProviderCatalogEntryDto {
@@ -986,9 +987,9 @@ fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
 }
 
 fn provider_model_catalog_from_listings(
-    listings: &[platform_api::ModelListing],
+    listings: &[lingxi_core::host::ModelListing],
 ) -> Vec<ProviderModelCatalogEntryDto> {
-    platform_api::provider_model_catalog(listings)
+    lingxi_core::host::provider_model_catalog(listings)
         .iter()
         .map(client::adapter::lowering::lower_provider_model_catalog_entry)
         .collect()
@@ -1249,8 +1250,8 @@ pub struct MobileOAuthManager {
     openai: Arc<openai_oauth::OpenAiOAuthHandle>,
     anthropic_refresh: Option<Arc<RefreshDriver>>,
     openai_refresh: Option<Arc<openai_oauth::RefreshDriver>>,
-    anthropic_refresh_spawner: Option<Arc<dyn platform_api::RuntimeSpawner>>,
-    openai_refresh_spawner: Option<Arc<dyn platform_api::RuntimeSpawner>>,
+    anthropic_refresh_spawner: Option<Arc<dyn lingxi_core::host::RuntimeSpawner>>,
+    openai_refresh_spawner: Option<Arc<dyn lingxi_core::host::RuntimeSpawner>>,
     http: Arc<dyn HttpTransport>,
     pending: Mutex<Option<PendingMobileOAuthSession>>,
 }
@@ -1261,8 +1262,8 @@ impl MobileOAuthManager {
         openai: Arc<openai_oauth::OpenAiOAuthHandle>,
         anthropic_refresh: Option<Arc<RefreshDriver>>,
         openai_refresh: Option<Arc<openai_oauth::RefreshDriver>>,
-        anthropic_refresh_spawner: Option<Arc<dyn platform_api::RuntimeSpawner>>,
-        openai_refresh_spawner: Option<Arc<dyn platform_api::RuntimeSpawner>>,
+        anthropic_refresh_spawner: Option<Arc<dyn lingxi_core::host::RuntimeSpawner>>,
+        openai_refresh_spawner: Option<Arc<dyn lingxi_core::host::RuntimeSpawner>>,
         http: Arc<dyn HttpTransport>,
     ) -> Self {
         Self {
@@ -1669,16 +1670,16 @@ fn lower_mobile_linux_mode(mode: MobileLinuxRuntimeMode) -> String {
     }
 }
 
-fn lower_mobile_linux_backend(backend: platform_api::SandboxBackend) -> String {
+fn lower_mobile_linux_backend(backend: lingxi_core::host::SandboxBackend) -> String {
     match backend {
-        platform_api::SandboxBackend::LinuxNamespaces => "linux-namespaces",
-        platform_api::SandboxBackend::LinuxFirejail => "linux-firejail",
-        platform_api::SandboxBackend::MacOsSandboxExec => "macos-sandbox-exec",
-        platform_api::SandboxBackend::WindowsJobObject => "windows-job-object",
-        platform_api::SandboxBackend::AndroidMinijail => "android-minijail",
-        platform_api::SandboxBackend::AndroidProot => "android-proot",
-        platform_api::SandboxBackend::IosIsh => "ios-ish",
-        platform_api::SandboxBackend::None => "none",
+        lingxi_core::host::SandboxBackend::LinuxNamespaces => "linux-namespaces",
+        lingxi_core::host::SandboxBackend::LinuxFirejail => "linux-firejail",
+        lingxi_core::host::SandboxBackend::MacOsSandboxExec => "macos-sandbox-exec",
+        lingxi_core::host::SandboxBackend::WindowsJobObject => "windows-job-object",
+        lingxi_core::host::SandboxBackend::AndroidMinijail => "android-minijail",
+        lingxi_core::host::SandboxBackend::AndroidProot => "android-proot",
+        lingxi_core::host::SandboxBackend::IosIsh => "ios-ish",
+        lingxi_core::host::SandboxBackend::None => "none",
     }
     .to_string()
 }
@@ -1733,57 +1734,57 @@ fn gate_mobile_git_ctx(
 }
 
 fn build_mobile_runtime_environment(
-    host_environment: Option<&platform_api::MobileHostEnvironment>,
+    host_environment: Option<&lingxi_core::host::MobileHostEnvironment>,
     shell_ctx: Option<&tool_api::MobileShellToolCtx>,
     capability: Option<&MobileLinuxCapability>,
     session_cwd: &SessionCwd,
-) -> Option<platform_api::MobileRuntimeEnvironment> {
+) -> Option<lingxi_core::host::MobileRuntimeEnvironment> {
     let host_environment = host_environment?.clone();
     let enabled_shell = shell_ctx.filter(|ctx| ctx.enabled);
     let tool_runtime = if capability
         .is_some_and(|cap| matches!(cap.mode, MobileLinuxRuntimeMode::MobileLinux) && cap.available)
         || enabled_shell.is_some_and(|ctx| ctx.force_platform_sandbox)
     {
-        platform_api::MobileToolRuntime::MobileLinuxGuest
+        lingxi_core::host::MobileToolRuntime::MobileLinuxGuest
     } else if enabled_shell.is_some() {
-        platform_api::MobileToolRuntime::AndroidLegacy
+        lingxi_core::host::MobileToolRuntime::AndroidLegacy
     } else {
-        platform_api::MobileToolRuntime::Unavailable
+        lingxi_core::host::MobileToolRuntime::Unavailable
     };
     let network_policy = match tool_runtime {
-        platform_api::MobileToolRuntime::MobileLinuxGuest => {
-            platform_api::MobileNetworkPolicy::PermissionMediated
+        lingxi_core::host::MobileToolRuntime::MobileLinuxGuest => {
+            lingxi_core::host::MobileNetworkPolicy::PermissionMediated
         }
-        platform_api::MobileToolRuntime::AndroidLegacy => {
-            platform_api::MobileNetworkPolicy::DeniedByHost
+        lingxi_core::host::MobileToolRuntime::AndroidLegacy => {
+            lingxi_core::host::MobileNetworkPolicy::DeniedByHost
         }
-        platform_api::MobileToolRuntime::Unavailable => {
-            platform_api::MobileNetworkPolicy::DeniedByHost
+        lingxi_core::host::MobileToolRuntime::Unavailable => {
+            lingxi_core::host::MobileNetworkPolicy::DeniedByHost
         }
     };
     let lifecycle_policy = match host_environment.launch_mode {
-        platform_api::MobileLaunchMode::ScheduledHeadless => {
-            platform_api::MobileLifecyclePolicy::ScheduledHeadlessBestEffort
+        lingxi_core::host::MobileLaunchMode::ScheduledHeadless => {
+            lingxi_core::host::MobileLifecyclePolicy::ScheduledHeadlessBestEffort
         }
-        platform_api::MobileLaunchMode::Interactive => match host_environment.host_os {
-            platform_api::MobileHostOs::Ios => {
-                platform_api::MobileLifecyclePolicy::IosFiniteBackgroundAssertion
+        lingxi_core::host::MobileLaunchMode::Interactive => match host_environment.host_os {
+            lingxi_core::host::MobileHostOs::Ios => {
+                lingxi_core::host::MobileLifecyclePolicy::IosFiniteBackgroundAssertion
             }
-            platform_api::MobileHostOs::Android => {
-                platform_api::MobileLifecyclePolicy::AndroidForegroundServiceBestEffort
+            lingxi_core::host::MobileHostOs::Android => {
+                lingxi_core::host::MobileLifecyclePolicy::AndroidForegroundServiceBestEffort
             }
         },
-        platform_api::MobileLaunchMode::Unknown => {
-            platform_api::MobileLifecyclePolicy::UnknownBestEffort
+        lingxi_core::host::MobileLaunchMode::Unknown => {
+            lingxi_core::host::MobileLifecyclePolicy::UnknownBestEffort
         }
     };
 
     let guest_cwd = matches!(
         tool_runtime,
-        platform_api::MobileToolRuntime::MobileLinuxGuest
+        lingxi_core::host::MobileToolRuntime::MobileLinuxGuest
     )
     .then(|| session_cwd.cwd().to_string_lossy().to_string());
-    Some(platform_api::MobileRuntimeEnvironment::new(
+    Some(lingxi_core::host::MobileRuntimeEnvironment::new(
         host_environment,
         tool_runtime,
         guest_cwd,
@@ -1795,27 +1796,27 @@ fn build_mobile_runtime_environment(
 }
 
 fn mobile_launch_is_interactive(
-    host_environment: Option<&platform_api::MobileHostEnvironment>,
+    host_environment: Option<&lingxi_core::host::MobileHostEnvironment>,
 ) -> bool {
     !host_environment.is_some_and(|environment| {
         matches!(
             environment.launch_mode,
-            platform_api::MobileLaunchMode::ScheduledHeadless
+            lingxi_core::host::MobileLaunchMode::ScheduledHeadless
         )
     })
 }
 
 async fn mobile_typescript_lsp_ready(
-    runtime: &Arc<dyn platform_api::MobileLinuxRuntime>,
-    capability: Option<&platform_api::MobileLinuxCapability>,
-    host_environment: Option<&platform_api::MobileHostEnvironment>,
+    runtime: &Arc<dyn lingxi_core::host::MobileLinuxRuntime>,
+    capability: Option<&lingxi_core::host::MobileLinuxCapability>,
+    host_environment: Option<&lingxi_core::host::MobileHostEnvironment>,
 ) -> bool {
     if !capability.is_some_and(|value| value.available)
         || host_environment.is_some_and(|environment| {
-            matches!(environment.host_os, platform_api::MobileHostOs::Ios)
+            matches!(environment.host_os, lingxi_core::host::MobileHostOs::Ios)
                 && matches!(
                     environment.execution_target,
-                    platform_api::MobileExecutionTarget::Simulator
+                    lingxi_core::host::MobileExecutionTarget::Simulator
                 )
         })
     {
@@ -1824,13 +1825,13 @@ async fn mobile_typescript_lsp_ready(
     let Ok(mut status) = runtime.rootfs_status().await else {
         return false;
     };
-    if matches!(status.state, platform_api::RootfsState::Missing) {
+    if matches!(status.state, lingxi_core::host::RootfsState::Missing) {
         let Ok(booted) = runtime.boot().await else {
             return false;
         };
         status = booted;
     }
-    if !matches!(status.state, platform_api::RootfsState::Ready) {
+    if !matches!(status.state, lingxi_core::host::RootfsState::Ready) {
         return false;
     }
     let Some(active_root) = status.active_root else {
@@ -1838,7 +1839,7 @@ async fn mobile_typescript_lsp_ready(
     };
     let relative = std::path::Path::new("opt/lingxi/toolchains/typescript/7.0.2");
     let toolchain_root = match runtime.backend() {
-        platform_api::SandboxBackend::IosIsh => active_root.join("data").join(relative),
+        lingxi_core::host::SandboxBackend::IosIsh => active_root.join("data").join(relative),
         _ => active_root.join(relative),
     };
     if !toolchain_root.join("tsc").is_file() {
@@ -1858,15 +1859,15 @@ async fn mobile_typescript_lsp_ready(
 
 fn model_visible_mobile_cwd(
     path: &std::path::Path,
-    mounts: &[platform_api::MountSpec],
+    mounts: &[lingxi_core::host::MountSpec],
     has_mobile_linux_guest: bool,
 ) -> Option<String> {
     if !has_mobile_linux_guest {
         return None;
     }
-    platform_api::mobile_linux::map_host_path_to_guest(path, mounts).or_else(|| {
+    lingxi_core::host::mobile_linux::map_host_path_to_guest(path, mounts).or_else(|| {
         path.to_str()
-            .and_then(platform_api::mobile_runtime_environment::normalize_mobile_guest_cwd)
+            .and_then(lingxi_core::host::mobile_runtime_environment::normalize_mobile_guest_cwd)
     })
 }
 
@@ -1880,7 +1881,7 @@ fn subagent_env_platform_name(rust_os: &str) -> &str {
 
 fn build_mobile_subagent_env_renderer(
     probe_cwd: std::path::PathBuf,
-    mobile_runtime_environment: Option<&platform_api::MobileRuntimeEnvironment>,
+    mobile_runtime_environment: Option<&lingxi_core::host::MobileRuntimeEnvironment>,
     mobile_workspace_cwd_provider: agent::handle::MobileWorkspaceCwdProvider,
 ) -> agent::handle::SubagentEnvRenderer {
     if mobile_runtime_environment.is_none() {
@@ -1899,9 +1900,11 @@ fn build_mobile_subagent_env_renderer(
         .or_else(|| {
             probe_cwd
                 .to_str()
-                .and_then(platform_api::mobile_runtime_environment::normalize_mobile_guest_cwd)
+                .and_then(lingxi_core::host::mobile_runtime_environment::normalize_mobile_guest_cwd)
         })
-        .unwrap_or_else(|| platform_api::mobile_linux::guest_paths::WORKSPACE_ROOT.to_string());
+        .unwrap_or_else(|| {
+            lingxi_core::host::mobile_linux::guest_paths::WORKSPACE_ROOT.to_string()
+        });
 
     Arc::new(
         move |model_id: &str, cwd_override: Option<&std::path::Path>| {
@@ -1909,7 +1912,7 @@ fn build_mobile_subagent_env_renderer(
                 .or_else(|| {
                     cwd_override.and_then(|path| {
                         path.to_str().and_then(
-                            platform_api::mobile_runtime_environment::normalize_mobile_guest_cwd,
+                            lingxi_core::host::mobile_runtime_environment::normalize_mobile_guest_cwd,
                         )
                     })
                 })
@@ -1935,7 +1938,7 @@ mod mobile_tool_gate_tests {
     fn unavailable_mobile_linux_capability() -> MobileLinuxCapability {
         MobileLinuxCapability {
             available: false,
-            backend: platform_api::SandboxBackend::IosIsh,
+            backend: lingxi_core::host::SandboxBackend::IosIsh,
             mode: MobileLinuxRuntimeMode::MobileLinux,
             reason: Some("runtime unavailable".into()),
             streaming_output: false,
@@ -1974,13 +1977,13 @@ mod mobile_tool_gate_tests {
         assert!(!gated.enabled);
     }
 
-    fn ios_host() -> platform_api::MobileHostEnvironment {
-        platform_api::MobileHostEnvironment::new(
-            platform_api::MobileHostOs::Ios,
+    fn ios_host() -> lingxi_core::host::MobileHostEnvironment {
+        lingxi_core::host::MobileHostEnvironment::new(
+            lingxi_core::host::MobileHostOs::Ios,
             Some("19.0".into()),
-            platform_api::MobileDeviceClass::Phone,
-            platform_api::MobileExecutionTarget::PhysicalDevice,
-            platform_api::MobileLaunchMode::Interactive,
+            lingxi_core::host::MobileDeviceClass::Phone,
+            lingxi_core::host::MobileExecutionTarget::PhysicalDevice,
+            lingxi_core::host::MobileLaunchMode::Interactive,
         )
     }
 
@@ -2010,7 +2013,7 @@ mod mobile_tool_gate_tests {
 
         assert_eq!(
             environment.tool_runtime,
-            platform_api::MobileToolRuntime::Unavailable
+            lingxi_core::host::MobileToolRuntime::Unavailable
         );
         assert_eq!(environment.guest_cwd(), None);
         let reminder = environment.render_body();
@@ -2020,11 +2023,11 @@ mod mobile_tool_gate_tests {
 
     #[test]
     fn workspace_prompt_paths_are_guest_only() {
-        let mounts = [platform_api::MountSpec {
+        let mounts = [lingxi_core::host::MountSpec {
             host_path: std::path::PathBuf::from("/native/workspace"),
             guest_path: "/workspace/app".into(),
             read_only: false,
-            purpose: platform_api::MountPurpose::Workspace,
+            purpose: lingxi_core::host::MountPurpose::Workspace,
         }];
 
         assert_eq!(
@@ -2057,25 +2060,25 @@ mod mobile_tool_gate_tests {
 
     #[test]
     fn mobile_subagent_env_renderer_uses_guest_paths_only() {
-        let mounts = vec![platform_api::MountSpec {
+        let mounts = vec![lingxi_core::host::MountSpec {
             host_path: std::path::PathBuf::from("/native/workspace"),
             guest_path: "/workspace/app".into(),
             read_only: false,
-            purpose: platform_api::MountPurpose::Workspace,
+            purpose: lingxi_core::host::MountPurpose::Workspace,
         }];
         let provider_mounts = mounts.clone();
         let provider = Arc::new(move |override_cwd: Option<&std::path::Path>| {
             let cwd = override_cwd.unwrap_or_else(|| std::path::Path::new("/native/workspace"));
             model_visible_mobile_cwd(cwd, &provider_mounts, true)
         });
-        let environment = platform_api::MobileRuntimeEnvironment::new(
+        let environment = lingxi_core::host::MobileRuntimeEnvironment::new(
             ios_host(),
-            platform_api::MobileToolRuntime::MobileLinuxGuest,
+            lingxi_core::host::MobileToolRuntime::MobileLinuxGuest,
             Some("/workspace/app".into()),
             Some("/bin/sh".into()),
             Some("mobile-linux".into()),
-            platform_api::MobileNetworkPolicy::PermissionMediated,
-            platform_api::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
+            lingxi_core::host::MobileNetworkPolicy::PermissionMediated,
+            lingxi_core::host::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
         );
         let renderer = build_mobile_subagent_env_renderer(
             std::path::PathBuf::from(
@@ -2108,10 +2111,10 @@ mod mobile_tool_gate_tests {
     fn only_explicit_scheduled_launches_use_headless_prompt_semantics() {
         let mut host = ios_host();
         assert!(mobile_launch_is_interactive(Some(&host)));
-        host.launch_mode = platform_api::MobileLaunchMode::Unknown;
+        host.launch_mode = lingxi_core::host::MobileLaunchMode::Unknown;
         assert!(mobile_launch_is_interactive(Some(&host)));
         assert!(mobile_launch_is_interactive(None));
-        host.launch_mode = platform_api::MobileLaunchMode::ScheduledHeadless;
+        host.launch_mode = lingxi_core::host::MobileLaunchMode::ScheduledHeadless;
         assert!(!mobile_launch_is_interactive(Some(&host)));
     }
 }
@@ -2151,7 +2154,7 @@ fn anthropic_models(default_model: &str) -> Vec<llm_runtime::ModelProfile> {
         reasoning: true,
         structured_output: true,
     };
-    // Every id `platform_api::is_curated_model` lists under the "anthropic" arm must
+    // Every id `lingxi_core::host::is_curated_model` lists under the "anthropic" arm must
     // appear here, otherwise the client picker's ANTHROPIC section renders only
     // the subset this registry happens to route (the section used to show just
     // Sonnet 4.6 + Haiku 4.5 while Sonnet 5 / Opus 4.8 / Fable 5 were curated
@@ -2216,14 +2219,16 @@ fn anthropic_route_id(model_ref: &str) -> Option<String> {
     (profile == "anthropic" && !bare.is_empty() && !bare.contains('/')).then_some(bare)
 }
 
-/// The assembled provider profiles flattened into the [`platform_api::ModelListing`]s
-/// that [`resolve_default_model_ref`] and [`platform_api::parse_model_ref`] resolve
+/// The assembled provider profiles flattened into the [`lingxi_core::host::ModelListing`]s
+/// that [`resolve_default_model_ref`] and [`lingxi_core::host::parse_model_ref`] resolve
 /// against.
 ///
 /// `display_model` / `provider_label` are immaterial to parsing, so
 /// `request_model` and the profile name stand in for both. Shared with the
 /// tests so they cannot drift from the shape production actually feeds in.
-fn model_listings(providers: &[llm_runtime::ProviderProfile]) -> Vec<platform_api::ModelListing> {
+fn model_listings(
+    providers: &[llm_runtime::ProviderProfile],
+) -> Vec<lingxi_core::host::ModelListing> {
     llm_runtime::ModelRegistry::from_config(llm_runtime::ClientConfig {
         providers: providers.to_vec(),
     })
@@ -2243,7 +2248,7 @@ fn model_listings(providers: &[llm_runtime::ProviderProfile]) -> Vec<platform_ap
 /// A client persists its last-picked model and hands it back on the next
 /// launch, so a client-side bug can hand us a reference no profile serves (iOS
 /// re-qualified an already-qualified id into `anthropic/deepseek/deepseek-v4-
-/// flash`). [`platform_api::parse_model_ref`] then returns the whole string as a bare
+/// flash`). [`lingxi_core::host::parse_model_ref`] then returns the whole string as a bare
 /// id, which boots the session onto an unroutable model: the picker shows a
 /// junk row and the first turn fails `ModelUnavailable`. Rewriting it to a
 /// model that IS registered keeps the session usable and lets the user re-pick.
@@ -2257,13 +2262,13 @@ fn model_listings(providers: &[llm_runtime::ProviderProfile]) -> Vec<platform_ap
 /// there would swap one unroutable ref for another while the log claimed the
 /// session was repaired. The chosen profile is returned too — a bare
 /// `ClientEvent::ModelList { current }` matches none of the provider-qualified
-/// rows `platform_api::curated_model_refs` emits, so the client's picker would render
+/// rows `lingxi_core::host::curated_model_refs` emits, so the client's picker would render
 /// with nothing selected.
 fn resolve_default_model_ref(
     default_model: &str,
-    listings: &[platform_api::ModelListing],
+    listings: &[lingxi_core::host::ModelListing],
 ) -> (String, Option<String>) {
-    let (model, profile) = platform_api::parse_model_ref(default_model, listings);
+    let (model, profile) = lingxi_core::host::parse_model_ref(default_model, listings);
     // `parse_model_ref` returns `Some(profile)` only after matching a listing on
     // that exact `(provider_id, request_model)` pair, so a qualified ref is
     // already proven routable and keeps its profile as-is.
@@ -2608,8 +2613,8 @@ fn mobile_mcp_preflight(
         if config.config_error.is_none()
             && matches!(
                 config.spec,
-                platform_api::McpTransportSpec::Sse { oauth: Some(_), .. }
-                    | platform_api::McpTransportSpec::Http { oauth: Some(_), .. }
+                lingxi_core::host::McpTransportSpec::Sse { oauth: Some(_), .. }
+                    | lingxi_core::host::McpTransportSpec::Http { oauth: Some(_), .. }
             )
         {
             config.config_error =
@@ -2828,7 +2833,7 @@ async fn mobile_mcp_run_reload_job(
 
 fn mobile_mcp_oauth_authorization_callback(
     slot: Arc<StdMutex<Option<String>>>,
-    opener: Option<Arc<dyn platform_api::DeepLinkOpener>>,
+    opener: Option<Arc<dyn lingxi_core::host::DeepLinkOpener>>,
 ) -> mcp::oauth::OnAuthorizationUrl {
     Arc::new(move |url| {
         // Record before attempting the native opener. A successful open is
@@ -2933,10 +2938,10 @@ async fn build_mobile_inner_with_ask(
     let http = platform.http();
     let clock = platform.clock();
     let fs = platform.filesystem();
-    let storage: Arc<dyn platform_api::SecureStorage> = platform
+    let storage: Arc<dyn lingxi_core::host::SecureStorage> = platform
         .secure_storage()
         .unwrap_or_else(|| Arc::new(platform_posix_minimal::PlainTextSecureStorage::new()));
-    let oauth_supported = platform_api::SecureStorage::is_encrypted(storage.as_ref());
+    let oauth_supported = lingxi_core::host::SecureStorage::is_encrypted(storage.as_ref());
 
     let local_apps_mcp = Arc::new(LocalAppsMcpTransport::new(mobile_apps_data_root(&cfg)));
     let _ = local_apps_mcp.attach_lingxi_home(cfg.lingxi_home.clone());
@@ -2946,7 +2951,7 @@ async fn build_mobile_inner_with_ask(
     let mcp_auth_callback =
         mobile_mcp_oauth_authorization_callback(mcp_auth_url.clone(), platform.deep_link());
     let mut mcp_registry = McpRegistry::with_raw_conn(
-        mobile_mcp.clone() as Arc<dyn platform_api::McpTransport>,
+        mobile_mcp.clone() as Arc<dyn lingxi_core::host::McpTransport>,
         mobile_mcp.clone() as Arc<dyn RawConnectionProvider>,
     )
     .with_headers_helper_cwd(cwd.clone())
@@ -2976,10 +2981,10 @@ async fn build_mobile_inner_with_ask(
     mcp_registry
         .connect(McpServerConfig {
             name: LOCAL_APPS_REGISTRY_KEY.into(),
-            spec: platform_api::McpTransportSpec::InProcess {
+            spec: lingxi_core::host::McpTransportSpec::InProcess {
                 registry_key: LOCAL_APPS_REGISTRY_KEY.into(),
             },
-            scope: McpConfigScope::Settings(protocol::SettingsScope::Managed),
+            scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
             disabled: false,
             timeout_ms: Some(LOCAL_APPS_MCP_TIMEOUT_MS),
             always_load: true,
@@ -3047,7 +3052,7 @@ async fn build_mobile_inner_with_ask(
 
     // (1) OS handles from the aggregate `Platform` (NOT a concrete posix type —
     //     the device supplies these; the host test supplies a portable shim).
-    let main_session_id = protocol::SessionId::new();
+    let main_session_id = lingxi_core::types::SessionId::new();
     let main_session_uuid = main_session_id.as_uuid().to_string();
     // v3 Phase 3 (MCP create 收权): the LIVE current-session uuid, updated on
     // every New/Resume/Clear retarget. The local-apps MCP `create` stamps an
@@ -3066,8 +3071,8 @@ async fn build_mobile_inner_with_ask(
     let plans_dir = orchestrator::ConversationOrchestrator::plans_dir(&cwd, None);
     let plan_files = Arc::new(permission::plan_files::PlanFileMatcher::with_identity(
         permission::plan_files::PlanFileIdentity {
-            slug: platform_api::plan_slug::generate_slug(None, &|candidate| {
-                platform_api::plan_slug::slug_taken_in(&plans_dir, candidate)
+            slug: lingxi_core::host::plan_slug::generate_slug(None, &|candidate| {
+                lingxi_core::host::plan_slug::slug_taken_in(&plans_dir, candidate)
             }),
             plans_dir: plans_dir.clone(),
             // `ZUe()` — LingXi ships no workshop skill.
@@ -3157,9 +3162,9 @@ async fn build_mobile_inner_with_ask(
         )
         .with_clock(clock.clone()),
     );
-    let anthropic_refresh_spawner: Arc<dyn platform_api::RuntimeSpawner> =
+    let anthropic_refresh_spawner: Arc<dyn lingxi_core::host::RuntimeSpawner> =
         Arc::new(platform_posix_minimal::PosixRuntime::new());
-    let openai_refresh_spawner: Arc<dyn platform_api::RuntimeSpawner> =
+    let openai_refresh_spawner: Arc<dyn lingxi_core::host::RuntimeSpawner> =
         Arc::new(platform_posix_minimal::PosixRuntime::new());
 
     let anthropic_oauth_state = match credentials.get_oauth_tokens().await {
@@ -3500,14 +3505,18 @@ async fn build_mobile_inner_with_ask(
         cfg.lingxi_home.join("output-styles"),
         cfg.cwd.join(branding::DOT_DIR).join("output-styles"),
     ];
-    platform_api::session_flags::set_show_thinking_summaries(
+    lingxi_core::host::session_flags::set_show_thinking_summaries(
         provider_settings.show_thinking_summaries.unwrap_or(false),
     );
-    platform_api::session_flags::set_task_output_max_chars(provider_settings.task_output_max_chars);
-    platform_api::session_flags::set_bash_output_max_chars(provider_settings.bash_output_max_chars);
+    lingxi_core::host::session_flags::set_task_output_max_chars(
+        provider_settings.task_output_max_chars,
+    );
+    lingxi_core::host::session_flags::set_bash_output_max_chars(
+        provider_settings.bash_output_max_chars,
+    );
     // `settings.attribution` / `settings.includeCoAuthoredBy` — the git
     // attribution trailers, published at boot beside the output caps.
-    platform_api::session_flags::set_attribution(
+    lingxi_core::host::session_flags::set_attribution(
         provider_settings
             .attribution
             .as_ref()
@@ -3517,10 +3526,10 @@ async fn build_mobile_inner_with_ask(
             .as_ref()
             .and_then(|a| a.pr.clone()),
     );
-    platform_api::session_flags::set_include_co_authored_by(
+    lingxi_core::host::session_flags::set_include_co_authored_by(
         provider_settings.include_co_authored_by,
     );
-    platform_api::session_flags::set_include_git_instructions(
+    lingxi_core::host::session_flags::set_include_git_instructions(
         provider_settings.include_git_instructions,
     );
     // Mobile is a transport host, not the CLI REPL. Keep main-query telemetry
@@ -3598,7 +3607,7 @@ async fn build_mobile_inner_with_ask(
     // Read from the SAME settings.json tiers as the perms loop below,
     // scalar-override (later tier wins). `false` by default (agent view enabled;
     // the env half still applies independently). Threaded into
-    // `register_core_batch_8` via `platform_api::agent_view::is_enabled_with_setting`.
+    // `register_core_batch_8` via `lingxi_core::host::agent_view::is_enabled_with_setting`.
     let mut disable_agent_view = false;
     // `agentPushNotifEnabled` scalar override (user → project → local). The
     // feature flag is checked independently by the cron/tool consumers.
@@ -3637,7 +3646,7 @@ async fn build_mobile_inner_with_ask(
     // `confined` is read ONCE here rather than inside the clamp — a gate that
     // reads `CLAUDE_CODE_EVAL_CONFINED` itself makes a parallel suite flaky.
     let mut subagent_bypass_gates = agent::permission_mode::SpawnBypassGates {
-        confined: platform_api::env::is_eval_confined_session(),
+        confined: lingxi_core::host::env::is_eval_confined_session(),
         bypass_disabled: false,
         restricted: false,
     };
@@ -3659,7 +3668,7 @@ async fn build_mobile_inner_with_ask(
     // >1 we keep the engine cwd, i.e. today's behavior.
     let workspace_mounts: Vec<_> = mobile_linux_mounts
         .iter()
-        .filter(|m| matches!(m.purpose, platform_api::MountPurpose::Workspace))
+        .filter(|m| matches!(m.purpose, lingxi_core::host::MountPurpose::Workspace))
         .collect();
     // THE workspace mount, chosen once. `model_cwd` below reuses this instead
     // of running its own `.find()`: a bare `.find()` takes table order, so with
@@ -3687,7 +3696,7 @@ async fn build_mobile_inner_with_ask(
             // Canonical forms are used ONLY to decide. BOTH returned values are
             // raw, and that is load-bearing: `translate_model_path` resolves a
             // guest path to `mount.host_path.join(rest)` with NO
-            // canonicalization (`platform_api::mobile_linux::find_guest_mount` is
+            // canonicalization (`lingxi_core::host::mobile_linux::find_guest_mount` is
             // pure path math). Returning the canonicalized spelling here would
             // leave `FsRoots.cwd` as `/private/var/...` while every translated
             // path arrives as `/var/...`; `path_matches_rule_pattern`
@@ -3760,18 +3769,18 @@ async fn build_mobile_inner_with_ask(
         if user != proj {
             sources.push((
                 user,
-                permission::PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ));
         }
         sources.push((
             proj,
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         ));
         // `settings.local.json` is a distinct filename from both `settings.json`
         // paths, so it never collides with the dedup above — always read it last.
         sources.push((
             local,
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         ));
         for (path, source) in sources {
             if let Ok(raw) = tokio::fs::read_to_string(&path).await {
@@ -3791,7 +3800,7 @@ async fn build_mobile_inner_with_ask(
                     if m != PermissionMode::Auto
                         || source
                             == permission::PermissionRuleSource::Settings(
-                                protocol::SettingsScope::User,
+                                lingxi_core::types::SettingsScope::User,
                             )
                     {
                         mode = m; // local settings read last → scalar modes win
@@ -3872,8 +3881,8 @@ async fn build_mobile_inner_with_ask(
                 }
             }
         }
-        platform_api::session_flags::set_agent_push_notif_enabled(agent_push_notif_enabled);
-        platform_api::session_flags::set_task_output_max_chars(task_output_max_chars);
+        lingxi_core::host::session_flags::set_agent_push_notif_enabled(agent_push_notif_enabled);
+        lingxi_core::host::session_flags::set_task_output_max_chars(task_output_max_chars);
         // Filesystem roots so file-path CONTENT rules (`Edit(src/**)`,
         // `Read(./secrets/**)`) match the call's path. `dirs` is not a mobile dep,
         // so HOME comes from the env (absent on a sandboxed device ⇒ `None`).
@@ -3973,12 +3982,12 @@ async fn build_mobile_inner_with_ask(
     if user_settings_path != project_settings_path {
         settings_sources.push((
             user_settings_path,
-            hooks::definition::HookSource::Settings(protocol::SettingsScope::User),
+            hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::User),
         ));
     }
     settings_sources.push((
         project_settings_path,
-        hooks::definition::HookSource::Settings(protocol::SettingsScope::Project),
+        hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::Project),
     ));
     // (H-BIN-12) Accumulate the CC 2.1.207 HTTP-hook security allowlists across
     // the SAME settings tiers, concat-deduped (CC merges these arrays across
@@ -4044,7 +4053,7 @@ async fn build_mobile_inner_with_ask(
     //        child processes through the SAME platform-sourced runner + sandbox
     //        the tools use (a device-jailed runner on Android, the host runner on
     //        iOS/CI). Both are required — the runner only accepts a
-    //        `platform_api::SandboxedCommand`, which only the sandbox can mint.
+    //        `lingxi_core::host::SandboxedCommand`, which only the sandbox can mint.
     //      - `with_prompt_runner(ApiClientHookPromptRunner)` evaluates inline
     //        single-turn `prompt` hooks over the SAME `api_client` the
     //        orchestrator drives (shared provider routing / auth / telemetry).
@@ -4071,7 +4080,7 @@ async fn build_mobile_inner_with_ask(
             hook_registry.clone(),
             http.clone(),
             Arc::new(platform_posix_minimal::PosixRuntime::new())
-                as Arc<dyn platform_api::RuntimeSpawner>,
+                as Arc<dyn lingxi_core::host::RuntimeSpawner>,
         )
         .with_policy_disable_all_hooks(disable_all_hooks)
         .with_process_runner(process.clone(), sandbox.clone())
@@ -4185,7 +4194,7 @@ async fn build_mobile_inner_with_ask(
                 .is_some_and(|environment| {
                     matches!(
                         environment.tool_runtime,
-                        platform_api::MobileToolRuntime::MobileLinuxGuest
+                        lingxi_core::host::MobileToolRuntime::MobileLinuxGuest
                     )
                 });
         Arc::new(move |override_cwd: Option<&std::path::Path>| {
@@ -4329,8 +4338,8 @@ async fn build_mobile_inner_with_ask(
     // session.
     let subagent_pool = Arc::new(agent::StateMachinePool::new(
         Arc::new(platform_posix_minimal::PosixRuntime::new())
-            as Arc<dyn platform_api::RuntimeSpawner>,
-        platform_api::subagent_spawn::max_concurrent_subagents(),
+            as Arc<dyn lingxi_core::host::RuntimeSpawner>,
+        lingxi_core::host::subagent_spawn::max_concurrent_subagents(),
     ));
     // Use the owning boot session for hook/checkpoint identity. Hot-resume
     // rebinding still requires the deferred dynamic session-context substrate,
@@ -4411,13 +4420,13 @@ async fn build_mobile_inner_with_ask(
     let subagent_provider_first_party_resolver_cell =
         subagent_spawner_concrete.provider_first_party_resolver_handle();
     let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
-    let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
+    let subagent_spawner: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
 
     // (c) Budget enforcer over the session CostTracker (desktop parity —
     // background subagents halt at the same session ceiling as the main loop;
     // with no configured ceiling this stays unlimited).
-    let budget_enforcer: Arc<dyn platform_api::budget::BudgetEnforcerHandle> =
+    let budget_enforcer: Arc<dyn lingxi_core::host::budget::BudgetEnforcerHandle> =
         Arc::new(cost::BudgetEnforcer::new(
             cost::BudgetConfig {
                 max_session_nano_usd: orch_cfg.max_budget_nano_usd,
@@ -4458,7 +4467,7 @@ async fn build_mobile_inner_with_ask(
     let local_workflow_handler = Arc::new(
         tasks::handlers::LocalWorkflowHandler::new(
             subagent_spawner.clone(),
-            local_workflow_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+            local_workflow_invoker.clone() as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
             budget_enforcer.clone(),
             task_registry_inner.output_manager.clone(),
         )
@@ -4487,7 +4496,8 @@ async fn build_mobile_inner_with_ask(
         Arc::new(
             tasks::handlers::LocalAgentHandler::new(
                 subagent_spawner.clone(),
-                local_workflow_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+                local_workflow_invoker.clone()
+                    as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
                 budget_enforcer.clone(),
                 task_registry_inner.output_manager.clone(),
             )
@@ -4503,7 +4513,7 @@ async fn build_mobile_inner_with_ask(
     // observer; `ObserverReport` resolves against this same `Arc`. A second
     // `ObserverPairings::new()` anywhere would compile, look wired, and answer
     // "not armed" forever.
-    let observer_pairings = Arc::new(platform_api::observer_pairing::ObserverPairings::new());
+    let observer_pairings = Arc::new(lingxi_core::host::observer_pairing::ObserverPairings::new());
     task_registry.set_observer_pairings(observer_pairings.clone());
     subagent_spawner_arc.set_task_registry(task_registry.clone());
     local_agent_status_sink.bind(task_registry.clone());
@@ -4582,7 +4592,7 @@ async fn build_mobile_inner_with_ask(
         subagent_spawner: Some(subagent_spawner.clone()),
         agent_name_registry: None,
         task_registry: Some(
-            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>
         ),
         mailbox_router: None,
         budget_enforcer: Some(budget_enforcer.clone()),
@@ -4701,7 +4711,7 @@ async fn build_mobile_inner_with_ask(
             fs.clone(),
             http.clone(),
             Arc::new(platform_posix_minimal::PosixRuntime::new())
-                as Arc<dyn platform_api::RuntimeSpawner>,
+                as Arc<dyn lingxi_core::host::RuntimeSpawner>,
             credentials.clone(),
             Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
             shared_command_registry.clone(),
@@ -4722,7 +4732,7 @@ async fn build_mobile_inner_with_ask(
         )
         .with_project_dir(cwd.clone())
         .with_task_registry(
-            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>
         )
         .with_plugin_workflows(plugin_workflow_registry.clone()),
     );
@@ -4738,7 +4748,8 @@ async fn build_mobile_inner_with_ask(
         .with_prompt_cwd(session_cwd.clone()),
     );
     let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = live_skill_loader.clone();
-    let agent_skill_loader: Arc<dyn platform_api::skill_loader::SkillLoader> = live_skill_loader;
+    let agent_skill_loader: Arc<dyn lingxi_core::host::skill_loader::SkillLoader> =
+        live_skill_loader;
     // D1 (P-1.5 review): bind the per-turn skill-listing provider HERE, in the
     // same breath as the Skill loader above, and retain both handles on the
     // returned `MobileRuntime`. There is then exactly ONE construction site per
@@ -4807,13 +4818,13 @@ async fn build_mobile_inner_with_ask(
     });
     let workflow_policy_enabled = tool_workflow::workflows_enabled(false);
     let workflow_size_guideline_state =
-        platform_api::session_flags::WorkflowSizeGuidelineState::new(
+        lingxi_core::host::session_flags::WorkflowSizeGuidelineState::new(
             workflow_size_guideline.as_wire(),
             false,
             workflow_size_guideline_is_default,
         )
         .expect("mobile workflowSizeGuideline must be valid");
-    let dynamic_workflows_gate = platform_api::session_flags::DynamicWorkflowsGate::new(
+    let dynamic_workflows_gate = lingxi_core::host::session_flags::DynamicWorkflowsGate::new(
         workflow_policy_enabled && workflow_session_enabled,
         !workflow_policy_enabled,
     );
@@ -4869,7 +4880,7 @@ async fn build_mobile_inner_with_ask(
     // the probe stays unpublished and `read_auto_allowed` keeps answering
     // `false` — the fail-safe answer.
     if let Some(policy) = boot_permission_policy.clone() {
-        platform_api::read_auto_allow::set_read_auto_allow_probe(Arc::new(
+        lingxi_core::host::read_auto_allow::set_read_auto_allow_probe(Arc::new(
             permission::read_auto_allow::PolicyReadAutoAllow::new(policy, tools.all_names()),
         ));
     }
@@ -5013,7 +5024,7 @@ async fn build_mobile_inner_with_ask(
             Some(cfg.api_base.clone()),
             api_service.transport(),
             Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
-                as Arc<dyn platform_api::RuntimeSpawner>,
+                as Arc<dyn lingxi_core::host::RuntimeSpawner>,
             &home,
             &cwd,
         ))
@@ -5118,7 +5129,7 @@ async fn build_mobile_inner_with_ask(
     // into the per-turn `<task-notification>` reminder — the model learns a
     // launched workflow finished on the next turn (desktop mirror).
     .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
-        task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     )))
     // SKILLLIST.1: enumerate model-invocable skills each turn so the model
     // can discover bundled and user skills. Reads the shared registry lazily;
@@ -5152,7 +5163,7 @@ async fn build_mobile_inner_with_ask(
     // added later still resolve.
     orch_inner = if let Some(runtime) = mobile_linux.clone() {
         orch_inner.with_prompt_probe_cwd_resolver(std::sync::Arc::new(move |path| {
-            platform_api::mobile_linux::map_guest_path_to_host(
+            lingxi_core::host::mobile_linux::map_guest_path_to_host(
                 &path.to_string_lossy(),
                 &runtime.current_mounts(),
             )
@@ -5165,7 +5176,7 @@ async fn build_mobile_inner_with_ask(
         let runtime = mobile_linux.clone();
         let has_mobile_linux_guest = matches!(
             environment.tool_runtime,
-            platform_api::MobileToolRuntime::MobileLinuxGuest
+            lingxi_core::host::MobileToolRuntime::MobileLinuxGuest
         );
         let resolver = Arc::new(move |path: &std::path::Path| {
             let mounts = runtime
@@ -5301,7 +5312,7 @@ async fn build_mobile_inner_with_ask(
     // return the picker's snapshot as a structured command-output result.
     reg.register_builtin_handler(Arc::new(
         command_api::builtins::WorkflowsHandler::with_registry(
-            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>
         ),
     ));
     // Batch 8 (`/fork`, `/goal`, `/recap`, `/reload-skills`, `/skill-doctor`,
@@ -5475,7 +5486,7 @@ async fn build_mobile_inner_with_ask(
                 .await
             {
                 Ok(()) => {
-                    let _ = platform_api::OrchestratorHandle::set_plan_mode(
+                    let _ = lingxi_core::host::OrchestratorHandle::set_plan_mode(
                         orch.as_ref(),
                         preference == PermissionMode::Plan,
                     )
@@ -5698,7 +5709,7 @@ pub struct MobileEngineHandle {
     /// through (`list_recent_sessions`' `Arc<dyn FileSystem>` argument). The SAME
     /// `fs` the orchestrator's tools use — captured from the `Platform` so the
     /// session listing reads through the device's real backend.
-    fs: Arc<dyn platform_api::FileSystem>,
+    fs: Arc<dyn lingxi_core::host::FileSystem>,
     /// The deterministic build recipe, captured so the cron firing path
     /// (the per-task `run_cron_task_if_due`) can rebuild a FRESH, throwaway
     /// [`MobileRuntime`] per fired job (an isolated session that never pollutes
@@ -5741,7 +5752,7 @@ impl MobileRuntime {
     async fn retarget_session_context(
         &self,
         home: &std::path::Path,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         cwd: &str,
     ) {
         let next_session_id = session_id.as_uuid().to_string();
@@ -5797,8 +5808,8 @@ impl MobileRuntime {
                 let plans_dir = identity.plans_dir.clone();
                 self.plan_files
                     .publish(permission::plan_files::PlanFileIdentity {
-                        slug: platform_api::plan_slug::generate_slug(None, &|candidate| {
-                            platform_api::plan_slug::slug_taken_in(&plans_dir, candidate)
+                        slug: lingxi_core::host::plan_slug::generate_slug(None, &|candidate| {
+                            lingxi_core::host::plan_slug::slug_taken_in(&plans_dir, candidate)
                         }),
                         ..identity
                     });
@@ -5881,13 +5892,15 @@ fn session_agent_transcript_revision(raw: &[u8]) -> u64 {
         .filter(|line| !line.is_empty())
         .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
         .filter_map(|value| value.get("message").cloned())
-        .filter_map(|message| serde_json::from_value::<protocol::ConversationMessage>(message).ok())
+        .filter_map(|message| {
+            serde_json::from_value::<lingxi_core::types::ConversationMessage>(message).ok()
+        })
         .count() as u64
 }
 
 fn session_agent_transcript_event(
-    requested_session_id: protocol::SessionId,
-    current_session_id: protocol::SessionId,
+    requested_session_id: lingxi_core::types::SessionId,
+    current_session_id: lingxi_core::types::SessionId,
     agent_id: String,
     messages: Vec<client::protocol::message::MessageDto>,
     revision: u64,
@@ -5910,7 +5923,7 @@ fn session_agent_id_from_path(path: &std::path::Path) -> Option<String> {
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix("agent-"))
         .and_then(|id| id.strip_suffix(".jsonl"))
-        .and_then(protocol::AgentId::parse_prefixed)
+        .and_then(lingxi_core::types::AgentId::parse_prefixed)
         .map(|id| id.to_string())
 }
 
@@ -5959,15 +5972,17 @@ async fn find_session_agent_transcript_path(
 /// compact-summary, and transcript-only user records must not become
 /// standalone MessageDto rows. Agent indexes count only rows that the full
 /// transcript and live stream can both expose.
-fn session_agent_conversation_is_visible(message: &protocol::ConversationMessage) -> bool {
+fn session_agent_conversation_is_visible(
+    message: &lingxi_core::types::ConversationMessage,
+) -> bool {
     !matches!(
         message,
-        protocol::ConversationMessage::User { is_meta: true, .. }
-            | protocol::ConversationMessage::User {
+        lingxi_core::types::ConversationMessage::User { is_meta: true, .. }
+            | lingxi_core::types::ConversationMessage::User {
                 is_compact_summary: true,
                 ..
             }
-            | protocol::ConversationMessage::User {
+            | lingxi_core::types::ConversationMessage::User {
                 is_visible_in_transcript_only: true,
                 ..
             }
@@ -6198,22 +6213,26 @@ fn mobile_settings_write_lock(settings_path: &std::path::Path) -> Arc<Mutex<()>>
     lock
 }
 
-fn live_session_agent_activity(message: &protocol::ConversationMessage) -> Option<String> {
+fn live_session_agent_activity(
+    message: &lingxi_core::types::ConversationMessage,
+) -> Option<String> {
     match message {
-        protocol::ConversationMessage::Assistant { content, .. }
-        | protocol::ConversationMessage::User { content, .. } => {
+        lingxi_core::types::ConversationMessage::Assistant { content, .. }
+        | lingxi_core::types::ConversationMessage::User { content, .. } => {
             content.iter().find_map(|block| match block {
-                protocol::ContentBlock::Text { text } if !text.is_empty() => {
+                lingxi_core::types::ContentBlock::Text { text } if !text.is_empty() => {
                     Some(text.chars().take(160).collect())
                 }
-                protocol::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
-                protocol::ContentBlock::ToolResult { content, .. } if !content.is_empty() => {
+                lingxi_core::types::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                lingxi_core::types::ContentBlock::ToolResult { content, .. }
+                    if !content.is_empty() =>
+                {
                     Some(content.chars().take(160).collect())
                 }
                 _ => None,
             })
         }
-        protocol::ConversationMessage::System { content, .. } if !content.is_empty() => {
+        lingxi_core::types::ConversationMessage::System { content, .. } if !content.is_empty() => {
             Some(content.chars().take(160).collect())
         }
         _ => None,
@@ -6274,10 +6293,10 @@ impl MobileSessionAgentObserver {
 }
 
 #[async_trait::async_trait]
-impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentObserver {
-    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
+impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentObserver {
+    async fn on_event(&self, event: lingxi_core::host::subagent_spawn::SubagentObservation) {
         match event {
-            platform_api::subagent_spawn::SubagentObservation::Allocated {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
                 agent_id,
                 agent_type,
                 name,
@@ -6320,14 +6339,17 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                     })
                     .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Message { agent_id, message } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Message {
+                agent_id,
+                message,
+            } => {
                 let parked = matches!(
                     &message,
-                    protocol::ConversationMessage::System { subtype: Some(subtype), .. } if subtype == "agent_idle"
+                    lingxi_core::types::ConversationMessage::System { subtype: Some(subtype), .. } if subtype == "agent_idle"
                 );
                 let hidden_wake = matches!(
                     &message,
-                    protocol::ConversationMessage::User { is_meta: true, .. }
+                    lingxi_core::types::ConversationMessage::User { is_meta: true, .. }
                 );
                 if parked || hidden_wake {
                     let agent_key = agent_id.to_string();
@@ -6398,7 +6420,9 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                     })
                     .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Completed { agent_id, .. } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Completed {
+                agent_id, ..
+            } => {
                 let agent_key = agent_id.to_string();
                 let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
                     return;
@@ -6429,7 +6453,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                     self.clear_agent_state(&agent_key).await;
                 }
             }
-            platform_api::subagent_spawn::SubagentObservation::Failed { agent_id, error } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Failed { agent_id, error } => {
                 let agent_key = agent_id.to_string();
                 let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
                     return;
@@ -6451,7 +6475,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                     .await;
                 self.clear_agent_state(&agent_key).await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Killed { agent_id } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Killed { agent_id } => {
                 let agent_key = agent_id.to_string();
                 let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
                     return;
@@ -6473,13 +6497,13 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                     .await;
                 self.clear_agent_state(&agent_key).await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Progress { .. } => {}
-            platform_api::subagent_spawn::SubagentObservation::Retry { .. } => {}
+            lingxi_core::host::subagent_spawn::SubagentObservation::Progress { .. } => {}
+            lingxi_core::host::subagent_spawn::SubagentObservation::Retry { .. } => {}
         }
     }
 }
 
-fn parse_session_agent_messages(raw: &[u8]) -> Vec<protocol::ConversationMessage> {
+fn parse_session_agent_messages(raw: &[u8]) -> Vec<lingxi_core::types::ConversationMessage> {
     let mut messages = Vec::new();
     for line in raw.split(|byte| *byte == b'\n') {
         if line.is_empty() {
@@ -6492,13 +6516,13 @@ fn parse_session_agent_messages(raw: &[u8]) -> Vec<protocol::ConversationMessage
             continue;
         };
         let Ok(conversation) =
-            serde_json::from_value::<protocol::ConversationMessage>(message.clone())
+            serde_json::from_value::<lingxi_core::types::ConversationMessage>(message.clone())
         else {
             continue;
         };
         if matches!(
             &conversation,
-            protocol::ConversationMessage::System {
+            lingxi_core::types::ConversationMessage::System {
                 subtype: Some(subtype),
                 ..
             } if subtype.starts_with("agent_")
@@ -7354,7 +7378,7 @@ impl MobileEngineHandle {
             .is_some_and(|turn| turn.cancel.is_cancelled())
     }
 
-    async fn retarget_session_writer(&self, session_id: protocol::SessionId, cwd: &str) {
+    async fn retarget_session_writer(&self, session_id: lingxi_core::types::SessionId, cwd: &str) {
         self.inner
             .retarget_session_context(&self.lingxi_home, session_id, cwd)
             .await;
@@ -7449,7 +7473,7 @@ impl MobileEngineHandle {
             if let Err(error) = handle.set_reasoning_selection(selection).await {
                 tracing::warn!(%error, "saved mobile reasoning selection rejected by current model");
                 let _ = handle
-                    .set_reasoning_selection(platform_api::ReasoningSelection::Automatic)
+                    .set_reasoning_selection(lingxi_core::host::ReasoningSelection::Automatic)
                     .await;
             }
             return;
@@ -7457,7 +7481,7 @@ impl MobileEngineHandle {
         if let Some(controls) = handle.conversation_controls().await {
             if controls.requested_reasoning_selection != controls.effective_reasoning_selection {
                 let _ = handle
-                    .set_reasoning_selection(platform_api::ReasoningSelection::Automatic)
+                    .set_reasoning_selection(lingxi_core::host::ReasoningSelection::Automatic)
                     .await;
             }
         }
@@ -7656,11 +7680,11 @@ impl MobileEngineHandle {
                     .await;
                 if let Err(error) = handle
                     .resume_session(
-                        protocol::SessionId::from_uuid(uuid),
+                        lingxi_core::types::SessionId::from_uuid(uuid),
                         replayed.state.history.clone(),
                         replayed.last_message_uuid.map(|id| id.to_string()),
                         replayed.state.active_goal.clone().map(|goal| {
-                            platform_api::ActiveGoalSnapshot {
+                            lingxi_core::host::ActiveGoalSnapshot {
                                 condition: goal.condition,
                                 set_at: goal.set_at,
                                 last_reason: goal.last_reason,
@@ -7696,7 +7720,7 @@ impl MobileEngineHandle {
                 self.inner
                     .local_apps_llm
                     .set_model(current_model.model, current_model.model_profile);
-                self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
+                self.retarget_session_writer(lingxi_core::types::SessionId::from_uuid(uuid), &cwd)
                     .await;
                 self.inner
                     .workflow_checkpoints
@@ -7774,12 +7798,12 @@ impl MobileEngineHandle {
                     .await?;
                 if let Err(resume_error) = handle
                     .resume_session(
-                        protocol::SessionId::from_uuid(uuid),
+                        lingxi_core::types::SessionId::from_uuid(uuid),
                         Vec::new(),
                         None,
                         None,
                         self.resume_runtime_with_model_preference(
-                            platform_api::ResumeRuntimeSnapshot::default(),
+                            lingxi_core::host::ResumeRuntimeSnapshot::default(),
                         )
                         .await,
                     )
@@ -7804,7 +7828,7 @@ impl MobileEngineHandle {
                 self.inner
                     .local_apps_llm
                     .set_model(current_model.model, current_model.model_profile);
-                self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
+                self.retarget_session_writer(lingxi_core::types::SessionId::from_uuid(uuid), &cwd)
                     .await;
                 self.inner
                     .workflow_checkpoints
@@ -7939,11 +7963,11 @@ impl MobileEngineHandle {
         };
         let permission_count = cancelled_permissions.len();
         drop(cancelled_permissions);
-        if !platform_api::env::background_tasks_disabled() {
+        if !lingxi_core::host::env::background_tasks_disabled() {
             self.inner
                 .task_registry
                 .background_all_tasks_with_reason(
-                    platform_api::task_registry::TaskBackgroundReason::TurnAbort,
+                    lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort,
                 )
                 .await;
         }
@@ -8101,11 +8125,11 @@ impl MobileEngineHandle {
                 self.message_queue
                     .enqueue(mobile_prompt_command(text))
                     .await;
-                if !platform_api::env::background_tasks_disabled() {
+                if !lingxi_core::host::env::background_tasks_disabled() {
                     self.inner
                         .task_registry
                         .background_all_tasks_with_reason(
-                            platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                            lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
                         )
                         .await;
                 }
@@ -9642,11 +9666,11 @@ impl MobileEngineHandle {
                             controls.reasoning_spec.selections_persistable,
                         )
                     })
-                    .unwrap_or((platform_api::ReasoningSelection::Automatic, true));
+                    .unwrap_or((lingxi_core::host::ReasoningSelection::Automatic, true));
                 let persisted_default = if persistable {
                     effective
                 } else {
-                    platform_api::ReasoningSelection::Automatic
+                    lingxi_core::host::ReasoningSelection::Automatic
                 };
                 if let Err(error) =
                     command_api::builtins::effort::persist_reasoning_default_selection_at(
@@ -9657,14 +9681,14 @@ impl MobileEngineHandle {
                     let rollback = previous
                         .as_ref()
                         .map(|(requested, _, _)| requested.clone())
-                        .unwrap_or(platform_api::ReasoningSelection::Automatic);
+                        .unwrap_or(lingxi_core::host::ReasoningSelection::Automatic);
                     let _ = handle.set_reasoning_selection(rollback.clone()).await;
                     let previous_default = previous.as_ref().map_or(
-                        platform_api::ReasoningSelection::Automatic,
+                        lingxi_core::host::ReasoningSelection::Automatic,
                         |(_, effective, persistable)| {
                             persistable
                                 .then_some(effective.clone())
-                                .unwrap_or(platform_api::ReasoningSelection::Automatic)
+                                .unwrap_or(lingxi_core::host::ReasoningSelection::Automatic)
                         },
                     );
                     let _ = command_api::builtins::effort::persist_reasoning_default_selection_at(
@@ -9908,11 +9932,11 @@ impl MobileEngineHandle {
                 }
                 let before = self.capture_slash_authority().await;
                 match self.inner.dispatcher.dispatch(&raw).await {
-                    platform_api::SlashDispatchResult::RunAsTurn { prompt } => {
+                    lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt } => {
                         self.start_streaming_turn(prompt, None, Vec::new(), turn_id, false)
                             .await?;
                     }
-                    platform_api::SlashDispatchResult::Handled { display } => {
+                    lingxi_core::host::SlashDispatchResult::Handled { display } => {
                         self.event_sink
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -9921,7 +9945,7 @@ impl MobileEngineHandle {
                             })
                             .await;
                     }
-                    platform_api::SlashDispatchResult::Unknown { display, .. } => {
+                    lingxi_core::host::SlashDispatchResult::Unknown { display, .. } => {
                         self.event_sink
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -9930,7 +9954,7 @@ impl MobileEngineHandle {
                             })
                             .await;
                     }
-                    platform_api::SlashDispatchResult::NotASlashCommand => {
+                    lingxi_core::host::SlashDispatchResult::NotASlashCommand => {
                         self.event_sink
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -10752,7 +10776,7 @@ impl MobileEngineHandle {
             // one `TaskRow` per record, one `TaskOutputChunk`, one
             // `TaskStatusChanged` after a stop.
             ClientCommand::TaskList { status_filter, .. } => {
-                let filter = platform_api::task_registry::TaskListFilter {
+                let filter = lingxi_core::host::task_registry::TaskListFilter {
                     status: status_filter.map(|s| {
                         match s {
                             client::protocol::listings::TaskStatusDto::Pending => "pending",
@@ -10768,7 +10792,7 @@ impl MobileEngineHandle {
                         .to_string()
                     }),
                 };
-                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
+                let registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 let records = registry
                     .list(filter)
@@ -10783,7 +10807,7 @@ impl MobileEngineHandle {
                 Ok(())
             }
             ClientCommand::TaskOutput { task_id, offset } => {
-                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
+                let registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 let chunk = registry.output(&task_id, Some(offset)).await.map_err(|e| {
                     ClientError::Internal {
@@ -10808,7 +10832,7 @@ impl MobileEngineHandle {
                         message: "Trust this workspace before messaging a task".into(),
                     });
                 }
-                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
+                let registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 registry
                     .send_human_task_message(&task_id, &message)
@@ -10827,7 +10851,7 @@ impl MobileEngineHandle {
                 Ok(())
             }
             ClientCommand::TaskStop { task_id } => {
-                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
+                let registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 let record = registry
                     .kill(&task_id)
@@ -10849,7 +10873,7 @@ impl MobileEngineHandle {
                 Ok(())
             }
             ClientCommand::ResumeWorkflow { task_id } => {
-                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
+                let registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 let resume_session = self
                     .inner
@@ -11281,7 +11305,7 @@ impl MobileEngineHandle {
     /// fail-closed and strips every profile. Nothing is routable in that state
     /// whatever we show, so fall back to the static catalog rather than hand the
     /// client an empty picker it can neither act on nor explain.
-    async fn routable_model_listings(&self) -> Vec<platform_api::ModelListing> {
+    async fn routable_model_listings(&self) -> Vec<lingxi_core::host::ModelListing> {
         if !self.inner.routable_listings.is_empty() {
             return self.inner.routable_listings.clone();
         }
@@ -11304,8 +11328,8 @@ impl MobileEngineHandle {
 
     async fn resume_runtime_with_model_preference(
         &self,
-        mut runtime: platform_api::ResumeRuntimeSnapshot,
-    ) -> platform_api::ResumeRuntimeSnapshot {
+        mut runtime: lingxi_core::host::ResumeRuntimeSnapshot,
+    ) -> lingxi_core::host::ResumeRuntimeSnapshot {
         if self.inner.interactive_launch {
             if let Some(saved) = model_preference::load(&self.lingxi_home) {
                 // Picker listings can fall back to unavailable built-ins. Only
@@ -11336,8 +11360,10 @@ impl MobileEngineHandle {
                 message: format!("switch_model failed: {error}"),
             })?;
         let current = handle.get_status_snapshot().await;
-        let selected =
-            platform_api::qualified_model_ref(&current.model, current.model_profile.as_deref());
+        let selected = lingxi_core::host::qualified_model_ref(
+            &current.model,
+            current.model_profile.as_deref(),
+        );
         if self.inner.interactive_launch {
             if let Err(error) = model_preference::save(&self.lingxi_home, &selected) {
                 let rollback = handle
@@ -11365,7 +11391,7 @@ impl MobileEngineHandle {
     /// Resolve a client-supplied model reference into the `(wire id, profile)`
     /// pair the orchestrator takes, REFUSING one no configured provider serves.
     ///
-    /// [`platform_api::parse_model_ref`] falls back to treating an unresolvable
+    /// [`lingxi_core::host::parse_model_ref`] falls back to treating an unresolvable
     /// reference as a bare wire id, so accepting one put `provider/model` —
     /// which is not a wire id at all — into `session.model`. Every turn of that
     /// session then 404'd, and because the transcript persists the session
@@ -11375,7 +11401,7 @@ impl MobileEngineHandle {
         model: &str,
     ) -> Result<(String, Option<String>), ClientError> {
         let listings = &self.inner.routable_listings;
-        let (model_id, profile) = platform_api::parse_model_ref(model, listings);
+        let (model_id, profile) = lingxi_core::host::parse_model_ref(model, listings);
         let routable = listings.iter().any(|listing| {
             listing.request_model == model_id
                 && profile
@@ -11397,7 +11423,7 @@ impl MobileEngineHandle {
     /// Return the directory containing child-agent transcripts for the live
     /// connection session. The path is derived exclusively from engine-owned
     /// session state; callers never get to supply a filesystem path.
-    async fn session_agent_dir(&self) -> (protocol::SessionId, std::path::PathBuf) {
+    async fn session_agent_dir(&self) -> (lingxi_core::types::SessionId, std::path::PathBuf) {
         let session_id = self.inner.orchestrator.current_session_id().await;
         let dir = orchestrator::transcript_paths::subagents_dir(
             &self.lingxi_home,
@@ -11436,14 +11462,14 @@ impl MobileEngineHandle {
     }
 
     fn hide_agent_lifecycle_messages(
-        messages: Vec<protocol::ConversationMessage>,
-    ) -> Vec<protocol::ConversationMessage> {
+        messages: Vec<lingxi_core::types::ConversationMessage>,
+    ) -> Vec<lingxi_core::types::ConversationMessage> {
         messages
             .into_iter()
             .filter(|message| {
                 !matches!(
                     message,
-                    protocol::ConversationMessage::System {
+                    lingxi_core::types::ConversationMessage::System {
                         subtype: Some(subtype),
                         ..
                     } if subtype.starts_with("agent_")
@@ -11616,7 +11642,7 @@ impl MobileEngineHandle {
 
     async fn load_session_agent_transcript_for_session(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         dir: &std::path::Path,
         agent_id: &str,
     ) -> Result<(Vec<client::protocol::message::MessageDto>, u64), ClientError> {
@@ -11643,11 +11669,12 @@ impl MobileEngineHandle {
                 session_agent_transcript_revision(&raw),
             )
         } else {
-            let parsed = protocol::AgentId::parse_prefixed(agent_id).ok_or_else(|| {
-                ClientError::Rejected {
-                    message: format!("malformed session agent id: {agent_id:?}"),
-                }
-            })?;
+            let parsed =
+                lingxi_core::types::AgentId::parse_prefixed(agent_id).ok_or_else(|| {
+                    ClientError::Rejected {
+                        message: format!("malformed session agent id: {agent_id:?}"),
+                    }
+                })?;
             let path = find_session_agent_transcript_path(dir, &parsed.to_string())
                 .await
                 .map_err(|error| ClientError::Rejected {
@@ -11723,7 +11750,7 @@ impl MobileEngineHandle {
                 .await
                 .as_uuid()
                 .to_string(),
-            model: platform_api::qualified_model_ref(
+            model: lingxi_core::host::qualified_model_ref(
                 &snapshot.model,
                 snapshot.model_profile.as_deref(),
             ),
@@ -11816,19 +11843,19 @@ impl MobileEngineHandle {
                 let available = handle.list_available_models().await;
                 let listings = self.routable_model_listings().await;
                 let snapshot = handle.get_status_snapshot().await;
-                let curated = platform_api::curated_model_listings(
+                let curated = lingxi_core::host::curated_model_listings(
                     &listings,
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
-                let models = platform_api::curated_model_refs(
+                let models = lingxi_core::host::curated_model_refs(
                     &listings,
                     &available,
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
                 let details = curated.iter().map(lower_model_details).collect();
-                let current = platform_api::qualified_model_ref(
+                let current = lingxi_core::host::qualified_model_ref(
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
@@ -12079,11 +12106,19 @@ impl MobileEngineHandle {
 fn command_source_string(source: command_api::model::CommandSource) -> &'static str {
     match source {
         command_api::model::CommandSource::Builtin => "builtin",
-        command_api::model::CommandSource::Settings(protocol::SettingsScope::User) => "user",
-        command_api::model::CommandSource::Settings(protocol::SettingsScope::Project) => "project",
-        command_api::model::CommandSource::Settings(protocol::SettingsScope::Local) => "local",
+        command_api::model::CommandSource::Settings(lingxi_core::types::SettingsScope::User) => {
+            "user"
+        }
+        command_api::model::CommandSource::Settings(lingxi_core::types::SettingsScope::Project) => {
+            "project"
+        }
+        command_api::model::CommandSource::Settings(lingxi_core::types::SettingsScope::Local) => {
+            "local"
+        }
         command_api::model::CommandSource::Plugin => "plugin",
-        command_api::model::CommandSource::Settings(protocol::SettingsScope::Managed) => "managed",
+        command_api::model::CommandSource::Settings(lingxi_core::types::SettingsScope::Managed) => {
+            "managed"
+        }
         command_api::model::CommandSource::Mcp => "mcp",
         command_api::model::CommandSource::Bundled => "bundled",
     }
@@ -12093,7 +12128,7 @@ fn command_source_string(source: command_api::model::CommandSource) -> &'static 
 /// bridge-server router's helper — kept private to the shared host so iOS /
 /// Android cannot drift).
 fn lower_auth_state(
-    info: Option<platform_api::auth::LoginInfo>,
+    info: Option<lingxi_core::host::auth::LoginInfo>,
 ) -> client::protocol::listings::AuthStateDto {
     match info {
         Some(li) => client::protocol::listings::AuthStateDto::SignedIn {
@@ -12723,12 +12758,12 @@ impl MobileTurnFirer {
                 None => (
                     Vec::new(),
                     None,
-                    platform_api::ResumeRuntimeSnapshot::default(),
+                    lingxi_core::host::ResumeRuntimeSnapshot::default(),
                 ),
             };
             handle
                 .resume_session(
-                    protocol::SessionId::from_uuid(uuid),
+                    lingxi_core::types::SessionId::from_uuid(uuid),
                     history,
                     last_message,
                     None,
@@ -12738,7 +12773,7 @@ impl MobileTurnFirer {
                 .map_err(|error| format!("paused: Cannot restore conversation: {error}"))?;
             rt.retarget_session_context(
                 &self.cfg.lingxi_home,
-                protocol::SessionId::from_uuid(uuid),
+                lingxi_core::types::SessionId::from_uuid(uuid),
                 &cwd,
             )
             .await;
@@ -12788,7 +12823,7 @@ impl MobileTurnFirer {
         let run = async {
             if let Some(automation) = automation {
                 let reasoning = if automation.reasoning.is_null() {
-                    platform_api::ReasoningSelection::Automatic
+                    lingxi_core::host::ReasoningSelection::Automatic
                 } else {
                     serde_json::from_value(automation.reasoning.clone())
                         .map_err(|e| format!("paused: {e}"))?
@@ -13082,13 +13117,13 @@ impl MobileCronStoreHandle {
                 Ok(file) => Some(serde_json::from_str(&file.content).map_err(|e| {
                     MobileEngineError::Internal(format!("invalid cron migration marker: {e}"))
                 })?),
-                Err(platform_api::FsError::NotFound(_)) => None,
+                Err(lingxi_core::host::FsError::NotFound(_)) => None,
                 Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
             };
         let old_body =
             match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), root).await {
                 Ok(body) => body,
-                Err(platform_api::FsError::NotFound(_)) => {
+                Err(lingxi_core::host::FsError::NotFound(_)) => {
                     cron::serialize_tasks(&cron::ScheduledTasks::default())
                 }
                 Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
@@ -13143,7 +13178,7 @@ impl MobileCronStoreHandle {
             match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
                 Ok(body) => cron::tasks_file::parse_automation_tasks_strict(&body)
                     .map_err(|e| MobileEngineError::Internal(e.to_string()))?,
-                Err(platform_api::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
+                Err(lingxi_core::host::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
                 Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
             };
         for mut task in source.tasks {
@@ -13202,8 +13237,9 @@ impl MobileCronStoreHandle {
         if model.trim().is_empty() {
             return Ok(());
         }
-        let reasoning: platform_api::ReasoningSelection = serde_json::from_str(&reasoning_json)
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
+        let reasoning: lingxi_core::host::ReasoningSelection =
+            serde_json::from_str(&reasoning_json)
+                .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
         let reasoning = serde_json::to_value(reasoning)
             .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
         let _guard = cron::lock_cron_file().await;
@@ -13213,7 +13249,7 @@ impl MobileCronStoreHandle {
         let body =
             match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
                 Ok(body) => body,
-                Err(platform_api::FsError::NotFound(_)) => return Ok(()),
+                Err(lingxi_core::host::FsError::NotFound(_)) => return Ok(()),
                 Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
             };
         let mut document = cron::tasks_file::parse_automation_tasks_strict(&body)
@@ -13334,7 +13370,7 @@ impl MobileCronStoreHandle {
         let mut document =
             match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
                 Ok(body) => cron::tasks_file::parse_automation_tasks(&body),
-                Err(platform_api::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
+                Err(lingxi_core::host::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
                 Err(error) => {
                     return Err(MobileEngineError::Internal(format!(
                         "read scheduled_tasks.json: {error}"
@@ -13879,7 +13915,7 @@ pub(crate) async fn mint_app_init_session(
     lingxi_home: &std::path::Path,
     source_cwd: &str,
     data_root: &std::path::Path,
-    fs: Arc<dyn platform_api::FileSystem>,
+    fs: Arc<dyn lingxi_core::host::FileSystem>,
     record: &local_apps::AppRecord,
 ) -> Result<String, String> {
     let workspace_cwd = canonical_cwd_string(&data_root.join(&record.workspace_rel));
@@ -14040,7 +14076,7 @@ pub(crate) async fn run_app_boot_backfill_sweep(
     backfill_home: std::path::PathBuf,
     backfill_cwd: String,
     backfill_root: std::path::PathBuf,
-    backfill_fs: Arc<dyn platform_api::FileSystem>,
+    backfill_fs: Arc<dyn lingxi_core::host::FileSystem>,
     backfill_service: Arc<local_apps::AppService>,
     backfill_host: Arc<LocalAppsHostBroker>,
 ) {
@@ -14762,11 +14798,11 @@ pub fn build_mobile_engine_inner(
                             })
                             .await
                             .is_empty()
-                        && !platform_api::env::background_tasks_disabled()
+                        && !lingxi_core::host::env::background_tasks_disabled()
                     {
                         registry
                             .background_all_tasks_with_reason(
-                                platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                                lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
                             )
                             .await;
                         continue;
@@ -15051,8 +15087,10 @@ mod tests {
     use client::adapter::{ClientEventListener, ListenerSink, MockSink, PermissionRequestSink};
     use client::protocol::events::ClientEvent;
     use client::protocol::listings::SessionModeDto;
-    use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
-    use platform_api::{OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult};
+    use lingxi_core::host::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
+    use lingxi_core::host::{
+        OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult,
+    };
     use tokio::sync::Notify;
     use tool_skill::skill::SkillCommandType;
 
@@ -15110,8 +15148,10 @@ mod tests {
                     .models
                     .iter()
                     .filter(|model| {
-                        platform_api::is_curated_model(&provider.profile_name, &model.request_model)
-                            || !platform_api::provider_has_curated_list(&provider.profile_name)
+                        lingxi_core::host::is_curated_model(
+                            &provider.profile_name,
+                            &model.request_model,
+                        ) || !lingxi_core::host::provider_has_curated_list(&provider.profile_name)
                     })
                     .map(|model| model.request_model.clone())
                     .collect::<Vec<_>>()
@@ -15153,7 +15193,7 @@ mod tests {
         let script_path = tmp.path().join("secret.js");
         std::fs::create_dir(&script_path).expect("directory path must be unreadable as a script");
 
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let permission_sink: Arc<dyn PermissionRequestSink> =
@@ -15187,14 +15227,14 @@ mod tests {
         tokio::fs::create_dir_all(&nested)
             .await
             .expect("create nested transcript dir");
-        let agent_id = protocol::AgentId::new().to_string();
+        let agent_id = lingxi_core::types::AgentId::new().to_string();
         let path = nested.join(format!("agent-{agent_id}.jsonl"));
         tokio::fs::write(
             &path,
             serde_json::to_string(&serde_json::json!({
-                "message": protocol::ConversationMessage::Assistant {
-                    id: protocol::MessageId::new(),
-                    content: vec![protocol::ContentBlock::Text {
+                "message": lingxi_core::types::ConversationMessage::Assistant {
+                    id: lingxi_core::types::MessageId::new(),
+                    content: vec![lingxi_core::types::ContentBlock::Text {
                         text: "nested child".to_string(),
                     }],
                     stop_reason: None,
@@ -15220,16 +15260,16 @@ mod tests {
 
     #[test]
     fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
-        let visible = protocol::ConversationMessage::Assistant {
-            id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::Text {
+        let visible = lingxi_core::types::ConversationMessage::Assistant {
+            id: lingxi_core::types::MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "visible".to_string(),
             }],
             stop_reason: None,
         };
-        let compact = protocol::ConversationMessage::User {
-            id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::Text {
+        let compact = lingxi_core::types::ConversationMessage::User {
+            id: lingxi_core::types::MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "replacement summary".to_string(),
             }],
             is_meta: false,
@@ -15251,8 +15291,8 @@ mod tests {
 
     #[test]
     fn session_agent_transcript_event_is_dropped_after_session_switch() {
-        let requested_session_id = protocol::SessionId::new();
-        let current_session_id = protocol::SessionId::new();
+        let requested_session_id = lingxi_core::types::SessionId::new();
+        let current_session_id = lingxi_core::types::SessionId::new();
 
         assert!(session_agent_transcript_event(
             requested_session_id,
@@ -15287,7 +15327,7 @@ mod tests {
 
     #[test]
     fn session_agent_id_from_nested_transcript_path_requires_agent_jsonl_shape() {
-        let agent_id = protocol::AgentId::nil().to_string();
+        let agent_id = lingxi_core::types::AgentId::nil().to_string();
         let transcript_path = format!("/tmp/subagents/workflows/wf_1/agent-{agent_id}.jsonl");
         assert_eq!(
             super::session_agent_id_from_path(std::path::Path::new(&transcript_path)),
@@ -15303,31 +15343,31 @@ mod tests {
 
     #[test]
     fn session_agent_index_excludes_hidden_transcript_records() {
-        let hidden_meta = protocol::ConversationMessage::User {
-            id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::Text {
+        let hidden_meta = lingxi_core::types::ConversationMessage::User {
+            id: lingxi_core::types::MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "<runtime-reminder>internal</runtime-reminder>".to_string(),
             }],
             is_meta: true,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
         };
-        let hidden_summary = protocol::ConversationMessage::User {
-            id: protocol::MessageId::new(),
+        let hidden_summary = lingxi_core::types::ConversationMessage::User {
+            id: lingxi_core::types::MessageId::new(),
             content: Vec::new(),
             is_meta: false,
             is_compact_summary: true,
             is_visible_in_transcript_only: false,
         };
-        let hidden_transcript_only = protocol::ConversationMessage::User {
-            id: protocol::MessageId::new(),
+        let hidden_transcript_only = lingxi_core::types::ConversationMessage::User {
+            id: lingxi_core::types::MessageId::new(),
             content: Vec::new(),
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: true,
         };
-        let visible = protocol::ConversationMessage::Assistant {
-            id: protocol::MessageId::new(),
+        let visible = lingxi_core::types::ConversationMessage::Assistant {
+            id: lingxi_core::types::MessageId::new(),
             content: Vec::new(),
             stop_reason: None,
         };
@@ -15360,7 +15400,7 @@ mod tests {
         let sink = ListenerSink::arc(listener.clone());
         let session_uuid = Arc::new(std::sync::Mutex::new("session-a".to_string()));
         let observer = MobileSessionAgentObserver::new(sink, session_uuid.clone());
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
 
         observer
             .on_event(SubagentObservation::Allocated {
@@ -15378,9 +15418,9 @@ mod tests {
         observer
             .on_event(SubagentObservation::Message {
                 agent_id,
-                message: protocol::ConversationMessage::Assistant {
-                    id: protocol::MessageId::new(),
-                    content: vec![protocol::ContentBlock::Text {
+                message: lingxi_core::types::ConversationMessage::Assistant {
+                    id: lingxi_core::types::MessageId::new(),
+                    content: vec![lingxi_core::types::ContentBlock::Text {
                         text: "working".to_string(),
                     }],
                     stop_reason: None,
@@ -15391,7 +15431,7 @@ mod tests {
             .on_event(SubagentObservation::Completed {
                 agent_id,
                 content: serde_json::json!("done"),
-                usage: platform_api::SubagentUsage::default(),
+                usage: lingxi_core::host::SubagentUsage::default(),
                 total_tool_use_count: 0,
                 total_duration_ms: 0,
                 assistant_message_count: 0,
@@ -15443,7 +15483,7 @@ mod tests {
             ListenerSink::arc(listener.clone()),
             Arc::new(std::sync::Mutex::new("session-a".to_string())),
         );
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         observer
             .on_event(SubagentObservation::Allocated {
                 agent_id,
@@ -15461,8 +15501,8 @@ mod tests {
         observer
             .on_event(SubagentObservation::Message {
                 agent_id,
-                message: protocol::ConversationMessage::System {
-                    id: protocol::MessageId::new(),
+                message: lingxi_core::types::ConversationMessage::System {
+                    id: lingxi_core::types::MessageId::new(),
                     subtype: Some("agent_idle".to_string()),
                     content: "idle".to_string(),
                     compact_metadata: None,
@@ -15494,9 +15534,9 @@ mod tests {
         observer
             .on_event(SubagentObservation::Message {
                 agent_id,
-                message: protocol::ConversationMessage::User {
-                    id: protocol::MessageId::new(),
-                    content: vec![protocol::ContentBlock::Text {
+                message: lingxi_core::types::ConversationMessage::User {
+                    id: lingxi_core::types::MessageId::new(),
+                    content: vec![lingxi_core::types::ContentBlock::Text {
                         text: "follow-up".to_string(),
                     }],
                     is_meta: true,
@@ -15522,9 +15562,9 @@ mod tests {
         observer
             .on_event(SubagentObservation::Message {
                 agent_id,
-                message: protocol::ConversationMessage::Assistant {
-                    id: protocol::MessageId::new(),
-                    content: vec![protocol::ContentBlock::Text {
+                message: lingxi_core::types::ConversationMessage::Assistant {
+                    id: lingxi_core::types::MessageId::new(),
+                    content: vec![lingxi_core::types::ContentBlock::Text {
                         text: "resumed".to_string(),
                     }],
                     stop_reason: None,
@@ -15552,7 +15592,7 @@ mod tests {
         let sink = ListenerSink::arc(listener.clone());
         let session_uuid = Arc::new(std::sync::Mutex::new("session-b".to_string()));
         let observer = MobileSessionAgentObserver::new(sink, session_uuid);
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         let workflow_dir = std::path::PathBuf::from(
             "/profile/projects/workspace/session-a/subagents/workflows/wf_abcdef",
         );
@@ -15664,7 +15704,7 @@ mod tests {
     #[test]
     fn provider_connection_maps_auth_failure_without_echoing_response_body() {
         let result = classify_provider_connection_response(
-            Err(platform_api::HttpError::Status {
+            Err(lingxi_core::host::HttpError::Status {
                 status: 401,
                 body: "secret-bearing upstream response".to_string(),
             }),
@@ -15685,7 +15725,7 @@ mod tests {
     fn provider_connection_maps_forbidden_rate_limit_and_timeout_without_secrets() {
         for (response, status, expected_fragment) in [
             (
-                Err(platform_api::HttpError::Status {
+                Err(lingxi_core::host::HttpError::Status {
                     status: 403,
                     body: "private upstream detail".to_string(),
                 }),
@@ -15693,7 +15733,7 @@ mod tests {
                 "拒绝访问",
             ),
             (
-                Err(platform_api::HttpError::Status {
+                Err(lingxi_core::host::HttpError::Status {
                     status: 429,
                     body: "retry-after: 30".to_string(),
                 }),
@@ -15701,7 +15741,7 @@ mod tests {
                 "频率",
             ),
             (
-                Err(platform_api::HttpError::Timeout(
+                Err(lingxi_core::host::HttpError::Timeout(
                     std::time::Duration::from_secs(1),
                 )),
                 None,
@@ -15756,17 +15796,17 @@ mod tests {
     /// writes without involving a platform keychain.
     #[derive(Default)]
     struct FakeEncryptedStore {
-        map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        map: StdMutex<HashMap<(String, String), lingxi_core::types::SecureStorageData>>,
     }
 
     #[async_trait]
-    impl platform_api::SecureStorage for FakeEncryptedStore {
+    impl lingxi_core::host::SecureStorage for FakeEncryptedStore {
         async fn store(
             &self,
             service: &str,
             account: &str,
-            data: protocol::SecureStorageData,
-        ) -> Result<(), platform_api::SecureStorageError> {
+            data: lingxi_core::types::SecureStorageData,
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
             self.map
                 .lock()
                 .unwrap()
@@ -15778,7 +15818,10 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
+        ) -> Result<
+            Option<lingxi_core::types::SecureStorageData>,
+            lingxi_core::host::SecureStorageError,
+        > {
             Ok(self
                 .map
                 .lock()
@@ -15791,7 +15834,7 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<(), platform_api::SecureStorageError> {
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
             self.map
                 .lock()
                 .unwrap()
@@ -15802,7 +15845,7 @@ mod tests {
         async fn list(
             &self,
             service: &str,
-        ) -> Result<Vec<String>, platform_api::SecureStorageError> {
+        ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -15817,8 +15860,8 @@ mod tests {
             true
         }
 
-        fn backend(&self) -> platform_api::SecureStorageBackend {
-            platform_api::SecureStorageBackend::EncryptedFile
+        fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
+            lingxi_core::host::SecureStorageBackend::EncryptedFile
         }
     }
 
@@ -15833,7 +15876,7 @@ mod tests {
         assert_eq!(cfg.default_model, "anthropic/claude-sonnet-5");
         // The boot default must be a CURATED Anthropic id, so a client with no
         // configured provider lands inside the shortlist its picker renders.
-        assert!(platform_api::is_curated_model(
+        assert!(lingxi_core::host::is_curated_model(
             "anthropic",
             cfg.default_model.rsplit('/').next().unwrap_or_default()
         ));
@@ -15855,7 +15898,7 @@ mod tests {
     #[tokio::test]
     async fn build_mobile_constructs_orchestrator() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -15868,7 +15911,7 @@ mod tests {
         // The orchestrator exists and exposes the `OrchestratorHandle` surface
         // the command registry binds to. Constructing it at all proves the full
         // mobile assembly (tool registry + command registry + adapter sinks).
-        let _handle: Arc<dyn platform_api::OrchestratorHandle> = rt.orchestrator.clone();
+        let _handle: Arc<dyn lingxi_core::host::OrchestratorHandle> = rt.orchestrator.clone();
 
         // SKILLLIST.1: the production composition must attach the listing
         // provider before the orchestrator is wrapped, and the provider's live
@@ -15999,7 +16042,7 @@ mod tests {
             let mut cfg = test_config(data_root);
             cfg.cwd = cwd;
             cfg.session_mode = session_mode;
-            let platform: Arc<dyn platform_api::Platform> =
+            let platform: Arc<dyn lingxi_core::host::Platform> =
                 Arc::new(HostFakePlatform::new(data_root.to_path_buf()));
             let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
             let permission_sink: Arc<dyn PermissionRequestSink> =
@@ -16211,7 +16254,7 @@ mod tests {
         )
         .expect("write loop decoy");
 
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -16489,7 +16532,7 @@ mod tests {
             agent_name,
         );
 
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -16625,7 +16668,7 @@ mod tests {
     #[tokio::test]
     async fn mobile_boot_materializes_the_builtin_bundle() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -16813,7 +16856,7 @@ mod tests {
             .expect("Plugin agent bare skill must resolve through its namespace");
         assert!(matches!(
             preloaded.content.as_slice(),
-            [protocol::ContentBlock::Text { text }]
+            [lingxi_core::types::ContentBlock::Text { text }]
                 if text.contains("# Frontend QA")
                     && text.contains("Verify the running app, not only the build output.")
         ));
@@ -16967,7 +17010,7 @@ mod tests {
         );
 
         // Inject an encrypted store → OAuth /login enabled.
-        let platform: Arc<dyn platform_api::Platform> = Arc::new(
+        let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
             HostFakePlatform::new(tmp.path().to_path_buf())
                 .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
         );
@@ -17016,7 +17059,7 @@ mod tests {
             ),
         )
         .expect("write MCP config");
-        let platform: Arc<dyn platform_api::Platform> = Arc::new(
+        let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
             HostFakePlatform::new(tmp.path().to_path_buf())
                 .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
         );
@@ -17044,7 +17087,7 @@ mod tests {
 
     #[test]
     fn mobile_mcp_boot_and_reload_preflight_reject_plaintext_oauth_before_dial() {
-        let oauth = platform_api::McpOAuthConfigDto {
+        let oauth = lingxi_core::host::McpOAuthConfigDto {
             client_id: Some("mobile-test".into()),
             callback_port: None,
             auth_server_metadata_url: None,
@@ -17053,13 +17096,13 @@ mod tests {
         };
         let config = McpServerConfig {
             name: "remote".into(),
-            spec: platform_api::McpTransportSpec::Http {
+            spec: lingxi_core::host::McpTransportSpec::Http {
                 url: "https://127.0.0.1:1/mcp".into(),
-                headers: platform_api::McpHeaders::new(),
+                headers: lingxi_core::host::McpHeaders::new(),
                 headers_helper: None,
                 oauth: Some(oauth),
             },
-            scope: McpConfigScope::Settings(protocol::SettingsScope::User),
+            scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -17078,18 +17121,18 @@ mod tests {
 
     #[test]
     fn mobile_mcp_reload_snapshot_is_complete_and_stable() {
-        let mut headers = platform_api::McpHeaders::new();
+        let mut headers = lingxi_core::host::McpHeaders::new();
         headers.insert("X-First".into(), "one".into());
         headers.insert("X-Second".into(), "two".into());
         let config = McpServerConfig {
             name: "remote".into(),
-            spec: platform_api::McpTransportSpec::Http {
+            spec: lingxi_core::host::McpTransportSpec::Http {
                 url: "https://example.test/mcp".into(),
                 headers,
                 headers_helper: Some("helper".into()),
                 oauth: None,
             },
-            scope: McpConfigScope::Settings(protocol::SettingsScope::User),
+            scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             disabled: false,
             timeout_ms: Some(5000),
             always_load: true,
@@ -17103,13 +17146,13 @@ mod tests {
         assert!(mobile_mcp_config_unchanged(&config, &same));
 
         let mut changed = config.clone();
-        if let platform_api::McpTransportSpec::Http { headers, .. } = &mut changed.spec {
+        if let lingxi_core::host::McpTransportSpec::Http { headers, .. } = &mut changed.spec {
             headers.insert("X-Third".into(), "three".into());
         }
         assert!(!mobile_mcp_config_unchanged(&config, &changed));
 
         let mut reordered = config.clone();
-        if let platform_api::McpTransportSpec::Http { headers, .. } = &mut reordered.spec {
+        if let lingxi_core::host::McpTransportSpec::Http { headers, .. } = &mut reordered.spec {
             let first = headers.shift_remove("X-First").unwrap();
             headers.insert("X-First".into(), first);
         }
@@ -17125,13 +17168,13 @@ mod tests {
     }
 
     #[async_trait]
-    impl platform_api::DeepLinkOpener for RecordingDeepLinkOpener {
-        async fn open(&self, url: String) -> Result<(), platform_api::DeepLinkError> {
+    impl lingxi_core::host::DeepLinkOpener for RecordingDeepLinkOpener {
+        async fn open(&self, url: String) -> Result<(), lingxi_core::host::DeepLinkError> {
             self.opened.lock().unwrap().push(url);
             if self.succeed {
                 Ok(())
             } else {
-                Err(platform_api::DeepLinkError::Unavailable)
+                Err(lingxi_core::host::DeepLinkError::Unavailable)
             }
         }
     }
@@ -17200,7 +17243,7 @@ mod tests {
     #[tokio::test]
     async fn mobile_runtime_binds_adapter_sinks() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let sink = Arc::new(RecordingPermissionSink::default());
@@ -17213,11 +17256,11 @@ mod tests {
         // The policy gate is the same enforcing gate injected into the mobile
         // builtin tool context. A headless ExitPlanMode check must deny before
         // it can mutate plan state rather than relying on a prompt transport.
-        let headless_ctx = platform_api::permission_gate::PermissionCheckContext {
+        let headless_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
             is_non_interactive_session: true,
             ..Default::default()
         };
-        let outcome = platform_api::permission_gate::PermissionGate::check_exit_plan_mode(
+        let outcome = lingxi_core::host::permission_gate::PermissionGate::check_exit_plan_mode(
             rt.permission_policy_gate.as_ref(),
             "1. Ship it",
             &headless_ctx,
@@ -17225,7 +17268,7 @@ mod tests {
         .await;
         assert!(matches!(
             outcome,
-            platform_api::permission_gate::PermissionOutcome::Deny { reason }
+            lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason }
                 if reason.starts_with("Permission to use ExitPlanMode has been denied.")
         ));
 
@@ -17301,12 +17344,12 @@ mod tests {
     /// dispatched against (mobile sibling of the desktop test).
     #[tokio::test]
     async fn build_mobile_fires_session_start_against_a_registered_hook() {
-        use platform_api::OrchestratorHandle as _;
+        use lingxi_core::host::OrchestratorHandle as _;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         write_project_hook(tmp.path(), "SessionStart");
 
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -17341,7 +17384,7 @@ mod tests {
         use tool_workflow::WorkflowLauncher as _;
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener = Arc::new(FakeListener::default());
         let listener_for_build: Arc<dyn ClientEventListener> = listener.clone();
@@ -17406,7 +17449,8 @@ mod tests {
         );
 
         // Poll to a terminal status (the script thread is fast; bound the wait).
-        let registry: &dyn platform_api::task_registry::TaskRegistryHandle = &*rt.task_registry;
+        let registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle =
+            &*rt.task_registry;
         let mut status = String::new();
         for _ in 0..100 {
             let record = registry
@@ -17462,7 +17506,7 @@ mod tests {
         use tool_workflow::WorkflowLauncher as _;
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener = Arc::new(FakeListener::default());
         let listener_for_build: Arc<dyn ClientEventListener> = listener.clone();
@@ -17544,12 +17588,12 @@ mod tests {
     /// real registry wiring.)
     #[tokio::test]
     async fn build_mobile_fires_instructions_loaded_against_a_registered_hook() {
-        use platform_api::OrchestratorHandle as _;
+        use lingxi_core::host::OrchestratorHandle as _;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         write_project_hook(tmp.path(), "InstructionsLoaded");
 
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -17593,7 +17637,7 @@ mod tests {
             orchestrator::test_support::StaticMemoryProvider::with_files(vec![memory_file]),
         ));
 
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -17641,7 +17685,7 @@ mod tests {
             "default config must leave memory_provider None (empty, deterministic)"
         );
 
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -17668,7 +17712,7 @@ mod tests {
     use client::protocol::error::ClientError;
     use client::protocol::events::{ClientEvent as Ev, TurnRecoveryStateDto};
     use client::protocol::permission::PermissionResponseDto;
-    use platform_api::audio::{
+    use lingxi_core::host::audio::{
         AudioCapabilitySnapshot, AudioError, AudioOperation, AudioOperationContext,
         AudioOperationId, AudioOperationKind, AudioOperationSuccess, AudioOwner,
         AudioRecordingHandle, AudioService,
@@ -17692,7 +17736,7 @@ mod tests {
 
     fn build_submit_handle_with_platform(
         root: &std::path::Path,
-        platform: Arc<dyn platform_api::Platform>,
+        platform: Arc<dyn lingxi_core::host::Platform>,
     ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
         let listener = Arc::new(FakeListener::default());
         let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
@@ -17709,28 +17753,28 @@ mod tests {
         audio: Arc<dyn AudioService>,
     }
 
-    impl platform_api::Platform for AudioHostFakePlatform {
-        fn filesystem(&self) -> Arc<dyn platform_api::FileSystem> {
+    impl lingxi_core::host::Platform for AudioHostFakePlatform {
+        fn filesystem(&self) -> Arc<dyn lingxi_core::host::FileSystem> {
             self.base.filesystem()
         }
 
-        fn http(&self) -> Arc<dyn platform_api::HttpTransport> {
+        fn http(&self) -> Arc<dyn lingxi_core::host::HttpTransport> {
             self.base.http()
         }
 
-        fn clock(&self) -> Arc<dyn platform_api::Clock> {
+        fn clock(&self) -> Arc<dyn lingxi_core::host::Clock> {
             self.base.clock()
         }
 
-        fn process(&self) -> Arc<dyn platform_api::ProcessRunner> {
+        fn process(&self) -> Arc<dyn lingxi_core::host::ProcessRunner> {
             self.base.process()
         }
 
-        fn sandbox(&self) -> Arc<dyn platform_api::Sandbox> {
+        fn sandbox(&self) -> Arc<dyn lingxi_core::host::Sandbox> {
             self.base.sandbox()
         }
 
-        fn worktree(&self) -> Arc<dyn platform_api::WorktreeManager> {
+        fn worktree(&self) -> Arc<dyn lingxi_core::host::WorktreeManager> {
             self.base.worktree()
         }
 
@@ -17770,7 +17814,7 @@ mod tests {
             match operation {
                 AudioOperation::EndOwner => Ok(AudioOperationSuccess::OwnerEnded),
                 _ => Err(AudioError::new(
-                    platform_api::audio::AudioErrorKind::Unsupported,
+                    lingxi_core::host::audio::AudioErrorKind::Unsupported,
                     "teardown probe only accepts EndOwner",
                 )),
             }
@@ -18370,7 +18414,7 @@ mod tests {
         cfg: MobileConfig,
         root: &std::path::Path,
     ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(root.to_path_buf()));
         let listener = Arc::new(FakeListener::default());
         let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
@@ -18385,7 +18429,7 @@ mod tests {
     fn build_submit_handle_with_secure_store(
         root: &std::path::Path,
     ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
-        let platform: Arc<dyn platform_api::Platform> = Arc::new(
+        let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
             HostFakePlatform::new(root.to_path_buf())
                 .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
         );
@@ -18427,16 +18471,16 @@ mod tests {
         .into_iter()
         .find(|config| config.name == "remote")
         .expect("settings MCP entry");
-        let connection_id = protocol::McpConnectionId::new();
+        let connection_id = lingxi_core::types::McpConnectionId::new();
         handle.runtime().block_on(async {
             handle.inner.mcp_registry.connections.write().await.insert(
                 "remote".into(),
                 mcp::connection::McpConnectionState::Connected {
                     config: desired.clone(),
                     connection_id,
-                    capabilities: platform_api::ServerCapabilitiesDto::default(),
-                    negotiated: platform_api::McpNegotiatedProtocol {
-                        era: platform_api::McpProtocolEra::Legacy,
+                    capabilities: lingxi_core::host::ServerCapabilitiesDto::default(),
+                    negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                        era: lingxi_core::host::McpProtocolEra::Legacy,
                         version: "2025-11-25".into(),
                     },
                     tools: Vec::new(),
@@ -18537,13 +18581,13 @@ mod tests {
     fn mobile_reload_test_config(url: &str) -> McpServerConfig {
         McpServerConfig {
             name: "remote".into(),
-            spec: platform_api::McpTransportSpec::Http {
+            spec: lingxi_core::host::McpTransportSpec::Http {
                 url: url.into(),
-                headers: platform_api::McpHeaders::new(),
+                headers: lingxi_core::host::McpHeaders::new(),
                 headers_helper: None,
                 oauth: None,
             },
-            scope: McpConfigScope::Settings(protocol::SettingsScope::User),
+            scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -18576,104 +18620,104 @@ mod tests {
     }
 
     #[async_trait]
-    impl platform_api::McpTransport for BlockingMobileMcpTransport {
+    impl lingxi_core::host::McpTransport for BlockingMobileMcpTransport {
         async fn connect(
             &self,
-            _spec: &platform_api::McpTransportSpec,
-        ) -> Result<platform_api::McpRawConnection, platform_api::McpError> {
+            _spec: &lingxi_core::host::McpTransportSpec,
+        ) -> Result<lingxi_core::host::McpRawConnection, lingxi_core::host::McpError> {
             self.connect_calls.fetch_add(1, Ordering::SeqCst);
             self.connect_started.notify_one();
             if self.block_connect.load(Ordering::SeqCst) {
                 self.connect_release.notified().await;
             }
-            Ok(platform_api::McpRawConnection {
-                connection_id: protocol::McpConnectionId::new(),
+            Ok(lingxi_core::host::McpRawConnection {
+                connection_id: lingxi_core::types::McpConnectionId::new(),
             })
         }
 
         async fn initialize(
             &self,
-            _conn: &platform_api::McpRawConnection,
-        ) -> Result<platform_api::ServerCapabilitiesDto, platform_api::McpError> {
-            Ok(platform_api::ServerCapabilitiesDto::default())
+            _conn: &lingxi_core::host::McpRawConnection,
+        ) -> Result<lingxi_core::host::ServerCapabilitiesDto, lingxi_core::host::McpError> {
+            Ok(lingxi_core::host::ServerCapabilitiesDto::default())
         }
 
         async fn list_tools(
             &self,
-            _conn: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpToolDto>, platform_api::McpError> {
+            _conn: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpToolDto>, lingxi_core::host::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_resources(
             &self,
-            _conn: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpResourceDto>, platform_api::McpError> {
+            _conn: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpResourceDto>, lingxi_core::host::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_prompts(
             &self,
-            _conn: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpPromptDto>, platform_api::McpError> {
+            _conn: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpPromptDto>, lingxi_core::host::McpError> {
             Ok(Vec::new())
         }
 
         async fn call_tool(
             &self,
-            _conn: &platform_api::McpRawConnection,
+            _conn: &lingxi_core::host::McpRawConnection,
             _tool: &str,
             _input: serde_json::Value,
-        ) -> Result<platform_api::McpToolResultDto, platform_api::McpError> {
-            Err(platform_api::McpError::Internal(
+        ) -> Result<lingxi_core::host::McpToolResultDto, lingxi_core::host::McpError> {
+            Err(lingxi_core::host::McpError::Internal(
                 "unused test tool call".into(),
             ))
         }
 
         async fn read_resource(
             &self,
-            _conn: &platform_api::McpRawConnection,
+            _conn: &lingxi_core::host::McpRawConnection,
             _uri: &str,
-        ) -> Result<platform_api::McpResourceContentDto, platform_api::McpError> {
-            Err(platform_api::McpError::Internal(
+        ) -> Result<lingxi_core::host::McpResourceContentDto, lingxi_core::host::McpError> {
+            Err(lingxi_core::host::McpError::Internal(
                 "unused test resource read".into(),
             ))
         }
 
         async fn ping(
             &self,
-            _connection_id: protocol::McpConnectionId,
-        ) -> Result<(), platform_api::McpError> {
+            _connection_id: lingxi_core::types::McpConnectionId,
+        ) -> Result<(), lingxi_core::host::McpError> {
             Ok(())
         }
 
         async fn notifications(
             &self,
-            _conn: &platform_api::McpRawConnection,
-        ) -> Result<platform_api::McpNotificationStream, platform_api::McpError> {
+            _conn: &lingxi_core::host::McpRawConnection,
+        ) -> Result<lingxi_core::host::McpNotificationStream, lingxi_core::host::McpError> {
             Ok(Box::pin(futures_util::stream::empty()))
         }
 
         async fn handle_elicitation(
             &self,
-            _conn: &platform_api::McpRawConnection,
-            _request: platform_api::ElicitRequestDto,
-        ) -> Result<platform_api::ElicitResultDto, platform_api::McpError> {
-            Err(platform_api::McpError::Internal(
+            _conn: &lingxi_core::host::McpRawConnection,
+            _request: lingxi_core::host::ElicitRequestDto,
+        ) -> Result<lingxi_core::host::ElicitResultDto, lingxi_core::host::McpError> {
+            Err(lingxi_core::host::McpError::Internal(
                 "unused test elicitation".into(),
             ))
         }
 
         async fn disconnect(
             &self,
-            _connection_id: protocol::McpConnectionId,
-        ) -> Result<(), platform_api::McpError> {
+            _connection_id: lingxi_core::types::McpConnectionId,
+        ) -> Result<(), lingxi_core::host::McpError> {
             self.disconnect_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
-        fn supported_transports(&self) -> Vec<platform_api::McpTransportKind> {
-            vec![platform_api::McpTransportKind::Http]
+        fn supported_transports(&self) -> Vec<lingxi_core::host::McpTransportKind> {
+            vec![lingxi_core::host::McpTransportKind::Http]
         }
     }
 
@@ -18684,7 +18728,7 @@ mod tests {
             let transport = BlockingMobileMcpTransport::new();
             transport.block_connect.store(true, Ordering::SeqCst);
             let registry = Arc::new(McpRegistry::new(
-                transport.clone() as Arc<dyn platform_api::McpTransport>
+                transport.clone() as Arc<dyn lingxi_core::host::McpTransport>
             ));
             let generations = Arc::new(StdMutex::new(HashMap::new()));
             let config_a = mobile_reload_test_config("http://127.0.0.1:1/startup-a");
@@ -18804,7 +18848,7 @@ mod tests {
             let transport = BlockingMobileMcpTransport::new();
             transport.block_connect.store(true, Ordering::SeqCst);
             let registry = Arc::new(McpRegistry::new(
-                transport.clone() as Arc<dyn platform_api::McpTransport>
+                transport.clone() as Arc<dyn lingxi_core::host::McpTransport>
             ));
             let generations = Arc::new(StdMutex::new(HashMap::new()));
             let config = mobile_reload_test_config("http://127.0.0.1:1/repeated");
@@ -18931,7 +18975,7 @@ mod tests {
             let transport = BlockingMobileMcpTransport::new();
             transport.block_connect.store(true, Ordering::SeqCst);
             let registry = Arc::new(McpRegistry::new(
-                transport.clone() as Arc<dyn platform_api::McpTransport>
+                transport.clone() as Arc<dyn lingxi_core::host::McpTransport>
             ));
             let generations = Arc::new(StdMutex::new(HashMap::new()));
             let config_a = mobile_reload_test_config("http://127.0.0.1:1/a");
@@ -18992,7 +19036,7 @@ mod tests {
             let transport = BlockingMobileMcpTransport::new();
             transport.block_connect.store(true, Ordering::SeqCst);
             let registry = Arc::new(McpRegistry::new(
-                transport.clone() as Arc<dyn platform_api::McpTransport>
+                transport.clone() as Arc<dyn lingxi_core::host::McpTransport>
             ));
             let generations = Arc::new(StdMutex::new(HashMap::new()));
             let config_a = mobile_reload_test_config("http://127.0.0.1:1/a");
@@ -19051,7 +19095,7 @@ mod tests {
         runtime.block_on(async {
             let transport = BlockingMobileMcpTransport::new();
             let registry = Arc::new(McpRegistry::new(
-                transport.clone() as Arc<dyn platform_api::McpTransport>
+                transport.clone() as Arc<dyn lingxi_core::host::McpTransport>
             ));
             let config_a = mobile_reload_test_config("http://127.0.0.1:1/a");
             let mut disabled = config_a.clone();
@@ -19208,13 +19252,13 @@ mod tests {
         let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
         let old_config = McpServerConfig {
             name: "remote".into(),
-            spec: platform_api::McpTransportSpec::Http {
+            spec: lingxi_core::host::McpTransportSpec::Http {
                 url: "http://127.0.0.1:1/old".into(),
-                headers: platform_api::McpHeaders::new(),
+                headers: lingxi_core::host::McpHeaders::new(),
                 headers_helper: None,
                 oauth: None,
             },
-            scope: McpConfigScope::Settings(protocol::SettingsScope::User),
+            scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -19319,13 +19363,13 @@ mod tests {
         let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
         let old_config = McpServerConfig {
             name: "remote".into(),
-            spec: platform_api::McpTransportSpec::Http {
+            spec: lingxi_core::host::McpTransportSpec::Http {
                 url: "http://127.0.0.1:1/pending".into(),
-                headers: platform_api::McpHeaders::new(),
+                headers: lingxi_core::host::McpHeaders::new(),
                 headers_helper: None,
                 oauth: None,
             },
-            scope: McpConfigScope::Settings(protocol::SettingsScope::User),
+            scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -19464,7 +19508,8 @@ mod tests {
         let (handle, _listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
-            let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> =
+                handle.inner.orchestrator.clone();
             assert!(
                 orch.dynamic_workflows_enabled().await,
                 "mobile should default enableWorkflows to true when no tier sets it"
@@ -19513,7 +19558,8 @@ mod tests {
         let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
 
         handle.runtime().block_on(async {
-            let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> =
+                handle.inner.orchestrator.clone();
             assert!(
                 !orch.dynamic_workflows_enabled().await,
                 "the local enableWorkflows=false override must disable workflows for the session"
@@ -19551,7 +19597,7 @@ mod tests {
             tokio::fs::create_dir_all(&dir)
                 .await
                 .expect("create nested workflow dir");
-            let expected_agent_id = protocol::AgentId::new().to_string();
+            let expected_agent_id = lingxi_core::types::AgentId::new().to_string();
             let transcript_path = dir.join(format!("agent-{expected_agent_id}.jsonl"));
             let body = [
                 serde_json::to_string(&serde_json::json!({
@@ -19561,9 +19607,9 @@ mod tests {
                 }))
                 .unwrap(),
                 serde_json::to_string(&serde_json::json!({
-                    "message": protocol::ConversationMessage::Assistant {
-                        id: protocol::MessageId::new(),
-                        content: vec![protocol::ContentBlock::Text {
+                    "message": lingxi_core::types::ConversationMessage::Assistant {
+                        id: lingxi_core::types::MessageId::new(),
+                        content: vec![lingxi_core::types::ContentBlock::Text {
                             text: "nested workflow child".to_string(),
                         }],
                         stop_reason: None,
@@ -19641,11 +19687,11 @@ mod tests {
     fn submit_task_message_enters_the_real_human_inbox_without_using_model_send() {
         struct ModelInbox;
         #[async_trait::async_trait]
-        impl platform_api::task_registry::TaskMessageReceiver for ModelInbox {
+        impl lingxi_core::host::task_registry::TaskMessageReceiver for ModelInbox {
             async fn send(
                 &self,
                 _: String,
-            ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
                 panic!("human command must use the dedicated human inbox");
             }
         }
@@ -19654,10 +19700,10 @@ mod tests {
         cfg.workspace_trusted = true;
         let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
         handle.runtime().block_on(async {
-            use platform_api::task_registry::{TaskCreateInput, TaskRegistryHandle};
+            use lingxi_core::host::task_registry::{TaskCreateInput, TaskRegistryHandle};
             let registry = handle.inner.task_registry.as_ref();
             let task = TaskRegistryHandle::create(registry, TaskCreateInput { task_type: "local_agent".into(), description: "active agent fixture".into() }).await.unwrap();
-            let agent_id = protocol::AgentId::new();
+            let agent_id = lingxi_core::types::AgentId::new();
             registry.bind_agent_id(&task.task_id, agent_id).await.unwrap();
             registry.bind_agent_message_receiver(&task.task_id, Arc::new(ModelInbox)).await.unwrap();
             handle.submit(ClientCommand::TaskMessage { task_id: task.task_id.clone(), message: "  continue with care\nnext line".into() }).await.unwrap();
@@ -19671,13 +19717,13 @@ mod tests {
         use std::io::{Read, Write};
         struct NoWork;
         #[async_trait::async_trait]
-        impl platform_api::ToolInvoker for NoWork {
+        impl lingxi_core::host::ToolInvoker for NoWork {
             async fn invoke(
                 &self,
                 _: &str,
                 _: serde_json::Value,
-                _: platform_api::tool_invoker::SubagentInvocationContext,
-            ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError>
+                _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+            ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError>
             {
                 unreachable!("fixture model never calls tools")
             }
@@ -19686,8 +19732,8 @@ mod tests {
             }
         }
         #[async_trait::async_trait]
-        impl platform_api::BudgetEnforcerHandle for NoWork {
-            async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::BudgetError> {
+        impl lingxi_core::host::BudgetEnforcerHandle for NoWork {
+            async fn check_and_charge(&self, _: u64) -> Result<(), lingxi_core::host::BudgetError> {
                 Ok(())
             }
             async fn snapshot_total_nano_usd(&self) -> u64 {
@@ -19782,7 +19828,7 @@ mod tests {
         // is needed to prove this targeted producer reaches a real model turn.
         handle.task_notification_watcher.abort();
         handle.runtime().block_on(async {
-            use platform_api::task_registry::{TaskCreateInput, TaskRegistryHandle};
+            use lingxi_core::host::task_registry::{TaskCreateInput, TaskRegistryHandle};
             let registry = handle.inner.task_registry.as_ref();
             let task = TaskRegistryHandle::create(
                 registry,
@@ -19793,7 +19839,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let id = protocol::AgentId::new();
+            let id = lingxi_core::types::AgentId::new();
             registry.bind_agent_id(&task.task_id, id).await.unwrap();
             let session_id = handle.inner.orchestrator.current_session_id().await;
             let dir = orchestrator::transcript_paths::subagents_dir(
@@ -19803,8 +19849,8 @@ mod tests {
             );
             tokio::fs::create_dir_all(&dir).await.unwrap();
             let transcript = session::forked_skill::agent_transcript_path(&dir, &id.to_string());
-            let previous = protocol::ConversationMessage::user(
-                protocol::MessageId::new(),
+            let previous = lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
                 "original review context".into(),
             );
             tokio::fs::write(
@@ -19819,14 +19865,14 @@ mod tests {
             TaskRegistryHandle::register_agent_resume_recipe(
                 registry,
                 &task.task_id,
-                platform_api::SubagentSpawnRequest {
+                lingxi_core::host::SubagentSpawnRequest {
                     subagent_type: "general-purpose".into(),
                     prompt: "do not replay this initial prompt".into(),
                     cwd: Some(tmp.path().display().to_string()),
                     model: Some("claude-sonnet-4-5".into()),
                     ..Default::default()
                 },
-                platform_api::SubagentInheritance {
+                lingxi_core::host::SubagentInheritance {
                     tool_invoker: Arc::new(NoWork),
                     budget: Arc::new(NoWork),
                 },
@@ -20085,7 +20131,7 @@ mod tests {
         let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
 
         handle.runtime().block_on(async {
-            let before: Arc<dyn platform_api::OrchestratorHandle> =
+            let before: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 handle.inner.orchestrator.clone();
             let before = before.get_status_snapshot().await;
 
@@ -20099,7 +20145,8 @@ mod tests {
                 "switching to a non-configured provider must be rejected, got {result:?}"
             );
 
-            let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> =
+                handle.inner.orchestrator.clone();
             let after = orch.get_status_snapshot().await;
             assert_eq!(
                 (after.model, after.model_profile),
@@ -20124,7 +20171,8 @@ mod tests {
         let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
 
         handle.runtime().block_on(async {
-            let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> =
+                handle.inner.orchestrator.clone();
             let before = orch.current_session_id().await;
 
             let result = handle
@@ -20214,7 +20262,8 @@ mod tests {
                 })
                 .await
                 .expect("a custom provider's model must be selectable");
-            let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> =
+                handle.inner.orchestrator.clone();
             let snapshot = orch.get_status_snapshot().await;
             assert_eq!(snapshot.model, "internal-7b");
             assert_eq!(snapshot.model_profile.as_deref(), Some("my-proxy"));
@@ -21559,7 +21608,7 @@ mod tests {
                 handle.session_cron.is_some(),
                 "mobile construction binds a real session cron scheduler"
             );
-            let registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle> =
+            let registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle> =
                 handle.inner.task_registry.clone();
             assert!(!handle.message_queue.has_main_thread_commands().await);
             assert!(
@@ -21787,7 +21836,7 @@ mod tests {
     fn mobile_session_switch_ends_only_the_previous_audio_owner() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let audio = Arc::new(AudioOwnerTeardownProbe::default());
-        let platform: Arc<dyn platform_api::Platform> = Arc::new(AudioHostFakePlatform {
+        let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(AudioHostFakePlatform {
             base: HostFakePlatform::new(tmp.path().to_path_buf()),
             audio: audio.clone(),
         });
@@ -21944,7 +21993,7 @@ mod tests {
             )),
         });
         let state = service.state.clone();
-        let platform: Arc<dyn platform_api::Platform> = Arc::new(AudioHostFakePlatform {
+        let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(AudioHostFakePlatform {
             base: HostFakePlatform::new(tmp.path().to_path_buf()),
             audio: service,
         });
@@ -22003,7 +22052,7 @@ mod tests {
         use orchestrator::test_support_stream::MockStreamingApiClient;
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
         let listener = Arc::new(FakeListener::default());
         let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
@@ -22324,7 +22373,7 @@ mod tests {
         let (handle, listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
-            use platform_api::OrchestratorHandle;
+            use lingxi_core::host::OrchestratorHandle;
             let oh: Arc<dyn OrchestratorHandle> = handle.inner().orchestrator.clone();
             let before = oh.current_session_id().await.to_string();
 
@@ -22399,7 +22448,7 @@ mod tests {
         let (handle, listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
-            use platform_api::OrchestratorHandle;
+            use lingxi_core::host::OrchestratorHandle;
 
             handle
                 .submit(ClientCommand::NewSession {
@@ -22464,7 +22513,7 @@ mod tests {
 
         let (handle, _) = build_submit_handle(tmp.path());
         handle.runtime().block_on(async {
-            use platform_api::OrchestratorHandle;
+            use lingxi_core::host::OrchestratorHandle;
 
             handle
                 .submit(ClientCommand::ResumeSession {
@@ -22672,7 +22721,7 @@ mod tests {
         let expected = "dddddddd-4444-4444-8444-dddddddddddd";
 
         handle.runtime().block_on(async {
-            use platform_api::OrchestratorHandle;
+            use lingxi_core::host::OrchestratorHandle;
 
             handle
                 .resume_empty_session(expected.into(), "旧空会话".into())
@@ -22774,7 +22823,7 @@ mod tests {
         let (handle, listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
-            use platform_api::OrchestratorHandle;
+            use lingxi_core::host::OrchestratorHandle;
 
             let result = handle
                 .submit(ClientCommand::ResumeSession {
@@ -22981,7 +23030,7 @@ mod tests {
         // from `assembled.client_config.providers` (display_model == request_model
         // on mobile; provider_label == profile_name).
         let listings = vec![
-            platform_api::ModelListing {
+            lingxi_core::host::ModelListing {
                 connection: Default::default(),
                 display_model: "gpt-5.2".to_string(),
                 request_model: "gpt-5.2".to_string(),
@@ -22994,7 +23043,7 @@ mod tests {
                 supports_reasoning: false,
                 fusion_analyst_capable: false,
             },
-            platform_api::ModelListing {
+            lingxi_core::host::ModelListing {
                 connection: Default::default(),
                 display_model: "gpt-5.2".to_string(),
                 request_model: "gpt-5.2".to_string(),
@@ -23007,7 +23056,7 @@ mod tests {
                 supports_reasoning: false,
                 fusion_analyst_capable: false,
             },
-            platform_api::ModelListing {
+            lingxi_core::host::ModelListing {
                 connection: Default::default(),
                 display_model: "claude-sonnet-4-20250514".to_string(),
                 request_model: "claude-sonnet-4-20250514".to_string(),
@@ -23023,7 +23072,7 @@ mod tests {
         ];
 
         // Qualified: "openai/gpt-5.2" → bare id "gpt-5.2" + profile "openai"
-        let (id, profile) = platform_api::parse_model_ref("openai/gpt-5.2", &listings);
+        let (id, profile) = lingxi_core::host::parse_model_ref("openai/gpt-5.2", &listings);
         assert_eq!(id, "gpt-5.2", "qualified ref must strip the profile prefix");
         assert_eq!(
             profile.as_deref(),
@@ -23032,7 +23081,8 @@ mod tests {
         );
 
         // Bare: "claude-sonnet-4-20250514" → same id, no profile (no-op seed path)
-        let (id2, profile2) = platform_api::parse_model_ref("claude-sonnet-4-20250514", &listings);
+        let (id2, profile2) =
+            lingxi_core::host::parse_model_ref("claude-sonnet-4-20250514", &listings);
         assert_eq!(
             id2, "claude-sonnet-4-20250514",
             "bare model id must pass through"
@@ -23040,7 +23090,8 @@ mod tests {
         assert!(profile2.is_none(), "bare model must yield None profile");
 
         // Shared id with two providers and explicit profile qualifier
-        let (id3, profile3) = platform_api::parse_model_ref("github-copilot/gpt-5.2", &listings);
+        let (id3, profile3) =
+            lingxi_core::host::parse_model_ref("github-copilot/gpt-5.2", &listings);
         assert_eq!(id3, "gpt-5.2");
         assert_eq!(profile3.as_deref(), Some("github-copilot"));
     }
@@ -23048,7 +23099,7 @@ mod tests {
     #[test]
     fn mobile_model_refs_keep_duplicate_provider_models_distinct() {
         let listings = vec![
-            platform_api::ModelListing {
+            lingxi_core::host::ModelListing {
                 connection: Default::default(),
                 display_model: "gpt-5.6-sol".into(),
                 request_model: "gpt-5.6-sol".into(),
@@ -23061,7 +23112,7 @@ mod tests {
                 supports_reasoning: true,
                 fusion_analyst_capable: false,
             },
-            platform_api::ModelListing {
+            lingxi_core::host::ModelListing {
                 connection: Default::default(),
                 display_model: "gpt-5.6-sol".into(),
                 request_model: "gpt-5.6-sol".into(),
@@ -23076,7 +23127,7 @@ mod tests {
             },
         ];
 
-        let refs = platform_api::curated_model_refs(
+        let refs = lingxi_core::host::curated_model_refs(
             &listings,
             &["gpt-5.6-sol".into()],
             "gpt-5.6-sol",
@@ -23501,7 +23552,7 @@ mod tests {
         )
         .record;
         record.origin_cwd = Some(origin_cwd.clone());
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
         );
         // The caller is anchored somewhere else entirely — the sweep's case.
@@ -23581,7 +23632,7 @@ mod tests {
             1,
         )
         .record;
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
         );
         let init_id =
@@ -23627,24 +23678,28 @@ mod tests {
     /// can prove the first write's bytes get cleaned up rather than
     /// stranded.
     struct FlakyAppendFs {
-        inner: Arc<dyn platform_api::FileSystem>,
+        inner: Arc<dyn lingxi_core::host::FileSystem>,
         target_suffix: String,
         calls: std::sync::atomic::AtomicUsize,
         fail_on_call: usize,
     }
 
     #[async_trait]
-    impl platform_api::FileSystem for FlakyAppendFs {
+    impl lingxi_core::host::FileSystem for FlakyAppendFs {
         async fn read_file(
             &self,
             path: &str,
             offset: Option<u64>,
             limit: Option<u64>,
-        ) -> Result<platform_api::FileContent, platform_api::FsError> {
+        ) -> Result<lingxi_core::host::FileContent, lingxi_core::host::FsError> {
             self.inner.read_file(path, offset, limit).await
         }
 
-        async fn write_file(&self, path: &str, content: &str) -> Result<(), platform_api::FsError> {
+        async fn write_file(
+            &self,
+            path: &str,
+            content: &str,
+        ) -> Result<(), lingxi_core::host::FsError> {
             self.inner.write_file(path, content).await
         }
 
@@ -23657,9 +23712,9 @@ mod tests {
             dir: &str,
         ) -> Result<
             std::pin::Pin<
-                Box<dyn futures_util::stream::Stream<Item = platform_api::FileEvent> + Send>,
+                Box<dyn futures_util::stream::Stream<Item = lingxi_core::host::FileEvent> + Send>,
             >,
-            platform_api::FsError,
+            lingxi_core::host::FsError,
         > {
             self.inner.watch(dir).await
         }
@@ -23668,7 +23723,7 @@ mod tests {
             &self,
             path: &str,
             content: &str,
-        ) -> Result<(), platform_api::FsError> {
+        ) -> Result<(), lingxi_core::host::FsError> {
             self.inner.append_file(path, content).await
         }
 
@@ -23677,11 +23732,11 @@ mod tests {
             path: &str,
             content: &str,
             mode: u32,
-        ) -> Result<(), platform_api::FsError> {
+        ) -> Result<(), lingxi_core::host::FsError> {
             if path.ends_with(&self.target_suffix) {
                 let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 if n == self.fail_on_call {
-                    return Err(platform_api::FsError::Io(
+                    return Err(lingxi_core::host::FsError::Io(
                         "r1-engine-core-002 planted failure".into(),
                     ));
                 }
@@ -23689,37 +23744,41 @@ mod tests {
             self.inner.append_file_with_mode(path, content, mode).await
         }
 
-        async fn truncate(&self, path: &str, len: u64) -> Result<(), platform_api::FsError> {
+        async fn truncate(&self, path: &str, len: u64) -> Result<(), lingxi_core::host::FsError> {
             self.inner.truncate(path, len).await
         }
 
         async fn file_mtime(
             &self,
             path: &str,
-        ) -> Result<std::time::SystemTime, platform_api::FsError> {
+        ) -> Result<std::time::SystemTime, lingxi_core::host::FsError> {
             self.inner.file_mtime(path).await
         }
 
-        async fn file_size(&self, path: &str) -> Result<u64, platform_api::FsError> {
+        async fn file_size(&self, path: &str) -> Result<u64, lingxi_core::host::FsError> {
             self.inner.file_size(path).await
         }
 
-        async fn delete_file(&self, path: &str) -> Result<(), platform_api::FsError> {
+        async fn delete_file(&self, path: &str) -> Result<(), lingxi_core::host::FsError> {
             self.inner.delete_file(path).await
         }
 
-        async fn symlink(&self, target: &str, link: &str) -> Result<(), platform_api::FsError> {
+        async fn symlink(
+            &self,
+            target: &str,
+            link: &str,
+        ) -> Result<(), lingxi_core::host::FsError> {
             self.inner.symlink(target, link).await
         }
 
         async fn flock_exclusive(
             &self,
             path: &str,
-        ) -> Result<Box<dyn platform_api::FlockGuard>, platform_api::FsError> {
+        ) -> Result<Box<dyn lingxi_core::host::FlockGuard>, lingxi_core::host::FsError> {
             self.inner.flock_exclusive(path).await
         }
 
-        async fn fsync(&self, path: &str) -> Result<(), platform_api::FsError> {
+        async fn fsync(&self, path: &str) -> Result<(), lingxi_core::host::FsError> {
             self.inner.fsync(path).await
         }
     }
@@ -23748,10 +23807,10 @@ mod tests {
         )
         .record;
 
-        let inner: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let inner: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
         );
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(FlakyAppendFs {
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(FlakyAppendFs {
             inner,
             target_suffix: ".jsonl".to_string(),
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -23833,10 +23892,10 @@ mod tests {
         )
         .record;
 
-        let inner: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let inner: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
         );
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(FlakyAppendFs {
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(FlakyAppendFs {
             inner,
             target_suffix: ".jsonl".to_string(),
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -23904,7 +23963,7 @@ mod tests {
         let backfill_home = tmp.path().join(".claude");
         let backfill_root = tmp.path().to_path_buf();
         let backfill_cwd = tmp.path().to_string_lossy().to_string();
-        let backfill_fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let backfill_fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
         );
         let backfill_service = Arc::new(
@@ -24318,7 +24377,7 @@ mod tests {
                 .expect("seed app");
             let layout =
                 local_apps::AppLayout::new(tmp.path(), record.id.clone()).expect("seed app layout");
-            let definition = platform_api::McpToolDefinitionDto::new(
+            let definition = lingxi_core::host::McpToolDefinitionDto::new(
                 "read_value",
                 serde_json::json!({
                     "type": "object",
@@ -25310,7 +25369,7 @@ mod anthropic_model_registry_tests {
             "claude-haiku-4-5",
         ] {
             assert!(
-                platform_api::is_curated_model("anthropic", curated),
+                lingxi_core::host::is_curated_model("anthropic", curated),
                 "{curated} is no longer curated; update this test with the shortlist"
             );
             assert!(
@@ -25411,7 +25470,7 @@ mod anthropic_model_registry_tests {
 mod default_model_resolution_tests {
     use super::{anthropic_models, resolve_default_model_ref};
 
-    fn listings() -> Vec<platform_api::ModelListing> {
+    fn listings() -> Vec<lingxi_core::host::ModelListing> {
         let assembled = provider_config::assemble(provider_config::AssembleInputs {
             anthropic_api_base: "https://api.anthropic.com".to_string(),
             anthropic_models: anthropic_models("claude-sonnet-5"),
@@ -25453,7 +25512,7 @@ mod default_model_resolution_tests {
     /// reports the ambiguity rather than this function silently picking one.
     #[test]
     fn a_bare_id_served_by_two_profiles_stays_unscoped() {
-        let listing = |provider: &str| platform_api::ModelListing {
+        let listing = |provider: &str| lingxi_core::host::ModelListing {
             connection: Default::default(),
             display_model: "claude-fable-5-1".to_string(),
             request_model: "claude-fable-5-1".to_string(),
@@ -25485,7 +25544,7 @@ mod default_model_resolution_tests {
         // provider-qualified rows, so a bare `current` matches none of them and
         // the client's picker renders with nothing selected.
         assert_eq!(profile.as_deref(), Some("anthropic"));
-        assert!(platform_api::is_curated_model("anthropic", &model));
+        assert!(lingxi_core::host::is_curated_model("anthropic", &model));
     }
 
     #[test]
@@ -25503,7 +25562,7 @@ mod default_model_resolution_tests {
     /// unroutable ref for another while the warn log claimed a repair.
     #[test]
     fn fallback_is_taken_from_the_listings_when_anthropic_is_not_registered() {
-        let listings = vec![platform_api::ModelListing {
+        let listings = vec![lingxi_core::host::ModelListing {
             connection: Default::default(),
             display_model: "deepseek-flash".to_string(),
             request_model: "deepseek-flash".to_string(),
@@ -25619,7 +25678,7 @@ mod cron_automation_tests {
     #[tokio::test]
     async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_identity() {
         use crate::mobile::test_support::{test_config, FakeListener, HostFakePlatform};
-        use platform_api::PermissionGate as _;
+        use lingxi_core::host::PermissionGate as _;
         let temp = tempfile::tempdir().unwrap();
         let config = test_config(temp.path());
         let home = config.lingxi_home.clone();
@@ -25634,7 +25693,7 @@ mod cron_automation_tests {
         .await
         .unwrap();
         let original = runtime.active_session_uuid.lock().unwrap().clone();
-        let target = protocol::SessionId::new();
+        let target = lingxi_core::types::SessionId::new();
         let target_uuid = target.as_uuid().to_string();
         for (task_id, session_uuid, run_id) in [
             ("wold00001", original, "wf_old"),
@@ -25663,7 +25722,7 @@ mod cron_automation_tests {
                 Vec::new(),
                 None,
                 None,
-                platform_api::ResumeRuntimeSnapshot::default(),
+                lingxi_core::host::ResumeRuntimeSnapshot::default(),
             )
             .await
             .unwrap();
@@ -25673,7 +25732,7 @@ mod cron_automation_tests {
             runtime.session_writer.active_path(),
             orchestrator::transcript_paths::main_transcript_path(&home, &cwd, &target_uuid)
         );
-        let workflows = platform_api::task_registry::TaskRegistryHandle::list_workflows(
+        let workflows = lingxi_core::host::task_registry::TaskRegistryHandle::list_workflows(
             runtime.task_registry.as_ref(),
         )
         .await

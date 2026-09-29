@@ -15,7 +15,7 @@ use axum::{
     Json, Router,
 };
 use futures::{stream, Stream, StreamExt};
-use platform_api::{McpConnectOptions, McpTransport, McpTransportSpec};
+use lingxi_core::host::{McpConnectOptions, McpTransport, McpTransportSpec};
 use platform_common::mcp_remote::RemoteMcpTransport;
 use serde_json::{json, Value};
 use std::convert::Infallible;
@@ -116,7 +116,9 @@ fn http_spec(url: String) -> McpTransportSpec {
     }
 }
 
-async fn connect(url: String) -> Result<platform_api::McpConnectResult, platform_api::McpError> {
+async fn connect(
+    url: String,
+) -> Result<lingxi_core::host::McpConnectResult, lingxi_core::host::McpError> {
     let transport = RemoteMcpTransport::new();
     tokio::time::timeout(
         Duration::from_secs(8),
@@ -144,7 +146,7 @@ async fn a_405_with_no_jsonrpc_body_is_rescued_over_legacy_sse() {
     );
     assert_eq!(
         result.negotiated.era,
-        platform_api::McpProtocolEra::Legacy,
+        lingxi_core::host::McpProtocolEra::Legacy,
         "a rescued connection is a legacy one"
     );
 }

@@ -21,12 +21,12 @@
 
 use crate::persist::{append_binary_footer, is_binary_content_type};
 use async_trait::async_trait;
+use lingxi_core::host::http::HttpError;
+use lingxi_core::host::tool_invoker::ToolExecutionPolicy;
+use lingxi_core::types::{HttpMethod, HttpRequest};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::http::HttpError;
-use platform_api::tool_invoker::ToolExecutionPolicy;
-use protocol::{HttpMethod, HttpRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -70,7 +70,7 @@ pub const WEBFETCH_TRUNCATION_SUFFIX: &str = "\n\n[Content truncated due to leng
 
 /// Legacy User-Agent prefix (kept for `web_search` + the parity fixture). The
 /// live WebFetch `User-Agent` is built by [`WebFetchTool::user_agent`] as
-/// `Claude-User (claude-code/{platform_api::CLAUDE_CODE_VERSION}; +https://support.anthropic.com/)`
+/// `Claude-User (claude-code/{lingxi_core::host::CLAUDE_CODE_VERSION}; +https://support.anthropic.com/)`
 /// — see R-V1; this prefix const is NOT the WebFetch header.
 /// Spec §7 lock.
 pub const WEBFETCH_USER_AGENT_PREFIX: &str = "claude-code-tool/";
@@ -592,12 +592,12 @@ impl WebFetchTool {
         // The `Claude-User (...)` wrapper is how Anthropic web infra recognizes
         // claude-code fetch traffic (distinct from the api-client UA).
         // R-V1: the version is claude-code's VERSION (the parity target,
-        // `platform_api::CLAUDE_CODE_VERSION`), NOT LingXi's CARGO_PKG_VERSION — every
+        // `lingxi_core::host::CLAUDE_CODE_VERSION`), NOT LingXi's CARGO_PKG_VERSION — every
         // WebFetch GET previously sent `claude-code/0.12.0` to Anthropic infra +
         // target servers instead of `claude-code/2.1.207`.
         format!(
             "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
-            platform_api::CLAUDE_CODE_VERSION
+            lingxi_core::host::CLAUDE_CODE_VERSION
         )
     }
 
@@ -624,7 +624,7 @@ impl WebFetchTool {
         markdown: &str,
         prompt: &str,
     ) -> Option<String> {
-        use protocol::{ConversationMessage, MessageId};
+        use lingxi_core::types::{ConversationMessage, MessageId};
         use sidequery::{QuerySource, SideQueryRequest};
         let truncated = crate::markdown::truncate_markdown(markdown.to_string());
         let model_prompt =

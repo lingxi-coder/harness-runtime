@@ -136,7 +136,7 @@ pub fn assemble_system_prompt_with_style(
     let has_agent = ctx.tool_names.iter().any(|t| t == "Agent");
     // 2.1.232 `SPe()`: fork session-guidance is ON by default for interactive
     // main-thread prompts. Coordinator sessions use a separate prompt builder.
-    let fork_mode = platform_api::fork_subagent::is_fork_subagent_enabled(
+    let fork_mode = lingxi_core::host::fork_subagent::is_fork_subagent_enabled(
         /* is_coordinator */ false,
         /* is_non_interactive */ !ctx.is_interactive,
     );
@@ -172,7 +172,7 @@ pub fn assemble_system_prompt_with_style(
         push_section_separator(&mut s);
         s.push_str(&memory_section::render_for_profile(
             &dir.to_string_lossy(),
-            platform_api::model_capabilities::prompt_profile_for(&ctx.model),
+            lingxi_core::host::model_capabilities::prompt_profile_for(&ctx.model),
         ));
     }
 

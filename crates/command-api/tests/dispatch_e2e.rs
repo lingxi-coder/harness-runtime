@@ -9,7 +9,7 @@
 use command_api::builtins::register_all_builtin_commands;
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
-use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
+use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

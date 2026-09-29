@@ -10,7 +10,7 @@
 #![allow(clippy::unwrap_used)]
 
 use harness_runtime::desktop::desktop_tool_registry;
-use platform_api::process::ProcessOutput;
+use lingxi_core::host::process::ProcessOutput;
 
 #[test]
 fn desktop_tool_list_snapshot() {

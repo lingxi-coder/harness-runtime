@@ -77,4 +77,4 @@ pub use worktree_session::{
 pub mod send_message_contract;
 
 // Native sandbox adapters implement this without depending on a concrete HTTP client.
-pub use platform_api::http::{MonitorSocketIo, MonitorWebSocketProxy};
+pub use lingxi_core::host::http::{MonitorSocketIo, MonitorWebSocketProxy};

@@ -2,7 +2,7 @@
 //! specs to the shared connectors rather than returning
 //! `UnsupportedTransport`.
 
-use platform_api::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
+use lingxi_core::host::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
 use platform_posix::PosixMcpTransport;
 
 #[tokio::test]
@@ -12,7 +12,7 @@ async fn connect_sse_does_not_return_unsupported_transport() {
         // Use a URL that will fail to connect — we only care that the
         // dispatch arm does NOT short-circuit to UnsupportedTransport.
         url: "http://127.0.0.1:1/never-listens".into(),
-        headers: platform_api::McpHeaders::new(),
+        headers: lingxi_core::host::McpHeaders::new(),
         headers_helper: None,
         oauth: None,
     };
@@ -36,7 +36,7 @@ async fn connect_http_does_not_return_unsupported_transport() {
     let t = PosixMcpTransport::new();
     let spec = McpTransportSpec::Http {
         url: "http://127.0.0.1:1/never-listens".into(),
-        headers: platform_api::McpHeaders::new(),
+        headers: lingxi_core::host::McpHeaders::new(),
         headers_helper: None,
         oauth: None,
     };

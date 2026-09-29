@@ -4,14 +4,14 @@
 //! same owned durability turn as these transitions.
 use super::*;
 use crate::{AttemptDisposition, AttemptReceipt};
-use platform_api::BudgetError;
-use protocol::MessageId;
+use lingxi_core::host::BudgetError;
+use lingxi_core::types::MessageId;
 
 /// Temporary publication owner only. Retained mutation slots keep its opaque
 /// key, never this account/tracker owner (which would form a reference cycle).
 pub(crate) struct BoundAttemptBudget {
     account: Arc<super::output::BudgetOutputAccount>,
-    _retention_pin: platform_api::SessionRetentionPin,
+    _retention_pin: lingxi_core::host::SessionRetentionPin,
 }
 
 impl BoundAttemptBudget {
@@ -389,8 +389,8 @@ impl ReservationBook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::WorkflowOutputScope;
-    use protocol::SessionId;
+    use lingxi_core::host::WorkflowOutputScope;
+    use lingxi_core::types::SessionId;
 
     async fn setup(limit: u64) -> (BudgetEnforcer, Arc<BudgetSessionState>, WorkflowOutputScope) {
         let (tx, _) = tokio::sync::mpsc::channel(1);
@@ -523,7 +523,7 @@ mod tests {
         let (_enforcer, session, scope) = setup(100).await;
         scope
             .record_legacy(
-                platform_api::WorkflowOutputEventId::MainResponse(MessageId::new()),
+                lingxi_core::host::WorkflowOutputEventId::MainResponse(MessageId::new()),
                 10,
             )
             .unwrap();
@@ -587,7 +587,7 @@ mod tests {
         drop(book);
         scope
             .record_legacy(
-                platform_api::WorkflowOutputEventId::MainResponse(MessageId::new()),
+                lingxi_core::host::WorkflowOutputEventId::MainResponse(MessageId::new()),
                 u64::MAX,
             )
             .unwrap();

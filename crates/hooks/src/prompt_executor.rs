@@ -73,10 +73,10 @@ pub const HOOK_PROMPT_TIMEOUT_MS: u64 = 30_000;
 /// Live evaluator input, carried separately from the public hook JSON envelope.
 #[derive(Debug, Clone, Default)]
 pub struct PromptHookTranscript {
-    pub messages: Vec<protocol::ConversationMessage>,
+    pub messages: Vec<lingxi_core::types::ConversationMessage>,
     pub last_usage_tokens: usize,
     /// Original `(isVirtual, resumedFromIncompleteThinking)` assistant flags.
-    pub message_grouping: std::collections::HashMap<protocol::MessageId, (bool, bool)>,
+    pub message_grouping: std::collections::HashMap<lingxi_core::types::MessageId, (bool, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -426,7 +426,7 @@ mod tests {
     use super::*;
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::HookEventType;
-    use protocol::HookId;
+    use lingxi_core::types::HookId;
     use std::sync::Mutex;
 
     /// Records the request it received and returns a scripted result.
@@ -471,7 +471,7 @@ mod tests {
                 model: None,
                 continue_on_block: false,
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -488,8 +488,8 @@ mod tests {
         let runner = MockRunner::ok(r#"{"ok":true,"reason":"yes"}"#);
         let mut exec = PromptExecutor::new(Some(runner.clone()), Duration::from_secs(5));
         exec.transcript = Some(PromptHookTranscript {
-            messages: vec![protocol::ConversationMessage::user(
-                protocol::MessageId::new(),
+            messages: vec![lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
                 "live evidence".into(),
             )],
             last_usage_tokens: 123,

@@ -470,12 +470,12 @@ mod tests {
             allow(
                 SHELL_TOOL_NAME,
                 Some("python:*"),
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ),
             allow(
                 SHELL_TOOL_NAME,
                 Some("ls:*"),
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ),
         ];
         let found = find_dangerous_classifier_permissions(&rules);
@@ -749,17 +749,17 @@ mod tests {
             allow(
                 "Bash",
                 Some("python:*"),
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ),
             allow(
                 "Bash",
                 Some("ls:*"),
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ),
             allow(
                 "Read",
                 None,
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ),
             allow("Agent", None, PermissionRuleSource::CliArg),
             // a dangerous DENY rule must NOT be collected (only allow rules).
@@ -769,7 +769,7 @@ mod tests {
                     rule_content: None,
                 },
                 behavior: PermissionBehavior::Deny,
-                source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             },
         ];
         let found = find_dangerous_classifier_permissions(&rules);
@@ -786,7 +786,7 @@ mod tests {
         let rules = vec![allow(
             "Bash",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )];
         let found = find_dangerous_classifier_permissions(&rules);
         assert_eq!(found.len(), 1);
@@ -799,17 +799,17 @@ mod tests {
             allow(
                 "Bash",
                 Some("ls:*"),
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ),
             allow(
                 "PowerShell",
                 Some("gci:*"),
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ),
             allow(
                 "Read",
                 None,
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ),
         ];
         // flag OFF: none of these safe shell allows is dangerous.

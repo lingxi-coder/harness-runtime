@@ -42,7 +42,7 @@ impl Boundary {
                     | "tool_shell"
                     | "session"
                     | "permission"
-                    | "platform_api"
+                    | "lingxi_core"
             ),
             "presentation" => {
                 matches!(root, "adapter" | "protocol" | "orchestrator" | "tool_shell")

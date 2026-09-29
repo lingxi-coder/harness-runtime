@@ -39,7 +39,7 @@ pub(crate) struct TranscriptStore {
     /// when it builds a `result` frame — the `session_id: Arc<Mutex<String>>`
     /// pattern. Sharing the cell beats pushing a snapshot at each of the six
     /// result-emit sites, where forgetting one would silently report `[]` again.
-    pub(crate) permission_denials: std::sync::Arc<Mutex<Vec<platform_api::PermissionDenial>>>,
+    pub(crate) permission_denials: std::sync::Arc<Mutex<Vec<lingxi_core::host::PermissionDenial>>>,
     /// Buffered `tool_result` SDK frames, keyed by `tool_use_id`.
     ///
     /// `None` = emit as soon as the tool finishes (the batched driver, which
@@ -245,7 +245,7 @@ pub(crate) struct PromptRuntime {
     /// LSP diagnostics not yet surfaced and injects them as a transient meta
     /// user message (claude-code's `formatDiagnosticsBlock` flow). `None` when
     /// no LSP servers are configured (the common case) ⇒ no reminder.
-    pub(crate) new_diagnostics_source: Option<Arc<dyn platform_api::NewDiagnosticsSource>>,
+    pub(crate) new_diagnostics_source: Option<Arc<dyn lingxi_core::host::NewDiagnosticsSource>>,
     /// FORK (codex #5 follow-up): the rendered system-prompt bytes the current
     /// turn handed the model, recorded by the turn driver after a successful API
     /// call so a fork-subagent spawn dispatched LATER in the same turn can thread
@@ -436,7 +436,7 @@ pub(crate) struct PromptRuntime {
     pub(crate) app_agent_prompt_profile: std::sync::RwLock<Option<AppAgentPromptProfile>>,
     /// Optional carved-slate snapshot of the static prompt and inline tool
     /// descriptions. Dynamic system context remains live per request.
-    pub(crate) prompt_snapshot: Mutex<Option<platform_api::PromptSnapshot>>,
+    pub(crate) prompt_snapshot: Mutex<Option<lingxi_core::host::PromptSnapshot>>,
     /// True while the mounted session came from resume. Missing snapshots on
     /// resumed sessions must remain missing rather than being created by the
     /// next turn.
@@ -583,7 +583,7 @@ mod prompt_runtime_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .delivered_date = Some("2026-08-24".to_string());
-        *runtime.prompt_snapshot.lock().await = Some(platform_api::PromptSnapshot {
+        *runtime.prompt_snapshot.lock().await = Some(lingxi_core::host::PromptSnapshot {
             system_prompt: vec!["stale".to_string()],
             ..Default::default()
         });
@@ -799,7 +799,7 @@ pub(crate) struct LifecycleRuntime {
     /// hooks. Unlike subagent buckets this normally lives for the session, but
     /// hot resume must replace it so hooks from the previous session cannot
     /// leak into the resumed one.
-    pub(crate) main_thread_agent_hook_id: Mutex<Option<protocol::AgentId>>,
+    pub(crate) main_thread_agent_hook_id: Mutex<Option<lingxi_core::types::AgentId>>,
     /// REM-09 goal check-in deferral bookkeeping (`deferredSince` /
     /// `checkinCount` / `lastDeferralPassAt` on the oracle's `activeGoal`).
     /// Session-scoped and deliberately not persisted on
@@ -917,7 +917,7 @@ pub trait CostSessionSwitcher: Send + Sync {
     async fn prepare_session(
         &self,
         tracker: Arc<cost::CostTracker>,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
     ) -> Result<PreparedSessionSwitch, cost::CostPersistError>;
 }
 
@@ -929,8 +929,8 @@ pub trait SessionActivationObserver: Send + Sync {
     /// Rebind process-scoped discovery/inbox state to the committed identity.
     async fn session_activated(
         &self,
-        previous: protocol::SessionId,
-        current: protocol::SessionId,
+        previous: lingxi_core::types::SessionId,
+        current: lingxi_core::types::SessionId,
     ) -> Result<(), String>;
 }
 
@@ -1104,7 +1104,8 @@ pub(crate) struct ModelRuntime {
     /// stream-json control requests and in-place resume.
     pub(crate) current_effort: std::sync::RwLock<Option<String>>,
     /// Provider-neutral live reasoning selection for subsequent requests.
-    pub(crate) current_reasoning_selection: std::sync::RwLock<platform_api::ReasoningSelection>,
+    pub(crate) current_reasoning_selection:
+        std::sync::RwLock<lingxi_core::host::ReasoningSelection>,
     /// Whether the live effort came from an explicit launch/control choice.
     /// Hot resume may inherit transcript effort only while this is false.
     pub(crate) current_effort_explicit: std::sync::atomic::AtomicBool,
@@ -1125,7 +1126,7 @@ pub(crate) struct ModelRuntime {
     /// keeps today's terminal behavior (no re-swap), so the fallback fires at
     /// most ONCE per session — matching the binary, where the latch makes the
     /// `mainLoopModel` override sticky.
-    pub(crate) refusal_cascade: Mutex<platform_api::refusal_driver::RefusalCascadeState>,
+    pub(crate) refusal_cascade: Mutex<lingxi_core::host::refusal_driver::RefusalCascadeState>,
 
     /// Cost tracker wired by [`Self::with_cost_tracker`] (M6-06). `None`
     /// when not configured — `snapshot_cost` then falls back to the M5-10
@@ -1134,12 +1135,13 @@ pub(crate) struct ModelRuntime {
     /// (e.g. unit tests) may leave it `None`.
     pub(crate) cost_tracker: Option<Arc<cost::CostTracker>>,
     /// Optional `/usage` Loops source (cron scheduler). `None` hides the section.
-    pub(crate) loop_usage: Option<Arc<dyn platform_api::LoopUsageProvider>>,
+    pub(crate) loop_usage: Option<Arc<dyn lingxi_core::host::LoopUsageProvider>>,
     /// The session's observer pairing table, shared with the task registry so
     /// a pairing filed when an observer spawns is the same one `ObserverReport`
     /// resolves. `None` on hosts without observer agents.
-    pub(crate) observer_pairings: Option<Arc<platform_api::observer_pairing::ObserverPairings>>,
-    pub(crate) output_scopes: Option<Arc<dyn platform_api::WorkflowOutputScopes>>,
+    pub(crate) observer_pairings:
+        Option<Arc<lingxi_core::host::observer_pairing::ObserverPairings>>,
+    pub(crate) output_scopes: Option<Arc<dyn lingxi_core::host::WorkflowOutputScopes>>,
     pub(crate) output_turn: std::sync::Mutex<Option<super::output_accounting_impl::OutputTurn>>,
     /// Session-pinned response finalizer scope captured before provider work.
     /// It remains fixed across hot-session switches until the switch
@@ -1157,7 +1159,7 @@ pub(crate) struct ModelRuntime {
     pub(crate) analytics_bus: Option<Arc<telemetry::AnalyticsBus>>,
     /// Monotonic timestamp captured at the start of the current session. Used by
     /// `snapshot_cost` to compute the `session_duration` field of the
-    /// returned [`platform_api::CostSnapshot`]. Stored as `std::time::Instant`
+    /// returned [`lingxi_core::host::CostSnapshot`]. Stored as `std::time::Instant`
     /// (not `tokio::time::Instant`) so the orchestrator can be constructed
     /// outside a tokio runtime if needed.
     pub(crate) session_started_at: std::sync::Mutex<std::time::Instant>,
@@ -1190,7 +1192,7 @@ pub(crate) struct ModelRuntime {
     /// same transformed request without mutating `session.history`.
     pub(crate) model_call_preparer: Option<Arc<dyn ModelCallPreparer>>,
     /// Task 8 (llm-runtime future-work batch 3): the last rate-limit snapshot
-    /// forwarded to [`platform_api::OutputStream::emit_rate_limit`], for the
+    /// forwarded to [`lingxi_core::host::OutputStream::emit_rate_limit`], for the
     /// emit-on-change dedup in [`Self::emit_rate_limit_if_changed`]. Lives on
     /// the orchestrator (not per-turn loop state) so the dedup spans turns —
     /// an identical snapshot across two `run_turn` calls emits exactly once.
@@ -1198,7 +1200,7 @@ pub(crate) struct ModelRuntime {
     pub(crate) last_emitted_rate_limit: Mutex<Option<crate::model::rate_limit::RateLimitInfo>>,
     /// Task 2 (llm-runtime future-work batch 5): the last RAW per-window
     /// utilization snapshot forwarded to
-    /// [`platform_api::OutputStream::emit_raw_utilization`], for the
+    /// [`lingxi_core::host::OutputStream::emit_raw_utilization`], for the
     /// emit-on-change dedup in [`Self::emit_raw_utilization_if_changed`].
     /// Same lifetime/placement rationale as
     /// [`Self::last_emitted_rate_limit`]: lives on the orchestrator so the
@@ -1210,7 +1212,7 @@ pub(crate) struct ModelRuntime {
 impl ModelRuntime {
     pub(crate) fn new(
         current_effort: Option<String>,
-        current_reasoning_selection: platform_api::ReasoningSelection,
+        current_reasoning_selection: lingxi_core::host::ReasoningSelection,
         current_effort_explicit: bool,
     ) -> Self {
         Self {
@@ -1222,7 +1224,7 @@ impl ModelRuntime {
             current_effort_explicit: std::sync::atomic::AtomicBool::new(current_effort_explicit),
             current_effort_from_resume: std::sync::atomic::AtomicBool::new(false),
             refusal_cascade: Mutex::new(
-                platform_api::refusal_driver::RefusalCascadeState::default(),
+                lingxi_core::host::refusal_driver::RefusalCascadeState::default(),
             ),
             cost_tracker: None,
             loop_usage: None,
@@ -1259,7 +1261,7 @@ impl ModelRuntime {
     /// only after every fallible/awaiting reset step has completed.
     pub(crate) async fn prepare_cost_session(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
     ) -> Result<Option<PreparedSessionSwitch>, cost::CostPersistError> {
         if let Some(tracker) = self.cost_tracker.as_ref() {
             let prepared = if let Some(switcher) = self.cost_session_switcher.as_ref() {
@@ -1317,7 +1319,7 @@ pub struct SessionMemoryHandle {
     /// Resolved `$LINGXI_CONFIG_DIR ?? ~/.claude` dir (the write base).
     pub config_home: std::path::PathBuf,
     /// Runtime used to background-spawn the extraction fork.
-    pub runtime: Arc<dyn platform_api::RuntimeSpawner>,
+    pub runtime: Arc<dyn lingxi_core::host::RuntimeSpawner>,
     /// One extraction at a time per conversation. The flag is claimed before
     /// spawning so scheduler reordering cannot let an older history snapshot
     /// run after a newer extraction and move the watermark backwards.
@@ -1436,10 +1438,10 @@ pub(super) fn compact_file_reference_body(path: &std::path::Path, read_tool_name
 /// stream frame, mirroring the TS `yield sdkAssistantMessage`. Used by
 /// [`ConversationOrchestrator::run_orphaned_permission`].
 pub(super) fn find_unresolved_tool_use_in_history(
-    history: &[protocol::ConversationMessage],
-    tool_use_id: &protocol::ToolUseId,
-) -> Option<protocol::ConversationMessage> {
-    use protocol::{ContentBlock, ConversationMessage};
+    history: &[lingxi_core::types::ConversationMessage],
+    tool_use_id: &lingxi_core::types::ToolUseId,
+) -> Option<lingxi_core::types::ConversationMessage> {
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
     // A matching `tool_result` anywhere ⇒ already resolved (bail, like the TS
     // early `return null` when a tool_result block is found).
     let resolved = history.iter().any(|m| match m {

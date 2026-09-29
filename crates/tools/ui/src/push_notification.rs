@@ -119,7 +119,7 @@ impl PushNotificationTool {
 /// port has no `Nt.caps.workspace` remote-workspace tracking (`sa()`=false), so
 /// only the env override applies.
 fn is_remote() -> bool {
-    platform_api::env::is_env_truthy(std::env::var("LINGXI_REMOTE").ok().as_deref())
+    lingxi_core::host::env::is_env_truthy(std::env::var("LINGXI_REMOTE").ok().as_deref())
 }
 
 /// `mH()` (`Nt.replBridgeActive`) — is a mobile-push transport (Remote Control /
@@ -131,7 +131,7 @@ fn mobile_push_available() -> bool {
 /// `mc("agentPushNotifEnabled",false).value` — the merged per-session
 /// mobile-push opt-in.
 fn agent_push_notif_enabled() -> bool {
-    platform_api::session_flags::agent_push_notif_enabled()
+    lingxi_core::host::session_flags::agent_push_notif_enabled()
 }
 
 /// `xur()` — is the user present (focus `H1e()` known, else last interaction `N0()`
@@ -422,7 +422,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::process::ProcessOutput;
+    use lingxi_core::host::process::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     fn dummy_out() -> ProcessOutput {
@@ -440,7 +440,7 @@ mod tests {
         std::env::remove_var("LINGXI_REMOTE");
         std::env::remove_var("CLAUDE_CODE_ENTRYPOINT");
         telemetry::test_clear_flag(PUSH_NOTIFICATION_FLAG);
-        platform_api::session_flags::set_agent_push_notif_enabled(false);
+        lingxi_core::host::session_flags::set_agent_push_notif_enabled(false);
         g
     }
 

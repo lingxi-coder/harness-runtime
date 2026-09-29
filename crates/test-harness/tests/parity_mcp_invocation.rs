@@ -17,6 +17,8 @@
 
 use std::sync::Arc;
 
+use lingxi_core::host::{McpTransport, McpTransportSpec, OutputEvent, ProcessOutput};
+use lingxi_core::types::ToolUseId;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 use orchestrator::test_support::{
@@ -24,8 +26,6 @@ use orchestrator::test_support::{
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::{McpTransport, McpTransportSpec, OutputEvent, ProcessOutput};
-use protocol::ToolUseId;
 use test_harness::mocks::MockMcpTransport;
 use tool_api::registry::ToolRegistry;
 use tool_api::BuiltinToolContext;
@@ -40,7 +40,7 @@ fn mock_config() -> McpServerConfig {
         spec: McpTransportSpec::InProcess {
             registry_key: "mock".into(),
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::User),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         disabled: false,
         timeout_ms: None,
         always_load: false,

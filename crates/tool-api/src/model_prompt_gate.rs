@@ -98,9 +98,9 @@ fn uwu_standard_model(model: &str) -> bool {
     // which reached the right answer only by falling through to the default
     // below — correct by accident, and silently wrong for any model added
     // later.
-    if platform_api::model_capabilities::has_capability(
+    if lingxi_core::host::model_capabilities::has_capability(
         &t,
-        platform_api::model_capabilities::ModelCapability::LeanPrompt,
+        lingxi_core::host::model_capabilities::ModelCapability::LeanPrompt,
     ) || t == "claude-mythos-5-1"
     {
         return false;
@@ -157,16 +157,16 @@ pub fn dh_simple_system_prompt(model: Option<&str>) -> bool {
     // LingXi's multi-provider harness is intentionally more explicit than the
     // model-specific Claude prompt. A non-Claude model must never inherit the
     // short prompt from Claude's unknown-model fallthrough.
-    if platform_api::model_capabilities::prompt_profile_for(model)
-        == platform_api::model_capabilities::PromptProfile::FullHarness
+    if lingxi_core::host::model_capabilities::prompt_profile_for(model)
+        == lingxi_core::host::model_capabilities::PromptProfile::FullHarness
     {
         return false;
     }
     let env = std::env::var("LINGXI_SIMPLE_SYSTEM_PROMPT").ok();
-    if platform_api::env::is_env_truthy(env.as_deref()) {
+    if lingxi_core::host::env::is_env_truthy(env.as_deref()) {
         return true;
     }
-    if platform_api::env::is_env_defined_falsy(env.as_deref()) {
+    if lingxi_core::host::env::is_env_defined_falsy(env.as_deref()) {
         return false;
     }
     // `if(!BKb(e)) return true; if(it("tengu_velvet_tide")) return true;
@@ -189,9 +189,9 @@ mod tests {
     /// `capability_arm` is `F2(t,"lean_prompt")||t==="claude-mythos-5"`;
     /// `classic_name_arm` is the `includes`/equality list that follows it.
     fn capability_arm(t: &str) -> bool {
-        platform_api::model_capabilities::has_capability(
+        lingxi_core::host::model_capabilities::has_capability(
             t,
-            platform_api::model_capabilities::ModelCapability::LeanPrompt,
+            lingxi_core::host::model_capabilities::ModelCapability::LeanPrompt,
         ) || t == "claude-mythos-5-1"
     }
 
@@ -219,7 +219,7 @@ mod tests {
     /// If a future model is ever both — a lean-prompt Sonnet, say — the order
     /// becomes load-bearing and this test goes red, pointing at the branch that
     /// has to stay first. The id list mirrors
-    /// `platform_api::model_capabilities::KNOWN_MODEL_IDS` (private to that crate);
+    /// `lingxi_core::host::model_capabilities::KNOWN_MODEL_IDS` (private to that crate);
     /// extend it whenever the registry gains a model.
     #[test]
     fn no_registry_model_is_both_lean_and_classic() {
@@ -283,9 +283,9 @@ mod tests {
     #[test]
     fn opus_5_is_short_via_the_capability_registry() {
         assert!(dh_simple_system_prompt(Some("claude-opus-5")));
-        assert!(platform_api::model_capabilities::has_capability(
+        assert!(lingxi_core::host::model_capabilities::has_capability(
             "claude-opus-5",
-            platform_api::model_capabilities::ModelCapability::LeanPrompt
+            lingxi_core::host::model_capabilities::ModelCapability::LeanPrompt
         ));
     }
 

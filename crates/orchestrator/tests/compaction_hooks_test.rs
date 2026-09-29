@@ -28,14 +28,14 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
+use lingxi_core::host::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
+use lingxi_core::types::{ConversationMessage, HookId, HttpRequest, HttpResponse, MessageId};
 use orchestrator::prompt::MemoryFile;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
-use protocol::{ConversationMessage, HookId, HttpRequest, HttpResponse, MessageId};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -52,7 +52,7 @@ impl HttpTransport for UnusedHttp {
     async fn stream_sse(
         &self,
         _req: HttpRequest,
-    ) -> Result<platform_api::http::SseStream, HttpError> {
+    ) -> Result<lingxi_core::host::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -63,11 +63,14 @@ impl RuntimeSpawner for UnusedRuntime {
         &self,
         _name: &str,
         _task: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, RuntimeError> {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _d: Duration) {}
-    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+    async fn cancel(
+        &self,
+        _h: &lingxi_core::host::BackgroundTaskHandle,
+    ) -> Result<(), RuntimeError> {
         Ok(())
     }
 }
@@ -246,7 +249,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         executor: DefHookExecutor::Builtin {
             handler_id: handler_id.into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -321,7 +324,7 @@ async fn seed_history(orch: &ConversationOrchestrator, n: usize) {
         } else {
             s.history.push(ConversationMessage::Assistant {
                 id: MessageId::new(),
-                content: vec![protocol::ContentBlock::Text {
+                content: vec![lingxi_core::types::ContentBlock::Text {
                     text: format!("reply-{i} with enough detail for compaction"),
                 }],
                 stop_reason: Some("end_turn".into()),
@@ -501,7 +504,7 @@ async fn manual_compact_runs_reload_session_start_then_post_compact() {
     .with_compaction(compactor);
     seed_history(&orch, 6).await;
 
-    platform_api::OrchestratorHandle::force_compact(&orch)
+    lingxi_core::host::OrchestratorHandle::force_compact(&orch)
         .await
         .expect("manual compaction");
 

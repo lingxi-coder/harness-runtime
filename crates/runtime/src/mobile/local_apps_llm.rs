@@ -10,9 +10,9 @@
 
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
+use lingxi_core::types::{ConversationMessage, MediaAnalysis, MessageId, MessageRole};
 use llm_runtime::{ApiService, ContentBlock, HistoryEvent};
 use local_apps::AppError;
-use protocol::{ConversationMessage, MediaAnalysis, MessageId, MessageRole};
 use sha2::{Digest, Sha256};
 use sidequery::{
     filter_messages_to_fingerprints, prepare_media_for_nonvision, ProviderSideQueryClient,
@@ -139,17 +139,17 @@ pub trait LocalAppsModel: Send + Sync {
 }
 
 /// Lower one app-supplied part to the conversation vocabulary.
-fn chat_part_block(part: ChatPart) -> protocol::ContentBlock {
+fn chat_part_block(part: ChatPart) -> lingxi_core::types::ContentBlock {
     match part {
-        ChatPart::Text(text) => protocol::ContentBlock::Text { text },
-        ChatPart::Image { media_type, base64 } => protocol::ContentBlock::Image {
-            source: protocol::ImageSource::Base64 {
+        ChatPart::Text(text) => lingxi_core::types::ContentBlock::Text { text },
+        ChatPart::Image { media_type, base64 } => lingxi_core::types::ContentBlock::Image {
+            source: lingxi_core::types::ImageSource::Base64 {
                 media_type,
                 data: base64,
             },
         },
-        ChatPart::Document { media_type, base64 } => protocol::ContentBlock::Document {
-            source: protocol::DocumentSource::Base64 {
+        ChatPart::Document { media_type, base64 } => lingxi_core::types::ContentBlock::Document {
+            source: lingxi_core::types::DocumentSource::Base64 {
                 media_type,
                 data: base64,
             },
@@ -922,7 +922,7 @@ fn lower_messages(messages: Vec<ChatMessage>) -> Vec<ConversationMessage> {
     messages
         .into_iter()
         .map(|message| {
-            let content: Vec<protocol::ContentBlock> =
+            let content: Vec<lingxi_core::types::ContentBlock> =
                 message.content.into_iter().map(chat_part_block).collect();
             match message.role {
                 ChatRole::User => ConversationMessage::User {
@@ -1295,8 +1295,8 @@ mod tests {
         });
         assert!(matches!(
             block,
-            protocol::ContentBlock::Image {
-                source: protocol::ImageSource::Base64 { media_type, data }
+            lingxi_core::types::ContentBlock::Image {
+                source: lingxi_core::types::ImageSource::Base64 { media_type, data }
             } if media_type == "image/jpeg" && data == "AQID"
         ));
 
@@ -1306,8 +1306,8 @@ mod tests {
         });
         assert!(matches!(
             block,
-            protocol::ContentBlock::Document {
-                source: protocol::DocumentSource::Base64 { media_type, .. }
+            lingxi_core::types::ContentBlock::Document {
+                source: lingxi_core::types::DocumentSource::Base64 { media_type, .. }
             } if media_type == "application/pdf"
         ));
     }

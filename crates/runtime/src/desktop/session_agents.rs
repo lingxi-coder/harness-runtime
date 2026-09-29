@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use client::adapter::ClientEventSink;
 use client::protocol::events::ClientEvent;
 use client::protocol::listings::SessionAgentSummaryDto;
-use protocol::{ConversationMessage, SessionId};
+use lingxi_core::types::{ConversationMessage, SessionId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -105,7 +105,7 @@ pub fn agent_id_from_path(path: &Path) -> Option<String> {
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix("agent-"))
         .and_then(|id| id.strip_suffix(".jsonl"))
-        .and_then(protocol::AgentId::parse_prefixed)
+        .and_then(lingxi_core::types::AgentId::parse_prefixed)
         .map(|id| id.to_string())
 }
 
@@ -169,7 +169,7 @@ pub async fn read_transcript(root: &Path, path: &Path) -> std::io::Result<Vec<u8
     let root = root.to_path_buf();
     let relative = relative.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        platform_api::rooted_fs::read_to_string(&root, &relative)
+        lingxi_core::host::rooted_fs::read_to_string(&root, &relative)
             .map(String::into_bytes)
             .map_err(|error| std::io::Error::other(error.to_string()))
     })
@@ -202,11 +202,11 @@ fn activity(message: &ConversationMessage) -> Option<String> {
         }
     }?;
     blocks.iter().find_map(|block| match block {
-        protocol::ContentBlock::Text { text } if !text.is_empty() => {
+        lingxi_core::types::ContentBlock::Text { text } if !text.is_empty() => {
             Some(text.chars().take(160).collect())
         }
-        protocol::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
-        protocol::ContentBlock::ToolResult { content, .. } if !content.is_empty() => {
+        lingxi_core::types::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+        lingxi_core::types::ContentBlock::ToolResult { content, .. } if !content.is_empty() => {
             Some(content.chars().take(160).collect())
         }
         _ => None,
@@ -238,13 +238,13 @@ impl DesktopSubagentUsageRecorder {
 }
 
 #[async_trait]
-impl platform_api::SubagentUsageRecorder for DesktopSubagentUsageRecorder {
+impl lingxi_core::host::SubagentUsageRecorder for DesktopSubagentUsageRecorder {
     async fn record_subagent_usage(
         &self,
         session_id: Option<SessionId>,
         model: &str,
         model_profile: Option<&str>,
-        usage: platform_api::SubagentUsage,
+        usage: lingxi_core::host::SubagentUsage,
         duration: Duration,
         _usage_complete: bool,
     ) {
@@ -365,7 +365,7 @@ impl DesktopSessionAgentObserver {
             );
     }
 
-    async fn emit_activity(&self, agent_id: protocol::AgentId, activity: String) {
+    async fn emit_activity(&self, agent_id: lingxi_core::types::AgentId, activity: String) {
         // A workflow retry can arrive through a different observer worker.
         // Check and update under one lock so delayed telemetry cannot revive
         // an idle or terminal child between separate liveness checks.
@@ -397,7 +397,10 @@ impl DesktopSessionAgentObserver {
         self.event_sink.emit(event).await;
     }
 
-    fn allocated_session_id(&self, origin_session_id: Option<protocol::SessionId>) -> String {
+    fn allocated_session_id(
+        &self,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
+    ) -> String {
         // The spawner resolves this together with the child's hook and actual
         // transcript directory before allocation crosses an async boundary.
         if let Some(session_id) = origin_session_id {
@@ -421,9 +424,9 @@ impl DesktopSessionAgentObserver {
 }
 
 #[async_trait]
-impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgentObserver {
-    fn on_allocated(&self, event: &platform_api::subagent_spawn::SubagentObservation) {
-        if let platform_api::subagent_spawn::SubagentObservation::Allocated {
+impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgentObserver {
+    fn on_allocated(&self, event: &lingxi_core::host::subagent_spawn::SubagentObservation) {
+        if let lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
             agent_id,
             agent_type,
             name,
@@ -450,8 +453,8 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgent
         }
     }
 
-    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
-        use platform_api::subagent_spawn::SubagentObservation;
+    async fn on_event(&self, event: lingxi_core::host::subagent_spawn::SubagentObservation) {
+        use lingxi_core::host::subagent_spawn::SubagentObservation;
         match event {
             SubagentObservation::Allocated {
                 agent_id,
@@ -644,14 +647,14 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgent
 }
 
 impl DesktopSessionAgentObserver {
-    async fn emit_terminal(&self, agent_id: protocol::AgentId, status: &str) {
+    async fn emit_terminal(&self, agent_id: lingxi_core::types::AgentId, status: &str) {
         self.emit_terminal_with_activity(agent_id, status, None)
             .await;
     }
 
     async fn emit_terminal_with_activity(
         &self,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         status: &str,
         latest_activity: Option<String>,
     ) {
@@ -661,7 +664,7 @@ impl DesktopSessionAgentObserver {
 
     async fn emit_update(
         &self,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         status: &str,
         latest_activity: Option<String>,
         clear_state: bool,
@@ -730,13 +733,13 @@ pub fn lower_transcript(raw: &[u8]) -> Vec<client::protocol::message::MessageDto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::subagent_spawn::{
+    use lingxi_core::host::subagent_spawn::{
         SubagentObservation, SubagentSpawnObserver, SubagentUsage, SubagentUsageRecorder,
     };
 
     async fn allocate(
         observer: &DesktopSessionAgentObserver,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         persistent: bool,
         initial_message_index: u64,
     ) {
@@ -754,7 +757,7 @@ mod tests {
             .await;
     }
 
-    fn completed(agent_id: protocol::AgentId) -> SubagentObservation {
+    fn completed(agent_id: lingxi_core::types::AgentId) -> SubagentObservation {
         SubagentObservation::Completed {
             agent_id,
             content: serde_json::json!("done"),
@@ -770,7 +773,7 @@ mod tests {
     async fn live_snapshot_is_process_scoped_and_allocation_precedes_async_delivery() {
         let observer =
             DesktopSessionAgentObserver::new(client::adapter::MockSink::arc(), "session-a");
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         let allocation = SubagentObservation::Allocated {
             agent_id,
             agent_type: "reviewer".into(),
@@ -809,7 +812,7 @@ mod tests {
     async fn session_switch_keeps_existing_receipts_and_moves_future_allocations() {
         let observer =
             DesktopSessionAgentObserver::new(client::adapter::MockSink::arc(), "session-a");
-        let old_id = protocol::AgentId::new();
+        let old_id = lingxi_core::types::AgentId::new();
         let event = SubagentObservation::Allocated {
             agent_id: old_id,
             agent_type: "reviewer".into(),
@@ -823,7 +826,7 @@ mod tests {
         observer.on_allocated(&event);
         observer.set_session_id("session-b");
         observer.on_event(event).await;
-        let new_id = protocol::AgentId::new();
+        let new_id = lingxi_core::types::AgentId::new();
         allocate(&observer, new_id, false, 0).await;
         assert!(observer
             .snapshot("session-a")
@@ -839,8 +842,8 @@ mod tests {
     #[tokio::test]
     async fn explicit_spawn_owner_survives_session_switch_and_delayed_delivery() {
         let sink = client::adapter::MockSink::arc();
-        let session_a = protocol::SessionId::new();
-        let session_b = protocol::SessionId::new();
+        let session_a = lingxi_core::types::SessionId::new();
+        let session_b = lingxi_core::types::SessionId::new();
         let owner_a = session_a.as_uuid().to_string();
         let owner_b = session_b.as_uuid().to_string();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), &owner_a);
@@ -849,7 +852,7 @@ mod tests {
         // The old background parent creates a child after the switch. Its
         // explicit origin wins over the observer's current-session fallback.
         for (owner, synchronous_receipt) in [(session_a, true), (session_b, false)] {
-            let agent_id = protocol::AgentId::new();
+            let agent_id = lingxi_core::types::AgentId::new();
             let allocation = SubagentObservation::Allocated {
                 agent_id,
                 agent_type: "reviewer".into(),
@@ -889,7 +892,7 @@ mod tests {
     async fn progress_and_retry_are_live_activity_not_a_resurrection_signal() {
         let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         allocate(&observer, agent_id, true, 0).await;
         observer
             .on_event(SubagentObservation::Progress {
@@ -944,7 +947,7 @@ mod tests {
     async fn foreground_park_updates_liveness_without_losing_wake_binding() {
         let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         allocate(&observer, agent_id, false, 0).await;
         for _ in 0..2 {
             let before = sink.events().await.len();
@@ -952,7 +955,7 @@ mod tests {
                 .on_event(SubagentObservation::Message {
                     agent_id,
                     message: ConversationMessage::System {
-                        id: protocol::MessageId::new(),
+                        id: lingxi_core::types::MessageId::new(),
                         content: "idle".into(),
                         subtype: Some("agent_idle".into()),
                         compact_metadata: None,
@@ -972,7 +975,7 @@ mod tests {
                 .on_event(SubagentObservation::Message {
                     agent_id,
                     message: ConversationMessage::user_meta(
-                        protocol::MessageId::new(),
+                        lingxi_core::types::MessageId::new(),
                         "task finished".into(),
                     ),
                 })
@@ -995,7 +998,7 @@ mod tests {
     async fn hidden_notification_wakes_idle_without_exposing_internal_input() {
         let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         allocate(&observer, agent_id, true, 0).await;
         observer.on_event(completed(agent_id)).await;
         let before = sink.events().await.len();
@@ -1003,7 +1006,7 @@ mod tests {
             .on_event(SubagentObservation::Message {
                 agent_id,
                 message: ConversationMessage::user_meta(
-                    protocol::MessageId::new(),
+                    lingxi_core::types::MessageId::new(),
                     "private task notification".into(),
                 ),
             })
@@ -1033,10 +1036,11 @@ mod tests {
 
     #[test]
     fn revision_counts_hidden_records_while_lowering_only_visible() {
-        let visible = ConversationMessage::user(protocol::MessageId::new(), "hello".to_string());
+        let visible =
+            ConversationMessage::user(lingxi_core::types::MessageId::new(), "hello".to_string());
         let hidden = ConversationMessage::User {
-            id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::Text {
+            id: lingxi_core::types::MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "summary".into(),
             }],
             is_meta: false,
@@ -1054,7 +1058,8 @@ mod tests {
 
     #[test]
     fn transcript_validation_ignores_only_an_unterminated_tail() {
-        let message = ConversationMessage::user(protocol::MessageId::new(), "hello".to_string());
+        let message =
+            ConversationMessage::user(lingxi_core::types::MessageId::new(), "hello".to_string());
         let valid = serde_json::json!({"message": message}).to_string();
         let raw = format!("{valid}\nnot-json\n");
         assert_eq!(first_corrupt_transcript_line(raw.as_bytes()), Some(2));
@@ -1073,7 +1078,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let root = root_parent.path().join("subagents");
         std::fs::create_dir(&root).unwrap();
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         let outside_file = outside.path().join(format!("agent-{agent_id}.jsonl"));
         std::fs::write(&outside_file, "secret").unwrap();
         symlink(&outside_file, root.join(format!("agent-{agent_id}.jsonl"))).unwrap();
@@ -1094,8 +1099,11 @@ mod tests {
     async fn allocation_origin_routes_updates_independently_of_boot_session() {
         let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "boot-session");
-        for owner in [protocol::SessionId::new(), protocol::SessionId::new()] {
-            let agent_id = protocol::AgentId::new();
+        for owner in [
+            lingxi_core::types::SessionId::new(),
+            lingxi_core::types::SessionId::new(),
+        ] {
+            let agent_id = lingxi_core::types::AgentId::new();
             observer
                 .on_event(SubagentObservation::Allocated {
                     agent_id,
@@ -1134,7 +1142,7 @@ mod tests {
     async fn one_shot_completion_emits_completed_and_releases_all_observer_state() {
         let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         allocate(&observer, agent_id, false, 0).await;
 
         observer.on_event(completed(agent_id)).await;
@@ -1162,7 +1170,7 @@ mod tests {
     async fn a_parked_persistent_agent_can_be_reallocated() {
         let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         allocate(&observer, agent_id, true, 0).await;
         observer.on_event(completed(agent_id)).await;
         assert_eq!(
@@ -1193,7 +1201,7 @@ mod tests {
     async fn a_terminal_agent_is_never_reallocated() {
         let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         allocate(&observer, agent_id, false, 0).await;
         observer.on_event(completed(agent_id)).await;
         assert_eq!(
@@ -1215,7 +1223,7 @@ mod tests {
     async fn persistent_completion_is_completed_and_keeps_restored_index_for_resume() {
         let sink = client::adapter::MockSink::arc();
         let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         allocate(&observer, agent_id, true, 4).await;
 
         observer.on_event(completed(agent_id)).await;
@@ -1245,8 +1253,8 @@ mod tests {
             .on_event(SubagentObservation::Message {
                 agent_id,
                 message: ConversationMessage::Assistant {
-                    id: protocol::MessageId::new(),
-                    content: vec![protocol::ContentBlock::Text {
+                    id: lingxi_core::types::MessageId::new(),
+                    content: vec![lingxi_core::types::ContentBlock::Text {
                         text: "resumed output".to_string(),
                     }],
                     stop_reason: None,
@@ -1273,7 +1281,7 @@ mod tests {
 
     #[tokio::test]
     async fn desktop_usage_recorder_adds_subagent_tokens_to_session_ledger() {
-        let session_id = protocol::SessionId::new();
+        let session_id = lingxi_core::types::SessionId::new();
         let tracker = Arc::new(cost::CostTracker::new(
             session_id,
             Arc::new(cost::PricingCatalog::builtin_reference()),

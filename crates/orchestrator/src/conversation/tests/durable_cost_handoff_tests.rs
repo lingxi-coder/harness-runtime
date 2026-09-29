@@ -5,14 +5,14 @@ use cost::{
     CostSessionScope, CostState, CostTracker, PricingCatalog, ProviderId,
     TokenUsage as CostTokenUsage, Usage as CostUsage,
 };
+use lingxi_core::host::live_sessions::{SessionWriterLease, SharedSessionWriterLease};
+use lingxi_core::host::{CostSnapshot, OutputStream};
+use lingxi_core::types::{
+    ContentBlock, ConversationMessage, ImageSource, MediaAnalysis, MessageId, SessionId,
+};
 use llm_runtime::{
     Capabilities, ContentBlock as LlmContentBlock, ExecutionUsage as LlmUsage, LlmError,
     MediaRoute, ProviderId as LlmProvider, ResolvedRoute,
-};
-use platform_api::live_sessions::{SessionWriterLease, SharedSessionWriterLease};
-use platform_api::{CostSnapshot, OutputStream};
-use protocol::{
-    ContentBlock, ConversationMessage, ImageSource, MediaAnalysis, MessageId, SessionId,
 };
 use sidequery::{
     CacheSafeParamsSlot, ForkedAgentRunner, SideQueryClient, SideQueryError, SideQueryRequest,
@@ -153,7 +153,11 @@ impl crate::conversation::StreamingApiClient for PatchBarrierStream {
         let first = futures::stream::iter(
             vec![
                 message_start_with_usage("edit-stream", "claude-opus-4-8", llm_usage(3, 0, 0, 0)),
-                content_block_start_tool_use(0, protocol::ToolUseId::new(), "DurablePatch"),
+                content_block_start_tool_use(
+                    0,
+                    lingxi_core::types::ToolUseId::new(),
+                    "DurablePatch",
+                ),
                 input_json_delta(0, "{}"),
                 content_block_stop(0),
             ]
@@ -779,7 +783,7 @@ impl OutputStream for VisionProgressOutput {
 
     async fn emit_tool_call(
         &self,
-        _id: &protocol::ToolUseId,
+        _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
         _input: &serde_json::Value,
     ) {
@@ -787,7 +791,7 @@ impl OutputStream for VisionProgressOutput {
 
     async fn emit_tool_result(
         &self,
-        _id: &protocol::ToolUseId,
+        _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
         _model_text: &str,
         _result: &serde_json::Value,
@@ -950,7 +954,7 @@ async fn manual_compaction_post_response_cancel_retains_known_usage() {
 
     let result = orchestrator.force_compact_with_cancel(cancel).await;
     assert!(
-        matches!(&result, Err(platform_api::HandleError::ActionFailed(message)) if message == "Compaction canceled."),
+        matches!(&result, Err(lingxi_core::host::HandleError::ActionFailed(message)) if message == "Compaction canceled."),
         "post-response cancellation must leave compaction uncommitted: {result:?}"
     );
     durability.wait_until_response_owner_is_blocked().await;

@@ -19,9 +19,9 @@ use base64::Engine as _;
 use client::protocol::events::ClientEvent;
 use client::protocol::local_apps::{AppCapabilityKindDto, AppEventDto};
 use futures_util::StreamExt;
+use lingxi_core::host::OutputStream;
 use llm_runtime::{HistoryContentDelta, HistoryEvent};
 use local_apps::AppCapability;
-use platform_api::OutputStream;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -627,12 +627,12 @@ mod tests {
     struct StubCamera(Vec<u8>);
 
     #[async_trait]
-    impl platform_api::CameraControl for StubCamera {
+    impl lingxi_core::host::CameraControl for StubCamera {
         async fn capture_photo(
             &self,
-            _opts: platform_api::CapturePhotoOpts,
-        ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
-            Ok(platform_api::CapturedImage {
+            _opts: lingxi_core::host::CapturePhotoOpts,
+        ) -> Result<lingxi_core::host::CapturedImage, lingxi_core::host::CameraError> {
+            Ok(lingxi_core::host::CapturedImage {
                 jpeg_bytes: self.0.clone(),
                 width: 1280,
                 height: 960,
@@ -641,9 +641,9 @@ mod tests {
 
         async fn pick_from_library(
             &self,
-        ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
-            self.capture_photo(platform_api::CapturePhotoOpts {
-                position: platform_api::CameraPosition::Back,
+        ) -> Result<lingxi_core::host::CapturedImage, lingxi_core::host::CameraError> {
+            self.capture_photo(lingxi_core::host::CapturePhotoOpts {
+                position: lingxi_core::host::CameraPosition::Back,
                 allow_editing: false,
             })
             .await

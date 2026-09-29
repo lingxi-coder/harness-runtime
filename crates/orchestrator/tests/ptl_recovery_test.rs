@@ -1,14 +1,14 @@
 //! Provider overflow recovery preserves original history until a real summary succeeds.
 use async_trait::async_trait;
 use compaction::CompactionOrchestrator;
+use lingxi_core::host::OutputEvent;
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
 use orchestrator::test_support::{
     mock_message_response, noop_hook_executor, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig};
-use platform_api::OutputEvent;
-use protocol::{ContentBlock, ConversationMessage, MessageId};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;

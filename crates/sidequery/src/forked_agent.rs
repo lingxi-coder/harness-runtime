@@ -8,7 +8,7 @@
 //! → `agent::PoolSubagentSpawner::spawn` → `StateMachinePool::allocate` →
 //! `agent::runner::run_subagent_loop` (the real `loop` to `end_turn`/`max_turns`).
 //! All the claude-code fork parity bits are there: the `FORK_AGENT` builtin with
-//! `use_exact_tools`, `platform_api::fork_subagent::build_forked_messages` for the
+//! `use_exact_tools`, `lingxi_core::host::fork_subagent::build_forked_messages` for the
 //! cache-safe prefix, the verbatim parent system prompt, and the
 //! `is_in_fork_child` recursion guard. A forked agent that runs tools therefore
 //! goes through `AgentTool`, where that guard and the exact-tools pool apply.
@@ -37,7 +37,7 @@
 use crate::cache_safe_params::CacheSafeParams;
 use crate::purposes::QuerySource;
 use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest};
-use protocol::ConversationMessage;
+use lingxi_core::types::ConversationMessage;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -315,7 +315,7 @@ mod tests {
     use crate::side_query::{SideQueryError, SideQueryResponse};
     use async_trait::async_trait;
     use cost::Usage;
-    use protocol::{ConversationMessage, MessageId};
+    use lingxi_core::types::{ConversationMessage, MessageId};
     use std::sync::Mutex;
     use tool_api::context::ToolUseOptions;
 

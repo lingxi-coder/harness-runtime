@@ -1,8 +1,8 @@
 //! Desktop management surface over the scheduler's authoritative task file.
 use client::protocol::{commands::CronRequestDto, events::CronJobDto};
 use cron::tasks_file::{CronTask, ScheduledTasks};
-use platform_api::task_registry::TaskRegistryHandle;
-use platform_api::{FileSystem, FsError};
+use lingxi_core::host::task_registry::TaskRegistryHandle;
+use lingxi_core::host::{FileSystem, FsError};
 use std::{path::Path, sync::Arc};
 
 /// Upgrade old durable tasks once before a scheduler loads them. The write is
@@ -28,7 +28,7 @@ pub async fn migrate_legacy(
     // committed. `NotFound` is the one benign outcome (no store yet).
     let body = match cron::tasks_file::read_automation_tasks_body(fs, cwd).await {
         Ok(body) => body,
-        Err(platform_api::FsError::NotFound(_)) => body,
+        Err(lingxi_core::host::FsError::NotFound(_)) => body,
         Err(error) => return Err(error.to_string()),
     };
     let mut doc =
@@ -261,7 +261,7 @@ pub fn task_dto(task: CronTask) -> CronJobDto {
         last_fired_at: task.last_fired_at,
         expires_at: task.expires_at,
         session_id: task.session_id.map(|id| {
-            protocol::SessionId::parse_prefixed(&id)
+            lingxi_core::types::SessionId::parse_prefixed(&id)
                 .map_or(id, |session| session.as_uuid().to_string())
         }),
     }
@@ -314,7 +314,7 @@ fn apply(doc: &mut ScheduledTasks, request: CronRequestDto) -> Result<(), String
                 && automation
                     .target_session_id
                     .as_deref()
-                    .and_then(protocol::SessionId::parse_prefixed)
+                    .and_then(lingxi_core::types::SessionId::parse_prefixed)
                     .is_none()
             {
                 return Err("Choose a target session".to_string());

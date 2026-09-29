@@ -23,6 +23,7 @@ pub mod feature_flags;
 pub mod killswitch;
 pub mod otel;
 pub mod pii;
+pub mod settings_observer;
 pub mod sink;
 pub mod sinks;
 pub mod tengu;

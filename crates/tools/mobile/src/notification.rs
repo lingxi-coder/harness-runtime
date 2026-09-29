@@ -7,10 +7,10 @@
 //! affordance. The single action is `post` (title, body, optional tag).
 
 use async_trait::async_trait;
+use lingxi_core::host::notification::{NotificationError, NotificationRequest};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::notification::{NotificationError, NotificationRequest};
 use serde_json::{json, Value};
 
 use tool_api::context::ToolUseContext;
@@ -172,7 +172,7 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::notification::NotificationService;
+    use lingxi_core::host::notification::NotificationService;
     use std::sync::{Arc, Mutex};
 
     /// Fake `NotificationService` that records the last request it received.
@@ -193,8 +193,8 @@ mod tests {
         }
     }
 
-    fn empty_output() -> platform_api::process::ProcessOutput {
-        platform_api::process::ProcessOutput {
+    fn empty_output() -> lingxi_core::host::process::ProcessOutput {
+        lingxi_core::host::process::ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,

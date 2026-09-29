@@ -14,7 +14,7 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 
 use futures_util::stream::unfold;
-use platform_api::{
+use lingxi_core::host::{
     McpConfiguredToolPolicyDto, McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream,
     McpPermissionCeiling, McpPromptDto, McpProtocolEra, McpResourceContentDto, McpResourceDto,
     McpToolDto, McpToolResultDto, McpTransportKind, ServerCapabilitiesDto,
@@ -1054,11 +1054,15 @@ impl McpClient {
             // an org ceiling is present for the same raw tool name.
             if let Some(policy) = tool.permission_policy {
                 let policy_ceiling = match policy {
-                    platform_api::McpToolPermissionPolicy::AlwaysAllow => {
+                    lingxi_core::host::McpToolPermissionPolicy::AlwaysAllow => {
                         McpPermissionCeiling::Allow
                     }
-                    platform_api::McpToolPermissionPolicy::AlwaysAsk => McpPermissionCeiling::Ask,
-                    platform_api::McpToolPermissionPolicy::AlwaysDeny => McpPermissionCeiling::Deny,
+                    lingxi_core::host::McpToolPermissionPolicy::AlwaysAsk => {
+                        McpPermissionCeiling::Ask
+                    }
+                    lingxi_core::host::McpToolPermissionPolicy::AlwaysDeny => {
+                        McpPermissionCeiling::Deny
+                    }
                 };
                 org_ceilings
                     .entry(tool.name.as_str())
@@ -1401,7 +1405,7 @@ impl McpClient {
                 arguments: p
                     .arguments
                     .into_iter()
-                    .map(|argument| platform_api::McpPromptArgumentDto {
+                    .map(|argument| lingxi_core::host::McpPromptArgumentDto {
                         name: argument.name,
                         description: argument.description,
                         required: argument.required,
@@ -1493,7 +1497,7 @@ impl McpClient {
         &self,
         uri: &str,
         output_dir: &std::path::Path,
-    ) -> Result<Vec<platform_api::McpResourceContentsRich>, McpClientError> {
+    ) -> Result<Vec<lingxi_core::host::McpResourceContentsRich>, McpClientError> {
         let mut raw_value: serde_json::Value = self
             .connection
             .call(
@@ -2161,9 +2165,9 @@ struct RawTool {
     #[serde(rename = "outputSchema", default)]
     output_schema: Option<serde_json::Value>,
     #[serde(default)]
-    annotations: Option<platform_api::McpToolAnnotationsDto>,
+    annotations: Option<lingxi_core::host::McpToolAnnotationsDto>,
     #[serde(default)]
-    icons: Vec<platform_api::McpIconDto>,
+    icons: Vec<lingxi_core::host::McpIconDto>,
     #[serde(default, rename = "_meta")]
     meta: Option<serde_json::Value>,
 }
@@ -3207,7 +3211,7 @@ mod timeout_tests {
         resolve_idle_timeout_gld, resolve_tool_timeout, resolve_tool_timeout_bhs,
         DEFAULT_CALL_TOOL_TIMEOUT,
     };
-    use platform_api::McpTransportKind;
+    use lingxi_core::host::McpTransportKind;
     use std::time::Duration;
 
     #[test]

@@ -16,21 +16,21 @@ use crate::turn_loop::{
 use async_trait::async_trait;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
+use lingxi_core::types::{ConversationMessage, HookId, MessageId, SessionId};
 use lingxi_core::SessionState;
 use llm_runtime::{HistoryEvent, HistoryResponse, LlmError};
-use protocol::{ConversationMessage, HookId, MessageId, SessionId};
 use session::JsonlWriter;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::time::Duration;
 
-use platform_api::orchestrator::ModelListing;
-use platform_api::OutputStream;
+use lingxi_core::host::orchestrator::ModelListing;
+use lingxi_core::host::OutputStream;
 /// Re-export of the canonical image-source shape (FROZEN in `protocol`) so callers
 /// that do NOT depend on the `protocol` crate — notably the desktop bridge's
 /// `OrchestratorTurnDriver` — can construct the already-decoded sources handed to
 /// [`ConversationOrchestrator::run_turn_streaming_with_cancel_image_sources`].
-pub use protocol::ImageSource;
+pub use lingxi_core::types::ImageSource;
 use std::sync::Arc;
 use telemetry::tengu::orchestrator as orch_events;
 use tokio::sync::Mutex;
@@ -208,7 +208,10 @@ pub trait OrchestratorApiClient: Send + Sync {
         _tools: Vec<serde_json::Value>,
     ) -> Result<u64, LlmError> {
         let mut bytes = system.map_or(0u64, |s| s.len() as u64);
-        bytes += msgs.iter().map(protocol::text_byte_size).sum::<u64>();
+        bytes += msgs
+            .iter()
+            .map(lingxi_core::types::text_byte_size)
+            .sum::<u64>();
         Ok((bytes / crate::model::count_tokens::APPROX_CHARS_PER_TOKEN).max(1))
     }
 
@@ -281,11 +284,11 @@ pub trait OrchestratorApiClient: Send + Sync {
     /// to [`crate::provider_adapter::ProviderApiAdapter::last_rate_limit_info`],
     /// which is populated from every successful 2xx response's headers.
     ///
-    /// Returns a [`platform_api::RateLimitSnapshot`] carrying all three header-derived
+    /// Returns a [`lingxi_core::host::RateLimitSnapshot`] carrying all three header-derived
     /// fields (`rate_limit_type`, `overage_status`, `overage_disabled_reason`).
     /// Using the public snapshot type avoids leaking the orchestrator-internal
     /// `RateLimitInfo` struct through the trait.
-    fn last_rate_limit_info(&self) -> Option<platform_api::RateLimitSnapshot> {
+    fn last_rate_limit_info(&self) -> Option<lingxi_core::host::RateLimitSnapshot> {
         None
     }
 
@@ -333,11 +336,11 @@ pub trait OrchestratorApiClient: Send + Sync {
     ///
     /// Task 8 (llm-runtime future-work batch 3): unlike
     /// [`Self::last_rate_limit_info`] — whose signature is kept untouched and
-    /// projects the three-field public `platform_api::RateLimitSnapshot` — this
+    /// projects the three-field public `lingxi_core::host::RateLimitSnapshot` — this
     /// returns the orchestrator-internal nine-field
     /// [`crate::model::rate_limit::RateLimitInfo`] so the turn drivers can
     /// forward every unified header value to
-    /// `platform_api::OutputStream::emit_rate_limit`.
+    /// `lingxi_core::host::OutputStream::emit_rate_limit`.
     ///
     /// Default returns `None` (mocks / non-Anthropic impls compile
     /// unchanged); `ProviderApiAdapter` overrides it to expose its cached
@@ -868,22 +871,26 @@ fn git_branch_for_cwd(cwd: &std::path::Path) -> Option<String> {
 /// `imageBlockCount`, `bin/claude.exe` offset 203004969).
 ///
 /// The binary recurses into `tool_result.content` arrays; in this port a
-/// [`protocol::ContentBlock::ToolResult`] carries a flat `String` (it cannot
+/// [`lingxi_core::types::ContentBlock::ToolResult`] carries a flat `String` (it cannot
 /// nest image/document blocks), so counting the top-level blocks of each
 /// message is the faithful equivalent. Returns `(document_count, image_count)`.
-fn count_document_and_image_blocks(messages: &[protocol::ConversationMessage]) -> (u32, u32) {
+fn count_document_and_image_blocks(
+    messages: &[lingxi_core::types::ConversationMessage],
+) -> (u32, u32) {
     let mut documents = 0u32;
     let mut images = 0u32;
     for message in messages {
         let blocks = match message {
-            protocol::ConversationMessage::User { content, .. }
-            | protocol::ConversationMessage::Assistant { content, .. } => content,
-            protocol::ConversationMessage::System { .. } => continue,
+            lingxi_core::types::ConversationMessage::User { content, .. }
+            | lingxi_core::types::ConversationMessage::Assistant { content, .. } => content,
+            lingxi_core::types::ConversationMessage::System { .. } => continue,
         };
         for block in blocks {
             match block {
-                protocol::ContentBlock::Document { .. } => documents = documents.saturating_add(1),
-                protocol::ContentBlock::Image { .. } => images = images.saturating_add(1),
+                lingxi_core::types::ContentBlock::Document { .. } => {
+                    documents = documents.saturating_add(1)
+                }
+                lingxi_core::types::ContentBlock::Image { .. } => images = images.saturating_add(1),
                 _ => {}
             }
         }
@@ -900,16 +907,16 @@ const INTERRUPT_MESSAGE: &str = "[Request interrupted by user]";
 /// images with their non-sensitive summary. The live in-memory message remains
 /// untouched and still carries its image content blocks to the current model.
 fn redact_ephemeral_tool_result_images(
-    message: &protocol::ConversationMessage,
-) -> protocol::ConversationMessage {
+    message: &lingxi_core::types::ConversationMessage,
+) -> lingxi_core::types::ConversationMessage {
     let mut sanitized = message.clone();
     let blocks = match &mut sanitized {
-        protocol::ConversationMessage::User { content, .. }
-        | protocol::ConversationMessage::Assistant { content, .. } => content,
-        protocol::ConversationMessage::System { .. } => return sanitized,
+        lingxi_core::types::ConversationMessage::User { content, .. }
+        | lingxi_core::types::ConversationMessage::Assistant { content, .. } => content,
+        lingxi_core::types::ConversationMessage::System { .. } => return sanitized,
     };
     for block in blocks {
-        let protocol::ContentBlock::ToolResult {
+        let lingxi_core::types::ContentBlock::ToolResult {
             content,
             content_blocks,
             ..
@@ -1043,7 +1050,7 @@ pub(crate) struct PendingToolFrame {
 #[derive(Debug, Default)]
 pub(crate) struct DateChangeState {
     /// Session this state belongs to; `None` until the first producer run.
-    session_id: Option<protocol::SessionId>,
+    session_id: Option<lingxi_core::types::SessionId>,
     /// `LGe()` — the local date memoized at session start.
     session_date: String,
     /// `newDate` of the reminder last DELIVERED to the model in this session.
@@ -1207,10 +1214,11 @@ pub struct ConversationOrchestrator {
     pub(crate) model_runtime: ModelRuntime,
     /// Session-owned dynamic-workflow gate shared with the Workflow tool and
     /// TUI `/config` consumers.
-    pub(crate) dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate,
+    pub(crate) dynamic_workflows_gate: lingxi_core::host::session_flags::DynamicWorkflowsGate,
     /// Session-owned workflow-size setting shared with the Workflow tool and
     /// TUI `/config` consumers.
-    pub(crate) workflow_size_guideline: platform_api::session_flags::WorkflowSizeGuidelineState,
+    pub(crate) workflow_size_guideline:
+        lingxi_core::host::session_flags::WorkflowSizeGuidelineState,
     /// `queryTracking.chainId` for analytics (claude-code `query.ts:347-358`): a
     /// random uuid grouping a query chain, stamped onto the `queryChainId` field
     /// of `tengu_query_error` / `tengu_auto_compact_*` events. In claude-code a
@@ -1271,7 +1279,7 @@ pub struct ConversationOrchestrator {
     /// rendered per request as a separate second message. Stable host/tool
     /// facts remain frozen in `mobile_runtime_environment_message`.
     pub(crate) mobile_runtime_environment:
-        Option<platform_api::mobile_runtime_environment::MobileRuntimeEnvironment>,
+        Option<lingxi_core::host::mobile_runtime_environment::MobileRuntimeEnvironment>,
     /// Optional mobile host-path to guest-path mapping for live cwd updates.
     pub(crate) mobile_workspace_cwd_resolver:
         Option<Arc<dyn Fn(&std::path::Path) -> Option<String> + Send + Sync>>,
@@ -1293,7 +1301,7 @@ pub struct ConversationOrchestrator {
     pub(crate) transcript: TranscriptStore,
     /// Model-input assembly, reminder, and prompt cache state.
     pub(crate) prompt_runtime: PromptRuntime,
-    /// Set by [`platform_api::OrchestratorHandle::request_exit`] (M5-10).
+    /// Set by [`lingxi_core::host::OrchestratorHandle::request_exit`] (M5-10).
     /// The REPL (M5-13) checks this flag at the start of each iteration
     /// and breaks the loop. Wraps `AtomicBool` so reads are lock-free.
     /// Once `true`, this flag is never cleared (idempotent `/exit`).
@@ -1314,7 +1322,7 @@ pub struct ConversationOrchestrator {
     pub(crate) mcp_registry: Option<Arc<mcp::McpRegistry>>,
     /// Provider-neutral local IDE lifecycle handle. `None` for hosts that do
     /// not expose a local endpoint inventory (mobile/embedded callers).
-    pub(crate) ide_handle: Option<Arc<dyn platform_api::IdeHandle>>,
+    pub(crate) ide_handle: Option<Arc<dyn lingxi_core::host::IdeHandle>>,
     /// Compaction engines, token ledgers, and extraction state.
     pub(crate) compaction_runtime: CompactionRuntime,
     /// `/fork` background-agent spawner. When wired (via
@@ -1324,11 +1332,11 @@ pub struct ConversationOrchestrator {
     /// `None` (tests / non-desktop roots) ⇒ `fork_conversation` fails with a
     /// clear `ActionFailed` rather than panicking. Mirrors the existing
     /// `with_compaction` / `with_cache_safe_slot` Option-field pattern.
-    pub(crate) fork_spawner: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawner>>,
+    pub(crate) fork_spawner: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner>>,
     /// `/fork` budget enforcer inherited by the spawned background agent
     /// (`SubagentInheritance::budget`). Wired via [`Self::with_fork_budget`].
     /// `None` ⇒ `fork_conversation` fails gracefully.
-    pub(crate) fork_budget: Option<Arc<dyn platform_api::budget::BudgetEnforcerHandle>>,
+    pub(crate) fork_budget: Option<Arc<dyn lingxi_core::host::budget::BudgetEnforcerHandle>>,
     /// 2.1.212 `/fork` (`vAd`) background-session forker. When wired (via
     /// [`Self::with_bg_session_forker`], the CLI composition root's
     /// `CliBgSessionForker`), [`OrchestratorHandle::fork_to_background_session`]
@@ -1337,13 +1345,14 @@ pub struct ConversationOrchestrator {
     /// session. `None` (tests / non-desktop roots) ⇒ that handle method fails
     /// with a clear `ActionFailed`. Mirrors the `fork_spawner`/`fork_budget`
     /// optional-seam pattern above.
-    pub(crate) bg_session_forker: Option<Arc<dyn platform_api::bg_session_forker::BgSessionForker>>,
+    pub(crate) bg_session_forker:
+        Option<Arc<dyn lingxi_core::host::bg_session_forker::BgSessionForker>>,
     /// Host-owned live catalog reconciler used by `register_repo_root`.
     ///
     /// The orchestrator admits the root into the sandbox and MCP root set
     /// first; the desktop composition root then refreshes the registries it
     /// exclusively owns.
-    pub(crate) repo_root_reloader: Option<Arc<dyn platform_api::RepoRootReloader>>,
+    pub(crate) repo_root_reloader: Option<Arc<dyn lingxi_core::host::RepoRootReloader>>,
     /// `/recap` side-query runner — the SAME single-turn
     /// [`sidequery::ForkedAgentRunner`] the autocompact summarizer uses (cloned
     /// from the composition root's `forked_runner` before it moves into the
@@ -1368,7 +1377,10 @@ pub struct ConversationOrchestrator {
     /// normal turn → the gate's behaviour (and the byte-locked turn-loop
     /// fixtures) are unchanged.
     pub(crate) orphan_forced_decisions: Mutex<
-        std::collections::HashMap<protocol::ToolUseId, crate::test_support::PermissionDecision>,
+        std::collections::HashMap<
+            lingxi_core::types::ToolUseId,
+            crate::test_support::PermissionDecision,
+        >,
     >,
     /// Mid-turn drain seam: source of queued user input to inject WITHIN a
     /// running streaming turn (claude-code's query.ts mid-turn injection,
@@ -1416,7 +1428,7 @@ pub struct ConversationOrchestrator {
     /// Live coordinator-mode flag (`Ci()`). `None` is an ordinary session, so
     /// unknown-tool `Ldt` never takes the coordinator `Y7e` arm.
     pub(crate) coordinator_mode:
-        Option<std::sync::Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>>,
+        Option<std::sync::Arc<dyn lingxi_core::host::coordinator_mode::CoordinatorModeHandle>>,
 }
 
 // Responsibility-focused implementation modules. `conversation.rs` owns the

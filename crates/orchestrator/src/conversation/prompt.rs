@@ -4,7 +4,7 @@ use super::*;
 
 fn prompt_tool_descriptions(
     wire_tools: &[serde_json::Value],
-) -> Vec<platform_api::PromptToolDescription> {
+) -> Vec<lingxi_core::host::PromptToolDescription> {
     let mut seen = std::collections::HashSet::new();
     wire_tools
         .iter()
@@ -20,7 +20,7 @@ fn prompt_tool_descriptions(
             if name.is_empty() || !seen.insert(name.to_owned()) {
                 return None;
             }
-            Some(platform_api::PromptToolDescription {
+            Some(lingxi_core::host::PromptToolDescription {
                 name: name.to_owned(),
                 description: description.to_owned(),
             })
@@ -28,7 +28,7 @@ fn prompt_tool_descriptions(
         .collect()
 }
 
-fn valid_prompt_snapshot(snapshot: &platform_api::PromptSnapshot) -> bool {
+fn valid_prompt_snapshot(snapshot: &lingxi_core::host::PromptSnapshot) -> bool {
     !snapshot.system_prompt.is_empty()
         && snapshot.system_prompt.iter().all(|part| !part.is_empty())
         && snapshot.tools.iter().all(|tool| !tool.name.is_empty())
@@ -116,7 +116,7 @@ impl ConversationOrchestrator {
         if definitions.is_empty() {
             return;
         }
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         self.hooks
             .register_agent_hooks(agent_id, definitions, false)
             .await;
@@ -326,14 +326,15 @@ impl ConversationOrchestrator {
     /// upstream applies those at the recording seam (`swt`), and the port
     /// carries them here because one predicate feeds both record and reuse.
     pub(crate) fn prompt_snapshot_eligible(&self) -> bool {
-        let simple =
-            platform_api::env::is_env_truthy(std::env::var("CLAUDE_CODE_SIMPLE").ok().as_deref());
+        let simple = lingxi_core::host::env::is_env_truthy(
+            std::env::var("CLAUDE_CODE_SIMPLE").ok().as_deref(),
+        );
         // `CLAUDE_CODE_SESSION_KIND` in claude-code; the port already spells it
         // `LINGXI_SESSION_KIND` at its other reader (`tool_api::defer`).
         let background_session = std::env::var("LINGXI_SESSION_KIND").ok().as_deref() == Some("bg");
         let source = crate::config::sanitize_query_source(&self.config.query_source);
         Self::snapshot_gate(
-            platform_api::session_flags::system_prompt_snapshot(),
+            lingxi_core::host::session_flags::system_prompt_snapshot(),
             background_session,
             simple,
         ) && self.config.system_prompt_override.is_none()
@@ -372,7 +373,7 @@ impl ConversationOrchestrator {
                 system.strip_suffix(&suffix).map(str::to_owned)
             })
             .unwrap_or_else(|| system.to_owned());
-        let snapshot = platform_api::PromptSnapshot {
+        let snapshot = lingxi_core::host::PromptSnapshot {
             system_prompt: vec![static_prompt],
             tools: prompt_tool_descriptions(wire_tools),
         };
@@ -423,7 +424,10 @@ impl ConversationOrchestrator {
         }
     }
 
-    async fn persist_prompt_snapshot_attachment(&self, snapshot: &platform_api::PromptSnapshot) {
+    async fn persist_prompt_snapshot_attachment(
+        &self,
+        snapshot: &lingxi_core::host::PromptSnapshot,
+    ) {
         let mut payload = serde_json::Map::new();
         payload.insert(
             "type".to_string(),
@@ -491,7 +495,7 @@ impl ConversationOrchestrator {
             .and_then(|m| match m {
                 ConversationMessage::User { content, .. } => {
                     content.into_iter().find_map(|b| match b {
-                        protocol::ContentBlock::Text { text } => Some(text),
+                        lingxi_core::types::ContentBlock::Text { text } => Some(text),
                         _ => None,
                     })
                 }
@@ -531,7 +535,7 @@ impl ConversationOrchestrator {
             |environment| {
                 !matches!(
                     environment.host.launch_mode,
-                    platform_api::MobileLaunchMode::ScheduledHeadless
+                    lingxi_core::host::MobileLaunchMode::ScheduledHeadless
                 )
             },
         )
@@ -559,7 +563,7 @@ impl ConversationOrchestrator {
         if self.mobile_runtime_environment.is_some()
             && messages.get(index).is_some_and(|message| {
                 matches!(message, ConversationMessage::User { content, .. } if content.iter().any(
-                    |block| matches!(block, protocol::ContentBlock::Text { text } if text.starts_with("<system-reminder>\nMobile workspace context"))
+                    |block| matches!(block, lingxi_core::types::ContentBlock::Text { text } if text.starts_with("<system-reminder>\nMobile workspace context"))
                 ))
             })
         {

@@ -12,7 +12,7 @@ fn rule(name: &str, behavior: PermissionBehavior) -> PermissionRule {
             rule_content: None,
         },
         behavior,
-        source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
     }
 }
 
@@ -143,8 +143,8 @@ fn monitor_outer_allow_preserves_nested_shell_safety_objection() {
 
 #[tokio::test]
 async fn loop_permissions_reach_outer_transport_only_when_required() {
+    use lingxi_core::host::{PermissionDecision, PermissionGate};
     use permission::policy_gate::PolicyPermissionGate;
-    use platform_api::{PermissionDecision, PermissionGate};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -182,9 +182,9 @@ async fn loop_permissions_reach_outer_transport_only_when_required() {
 
 #[tokio::test]
 async fn auto_loop_permission_uses_bound_llm_classifier_and_preserves_rules() {
+    use lingxi_core::host::{PermissionDecision, PermissionGate};
     use permission::classifier::{AutoModeClassifierVerdict, LoopPermissionClassifier};
     use permission::policy_gate::PolicyPermissionGate;
-    use platform_api::{PermissionDecision, PermissionGate};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,

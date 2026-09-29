@@ -3,7 +3,7 @@
 use crate::budget::{CapturedPriceBook, FusionPriceBook};
 use crate::config::FusionRuntimeConfig;
 use crate::model_resolver::{canonical_key, route_key, CatalogModel, ModelLimits, ModelSource};
-use platform_api::FusionError;
+use lingxi_core::host::FusionError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
@@ -208,7 +208,7 @@ mod tests {
     use super::*;
     use crate::budget::ModelRates;
     use crate::model_resolver::ModelSource;
-    use platform_api::FusionModelHints;
+    use lingxi_core::host::FusionModelHints;
     use std::sync::Mutex;
 
     struct MutableCatalog {

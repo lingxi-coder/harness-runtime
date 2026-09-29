@@ -11,8 +11,8 @@ license.workspace = true
 # and threaded through MobileConfig -> BuiltinToolContext.android_shell).
 
 [dependencies]
+core = { path = "../../core" }
 tool-api = { path = "../../tool-api" }
-platform-api = { path = "../../platform-api" }
 permission = { path = "../../permission" }
 async-trait.workspace = true
 serde.workspace = true

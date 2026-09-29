@@ -7,9 +7,7 @@ license.workspace = true
 description = "Fusion multi-model deliberation orchestrator"
 
 [dependencies]
-platform-api = { path = "../platform-api" }
 sidequery = { path = "../sidequery" }
-protocol = { path = "../protocol" }
 cost = { path = "../cost" }
 core = { path = "../core" }
 telemetry = { path = "../telemetry" }

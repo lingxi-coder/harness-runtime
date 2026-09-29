@@ -1,8 +1,8 @@
 //! Passive Monitor sockets: DNS is vetted once and the TCP address is pinned.
 use futures_util::{SinkExt, StreamExt};
-use platform_api::http::is_public_monitor_address as public_ip;
-use platform_api::http::{MonitorWebSocketFrame as Frame, MonitorWebSocketReceiver};
-use platform_api::HttpError;
+use lingxi_core::host::http::is_public_monitor_address as public_ip;
+use lingxi_core::host::http::{MonitorWebSocketFrame as Frame, MonitorWebSocketReceiver};
+use lingxi_core::host::HttpError;
 use std::{sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest, protocol::WebSocketConfig, Message,
@@ -45,7 +45,7 @@ pub(crate) async fn connect(
     raw: String,
     protocols: Vec<String>,
     tls: Arc<rustls::ClientConfig>,
-    proxy: Option<Arc<dyn platform_api::http::MonitorWebSocketProxy>>,
+    proxy: Option<Arc<dyn lingxi_core::host::http::MonitorWebSocketProxy>>,
 ) -> Result<MonitorWebSocketReceiver, HttpError> {
     let addresses = preflight(&raw).await?;
     let endpoint =
@@ -99,7 +99,7 @@ pub(crate) async fn connect(
         } else {
             None
         };
-        let tcp: Box<dyn platform_api::http::MonitorSocketIo> = if let Some(tunnel) = tunnel {
+        let tcp: Box<dyn lingxi_core::host::http::MonitorSocketIo> = if let Some(tunnel) = tunnel {
             tunnel
         } else {
             Box::new(

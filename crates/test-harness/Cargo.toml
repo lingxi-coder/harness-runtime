@@ -14,8 +14,6 @@ default = []
 "10k-iterations" = []
 
 [dependencies]
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
 core = { path = "../core" }
 llm-runtime = { path = "../llm-runtime" }
 cost = { path = "../cost" }

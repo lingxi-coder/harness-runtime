@@ -34,7 +34,7 @@
 //! `J0e` is the set `{plugin, policySettings, built-in, builtin, bundled}`; the
 //! second arm adds `userSettings`/`flagSettings`. Mapping those onto
 //! [`AgentSource`] via `agent_source_to_claude_str` leaves exactly ONE source
-//! that must prove folder trust: [`AgentSource::Settings(protocol::SettingsScope::Project)`] (`projectSettings`) —
+//! that must prove folder trust: [`AgentSource::Settings(lingxi_core::types::SettingsScope::Project)`] (`projectSettings`) —
 //! precisely the definitions that come from a workspace/`--add-dir` tree.
 
 use crate::definition::{AgentDefinition, AgentSource};
@@ -72,7 +72,7 @@ pub fn hooks_trust_dir(base_dir: &Path) -> PathBuf {
 /// `true` when the definition's SOURCE alone establishes trust — claude-code's
 /// `J0e(e.source)` set plus the `userSettings`/`flagSettings` arm of `mvo`.
 ///
-/// Only [`AgentSource::Settings(protocol::SettingsScope::Project)`] (`"projectSettings"`) falls through to the
+/// Only [`AgentSource::Settings(lingxi_core::types::SettingsScope::Project)`] (`"projectSettings"`) falls through to the
 /// folder-trust check.
 #[must_use]
 pub fn source_is_self_trusting(source: AgentSource) -> bool {
@@ -80,9 +80,9 @@ pub fn source_is_self_trusting(source: AgentSource) -> bool {
         // `J0e` = {plugin, policySettings, built-in, builtin, bundled}
         AgentSource::BuiltIn
         | AgentSource::Plugin
-        | AgentSource::Settings(protocol::SettingsScope::Managed) => true,
+        | AgentSource::Settings(lingxi_core::types::SettingsScope::Managed) => true,
         // `e.source==="userSettings" || e.source==="flagSettings"`
-        AgentSource::Settings(protocol::SettingsScope::User)
+        AgentSource::Settings(lingxi_core::types::SettingsScope::User)
         | AgentSource::Flag
         | AgentSource::AdditionalDirectory => true,
         // `localSettings` is in neither claude set — not in `J0e`
@@ -90,8 +90,8 @@ pub fn source_is_self_trusting(source: AgentSource) -> bool {
         // `mvo`'s userSettings/flagSettings arm — so like `projectSettings` it
         // falls through to the folder-trust check. Unreachable today; erring
         // toward requiring trust is also the safe direction if it ever is not.
-        AgentSource::Settings(protocol::SettingsScope::Local)
-        | AgentSource::Settings(protocol::SettingsScope::Project) => false,
+        AgentSource::Settings(lingxi_core::types::SettingsScope::Local)
+        | AgentSource::Settings(lingxi_core::types::SettingsScope::Project) => false,
     }
 }
 
@@ -278,15 +278,15 @@ mod tests {
         for s in [
             AgentSource::BuiltIn,
             AgentSource::Plugin,
-            AgentSource::Settings(protocol::SettingsScope::Managed),
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Managed),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             AgentSource::Flag,
         ] {
             assert!(source_is_self_trusting(s), "{s:?} must be self-trusting");
         }
         // The workspace/`--add-dir` case is the one that must prove trust.
         assert!(!source_is_self_trusting(AgentSource::Settings(
-            protocol::SettingsScope::Project
+            lingxi_core::types::SettingsScope::Project
         )));
     }
 
@@ -313,7 +313,7 @@ mod tests {
 
         let def = def_at(
             &proj,
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
 
         // Before any trust grant: hooks are refused.
@@ -346,8 +346,8 @@ mod tests {
         for s in [
             AgentSource::BuiltIn,
             AgentSource::Plugin,
-            AgentSource::Settings(protocol::SettingsScope::Managed),
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Managed),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             AgentSource::Flag,
         ] {
             assert!(
@@ -375,7 +375,7 @@ mod tests {
 
         let def = def_at(
             &nested,
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert!(
             !agent_hooks_origin_trusted_with_config(&def, &nested, &cfg),
@@ -400,7 +400,7 @@ mod tests {
         std::fs::create_dir_all(proj.join(branding::DOT_DIR).join("agents")).unwrap();
         let def = def_at(
             &proj,
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         let dir = trust_dir_for(&def, &proj);
         // What the gate reads:
@@ -425,7 +425,7 @@ mod tests {
             !agent_hooks_origin_trusted_with_config(
                 &def_at(
                     &proj,
-                    AgentSource::Settings(protocol::SettingsScope::Project)
+                    AgentSource::Settings(lingxi_core::types::SettingsScope::Project)
                 ),
                 &proj,
                 &missing

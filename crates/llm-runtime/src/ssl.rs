@@ -13,7 +13,7 @@
 //! short-circuits the retry loop to terminal, and surfaces the `YLe` hint
 //! (which points the user at `NODE_EXTRA_CA_CERTS` / `/doctor`).
 //!
-//! In this port [`platform_api::HttpError`] is string-typed (there is no structured
+//! In this port [`lingxi_core::host::HttpError`] is string-typed (there is no structured
 //! `error.code` on the source chain), so the classifier scans the rendered
 //! error text for any of the known code tokens instead of doing an exact
 //! `Set.has(code)` lookup on a numeric/string code field. The token set and
@@ -71,7 +71,7 @@ pub fn is_ssl_code(code: &str) -> bool {
 ///
 /// Parity: the terminal decision hinges on `JF(e)?.isSSLError`, i.e. whether the
 /// cause chain carries a `code` in the `bBp` set. Because this port's
-/// [`platform_api::HttpError`] is string-typed, we substring-match the code tokens
+/// [`lingxi_core::host::HttpError`] is string-typed, we substring-match the code tokens
 /// against the rendered error text.
 ///
 /// Codes are matched **longest token first** so that a message carrying

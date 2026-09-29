@@ -13,7 +13,7 @@ mod fast_mode_preference_tests {
                 .await
                 .unwrap();
             assert_eq!(fast_mode_preference::load(&cfg.lingxi_home), Some(true));
-            let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 handle.inner().orchestrator.clone();
             assert!(orchestrator.fast_mode().await);
         });
@@ -21,7 +21,7 @@ mod fast_mode_preference_tests {
 
         let (restarted, _) = build_submit_handle(tmp.path());
         restarted.runtime().block_on(async {
-            let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 restarted.inner().orchestrator.clone();
             assert!(orchestrator.fast_mode().await);
             restarted
@@ -58,7 +58,7 @@ mod fast_mode_preference_tests {
                 .submit(ClientCommand::SetFastMode { enabled: false })
                 .await
                 .is_err());
-            let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 handle.inner().orchestrator.clone();
             assert!(orchestrator.fast_mode().await);
             assert_eq!(fast_mode_preference::load(&cfg.lingxi_home), None);
@@ -70,16 +70,16 @@ mod fast_mode_preference_tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg = test_config(tmp.path());
         fast_mode_preference::save(&cfg.lingxi_home, true).unwrap();
-        cfg.host_environment = Some(platform_api::MobileHostEnvironment::new(
-            platform_api::MobileHostOs::Android,
+        cfg.host_environment = Some(lingxi_core::host::MobileHostEnvironment::new(
+            lingxi_core::host::MobileHostOs::Android,
             None,
-            platform_api::MobileDeviceClass::Phone,
-            platform_api::MobileExecutionTarget::PhysicalDevice,
-            platform_api::MobileLaunchMode::ScheduledHeadless,
+            lingxi_core::host::MobileDeviceClass::Phone,
+            lingxi_core::host::MobileExecutionTarget::PhysicalDevice,
+            lingxi_core::host::MobileLaunchMode::ScheduledHeadless,
         ));
         let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
         handle.runtime().block_on(async {
-            let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 handle.inner().orchestrator.clone();
             assert!(!orchestrator.fast_mode().await);
             handle

@@ -5,7 +5,7 @@
 //! we extract (`sessionId`, `cwd`, `type`) live on line 1.
 
 use crate::jsonl::schema::JsonlMessage;
-use platform_api::{FileSystem, FsError};
+use lingxi_core::host::{FileSystem, FsError};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

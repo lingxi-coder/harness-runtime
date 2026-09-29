@@ -87,18 +87,20 @@ pub use handle::{
 // `shouldInjectAgentListInMessages` gate live in the leaf `platform-api` crate (so
 // `tool-agent` can reach them without depending on this engine crate); re-export
 // them here under the `agent::` path the orchestrator + callers use.
-pub use platform_api::subagent_spawn::{format_agent_line, should_inject_agent_list_in_messages};
+pub use lingxi_core::host::subagent_spawn::{
+    format_agent_line, should_inject_agent_list_in_messages,
+};
 // Fork-subagent helpers live in the leaf `platform-api` crate (reachable by both
 // `tool-agent` and `agent`); re-export under `agent::` for ergonomic access.
+pub use lingxi_core::host::fork_subagent::{
+    build_child_message, build_forked_messages, build_worktree_notice, is_fork_subagent_enabled,
+    is_in_fork_child, FORK_SUBAGENT_TYPE,
+};
 pub use mcp_servers::agent_mcp_specs_to_scoped_configs;
 pub use model_resolution::resolve_agent_model;
 pub use observer::{
     propagation_for_spawn, validate_observer_graph, ObserverPropagation, ObserverValidationError,
     DEFAULT_OBSERVER_FANOUT_DEPTH,
-};
-pub use platform_api::fork_subagent::{
-    build_child_message, build_forked_messages, build_worktree_notice, is_fork_subagent_enabled,
-    is_in_fork_child, FORK_SUBAGENT_TYPE,
 };
 pub use tool_resolver::{augment_teammate_tool_policy, resolve_subagent_tools};
 // Re-export `ToolRegistry` (from `tool_api`, an existing `agent` dep) so the

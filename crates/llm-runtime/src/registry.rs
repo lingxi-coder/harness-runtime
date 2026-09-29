@@ -4,7 +4,7 @@ use crate::{
     reasoning_control_spec, Capabilities, ClientConfig, FailoverTriggers, LlmError,
     PricingModelRef, ProviderId, ReasoningControlSpec, ReasoningTarget,
 };
-use platform_api::{ModelBillingMode, ModelMetadata, ModelPricing};
+use lingxi_core::host::{ModelBillingMode, ModelMetadata, ModelPricing};
 
 /// Model entry exposed to model-picker and listing callers.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,7 +39,7 @@ pub struct ModelListing {
     /// Exact reasoning controls accepted by this route.
     pub reasoning: ReasoningControlSpec,
     /// Optional Fusion panel/analyst hints.
-    pub fusion_hints: Option<platform_api::FusionModelHints>,
+    pub fusion_hints: Option<lingxi_core::host::FusionModelHints>,
     /// Whether THIS ROUTE could serve as the Fusion analyst: the model claims
     /// structured output AND the owning profile's codec can actually encode a
     /// `response_format`. The two are different claims and the weaker one is

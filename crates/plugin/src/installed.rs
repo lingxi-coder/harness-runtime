@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use platform_api::rooted_fs::{RootedFileLock, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE};
+use lingxi_core::host::rooted_fs::{RootedFileLock, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE};
 use serde_json::{Map, Value};
 
 const CURRENT_FILE: &str = "installed_plugins.json";
@@ -155,7 +155,7 @@ fn acquire_lock(
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|_| "installed plugin registry process lock poisoned".to_string())?;
-    let file_lock = platform_api::rooted_fs::lock_exclusive(
+    let file_lock = lingxi_core::host::rooted_fs::lock_exclusive(
         install_dir,
         Path::new(LOCK_FILE),
         PRIVATE_DIR_MODE,
@@ -200,9 +200,9 @@ fn load_normalized_locked(
 
 fn persist_normalized(install_dir: &Path, doc: &Value, overwrite: bool) -> Result<(), String> {
     let serialized = serde_json::to_string_pretty(doc).map_err(|error| error.to_string())?;
-    let mut options = platform_api::AtomicWriteOptions::default();
+    let mut options = lingxi_core::host::AtomicWriteOptions::default();
     options.overwrite = overwrite;
-    platform_api::rooted_fs::atomic_write(
+    lingxi_core::host::rooted_fs::atomic_write(
         install_dir,
         Path::new(CURRENT_FILE),
         serialized.as_bytes(),
@@ -212,9 +212,9 @@ fn persist_normalized(install_dir: &Path, doc: &Value, overwrite: bool) -> Resul
 }
 
 fn remove_legacy_file(install_dir: &Path) -> Result<(), String> {
-    match platform_api::rooted_fs::remove_file(install_dir, Path::new(LEGACY_FILE)) {
+    match lingxi_core::host::rooted_fs::remove_file(install_dir, Path::new(LEGACY_FILE)) {
         Ok(()) => Ok(()),
-        Err(platform_api::FsError::NotFound(_)) => Ok(()),
+        Err(lingxi_core::host::FsError::NotFound(_)) => Ok(()),
         Err(error) => Err(error.to_string()),
     }
 }
@@ -224,7 +224,7 @@ fn empty_installed_doc() -> Value {
 }
 
 fn read_relative_bytes(install_dir: &Path, relative: &str) -> Result<FileSnapshot, String> {
-    let full_path = platform_api::rooted_fs::checked_join(install_dir, Path::new(relative))
+    let full_path = lingxi_core::host::rooted_fs::checked_join(install_dir, Path::new(relative))
         .map_err(|error| error.to_string())?;
     let metadata = match std::fs::symlink_metadata(&full_path) {
         Ok(metadata) => metadata,
@@ -241,16 +241,16 @@ fn read_relative_bytes(install_dir: &Path, relative: &str) -> Result<FileSnapsho
 }
 
 fn restore_relative_bytes(install_dir: &Path, relative: &str, bytes: &[u8]) -> Result<(), String> {
-    let mut options = platform_api::AtomicWriteOptions::default();
+    let mut options = lingxi_core::host::AtomicWriteOptions::default();
     options.overwrite = true;
-    platform_api::rooted_fs::atomic_write(install_dir, Path::new(relative), bytes, options)
+    lingxi_core::host::rooted_fs::atomic_write(install_dir, Path::new(relative), bytes, options)
         .map_err(|error| error.to_string())
 }
 
 fn remove_relative_file(install_dir: &Path, relative: &str) -> Result<(), String> {
-    match platform_api::rooted_fs::remove_file(install_dir, Path::new(relative)) {
+    match lingxi_core::host::rooted_fs::remove_file(install_dir, Path::new(relative)) {
         Ok(()) => Ok(()),
-        Err(platform_api::FsError::NotFound(_)) => Ok(()),
+        Err(lingxi_core::host::FsError::NotFound(_)) => Ok(()),
         Err(error) => Err(error.to_string()),
     }
 }

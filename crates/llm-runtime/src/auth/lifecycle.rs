@@ -5,7 +5,7 @@
 //! with each driver.
 
 use crate::LlmError;
-use protocol::Secret;
+use lingxi_core::types::Secret;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use thiserror::Error;

@@ -30,11 +30,11 @@ mod tool_frame_ordering_tests {
         )
     }
 
-    fn result_ids(events: &[platform_api::orchestrator::OutputEvent]) -> Vec<String> {
+    fn result_ids(events: &[lingxi_core::host::orchestrator::OutputEvent]) -> Vec<String> {
         events
             .iter()
             .filter_map(|e| match e {
-                platform_api::orchestrator::OutputEvent::ToolResult { id, .. } => {
+                lingxi_core::host::orchestrator::OutputEvent::ToolResult { id, .. } => {
                     Some(id.to_string())
                 }
                 _ => None,
@@ -48,7 +48,7 @@ mod tool_frame_ordering_tests {
     async fn buffering_off_emits_immediately() {
         let output = Arc::new(MockOutputStream::new());
         let orch = orch_for_frames(output.clone());
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         orch.emit_tool_result_frame(&id, "Bash", "out", &serde_json::json!({}), None)
             .await;
         assert_eq!(result_ids(&output.snapshot().await), vec![id.to_string()]);
@@ -61,8 +61,8 @@ mod tool_frame_ordering_tests {
         let orch = orch_for_frames(output.clone());
         orch.set_tool_frame_buffering(true).await;
 
-        let first = protocol::ToolUseId::new();
-        let second = protocol::ToolUseId::new();
+        let first = lingxi_core::types::ToolUseId::new();
+        let second = lingxi_core::types::ToolUseId::new();
         // Buffered in COMPLETION order: `second` finished first.
         orch.emit_tool_result_frame(&second, "Bash", "b", &serde_json::json!({}), None)
             .await;
@@ -92,7 +92,7 @@ mod tool_frame_ordering_tests {
         let orch = orch_for_frames(output.clone());
         orch.set_tool_frame_buffering(true).await;
 
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         orch.release_tool_frame(&id, "Read", "The user doesn't want to proceed", true)
             .await;
         assert_eq!(
@@ -111,7 +111,7 @@ mod tool_frame_ordering_tests {
         let orch = orch_for_frames(output.clone());
         orch.set_tool_frame_buffering(true).await;
 
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         orch.emit_tool_result_frame(
             &id,
             "Bash",
@@ -126,7 +126,7 @@ mod tool_frame_ordering_tests {
         let events = output.snapshot().await;
         let found = events.iter().any(|e| matches!(
             e,
-            platform_api::orchestrator::OutputEvent::ToolResult { id: gid, .. } if gid.to_string() == id.to_string()
+            lingxi_core::host::orchestrator::OutputEvent::ToolResult { id: gid, .. } if gid.to_string() == id.to_string()
         ));
         assert!(found, "the released frame must be emitted");
         assert!(
@@ -143,7 +143,7 @@ mod tool_frame_ordering_tests {
         let orch = orch_for_frames(output.clone());
         orch.set_tool_frame_buffering(true).await;
 
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         orch.emit_tool_result_frame(
             &id,
             "Bash",
@@ -180,7 +180,7 @@ mod tool_frame_ordering_tests {
         let orch = orch_for_frames(output.clone());
         orch.set_tool_frame_buffering(true).await;
 
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         orch.record_tool_denial_kind(&id, "interrupted").await;
         orch.record_tool_use_result(&id, serde_json::Value::String("Error: interrupted".into()))
             .await;
@@ -195,7 +195,7 @@ mod tool_frame_ordering_tests {
         let events = output.snapshot().await;
         assert!(matches!(
             events.as_slice(),
-            [platform_api::orchestrator::OutputEvent::ToolResult { id: got_id, tool, .. }]
+            [lingxi_core::host::orchestrator::OutputEvent::ToolResult { id: got_id, tool, .. }]
                 if got_id == &id && tool == "McpCancelTool"
         ));
     }
@@ -205,7 +205,7 @@ mod tool_frame_ordering_tests {
         let output = Arc::new(MockOutputStream::new());
         let orch = orch_for_frames(output);
         orch.set_tool_frame_buffering(true).await;
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         orch.record_tool_use_result(&id, serde_json::json!({"ok": true}))
             .await;
         orch.record_tool_denial_kind(&id, "user-rejected").await;
@@ -216,9 +216,9 @@ mod tool_frame_ordering_tests {
         orch.release_tool_frame(&id, "McpTool", "cancelled", true)
             .await;
 
-        let message = protocol::ConversationMessage::User {
-            id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::ToolResult {
+        let message = lingxi_core::types::ConversationMessage::User {
+            id: lingxi_core::types::MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::ToolResult {
                 tool_use_id: id.clone(),
                 content: "cancelled".into(),
                 is_error: true,
@@ -262,7 +262,7 @@ mod tool_frame_ordering_tests {
     async fn abandoning_a_buffered_frame_consumes_its_side_tables() {
         let orch = orch_for_frames(Arc::new(MockOutputStream::new()));
         orch.set_tool_frame_buffering(true).await;
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         orch.emit_tool_result_frame(
             &id,
             "Bash",
@@ -294,7 +294,8 @@ mod tool_frame_ordering_tests {
 }
 
 fn orch_with_writer(dir: &std::path::Path, path: std::path::PathBuf) -> ConversationOrchestrator {
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(PosixFileSystem::new(dir.to_path_buf()));
+    let fs: Arc<dyn lingxi_core::host::FileSystem> =
+        Arc::new(PosixFileSystem::new(dir.to_path_buf()));
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path, fs));
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -364,7 +365,7 @@ async fn queued_hook_attachments_flush_after_the_tool_result_in_order() {
     let path = dir.path().join("session.jsonl");
     let orch = orch_with_writer(dir.path(), path.clone());
 
-    let tuid = protocol::ToolUseId::new();
+    let tuid = lingxi_core::types::ToolUseId::new();
     orch.queue_hook_attachment(
         &tuid,
         hooks::additional_context_attachment(
@@ -387,8 +388,8 @@ async fn queued_hook_attachments_flush_after_the_tool_result_in_order() {
     .await;
 
     let msg = ConversationMessage::User {
-        id: protocol::MessageId::new(),
-        content: vec![protocol::ContentBlock::ToolResult {
+        id: lingxi_core::types::MessageId::new(),
+        content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
             content: "ok".into(),
             is_error: false,
@@ -450,49 +451,54 @@ async fn executor_run_reaches_the_transcript_through_the_real_sink() {
 
     struct UnusedHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for UnusedHttp {
+    impl lingxi_core::host::HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
     struct UnusedRuntime;
     #[async_trait]
-    impl platform_api::RuntimeSpawner for UnusedRuntime {
+    impl lingxi_core::host::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-            Err(platform_api::RuntimeError::Internal("unused".into()))
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _d: std::time::Duration) {}
         async fn cancel(
             &self,
-            _h: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _h: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
 
     let mut registry = HookRegistry::new();
     registry.register(hooks::HookDefinition {
-        id: protocol::HookId::new(),
+        id: lingxi_core::types::HookId::new(),
         name: "lint".into(),
         events: vec![hooks::HookEventType::PostToolUse],
         if_condition: None,
         executor: hooks::HookExecutor::Builtin {
             handler_id: "lint".into(),
         },
-        source: hooks::HookSource::Settings(protocol::SettingsScope::User),
+        source: hooks::HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -523,7 +529,7 @@ async fn executor_run_reaches_the_transcript_through_the_real_sink() {
             tool_name: "Edit".into(),
             tool_input: serde_json::json!({}),
             tool_output: serde_json::json!({}),
-            tool_use_id: protocol::ToolUseId::from("toolu_e2e".to_string()),
+            tool_use_id: lingxi_core::types::ToolUseId::from("toolu_e2e".to_string()),
             duration_ms: None,
         },
         HookContext::default(),

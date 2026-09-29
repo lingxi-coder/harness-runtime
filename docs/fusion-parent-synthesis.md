@@ -56,7 +56,7 @@ Fable 5 + GPT-5.5 由 Opus 4.8 综合 69.0%。**同模型也提升 6.7 分**，�
 （`ModelAttemptStage::Synthesis`）、`decision::interpret` 均已删除。模型角色只剩
 panel 与 analyst（`FusionModelRole::{Panels, Analyst}`）。
 
-### 结果类型（`platform-api/src/fusion.rs`，`FUSION_SCHEMA_VERSION = 2`）
+### 结果类型（`crates/core/src/host/fusion.rs`，`FUSION_SCHEMA_VERSION = 2`）
 
 ```rust
 pub struct FusionAnalysis {
@@ -170,7 +170,7 @@ analyst 和主模型。它不核实推理本身是否成立。
   没有余量时不做核对。未轮到或超时的记 `unverifiable`。
 - 新增进度阶段 `FusionStage::CheckingEvidence`（"Checking evidence"）。
 
-### 类型（`platform-api`）
+### 类型（`core::host`）
 
 ```rust
 pub enum EvidenceCheckStatus {
@@ -223,7 +223,7 @@ analyst 打包和 `PanelMaterial` 都从这里读取。panel 输出里即使带�
   32 条上限下的引用优先与 panel 轮流、截止时间到达后保持 `unverifiable`。
 - `orchestrator_test::evidence_checks_reach_the_analyst_the_material_and_telemetry`：只调用 Grep
   且为非交互上下文；核对结果进入 analyst 输入、`responses`、渲染材料与 `COMPLETED` 遥测。
-- `platform-api` 材料测试：claims 与计数渲染、转义、整条省略、计数的序列化。
+- `core::host` 材料测试：claims 与计数渲染、转义、整条省略、计数的序列化。
 
 ## 两种 panel 模式
 

@@ -9,7 +9,7 @@
 //!    (`tags`, `agent_names`, `agent_settings`, `modes`, `permission_modes`,
 //!    `worktree_states`, `last_prompt_leaf_uuid`/`last_prompt_explicit`)
 
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use session::jsonl::loader::{find_tip, list_recent_sessions};
 use session::jsonl::project_dir_name;

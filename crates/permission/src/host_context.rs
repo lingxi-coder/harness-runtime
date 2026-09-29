@@ -52,7 +52,7 @@ pub const LINE_KIND_RESTORED: &str = "host_context";
 /// When ON, every record reports the RESTORED kind regardless of provenance.
 #[must_use]
 pub fn live_host_context_disabled() -> bool {
-    platform_api::env::is_env_truthy(
+    lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_DISABLE_LIVE_HOST_CONTEXT")
             .ok()
             .as_deref(),

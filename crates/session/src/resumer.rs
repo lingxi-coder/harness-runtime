@@ -8,7 +8,7 @@
 use crate::filestate::{self, FileStateCache};
 use crate::rollout::{InitialHistory, RolloutRecorder};
 use crate::storage::{LoadedSession, SessionStorage};
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
@@ -82,7 +82,7 @@ impl SessionResumer {
     /// agent re-Reads any file it needs.
     pub async fn resume(
         &self,
-        session_id: &protocol::SessionId,
+        session_id: &lingxi_core::types::SessionId,
     ) -> Result<ResumedSession, ResumeError> {
         let loaded = self
             .storage

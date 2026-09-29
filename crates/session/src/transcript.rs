@@ -4,7 +4,7 @@
 //! to disk. JSONL serialization uses an internal `type` tag to keep entries
 //! self-describing.
 
-use protocol::{ConversationMessage, HookId, MessageId, SessionId, ToolUseId};
+use lingxi_core::types::{ConversationMessage, HookId, MessageId, SessionId, ToolUseId};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 

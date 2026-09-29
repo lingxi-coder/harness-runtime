@@ -21,10 +21,10 @@
 use crate::config::FusionRuntimeConfig;
 use crate::panel::PanelInternal;
 use async_trait::async_trait;
-use platform_api::tool_invoker::{
+use lingxi_core::host::tool_invoker::{
     SubagentInvocationContext, ToolInvocationResult, ToolInvoker, ToolInvokerError,
 };
-use platform_api::{
+use lingxi_core::host::{
     panel_never_dispatched, truncate_at_char_boundary, FusionError, FusionImplementHost,
     PanelPatch, PanelVerification, SnapshotLimits, VerificationOutcome, VerificationRun,
     WorkspaceBase, WorktreeError, WorktreeHandle, FUSION_MATERIAL_DIFF_BYTE_CAP,
@@ -343,7 +343,7 @@ async fn remove_patch_file(worktree: &Path) {
 async fn material_patch(
     handle: &WorktreeHandle,
     base: &WorkspaceBase,
-    patch: platform_api::WorktreePatch,
+    patch: lingxi_core::host::WorktreePatch,
 ) -> PanelPatch {
     let insertions = patch.files.iter().map(|f| u64::from(f.insertions)).sum();
     let deletions = patch.files.iter().map(|f| u64::from(f.deletions)).sum();
@@ -658,7 +658,7 @@ fn resolve_existing_prefix(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::tool_invoker::ToolExecutionPolicy;
+    use lingxi_core::host::tool_invoker::ToolExecutionPolicy;
     use std::sync::Mutex;
 
     #[derive(Default)]

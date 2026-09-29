@@ -6,10 +6,10 @@
 //! Kotlin impl via `UniFFI` (P12). The Rust side is platform-agnostic.
 
 use async_trait::async_trait;
+use lingxi_core::host::camera::{CameraError, CameraPosition, CapturePhotoOpts};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::camera::{CameraError, CameraPosition, CapturePhotoOpts};
 use serde_json::{json, Value};
 
 use tool_api::context::ToolUseContext;

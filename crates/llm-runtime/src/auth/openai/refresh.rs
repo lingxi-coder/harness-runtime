@@ -14,6 +14,7 @@ use crate::auth::lifecycle::{
 };
 use crate::auth::openai::login::OAuthError;
 use async_trait::async_trait;
+use lingxi_core::types::Secret;
 use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
 use lingxi_llm_client::auth::oauth::openai::{
     refresh_token, ExchangedTokens as TokenEndpointResponse, OAuthProtocolError,
@@ -22,7 +23,6 @@ use lingxi_llm_client::{
     transport::{HttpRequest as SdkHttpRequest, StreamResponse},
     Transport,
 };
-use protocol::Secret;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
@@ -78,9 +78,9 @@ pub struct AuthState {
     /// Single-flight refresh lock.
     pub(crate) refresh_lock: Arc<Mutex<()>>,
     /// Proactive task handle.
-    pub(crate) proactive_handle: RwLock<Option<platform_api::BackgroundTaskHandle>>,
+    pub(crate) proactive_handle: RwLock<Option<lingxi_core::host::BackgroundTaskHandle>>,
     pub(crate) http: Arc<dyn Transport>,
-    pub(crate) clock: Arc<dyn platform_api::Clock>,
+    pub(crate) clock: Arc<dyn lingxi_core::host::Clock>,
     pub(crate) bus: Option<Arc<telemetry::AnalyticsBus>>,
     pub(crate) credentials: Option<Arc<secret::CredentialManager>>,
 }
@@ -98,7 +98,7 @@ impl AuthState {
         fedramp: bool,
         email: Option<String>,
         http: Arc<dyn Transport>,
-        clock: Arc<dyn platform_api::Clock>,
+        clock: Arc<dyn lingxi_core::host::Clock>,
         bus: Option<Arc<telemetry::AnalyticsBus>>,
         credentials: Option<Arc<secret::CredentialManager>>,
     ) -> Arc<Self> {
@@ -151,12 +151,12 @@ impl AuthState {
     }
 
     /// Borrow the proactive task handle if one has been spawned.
-    pub async fn proactive_handle(&self) -> Option<platform_api::BackgroundTaskHandle> {
+    pub async fn proactive_handle(&self) -> Option<lingxi_core::host::BackgroundTaskHandle> {
         self.proactive_handle.read().await.clone()
     }
 
     /// Cancel the proactive refresh task.
-    pub async fn shutdown(&self, spawner: &dyn platform_api::RuntimeSpawner) {
+    pub async fn shutdown(&self, spawner: &dyn lingxi_core::host::RuntimeSpawner) {
         let handle = self.proactive_handle.write().await.take();
         let Some(handle) = handle else {
             return;
@@ -248,7 +248,7 @@ impl Transport for NullTransport {
 
 /// Null clock — always returns [`SystemTime::UNIX_EPOCH`].
 struct NullClock;
-impl platform_api::Clock for NullClock {
+impl lingxi_core::host::Clock for NullClock {
     fn now(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH
     }
@@ -267,7 +267,7 @@ impl RefreshDriver {
     }
 
     /// Stop proactive refresh and invalidate this driver's in-memory token.
-    pub async fn invalidate(&self, spawner: &dyn platform_api::RuntimeSpawner) {
+    pub async fn invalidate(&self, spawner: &dyn lingxi_core::host::RuntimeSpawner) {
         self.state.shutdown(spawner).await;
         self.state.invalidate().await;
     }
@@ -429,7 +429,7 @@ impl RefreshDriver {
     /// Spawn the proactive refresh task.
     pub async fn spawn_proactive(
         state: Arc<AuthState>,
-        spawner: Arc<dyn platform_api::RuntimeSpawner>,
+        spawner: Arc<dyn lingxi_core::host::RuntimeSpawner>,
     ) -> Result<(), OAuthError> {
         let task_state = state.clone();
         let task_spawner = spawner.clone();
@@ -448,7 +448,10 @@ impl RefreshDriver {
 
 /// The proactive task loop. Wakes at `min(remaining/2, 5min)` before expiry.
 /// Also fires early if `last_refresh` is older than 8 days.
-async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn platform_api::RuntimeSpawner>) {
+async fn proactive_loop(
+    state: Arc<AuthState>,
+    spawner: Arc<dyn lingxi_core::host::RuntimeSpawner>,
+) {
     let driver = RefreshDriver::new(state.clone());
     loop {
         // Read current expiry + token_hash + last_refresh.
@@ -540,7 +543,7 @@ mod refresh_tests {
         let storage = MemStorage::new();
         let credentials = mem_credential_manager(
             storage.clone(),
-            clock.clone() as Arc<dyn platform_api::Clock>,
+            clock.clone() as Arc<dyn lingxi_core::host::Clock>,
         );
 
         let state = AuthState::new(
@@ -552,7 +555,7 @@ mod refresh_tests {
             false,
             Some("acc_xyz@example.com".into()),
             http.clone() as Arc<dyn Transport>,
-            clock.clone() as Arc<dyn platform_api::Clock>,
+            clock.clone() as Arc<dyn lingxi_core::host::Clock>,
             None,
             Some(credentials.clone()),
         );
@@ -602,7 +605,7 @@ mod refresh_tests {
             false,
             None,
             http.clone() as Arc<dyn Transport>,
-            clock.clone() as Arc<dyn platform_api::Clock>,
+            clock.clone() as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );
@@ -667,7 +670,7 @@ mod refresh_tests {
             false,
             None,
             http as Arc<dyn Transport>,
-            clock as Arc<dyn platform_api::Clock>,
+            clock as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );
@@ -711,7 +714,7 @@ mod refresh_tests {
             false,
             Some("user@example.com".into()),
             http as Arc<dyn Transport>,
-            clock as Arc<dyn platform_api::Clock>,
+            clock as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );
@@ -755,7 +758,7 @@ mod refresh_tests {
             false,
             Some("old@example.com".into()),
             http as Arc<dyn Transport>,
-            clock as Arc<dyn platform_api::Clock>,
+            clock as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );
@@ -787,7 +790,7 @@ mod refresh_tests {
             false,
             None,
             http as Arc<dyn Transport>,
-            clock as Arc<dyn platform_api::Clock>,
+            clock as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );
@@ -822,7 +825,7 @@ mod refresh_tests {
             false,
             None,
             http.clone() as Arc<dyn Transport>,
-            clock as Arc<dyn platform_api::Clock>,
+            clock as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );
@@ -858,14 +861,14 @@ mod refresh_tests {
             false,
             None,
             http.clone() as Arc<dyn Transport>,
-            clock.clone() as Arc<dyn platform_api::Clock>,
+            clock.clone() as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );
         let spawner = InstantSpawner::new();
         RefreshDriver::spawn_proactive(
             state.clone(),
-            spawner.clone() as Arc<dyn platform_api::RuntimeSpawner>,
+            spawner.clone() as Arc<dyn lingxi_core::host::RuntimeSpawner>,
         )
         .await
         .expect("spawn ok");

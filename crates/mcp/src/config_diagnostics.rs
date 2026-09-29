@@ -82,13 +82,13 @@ pub const MCP_CONFIG_MAX_BYTES: u64 = 2_097_152;
 /// single words).
 fn oracle_scope_label(scope: ConfigScope) -> &'static str {
     match scope {
-        ConfigScope::Settings(protocol::SettingsScope::Local) => "local",
-        ConfigScope::Settings(protocol::SettingsScope::User) => "user",
-        ConfigScope::Settings(protocol::SettingsScope::Project) => "project",
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Local) => "local",
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::User) => "user",
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project) => "project",
         ConfigScope::Dynamic => "dynamic",
         ConfigScope::Enterprise => "enterprise",
         ConfigScope::ClaudeAi => "claudeai",
-        ConfigScope::Settings(protocol::SettingsScope::Managed) => "managed",
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed) => "managed",
         ConfigScope::Agent => "agent",
     }
 }
@@ -748,12 +748,12 @@ pub fn collect_all_mcp_config_warnings_at(
     let project = project_mcp_path;
     match read_mcp_config_file(
         project,
-        ConfigScope::Settings(protocol::SettingsScope::Project),
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
     ) {
         Ok(raw) => match parse_mcp_config_json(
             &raw,
             project,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         ) {
             Ok(v) => {
                 // oracle: `return y("mcp_config_parse"), xqe({...})` — the
@@ -762,7 +762,7 @@ pub fn collect_all_mcp_config_warnings_at(
                 telemetry::emit_mcp_config_parse_gate(None);
                 out.extend(collect_mcp_config_warnings(
                     &v,
-                    ConfigScope::Settings(protocol::SettingsScope::Project),
+                    ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
                     Some(&project.to_string_lossy()),
                 ))
             }
@@ -789,14 +789,14 @@ pub fn collect_all_mcp_config_warnings_at(
             let file = gp.to_string_lossy();
             out.extend(collect_mcp_config_warnings(
                 &v,
-                ConfigScope::Settings(protocol::SettingsScope::User),
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
                 Some(&file),
             ));
             let key = migrations::global_config::project_path_for_config(cwd);
             if let Some(proj) = v.get("projects").and_then(|p| p.get(&key)) {
                 out.extend(collect_mcp_config_warnings(
                     proj,
-                    ConfigScope::Settings(protocol::SettingsScope::Local),
+                    ConfigScope::Settings(lingxi_core::types::SettingsScope::Local),
                     Some(&file),
                 ));
             }
@@ -813,7 +813,7 @@ mod tests {
     fn only(config: &Value) -> Vec<McpConfigWarning> {
         collect_mcp_config_warnings(
             config,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
             Some("/p/.mcp.json"),
         )
     }
@@ -1129,7 +1129,7 @@ mod tests {
         let c = json!({"servers":{"a":{"type":"stdio","command":"c"}}});
         let w = collect_mcp_config_warnings(
             &c,
-            ConfigScope::Settings(protocol::SettingsScope::User),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             Some("/u/config.json"),
         );
         assert_eq!(w.len(), 1);
@@ -1203,14 +1203,14 @@ mod tests {
 
         let err = read_mcp_config_file(
             &path,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap_err();
         assert!(!err.is_not_found());
         assert_eq!(err.severity, McpConfigSeverity::Fatal);
         assert_eq!(
             err.scope,
-            ConfigScope::Settings(protocol::SettingsScope::Project)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
         );
         assert_eq!(
             err.message,
@@ -1237,7 +1237,7 @@ mod tests {
         std::fs::write(&path, &body).unwrap();
         let raw = read_mcp_config_file(
             &path,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(raw.len() as u64, MCP_CONFIG_MAX_BYTES);
@@ -1251,7 +1251,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let err = read_mcp_config_file(
             dir.path(),
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap_err();
         assert!(err
@@ -1273,7 +1273,7 @@ mod tests {
         assert!(status.success());
         let err = read_mcp_config_file(
             &fifo,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap_err();
         assert!(err
@@ -1294,7 +1294,7 @@ mod tests {
         let path = dir.path().join("absent.mcp.json");
         let err = read_mcp_config_file(
             &path,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap_err();
         assert!(err.is_not_found());
@@ -1319,7 +1319,7 @@ mod tests {
         let path = dir.path().join("a".repeat(300));
         let err = read_mcp_config_file(
             &path,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap_err();
         assert!(!err.is_not_found());
@@ -1355,7 +1355,7 @@ mod tests {
         std::fs::write(&path, r#"{"mcpServers":{}}"#).unwrap();
         let raw = read_mcp_config_file(
             &path,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(raw, r#"{"mcpServers":{}}"#);
@@ -1370,7 +1370,7 @@ mod tests {
         let err = parse_mcp_config_json(
             "{ not json",
             path,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap_err();
         assert_eq!(err.message, "MCP config is not a valid JSON");
@@ -1389,7 +1389,7 @@ mod tests {
         let v = parse_mcp_config_json(
             r#"{"mcpServers":{}}"#,
             path,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(v, json!({"mcpServers":{}}));
@@ -1420,7 +1420,7 @@ mod tests {
         std::fs::write(&path, vec![b' '; (MCP_CONFIG_MAX_BYTES + 1) as usize]).unwrap();
         let _ = read_mcp_config_file(
             &path,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         );
 
         assert_eq!(
@@ -1440,7 +1440,7 @@ mod tests {
         let path = dir.path().join("a".repeat(300));
         let _ = read_mcp_config_file(
             &path,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         );
 
         assert_eq!(
@@ -1462,7 +1462,7 @@ mod tests {
         let path = dir.path().join("absent.mcp.json");
         let _ = read_mcp_config_file(
             &path,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         );
 
         assert_eq!(cap.rows(), Vec::<(String, Option<String>)>::new());
@@ -1476,7 +1476,7 @@ mod tests {
         let _ = parse_mcp_config_json(
             "{ not json",
             path,
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         );
 
         assert_eq!(
@@ -1532,7 +1532,7 @@ mod tests {
         );
         assert_eq!(
             warnings[0].scope,
-            ConfigScope::Settings(protocol::SettingsScope::Project)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
         );
     }
 

@@ -1,11 +1,11 @@
 //! happy path — single turn, no tools.
+use lingxi_core::host::OutputEvent;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use platform_api::OutputEvent;
 use std::sync::Arc;
 
 #[tokio::test]

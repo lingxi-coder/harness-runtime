@@ -11,11 +11,11 @@
 //! `compactMetadata` fields as the persisted boundary. Exact-content matching
 //! remains only as a compatibility fallback for legacy in-memory snapshots.
 
-pub use protocol::{
+pub use lingxi_core::types::{
     CompactActiveGoalState, CompactBoundaryMetadata, CompactGoalOrigin, CompactTrigger,
     PreservedMessages, PreservedSegment,
 };
-use protocol::{ConversationMessage, MessageId};
+use lingxi_core::types::{ConversationMessage, MessageId};
 
 /// Exact content string TS stamps on every compact-boundary system message
 /// (`createCompactBoundaryMessage` sets `content` to `Conversation compacted`).
@@ -261,7 +261,7 @@ pub fn get_messages_after_compact_boundary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::ConversationMessage;
+    use lingxi_core::types::ConversationMessage;
 
     fn user(text: &str) -> ConversationMessage {
         ConversationMessage::user(MessageId::new(), text.to_string())

@@ -3,7 +3,7 @@
 //! See spec §6.6 / D8 — task output is materialized as files under a
 //! sandbox directory, with a per-file and total byte budget.
 
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -250,7 +250,7 @@ pub enum OutputError {
 #[derive(Debug, Default)]
 struct OutputRootState {
     initialized: bool,
-    identity: Option<platform_api::rooted_fs::RootIdentity>,
+    identity: Option<lingxi_core::host::rooted_fs::RootIdentity>,
 }
 
 /// Read options for [`TaskOutputManager::read`].
@@ -259,7 +259,7 @@ pub struct OutputOptions {
     /// Number of LINES to skip from the start.
     ///
     /// These two said "bytes" for as long as they have existed, while `read`
-    /// has always forwarded them to `platform_api::apply_line_window`, whose
+    /// has always forwarded them to `lingxi_core::host::apply_line_window`, whose
     /// own doc says "line-indexed offset/limit window". Nothing in the tree
     /// constructs either as `Some`, so no caller was ever wrong — but one
     /// following the old contract (resume a poll at the byte count already
@@ -303,7 +303,7 @@ impl TaskOutputManager {
         if let Some(identity) = identity {
             // Truncate the same no-follow inode we stat, never a second path
             // lookup that could follow a swapped output into another file.
-            let file = platform_api::rooted_fs::open_append_file_pinned(
+            let file = lingxi_core::host::rooted_fs::open_append_file_pinned(
                 &self.output_dir,
                 &relative,
                 Some(&identity),
@@ -369,7 +369,7 @@ impl TaskOutputManager {
             return Ok(());
         }
         let root = self.check_output_root().await?;
-        let file = platform_api::rooted_fs::adopt_task_output_link(
+        let file = lingxi_core::host::rooted_fs::adopt_task_output_link(
             &self.output_dir,
             &relative,
             root.as_ref(),
@@ -418,7 +418,7 @@ impl TaskOutputManager {
             return Ok(());
         }
         let root = self.check_output_root().await?;
-        let file = platform_api::rooted_fs::link_task_transcript(
+        let file = lingxi_core::host::rooted_fs::link_task_transcript(
             &self.output_dir,
             &relative,
             root.as_ref(),
@@ -481,7 +481,7 @@ impl TaskOutputManager {
                 #[cfg(windows)]
                 {
                     let pin = self.check_output_root().await?;
-                    platform_api::rooted_fs::validate_task_output_link(
+                    lingxi_core::host::rooted_fs::validate_task_output_link(
                         &self.output_dir,
                         &relative,
                         pin.as_ref(),
@@ -567,9 +567,9 @@ impl TaskOutputManager {
     pub fn path_for(&self, task_id: &str) -> Result<PathBuf, OutputError> {
         // Extension `.output` byte-aligns with claude-code's
         // `getTaskOutputPath` (`diskOutput.ts:72-74` → `${taskId}.output`).
-        let filename = platform_api::task_output::output_filename(task_id);
+        let filename = lingxi_core::host::task_output::output_filename(task_id);
         let relative = Path::new(&filename);
-        platform_api::rooted_fs::validate_relative_path(relative)
+        lingxi_core::host::rooted_fs::validate_relative_path(relative)
             .map_err(|_| OutputError::PathEscape(filename.clone()))?;
         if relative.components().count() != 1 {
             return Err(OutputError::PathEscape(filename));
@@ -582,7 +582,7 @@ impl TaskOutputManager {
             .strip_prefix(&self.output_dir)
             .map_err(|_| OutputError::PathEscape(output_file.display().to_string()))?
             .to_path_buf();
-        platform_api::rooted_fs::validate_relative_path(&relative)
+        lingxi_core::host::rooted_fs::validate_relative_path(&relative)
             .map_err(|_| OutputError::PathEscape(relative.display().to_string()))?;
         Ok(relative)
     }
@@ -620,7 +620,7 @@ impl TaskOutputManager {
 
     async fn check_output_root(
         &self,
-    ) -> Result<Option<platform_api::rooted_fs::RootIdentity>, OutputError> {
+    ) -> Result<Option<lingxi_core::host::rooted_fs::RootIdentity>, OutputError> {
         let mut state = self.root_pin.lock().await;
         let current = match self.fs.root_identity_no_follow(&self.output_dir).await {
             Ok(identity) => identity,
@@ -652,9 +652,9 @@ impl TaskOutputManager {
         Ok(state.identity)
     }
 
-    fn map_rooted_error(&self, error: platform_api::FsError) -> OutputError {
+    fn map_rooted_error(&self, error: lingxi_core::host::FsError) -> OutputError {
         match error {
-            platform_api::FsError::OutsideWorkspace(_) => {
+            lingxi_core::host::FsError::OutsideWorkspace(_) => {
                 // A LingXi-specific check (the port validates the relative path
                 // before opening, where the oracle relies on `O_NOFOLLOW`), so
                 // the reason stays truthful to what was refused rather than
@@ -745,7 +745,7 @@ impl TaskOutputManager {
             )
             .await
             .map_err(|e| match e {
-                platform_api::FsError::AlreadyExists(p) => OutputError::AlreadyExists(p),
+                lingxi_core::host::FsError::AlreadyExists(p) => OutputError::AlreadyExists(p),
                 other => self.map_rooted_error(other),
             })?;
         Ok(path)
@@ -784,7 +784,7 @@ impl TaskOutputManager {
             .delete_file_rooted_no_follow(&self.output_dir, &relative)
             .await
         {
-            Ok(()) | Err(platform_api::FsError::NotFound(_)) => Ok(()),
+            Ok(()) | Err(lingxi_core::host::FsError::NotFound(_)) => Ok(()),
             Err(other) => Err(self.map_rooted_error(other)),
         }
     }
@@ -907,7 +907,7 @@ impl TaskOutputManager {
                 Err(failure) => {
                     let error = self.map_rooted_error(failure.error);
                     let is_write =
-                        failure.stage == platform_api::filesystem::FileAppendStage::Write;
+                        failure.stage == lingxi_core::host::filesystem::FileAppendStage::Write;
                     {
                         let mut queue = writer.queue();
                         queue.in_flight = false;
@@ -1170,8 +1170,11 @@ impl TaskOutputManager {
         {
             let physical_spool_authoritative = terminal_override.physical_spool_authoritative
                 && self.check_output_root().await.is_ok();
-            let fc =
-                platform_api::apply_line_window(terminal_override.content, opts.offset, opts.limit);
+            let fc = lingxi_core::host::apply_line_window(
+                terminal_override.content,
+                opts.offset,
+                opts.limit,
+            );
             return Ok(TaskOutput {
                 content: cap_full_read(fc.content, &opts),
                 total_lines: fc.total_lines,
@@ -1209,7 +1212,7 @@ impl TaskOutputManager {
                 #[cfg(windows)]
                 {
                     let pin = self.check_output_root().await?;
-                    platform_api::rooted_fs::validate_task_output_link(
+                    lingxi_core::host::rooted_fs::validate_task_output_link(
                         &self.output_dir,
                         &relative,
                         pin.as_ref(),
@@ -1271,7 +1274,7 @@ impl TaskOutputManager {
                 } else {
                     content
                 };
-                let fc = platform_api::apply_line_window(content, opts.offset, opts.limit);
+                let fc = lingxi_core::host::apply_line_window(content, opts.offset, opts.limit);
                 return Ok(TaskOutput {
                     content: fc.content,
                     total_lines: fc.total_lines,
@@ -1332,14 +1335,14 @@ impl TaskOutputSink {
         }
     }
 
-    fn validate(&self, task_id: &str) -> Result<(), platform_api::ProcessError> {
+    fn validate(&self, task_id: &str) -> Result<(), lingxi_core::host::ProcessError> {
         if self
             .manager
             .path_for(task_id)
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))?
+            .map_err(|error| lingxi_core::host::ProcessError::Io(error.to_string()))?
             != self.path
         {
-            return Err(platform_api::ProcessError::Io(
+            return Err(lingxi_core::host::ProcessError::Io(
                 "supervisor task output identity mismatch".into(),
             ));
         }
@@ -1348,7 +1351,7 @@ impl TaskOutputSink {
 }
 
 #[async_trait::async_trait]
-impl platform_api::BackgroundExitSink for TaskOutputSink {
+impl lingxi_core::host::BackgroundExitSink for TaskOutputSink {
     fn manages_output(&self) -> bool {
         true
     }
@@ -1356,31 +1359,31 @@ impl platform_api::BackgroundExitSink for TaskOutputSink {
         &self,
         task_id: &str,
         content: &str,
-    ) -> Result<(), platform_api::ProcessError> {
+    ) -> Result<(), lingxi_core::host::ProcessError> {
         self.validate(task_id)?;
         self.manager
             .append(&self.path, content)
             .await
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+            .map_err(|error| lingxi_core::host::ProcessError::Io(error.to_string()))
     }
-    async fn flush_output(&self, task_id: &str) -> Result<(), platform_api::ProcessError> {
+    async fn flush_output(&self, task_id: &str) -> Result<(), lingxi_core::host::ProcessError> {
         self.validate(task_id)?;
         self.manager
             .flush_writer(&self.path)
             .await
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+            .map_err(|error| lingxi_core::host::ProcessError::Io(error.to_string()))
     }
     async fn finalize_persisted_output(
         &self,
         task_id: &str,
         max_bytes: u64,
-    ) -> Result<Option<u64>, platform_api::ProcessError> {
+    ) -> Result<Option<u64>, lingxi_core::host::ProcessError> {
         self.validate(task_id)?;
         self.manager
             .finalize_persisted_output(&self.path, max_bytes)
             .await
             .map(Some)
-            .map_err(|error| platform_api::ProcessError::Io(error.to_string()))
+            .map_err(|error| lingxi_core::host::ProcessError::Io(error.to_string()))
     }
     async fn on_exit(&self, task_id: &str, exit_code: Option<i32>) {
         self.on_exit_with_status(task_id, exit_code, false).await;
@@ -1417,7 +1420,7 @@ impl platform_api::BackgroundExitSink for TaskOutputSink {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
+    use lingxi_core::host::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
@@ -1473,9 +1476,9 @@ mod tests {
         async fn root_identity_no_follow(
             &self,
             root: &Path,
-        ) -> Result<Option<platform_api::rooted_fs::RootIdentity>, FsError> {
+        ) -> Result<Option<lingxi_core::host::rooted_fs::RootIdentity>, FsError> {
             if root.exists() {
-                platform_api::rooted_fs::root_identity(root).map(Some)
+                lingxi_core::host::rooted_fs::root_identity(root).map(Some)
             } else {
                 Ok(None)
             }
@@ -1528,9 +1531,9 @@ mod tests {
             root: &Path,
             relative: &Path,
             content: &str,
-            expected: Option<&platform_api::rooted_fs::RootIdentity>,
-        ) -> Result<(), platform_api::filesystem::FileAppendError> {
-            use platform_api::filesystem::{FileAppendError, FileAppendStage};
+            expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
+        ) -> Result<(), lingxi_core::host::filesystem::FileAppendError> {
+            use lingxi_core::host::filesystem::{FileAppendError, FileAppendStage};
             let attempt = self.staged_attempts.fetch_add(1, Ordering::SeqCst) + 1;
             if self.block_attempt.load(Ordering::SeqCst) == attempt {
                 self.stage_entered.notify_one();
@@ -1862,8 +1865,8 @@ mod tests {
             async fn root_identity_no_follow(
                 &self,
                 root: &Path,
-            ) -> Result<Option<platform_api::rooted_fs::RootIdentity>, FsError> {
-                platform_api::rooted_fs::root_identity(root).map(Some)
+            ) -> Result<Option<lingxi_core::host::rooted_fs::RootIdentity>, FsError> {
+                lingxi_core::host::rooted_fs::root_identity(root).map(Some)
             }
             async fn read_file(
                 &self,
@@ -1873,7 +1876,7 @@ mod tests {
             ) -> Result<FileContent, FsError> {
                 let content = std::fs::read_to_string(path)
                     .map_err(|error| FsError::Io(error.to_string()))?;
-                Ok(platform_api::apply_line_window(content, offset, limit))
+                Ok(lingxi_core::host::apply_line_window(content, offset, limit))
             }
             async fn write_file(&self, path: &str, content: &str) -> Result<(), FsError> {
                 std::fs::write(path, content).map_err(|error| FsError::Io(error.to_string()))
@@ -1890,9 +1893,9 @@ mod tests {
                 &self,
                 root: &Path,
                 relative: &Path,
-                expected: Option<&platform_api::rooted_fs::RootIdentity>,
+                expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
             ) -> Result<(), FsError> {
-                platform_api::rooted_fs::create_new_file_pinned(root, relative, expected)
+                lingxi_core::host::rooted_fs::create_new_file_pinned(root, relative, expected)
             }
             async fn append_file(&self, path: &str, content: &str) -> Result<(), FsError> {
                 std::fs::OpenOptions::new()
@@ -1906,9 +1909,9 @@ mod tests {
                 root: &Path,
                 relative: &Path,
                 content: &str,
-                expected: Option<&platform_api::rooted_fs::RootIdentity>,
+                expected: Option<&lingxi_core::host::rooted_fs::RootIdentity>,
             ) -> Result<(), FsError> {
-                platform_api::rooted_fs::append_file_pinned(root, relative, content, expected)
+                lingxi_core::host::rooted_fs::append_file_pinned(root, relative, content, expected)
             }
             async fn delete_file(&self, path: &str) -> Result<(), FsError> {
                 std::fs::remove_file(path).map_err(|error| FsError::Io(error.to_string()))
@@ -1918,7 +1921,7 @@ mod tests {
                 root: &Path,
                 relative: &Path,
             ) -> Result<(), FsError> {
-                platform_api::rooted_fs::remove_file(root, relative)
+                lingxi_core::host::rooted_fs::remove_file(root, relative)
             }
             async fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {
                 std::fs::OpenOptions::new()
@@ -2544,7 +2547,7 @@ mod tests {
 
     #[tokio::test]
     async fn supervisor_sink_preserves_framed_bytes_and_rejects_wrong_task_identity() {
-        use platform_api::BackgroundExitSink;
+        use lingxi_core::host::BackgroundExitSink;
         let root = tempfile::tempdir().unwrap();
         let manager = Arc::new(TaskOutputManager::new(
             root.path().into(),

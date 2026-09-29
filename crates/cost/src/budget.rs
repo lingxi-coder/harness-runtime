@@ -68,17 +68,17 @@ pub struct BudgetEnforcer {
     /// Per-session warning/latch/hold state. The active enforcer follows the
     /// tracker projection; scoped views stay pinned to their origin session.
     sessions: Arc<BudgetSessionLedger>,
-    session_scope: Option<protocol::SessionId>,
+    session_scope: Option<lingxi_core::types::SessionId>,
 }
 
 struct BudgetSessionLedger {
-    sessions: Mutex<HashMap<protocol::SessionId, Arc<BudgetSessionState>>>,
+    sessions: Mutex<HashMap<lingxi_core::types::SessionId, Arc<BudgetSessionState>>>,
     next_reservation_id: AtomicU64,
     owners: std::sync::Mutex<HashMap<u64, ReservationOwner>>,
     settlements: std::sync::Mutex<HashMap<u64, Arc<SettlementSlot>>>,
     output_publication: Mutex<()>,
     current_outputs:
-        std::sync::Mutex<HashMap<protocol::SessionId, Arc<output::BudgetOutputAccount>>>,
+        std::sync::Mutex<HashMap<lingxi_core::types::SessionId, Arc<output::BudgetOutputAccount>>>,
 }
 
 mod retirement;
@@ -89,22 +89,22 @@ pub(crate) use retirement::BudgetCacheRetirement;
 /// that same owned operation instead of treating the consumed token as an
 /// unrelated no-op.
 struct SettlementSlot {
-    session_id: protocol::SessionId,
+    session_id: lingxi_core::types::SessionId,
     started: AtomicBool,
     actual_nano_usd: u64,
-    result: std::sync::Mutex<Option<Result<(), platform_api::BudgetError>>>,
+    result: std::sync::Mutex<Option<Result<(), lingxi_core::host::BudgetError>>>,
     notify: tokio::sync::Notify,
 }
 
 #[derive(Clone)]
 struct ReservationOwner {
-    session_id: protocol::SessionId,
+    session_id: lingxi_core::types::SessionId,
     tracker: Arc<CostTracker>,
     session: Arc<BudgetSessionState>,
 }
 
 impl SettlementSlot {
-    fn new(session_id: protocol::SessionId, actual_nano_usd: u64) -> Self {
+    fn new(session_id: lingxi_core::types::SessionId, actual_nano_usd: u64) -> Self {
         Self {
             session_id,
             started: AtomicBool::new(false),
@@ -114,7 +114,7 @@ impl SettlementSlot {
         }
     }
 
-    async fn wait_result(&self) -> Result<(), platform_api::BudgetError> {
+    async fn wait_result(&self) -> Result<(), lingxi_core::host::BudgetError> {
         loop {
             if let Some(result) = self
                 .result
@@ -146,8 +146,8 @@ struct CostBudgetCommitReceipt {
 }
 
 #[async_trait::async_trait]
-impl platform_api::BudgetSettlementReceipt for CostBudgetCommitReceipt {
-    async fn finish(self: Box<Self>) -> Result<(), platform_api::BudgetError> {
+impl lingxi_core::host::BudgetSettlementReceipt for CostBudgetCommitReceipt {
+    async fn finish(self: Box<Self>) -> Result<(), lingxi_core::host::BudgetError> {
         self.slot.wait_result().await
     }
 }
@@ -174,12 +174,12 @@ impl BudgetSessionState {
     fn lock_reservations(
         &self,
         gate: &crate::CostDurabilityGate,
-    ) -> Result<std::sync::MutexGuard<'_, ReservationBook>, platform_api::BudgetError> {
+    ) -> Result<std::sync::MutexGuard<'_, ReservationBook>, lingxi_core::host::BudgetError> {
         self.reservations.lock().map_err(|error| {
             drop(error);
             let reason = "reservation accounting book was poisoned";
             gate.freeze(reason);
-            platform_api::BudgetError::Internal(reason.into())
+            lingxi_core::host::BudgetError::Internal(reason.into())
         })
     }
 }
@@ -188,8 +188,8 @@ struct ReservationBook {
     active: HashMap<u64, u64>,
     attempt_holds: HashMap<String, attempts::AttemptHold>,
     attempt_runs: HashMap<String, attempts::AttemptRunBudget>,
-    attempt_origins: HashMap<String, protocol::MessageId>,
-    output_scopes: HashMap<protocol::MessageId, output::OutputScopeState>,
+    attempt_origins: HashMap<String, lingxi_core::types::MessageId>,
+    output_scopes: HashMap<lingxi_core::types::MessageId, output::OutputScopeState>,
     next_output_generation: u64,
     output_recovery_loaded: bool,
 }
@@ -225,7 +225,7 @@ impl ReservationBook {
 }
 
 fn reservation_id_seed() -> u64 {
-    let session = protocol::SessionId::new();
+    let session = lingxi_core::types::SessionId::new();
     let uuid = session.as_uuid();
     let bytes = uuid.as_bytes();
     u64::from_le_bytes(
@@ -315,7 +315,7 @@ impl BudgetEnforcer {
     /// warning thresholds, and realized-exceeded latch are independent from
     /// the active projection used by the parent session.
     #[must_use]
-    pub fn scoped_for_session(&self, session_id: protocol::SessionId) -> Arc<Self> {
+    pub fn scoped_for_session(&self, session_id: lingxi_core::types::SessionId) -> Arc<Self> {
         Arc::new(Self {
             config: self.config.clone(),
             cost_tracker: self.cost_tracker.scoped(session_id),
@@ -324,14 +324,17 @@ impl BudgetEnforcer {
         })
     }
 
-    async fn session_id(&self) -> protocol::SessionId {
+    async fn session_id(&self) -> lingxi_core::types::SessionId {
         match self.session_scope {
             Some(session_id) => session_id,
             None => self.cost_tracker.session_id().await,
         }
     }
 
-    async fn session_state_for(&self, session_id: protocol::SessionId) -> Arc<BudgetSessionState> {
+    async fn session_state_for(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+    ) -> Arc<BudgetSessionState> {
         let mut sessions = self.sessions.sessions.lock().await;
         sessions
             .entry(session_id)
@@ -353,7 +356,7 @@ impl BudgetEnforcer {
 
     async fn session_context_for(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
     ) -> (
         Arc<BudgetSessionState>,
         Arc<tokio::sync::RwLock<crate::tracker::CostState>>,
@@ -364,7 +367,7 @@ impl BudgetEnforcer {
         (session, state)
     }
 
-    fn owner_for(&self, id: platform_api::BudgetReservationId) -> Option<ReservationOwner> {
+    fn owner_for(&self, id: lingxi_core::host::BudgetReservationId) -> Option<ReservationOwner> {
         self.sessions
             .owners
             .lock()
@@ -375,8 +378,8 @@ impl BudgetEnforcer {
 
     fn settled_result(
         &self,
-        id: platform_api::BudgetReservationId,
-    ) -> Option<Result<(), platform_api::BudgetError>> {
+        id: lingxi_core::host::BudgetReservationId,
+    ) -> Option<Result<(), lingxi_core::host::BudgetError>> {
         self.sessions
             .settlements
             .lock()
@@ -413,13 +416,14 @@ impl BudgetEnforcer {
     ///
     /// # Errors
     ///
-    /// [`platform_api::budget::BudgetError::Exceeded`] when
+    /// [`lingxi_core::host::budget::BudgetError::Exceeded`] when
     /// `realized + held + nano_usd` would pass the session cap.
     pub async fn reserve_nano_usd(
         &self,
         nano_usd: u64,
-    ) -> Result<platform_api::BudgetReservationId, platform_api::budget::BudgetError> {
-        use platform_api::budget::{BudgetError, BudgetReservationId};
+    ) -> Result<lingxi_core::host::BudgetReservationId, lingxi_core::host::budget::BudgetError>
+    {
+        use lingxi_core::host::budget::{BudgetError, BudgetReservationId};
         let session_id = self.session_id().await;
         let pinned_tracker = self.cost_tracker.scoped(session_id);
         let _durability_turn = pinned_tracker
@@ -489,7 +493,7 @@ impl BudgetEnforcer {
     }
 
     /// Drop a hold. Unknown and noop ids are ignored.
-    pub async fn release_reservation(&self, id: platform_api::BudgetReservationId) {
+    pub async fn release_reservation(&self, id: lingxi_core::host::BudgetReservationId) {
         if id.is_noop() {
             return;
         }
@@ -525,13 +529,13 @@ impl BudgetEnforcer {
     async fn commit_owned(
         sessions: &Arc<BudgetSessionLedger>,
         owner: ReservationOwner,
-        id: platform_api::BudgetReservationId,
+        id: lingxi_core::host::BudgetReservationId,
         actual_nano_usd: u64,
         durability_turn: Result<
             Option<crate::persistence::CostDurabilityTurn>,
             crate::CostPersistError,
         >,
-    ) -> Result<(), platform_api::BudgetError> {
+    ) -> Result<(), lingxi_core::host::BudgetError> {
         // Queue capacity is acquired by the owned finalizer, before either
         // the cost state lock or reservation-book lock. If this fails, receipt
         // ownership still consumes the token, but unaccepted state is not
@@ -551,7 +555,7 @@ impl BudgetEnforcer {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&id.raw());
-                return Err(platform_api::BudgetError::Internal(error.to_string()));
+                return Err(lingxi_core::host::BudgetError::Internal(error.to_string()));
             }
         };
         if let Some(turn) = durability_turn.as_mut() {
@@ -571,7 +575,7 @@ impl BudgetEnforcer {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&id.raw());
-                return Err(platform_api::BudgetError::Internal(error.to_string()));
+                return Err(lingxi_core::host::BudgetError::Internal(error.to_string()));
             }
         };
         let state_cell = tracker.selected_state_cell().await;
@@ -583,7 +587,7 @@ impl BudgetEnforcer {
             if !book.active.contains_key(&id.raw()) {
                 let message = "accepted reservation token disappeared before settlement";
                 tracker.durability_gate().freeze(message);
-                return Err(platform_api::BudgetError::Internal(message.into()));
+                return Err(lingxi_core::host::BudgetError::Internal(message.into()));
             }
             let snapshot = match CostTracker::record_external_cost_in_state(&state, actual_nano_usd)
             {
@@ -596,7 +600,7 @@ impl BudgetEnforcer {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(&id.raw());
-                    return Err(platform_api::BudgetError::Internal(error.to_string()));
+                    return Err(lingxi_core::host::BudgetError::Internal(error.to_string()));
                 }
             };
             let enqueue = match (snapshot.as_ref(), permit) {
@@ -636,10 +640,10 @@ impl BudgetEnforcer {
                     .await_persistence_ack(owner.session_id, mutation_id, revision, ack_rx)
                     .await
                     .map(|_| ())
-                    .map_err(|error| platform_api::BudgetError::Internal(error.to_string())),
+                    .map_err(|error| lingxi_core::host::BudgetError::Internal(error.to_string())),
                 Some(Err(error)) => {
                     tracker.durability_gate().freeze(error.to_string());
-                    Err(platform_api::BudgetError::Internal(error.to_string()))
+                    Err(lingxi_core::host::BudgetError::Internal(error.to_string()))
                 }
                 None => {
                     // Ephemeral/test trackers retain their legacy snapshot
@@ -662,9 +666,10 @@ impl BudgetEnforcer {
     /// durable queue permit.  `None` is retained for legacy/ephemeral callers.
     pub fn begin_commit_reservation(
         &self,
-        id: platform_api::BudgetReservationId,
+        id: lingxi_core::host::BudgetReservationId,
         actual_nano_usd: u64,
-    ) -> Result<Option<platform_api::BudgetCommitReceipt>, platform_api::BudgetError> {
+    ) -> Result<Option<lingxi_core::host::BudgetCommitReceipt>, lingxi_core::host::BudgetError>
+    {
         if id.is_noop() {
             return Ok(None);
         }
@@ -677,7 +682,7 @@ impl BudgetEnforcer {
             .cloned();
         if let Some(slot) = existing {
             if slot.actual_nano_usd != actual_nano_usd {
-                return Err(platform_api::BudgetError::Internal(
+                return Err(lingxi_core::host::BudgetError::Internal(
                     "reservation retry changed the realized amount".into(),
                 ));
             }
@@ -687,7 +692,7 @@ impl BudgetEnforcer {
             return Ok(None);
         };
         let handle = tokio::runtime::Handle::try_current().map_err(|_| {
-            platform_api::BudgetError::Internal(
+            lingxi_core::host::BudgetError::Internal(
                 "budget settlement requires an async runtime".into(),
             )
         })?;
@@ -699,7 +704,7 @@ impl BudgetEnforcer {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(slot) = settlements.get(&id.raw()) {
                 if slot.actual_nano_usd != actual_nano_usd {
-                    return Err(platform_api::BudgetError::Internal(
+                    return Err(lingxi_core::host::BudgetError::Internal(
                         "reservation retry changed the realized amount".into(),
                     ));
                 }
@@ -725,7 +730,7 @@ impl BudgetEnforcer {
                 Err(error) => {
                     let message = format!("budget settlement worker failed: {error}");
                     panic_gate.freeze(message.clone());
-                    Err(platform_api::BudgetError::Internal(message))
+                    Err(lingxi_core::host::BudgetError::Internal(message))
                 }
             };
             *worker_slot
@@ -758,9 +763,9 @@ impl BudgetEnforcer {
     /// Never — unknown ids succeed so commit is idempotent.
     pub async fn commit_reservation(
         &self,
-        id: platform_api::BudgetReservationId,
+        id: lingxi_core::host::BudgetReservationId,
         actual_nano_usd: u64,
-    ) -> Result<(), platform_api::budget::BudgetError> {
+    ) -> Result<(), lingxi_core::host::budget::BudgetError> {
         if id.is_noop() {
             return Ok(());
         }
@@ -1011,8 +1016,8 @@ mod tests {
         CostPersistence, CostState, ModelRef,
     };
     use async_trait::async_trait;
-    use platform_api::live_sessions::{SessionWriterLease, SharedSessionWriterLease};
-    use protocol::SessionId;
+    use lingxi_core::host::live_sessions::{SessionWriterLease, SharedSessionWriterLease};
+    use lingxi_core::types::SessionId;
     use std::sync::Mutex;
     use std::time::Duration;
     use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
@@ -1470,7 +1475,7 @@ mod tests {
         let err = e.reserve_nano_usd(800).await.unwrap_err();
         assert!(matches!(
             err,
-            platform_api::budget::BudgetError::Exceeded {
+            lingxi_core::host::budget::BudgetError::Exceeded {
                 current_nano_usd: 800
             }
         ));
@@ -1503,7 +1508,7 @@ mod tests {
         ));
         assert!(matches!(
             enforcer.reserve_nano_usd(1).await,
-            Err(platform_api::BudgetError::Internal(reason)) if reason.contains("synthetic WAL failure")
+            Err(lingxi_core::host::BudgetError::Internal(reason)) if reason.contains("synthetic WAL failure")
         ));
     }
 
@@ -1617,7 +1622,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             reservation.await,
-            Err(platform_api::BudgetError::Internal(message)) if message.contains("append failed")
+            Err(lingxi_core::host::BudgetError::Internal(message)) if message.contains("append failed")
         ));
         assert!(response.settle().await.persistence_result().is_err());
         assert!(gate.frozen_reason().is_some());
@@ -1717,7 +1722,7 @@ mod tests {
 
         assert!(matches!(
             enforcer.begin_commit_reservation(id, 401),
-            Err(platform_api::BudgetError::Internal(message)) if message.contains("changed")
+            Err(lingxi_core::host::BudgetError::Internal(message)) if message.contains("changed")
         ));
         receipt.finish().await.unwrap();
     }

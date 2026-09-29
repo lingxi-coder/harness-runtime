@@ -508,7 +508,7 @@ pub fn build_digest(
         ));
     }
     parts.extend(activity.iter().map(render_activity));
-    let body = platform_api::tag_escape::escape_tag(&tag, &parts.join("\n\n"));
+    let body = lingxi_core::host::tag_escape::escape_tag(&tag, &parts.join("\n\n"));
     let envelope = format!("<{tag}>\n{body}\n</{tag}>");
     if with_postamble {
         format!("{envelope}\n\n{}", digest_postamble(observer_message))

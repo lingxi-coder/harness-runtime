@@ -21,7 +21,7 @@
 //! subagent's tool pool is byte-identical to before this feature.
 
 use crate::definition::AgentDefinition;
-use protocol::AgentId;
+use lingxi_core::types::AgentId;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

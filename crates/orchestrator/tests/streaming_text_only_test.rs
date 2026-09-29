@@ -6,6 +6,7 @@
 //!
 //! Fails to compile until Tasks 6, 8, 9, 12 land the streaming surface.
 
+use lingxi_core::host::OutputEvent;
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -14,7 +15,6 @@ use orchestrator::test_support_stream::{
     text_delta, MockStreamingApiClient,
 };
 use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use platform_api::OutputEvent;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;

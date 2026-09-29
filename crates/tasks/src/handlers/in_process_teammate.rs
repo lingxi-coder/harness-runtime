@@ -73,7 +73,7 @@ use agent::SubagentApiClient;
 
 enum TeammateInput {
     Message(String),
-    PlanApproval(platform_api::teammate_plan::PlanApprovalResponse),
+    PlanApproval(lingxi_core::host::teammate_plan::PlanApprovalResponse),
 }
 
 /// Handler name reported by [`Task::name`] and used as the runtime task-name
@@ -163,7 +163,7 @@ fn escape_xml_attribute(value: &str) -> String {
 
 /// Neutralize literal teammate-envelope tags inside untrusted message text.
 ///
-/// Same rule as `platform_api::subagent_output_guard`'s harness-envelope neutralizer
+/// Same rule as `lingxi_core::host::subagent_output_guard`'s harness-envelope neutralizer
 /// (whose tag list already contains `teammate-message`): `<` before an optional
 /// `/`, the tag name case-insensitively, then `>` / `/` / whitespace / end-of-
 /// input becomes `<\`. The boundary predicate is IMPORTED from there rather than
@@ -189,7 +189,7 @@ fn escape_teammate_tags(text: &str) -> String {
             continue;
         };
         if suffix.chars().next().is_none_or(|c| {
-            c == '>' || c == '/' || platform_api::subagent_output_guard::is_js_space(c)
+            c == '>' || c == '/' || lingxi_core::host::subagent_output_guard::is_js_space(c)
         }) {
             out.push_str(&text[start..=index]);
             out.push('\\');
@@ -384,7 +384,11 @@ async fn rollback_claimed_task(
 pub trait TeammateDefinitionResolver: Send + Sync {
     /// Resolve the definition for the teammate identified by `agent_id` /
     /// `name`. Returns `None` when no such definition exists.
-    async fn resolve(&self, agent_id: &protocol::AgentId, name: &str) -> Option<AgentDefinition>;
+    async fn resolve(
+        &self,
+        agent_id: &lingxi_core::types::AgentId,
+        name: &str,
+    ) -> Option<AgentDefinition>;
 }
 
 /// Default resolver that synthesizes a permissive built-in definition. Lets the
@@ -393,7 +397,11 @@ pub struct DefaultTeammateDefinition;
 
 #[async_trait]
 impl TeammateDefinitionResolver for DefaultTeammateDefinition {
-    async fn resolve(&self, _agent_id: &protocol::AgentId, name: &str) -> Option<AgentDefinition> {
+    async fn resolve(
+        &self,
+        _agent_id: &lingxi_core::types::AgentId,
+        name: &str,
+    ) -> Option<AgentDefinition> {
         Some(AgentDefinition {
             cache_ttl: None,
             agent_type: name.to_string(),
@@ -431,7 +439,7 @@ impl TeammateDefinitionResolver for DefaultTeammateDefinition {
 /// route input to the live slot and [`Task::kill`] can tear it down.
 struct TeammateEntry {
     /// Slot key in the [`StateMachinePool`].
-    agent_id: protocol::AgentId,
+    agent_id: lingxi_core::types::AgentId,
     /// Cooperative stop flag for the streaming worker. The worker also exits
     /// naturally when `out_rx` closes (the slot's runner future drops its
     /// sender on deallocate); the flag is the belt-and-braces fast path.
@@ -466,15 +474,15 @@ pub struct InProcessTeammateHandler {
     /// `<config-home>/plans/<agentId>.md`, which only the call-local
     /// `own_plan_file_root` allowance covers (and only once that directory
     /// exists).
-    plan_files: Option<Arc<platform_api::plan_files::PlanFileMatcher>>,
-    plan_approval_mailbox: Option<Arc<dyn platform_api::mailbox::MailboxRouterHandle>>,
-    plan_approval_gate: Option<Arc<dyn platform_api::PermissionGate>>,
-    transcript: Option<(Arc<dyn platform_api::FileSystem>, std::path::PathBuf)>,
+    plan_files: Option<Arc<lingxi_core::host::plan_files::PlanFileMatcher>>,
+    plan_approval_mailbox: Option<Arc<dyn lingxi_core::host::mailbox::MailboxRouterHandle>>,
+    plan_approval_gate: Option<Arc<dyn lingxi_core::host::PermissionGate>>,
+    transcript: Option<(Arc<dyn lingxi_core::host::FileSystem>, std::path::PathBuf)>,
     /// Model API seam handed to every spawned teammate's runner.
     api_client: Arc<dyn SubagentApiClient>,
     /// Tool dispatch seam inherited by the teammate. `None` means the teammate
     /// cannot dispatch tools (a `tool_use` then surfaces a runner failure).
-    tool_invoker: Option<Arc<dyn platform_api::ToolInvoker>>,
+    tool_invoker: Option<Arc<dyn lingxi_core::host::ToolInvoker>>,
     /// Resolves the [`AgentDefinition`] for a spawn.
     definitions: Arc<dyn TeammateDefinitionResolver>,
     /// Parent / main-loop model used to resolve a teammate definition's
@@ -501,7 +509,7 @@ pub struct InProcessTeammateHandler {
     /// required here: sharing one source would also share its dedup cursor, so
     /// the first teammate to poll would consume diagnostics for every peer.
     new_diagnostics_source_factory:
-        Option<Arc<dyn Fn() -> Arc<dyn platform_api::NewDiagnosticsSource> + Send + Sync>>,
+        Option<Arc<dyn Fn() -> Arc<dyn lingxi_core::host::NewDiagnosticsSource> + Send + Sync>>,
     /// Live tool registry used to resolve the teammate's advertised tool
     /// SCHEMAS + dispatch allow-list per spawn (claude-code `assembleToolPool`),
     /// mirroring [`agent::PoolSubagentSpawner`]. A SET-ONCE cell (same
@@ -518,7 +526,7 @@ pub struct InProcessTeammateHandler {
     /// Budget enforcer inherited by the teammate so its turns charge the shared
     /// cumulative cost (claude-code teammates share the session budget). `None`
     /// (the default / tests) ⇒ no per-turn budget gate.
-    budget_enforcer: Option<Arc<dyn platform_api::budget::BudgetEnforcerHandle>>,
+    budget_enforcer: Option<Arc<dyn lingxi_core::host::budget::BudgetEnforcerHandle>>,
     /// Hook executor handed to the teammate's runner so it fires `SubagentStart`
     /// (+ frontmatter hooks) like a normal subagent. SET-ONCE cell (same
     /// cycle-break as [`Self::tool_registry`]); unfilled ⇒ the runner skips the
@@ -528,10 +536,10 @@ pub struct InProcessTeammateHandler {
     strict_plugin_only_hooks: Arc<OnceLock<bool>>,
     /// Skill loader handed to the teammate's runner so it preloads the
     /// definition's frontmatter `skills:`. SET-ONCE; unfilled ⇒ no preloading.
-    skill_loader: Arc<OnceLock<Arc<dyn platform_api::skill_loader::SkillLoader>>>,
+    skill_loader: Arc<OnceLock<Arc<dyn lingxi_core::host::skill_loader::SkillLoader>>>,
     /// Session id + cwd stamped on the `HookContext` the runner builds for the
     /// SubagentStart fire (only consulted when [`Self::hook_executor`] is filled).
-    hook_session_id: protocol::SessionId,
+    hook_session_id: lingxi_core::types::SessionId,
     hook_cwd: std::path::PathBuf,
     /// Terminal-status sink (same seam as `LocalBashHandler`).
     status_sink: Arc<dyn TaskStatusSink>,
@@ -583,7 +591,7 @@ impl InProcessTeammateHandler {
             hook_executor: Arc::new(OnceLock::new()),
             strict_plugin_only_hooks: Arc::new(OnceLock::new()),
             skill_loader: Arc::new(OnceLock::new()),
-            hook_session_id: protocol::SessionId::nil(),
+            hook_session_id: lingxi_core::types::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
             status_sink: Arc::new(NoopStatusSink),
             teammate_idle_firer: None,
@@ -620,7 +628,7 @@ impl InProcessTeammateHandler {
     #[must_use]
     pub fn with_budget_enforcer(
         mut self,
-        enforcer: Arc<dyn platform_api::budget::BudgetEnforcerHandle>,
+        enforcer: Arc<dyn lingxi_core::host::budget::BudgetEnforcerHandle>,
     ) -> Self {
         self.budget_enforcer = Some(enforcer);
         self
@@ -652,7 +660,7 @@ impl InProcessTeammateHandler {
     #[must_use]
     pub fn skill_loader_handle(
         &self,
-    ) -> Arc<OnceLock<Arc<dyn platform_api::skill_loader::SkillLoader>>> {
+    ) -> Arc<OnceLock<Arc<dyn lingxi_core::host::skill_loader::SkillLoader>>> {
         self.skill_loader.clone()
     }
 
@@ -661,7 +669,7 @@ impl InProcessTeammateHandler {
     #[must_use]
     pub fn with_hook_context(
         mut self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         cwd: std::path::PathBuf,
     ) -> Self {
         self.hook_session_id = session_id;
@@ -681,7 +689,7 @@ impl InProcessTeammateHandler {
     #[must_use]
     pub fn with_plan_files(
         mut self,
-        plan_files: Arc<platform_api::plan_files::PlanFileMatcher>,
+        plan_files: Arc<lingxi_core::host::plan_files::PlanFileMatcher>,
     ) -> Self {
         self.plan_files = Some(plan_files);
         self
@@ -689,7 +697,7 @@ impl InProcessTeammateHandler {
 
     /// Attach the tool dispatch seam inherited by spawned teammates.
     #[must_use]
-    pub fn with_tool_invoker(mut self, invoker: Arc<dyn platform_api::ToolInvoker>) -> Self {
+    pub fn with_tool_invoker(mut self, invoker: Arc<dyn lingxi_core::host::ToolInvoker>) -> Self {
         self.tool_invoker = Some(invoker);
         self
     }
@@ -708,7 +716,7 @@ impl InProcessTeammateHandler {
     #[must_use]
     pub fn with_new_diagnostics_source_factory(
         mut self,
-        factory: Arc<dyn Fn() -> Arc<dyn platform_api::NewDiagnosticsSource> + Send + Sync>,
+        factory: Arc<dyn Fn() -> Arc<dyn lingxi_core::host::NewDiagnosticsSource> + Send + Sync>,
     ) -> Self {
         self.new_diagnostics_source_factory = Some(factory);
         self
@@ -751,14 +759,17 @@ impl InProcessTeammateHandler {
     /// Share the leader inbox used for nonmutating teammate plan review.
     pub fn with_plan_approval_mailbox(
         mut self,
-        mailbox: Arc<dyn platform_api::mailbox::MailboxRouterHandle>,
+        mailbox: Arc<dyn lingxi_core::host::mailbox::MailboxRouterHandle>,
     ) -> Self {
         self.plan_approval_mailbox = Some(mailbox);
         self
     }
 
     /// Live mode availability used when the lead approves a teammate plan.
-    pub fn with_plan_approval_gate(mut self, gate: Arc<dyn platform_api::PermissionGate>) -> Self {
+    pub fn with_plan_approval_gate(
+        mut self,
+        gate: Arc<dyn lingxi_core::host::PermissionGate>,
+    ) -> Self {
         self.plan_approval_gate = Some(gate);
         self
     }
@@ -766,7 +777,7 @@ impl InProcessTeammateHandler {
     /// Attach the session transcript filesystem and subagent directory.
     pub fn with_transcript(
         mut self,
-        fs: Arc<dyn platform_api::FileSystem>,
+        fs: Arc<dyn lingxi_core::host::FileSystem>,
         directory: std::path::PathBuf,
     ) -> Self {
         self.transcript = Some((fs, directory));
@@ -824,13 +835,13 @@ impl InProcessTeammateHandler {
     /// team it belongs to (empty when spawned standalone). Both ride on the
     /// context as [`SubagentContext::agent_name`] / [`SubagentContext::team_name`]
     /// so the runner threads them into every dispatched tool's
-    /// [`platform_api::tool_invoker::SubagentInvocationContext`] — the Rust analogue of
+    /// [`lingxi_core::host::tool_invoker::SubagentInvocationContext`] — the Rust analogue of
     /// claude-code running the teammate inside `runWithTeammateContext` so
     /// `getAgentName()` / `getTeammateContext()?.teamName` resolve inside its
     /// tool calls.
     async fn build_context(
         &self,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         name: &str,
         team_name: &str,
         description: &str,
@@ -887,8 +898,8 @@ impl InProcessTeammateHandler {
         let prompt_messages = if description.is_empty() {
             vec![]
         } else {
-            vec![protocol::ConversationMessage::user(
-                protocol::MessageId::new(),
+            vec![lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
                 teammate_message_envelope(TEAM_LEAD_NAME, description),
             )]
         };
@@ -1015,7 +1026,10 @@ fn event_line(ev: &SubagentEvent) -> String {
     }
 }
 
-fn apply_spawn_context(context: &mut SubagentContext, request: platform_api::SubagentSpawnRequest) {
+fn apply_spawn_context(
+    context: &mut SubagentContext,
+    request: lingxi_core::host::SubagentSpawnRequest,
+) {
     context.cwd = request.cwd.map(Into::into);
     context.origin_session_id = request.origin_session_id;
     context.depth = request.depth;
@@ -1200,10 +1214,10 @@ impl Task for InProcessTeammateHandler {
                 } else {
                     format!("No plan file exists yet. You should create your plan at {} using the Write tool if you need to.",controller.plan_path())
                 };
-                subagent_ctx.prompt_messages.insert(0, protocol::ConversationMessage::user(protocol::MessageId::new(), format!("<system-reminder>\n## Plan File Info:\n{plan_file_info}\nYou should build your plan incrementally by writing to or editing this file. NOTE that this is the only file you are allowed to edit - other than this you are only allowed to take READ-ONLY actions.\n</system-reminder>")));
-                let requester: Arc<dyn platform_api::teammate_plan::TeammatePlanRequester> =
+                subagent_ctx.prompt_messages.insert(0, lingxi_core::types::ConversationMessage::user(lingxi_core::types::MessageId::new(), format!("<system-reminder>\n## Plan File Info:\n{plan_file_info}\nYou should build your plan incrementally by writing to or editing this file. NOTE that this is the only file you are allowed to edit - other than this you are only allowed to take READ-ONLY actions.\n</system-reminder>")));
+                let requester: Arc<dyn lingxi_core::host::teammate_plan::TeammatePlanRequester> =
                     controller.clone();
-                platform_api::teammate_plan::register(agent_id, &requester);
+                lingxi_core::host::teammate_plan::register(agent_id, &requester);
                 subagent_ctx.tool_invoker = Some(controller.clone());
                 Some(controller)
             }
@@ -1213,7 +1227,7 @@ impl Task for InProcessTeammateHandler {
         // Without a registry/model, the oracle falls back to the task env gate.
         const TASK_LIST_TOOLS: [&str; 4] = ["TaskCreate", "TaskGet", "TaskUpdate", "TaskList"];
         let has_task_list_tools = if self.tool_registry.get().is_none() {
-            !platform_api::env::is_env_defined_falsy(
+            !lingxi_core::host::env::is_env_defined_falsy(
                 std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref(),
             )
         } else {
@@ -1439,8 +1453,8 @@ impl Task for InProcessTeammateHandler {
                                 .send_event(
                                     &claim_agent_id,
                                     lingxi_core::Event::UserMessage {
-                                        message_id: protocol::MessageId::new(),
-                                        request_id: protocol::RequestId::new(),
+                                        message_id: lingxi_core::types::MessageId::new(),
+                                        request_id: lingxi_core::types::RequestId::new(),
                                         content,
                                     },
                                 )
@@ -1546,8 +1560,8 @@ impl Task for InProcessTeammateHandler {
                             .send_event(
                                 &claim_agent_id,
                                 lingxi_core::Event::UserMessage {
-                                    message_id: protocol::MessageId::new(),
-                                    request_id: protocol::RequestId::new(),
+                                    message_id: lingxi_core::types::MessageId::new(),
+                                    request_id: lingxi_core::types::RequestId::new(),
                                     content,
                                 },
                             )
@@ -1696,7 +1710,7 @@ impl Task for InProcessTeammateHandler {
     async fn apply_plan_approval(
         &self,
         task_id: &str,
-        response: platform_api::teammate_plan::PlanApprovalResponse,
+        response: lingxi_core::host::teammate_plan::PlanApprovalResponse,
         _ctx: TaskContext,
     ) -> Result<(), TaskError> {
         let sender = self

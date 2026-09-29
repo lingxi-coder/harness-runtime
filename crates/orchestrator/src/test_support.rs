@@ -6,11 +6,11 @@
 
 use crate::conversation::OrchestratorApiClient;
 use async_trait::async_trait;
+use lingxi_core::host::{CostSnapshot, OutputEvent, OutputStream};
+use lingxi_core::types::ConversationMessage;
 use llm_runtime::{
     ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryResponse, LlmError,
 };
-use platform_api::{CostSnapshot, OutputEvent, OutputStream};
-use protocol::ConversationMessage;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -95,7 +95,7 @@ pub struct MockApiClient {
     /// The catalog returned by `list_model_listings()`. Empty by default (the
     /// trait default); tests that exercise provider-qualified model-ref parsing
     /// seed it with the rows they need.
-    model_listings: std::sync::Mutex<Vec<platform_api::ModelListing>>,
+    model_listings: std::sync::Mutex<Vec<lingxi_core::host::ModelListing>>,
 }
 
 /// Captured startup Responses WebSocket prewarm call.
@@ -134,9 +134,9 @@ impl MockApiClient {
     }
 
     /// Seed the catalog `list_model_listings()` returns, so a test can exercise
-    /// `platform_api::parse_model_ref` (which resolves a `profile/model` reference
+    /// `lingxi_core::host::parse_model_ref` (which resolves a `profile/model` reference
     /// only against real listings).
-    pub fn set_model_listings(&self, listings: Vec<platform_api::ModelListing>) {
+    pub fn set_model_listings(&self, listings: Vec<lingxi_core::host::ModelListing>) {
         *self.model_listings.lock().unwrap() = listings;
     }
 
@@ -299,7 +299,7 @@ impl OrchestratorApiClient for MockApiClient {
 
     /// The catalog seeded by [`MockApiClient::set_model_listings`] (empty by
     /// default, matching the trait's own default).
-    fn list_model_listings(&self) -> Vec<platform_api::ModelListing> {
+    fn list_model_listings(&self) -> Vec<lingxi_core::host::ModelListing> {
         self.model_listings.lock().unwrap().clone()
     }
 }
@@ -345,12 +345,12 @@ pub struct MockOutputStream {
     /// trait method is DEFAULTED — without an explicit override the mock would
     /// silently inherit the default, drop `denial_kind`, and let every
     /// deny-path test pass no matter what the turn loop computed.
-    denials: Arc<Mutex<Vec<(protocol::ToolUseId, String)>>>,
+    denials: Arc<Mutex<Vec<(lingxi_core::types::ToolUseId, String)>>>,
     /// Attachments observed via `emit_attachment`, same rationale as `denials`:
     /// the trait method is DEFAULTED, so without this override the mock would
     /// inherit the no-op and every attachment test would pass whether or not
     /// the orchestrator emitted anything.
-    attachments: Arc<Mutex<Vec<platform_api::AttachmentKind>>>,
+    attachments: Arc<Mutex<Vec<lingxi_core::host::AttachmentKind>>>,
     /// Compaction lifecycle is separate from transcript events.
     compaction_phases: Arc<Mutex<Vec<String>>>,
     /// How many times `emit_turn_started` was called, same rationale as
@@ -393,12 +393,12 @@ impl MockOutputStream {
     }
 
     /// Snapshot the attachments emitted so far, in emission order.
-    pub async fn attachment_snapshot(&self) -> Vec<platform_api::AttachmentKind> {
+    pub async fn attachment_snapshot(&self) -> Vec<lingxi_core::host::AttachmentKind> {
         self.attachments.lock().await.clone()
     }
 
     /// Snapshot the `(tool_use_id, denial_kind)` pairs captured so far.
-    pub async fn denial_snapshot(&self) -> Vec<(protocol::ToolUseId, String)> {
+    pub async fn denial_snapshot(&self) -> Vec<(lingxi_core::types::ToolUseId, String)> {
         self.denials.lock().await.clone()
     }
 
@@ -463,12 +463,12 @@ impl OutputStream for MockOutputStream {
         *self.turn_starts.lock().await += 1;
     }
 
-    async fn emit_assistant_message_identity(&self, message_id: &protocol::MessageId) {
+    async fn emit_assistant_message_identity(&self, message_id: &lingxi_core::types::MessageId) {
         self.events.lock().await.push(OutputEvent::MessageIdentity {
             message_id: *message_id,
         });
     }
-    async fn emit_message_retracted(&self, message_id: &protocol::MessageId) {
+    async fn emit_message_retracted(&self, message_id: &lingxi_core::types::MessageId) {
         self.events
             .lock()
             .await
@@ -497,7 +497,7 @@ impl OutputStream for MockOutputStream {
     }
     async fn emit_tool_call(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         tool: &str,
         input: &serde_json::Value,
     ) {
@@ -507,7 +507,12 @@ impl OutputStream for MockOutputStream {
             input: input.clone(),
         });
     }
-    async fn emit_tool_heartbeat(&self, id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) {
+    async fn emit_tool_heartbeat(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        tool: &str,
+        elapsed_ms: u64,
+    ) {
         self.events.lock().await.push(OutputEvent::ToolHeartbeat {
             id: id.clone(),
             tool: tool.to_string(),
@@ -516,7 +521,7 @@ impl OutputStream for MockOutputStream {
     }
     async fn emit_tool_result(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         tool: &str,
         _model_text: &str,
         result: &serde_json::Value,
@@ -527,13 +532,13 @@ impl OutputStream for MockOutputStream {
             result: result.clone(),
         });
     }
-    async fn emit_attachment(&self, attachment: platform_api::AttachmentKind) {
+    async fn emit_attachment(&self, attachment: lingxi_core::host::AttachmentKind) {
         self.attachments.lock().await.push(attachment);
     }
 
     async fn emit_tool_result_denied(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         tool: &str,
         model_text: &str,
         result: &serde_json::Value,
@@ -615,7 +620,7 @@ impl OutputStream for MockOutputStream {
     /// emission so tests can assert the emit-on-change behaviour.
     #[allow(
         clippy::too_many_arguments,
-        reason = "mirrors the eleven-argument trait signature (see platform_api::OutputStream::emit_rate_limit)"
+        reason = "mirrors the eleven-argument trait signature (see lingxi_core::host::OutputStream::emit_rate_limit)"
     )]
     async fn emit_rate_limit(
         &self,
@@ -693,20 +698,20 @@ pub fn noop_hook_executor() -> Arc<hooks::HookExecutorImpl> {
 
     struct UnusedHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for UnusedHttp {
+    impl lingxi_core::host::HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest(
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
                 "noop hook executor — http arm is never called with an empty registry".into(),
             ))
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest(
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
                 "noop hook executor — sse arm is never called".into(),
             ))
         }
@@ -714,28 +719,29 @@ pub fn noop_hook_executor() -> Arc<hooks::HookExecutorImpl> {
 
     struct UnusedRuntime;
     #[async_trait]
-    impl platform_api::RuntimeSpawner for UnusedRuntime {
+    impl lingxi_core::host::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-            Err(platform_api::RuntimeError::Internal(
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal(
                 "noop hook executor — runtime arm is never called".into(),
             ))
         }
         async fn sleep(&self, _duration: std::time::Duration) {}
         async fn cancel(
             &self,
-            _handle: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
 
     let registry = Arc::new(tokio::sync::RwLock::new(HookRegistry::new()));
-    let http: Arc<dyn platform_api::HttpTransport> = Arc::new(UnusedHttp);
-    let runtime: Arc<dyn platform_api::RuntimeSpawner> = Arc::new(UnusedRuntime);
+    let http: Arc<dyn lingxi_core::host::HttpTransport> = Arc::new(UnusedHttp);
+    let runtime: Arc<dyn lingxi_core::host::RuntimeSpawner> = Arc::new(UnusedRuntime);
     Arc::new(hooks::HookExecutorImpl::new(registry, http, runtime))
 }
 
@@ -746,7 +752,7 @@ pub fn noop_hook_executor() -> Arc<hooks::HookExecutorImpl> {
 // directly).
 
 // M5-05 Task 2: PermissionGate + PermissionDecision are promoted to
-// lingxi-platform_api::permission_gate. We re-export them here so existing
+// lingxi-lingxi_core::host::permission_gate. We re-export them here so existing
 // orchestrator imports (crate::test_support::PermissionGate, …) keep
 // working unchanged.
 pub use permission::gate::{
@@ -825,15 +831,15 @@ pub use crate::test_support_stream::{
 // MockOrchestratorHandle (M5-10 Task 2)
 // ============================================================================
 //
-// Scripted mock of `platform_api::OrchestratorHandle` for the M5-10/M5-11
+// Scripted mock of `lingxi_core::host::OrchestratorHandle` for the M5-10/M5-11
 // slash-command handler tests. Captures every call as a flag/counter and
 // returns whatever the test pre-loaded via setter methods.
 
-use platform_api::{
+use lingxi_core::host::{
     ActiveGoalSnapshot, AgentInfo, CompactionSummary, DoctorReport, HandleError, HookInfo,
     McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, SkillInfo, StatusSnapshot,
 };
-use protocol::SessionId;
+use lingxi_core::types::SessionId;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
@@ -875,17 +881,17 @@ pub struct MockOrchestratorHandle {
     effort: StdMutex<Option<String>>,
     /// Output-style listing returned by `output_styles`; `None` means this
     /// engine has no prompt-assembly layer (the trait default).
-    output_style_listing: StdMutex<Option<platform_api::OutputStyleListing>>,
+    output_style_listing: StdMutex<Option<lingxi_core::host::OutputStyleListing>>,
     /// Every name passed to `set_output_style`, in order.
     output_style_switches: StdMutex<Vec<String>>,
     /// Optional live controls snapshot for routing synchronization tests.
-    conversation_controls: StdMutex<Option<platform_api::ConversationControls>>,
+    conversation_controls: StdMutex<Option<lingxi_core::host::ConversationControls>>,
     /// Session-scoped fast-mode flag used by bridge routing tests.
     fast_mode: AtomicBool,
     /// Session-owned dynamic-workflow gate exposed through the handle.
-    dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate,
+    dynamic_workflows_gate: lingxi_core::host::session_flags::DynamicWorkflowsGate,
     /// Session-owned workflow-size state exposed through the handle.
-    workflow_size_guideline: platform_api::session_flags::WorkflowSizeGuidelineState,
+    workflow_size_guideline: lingxi_core::host::session_flags::WorkflowSizeGuidelineState,
     /// If `Some`, the next `set_permission_mode` call returns `ActionFailed(_)`.
     permission_mode_error: StdMutex<Option<String>>,
     /// Set by `request_exit`. Readable via `was_exit_requested`.
@@ -901,7 +907,7 @@ pub struct MockOrchestratorHandle {
     cost_tokens: AtomicU64,
     /// Optional pre-loaded full cost snapshot returned by `snapshot_cost`.
     /// If `Some`, used verbatim (with `session_id` overwritten to mock's id).
-    cost_snapshot: StdMutex<Option<platform_api::CostSnapshot>>,
+    cost_snapshot: StdMutex<Option<lingxi_core::host::CostSnapshot>>,
     // M5-11 additions:
     /// Pre-loaded MCP server list returned by `list_mcp_servers`.
     mcp_servers: StdMutex<Vec<McpServerInfo>>,
@@ -930,7 +936,7 @@ pub struct MockOrchestratorHandle {
     /// Pre-loaded read-file-state cache keys returned by `files_in_context`.
     files_in_context: StdMutex<Vec<PathBuf>>,
     /// Pre-loaded model listings returned by `list_model_listings`.
-    model_listings: StdMutex<Vec<platform_api::ModelListing>>,
+    model_listings: StdMutex<Vec<lingxi_core::host::ModelListing>>,
     /// Local slash-command transcript pairs requested by a host.
     slash_command_transcript: StdMutex<Vec<(String, String)>>,
     /// Every `body` passed to `emit_background_system_notice`, in call order
@@ -959,11 +965,11 @@ impl MockOrchestratorHandle {
             output_style_switches: StdMutex::new(Vec::new()),
             conversation_controls: StdMutex::new(None),
             fast_mode: AtomicBool::new(false),
-            dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate::new(
+            dynamic_workflows_gate: lingxi_core::host::session_flags::DynamicWorkflowsGate::new(
                 false, false,
             ),
             workflow_size_guideline:
-                platform_api::session_flags::WorkflowSizeGuidelineState::default(),
+                lingxi_core::host::session_flags::WorkflowSizeGuidelineState::default(),
             permission_mode_error: StdMutex::new(None),
             exit_requested: AtomicBool::new(false),
             memory_path: StdMutex::new(None),
@@ -1033,7 +1039,7 @@ impl MockOrchestratorHandle {
     }
 
     /// Enable authoritative controls snapshots; successful control setters update them.
-    pub fn set_conversation_controls(&self, controls: platform_api::ConversationControls) {
+    pub fn set_conversation_controls(&self, controls: lingxi_core::host::ConversationControls) {
         *self.permission_mode.lock().unwrap() = Some(controls.permission.effective.clone());
         *self.conversation_controls.lock().unwrap() = Some(controls);
     }
@@ -1084,7 +1090,7 @@ impl MockOrchestratorHandle {
     /// Pre-load the full `CostSnapshot` returned by `snapshot_cost`. If set,
     /// the snapshot is returned verbatim (with `session_id` overwritten to
     /// the mock's stable id).
-    pub fn set_cost_snapshot(&self, s: platform_api::CostSnapshot) {
+    pub fn set_cost_snapshot(&self, s: lingxi_core::host::CostSnapshot) {
         *self.cost_snapshot.lock().unwrap() = Some(s);
     }
     // M5-11 setters:
@@ -1137,7 +1143,7 @@ impl MockOrchestratorHandle {
         *self.available_models.lock().unwrap() = m;
     }
     /// Pre-load the listing `output_styles` answers with.
-    pub fn set_output_style_listing(&self, listing: platform_api::OutputStyleListing) {
+    pub fn set_output_style_listing(&self, listing: lingxi_core::host::OutputStyleListing) {
         *self.output_style_listing.lock().unwrap() = Some(listing);
     }
     /// Every name `set_output_style` was called with, in order.
@@ -1150,7 +1156,7 @@ impl MockOrchestratorHandle {
         *self.files_in_context.lock().unwrap() = files;
     }
     /// Pre-load the model listings returned by `list_model_listings`.
-    pub fn set_model_listings(&self, listings: Vec<platform_api::ModelListing>) {
+    pub fn set_model_listings(&self, listings: Vec<lingxi_core::host::ModelListing>) {
         *self.model_listings.lock().unwrap() = listings;
     }
 
@@ -1222,20 +1228,20 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         self.force_compact().await
     }
 
-    async fn snapshot_cost(&self) -> platform_api::CostSnapshot {
+    async fn snapshot_cost(&self) -> lingxi_core::host::CostSnapshot {
         if let Some(s) = self.cost_snapshot.lock().unwrap().clone() {
             // Force the session id to match the mock's stable id for
             // consistency with other handle methods.
-            return platform_api::CostSnapshot {
+            return lingxi_core::host::CostSnapshot {
                 session_id: self.session_id,
                 ..s
             };
         }
-        platform_api::CostSnapshot {
+        lingxi_core::host::CostSnapshot {
             session_id: self.session_id,
             total_nano_usd: self.cost_nano_usd.load(Ordering::SeqCst),
             total_tokens: self.cost_tokens.load(Ordering::SeqCst),
-            ..platform_api::CostSnapshot::default()
+            ..lingxi_core::host::CostSnapshot::default()
         }
     }
 
@@ -1279,7 +1285,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
             return Err(HandleError::ActionFailed(reason));
         }
         if let Some(controls) = self.conversation_controls.lock().unwrap().as_mut() {
-            controls.model_reference = platform_api::qualified_model_ref(model, profile);
+            controls.model_reference = lingxi_core::host::qualified_model_ref(model, profile);
         }
         Ok(())
     }
@@ -1288,13 +1294,13 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         self.permission_mode.lock().unwrap().clone()
     }
 
-    async fn conversation_controls(&self) -> Option<platform_api::ConversationControls> {
+    async fn conversation_controls(&self) -> Option<lingxi_core::host::ConversationControls> {
         self.conversation_controls.lock().unwrap().clone()
     }
 
     async fn set_reasoning_selection(
         &self,
-        selection: platform_api::ReasoningSelection,
+        selection: lingxi_core::host::ReasoningSelection,
     ) -> Result<(), HandleError> {
         if let Some(controls) = self.conversation_controls.lock().unwrap().as_mut() {
             controls.requested_reasoning_selection = selection.clone();
@@ -1334,7 +1340,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
     async fn workflow_size_guideline_state(
         &self,
-    ) -> platform_api::session_flags::WorkflowSizeGuidelineSnapshot {
+    ) -> lingxi_core::host::session_flags::WorkflowSizeGuidelineSnapshot {
         self.workflow_size_guideline.snapshot()
     }
 
@@ -1369,7 +1375,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         }
     }
 
-    async fn output_styles(&self) -> Option<platform_api::OutputStyleListing> {
+    async fn output_styles(&self) -> Option<lingxi_core::host::OutputStyleListing> {
         self.output_style_listing.lock().unwrap().clone()
     }
 
@@ -1478,7 +1484,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
             .push(body.to_string());
     }
 
-    async fn list_model_listings(&self) -> Vec<platform_api::ModelListing> {
+    async fn list_model_listings(&self) -> Vec<lingxi_core::host::ModelListing> {
         self.model_listings.lock().unwrap().clone()
     }
 
@@ -1493,8 +1499,8 @@ impl OrchestratorHandle for MockOrchestratorHandle {
     async fn fork_conversation(
         &self,
         _directive: &str,
-    ) -> Result<platform_api::ForkOutcome, HandleError> {
-        Ok(platform_api::ForkOutcome {
+    ) -> Result<lingxi_core::host::ForkOutcome, HandleError> {
+        Ok(lingxi_core::host::ForkOutcome {
             name: "mock-fork".to_string(),
             agent_id: "mock-agent-abcd".to_string(),
         })
@@ -1510,15 +1516,17 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
     async fn background_conversation(
         &self,
-        _snapshot: platform_api::BackgroundingSnapshot,
+        _snapshot: lingxi_core::host::BackgroundingSnapshot,
     ) -> Result<String, HandleError> {
         Ok("Moved conversation into a background session (mock-bg-abcd).".to_string())
     }
 
     /// Deterministic recap text so wired-success tests can assert real output.
     /// (`/recap`'s handler gates on a qualifying transcript turn before calling.)
-    async fn generate_recap(&self) -> Result<platform_api::RecapOutcome, HandleError> {
-        Ok(platform_api::RecapOutcome::Text("mock recap".to_string()))
+    async fn generate_recap(&self) -> Result<lingxi_core::host::RecapOutcome, HandleError> {
+        Ok(lingxi_core::host::RecapOutcome::Text(
+            "mock recap".to_string(),
+        ))
     }
 }
 
@@ -1609,7 +1617,7 @@ mod tests {
     #[tokio::test]
     async fn mock_output_stream_captures_tool_lifecycle() {
         let m = MockOutputStream::new();
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         let input = serde_json::json!({"file_path": "/tmp/x"});
         let result = serde_json::json!({"content": "ok"});
         m.emit_tool_call(&id, "Read", &input).await;
@@ -1661,7 +1669,7 @@ mod tests {
         let event = hooks::events::HookEvent::PreToolUse {
             tool_name: "Read".into(),
             tool_input: serde_json::json!({}),
-            tool_use_id: protocol::ToolUseId::new(),
+            tool_use_id: lingxi_core::types::ToolUseId::new(),
         };
         let ctx = hooks::registry::HookContext::default();
         let agg = h.execute(event, ctx).await;

@@ -6,13 +6,13 @@
 
 use cost::pricing::PricingCatalog;
 use cost::CostTracker;
+use lingxi_core::host::OrchestratorHandle;
+use lingxi_core::types::SessionId;
 use llm_runtime::{ContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::OrchestratorHandle;
-use protocol::SessionId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tool_api::registry::ToolRegistry;
@@ -202,7 +202,7 @@ async fn emit_end_turn_carries_real_cost() {
     let end_turn_cost = events
         .iter()
         .find_map(|e| match e {
-            platform_api::OutputEvent::EndTurn { cost, .. } => Some(cost.clone()),
+            lingxi_core::host::OutputEvent::EndTurn { cost, .. } => Some(cost.clone()),
             _ => None,
         })
         .expect("end_turn event present");

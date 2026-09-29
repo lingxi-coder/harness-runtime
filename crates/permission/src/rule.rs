@@ -175,7 +175,7 @@ pub enum PermissionBehavior {
 pub enum PermissionRuleSource {
     /// A settings tier — `~/.lingxi/settings.json`, the committed project file,
     /// the gitignored per-clone override, or managed policy.
-    Settings(protocol::SettingsScope),
+    Settings(lingxi_core::types::SettingsScope),
     /// Rules attached to a feature flag.
     FlagSettings,
     /// Rules supplied on the command line.
@@ -194,7 +194,7 @@ pub enum PermissionRuleSource {
 
 impl PermissionRuleSource {
     /// Answers: which rule a denial CITES — NOT which rule wins.
-    /// One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
+    /// One of several orderings over these rungs; `lingxi_core::types::scope`'s module docs index them all and say which question each answers.
     ///
     /// Citation precedence matching claude-code's `Szn` walk
     /// (`userSettings` → `projectSettings` → `localSettings` → `flagSettings`
@@ -215,11 +215,11 @@ impl PermissionRuleSource {
             Self::Session => 2,
             Self::Command => 3,
             Self::CliArg => 4,
-            Self::Settings(protocol::SettingsScope::Managed) => 5,
+            Self::Settings(lingxi_core::types::SettingsScope::Managed) => 5,
             Self::FlagSettings => 6,
-            Self::Settings(protocol::SettingsScope::Local) => 7,
-            Self::Settings(protocol::SettingsScope::Project) => 8,
-            Self::Settings(protocol::SettingsScope::User) => 9,
+            Self::Settings(lingxi_core::types::SettingsScope::Local) => 7,
+            Self::Settings(lingxi_core::types::SettingsScope::Project) => 8,
+            Self::Settings(lingxi_core::types::SettingsScope::User) => 9,
         }
     }
 
@@ -233,11 +233,11 @@ impl PermissionRuleSource {
     #[must_use]
     pub fn lingxi_settings_source(self) -> &'static str {
         match self {
-            Self::Settings(protocol::SettingsScope::User) => "userSettings",
-            Self::Settings(protocol::SettingsScope::Project) => "projectSettings",
-            Self::Settings(protocol::SettingsScope::Local) => "localSettings",
+            Self::Settings(lingxi_core::types::SettingsScope::User) => "userSettings",
+            Self::Settings(lingxi_core::types::SettingsScope::Project) => "projectSettings",
+            Self::Settings(lingxi_core::types::SettingsScope::Local) => "localSettings",
             Self::FlagSettings => "flagSettings",
-            Self::Settings(protocol::SettingsScope::Managed) => "policySettings",
+            Self::Settings(lingxi_core::types::SettingsScope::Managed) => "policySettings",
             Self::CliArg => "cliArg",
             Self::Command => "command",
             Self::Session => "session",
@@ -312,7 +312,7 @@ mod tests {
         // #35: claude-code's Szn cites userSettings before session, so
         // userSettings has the higher citation precedence (NOT session).
         assert!(
-            PermissionRuleSource::Settings(protocol::SettingsScope::User).priority()
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User).priority()
                 > PermissionRuleSource::Session.priority()
         );
     }
@@ -328,7 +328,7 @@ mod tests {
     /// and names it, rather than reporting a single opaque inequality.
     #[test]
     fn citation_precedence_walks_the_whole_szn_chain_descending() {
-        use protocol::SettingsScope as T;
+        use lingxi_core::types::SettingsScope as T;
         // claude-code `Szn`: userSettings → projectSettings → localSettings →
         // flagSettings → policySettings → cliArg → command → session, then the
         // two latent producers. FIRST in the walk wins citation, and `priority`
@@ -371,7 +371,7 @@ mod tests {
     /// a denial names.
     #[test]
     fn citation_precedence_is_the_reverse_of_value_precedence_for_the_file_tiers() {
-        use protocol::SettingsScope as T;
+        use lingxi_core::types::SettingsScope as T;
         // Citation: user cites before project cites before local.
         assert!(
             PermissionRuleSource::Settings(T::User).priority()

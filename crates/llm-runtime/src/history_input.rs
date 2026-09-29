@@ -73,7 +73,8 @@ fn block(block: &ContentBlock) -> Result<wire::ContentBlock, LlmError> {
             cache_control,
             cache_reference,
         } => {
-            let exact_text = ::protocol::js_utf16::tool_result_display(output).map(Value::String);
+            let exact_text =
+                ::lingxi_core::types::js_utf16::tool_result_display(output).map(Value::String);
             let output = exact_text.as_ref().unwrap_or(output);
             if cache_reference.is_some() {
                 let content = if output.is_string() || output.is_array() {
@@ -273,7 +274,7 @@ pub fn history_input(
                         utf16_code_units, ..
                     } => Some(("text", utf16_code_units.clone())),
                     ContentBlock::ToolResult { output, .. } => {
-                        ::protocol::js_utf16::tool_result_units(output)
+                        ::lingxi_core::types::js_utf16::tool_result_units(output)
                             .map(|units| ("content", units))
                     }
                     _ => None,

@@ -97,8 +97,8 @@ mod credential_provider_tests {
     use super::*;
     use crate::auth::openai::refresh::AuthState;
     use crate::auth::openai::testsupport::{Canned, MockHttp, TestClock};
+    use lingxi_core::types::Secret;
     use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
-    use protocol::Secret;
     use std::time::{Duration, SystemTime};
 
     #[tokio::test]
@@ -116,7 +116,7 @@ mod credential_provider_tests {
             true,
             Some("acc_xyz@example.com".into()),
             http as Arc<dyn lingxi_llm_client::Transport>,
-            clock as Arc<dyn platform_api::Clock>,
+            clock as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );
@@ -161,7 +161,7 @@ mod credential_provider_tests {
             false,
             None,
             http as Arc<dyn lingxi_llm_client::Transport>,
-            clock as Arc<dyn platform_api::Clock>,
+            clock as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );
@@ -198,7 +198,7 @@ mod credential_provider_tests {
             false,
             None,
             http as Arc<dyn lingxi_llm_client::Transport>,
-            clock as Arc<dyn platform_api::Clock>,
+            clock as Arc<dyn lingxi_core::host::Clock>,
             None,
             None,
         );

@@ -5,6 +5,7 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use async_trait::async_trait;
+use lingxi_core::types::ToolUseId;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::structured_output::{StructuredOutputSlot, StructuredOutputTool};
 use orchestrator::test_support::{
@@ -14,7 +15,6 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use protocol::ToolUseId;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tool_api::progress::ToolProgressSender;

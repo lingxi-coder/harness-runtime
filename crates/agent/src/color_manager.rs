@@ -8,7 +8,7 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::display::AgentColor;
-use protocol::AgentId;
+use lingxi_core::types::AgentId;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 

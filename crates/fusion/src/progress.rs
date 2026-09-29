@@ -1,6 +1,6 @@
 //! Progress fan-out helper.
 
-use platform_api::{FusionProgress, FusionStage};
+use lingxi_core::host::{FusionProgress, FusionStage};
 use tokio::sync::mpsc::Sender;
 
 /// Best-effort progress send. A closed OR FULL channel is ignored (F005):
@@ -33,7 +33,7 @@ pub fn emit(
 /// (`panel::PanelDispatch::allocated_count`), and only they may send it: on
 /// every other event `panels_allocated` stays `None`, which consumers read as
 /// "no figure published" rather than "zero allocated". See
-/// [`platform_api::FusionProgress::panels_allocated`] for why the resolved
+/// [`lingxi_core::host::FusionProgress::panels_allocated`] for why the resolved
 /// `total` on the stage cannot answer the same question.
 pub fn emit_with_allocated(
     progress: &Option<Sender<FusionProgress>>,

@@ -77,7 +77,7 @@ pub fn is_long_output(stdout: &str) -> bool {
 #[must_use]
 pub fn is_enabled() -> bool {
     let raw = std::env::var("CLAUDE_CODE_BASH_OUTPUT_AUDIENCE_NOTE").ok();
-    platform_api::env::is_env_truthy(raw.as_deref())
+    lingxi_core::host::env::is_env_truthy(raw.as_deref())
 }
 
 /// `kpm(toolName, data, model)` — should the note follow this tool result?

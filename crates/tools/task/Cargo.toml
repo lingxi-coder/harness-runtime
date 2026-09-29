@@ -8,8 +8,6 @@ license.workspace = true
 [dependencies]
 tool-api = { path = "../../tool-api" }
 branding.workspace = true
-platform-api = { path = "../../platform-api" }
-protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
 # Monitor's lJr() push-notification splice reuses the shared `Yke()` predicate.

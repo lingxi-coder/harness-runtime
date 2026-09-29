@@ -5,7 +5,7 @@
 //! locked at 108.
 
 use crate::parser::ParsedSlashCommand;
-use platform_api::{
+use lingxi_core::host::{
     normalize_dimensions, normalize_dimensions_for, validate_verify_commands, FusionModelRef,
     FusionOrigin, FusionPanelMode, FusionPreset, FusionRequest, FUSION_MAX_PANEL, FUSION_MIN_PANEL,
     FUSION_SCHEMA_VERSION,
@@ -457,13 +457,15 @@ fn parse_csv(raw: &str, flag: &str) -> Result<Vec<String>, String> {
 }
 
 /// Splits `raw` on commas, then parses each entry through the single
-/// `platform_api::parse_fusion_model_ref` the Agent tool also routes through,
+/// `lingxi_core::host::parse_fusion_model_ref` the Agent tool also routes through,
 /// so a malformed entry (e.g. `openai:` — a colon with an empty model) is
 /// rejected identically from every entrypoint.
 fn parse_models(raw: &str) -> Result<Vec<FusionModelRef>, String> {
     let mut out = Vec::new();
     for item in parse_csv(raw, "--models")? {
-        out.push(platform_api::parse_fusion_model_ref(&item).map_err(|error| error.to_string())?);
+        out.push(
+            lingxi_core::host::parse_fusion_model_ref(&item).map_err(|error| error.to_string())?,
+        );
     }
     if out.len() < usize::from(FUSION_MIN_PANEL) {
         return Err("explicit --models must contain at least 2 entries".into());
@@ -575,7 +577,7 @@ mod tests {
 
     #[test]
     fn a_colon_with_an_empty_model_is_rejected_with_the_same_message_as_the_agent_tool() {
-        // `platform_api::parse_fusion_model_ref` is the single implementation
+        // `lingxi_core::host::parse_fusion_model_ref` is the single implementation
         // both `/fusion` and the Agent tool (`tools/agent/src/agent.rs`'s
         // `parse_fusion_models`) route a `--models`/`models[]` entry through,
         // so an invalid entry rejects identically from either entrypoint.
@@ -819,7 +821,7 @@ mod tests {
         assert_eq!(implement.verify_commands, vec!["cargo check".to_string()]);
         assert_eq!(
             implement.dimensions,
-            platform_api::DEFAULT_IMPLEMENT_FUSION_DIMENSIONS
+            lingxi_core::host::DEFAULT_IMPLEMENT_FUSION_DIMENSIONS
         );
         let custom = request("/fusion --implement --dimensions scope,speed do it");
         assert_eq!(
@@ -830,6 +832,9 @@ mod tests {
         let analysis = request("/fusion review it");
         assert_eq!(analysis.mode, FusionPanelMode::Analysis);
         assert!(analysis.verify_commands.is_empty());
-        assert_eq!(analysis.dimensions, platform_api::DEFAULT_FUSION_DIMENSIONS);
+        assert_eq!(
+            analysis.dimensions,
+            lingxi_core::host::DEFAULT_FUSION_DIMENSIONS
+        );
     }
 }

@@ -4,7 +4,7 @@
 //! execution in `process.rs`. Fail-closed: every unenforceable request is
 //! rejected with a named guarantee.
 
-use platform_api::{NetworkPolicy, SandboxError, SandboxPolicy};
+use lingxi_core::host::{NetworkPolicy, SandboxError, SandboxPolicy};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -278,7 +278,7 @@ pub fn build_shell_env<S: std::hash::BuildHasher>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::{NetworkPolicy, ResourceLimits, SandboxError, SandboxPolicy};
+    use lingxi_core::host::{NetworkPolicy, ResourceLimits, SandboxError, SandboxPolicy};
     use std::collections::HashMap;
 
     #[test]

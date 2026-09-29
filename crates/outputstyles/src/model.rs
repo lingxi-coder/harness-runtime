@@ -84,7 +84,7 @@ pub enum OutputFormat {
 
 /// Where the style came from.
 ///
-/// The settings rungs are the shared [`protocol::SettingsScope`]; `Builtin` and
+/// The settings rungs are the shared [`lingxi_core::types::SettingsScope`]; `Builtin` and
 /// `Plugin` are this subsystem's own producers and stay here, because they are
 /// exactly what an output style can come from and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,7 +92,7 @@ pub enum OutputStyleSource {
     /// Compiled-in default.
     Builtin,
     /// Read from a settings tier's `output-styles/` directory.
-    Settings(protocol::SettingsScope),
+    Settings(lingxi_core::types::SettingsScope),
     /// Loaded by an installed plugin.
     Plugin,
 }

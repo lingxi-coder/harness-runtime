@@ -43,16 +43,16 @@ pub fn format_description_with_source(cmd: &SlashCommand) -> String {
         // TS: plugin → `(name) desc` when the manifest name is known, else `desc (plugin)`.
         CommandSource::Plugin => format!("{} (plugin)", cmd.description),
         // TS: `getSettingSourceName` mapping for the SettingSource cases.
-        CommandSource::Settings(protocol::SettingsScope::User) => {
+        CommandSource::Settings(lingxi_core::types::SettingsScope::User) => {
             format!("{} (user)", cmd.description)
         }
-        CommandSource::Settings(protocol::SettingsScope::Project) => {
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Project) => {
             format!("{} (project)", cmd.description)
         }
-        CommandSource::Settings(protocol::SettingsScope::Local) => {
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Local) => {
             format!("{} (project, gitignored)", cmd.description)
         }
-        CommandSource::Settings(protocol::SettingsScope::Managed) => {
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Managed) => {
             format!("{} (managed)", cmd.description)
         }
     }
@@ -80,7 +80,7 @@ mod tests {
         let c = cmd(
             "deploy",
             "Ship it",
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert_eq!(format_description_with_source(&c), "Ship it (project)");
     }
@@ -90,7 +90,7 @@ mod tests {
         let c = cmd(
             "note",
             "Jot a note",
-            CommandSource::Settings(protocol::SettingsScope::User),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         assert_eq!(format_description_with_source(&c), "Jot a note (user)");
     }
@@ -119,7 +119,7 @@ mod tests {
         let c = cmd(
             "x",
             "Local cmd",
-            CommandSource::Settings(protocol::SettingsScope::Local),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Local),
         );
         assert_eq!(
             format_description_with_source(&c),
@@ -132,7 +132,7 @@ mod tests {
         let c = cmd(
             "x",
             "Managed cmd",
-            CommandSource::Settings(protocol::SettingsScope::Managed),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Managed),
         );
         assert_eq!(format_description_with_source(&c), "Managed cmd (managed)");
     }
@@ -142,7 +142,7 @@ mod tests {
         let mut c = cmd(
             "skill",
             "A bundled skill",
-            CommandSource::Settings(protocol::SettingsScope::User),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         c.loaded_from = Some("bundled".to_string());
         assert_eq!(

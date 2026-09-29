@@ -23,6 +23,8 @@
 
 use std::sync::Arc;
 
+use lingxi_core::host::{McpTransport, McpTransportSpec, OutputEvent, ProcessOutput};
+use lingxi_core::types::ToolUseId;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 use orchestrator::test_support::{
@@ -33,8 +35,6 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use permission::gate::{PermissionDecision, PermissionGate};
 use permission::loader::permission_rules_from_settings_json;
 use permission::{PermissionMode, PermissionPolicy, PermissionRuleSource, PolicyPermissionGate};
-use platform_api::{McpTransport, McpTransportSpec, OutputEvent, ProcessOutput};
-use protocol::ToolUseId;
 use test_harness::mocks::MockMcpTransport;
 use tool_api::registry::ToolRegistry;
 use tool_api::BuiltinToolContext;
@@ -49,7 +49,7 @@ fn mock_config() -> McpServerConfig {
         spec: McpTransportSpec::InProcess {
             registry_key: "mock".into(),
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::User),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -100,7 +100,7 @@ fn policy_gate(
 ) -> Arc<PolicyPermissionGate> {
     let rules = permission_rules_from_settings_json(
         permissions_json,
-        PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
     )
     .unwrap();
     let policy = Arc::new(PermissionPolicy::from_rules(PermissionMode::Default, rules));
@@ -138,7 +138,7 @@ fn build_orchestrator(
 fn deny_rule_on_fqn_does_not_collide_with_builtin_short_name() {
     let rules = permission_rules_from_settings_json(
         r#"{ "permissions": { "deny": ["mcp__mock__a"] } }"#,
-        PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
     )
     .unwrap();
     let policy = PermissionPolicy::from_rules(PermissionMode::Default, rules);

@@ -1,4 +1,4 @@
-//! `AdapterPermissionGate` — the id-keyed, fail-closed `platform_api::PermissionGate`
+//! `AdapterPermissionGate` — the id-keyed, fail-closed `lingxi_core::host::PermissionGate`
 //! impl (plan F1-14).
 //!
 //! This is the hardest mapping in the adapter: it replicates the proven
@@ -10,7 +10,7 @@
 //!
 //! ## Shape (mirrors `TuiPermissionGate`, id-keyed)
 //!
-//! `check(name, &Value)` ([`platform_api::PermissionGate`]):
+//! `check(name, &Value)` ([`lingxi_core::host::PermissionGate`]):
 //! 1. Consult the session rules — short-circuit `Allow` if a rule matches the
 //!    bare tool name (same as the TUI gate).
 //! 2. Build a [`PermissionKindDto::ToolUseConfirm`] from `permission::tool_default`

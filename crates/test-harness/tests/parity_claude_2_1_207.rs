@@ -15,11 +15,11 @@
 //! WebFetch GETs bodies as `responseType:"arraybuffer"` so binary content is
 //! persisted byte-identically.
 
-use protocol::HttpResponse;
+use lingxi_core::types::HttpResponse;
 
 const HISTORICAL_VERSION: &str = "2.1.207";
 
-/// The live single source of truth (`platform_api::CLAUDE_CODE_VERSION`, R-V1)
+/// The live single source of truth (`lingxi_core::host::CLAUDE_CODE_VERSION`, R-V1)
 /// is asserted by the current 2.1.252 fixture. This historical fixture keeps
 /// its own 2.1.207 literal so a target bump cannot rewrite old captures.
 #[test]

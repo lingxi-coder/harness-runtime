@@ -6,7 +6,7 @@
 //! request/result contract together.
 
 use axum::{extract::State, routing::post, Json, Router};
-use platform_api::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
+use lingxi_core::host::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 use platform_posix::mcp::PosixMcpTransport;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -129,7 +129,7 @@ async fn spawn_mock(mode: DiscoveryMode) -> (String, MockState) {
 fn spec(url: String) -> McpTransportSpec {
     McpTransportSpec::Http {
         url,
-        headers: platform_api::McpHeaders::new(),
+        headers: lingxi_core::host::McpHeaders::new(),
         headers_helper: None,
         oauth: None,
     }
@@ -258,7 +258,7 @@ async fn remote_probe_timeout_is_not_treated_as_compatibility() {
         .await
         .expect_err("remote timeout must be reported");
     assert!(
-        matches!(&error, platform_api::McpError::Internal(message) if message.contains("timed out")),
+        matches!(&error, lingxi_core::host::McpError::Internal(message) if message.contains("timed out")),
         "unexpected remote timeout classification: {error:?}"
     );
 }
@@ -274,7 +274,7 @@ async fn remote_network_failure_is_not_treated_as_compatibility() {
         .await
         .expect_err("remote network failure must be reported");
     assert!(
-        matches!(&error, platform_api::McpError::Internal(message) if message.contains("timed out") || message.contains("writer")),
+        matches!(&error, lingxi_core::host::McpError::Internal(message) if message.contains("timed out") || message.contains("writer")),
         "unexpected remote network classification: {error:?}"
     );
 }
@@ -290,7 +290,7 @@ async fn remote_auth_error_is_not_treated_as_compatibility() {
     assert!(
         matches!(
             error,
-            platform_api::McpError::HttpResponse { status: 401, .. }
+            lingxi_core::host::McpError::HttpResponse { status: 401, .. }
         ),
         "unexpected remote auth classification: {error:?}"
     );
@@ -309,7 +309,7 @@ async fn modern_catalog_rejects_non_complete_result_type() {
         .await
         .expect_err("partial modern catalog result must fail");
     assert!(
-        matches!(&error, platform_api::McpError::Handshake(message) if message.contains("resultType")),
+        matches!(&error, lingxi_core::host::McpError::Handshake(message) if message.contains("resultType")),
         "unexpected modern result classification: {error:?}"
     );
     assert!(state.requests.lock().unwrap().iter().any(|request| {

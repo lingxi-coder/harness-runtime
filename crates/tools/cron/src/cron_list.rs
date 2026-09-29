@@ -93,7 +93,10 @@ fn truncate_single_line(s: &str, max_width: usize) -> String {
 /// definition, so the `durable:false`
 /// key (CronListTool.ts' `durable === false` spread, which only applies to the
 /// separate in-memory session tasks) is never emitted here.
-async fn read_durable_jobs(fs: &dyn platform_api::FileSystem, project_root: &Path) -> Vec<Value> {
+async fn read_durable_jobs(
+    fs: &dyn lingxi_core::host::FileSystem,
+    project_root: &Path,
+) -> Vec<Value> {
     let body = match cron::tasks_file::read_tasks_body(fs, project_root).await {
         Ok(b) => b,
         Err(_) => return Vec::new(), // file absent → no jobs
@@ -331,7 +334,7 @@ impl Tool for CronListTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::process::ProcessOutput;
+    use lingxi_core::host::process::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx_in};
 
     fn dummy_out() -> ProcessOutput {

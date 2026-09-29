@@ -13,7 +13,7 @@
 #![forbid(unsafe_code)]
 
 use super::StreamingError;
-use protocol::{ContentBlock, ToolUseId};
+use lingxi_core::types::{ContentBlock, ToolUseId};
 use serde_json::Value;
 use std::collections::HashMap;
 

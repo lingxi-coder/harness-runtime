@@ -1,7 +1,7 @@
 //! Dynamic authentication headers for remote MCP transports.
 
 use crate::{ConfigScope, McpServerConfig};
-use platform_api::{McpError, McpHeaders, McpTransportSpec};
+use lingxi_core::host::{McpError, McpHeaders, McpTransportSpec};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -81,8 +81,8 @@ fn headers_helper_parts(spec: &McpTransportSpec) -> Option<(&str, &str)> {
 fn ensure_helper_source_trusted(scope: ConfigScope, cwd: &Path) -> Result<(), McpError> {
     if !matches!(
         scope,
-        ConfigScope::Settings(protocol::SettingsScope::Project)
-            | ConfigScope::Settings(protocol::SettingsScope::Local)
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
+            | ConfigScope::Settings(lingxi_core::types::SettingsScope::Local)
     ) {
         return Ok(());
     }
@@ -315,8 +315,8 @@ mod tests {
     fn only_project_and_local_scopes_are_trust_gated() {
         let cwd = std::path::Path::new("/definitely/not/a/trusted/workspace");
         for scope in [
-            ConfigScope::Settings(protocol::SettingsScope::Project),
-            ConfigScope::Settings(protocol::SettingsScope::Local),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Local),
         ] {
             let err = ensure_helper_source_trusted(scope, cwd)
                 .expect_err("repo-resident scopes must require a trust record");
@@ -326,11 +326,11 @@ mod tests {
             );
         }
         for scope in [
-            ConfigScope::Settings(protocol::SettingsScope::User),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             ConfigScope::Dynamic,
             ConfigScope::Enterprise,
             ConfigScope::ClaudeAi,
-            ConfigScope::Settings(protocol::SettingsScope::Managed),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
             ConfigScope::Agent,
         ] {
             assert!(
@@ -439,7 +439,7 @@ mod tests {
                 ),
                 oauth: None,
             },
-            scope: ConfigScope::Settings(protocol::SettingsScope::User),
+            scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -479,7 +479,7 @@ mod tests {
                 headers_helper: Some("dd if=/dev/zero bs=1048576 count=2 2>/dev/null".into()),
                 oauth: None,
             },
-            scope: ConfigScope::Settings(protocol::SettingsScope::User),
+            scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             always_load: false,

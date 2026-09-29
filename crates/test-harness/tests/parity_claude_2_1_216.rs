@@ -9,7 +9,7 @@ const HISTORICAL_VERSION: &str = "2.1.216";
 #[test]
 fn historical_version_is_2_1_216() {
     assert_eq!(HISTORICAL_VERSION, "2.1.216");
-    assert_ne!(platform_api::CLAUDE_CODE_VERSION, HISTORICAL_VERSION);
+    assert_ne!(lingxi_core::host::CLAUDE_CODE_VERSION, HISTORICAL_VERSION);
 }
 
 /// Child processes receive the 2.1.216 `AI_AGENT` identifier.

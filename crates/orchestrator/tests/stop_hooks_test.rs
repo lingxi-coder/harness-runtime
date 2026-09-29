@@ -15,6 +15,10 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 use hooks::{HookExecutorImpl, HookPromptRunner, PromptHookError, PromptHookRequest};
+use lingxi_core::host::{
+    HttpError, HttpTransport, OrchestratorHandle, RuntimeError, RuntimeSpawner,
+};
+use lingxi_core::types::{HookId, HttpRequest, HttpResponse, SessionId};
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -22,8 +26,6 @@ use orchestrator::test_support::{
 use orchestrator::{
     ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, TurnOutcome,
 };
-use platform_api::{HttpError, HttpTransport, OrchestratorHandle, RuntimeError, RuntimeSpawner};
-use protocol::{HookId, HttpRequest, HttpResponse, SessionId};
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -45,7 +47,7 @@ impl HttpTransport for UnusedHttp {
     async fn stream_sse(
         &self,
         _req: HttpRequest,
-    ) -> Result<platform_api::http::SseStream, HttpError> {
+    ) -> Result<lingxi_core::host::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -56,11 +58,14 @@ impl RuntimeSpawner for UnusedRuntime {
         &self,
         _name: &str,
         _task: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, RuntimeError> {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _d: Duration) {}
-    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+    async fn cancel(
+        &self,
+        _h: &lingxi_core::host::BackgroundTaskHandle,
+    ) -> Result<(), RuntimeError> {
         Ok(())
     }
 }
@@ -148,7 +153,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         executor: DefHookExecutor::Builtin {
             handler_id: handler_id.into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -686,9 +691,9 @@ async fn stop_goal_registers_named_prompt_hook_and_clears_when_met() {
 async fn goal_status_transcript_records_set_progress_and_one_terminal_achievement() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("session.jsonl");
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
-        dir.path().to_path_buf(),
-    ));
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+        platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+    );
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
     let api = Arc::new(MockApiClient::new(vec![end_turn("1"), end_turn("2")]));
     let runner = Arc::new(ScriptedPromptRunner {
@@ -744,9 +749,9 @@ async fn goal_status_transcript_records_set_progress_and_one_terminal_achievemen
 async fn goal_status_transcript_records_impossible_as_failed() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("session.jsonl");
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
-        dir.path().to_path_buf(),
-    ));
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+        platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+    );
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
     let api = Arc::new(MockApiClient::new(vec![end_turn("1")]));
     let runner = Arc::new(ScriptedPromptRunner {
@@ -1320,7 +1325,7 @@ fn round_calling_ends_turn() -> Vec<llm_runtime::HistoryEvent> {
         message_start("m1", "claude-opus-4-7"),
         orchestrator::test_support_stream::content_block_start_tool_use(
             0,
-            protocol::ToolUseId::new(),
+            lingxi_core::types::ToolUseId::new(),
             "EndsTurn",
         ),
         input_json_delta(0, "{}"),

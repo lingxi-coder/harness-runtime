@@ -7,7 +7,7 @@ use crate::builtin_support::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::OrchestratorHandle;
+use lingxi_core::host::OrchestratorHandle;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
 
@@ -18,7 +18,7 @@ use telemetry::tengu::command as cmd_evt;
 const COMPACT_DISPLAY: &str = "Compacted (ctrl+o to see full summary)";
 
 /// `/compact` handler — calls
-/// [`OrchestratorHandle::force_compact`](platform_api::OrchestratorHandle::force_compact)
+/// [`OrchestratorHandle::force_compact`](lingxi_core::host::OrchestratorHandle::force_compact)
 /// and renders the summary template.
 #[derive(Clone)]
 pub struct CompactHandler {
@@ -157,8 +157,8 @@ pub fn compact_failure_is_error(msg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lingxi_core::host::CompactionSummary;
     use orchestrator::test_support::MockOrchestratorHandle;
-    use platform_api::CompactionSummary;
 
     #[test]
     fn latest_reactive_failure_notices_are_preserved() {
@@ -368,12 +368,12 @@ mod tests {
     #[tokio::test]
     async fn unwired_real_orchestrator_does_not_claim_success() {
         use compaction::CompactionOrchestrator;
+        use lingxi_core::types::{ConversationMessage, MessageId};
         use orchestrator::test_support::{
             noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
             StaticMemoryProvider,
         };
         use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-        use protocol::{ConversationMessage, MessageId};
 
         let api = Arc::new(MockApiClient::new(vec![]));
         let tools = Arc::new(tool_api::registry::ToolRegistry::new());
@@ -408,7 +408,7 @@ mod tests {
                 } else {
                     s.history.push(ConversationMessage::Assistant {
                         id: MessageId::new(),
-                        content: vec![protocol::ContentBlock::Text {
+                        content: vec![lingxi_core::types::ContentBlock::Text {
                             text: format!("reply-{i}"),
                         }],
                         stop_reason: Some("end_turn".into()),

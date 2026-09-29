@@ -79,11 +79,11 @@ mod register_audio_tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use platform_api::audio::{
+    use lingxi_core::host::audio::{
         AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioOperation, AudioOperationContext,
         AudioOperationId, AudioOperationKind, AudioOperationSuccess, AudioService,
     };
-    use platform_api::process::ProcessOutput;
+    use lingxi_core::host::process::ProcessOutput;
     use tool_api::{BuiltinToolContext, ToolRegistry};
 
     struct StubAudio(Vec<AudioOperationKind>);

@@ -270,7 +270,7 @@ macro_rules! impl_fixture_transport {
 
 /// Adapt a scripted general HTTP fixture to SDK byte streams; never used by hosts.
 pub async fn send_http_fixture(
-    transport: &dyn platform_api::HttpTransport,
+    transport: &dyn lingxi_core::host::HttpTransport,
     request: sdk::HttpRequest,
 ) -> Result<sdk::StreamResponse, wire::LlmError> {
     use futures::StreamExt;
@@ -279,11 +279,11 @@ pub async fn send_http_fixture(
         .and_then(|v| v.get("stream").and_then(|v| v.as_bool()))
         .unwrap_or(false);
     let method = match request.method.as_str() {
-        "GET" => protocol::HttpMethod::Get,
-        "POST" => protocol::HttpMethod::Post,
+        "GET" => lingxi_core::types::HttpMethod::Get,
+        "POST" => lingxi_core::types::HttpMethod::Post,
         _ => panic!("unsupported fixture method"),
     };
-    let request = protocol::HttpRequest {
+    let request = lingxi_core::types::HttpRequest {
         method,
         url: request.url,
         headers: request.headers,
@@ -291,7 +291,7 @@ pub async fn send_http_fixture(
         body_bytes: None,
         timeout: request.timeout,
     };
-    let error = |e: platform_api::HttpError| wire::LlmError::Transport {
+    let error = |e: lingxi_core::host::HttpError| wire::LlmError::Transport {
         message: e.to_string(),
     };
     if streaming {

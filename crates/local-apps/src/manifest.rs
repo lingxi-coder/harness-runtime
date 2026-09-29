@@ -10,8 +10,8 @@ use crate::mcp_settings::MCP_SETTINGS_FILE;
 use crate::permissions::AppCapability;
 use crate::runtime_v2::RUNTIME_API_MAJOR;
 use crate::types::{AppRuntimeProfile, APPS_SCHEMA_VERSION};
-use platform_api::rooted_fs::{self, AtomicWriteOptions};
-use platform_api::FsError;
+use lingxi_core::host::rooted_fs::{self, AtomicWriteOptions};
+use lingxi_core::host::FsError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -186,22 +186,25 @@ impl DeviceContext {
     /// carries exactly that meaning.
     #[must_use]
     pub fn from_host_environment(
-        environment: &platform_api::MobileHostEnvironment,
+        environment: &lingxi_core::host::MobileHostEnvironment,
     ) -> Option<Self> {
         let (os, form_factor) = match (environment.host_os, environment.device_class) {
-            (platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Phone) => {
+            (lingxi_core::host::MobileHostOs::Ios, lingxi_core::host::MobileDeviceClass::Phone) => {
                 ("ios", "iphone")
             }
-            (platform_api::MobileHostOs::Ios, platform_api::MobileDeviceClass::Tablet) => {
-                ("ios", "ipad")
-            }
-            (platform_api::MobileHostOs::Android, platform_api::MobileDeviceClass::Phone) => {
-                ("android", "phone")
-            }
-            (platform_api::MobileHostOs::Android, platform_api::MobileDeviceClass::Tablet) => {
-                ("android", "tablet")
-            }
-            (_, platform_api::MobileDeviceClass::Unknown) => return None,
+            (
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Tablet,
+            ) => ("ios", "ipad"),
+            (
+                lingxi_core::host::MobileHostOs::Android,
+                lingxi_core::host::MobileDeviceClass::Phone,
+            ) => ("android", "phone"),
+            (
+                lingxi_core::host::MobileHostOs::Android,
+                lingxi_core::host::MobileDeviceClass::Tablet,
+            ) => ("android", "tablet"),
+            (_, lingxi_core::host::MobileDeviceClass::Unknown) => return None,
         };
         Some(Self {
             os: os.into(),
@@ -1468,12 +1471,12 @@ mod tests {
     #[test]
     fn the_host_device_class_derives_the_platform_form_factor() {
         let derive = |host_os, device_class| {
-            DeviceContext::from_host_environment(&platform_api::MobileHostEnvironment::new(
+            DeviceContext::from_host_environment(&lingxi_core::host::MobileHostEnvironment::new(
                 host_os,
                 Some("19.0".into()),
                 device_class,
-                platform_api::MobileExecutionTarget::PhysicalDevice,
-                platform_api::MobileLaunchMode::Interactive,
+                lingxi_core::host::MobileExecutionTarget::PhysicalDevice,
+                lingxi_core::host::MobileLaunchMode::Interactive,
             ))
             .map(|context| (context.os, context.form_factor))
         };
@@ -1481,67 +1484,68 @@ mod tests {
         // must not reach the manifest verbatim.
         assert_eq!(
             derive(
-                platform_api::MobileHostOs::Ios,
-                platform_api::MobileDeviceClass::Phone
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Phone
             ),
             Some(("ios".into(), "iphone".into()))
         );
         assert_eq!(
             derive(
-                platform_api::MobileHostOs::Ios,
-                platform_api::MobileDeviceClass::Tablet
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Tablet
             ),
             Some(("ios".into(), "ipad".into()))
         );
         assert_eq!(
             derive(
-                platform_api::MobileHostOs::Android,
-                platform_api::MobileDeviceClass::Phone
+                lingxi_core::host::MobileHostOs::Android,
+                lingxi_core::host::MobileDeviceClass::Phone
             ),
             Some(("android".into(), "phone".into()))
         );
         assert_eq!(
             derive(
-                platform_api::MobileHostOs::Android,
-                platform_api::MobileDeviceClass::Tablet
+                lingxi_core::host::MobileHostOs::Android,
+                lingxi_core::host::MobileDeviceClass::Tablet
             ),
             Some(("android".into(), "tablet".into()))
         );
         assert_eq!(
             derive(
-                platform_api::MobileHostOs::Ios,
-                platform_api::MobileDeviceClass::Unknown
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Unknown
             ),
             None
         );
         // Every pair the derivation can produce must survive validation.
         for (host_os, device_class) in [
             (
-                platform_api::MobileHostOs::Ios,
-                platform_api::MobileDeviceClass::Phone,
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Phone,
             ),
             (
-                platform_api::MobileHostOs::Ios,
-                platform_api::MobileDeviceClass::Tablet,
+                lingxi_core::host::MobileHostOs::Ios,
+                lingxi_core::host::MobileDeviceClass::Tablet,
             ),
             (
-                platform_api::MobileHostOs::Android,
-                platform_api::MobileDeviceClass::Phone,
+                lingxi_core::host::MobileHostOs::Android,
+                lingxi_core::host::MobileDeviceClass::Phone,
             ),
             (
-                platform_api::MobileHostOs::Android,
-                platform_api::MobileDeviceClass::Tablet,
+                lingxi_core::host::MobileHostOs::Android,
+                lingxi_core::host::MobileDeviceClass::Tablet,
             ),
         ] {
             let mut manifest = manifest();
-            manifest.device_context =
-                DeviceContext::from_host_environment(&platform_api::MobileHostEnvironment::new(
+            manifest.device_context = DeviceContext::from_host_environment(
+                &lingxi_core::host::MobileHostEnvironment::new(
                     host_os,
                     None,
                     device_class,
-                    platform_api::MobileExecutionTarget::PhysicalDevice,
-                    platform_api::MobileLaunchMode::Interactive,
-                ));
+                    lingxi_core::host::MobileExecutionTarget::PhysicalDevice,
+                    lingxi_core::host::MobileLaunchMode::Interactive,
+                ),
+            );
             manifest
                 .validate()
                 .expect("a derived pair always validates");

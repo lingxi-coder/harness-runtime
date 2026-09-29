@@ -14,6 +14,7 @@
 #   command   (commands/<x>)     ✗ tool ✗ platform ✗ app ✗ sibling-command
 #   engine    (root-level)       ✗ tool ✗ platform ✗ skill ✗ command ✗ app ✗ monolith
 #   GLOBAL                       ✗ any non-leaf crate depending on an app/example leaf
+#   shared core                   ✗ domain, telemetry, platform implementation crates
 #
 # Exemptions: the legacy `tools` monolith aggregator + test-fixture crates.
 #

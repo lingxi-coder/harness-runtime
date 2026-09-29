@@ -1,5 +1,6 @@
 //! cc 2.1.263 Oer: retry from pre-attempt history plus the clean meta nudge.
 
+use lingxi_core::types::{ContentBlock, ConversationMessage};
 use llm_runtime::HistoryEvent;
 use orchestrator::test_support::{
     content_block_start_text, content_block_start_thinking, content_block_stop, message_delta_stop,
@@ -7,7 +8,6 @@ use orchestrator::test_support::{
     MockOutputStream, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use protocol::{ContentBlock, ConversationMessage};
 use std::{path::PathBuf, sync::Arc};
 use tool_api::registry::ToolRegistry;
 
@@ -62,7 +62,7 @@ async fn retry_request_omits_malformed_and_thinking_only_attempts() {
         assert!(!std::fs::read_to_string(&path).unwrap().contains("<invoke name=invalid>"));
         let events = output.snapshot().await;
         assert_eq!(events.iter().filter(|event| matches!(event,
-            platform_api::OutputEvent::MessageRetracted { .. })).count(), 1);
+            lingxi_core::host::OutputEvent::MessageRetracted { .. })).count(), 1);
         let calls = api.captured_calls().await;
         assert_eq!(calls.len(), 2, "{stop}");
         assert!(!calls[1].messages.iter().any(|message| matches!(message,

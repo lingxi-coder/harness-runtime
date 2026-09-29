@@ -6,7 +6,7 @@
 //! cases (append, truncate, mtime, flock) come with the broader 13-trait
 //! contract sweep in M2.
 
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 
 /// Run the standard [`FileSystem`] contract against an impl.
 ///

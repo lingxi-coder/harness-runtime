@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn exposes_desktop_command_metadata() {
         let handler = DesktopCronCommandHandler::new(tool_api::test_support::shell_test_ctx(
-            platform_api::process::ProcessOutput {
+            lingxi_core::host::process::ProcessOutput {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
@@ -439,7 +439,7 @@ mod tests {
     async fn explicit_command_persists_without_a_permission_round_trip() {
         let workspace = tempfile::tempdir().expect("temp workspace");
         let ctx = tool_api::test_support::shell_test_ctx_in(
-            platform_api::process::ProcessOutput {
+            lingxi_core::host::process::ProcessOutput {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,

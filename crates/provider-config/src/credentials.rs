@@ -188,17 +188,17 @@ mod tests {
     #[derive(Default)]
     struct MemStorage {
         map: std::sync::Mutex<
-            std::collections::HashMap<(String, String), protocol::SecureStorageData>,
+            std::collections::HashMap<(String, String), lingxi_core::types::SecureStorageData>,
         >,
     }
     #[async_trait::async_trait]
-    impl platform_api::SecureStorage for MemStorage {
+    impl lingxi_core::host::SecureStorage for MemStorage {
         async fn store(
             &self,
             service: &str,
             account: &str,
-            data: protocol::SecureStorageData,
-        ) -> Result<(), platform_api::SecureStorageError> {
+            data: lingxi_core::types::SecureStorageData,
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
             self.map
                 .lock()
                 .unwrap()
@@ -209,7 +209,10 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
+        ) -> Result<
+            Option<lingxi_core::types::SecureStorageData>,
+            lingxi_core::host::SecureStorageError,
+        > {
             Ok(self
                 .map
                 .lock()
@@ -221,7 +224,7 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<(), platform_api::SecureStorageError> {
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
             self.map
                 .lock()
                 .unwrap()
@@ -231,7 +234,7 @@ mod tests {
         async fn list(
             &self,
             service: &str,
-        ) -> Result<Vec<String>, platform_api::SecureStorageError> {
+        ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -244,29 +247,29 @@ mod tests {
         fn is_encrypted(&self) -> bool {
             false
         }
-        fn backend(&self) -> platform_api::SecureStorageBackend {
-            platform_api::SecureStorageBackend::PlainText
+        fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
+            lingxi_core::host::SecureStorageBackend::PlainText
         }
     }
     struct FixedClock;
-    impl platform_api::Clock for FixedClock {
+    impl lingxi_core::host::Clock for FixedClock {
         fn now(&self) -> std::time::SystemTime {
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000)
         }
     }
     struct NoHttp;
     #[async_trait::async_trait]
-    impl platform_api::HttpTransport for NoHttp {
+    impl lingxi_core::host::HttpTransport for NoHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
             panic!("credential tests must not perform HTTP");
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
             panic!("credential tests must not perform HTTP");
         }
     }

@@ -12,8 +12,8 @@ use crate::conversation::{OrchestratorApiClient, StreamingApiClient};
 use crate::model::rate_limit::{RateLimitInfo, RawUtilization};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use lingxi_core::types::ConversationMessage;
 use llm_runtime::{HistoryEvent, HistoryResponse, LlmError, MediaDelegationAccounting};
-use protocol::ConversationMessage;
 use std::sync::Arc;
 
 /// Subscriber-state seed for [`llm_runtime::ApiService`]'s 429 gate. Re-exported
@@ -42,9 +42,9 @@ pub struct ProviderApiAdapter {
 
 /// Whether `model` carries the canonical registry's `fast_mode` capability.
 fn model_supports_fast_mode(model: &str) -> bool {
-    platform_api::model_capabilities::has_capability(
+    lingxi_core::host::model_capabilities::has_capability(
         model,
-        platform_api::model_capabilities::ModelCapability::FastMode,
+        lingxi_core::host::model_capabilities::ModelCapability::FastMode,
     )
 }
 
@@ -136,14 +136,14 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
     ) -> Result<Option<u64>, String> {
         let blocks = match content {
             serde_json::Value::String(text) => {
-                vec![protocol::ContentBlock::Text { text: text.clone() }]
+                vec![lingxi_core::types::ContentBlock::Text { text: text.clone() }]
             }
             serde_json::Value::Array(values) => values
                 .iter()
                 .filter(|&block| {
                     block.get("type").and_then(serde_json::Value::as_str) == Some("text")
                 })
-                .map(|block| protocol::ContentBlock::Text {
+                .map(|block| lingxi_core::types::ContentBlock::Text {
                     text: block
                         .get("text")
                         .and_then(serde_json::Value::as_str)
@@ -157,7 +157,7 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
             return Ok(None);
         }
         let message = ConversationMessage::User {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content: blocks,
             is_meta: false,
             is_compact_summary: false,
@@ -410,7 +410,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         })
     }
 
-    fn list_model_listings(&self) -> Vec<platform_api::orchestrator::ModelListing> {
+    fn list_model_listings(&self) -> Vec<lingxi_core::host::orchestrator::ModelListing> {
         self.service
             .model_listings()
             .into_iter()
@@ -422,12 +422,12 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     /// Return the most recently observed rate-limit header snapshot.
     ///
     /// Delegates to [`Self::last_rate_limit_info`] and maps the internal
-    /// `RateLimitInfo` struct into the public [`platform_api::RateLimitSnapshot`]
+    /// `RateLimitInfo` struct into the public [`lingxi_core::host::RateLimitSnapshot`]
     /// (all three fields: `rate_limit_type`, `overage_status`, and
     /// `overage_disabled_reason`).
-    fn last_rate_limit_info(&self) -> Option<platform_api::RateLimitSnapshot> {
+    fn last_rate_limit_info(&self) -> Option<lingxi_core::host::RateLimitSnapshot> {
         self.last_rate_limit_info()
-            .map(|info| platform_api::RateLimitSnapshot {
+            .map(|info| lingxi_core::host::RateLimitSnapshot {
                 rate_limit_type: info.rate_limit_type,
                 overage_status: info.overage_status,
                 overage_disabled_reason: info.overage_disabled_reason,
@@ -450,13 +450,15 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.service.set_thinking_signature_stripped(stripped);
     }
 
-    fn thinking_stripped_messages(&self) -> std::collections::HashMap<protocol::MessageId, usize> {
+    fn thinking_stripped_messages(
+        &self,
+    ) -> std::collections::HashMap<lingxi_core::types::MessageId, usize> {
         self.service.thinking_stripped_messages()
     }
 
     fn set_thinking_stripped_messages(
         &self,
-        messages: std::collections::HashMap<protocol::MessageId, usize>,
+        messages: std::collections::HashMap<lingxi_core::types::MessageId, usize>,
     ) {
         self.service.set_thinking_stripped_messages(messages);
     }
@@ -515,60 +517,64 @@ impl OrchestratorApiClient for ProviderApiAdapter {
 /// callers.
 fn lower_reasoning_spec(
     raw: llm_runtime::ReasoningControlSpec,
-) -> platform_api::ReasoningControlSpec {
+) -> lingxi_core::host::ReasoningControlSpec {
     let mandatory = raw
         .mandatory_selection
         .as_ref()
         .map(|selection| match selection {
             llm_runtime::ReasoningSelection::Automatic => {
-                platform_api::ReasoningSelection::Automatic
+                lingxi_core::host::ReasoningSelection::Automatic
             }
-            llm_runtime::ReasoningSelection::Disabled => platform_api::ReasoningSelection::Disabled,
-            llm_runtime::ReasoningSelection::Enabled => platform_api::ReasoningSelection::Enabled,
+            llm_runtime::ReasoningSelection::Disabled => {
+                lingxi_core::host::ReasoningSelection::Disabled
+            }
+            llm_runtime::ReasoningSelection::Enabled => {
+                lingxi_core::host::ReasoningSelection::Enabled
+            }
             llm_runtime::ReasoningSelection::Level(id) => {
-                platform_api::ReasoningSelection::Level { id: id.clone() }
+                lingxi_core::host::ReasoningSelection::Level { id: id.clone() }
             }
             llm_runtime::ReasoningSelection::TokenBudget(tokens) => {
-                platform_api::ReasoningSelection::TokenBudget {
+                lingxi_core::host::ReasoningSelection::TokenBudget {
                     tokens: u64::from(*tokens),
                 }
             }
         });
-    let mut available = vec![platform_api::ReasoningSelection::Automatic];
+    let mut available = vec![lingxi_core::host::ReasoningSelection::Automatic];
     if let Some(required) = mandatory.as_ref() {
         available = vec![required.clone()];
     } else {
         if raw.can_disable {
-            available.push(platform_api::ReasoningSelection::Disabled);
+            available.push(lingxi_core::host::ReasoningSelection::Disabled);
         }
         if raw.can_enable {
-            available.push(platform_api::ReasoningSelection::Enabled);
+            available.push(lingxi_core::host::ReasoningSelection::Enabled);
         }
         available.extend(
             raw.levels
                 .iter()
                 .cloned()
-                .map(|id| platform_api::ReasoningSelection::Level { id }),
+                .map(|id| lingxi_core::host::ReasoningSelection::Level { id }),
         );
     }
     let auto_only = available.len() == 1
         && matches!(
             available.first(),
-            Some(platform_api::ReasoningSelection::Automatic)
+            Some(lingxi_core::host::ReasoningSelection::Automatic)
         )
         && raw.token_budget.is_none();
-    platform_api::ReasoningControlSpec {
+    lingxi_core::host::ReasoningControlSpec {
         available,
         selections_persistable: mandatory.is_none(),
         budget_range: raw
             .token_budget
-            .map(|range| platform_api::ReasoningBudgetRange {
+            .map(|range| lingxi_core::host::ReasoningBudgetRange {
                 min_tokens: range.min,
                 max_tokens: range.max,
                 supports_dynamic: false,
                 supports_disabled: raw.can_disable,
             }),
-        provider_default: mandatory.unwrap_or(platform_api::ReasoningSelection::Automatic),
+        provider_default: mandatory.unwrap_or(lingxi_core::host::ReasoningSelection::Automatic),
         forced: raw.mandatory_selection.is_some(),
         modifiable: raw.mandatory_selection.is_none() && !auto_only,
         disabled_reason: if raw.mandatory_selection.is_some() {
@@ -583,8 +589,8 @@ fn lower_reasoning_spec(
 
 /// Project an llm-runtime route listing into the provider-neutral picker type.
 #[must_use]
-pub fn lower_model_listing(listing: llm_runtime::ModelListing) -> platform_api::ModelListing {
-    let capabilities = platform_api::ModelCapabilities {
+pub fn lower_model_listing(listing: llm_runtime::ModelListing) -> lingxi_core::host::ModelListing {
+    let capabilities = lingxi_core::host::ModelCapabilities {
         streaming: listing.capabilities.streaming,
         tools: listing.capabilities.tools,
         vision: listing.capabilities.vision,
@@ -597,14 +603,14 @@ pub fn lower_model_listing(listing: llm_runtime::ModelListing) -> platform_api::
     // several; a standalone provider leaves this default so every existing
     // consumer keeps reading `provider_id` and nothing changes for it.
     let connection = if listing.group == listing.profile_name {
-        platform_api::ConnectionRef::default()
+        lingxi_core::host::ConnectionRef::default()
     } else {
-        platform_api::ConnectionRef {
+        lingxi_core::host::ConnectionRef {
             group: Some(listing.group),
             connection_id: Some(listing.connection_id),
         }
     };
-    platform_api::ModelListing {
+    lingxi_core::host::ModelListing {
         display_model: listing.display_model,
         request_model: listing.request_model,
         provider_label: provider_label_owned(&listing.profile_name),
@@ -619,7 +625,7 @@ pub fn lower_model_listing(listing: llm_runtime::ModelListing) -> platform_api::
     }
 }
 
-fn catalog_model_listings() -> Vec<platform_api::orchestrator::ModelListing> {
+fn catalog_model_listings() -> Vec<lingxi_core::host::orchestrator::ModelListing> {
     // Build one listing, defaulting an absent description to a known per-model
     // parity blurb for the Claude family (models.dev / the Anthropic profiles
     // carry no such string).
@@ -631,7 +637,7 @@ fn catalog_model_listings() -> Vec<platform_api::orchestrator::ModelListing> {
                supports_reasoning: bool| {
         let description =
             description.or_else(|| model_description(&request_model).map(str::to_string));
-        platform_api::orchestrator::ModelListing {
+        lingxi_core::host::orchestrator::ModelListing {
             connection: Default::default(),
             display_model,
             request_model,
@@ -639,12 +645,12 @@ fn catalog_model_listings() -> Vec<platform_api::orchestrator::ModelListing> {
             provider_id: provider,
             description,
             supports_reasoning,
-            metadata: platform_api::ModelMetadata::default(),
-            capabilities: platform_api::ModelCapabilities {
+            metadata: lingxi_core::host::ModelMetadata::default(),
+            capabilities: lingxi_core::host::ModelCapabilities {
                 reasoning: supports_reasoning,
-                ..platform_api::ModelCapabilities::default()
+                ..lingxi_core::host::ModelCapabilities::default()
             },
-            reasoning: platform_api::ReasoningControlSpec::default(),
+            reasoning: lingxi_core::host::ReasoningControlSpec::default(),
             // This fallback catalog carries no per-route capability or protocol
             // facts (`ModelCapabilities::default()` above), so it cannot claim
             // a route can judge. Fail closed: the `/fusion setup` analyst
@@ -655,7 +661,7 @@ fn catalog_model_listings() -> Vec<platform_api::orchestrator::ModelListing> {
     };
 
     // 1. First-party Anthropic (not in the preset catalog).
-    let mut listings: Vec<platform_api::orchestrator::ModelListing> =
+    let mut listings: Vec<lingxi_core::host::orchestrator::ModelListing> =
         llm_runtime::anthropic_model_profiles()
             .into_iter()
             .map(|m| {
@@ -794,7 +800,7 @@ pub(crate) fn model_description(request_model: &str) -> Option<&'static str> {
 /// vendor, so the label is built from the VENDOR plus the connection using the
 /// same parser the TUI picker and the desktop header use.
 fn provider_label_owned(profile_name: &str) -> String {
-    let (group, connection, slot) = platform_api::split_connection_profile(profile_name);
+    let (group, connection, slot) = lingxi_core::host::split_connection_profile(profile_name);
     if connection.is_none() && slot.is_none() {
         return provider_label(profile_name).to_string();
     }
@@ -1067,13 +1073,15 @@ impl StreamingApiClient for ProviderApiAdapter {
         self.service.set_thinking_signature_stripped(stripped);
     }
 
-    fn thinking_stripped_messages(&self) -> std::collections::HashMap<protocol::MessageId, usize> {
+    fn thinking_stripped_messages(
+        &self,
+    ) -> std::collections::HashMap<lingxi_core::types::MessageId, usize> {
         self.service.thinking_stripped_messages()
     }
 
     fn set_thinking_stripped_messages(
         &self,
-        messages: std::collections::HashMap<protocol::MessageId, usize>,
+        messages: std::collections::HashMap<lingxi_core::types::MessageId, usize>,
     ) {
         self.service.set_thinking_stripped_messages(messages);
     }
@@ -1223,7 +1231,7 @@ mod tests {
         let settings = crate::scheduled_turn::ScheduledSettings {
             model: "claude-sonnet-4-20250514".into(),
             provider: "anthropic".into(),
-            reasoning: platform_api::ReasoningSelection::Disabled,
+            reasoning: lingxi_core::host::ReasoningSelection::Disabled,
             thinking: llm_runtime::model::thinking::ThinkingConfig::Disabled,
             effort: None,
         };
@@ -1386,13 +1394,13 @@ mod tests {
         )
         .with_jsonl_writer(writer);
         let old = ConversationMessage::Assistant {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content: vec![
-                protocol::ContentBlock::Thinking {
+                lingxi_core::types::ContentBlock::Thinking {
                     thinking: "rejected".into(),
                     signature: Some("sig".into()),
                 },
-                protocol::ContentBlock::Text {
+                lingxi_core::types::ContentBlock::Text {
                     text: "old answer".into(),
                 },
             ],
@@ -1445,7 +1453,7 @@ mod tests {
         assert!(resumed_history.iter().all(|m| match m {
             ConversationMessage::Assistant { content, .. } => !content
                 .iter()
-                .any(|b| matches!(b, protocol::ContentBlock::Thinking { .. })),
+                .any(|b| matches!(b, lingxi_core::types::ContentBlock::Thinking { .. })),
             _ => true,
         }));
         orch.persist_thinking_signature_strip_latch().await;
@@ -1511,13 +1519,13 @@ mod tests {
         });
         let adapter = make_adapter(transport.clone());
         let old = ConversationMessage::Assistant {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content: vec![
-                protocol::ContentBlock::Thinking {
+                lingxi_core::types::ContentBlock::Thinking {
                     thinking: "parent".into(),
                     signature: Some("sig".into()),
                 },
-                protocol::ContentBlock::Text {
+                lingxi_core::types::ContentBlock::Text {
                     text: "answer".into(),
                 },
             ],
@@ -1554,13 +1562,13 @@ mod tests {
         assert_eq!(a.messages().get(&old.id()), Some(&0));
         assert!(b.messages().is_empty());
         let fresh = ConversationMessage::Assistant {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content: vec![
-                protocol::ContentBlock::Thinking {
+                lingxi_core::types::ContentBlock::Thinking {
                     thinking: "fresh".into(),
                     signature: Some("fresh-sig".into()),
                 },
-                protocol::ContentBlock::Text {
+                lingxi_core::types::ContentBlock::Text {
                     text: "fresh answer".into(),
                 },
             ],
@@ -1568,7 +1576,7 @@ mod tests {
         };
         let history = vec![
             old.clone(),
-            ConversationMessage::user(protocol::MessageId::new(), "continue".into()),
+            ConversationMessage::user(lingxi_core::types::MessageId::new(), "continue".into()),
             fresh.clone(),
         ];
         let (ra, rb) = tokio::join!(
@@ -1793,8 +1801,8 @@ mod tests {
     async fn count_tokens_default_impl_is_byte_over_four_approximation() {
         let mock = crate::test_support::MockApiClient::new(vec![]);
         // system = 8 bytes; one user message of 40 bytes → (8 + 40) / 4 = 12.
-        let msgs = vec![protocol::ConversationMessage::user(
-            protocol::MessageId::new(),
+        let msgs = vec![lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
             "1234567890123456789012345678901234567890".to_string(),
         )];
         let count = OrchestratorApiClient::count_tokens(
@@ -2098,7 +2106,7 @@ mod tests {
     // ── Task 5 Part B: OrchestratorApiClient::last_rate_limit_info ──────────────
 
     /// `OrchestratorApiClient::last_rate_limit_info` returns the adapter's stored
-    /// rate-limit info mapped into a `platform_api::RateLimitSnapshot`.
+    /// rate-limit info mapped into a `lingxi_core::host::RateLimitSnapshot`.
     ///
     /// After a 2xx response with unified headers the snapshot must carry all
     /// three fields: `rate_limit_type`, `overage_status`, and

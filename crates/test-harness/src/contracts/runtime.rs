@@ -12,7 +12,7 @@
 //! The suite is parameterized over a `&R: RuntimeSpawner`; drivers in
 //! `tests/` exercise it against the mock, posix, and windows impls.
 
-use platform_api::{RuntimeError, RuntimeSpawner};
+use lingxi_core::host::{RuntimeError, RuntimeSpawner};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use llm_runtime::{HistoryEvent, LlmError};
-use protocol::{ContentBlock, ConversationMessage, MessageId};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -23,7 +23,7 @@ use crate::turn_loop::{
 pub(super) struct StreamingTurnDriver<'a> {
     pub(super) orch: &'a ConversationOrchestrator,
     pub(super) prompt: &'a str,
-    pub(super) images: Vec<protocol::ImageSource>,
+    pub(super) images: Vec<lingxi_core::types::ImageSource>,
     pub(super) user_cancel: Option<CancellationToken>,
     pub(super) message_id: Option<MessageId>,
     pub(super) transient_rewake: bool,

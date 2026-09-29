@@ -23,7 +23,7 @@
 //! clear/keep transform and therefore assumes its caller already passed the
 //! time gate.
 
-use protocol::{ContentBlock, ConversationMessage};
+use lingxi_core::types::{ContentBlock, ConversationMessage};
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
@@ -162,7 +162,7 @@ pub struct TimeBasedTrigger {
 /// Time-gap trigger predicate (TS `evaluateTimeBasedTrigger`,
 /// `microCompact.ts:422-444`). Returns `Some` when microcompact should fire.
 ///
-/// Because `protocol::ConversationMessage` has no per-message timestamp (and is
+/// Because `lingxi_core::types::ConversationMessage` has no per-message timestamp (and is
 /// frozen), the caller must supply `last_assistant_timestamp` out-of-band.
 /// Returns `None` when disabled, when there is no assistant timestamp, or when
 /// the gap is below `gap_threshold_minutes`.
@@ -189,7 +189,9 @@ pub fn evaluate_time_based_trigger(
 /// [`compactable_tools`], in encounter order. Keys on **assistant** `ToolUse`
 /// blocks (TS `collectCompactableToolIds`, `microCompact.ts:226-241`).
 #[must_use]
-pub fn collect_compactable_tool_ids(messages: &[ConversationMessage]) -> Vec<protocol::ToolUseId> {
+pub fn collect_compactable_tool_ids(
+    messages: &[ConversationMessage],
+) -> Vec<lingxi_core::types::ToolUseId> {
     let compactable = compactable_tools();
     let mut ids = Vec::new();
     for message in messages {
@@ -219,7 +221,7 @@ pub fn collect_compactable_tool_ids(messages: &[ConversationMessage]) -> Vec<pro
 pub fn keep_recent_persist_candidates(
     messages: &[ConversationMessage],
     keep_recent: usize,
-) -> Vec<(protocol::ToolUseId, String)> {
+) -> Vec<(lingxi_core::types::ToolUseId, String)> {
     let estimate = estimate_keep_recent(messages, keep_recent);
     let mut out = Vec::new();
     for message in messages {
@@ -281,11 +283,11 @@ fn has_media_blocks(blocks: Option<&[serde_json::Value]>) -> bool {
 #[derive(Debug, Clone)]
 pub struct KeepRecentEstimate {
     /// Tool-use ids whose results would be cleared.
-    pub clear_set: HashSet<protocol::ToolUseId>,
+    pub clear_set: HashSet<lingxi_core::types::ToolUseId>,
     /// Ids with an uncleared result block (`new Set(candidates.map(id))`).
-    pub candidate_ids: HashSet<protocol::ToolUseId>,
+    pub candidate_ids: HashSet<lingxi_core::types::ToolUseId>,
     /// Tool-use ids whose results would be kept (the most recent N).
-    pub keep_set: HashSet<protocol::ToolUseId>,
+    pub keep_set: HashSet<lingxi_core::types::ToolUseId>,
     /// Number of tool-result blocks that would be cleared.
     pub cleared_count: usize,
     /// Approximate tokens the clear would free (TS `tokensSaved`).
@@ -303,12 +305,12 @@ pub fn estimate_keep_recent(
 ) -> KeepRecentEstimate {
     let compactable_ids = collect_compactable_tool_ids(messages);
     let keep_count = keep_recent.max(1).min(compactable_ids.len());
-    let keep_set: HashSet<protocol::ToolUseId> = compactable_ids
+    let keep_set: HashSet<lingxi_core::types::ToolUseId> = compactable_ids
         [compactable_ids.len() - keep_count..]
         .iter()
         .cloned()
         .collect();
-    let clear_set: HashSet<protocol::ToolUseId> = compactable_ids
+    let clear_set: HashSet<lingxi_core::types::ToolUseId> = compactable_ids
         .iter()
         .filter(|&id| !keep_set.contains(id))
         .cloned()
@@ -416,7 +418,7 @@ impl Microcompactor {
         &self,
         messages: Vec<ConversationMessage>,
         _now: SystemTime,
-        persisted: &std::collections::HashMap<protocol::ToolUseId, String>,
+        persisted: &std::collections::HashMap<lingxi_core::types::ToolUseId, String>,
     ) -> MicrocompactResult {
         // Pass 1 + the scan-only pass, both via `estimate_keep_recent` — the
         // oracle's own factoring (`qsd` calls `ARs`), so the "would this be
@@ -521,7 +523,7 @@ impl Microcompactor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{MessageId, ToolUseId};
+    use lingxi_core::types::{MessageId, ToolUseId};
     use serde_json::json;
 
     fn assistant_tool_use(name: &str, id: ToolUseId) -> ConversationMessage {

@@ -4,7 +4,7 @@
 use crate::jsonl::{read_recover, StorageError};
 use crate::metadata::SessionMetadata;
 use crate::transcript::TranscriptEntry;
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -24,7 +24,7 @@ pub struct LoadedSession {
     /// Persisted session metadata.
     pub metadata: SessionMetadata,
     /// Recovered conversation messages in arrival order.
-    pub messages: Vec<protocol::ConversationMessage>,
+    pub messages: Vec<lingxi_core::types::ConversationMessage>,
 }
 
 impl SessionStorage {
@@ -40,20 +40,20 @@ impl SessionStorage {
 
     /// Directory holding `metadata.json` and `transcript.jsonl` for one session.
     #[must_use]
-    pub fn session_dir(&self, session_id: &protocol::SessionId) -> PathBuf {
+    pub fn session_dir(&self, session_id: &lingxi_core::types::SessionId) -> PathBuf {
         self.base_dir.join(session_id.as_uuid().to_string())
     }
 
     /// Full path to a session's transcript.
     #[must_use]
-    pub fn transcript_path(&self, session_id: &protocol::SessionId) -> PathBuf {
+    pub fn transcript_path(&self, session_id: &lingxi_core::types::SessionId) -> PathBuf {
         self.session_dir(session_id).join("transcript.jsonl")
     }
 
     /// Append one entry to the transcript with flock + fsync.
     pub async fn append(
         &self,
-        session_id: &protocol::SessionId,
+        session_id: &lingxi_core::types::SessionId,
         entry: TranscriptEntry,
     ) -> Result<(), StorageError> {
         let _guard = self.write_lock.lock().await;
@@ -81,7 +81,7 @@ impl SessionStorage {
     /// Load metadata + recover transcript messages.
     pub async fn load(
         &self,
-        session_id: &protocol::SessionId,
+        session_id: &lingxi_core::types::SessionId,
     ) -> Result<LoadedSession, StorageError> {
         let meta_path = self.session_dir(session_id).join("metadata.json");
         let meta_str = self

@@ -6,7 +6,7 @@
 
 use crate::mode::PermissionMode;
 use crate::rule::PermissionRule;
-use protocol::RequestId;
+use lingxi_core::types::RequestId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;

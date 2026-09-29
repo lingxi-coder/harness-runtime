@@ -352,7 +352,7 @@ fn check_existing_windows_file(path: &Path) -> Result<(), String> {
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)?;
         let metadata = file.metadata()?;
-        let links = platform_api::rooted_fs::file_link_count(&file)?;
+        let links = lingxi_core::host::rooted_fs::file_link_count(&file)?;
         Ok((metadata, links))
     };
     let (metadata, links) = checked()

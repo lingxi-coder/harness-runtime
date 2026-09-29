@@ -9,7 +9,7 @@
 //! here would dispatch a fresh connection's capture into a torn-down engine's
 //! Swift object.
 
-use platform_api::{
+use lingxi_core::host::{
     audio::AudioService, CalendarProvider, CameraControl, Clipboard, ContactsProvider,
     DeepLinkOpener, DeviceStatusProvider, HapticService, LocationProvider, NotificationService,
     SharingService,
@@ -134,7 +134,7 @@ impl SharedDeviceCapabilities {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::{CameraError, CapturePhotoOpts, CapturedImage};
+    use lingxi_core::host::{CameraError, CapturePhotoOpts, CapturedImage};
 
     struct FakeCamera;
 

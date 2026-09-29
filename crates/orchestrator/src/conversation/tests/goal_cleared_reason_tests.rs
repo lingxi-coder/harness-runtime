@@ -53,7 +53,7 @@ async fn system_notices(output: &MockOutputStream) -> Vec<String> {
         .await
         .into_iter()
         .filter_map(|event| match event {
-            platform_api::OutputEvent::SystemNotice { body, .. } => Some(body),
+            lingxi_core::host::OutputEvent::SystemNotice { body, .. } => Some(body),
             _ => None,
         })
         .collect()
@@ -146,7 +146,7 @@ async fn a_provider_error_teardown_is_reported_as_an_api_error() {
 
 #[tokio::test]
 async fn an_explicit_clear_still_reports_user_clear() {
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     let (bus, sink) = bus_and_sink().await;
     let orch = orch(bus);
@@ -163,7 +163,7 @@ async fn an_explicit_clear_still_reports_user_clear() {
 
 #[tokio::test]
 async fn replacing_a_live_goal_reports_superseded() {
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     let (bus, sink) = bus_and_sink().await;
     let orch = orch(bus);

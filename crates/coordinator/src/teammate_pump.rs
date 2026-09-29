@@ -28,7 +28,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+use lingxi_core::host::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 
 use crate::mailbox::{TeammateMailbox, TeammateMessage};
 
@@ -220,8 +220,10 @@ async fn deliver_batch_with_backoff(
                 continue;
             }
             let Some(response) = frame.and_then(|value| {
-                serde_json::from_value::<platform_api::teammate_plan::PlanApprovalResponse>(value)
-                    .ok()
+                serde_json::from_value::<lingxi_core::host::teammate_plan::PlanApprovalResponse>(
+                    value,
+                )
+                .ok()
             }) else {
                 continue;
             };
@@ -231,10 +233,12 @@ async fn deliver_batch_with_backoff(
                     .apply_plan_approval(task_id, response.clone())
                     .await
                 {
-                    Ok(()) | Err(platform_api::team_spawn::TeamSpawnError::Unsupported(_)) => break,
+                    Ok(()) | Err(lingxi_core::host::team_spawn::TeamSpawnError::Unsupported(_)) => {
+                        break
+                    }
                     Err(
-                        platform_api::team_spawn::TeamSpawnError::Terminated
-                        | platform_api::team_spawn::TeamSpawnError::NotFound(_),
+                        lingxi_core::host::team_spawn::TeamSpawnError::Terminated
+                        | lingxi_core::host::team_spawn::TeamSpawnError::NotFound(_),
                     ) => return DeliverOutcome::Stop,
                     Err(_) => {
                         if !spawn_seam.is_alive(task_id).await {
@@ -312,7 +316,7 @@ mod tests {
     use super::*;
     use crate::mailbox::MessageSender;
     use async_trait::async_trait;
-    use protocol::AgentId;
+    use lingxi_core::types::AgentId;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
     use std::time::SystemTime;
@@ -322,7 +326,7 @@ mod tests {
     /// a given number of successful deliveries (to drive the stop path).
     struct RecordingSeam {
         received: StdMutex<Vec<String>>,
-        approvals: StdMutex<Vec<platform_api::teammate_plan::PlanApprovalResponse>>,
+        approvals: StdMutex<Vec<lingxi_core::host::teammate_plan::PlanApprovalResponse>>,
         calls: AtomicUsize,
         /// After this many successful sends, the next `send_message` returns
         /// `Terminated`. `usize::MAX` ⇒ never terminate.
@@ -400,7 +404,7 @@ mod tests {
         async fn apply_plan_approval(
             &self,
             _: &str,
-            response: platform_api::teammate_plan::PlanApprovalResponse,
+            response: lingxi_core::host::teammate_plan::PlanApprovalResponse,
         ) -> Result<(), TeamSpawnError> {
             self.approvals.lock().unwrap().push(response);
             Ok(())

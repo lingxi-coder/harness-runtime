@@ -29,7 +29,7 @@ use crate::file::MemoryFile;
 use crate::memdir::{scan_memdir, MemdirRoots};
 use crate::selector::{memory_entry_to_memory_file_with_frontmatter, MemorySelector};
 use crate::surfacing::SurfacedMemory;
-use platform_api::RuntimeSpawner;
+use lingxi_core::host::RuntimeSpawner;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -358,9 +358,10 @@ mod tests {
             &self,
             name: &str,
             task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
             tokio::spawn(task);
-            Ok(platform_api::BackgroundTaskHandle {
+            Ok(lingxi_core::host::BackgroundTaskHandle {
                 task_name: name.to_string(),
                 task_id: 0,
             })
@@ -368,8 +369,8 @@ mod tests {
         async fn sleep(&self, _d: std::time::Duration) {}
         async fn cancel(
             &self,
-            _h: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _h: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }

@@ -1,5 +1,5 @@
 use super::redact_ephemeral_tool_result_images;
-use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use serde_json::json;
 
 fn tool_result(

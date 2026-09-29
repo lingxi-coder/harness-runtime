@@ -13,10 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jsonrpc::{Connection, ConnectionError};
+use lingxi_core::host::{LspError, LspServerConfig};
 use lsp_types::{
     InitializeResult, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
 };
-use platform_api::{LspError, LspServerConfig};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
@@ -28,7 +28,7 @@ const CONTENT_MODIFIED_BASE_DELAY_MS: u64 = 500;
 /// Oracle `clientInfo:{name:"Claude Code",version:{…}.VERSION}` — the same
 /// build VERSION the User-Agent and `AI_AGENT` stamps read, so it tracks the
 /// one constant instead of keeping a copy that has to be remembered.
-const LSP_CLIENT_VERSION: &str = platform_api::CLAUDE_CODE_VERSION;
+const LSP_CLIENT_VERSION: &str = lingxi_core::host::CLAUDE_CODE_VERSION;
 
 /// Typed client over a JSON-RPC connection to one LSP server.
 pub struct LspClient {

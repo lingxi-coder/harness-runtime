@@ -8,8 +8,8 @@
 
 use crate::registry::ToolRegistry;
 use async_trait::async_trait;
-use platform_api::permission_gate::PermissionGate;
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use lingxi_core::host::permission_gate::PermissionGate;
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// `case"disallowed_tools"` arm of `gn(toolUseContext)`).
 ///
 /// Returns an EMPTY vec when `frozen` is empty or nothing survives, which
-/// leaves [`platform_api::permission_gate::PermissionCheckContext::permission_layers`]
+/// leaves [`lingxi_core::host::permission_gate::PermissionCheckContext::permission_layers`]
 /// empty and the fold byte-identical to a spawn that froze nothing.
 ///
 /// ## Entries are CANONICALIZED, not round-trip-tested
@@ -137,7 +137,7 @@ pub struct RegistryToolInvoker {
     gate: Option<Arc<dyn PermissionGate>>,
     /// (Finding 22) Marks every dispatch through this invoker as owned by a
     /// background task with no interactive turn — see
-    /// [`platform_api::permission_gate::PermissionCheckContext::background_owned`].
+    /// [`lingxi_core::host::permission_gate::PermissionCheckContext::background_owned`].
     /// Default `false`; set only via [`Self::with_background_owned`].
     background_owned: bool,
 }
@@ -165,7 +165,7 @@ impl RegistryToolInvoker {
 
     /// (Finding 22) Mark every dispatch through this invoker as
     /// background-owned (no interactive turn owns it) — see
-    /// [`platform_api::permission_gate::PermissionCheckContext::background_owned`].
+    /// [`lingxi_core::host::permission_gate::PermissionCheckContext::background_owned`].
     /// The composition root calls this ONLY on the invoker instance wired
     /// exclusively to a background task's spawner (as of writing, the
     /// `/fusion` background task's `fusion_invoker`); an invoker that a
@@ -213,7 +213,7 @@ impl ToolInvoker for RegistryToolInvoker {
         mut input: Value,
         ctx: SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
-    ) -> Result<platform_api::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         let tool = self
             .registry
             .find_by_name(name)
@@ -275,7 +275,10 @@ impl ToolInvoker for RegistryToolInvoker {
                 append_system_prompt: None,
             },
             messages: vec![],
-            tool_use_id: ctx.tool_use_id.clone().map(protocol::ToolUseId::from),
+            tool_use_id: ctx
+                .tool_use_id
+                .clone()
+                .map(lingxi_core::types::ToolUseId::from),
             assistant_message_id: ctx.assistant_message_id,
             agent_id: ctx.parent_agent_id,
             agent_name: ctx.agent_name.clone(),
@@ -331,7 +334,7 @@ impl ToolInvoker for RegistryToolInvoker {
                     .get("file_path")
                     .and_then(Value::as_str)
                     .and_then(|path| {
-                        platform_api::teammate_plan::own_plan_file_root(
+                        lingxi_core::host::teammate_plan::own_plan_file_root(
                             ctx.parent_agent_id.as_ref(),
                             std::path::Path::new(path),
                         )
@@ -359,7 +362,7 @@ impl ToolInvoker for RegistryToolInvoker {
             let worker = (ctx.can_show_permission_prompts)
                 .then(|| ctx.agent_name.clone())
                 .flatten()
-                .map(|name| platform_api::permission_gate::PromptWorker {
+                .map(|name| lingxi_core::host::permission_gate::PromptWorker {
                     name,
                     team: ctx.team_name.clone(),
                     is_async: ctx.is_async,
@@ -373,7 +376,7 @@ impl ToolInvoker for RegistryToolInvoker {
             // delegates to `check_with_worker` and maps `Allow`→`Allow{None}`, so
             // a gate that only overrides `check_with_worker` (or `check`) is
             // unchanged. Behavior is identical when `updated_input` is `None`.
-            let check_ctx = platform_api::permission_gate::PermissionCheckContext {
+            let check_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
                 pause_observer: ctx.permission_pause_observer.clone(),
                 worker,
                 tool_use_id: ctx.tool_use_id.clone(),
@@ -425,14 +428,15 @@ impl ToolInvoker for RegistryToolInvoker {
                     .await
                     .map_err(|abort| ToolInvokerError::Abort(abort.message))?;
                 match resolution {
-                    platform_api::permission_gate::PermissionResolution::Deny {
-                        reason, ..
+                    lingxi_core::host::permission_gate::PermissionResolution::Deny {
+                        reason,
+                        ..
                     } => {
                         return Err(ToolInvokerError::Internal(reason));
                     }
-                    platform_api::permission_gate::PermissionResolution::Allow { .. }
-                    | platform_api::permission_gate::PermissionResolution::Ask
-                    | platform_api::permission_gate::PermissionResolution::AskWithContext {
+                    lingxi_core::host::permission_gate::PermissionResolution::Allow { .. }
+                    | lingxi_core::host::permission_gate::PermissionResolution::Ask
+                    | lingxi_core::host::permission_gate::PermissionResolution::AskWithContext {
                         ..
                     } => gate.ask_via_transport(name, &input, &check_ctx).await,
                 }
@@ -442,14 +446,17 @@ impl ToolInvoker for RegistryToolInvoker {
                     .map_err(|abort| ToolInvokerError::Abort(abort.message))?
             };
             match outcome {
-                platform_api::permission_gate::PermissionOutcome::Allow {
-                    updated_input, ..
+                lingxi_core::host::permission_gate::PermissionOutcome::Allow {
+                    updated_input,
+                    ..
                 } => {
                     if let Some(u) = updated_input {
                         input = u;
                     }
                 }
-                platform_api::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+                lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
+                    updated_input,
+                } => {
                     // Only the session-owning main turn can atomically switch the
                     // live permission mode. Subagent dispatch has no such seam,
                     // so `AllowAuto` degrades to a one-shot allow for THIS call
@@ -458,7 +465,7 @@ impl ToolInvoker for RegistryToolInvoker {
                         input = u;
                     }
                 }
-                platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
+                lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => {
                     return Err(ToolInvokerError::Internal(reason));
                 }
             }
@@ -471,7 +478,7 @@ impl ToolInvoker for RegistryToolInvoker {
                 .get("file_path")
                 .and_then(Value::as_str)
                 .is_some_and(|path| std::path::Path::new(path) == approved_path)
-                && platform_api::teammate_plan::own_plan_file_root(
+                && lingxi_core::host::teammate_plan::own_plan_file_root(
                     ctx.parent_agent_id.as_ref(),
                     &approved_path,
                 )
@@ -496,7 +503,7 @@ impl ToolInvoker for RegistryToolInvoker {
                 other => ToolInvokerError::Internal(format!("{other}")),
             })?;
 
-        Ok(platform_api::tool_invoker::ToolInvocationResult {
+        Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
             is_error: result.is_error,
             data: result.data,
             model_content: result.model_content,
@@ -872,9 +879,9 @@ mod tests {
                 Option<(
                     Option<String>,
                     Option<String>,
-                    Option<protocol::MessageId>,
-                    Option<protocol::SessionId>,
-                    platform_api::tool_invoker::ToolExecutionPolicy,
+                    Option<lingxi_core::types::MessageId>,
+                    Option<lingxi_core::types::SessionId>,
+                    lingxi_core::host::tool_invoker::ToolExecutionPolicy,
                 )>,
             >,
         >,
@@ -958,8 +965,8 @@ mod tests {
             captured: captured.clone(),
         }));
         let invoker = RegistryToolInvoker::new(Arc::new(registry));
-        let assistant_message_id = protocol::MessageId::new();
-        let origin_session_id = protocol::SessionId::new();
+        let assistant_message_id = lingxi_core::types::MessageId::new();
+        let origin_session_id = lingxi_core::types::SessionId::new();
 
         invoker
             .invoke(
@@ -970,7 +977,7 @@ mod tests {
                     parent_agent_id: None,
                     origin_session_id: Some(origin_session_id),
                     tool_execution_policy:
-                        platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+                        lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
                     agent_name: Some("researcher".to_string()),
                     team_name: Some("alpha".to_string()),
                     is_async: false,
@@ -1021,7 +1028,7 @@ mod tests {
         );
         assert_eq!(
             *captured_policy,
-            platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+            lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             "the trusted execution policy reaches ToolUseContext unchanged"
         );
     }
@@ -1043,7 +1050,7 @@ mod tests {
                     parent_agent_id: None,
                     origin_session_id: None,
                     tool_execution_policy:
-                        platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel,
+                        lingxi_core::host::tool_invoker::ToolExecutionPolicy::FusionPanel,
                     agent_name: None,
                     team_name: None,
                     is_async: false,
@@ -1068,7 +1075,7 @@ mod tests {
         let captured = captured.as_ref().expect("tool call ran");
         assert_eq!(
             captured.4,
-            platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel,
+            lingxi_core::host::tool_invoker::ToolExecutionPolicy::FusionPanel,
             "workspace lease path must not drop the trusted Fusion policy"
         );
     }
@@ -1186,7 +1193,7 @@ mod tests {
     }
 
     // ──── enforcement 3b: permission gate before dispatch ──────────────
-    use platform_api::permission_gate::{
+    use lingxi_core::host::permission_gate::{
         PermissionDecision as GateDecision, PermissionGate as Gate,
     };
 
@@ -1208,12 +1215,12 @@ mod tests {
             permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
-            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+            tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: None,
             team_name: None,
             is_async: false,
             is_non_interactive_session:
-                platform_api::session_flags::effective_non_interactive_session(),
+                lingxi_core::host::session_flags::effective_non_interactive_session(),
             can_show_permission_prompts: false,
             cwd: None,
             tool_use_id: None,
@@ -1302,7 +1309,7 @@ mod tests {
         }));
         let invoker = RegistryToolInvoker::new(Arc::new(registry));
 
-        platform_api::session_flags::scope_non_interactive_session(true, async {
+        lingxi_core::host::session_flags::scope_non_interactive_session(true, async {
             invoker
                 .invoke("SessionModeRecordingTool", json!({}), no_ctx())
                 .await
@@ -1328,7 +1335,8 @@ mod tests {
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
         let mut ctx = no_ctx();
-        ctx.tool_execution_policy = platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel;
+        ctx.tool_execution_policy =
+            lingxi_core::host::tool_invoker::ToolExecutionPolicy::FusionPanel;
         match invoker.invoke("TestEcho", json!({ "a": 1 }), ctx).await {
             Err(ToolInvokerError::Internal(reason)) => {
                 assert!(
@@ -1369,7 +1377,7 @@ mod tests {
 
     /// Gate that records the [`PromptWorker`] handed to `check_with_worker`.
     struct WorkerRecordingGate {
-        seen: Arc<StdMutex<Option<Option<platform_api::permission_gate::PromptWorker>>>>,
+        seen: Arc<StdMutex<Option<Option<lingxi_core::host::permission_gate::PromptWorker>>>>,
     }
     #[async_trait]
     impl Gate for WorkerRecordingGate {
@@ -1383,7 +1391,7 @@ mod tests {
             &self,
             _name: &str,
             _input: &Value,
-            worker: Option<platform_api::permission_gate::PromptWorker>,
+            worker: Option<lingxi_core::host::permission_gate::PromptWorker>,
         ) -> GateDecision {
             *self.seen.lock().unwrap() = Some(worker);
             GateDecision::Allow
@@ -1395,7 +1403,7 @@ mod tests {
             permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
-            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+            tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: Some("researcher".to_string()),
             team_name: Some("alpha".to_string()),
             is_async: true,
@@ -1463,8 +1471,8 @@ mod tests {
     /// (the parity gap the stdio `can_use_tool` flow needs), mirroring the main
     /// loop's Ask arm.
     struct ContextRecordingGate {
-        seen: Arc<StdMutex<Option<platform_api::permission_gate::PermissionCheckContext>>>,
-        outcome: platform_api::permission_gate::PermissionOutcome,
+        seen: Arc<StdMutex<Option<lingxi_core::host::permission_gate::PermissionCheckContext>>>,
+        outcome: lingxi_core::host::permission_gate::PermissionOutcome,
     }
     #[async_trait]
     impl Gate for ContextRecordingGate {
@@ -1476,15 +1484,15 @@ mod tests {
             &self,
             _name: &str,
             _input: &Value,
-            ctx: &platform_api::permission_gate::PermissionCheckContext,
-        ) -> platform_api::permission_gate::PermissionOutcome {
+            ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+        ) -> lingxi_core::host::permission_gate::PermissionOutcome {
             *self.seen.lock().unwrap() = Some(ctx.clone());
             self.outcome.clone()
         }
     }
 
     struct AbortGate {
-        seen: Arc<StdMutex<Option<platform_api::permission_gate::PermissionCheckContext>>>,
+        seen: Arc<StdMutex<Option<lingxi_core::host::permission_gate::PermissionCheckContext>>>,
     }
 
     #[async_trait]
@@ -1497,13 +1505,13 @@ mod tests {
             &self,
             _name: &str,
             _input: &Value,
-            ctx: &platform_api::permission_gate::PermissionCheckContext,
+            ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
         ) -> Result<
-            platform_api::permission_gate::PermissionOutcome,
-            platform_api::permission_gate::PermissionAbort,
+            lingxi_core::host::permission_gate::PermissionOutcome,
+            lingxi_core::host::permission_gate::PermissionAbort,
         > {
             *self.seen.lock().unwrap() = Some(ctx.clone());
-            Err(platform_api::permission_gate::PermissionAbort {
+            Err(lingxi_core::host::permission_gate::PermissionAbort {
                 message: "Agent aborted: too many classifier denials in headless mode".into(),
             })
         }
@@ -1521,9 +1529,9 @@ mod tests {
             &self,
             _name: &str,
             _input: &Value,
-            _ctx: &platform_api::permission_gate::PermissionCheckContext,
-        ) -> platform_api::permission_gate::PermissionOutcome {
-            platform_api::permission_gate::PermissionOutcome::AllowAuto {
+            _ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+        ) -> lingxi_core::host::permission_gate::PermissionOutcome {
+            lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
                 updated_input: Some(json!({ "rewritten": "auto" })),
             }
         }
@@ -1538,7 +1546,7 @@ mod tests {
             permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
-            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+            tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: Some("researcher".to_string()),
             team_name: Some("alpha".to_string()),
             is_async: true,
@@ -1566,14 +1574,14 @@ mod tests {
         let seen = Arc::new(StdMutex::new(None));
         let gate = Arc::new(ContextRecordingGate {
             seen: seen.clone(),
-            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
             },
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
-        let pause = platform_api::permission_gate::PermissionPauseObserver::new(|_| {});
+        let pause = lingxi_core::host::permission_gate::PermissionPauseObserver::new(|_| {});
         let mut invocation_context = ctx_with_tool_use_id("toolu_abc123");
         invocation_context.permission_pause_observer = Some(pause.clone());
         invoker
@@ -1630,7 +1638,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(None));
         let gate = Arc::new(ContextRecordingGate {
             seen: seen.clone(),
-            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -1660,7 +1668,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(None));
         let gate = Arc::new(ContextRecordingGate {
             seen: seen.clone(),
-            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -1786,7 +1794,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(None));
         let gate = Arc::new(ContextRecordingGate {
             seen: seen.clone(),
-            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -1818,7 +1826,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(None));
         let gate = Arc::new(ContextRecordingGate {
             seen: seen.clone(),
-            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -1845,7 +1853,7 @@ mod tests {
         // whatever input it received, so we can observe the substitution.
         let gate = Arc::new(ContextRecordingGate {
             seen: Arc::new(StdMutex::new(None)),
-            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                 updated_input: Some(json!({ "rewritten": true })),
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -1872,7 +1880,7 @@ mod tests {
         // Behavior identical when updated_input is None: the original input runs.
         let gate = Arc::new(ContextRecordingGate {
             seen: Arc::new(StdMutex::new(None)),
-            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
@@ -1911,7 +1919,7 @@ mod tests {
         // legacy 2-valued path.
         let gate = Arc::new(ContextRecordingGate {
             seen: Arc::new(StdMutex::new(None)),
-            outcome: platform_api::permission_gate::PermissionOutcome::Deny {
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Deny {
                 reason: "denied via context gate".into(),
             },
         });
@@ -2038,7 +2046,7 @@ mod tests {
     }
     struct OwnPlanRequester(String);
     #[async_trait]
-    impl platform_api::teammate_plan::TeammatePlanRequester for OwnPlanRequester {
+    impl lingxi_core::host::teammate_plan::TeammatePlanRequester for OwnPlanRequester {
         fn writable_plan_path(&self) -> Option<&str> {
             Some(&self.0)
         }
@@ -2098,7 +2106,7 @@ mod tests {
         registry.register_builtin(Arc::new(PlanWriteProbe));
         Arc::new(registry)
     }
-    fn plan_probe_context(id: protocol::AgentId) -> SubagentInvocationContext {
+    fn plan_probe_context(id: lingxi_core::types::AgentId) -> SubagentInvocationContext {
         let mut ctx = no_ctx();
         ctx.parent_agent_id = Some(id);
         ctx.mode_override = Some("plan".into());
@@ -2139,10 +2147,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().canonicalize().unwrap().join("plan.md");
         let sibling = path.with_file_name("sibling.md");
-        let id = protocol::AgentId::new();
-        let requester: Arc<dyn platform_api::teammate_plan::TeammatePlanRequester> =
+        let id = lingxi_core::types::AgentId::new();
+        let requester: Arc<dyn lingxi_core::host::teammate_plan::TeammatePlanRequester> =
             Arc::new(OwnPlanRequester(path.to_string_lossy().into_owned()));
-        platform_api::teammate_plan::register(id, &requester);
+        lingxi_core::host::teammate_plan::register(id, &requester);
         let input = json!({"file_path":path,"content":"Review then implement"});
         for rule in [Some(Deny), Some(Ask)] {
             let invoker =
@@ -2186,13 +2194,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().canonicalize().unwrap().join("plan.md");
         let other = path.with_file_name("other.md");
-        let id = protocol::AgentId::new();
-        let requester: Arc<dyn platform_api::teammate_plan::TeammatePlanRequester> =
+        let id = lingxi_core::types::AgentId::new();
+        let requester: Arc<dyn lingxi_core::host::teammate_plan::TeammatePlanRequester> =
             Arc::new(OwnPlanRequester(path.to_string_lossy().into_owned()));
-        platform_api::teammate_plan::register(id, &requester);
+        lingxi_core::host::teammate_plan::register(id, &requester);
         let gate = Arc::new(ContextRecordingGate {
             seen: Arc::new(StdMutex::new(None)),
-            outcome: platform_api::permission_gate::PermissionOutcome::Allow {
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                 updated_input: Some(json!({"file_path":other,"content":"no"})),
                 permission_updates: vec![],
                 decision_classification: None,

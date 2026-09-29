@@ -6,9 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+core = { path = "../../core" }
 tool-api = { path = "../../tool-api" }
-platform-api = { path = "../../platform-api" }
-protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
 async-trait.workspace = true

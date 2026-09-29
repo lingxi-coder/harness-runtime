@@ -10,8 +10,8 @@
 
 use crate::budget::{BudgetCheckResult, BudgetEnforcer};
 use async_trait::async_trait;
-use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-use protocol::SessionId;
+use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+use lingxi_core::types::SessionId;
 use std::sync::Arc;
 
 #[async_trait]
@@ -48,13 +48,13 @@ impl BudgetEnforcerHandle for BudgetEnforcer {
     async fn reserve_nano_usd(
         &self,
         nano_usd: u64,
-    ) -> Result<platform_api::BudgetReservationId, BudgetError> {
+    ) -> Result<lingxi_core::host::BudgetReservationId, BudgetError> {
         BudgetEnforcer::reserve_nano_usd(self, nano_usd).await
     }
 
     async fn commit_reservation(
         &self,
-        id: platform_api::BudgetReservationId,
+        id: lingxi_core::host::BudgetReservationId,
         actual_nano_usd: u64,
     ) -> Result<(), BudgetError> {
         BudgetEnforcer::commit_reservation(self, id, actual_nano_usd).await
@@ -62,13 +62,13 @@ impl BudgetEnforcerHandle for BudgetEnforcer {
 
     fn begin_commit_reservation(
         &self,
-        id: platform_api::BudgetReservationId,
+        id: lingxi_core::host::BudgetReservationId,
         actual_nano_usd: u64,
-    ) -> Result<Option<platform_api::BudgetCommitReceipt>, BudgetError> {
+    ) -> Result<Option<lingxi_core::host::BudgetCommitReceipt>, BudgetError> {
         BudgetEnforcer::begin_commit_reservation(self, id, actual_nano_usd)
     }
 
-    async fn release_reservation(&self, id: platform_api::BudgetReservationId) {
+    async fn release_reservation(&self, id: lingxi_core::host::BudgetReservationId) {
         BudgetEnforcer::release_reservation(self, id).await;
     }
 }
@@ -80,7 +80,7 @@ mod tests {
     use crate::tracker::CostTracker;
     use crate::usage::{TokenUsage, Usage};
     use crate::{BudgetConfig, BudgetExceedPolicy, ModelRef};
-    use protocol::SessionId;
+    use lingxi_core::types::SessionId;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::mpsc;

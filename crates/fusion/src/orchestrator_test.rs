@@ -20,7 +20,7 @@ async fn panel_settlement_failure_after_execution_is_not_a_preflight_refund() {
         ) -> Result<crate::RegisteredFusionAttempts, FusionError> {
             Ok(crate::RegisteredFusionAttempts {
                 panel_fence: Some(Arc::new(FailedFence)),
-                run: Arc::new(platform_api::ModelAttemptRun::new(Arc::new(()))),
+                run: Arc::new(lingxi_core::host::ModelAttemptRun::new(Arc::new(()))),
                 finalizer: Box::new(AttemptFinalizerProbe {
                     fail: false,
                     settled: Arc::new(AtomicUsize::new(0)),
@@ -63,7 +63,7 @@ async fn panel_settlement_failure_after_execution_is_not_a_preflight_refund() {
     );
     assert!(matches!(
         outcome.facts.attempt_settlement,
-        Some(platform_api::FusionAttemptSettlementStatus::Failed { .. })
+        Some(lingxi_core::host::FusionAttemptSettlementStatus::Failed { .. })
     ));
     assert_eq!(outcome.facts.usage.unwrap().provider_requests, 8);
 }
@@ -101,7 +101,7 @@ fn completion_policy_request_no_partial_rejects_before_attempt_registration() {
 
 struct AttemptQueryProbe {
     inner: Arc<ScriptedAnalyst>,
-    contexts: Mutex<Vec<platform_api::ModelAttemptContext>>,
+    contexts: Mutex<Vec<lingxi_core::host::ModelAttemptContext>>,
 }
 #[async_trait]
 impl SideQueryClient for AttemptQueryProbe {
@@ -144,7 +144,7 @@ impl crate::FusionAttemptRegistrar for AttemptRegistrarProbe {
         self.registered.fetch_add(1, Ordering::SeqCst);
         assert_eq!(
             captured.control.billing_mode(),
-            platform_api::ModelAttemptBillingMode::MeteredAttempts
+            lingxi_core::host::ModelAttemptBillingMode::MeteredAttempts
         );
         if self.reject {
             return Err(FusionError::InvalidConfiguration(
@@ -154,17 +154,17 @@ impl crate::FusionAttemptRegistrar for AttemptRegistrarProbe {
         assert!(
             captured
                 .live_policy
-                .validate(platform_api::ModelAttemptStage::Panel, Some(0))
+                .validate(lingxi_core::host::ModelAttemptStage::Panel, Some(0))
                 .is_err(),
             "registration must not authorize unactivated wire calls"
         );
         assert!(captured
             .live_policy
-            .validate(platform_api::ModelAttemptStage::Panel, Some(u32::MAX))
+            .validate(lingxi_core::host::ModelAttemptStage::Panel, Some(u32::MAX))
             .is_err());
         Ok(crate::RegisteredFusionAttempts {
             panel_fence: None,
-            run: Arc::new(platform_api::ModelAttemptRun::new(Arc::new(()))),
+            run: Arc::new(lingxi_core::host::ModelAttemptRun::new(Arc::new(()))),
             finalizer: Box::new(AttemptFinalizerProbe {
                 fail: self.fail_settlement,
                 settled: self.settled.clone(),
@@ -189,7 +189,7 @@ impl crate::FusionAttemptSettlement for AttemptFinalizerProbe {
             release.acquire().await.unwrap().forget();
         }
         let summary = crate::FusionAttemptSummary {
-            usage: platform_api::FusionUsage {
+            usage: lingxi_core::host::FusionUsage {
                 realized_nano_usd: 777,
                 output_tokens: 91,
                 provider_requests: 8,
@@ -269,7 +269,7 @@ async fn registered_attempts_all_stages_and_repair_keep_authoritative_settlement
         assert_eq!(
             matches!(
                 outcome.facts.attempt_settlement,
-                Some(platform_api::FusionAttemptSettlementStatus::Failed { .. })
+                Some(lingxi_core::host::FusionAttemptSettlementStatus::Failed { .. })
             ),
             fail
         );
@@ -278,7 +278,7 @@ async fn registered_attempts_all_stages_and_repair_keep_authoritative_settlement
             .iter()
             .map(|request| {
                 let context = request.model_attempt.as_ref().expect("registered panel");
-                assert_eq!(context.stage(), platform_api::ModelAttemptStage::Panel);
+                assert_eq!(context.stage(), lingxi_core::host::ModelAttemptStage::Panel);
                 context.panel_slot().unwrap()
             })
             .collect::<Vec<_>>();
@@ -290,7 +290,7 @@ async fn registered_attempts_all_stages_and_repair_keep_authoritative_settlement
         assert_eq!(contexts.len(), if fail { 2 } else { 1 });
         assert!(contexts
             .iter()
-            .all(|context| context.stage() == platform_api::ModelAttemptStage::Analyst));
+            .all(|context| context.stage() == lingxi_core::host::ModelAttemptStage::Analyst));
         if fail {
             assert_ne!(contexts[0].logical_call_id(), contexts[1].logical_call_id());
             assert_eq!(contexts[0].registration_id(), contexts[1].registration_id());
@@ -346,7 +346,7 @@ async fn registered_attempts_finish_and_wait_panics_preserve_computed_answer() {
         ) -> Result<crate::RegisteredFusionAttempts, FusionError> {
             Ok(crate::RegisteredFusionAttempts {
                 panel_fence: None,
-                run: Arc::new(platform_api::ModelAttemptRun::new(Arc::new(()))),
+                run: Arc::new(lingxi_core::host::ModelAttemptRun::new(Arc::new(()))),
                 finalizer: Box::new(PanicFinalizer {
                     finish: self.finish,
                     dropped: self.dropped.clone(),
@@ -394,7 +394,7 @@ async fn registered_attempts_finish_and_wait_panics_preserve_computed_answer() {
         assert!(!result.responses.is_empty());
         assert!(matches!(
             outcome.facts.attempt_settlement,
-            Some(platform_api::FusionAttemptSettlementStatus::Failed { .. })
+            Some(lingxi_core::host::FusionAttemptSettlementStatus::Failed { .. })
         ));
         assert!(outcome.facts.usage_incomplete);
         assert!(
@@ -415,7 +415,7 @@ fn registered_attempts_live_policy_checks_whole_panel_group_and_activation() {
             *self.0.lock().unwrap() = Some(captured);
             Ok(crate::RegisteredFusionAttempts {
                 panel_fence: None,
-                run: Arc::new(platform_api::ModelAttemptRun::new(Arc::new(()))),
+                run: Arc::new(lingxi_core::host::ModelAttemptRun::new(Arc::new(()))),
                 finalizer: Box::new(AttemptFinalizerProbe {
                     fail: false,
                     settled: Arc::new(AtomicUsize::new(0)),
@@ -450,7 +450,7 @@ fn registered_attempts_live_policy_checks_whole_panel_group_and_activation() {
     assert_eq!(routes.panels.len(), 3);
     assert!(captured
         .live_policy
-        .validate(platform_api::ModelAttemptStage::Panel, Some(0))
+        .validate(lingxi_core::host::ModelAttemptStage::Panel, Some(0))
         .is_err());
     assert!(captured.control.activate_at(tokio::time::Instant::now()));
     let mut added = catalog_state.lock().unwrap()[0].clone();
@@ -460,7 +460,7 @@ fn registered_attempts_live_policy_checks_whole_panel_group_and_activation() {
     for slot in 0..3 {
         captured
             .live_policy
-            .validate(platform_api::ModelAttemptStage::Panel, Some(slot))
+            .validate(lingxi_core::host::ModelAttemptStage::Panel, Some(slot))
             .unwrap();
     }
     assert_eq!(
@@ -471,7 +471,7 @@ fn registered_attempts_live_policy_checks_whole_panel_group_and_activation() {
     for slot in 0..3 {
         assert!(captured
             .live_policy
-            .validate(platform_api::ModelAttemptStage::Panel, Some(slot))
+            .validate(lingxi_core::host::ModelAttemptStage::Panel, Some(slot))
             .is_err());
     }
 }
@@ -512,7 +512,7 @@ async fn registered_attempts_terminal_waits_for_finalizer_after_panels_drain() {
     assert!(outcome.result.is_ok());
     assert!(matches!(
         outcome.facts.attempt_settlement,
-        Some(platform_api::FusionAttemptSettlementStatus::Settled)
+        Some(lingxi_core::host::FusionAttemptSettlementStatus::Settled)
     ));
 }
 
@@ -520,12 +520,12 @@ use super::*;
 use crate::config::FusionRuntimeConfig;
 use crate::model_resolver::{CatalogModel, ModelSource, ResolvedPanel};
 use async_trait::async_trait;
-use platform_api::subagent_spawn::{
+use lingxi_core::host::subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
     SubagentUsage,
 };
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-use platform_api::{
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use lingxi_core::host::{
     budget::{BudgetEnforcerHandle, BudgetError},
     BudgetReservationId, EvidenceKind, FusionActivation, FusionAnalysis, FusionContradiction,
     FusionError, FusionExecutor, FusionInheritance, FusionModelHints, FusionModelRef, FusionOrigin,
@@ -533,7 +533,7 @@ use platform_api::{
     PanelClaim, PanelEvidence, PanelPosition, PanelReport, PanelRunStatus, RiskSeverity,
     WorkflowQueryWatchdog, DEFAULT_FUSION_DIMENSIONS,
 };
-use protocol::AgentId;
+use lingxi_core::types::AgentId;
 use serde_json::{json, Value};
 use sidequery::{
     SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
@@ -691,7 +691,7 @@ impl SubagentSpawner for SyncBlockingAllocationSpawner {
         request: SubagentSpawnRequest,
         _inherit: SubagentInheritance,
         _progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
         _watchdog: WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         if !self.first.swap(true, Ordering::SeqCst) {
@@ -703,9 +703,9 @@ impl SubagentSpawner for SyncBlockingAllocationSpawner {
             }
             if let Some(observer) = observer {
                 observer.on_allocated(
-                    &platform_api::subagent_spawn::SubagentObservation::Allocated {
+                    &lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
                         agent_id: AgentId::new(),
-                        agent_type: platform_api::FUSION_PANEL_TYPE.to_string(),
+                        agent_type: lingxi_core::host::FUSION_PANEL_TYPE.to_string(),
                         name: request.name,
                         model: request.model.unwrap_or_default(),
                         model_profile: request.model_profile,
@@ -893,11 +893,11 @@ fn test_config() -> FusionRuntimeConfig {
     // to pick for `catalog()` + `request()`, so the assertions below still
     // describe the same run.
     cfg.panel_models = vec![
-        platform_api::FusionModelChoice::new("anthropic", "claude-sonnet-5"),
-        platform_api::FusionModelChoice::new("openai", "gpt-5.6-terra"),
-        platform_api::FusionModelChoice::new("deepseek", "deepseek-v4-pro"),
+        lingxi_core::host::FusionModelChoice::new("anthropic", "claude-sonnet-5"),
+        lingxi_core::host::FusionModelChoice::new("openai", "gpt-5.6-terra"),
+        lingxi_core::host::FusionModelChoice::new("deepseek", "deepseek-v4-pro"),
     ];
-    cfg.analyst_model = Some(platform_api::FusionModelChoice::new(
+    cfg.analyst_model = Some(lingxi_core::host::FusionModelChoice::new(
         "anthropic",
         "claude-sonnet-5",
     ));
@@ -1068,8 +1068,8 @@ impl BudgetEnforcerHandle for FailingCommitBudget {
 
 #[derive(Clone)]
 struct ScopeAwareBudget {
-    expected: protocol::SessionId,
-    scopes: Arc<Mutex<Vec<protocol::SessionId>>>,
+    expected: lingxi_core::types::SessionId,
+    scopes: Arc<Mutex<Vec<lingxi_core::types::SessionId>>>,
     scoped_reserves: Arc<AtomicUsize>,
     scoped: bool,
 }
@@ -1086,7 +1086,7 @@ impl BudgetEnforcerHandle for ScopeAwareBudget {
 
     fn scoped_for_session(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
     ) -> Option<Arc<dyn BudgetEnforcerHandle>> {
         self.scopes.lock().unwrap().push(session_id);
         (session_id == self.expected).then(|| {
@@ -1129,15 +1129,15 @@ impl SubagentSpawner for CancelOnFirstAllocationSpawner {
         request: SubagentSpawnRequest,
         _inherit: SubagentInheritance,
         _progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
         _watchdog: WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.allocation_gate.cancelled().await;
         if !self.allocated.swap(true, Ordering::SeqCst) {
             if let Some(observer) = observer {
-                let event = platform_api::subagent_spawn::SubagentObservation::Allocated {
+                let event = lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
                     agent_id: AgentId::new(),
-                    agent_type: platform_api::FUSION_PANEL_TYPE.to_string(),
+                    agent_type: lingxi_core::host::FUSION_PANEL_TYPE.to_string(),
                     name: request.name,
                     model: request.model.unwrap_or_default(),
                     model_profile: request.model_profile,
@@ -1262,7 +1262,7 @@ impl FakeSpawner {
     /// created", which is exactly the distinction
     /// `PanelDispatch::allocated` is keyed on.
     async fn emit_allocated(
-        observer: &Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        observer: &Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
         request: &SubagentSpawnRequest,
     ) {
         let Some(observer) = observer else {
@@ -1270,9 +1270,9 @@ impl FakeSpawner {
         };
         observer
             .on_event(
-                platform_api::subagent_spawn::SubagentObservation::Allocated {
+                lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
                     agent_id: AgentId::new(),
-                    agent_type: platform_api::FUSION_PANEL_TYPE.to_string(),
+                    agent_type: lingxi_core::host::FUSION_PANEL_TYPE.to_string(),
                     name: request.name.clone(),
                     model: request.model.clone().unwrap_or_default(),
                     model_profile: request.model_profile.clone(),
@@ -1287,7 +1287,7 @@ impl FakeSpawner {
     async fn run_script(
         &self,
         request: SubagentSpawnRequest,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(live, Ordering::SeqCst);
@@ -1295,7 +1295,7 @@ impl FakeSpawner {
         self.prompts.lock().unwrap().push(request.prompt.clone());
         self.requests.lock().unwrap().push(request.clone());
         tokio::time::sleep(std::time::Duration::from_millis(15)).await;
-        let model = if request.subagent_type == platform_api::FUSION_ANALYST_TYPE {
+        let model = if request.subagent_type == lingxi_core::host::FUSION_ANALYST_TYPE {
             ANALYST_SCRIPT.to_string()
         } else {
             request.model.clone().unwrap_or_default()
@@ -1511,7 +1511,7 @@ impl SubagentSpawner for FakeSpawner {
         request: SubagentSpawnRequest,
         _inherit: SubagentInheritance,
         _progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
         _watchdog: WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.run_script(request, observer).await
@@ -1574,7 +1574,7 @@ fn merge_analysis(panels: &[&str], dims: &[String], confidence: u8, critical: bo
     serde_json::to_value(FusionAnalysis {
         verified_claims: Vec::new(),
         schema_version: 1,
-        consensus: vec![platform_api::SupportedPoint {
+        consensus: vec![lingxi_core::host::SupportedPoint {
             point: "shared".into(),
             panel_ids: panels.iter().map(|id| (*id).to_string()).collect(),
         }],
@@ -1603,7 +1603,7 @@ fn needs_parent_analysis_with_injection(panels: &[&str], dims: &[String]) -> Val
     serde_json::to_value(FusionAnalysis {
         verified_claims: Vec::new(),
         schema_version: 1,
-        consensus: vec![platform_api::SupportedPoint {
+        consensus: vec![lingxi_core::host::SupportedPoint {
             point: "partial agreement".into(),
             panel_ids: vec![],
         }],
@@ -1741,9 +1741,9 @@ fn user_text(request: &StrictStructuredQueryRequest) -> String {
         .messages
         .first()
         .and_then(|msg| match msg {
-            protocol::ConversationMessage::User { content, .. } => {
+            lingxi_core::types::ConversationMessage::User { content, .. } => {
                 content.iter().find_map(|b| match b {
-                    protocol::ContentBlock::Text { text, .. } => Some(text.clone()),
+                    lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.clone()),
                     _ => None,
                 })
             }
@@ -1757,9 +1757,9 @@ fn synth_user_text(request: &SideQueryRequest) -> String {
         .messages
         .first()
         .and_then(|msg| match msg {
-            protocol::ConversationMessage::User { content, .. } => {
+            lingxi_core::types::ConversationMessage::User { content, .. } => {
                 content.iter().find_map(|b| match b {
-                    protocol::ContentBlock::Text { text, .. } => Some(text.clone()),
+                    lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.clone()),
                     _ => None,
                 })
             }
@@ -2138,7 +2138,7 @@ async fn analyst_stage_deadline_keeps_usage_from_prior_retry_response() {
 async fn three_panels_emit_exactly_four_running_panels_events_ending_at_three_of_three() {
     let spawner = FakeSpawner::new(three_ok());
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(64);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<lingxi_core::host::FusionProgress>(64);
     let result = orch_scripted(spawner, side)
         .run(request("review the lock"), inherit(), Some(tx))
         .await
@@ -2147,7 +2147,7 @@ async fn three_panels_emit_exactly_four_running_panels_events_ending_at_three_of
 
     let mut running_panels: Vec<(u8, u8)> = Vec::new();
     while let Ok(event) = rx.try_recv() {
-        if let platform_api::FusionStage::RunningPanels { completed, total } = event.stage {
+        if let lingxi_core::host::FusionStage::RunningPanels { completed, total } = event.stage {
             running_panels.push((completed, total));
         }
     }
@@ -2216,7 +2216,10 @@ async fn min_panels_not_met() {
         .run(request("task"), inherit(), None)
         .await
         .unwrap_err();
-    assert!(matches!(err, platform_api::FusionError::MinPanelsNotMet));
+    assert!(matches!(
+        err,
+        lingxi_core::host::FusionError::MinPanelsNotMet
+    ));
 }
 
 /// WP11/F0xx: a purely-Anthropic install (no other provider credentialed)
@@ -2479,7 +2482,7 @@ async fn cancel_joins_all_panel_tasks() {
     assert!(spawner.live() > 0);
     cancel.cancel();
     let err = handle.await.unwrap().unwrap_err();
-    assert!(matches!(err, platform_api::FusionError::Cancelled));
+    assert!(matches!(err, lingxi_core::host::FusionError::Cancelled));
     assert_eq!(spawner.live(), 0);
     let events = sink.events().await;
     assert_eq!(
@@ -2528,7 +2531,7 @@ impl SubagentSpawner for WatchdogSpawner {
         _request: SubagentSpawnRequest,
         _inherit: SubagentInheritance,
         _progress: Option<tokio::sync::mpsc::Sender<String>>,
-        _observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        _observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
         watchdog: WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.seen.lock().unwrap().push(watchdog);
@@ -2537,7 +2540,7 @@ impl SubagentSpawner for WatchdogSpawner {
                 agent_id: AgentId::new(),
                 reason: format!(
                     "{} workflow model query stalled while waiting for the next response event for {}ms",
-                    platform_api::subagent_spawn::SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
+                    lingxi_core::host::subagent_spawn::SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX,
                     watchdog.stall_timeout_ms
                 ),
                 usage: SubagentUsage::default(),
@@ -2929,7 +2932,7 @@ async fn blocked_post_analyst_analytics_respects_cancel_and_operational_deadline
         // The judge sits on its own profile so the egress assertion below
         // cannot be satisfied by a panel entry. It used to be reached by the
         // hint-ranked automatic pick; now it is named.
-        config.analyst_model = Some(platform_api::FusionModelChoice::new(
+        config.analyst_model = Some(lingxi_core::host::FusionModelChoice::new(
             "judge-only",
             "judge-model",
         ));
@@ -2941,7 +2944,7 @@ async fn blocked_post_analyst_analytics_respects_cancel_and_operational_deadline
                 eligible: true,
                 quality_rank: 100,
                 judge_eligible: true,
-                cost_class: platform_api::FusionCostClass::High,
+                cost_class: lingxi_core::host::FusionCostClass::High,
                 ..FusionModelHints::default()
             },
             structured_output: true,
@@ -3202,7 +3205,7 @@ async fn reserve_failure_makes_zero_panel_spawns() {
         .unwrap_err();
     assert_eq!(
         err,
-        platform_api::FusionError::BudgetExceeded,
+        lingxi_core::host::FusionError::BudgetExceeded,
         "a priced quote must reach reserve_nano_usd, not fail earlier at quote()"
     );
     assert!(
@@ -3564,7 +3567,7 @@ async fn panel_bar_failure_never_estimates_the_uncalled_analyst_or_synth() {
         .run(request("task"), inherit(), None)
         .await
         .unwrap_err();
-    assert_eq!(err, platform_api::FusionError::AllPanelsFailed);
+    assert_eq!(err, lingxi_core::host::FusionError::AllPanelsFailed);
     assert_eq!(
         side.analyst_calls.load(Ordering::SeqCst),
         0,
@@ -3737,7 +3740,7 @@ async fn budget_reservation_releases_on_min_panels_not_met() {
         .run(request("task"), inherit_recording(budget.clone()), None)
         .await
         .unwrap_err();
-    assert_eq!(err, platform_api::FusionError::MinPanelsNotMet);
+    assert_eq!(err, lingxi_core::host::FusionError::MinPanelsNotMet);
     settle_spawned_drops().await;
     // The "claude-sonnet-5" panel really completed (8 input + 4 output
     // tokens, priced at 1 nano-USD/token by `priced_book()` = 12) before the
@@ -3775,7 +3778,7 @@ async fn budget_reservation_releases_on_cancel() {
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     cancel.cancel();
     let err = handle.await.unwrap().unwrap_err();
-    assert_eq!(err, platform_api::FusionError::Cancelled);
+    assert_eq!(err, lingxi_core::host::FusionError::Cancelled);
     settle_spawned_drops().await;
     // [Round-4 review findings 1/2/3/19 — cancel path never settles] Before
     // the fix, a cancel landing while every panel is still hung (mid
@@ -3831,7 +3834,7 @@ async fn budget_reservation_releases_on_total_timeout() {
         .run(request("task"), inherit_recording(budget.clone()), None)
         .await
         .unwrap_err();
-    assert_eq!(err, platform_api::FusionError::TimedOutEmpty);
+    assert_eq!(err, lingxi_core::host::FusionError::TimedOutEmpty);
     settle_spawned_drops().await;
     // Every panel `Hang`s (no `SubagentResult` is ever produced) and each
     // hits `PanelFinish::TotalTimedOut` — real spend of unknown size that
@@ -3904,7 +3907,7 @@ async fn cancel_mid_analyst_call_commits_the_real_panel_spend_already_billed() {
         .expect("cancelled analyst should unwind")
         .expect("join")
         .expect_err("cancelled fusion");
-    assert_eq!(err, platform_api::FusionError::Cancelled);
+    assert_eq!(err, lingxi_core::host::FusionError::Cancelled);
     assert!(dropped.load(Ordering::SeqCst));
     settle_spawned_drops().await;
 
@@ -3961,7 +3964,7 @@ async fn cancel_mid_panel_fan_out_after_partial_completion_reports_realized_prog
     let orch = orch_scripted(spawner, side).with_price_book(Arc::new(priced_book()));
     let cancel = CancellationToken::new();
     let inherit = inherit_cancel(cancel.clone());
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(64);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<lingxi_core::host::FusionProgress>(64);
     let handle = tokio::spawn(async move { orch.run(request("task"), inherit, Some(tx)).await });
 
     // Both `Report` panels resolve ~15ms after spawn (`FakeSpawner::spawn`'s
@@ -3975,12 +3978,12 @@ async fn cancel_mid_panel_fan_out_after_partial_completion_reports_realized_prog
         .expect("cancelled run should unwind promptly")
         .expect("join")
         .expect_err("cancelled fusion");
-    assert_eq!(err, platform_api::FusionError::Cancelled);
+    assert_eq!(err, lingxi_core::host::FusionError::Cancelled);
     settle_spawned_drops().await;
 
     let mut terminal_cancelled = None;
     while let Ok(event) = rx.try_recv() {
-        if matches!(event.stage, platform_api::FusionStage::Cancelled) {
+        if matches!(event.stage, lingxi_core::host::FusionStage::Cancelled) {
             terminal_cancelled = Some(event);
         }
     }
@@ -4027,15 +4030,15 @@ async fn outer_cancel_after_allocation_corrects_an_initial_zero_progress_snapsho
             request: SubagentSpawnRequest,
             _inherit: SubagentInheritance,
             _progress: Option<tokio::sync::mpsc::Sender<String>>,
-            observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+            observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
             _watchdog: WorkflowQueryWatchdog,
         ) -> Result<SubagentResult, SubagentSpawnError> {
             self.allocation_gate.cancelled().await;
             if !self.allocated.swap(true, Ordering::SeqCst) {
                 if let Some(observer) = observer {
-                    let event = platform_api::subagent_spawn::SubagentObservation::Allocated {
+                    let event = lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
                         agent_id: AgentId::new(),
-                        agent_type: platform_api::FUSION_PANEL_TYPE.to_string(),
+                        agent_type: lingxi_core::host::FUSION_PANEL_TYPE.to_string(),
                         name: request.name,
                         model: request.model.unwrap_or_default(),
                         model_profile: request.model_profile,
@@ -4065,7 +4068,7 @@ async fn outer_cancel_after_allocation_corrects_an_initial_zero_progress_snapsho
         Arc::new(catalog()),
     );
     let inherit = inherit_cancel(cancel);
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(64);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<lingxi_core::host::FusionProgress>(64);
     let handle = tokio::spawn(async move { orch.run(request("task"), inherit, Some(tx)).await });
 
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -4076,7 +4079,7 @@ async fn outer_cancel_after_allocation_corrects_an_initial_zero_progress_snapsho
                 .expect("Fusion progress closed before the dispatch snapshot");
             if matches!(
                 event.stage,
-                platform_api::FusionStage::PanelsDispatched { .. }
+                lingxi_core::host::FusionStage::PanelsDispatched { .. }
             ) && event.panels_allocated == Some(0)
             {
                 break;
@@ -4098,7 +4101,7 @@ async fn outer_cancel_after_allocation_corrects_an_initial_zero_progress_snapsho
     while let Ok(event) = rx.try_recv() {
         if matches!(
             event.stage,
-            platform_api::FusionStage::PanelsDispatched { .. }
+            lingxi_core::host::FusionStage::PanelsDispatched { .. }
         ) && matches!(event.panels_allocated, Some(count) if count >= 1)
         {
             corrected = true;
@@ -4317,7 +4320,7 @@ async fn dropping_the_whole_run_future_commits_the_surviving_snapshot() {
     .with_price_book(Arc::new(priced_book()));
     let cancel = CancellationToken::new();
     let inherit = inherit_recording_cancel(budget.clone(), cancel.clone());
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(64);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<lingxi_core::host::FusionProgress>(64);
     let handle = tokio::spawn(async move { orch.run(request("task"), inherit, Some(tx)).await });
 
     let progress = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -4327,7 +4330,7 @@ async fn dropping_the_whole_run_future_commits_the_surviving_snapshot() {
             };
             if matches!(
                 event.stage,
-                platform_api::FusionStage::RunningPanels { completed, .. } if completed >= 1
+                lingxi_core::host::FusionStage::RunningPanels { completed, .. } if completed >= 1
             ) {
                 break event;
             }
@@ -4337,7 +4340,7 @@ async fn dropping_the_whole_run_future_commits_the_surviving_snapshot() {
     .expect("one panel should finish before aborting the owner task");
     assert!(matches!(
         progress.stage,
-        platform_api::FusionStage::RunningPanels { completed, .. } if completed >= 1
+        lingxi_core::host::FusionStage::RunningPanels { completed, .. } if completed >= 1
     ));
 
     handle.abort();
@@ -4447,7 +4450,7 @@ async fn analyst_input_and_parent_material_never_contain_panel_profile_or_model_
     assert_eq!(result.status, FusionStatus::Analyzed);
 
     let analyst_user = side.last_analyst_user.lock().unwrap().clone().unwrap();
-    let material = platform_api::render_fusion_material(&result);
+    let material = lingxi_core::host::render_fusion_material(&result);
     assert_eq!(result.responses.len(), 3);
     for identity in [
         "claude-sonnet-5",
@@ -4986,7 +4989,7 @@ async fn captured_activation_timestamp_counts_scheduler_delay() {
 
 #[tokio::test]
 async fn prepared_identity_requires_and_uses_its_scoped_budget_view() {
-    let session_id = protocol::SessionId::new();
+    let session_id = lingxi_core::types::SessionId::new();
     let scopes = Arc::new(Mutex::new(Vec::new()));
     let scoped_reserves = Arc::new(AtomicUsize::new(0));
     let budget = Arc::new(ScopeAwareBudget {
@@ -5705,7 +5708,7 @@ async fn captured_prices_keep_analyst_facts_and_commit_barrier_after_source_revo
             eligible: true,
             quality_rank: 100,
             judge_eligible: true,
-            cost_class: platform_api::FusionCostClass::High,
+            cost_class: lingxi_core::host::FusionCostClass::High,
             ..FusionModelHints::default()
         },
         structured_output: true,
@@ -5719,7 +5722,7 @@ async fn captured_prices_keep_analyst_facts_and_commit_barrier_after_source_revo
         panic_at: 1,
     });
     let mut analyst_config = test_config();
-    analyst_config.analyst_model = Some(platform_api::FusionModelChoice::new(
+    analyst_config.analyst_model = Some(lingxi_core::host::FusionModelChoice::new(
         "judge-only",
         "judge-model",
     ));
@@ -5936,7 +5939,7 @@ fn leftover_gateway_panel_catalog() -> Vec<CatalogModel> {
                 eligible: true,
                 quality_rank: 90,
                 judge_eligible: true,
-                cost_class: platform_api::FusionCostClass::High,
+                cost_class: lingxi_core::host::FusionCostClass::High,
                 ..FusionModelHints::default()
             },
             structured_output: true,
@@ -5949,7 +5952,7 @@ fn leftover_gateway_panel_catalog() -> Vec<CatalogModel> {
                 eligible: true,
                 quality_rank: 90,
                 judge_eligible: true,
-                cost_class: platform_api::FusionCostClass::Medium,
+                cost_class: lingxi_core::host::FusionCostClass::Medium,
                 ..FusionModelHints::default()
             },
             structured_output: true,
@@ -5962,7 +5965,7 @@ fn leftover_gateway_panel_catalog() -> Vec<CatalogModel> {
                 eligible: true,
                 quality_rank: 90,
                 judge_eligible: true,
-                cost_class: platform_api::FusionCostClass::Medium,
+                cost_class: lingxi_core::host::FusionCostClass::Medium,
                 ..FusionModelHints::default()
             },
             structured_output: true,
@@ -5977,7 +5980,7 @@ fn leftover_gateway_panel_catalog() -> Vec<CatalogModel> {
                 eligible: true,
                 quality_rank: 90,
                 judge_eligible: true,
-                cost_class: platform_api::FusionCostClass::Subscription,
+                cost_class: lingxi_core::host::FusionCostClass::Subscription,
                 ..FusionModelHints::default()
             },
             structured_output: true,
@@ -6110,7 +6113,7 @@ async fn panel_spawn_requests_are_when_done_capped_and_named() {
     for (index, request) in requests.iter().enumerate() {
         assert_eq!(
             request.structured_output_mode,
-            platform_api::subagent_spawn::StructuredOutputMode::WhenDone,
+            lingxi_core::host::subagent_spawn::StructuredOutputMode::WhenDone,
             "panel {index} must not force StructuredOutput every turn"
         );
         assert_eq!(
@@ -6880,7 +6883,7 @@ async fn cancel_mid_fan_out_still_bills_the_panels_still_in_flight() {
         .expect("cancelled run should unwind promptly")
         .expect("join")
         .expect_err("cancelled fusion");
-    assert_eq!(err, platform_api::FusionError::Cancelled);
+    assert_eq!(err, lingxi_core::host::FusionError::Cancelled);
     settle_spawned_drops().await;
 
     let expected = 12 + 2 * in_flight_panel_floor("task");
@@ -6920,7 +6923,7 @@ async fn a_spawn_rejection_never_deletes_the_floor_of_the_panels_still_streaming
         .expect("cancelled run should unwind promptly")
         .expect("join")
         .expect_err("cancelled fusion");
-    assert_eq!(err, platform_api::FusionError::Cancelled);
+    assert_eq!(err, lingxi_core::host::FusionError::Cancelled);
     settle_spawned_drops().await;
 
     let expected = 2 * in_flight_panel_floor("task");
@@ -7008,7 +7011,7 @@ async fn a_cancel_before_any_panel_is_dispatched_commits_exactly_zero() {
         .run(request("task"), inherit, None)
         .await
         .expect_err("a cancelled run must not produce a result");
-    assert_eq!(err, platform_api::FusionError::Cancelled);
+    assert_eq!(err, lingxi_core::host::FusionError::Cancelled);
     settle_spawned_drops().await;
 
     assert!(
@@ -7089,7 +7092,7 @@ fn panel_with_cache_write(cache_write_tokens: u64) -> Vec<crate::panel::PanelInt
         duration_ms: 0,
         error_category: None,
         error_detail: None,
-        usage: Some(platform_api::FusionUsage {
+        usage: Some(lingxi_core::host::FusionUsage {
             input_tokens: 8,
             output_tokens: 4,
             reasoning_tokens: 0,
@@ -7290,11 +7293,11 @@ async fn evidence_checks_reach_the_analyst_the_material_and_telemetry() {
     assert_eq!(
         checks
             .iter()
-            .filter(|check| **check == platform_api::EvidenceCheckStatus::MissingFile)
+            .filter(|check| **check == lingxi_core::host::EvidenceCheckStatus::MissingFile)
             .count(),
         1
     );
-    let material = platform_api::render_fusion_material(&result);
+    let material = lingxi_core::host::render_fusion_material(&result);
     assert!(material.contains("check=\"missing_file\">src/invented.rs:40-52</evidence>"));
     assert!(material.contains("evidence=\"1 missing_file\""));
 
@@ -7327,13 +7330,13 @@ struct FakeWorktrees {
 }
 
 #[async_trait]
-impl platform_api::WorktreeManager for FakeWorktrees {
+impl lingxi_core::host::WorktreeManager for FakeWorktrees {
     async fn create_worktree(
         &self,
         slug: &str,
         base_branch: Option<&str>,
         _copy_includes: &[std::path::PathBuf],
-    ) -> Result<platform_api::WorktreeHandle, platform_api::WorktreeError> {
+    ) -> Result<lingxi_core::host::WorktreeHandle, lingxi_core::host::WorktreeError> {
         assert_eq!(
             base_branch,
             Some("basecommit"),
@@ -7342,7 +7345,7 @@ impl platform_api::WorktreeManager for FakeWorktrees {
         let path = self.root.join(slug);
         std::fs::create_dir_all(&path).unwrap();
         self.created.lock().unwrap().push(slug.to_string());
-        Ok(platform_api::WorktreeHandle {
+        Ok(lingxi_core::host::WorktreeHandle {
             path,
             branch_name: format!("worktree-{slug}"),
             base_commit: None,
@@ -7350,19 +7353,19 @@ impl platform_api::WorktreeManager for FakeWorktrees {
     }
     async fn remove_worktree(
         &self,
-        _: &platform_api::WorktreeHandle,
-    ) -> Result<(), platform_api::WorktreeError> {
+        _: &lingxi_core::host::WorktreeHandle,
+    ) -> Result<(), lingxi_core::host::WorktreeError> {
         Ok(())
     }
     async fn list_worktrees(
         &self,
-    ) -> Result<Vec<platform_api::WorktreeInfo>, platform_api::WorktreeError> {
+    ) -> Result<Vec<lingxi_core::host::WorktreeInfo>, lingxi_core::host::WorktreeError> {
         Ok(Vec::new())
     }
     async fn cleanup_stale(
         &self,
         _: std::time::Duration,
-    ) -> Result<Vec<std::path::PathBuf>, platform_api::WorktreeError> {
+    ) -> Result<Vec<std::path::PathBuf>, lingxi_core::host::WorktreeError> {
         Ok(Vec::new())
     }
     fn is_supported(&self) -> bool {
@@ -7370,9 +7373,9 @@ impl platform_api::WorktreeManager for FakeWorktrees {
     }
     async fn snapshot_base(
         &self,
-        _: platform_api::SnapshotLimits,
-    ) -> Result<platform_api::WorkspaceBase, platform_api::WorktreeError> {
-        Ok(platform_api::WorkspaceBase {
+        _: lingxi_core::host::SnapshotLimits,
+    ) -> Result<lingxi_core::host::WorkspaceBase, lingxi_core::host::WorktreeError> {
+        Ok(lingxi_core::host::WorkspaceBase {
             commit: "basecommit".into(),
             head: Some("basecommit".into()),
             includes_uncommitted: false,
@@ -7380,9 +7383,9 @@ impl platform_api::WorktreeManager for FakeWorktrees {
     }
     async fn worktree_patch(
         &self,
-        handle: &platform_api::WorktreeHandle,
+        handle: &lingxi_core::host::WorktreeHandle,
         base: &str,
-    ) -> Result<platform_api::WorktreePatch, platform_api::WorktreeError> {
+    ) -> Result<lingxi_core::host::WorktreePatch, lingxi_core::host::WorktreeError> {
         assert_eq!(base, "basecommit");
         let name = handle
             .path
@@ -7391,16 +7394,16 @@ impl platform_api::WorktreeManager for FakeWorktrees {
             .to_string_lossy()
             .into_owned();
         if self.unchanged.iter().any(|suffix| name.ends_with(suffix)) {
-            return Ok(platform_api::WorktreePatch {
+            return Ok(lingxi_core::host::WorktreePatch {
                 diff: String::new(),
                 files: Vec::new(),
             });
         }
-        Ok(platform_api::WorktreePatch {
+        Ok(lingxi_core::host::WorktreePatch {
             diff: format!("--- a/src/a.rs\n+++ b/src/a.rs\n+// change from {name}\n"),
-            files: vec![platform_api::PatchFile {
+            files: vec![lingxi_core::host::PatchFile {
                 path: "src/a.rs".into(),
-                status: platform_api::PatchFileStatus::Modified,
+                status: lingxi_core::host::PatchFileStatus::Modified,
                 insertions: 1,
                 deletions: 0,
                 binary: false,
@@ -7409,8 +7412,8 @@ impl platform_api::WorktreeManager for FakeWorktrees {
     }
     async fn discard_worktree(
         &self,
-        handle: &platform_api::WorktreeHandle,
-    ) -> Result<(), platform_api::WorktreeError> {
+        handle: &lingxi_core::host::WorktreeHandle,
+    ) -> Result<(), lingxi_core::host::WorktreeError> {
         self.discarded.lock().unwrap().push(
             handle
                 .path
@@ -7432,8 +7435,8 @@ struct FakeImplementHost {
 }
 
 #[async_trait]
-impl platform_api::FusionImplementHost for FakeImplementHost {
-    fn worktrees(&self) -> Arc<dyn platform_api::WorktreeManager> {
+impl lingxi_core::host::FusionImplementHost for FakeImplementHost {
+    fn worktrees(&self) -> Arc<dyn lingxi_core::host::WorktreeManager> {
         self.worktrees.clone()
     }
     async fn preflight(&self, _: u64) -> Result<(), String> {
@@ -7445,21 +7448,21 @@ impl platform_api::FusionImplementHost for FakeImplementHost {
         command: &str,
         _: std::time::Duration,
         _: CancellationToken,
-    ) -> platform_api::VerificationRun {
+    ) -> lingxi_core::host::VerificationRun {
         let name = worktree.file_name().unwrap().to_string_lossy().into_owned();
         self.verified
             .lock()
             .unwrap()
             .push((name.clone(), command.to_string()));
         let failed = command == "cargo test" && name.ends_with("-p2");
-        platform_api::VerificationRun {
+        lingxi_core::host::VerificationRun {
             command: command.into(),
             outcome: if failed {
-                platform_api::VerificationOutcome::Failed {
+                lingxi_core::host::VerificationOutcome::Failed {
                     exit_code: Some(101),
                 }
             } else {
-                platform_api::VerificationOutcome::Passed
+                lingxi_core::host::VerificationOutcome::Passed
             },
             duration_ms: 3,
             output_tail: if failed {
@@ -7492,7 +7495,7 @@ fn implement_fixture(
 
 fn implement_request() -> FusionRequest {
     FusionRequest {
-        mode: platform_api::FusionPanelMode::Implement,
+        mode: lingxi_core::host::FusionPanelMode::Implement,
         dimensions: Vec::new(),
         verify_commands: vec!["cargo check".into(), "cargo test".into()],
         ..request("add a retry")
@@ -7505,19 +7508,19 @@ async fn implement_mode_collects_patches_verifies_them_and_feeds_the_analyst() {
     let spawner = FakeSpawner::new(three_ok());
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
     let orch = orch_scripted(spawner.clone(), side.clone()).with_implement_host(host.clone());
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(64);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<lingxi_core::host::FusionProgress>(64);
     let result = orch
         .run(implement_request(), inherit(), Some(tx))
         .await
         .expect("implement run");
 
-    assert_eq!(result.mode, platform_api::FusionPanelMode::Implement);
+    assert_eq!(result.mode, lingxi_core::host::FusionPanelMode::Implement);
     // The implement dimensions replaced the analysis defaults.
     let user = side.last_analyst_user.lock().unwrap().clone().unwrap();
     let sent: Value = serde_json::from_str(&user).unwrap();
     assert_eq!(
         sent["dimensions"],
-        json!(platform_api::DEFAULT_IMPLEMENT_FUSION_DIMENSIONS)
+        json!(lingxi_core::host::DEFAULT_IMPLEMENT_FUSION_DIMENSIONS)
     );
 
     // Each panel ran as the implementer, inside its own worktree.
@@ -7526,7 +7529,7 @@ async fn implement_mode_collects_patches_verifies_them_and_feeds_the_analyst() {
     let mut cwds: Vec<String> = requests
         .iter()
         .map(|r| {
-            assert_eq!(r.subagent_type, platform_api::FUSION_IMPLEMENTER_TYPE);
+            assert_eq!(r.subagent_type, lingxi_core::host::FUSION_IMPLEMENTER_TYPE);
             r.cwd.clone().expect("cwd override")
         })
         .collect();
@@ -7547,7 +7550,7 @@ async fn implement_mode_collects_patches_verifies_them_and_feeds_the_analyst() {
         assert_eq!(patch.base_commit, "basecommit");
         assert!(patch.diff.contains("+// change from"));
         assert!(patch.patch_file.is_some());
-        let Some(platform_api::PanelVerification::Runs(runs)) = &material.verification else {
+        let Some(lingxi_core::host::PanelVerification::Runs(runs)) = &material.verification else {
             panic!("verification ran for a panel with changes")
         };
         assert_eq!(runs.len(), 2);
@@ -7576,7 +7579,7 @@ async fn implement_mode_collects_patches_verifies_them_and_feeds_the_analyst() {
     assert!(user.contains("+// change from"));
 
     // The parent gets the patches and the outcomes.
-    let material = platform_api::render_fusion_material(&result);
+    let material = lingxi_core::host::render_fusion_material(&result);
     assert!(material.contains("<patch worktree="), "{material}");
     assert!(material.contains("<verification>"));
     assert!(material.contains("outcome=\"failed\""));
@@ -7594,23 +7597,23 @@ async fn implement_mode_collects_patches_verifies_them_and_feeds_the_analyst() {
     while let Ok(event) = rx.try_recv() {
         stages.push(std::mem::discriminant(&event.stage));
     }
-    let position = |stage: platform_api::FusionStage| {
+    let position = |stage: lingxi_core::host::FusionStage| {
         stages
             .iter()
             .position(|s| *s == std::mem::discriminant(&stage))
             .unwrap_or_else(|| panic!("missing stage {stage:?}"))
     };
     assert!(
-        position(platform_api::FusionStage::PreparingWorktrees)
-            < position(platform_api::FusionStage::CollectingPatches)
+        position(lingxi_core::host::FusionStage::PreparingWorktrees)
+            < position(lingxi_core::host::FusionStage::CollectingPatches)
     );
     assert!(
-        position(platform_api::FusionStage::CollectingPatches)
-            < position(platform_api::FusionStage::Verifying)
+        position(lingxi_core::host::FusionStage::CollectingPatches)
+            < position(lingxi_core::host::FusionStage::Verifying)
     );
     assert!(
-        position(platform_api::FusionStage::Verifying)
-            < position(platform_api::FusionStage::Analyzing)
+        position(lingxi_core::host::FusionStage::Verifying)
+            < position(lingxi_core::host::FusionStage::Analyzing)
     );
 }
 
@@ -7828,7 +7831,7 @@ async fn a_tool_analyst_runs_as_a_subagent_and_only_well_formed_claim_checks_sur
         .lock()
         .unwrap()
         .iter()
-        .filter(|r| r.subagent_type == platform_api::FUSION_ANALYST_TYPE)
+        .filter(|r| r.subagent_type == lingxi_core::host::FUSION_ANALYST_TYPE)
         .cloned()
         .collect();
     assert_eq!(analyst_spawns.len(), 1);
@@ -7843,7 +7846,7 @@ async fn a_tool_analyst_runs_as_a_subagent_and_only_well_formed_claim_checks_sur
     assert!(!analyst_spawns[0].prompt.contains("deepseek"));
 
     let analysis = result.analysis.clone().expect("analysis");
-    let kept: Vec<(&str, platform_api::ClaimVerdict)> = analysis
+    let kept: Vec<(&str, lingxi_core::host::ClaimVerdict)> = analysis
         .verified_claims
         .iter()
         .map(|c| (c.panel_id.as_str(), c.verdict))
@@ -7851,8 +7854,8 @@ async fn a_tool_analyst_runs_as_a_subagent_and_only_well_formed_claim_checks_sur
     assert_eq!(
         kept,
         vec![
-            ("P1", platform_api::ClaimVerdict::Supported),
-            ("P2", platform_api::ClaimVerdict::Unverified)
+            ("P1", lingxi_core::host::ClaimVerdict::Supported),
+            ("P2", lingxi_core::host::ClaimVerdict::Unverified)
         ]
     );
     assert_eq!(
@@ -7862,7 +7865,7 @@ async fn a_tool_analyst_runs_as_a_subagent_and_only_well_formed_claim_checks_sur
     assert_eq!(analysis.verified_claims[1].evidence, None);
     // Three panels of one request each plus the analyst's four turns.
     assert_eq!(result.usage.provider_requests, 3 + 4);
-    let material = platform_api::render_fusion_material(&result);
+    let material = lingxi_core::host::render_fusion_material(&result);
     assert!(material.contains("<verified-claims>"), "{material}");
     assert!(material.contains("verdict=\"supported\""), "{material}");
     assert!(!material.contains("ghost"), "{material}");
@@ -7892,7 +7895,7 @@ async fn a_failed_tool_analyst_degrades_to_material_without_a_retry() {
         .lock()
         .unwrap()
         .iter()
-        .filter(|r| r.subagent_type == platform_api::FUSION_ANALYST_TYPE)
+        .filter(|r| r.subagent_type == lingxi_core::host::FUSION_ANALYST_TYPE)
         .count();
     assert_eq!(
         analyst_spawns, 1,
@@ -7907,12 +7910,12 @@ async fn the_analyst_stays_a_single_call_unless_tools_are_asked_for() {
         (
             test_config(),
             false,
-            platform_api::FusionPanelMode::Analysis,
+            lingxi_core::host::FusionPanelMode::Analysis,
         ),
         (
             tool_analyst_config(),
             false,
-            platform_api::FusionPanelMode::Implement,
+            lingxi_core::host::FusionPanelMode::Implement,
         ),
     ] {
         assert!(
@@ -7928,7 +7931,7 @@ async fn the_analyst_stays_a_single_call_unless_tools_are_asked_for() {
     let mut asked = request("task");
     asked.verify_claims = true;
     assert!(test_config().analyst_uses_tools(&asked));
-    asked.mode = platform_api::FusionPanelMode::Implement;
+    asked.mode = lingxi_core::host::FusionPanelMode::Implement;
     assert!(!test_config().analyst_uses_tools(&asked));
     let mut fast = request("task");
     fast.preset = FusionPreset::Fast;

@@ -13,11 +13,11 @@
 //! On any other OS, returns plaintext directly with the documented warning.
 
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     CredentialStoragePolicy, InMemorySecureStorage, SecureStorage, SecureStorageBackend,
     SecureStorageError,
 };
-use protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
+use lingxi_core::types::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

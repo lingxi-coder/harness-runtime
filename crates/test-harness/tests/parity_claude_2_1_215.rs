@@ -1,7 +1,7 @@
 //! Parity **delta baseline** vs Claude Code 2.1.215.
 //!
 //! Unlike [`parity_claude_2_1_208`], this file does **not** own or pin the live
-//! `platform_api::CLAUDE_CODE_VERSION` — the port's live version-facing wave now tracks
+//! `lingxi_core::host::CLAUDE_CODE_VERSION` — the port's live version-facing wave now tracks
 //! 2.1.252. This is a historical capture of the real 2.1.215
 //! native binary's observable CLI surface (root/agents/mcp/plugin `--help`),
 //! recorded so audits diff against the CURRENT release instead of the stale

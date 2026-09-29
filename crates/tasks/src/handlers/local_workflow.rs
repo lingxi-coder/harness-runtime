@@ -38,10 +38,10 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use async_trait::async_trait;
 use futures::stream::StreamExt;
-use platform_api::filesystem::FileSystem;
-use platform_api::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry};
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
-use platform_api::{
+use lingxi_core::host::filesystem::FileSystem;
+use lingxi_core::host::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry};
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
+use lingxi_core::host::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
@@ -346,7 +346,7 @@ fn workflow_agent_display_model(opts: &Value) -> Option<String> {
         .or_else(|| opts.get("model_profile"))
         .and_then(Value::as_str)
         .filter(|profile| !profile.is_empty());
-    Some(platform_api::qualified_model_ref(
+    Some(lingxi_core::host::qualified_model_ref(
         agent_model,
         agent_model_profile,
     ))
@@ -592,7 +592,7 @@ impl ToolInvoker for WorkspaceLeaseToolInvoker {
         input: Value,
         ctx: SubagentInvocationContext,
         _workspace_lease_token: Option<u64>,
-    ) -> Result<platform_api::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         self.inner
             .invoke_detailed(name, input, ctx, Some(self.token))
             .await
@@ -899,7 +899,7 @@ async fn cancel_workflow_worker(rec: WorkerCancel) -> Result<(), TaskError> {
 /// worker drives the script to completion (via [`run_workflow_script`]), spools
 /// the script's return value, reports the terminal status, and removes its own
 /// cancel record on exit. `kill` cancels the in-flight worker.
-type ProcessOwners = Arc<StdMutex<HashSet<protocol::AgentId>>>;
+type ProcessOwners = Arc<StdMutex<HashSet<lingxi_core::types::AgentId>>>;
 
 /// Runs workflow workers and retains the process identities of their subagents.
 pub struct LocalWorkflowHandler {
@@ -922,7 +922,7 @@ pub struct LocalWorkflowHandler {
     /// {isolation:"worktree"})` calls. When wired, each isolated workflow
     /// subagent gets a fresh worktree cwd and the terminal keep/cleanup
     /// judgment runs after the spawn returns.
-    worktree_manager: Option<Arc<dyn platform_api::worktree::WorktreeManager>>,
+    worktree_manager: Option<Arc<dyn lingxi_core::host::worktree::WorktreeManager>>,
     /// `task_id` → live worker-cancel record (removed by the worker on exit, or
     /// by [`Task::kill`] / cleanup).
     workers: Arc<Mutex<HashMap<String, WorkerCancel>>>,
@@ -945,7 +945,7 @@ pub struct LocalWorkflowHandler {
     /// that the main loop also feeds, so `spent()` reads main loop + all
     /// workflows. When unset (tests), a run falls back to its own private pool.
     output_pool_cell: Option<Arc<OnceLock<Arc<AtomicU64>>>>,
-    output_scopes: Option<Arc<dyn platform_api::WorkflowOutputScopes>>,
+    output_scopes: Option<Arc<dyn lingxi_core::host::WorkflowOutputScopes>>,
     /// Late-bound turn-start output baseline (claude-code `xtr`): the cumulative
     /// output at the start of the CURRENT turn. The composition root publishes
     /// the orchestrator's `turn_start_output_baseline` here. At spawn the handler
@@ -1045,7 +1045,7 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_worktree_manager(
         mut self,
-        manager: Arc<dyn platform_api::worktree::WorktreeManager>,
+        manager: Arc<dyn lingxi_core::host::worktree::WorktreeManager>,
     ) -> Self {
         self.worktree_manager = Some(manager);
         self
@@ -1083,7 +1083,7 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_output_scopes(
         mut self,
-        scopes: Arc<dyn platform_api::WorkflowOutputScopes>,
+        scopes: Arc<dyn lingxi_core::host::WorkflowOutputScopes>,
     ) -> Self {
         self.output_scopes = Some(scopes);
         self
@@ -1149,7 +1149,7 @@ impl LocalWorkflowHandler {
 struct WorkflowIsolationSpawner {
     process_owners: ProcessOwners,
     inner: Arc<dyn SubagentSpawner>,
-    worktree: Option<Arc<dyn platform_api::worktree::WorktreeManager>>,
+    worktree: Option<Arc<dyn lingxi_core::host::worktree::WorktreeManager>>,
     slug_prefix: String,
     sequence: AtomicU64,
     transcript_subdir: Option<PathBuf>,
@@ -1161,8 +1161,8 @@ impl WorkflowIsolationSpawner {
         mut request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
-        watchdog: Option<platform_api::subagent_spawn::WorkflowQueryWatchdog>,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: Option<lingxi_core::host::subagent_spawn::WorkflowQueryWatchdog>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         // Process cleanup depends on synchronous allocation receipts, not on
         // whether a live-progress UI or journal happens to be enabled.
@@ -1170,7 +1170,7 @@ impl WorkflowIsolationSpawner {
             owners: self.process_owners.clone(),
             inner: observer,
         })
-            as Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>);
+            as Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>);
         let worktree = if request.isolation.as_deref() == Some("worktree") {
             if let Some(manager) = self.worktree.as_ref() {
                 let seq = self
@@ -1218,7 +1218,8 @@ impl WorkflowIsolationSpawner {
             })
             .await;
         if let (Some(manager), Some(handle)) = (self.worktree.as_ref(), worktree.as_ref()) {
-            let _ = platform_api::worktree::agent_worktree_result(manager.as_ref(), handle).await;
+            let _ =
+                lingxi_core::host::worktree::agent_worktree_result(manager.as_ref(), handle).await;
         }
         result
     }
@@ -1226,14 +1227,14 @@ impl WorkflowIsolationSpawner {
 
 struct WorkflowProcessObserver {
     owners: ProcessOwners,
-    inner: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+    inner: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
 }
 
 #[async_trait]
-impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowProcessObserver {
+impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for WorkflowProcessObserver {
     async fn on_model_selected(
         &self,
-        event: &platform_api::subagent_spawn::SubagentObservation,
+        event: &lingxi_core::host::subagent_spawn::SubagentObservation,
         effort: Option<&str>,
     ) {
         if let Some(inner) = &self.inner {
@@ -1243,15 +1244,17 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowProcessObse
 
     async fn before_start(
         &self,
-        event: &platform_api::subagent_spawn::SubagentObservation,
+        event: &lingxi_core::host::subagent_spawn::SubagentObservation,
     ) -> Result<(), SubagentSpawnError> {
         if let Some(inner) = &self.inner {
             inner.before_start(event).await?;
         }
         Ok(())
     }
-    fn on_allocated(&self, event: &platform_api::subagent_spawn::SubagentObservation) {
-        if let platform_api::subagent_spawn::SubagentObservation::Allocated { agent_id, .. } = event
+    fn on_allocated(&self, event: &lingxi_core::host::subagent_spawn::SubagentObservation) {
+        if let lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
+            agent_id, ..
+        } = event
         {
             self.owners
                 .lock()
@@ -1263,9 +1266,10 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowProcessObse
         }
     }
 
-    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
-        if let platform_api::subagent_spawn::SubagentObservation::Allocated { agent_id, .. } =
-            &event
+    async fn on_event(&self, event: lingxi_core::host::subagent_spawn::SubagentObservation) {
+        if let lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
+            agent_id, ..
+        } = &event
         {
             self.owners
                 .lock()
@@ -1321,7 +1325,7 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.spawn_inner(request, inherit, progress, observer, None)
             .await
@@ -1332,8 +1336,8 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
-        watchdog: platform_api::subagent_spawn::WorkflowQueryWatchdog,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: lingxi_core::host::subagent_spawn::WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.spawn_inner(request, inherit, progress, observer, Some(watchdog))
             .await
@@ -1362,11 +1366,11 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         self.inner.resolve_selection(subagent_type, model).await
     }
 
-    async fn register_name(&self, name: &str, agent_id: protocol::AgentId) {
+    async fn register_name(&self, name: &str, agent_id: lingxi_core::types::AgentId) {
         self.inner.register_name(name, agent_id).await;
     }
 
-    async fn resolve_name(&self, name: &str) -> Option<protocol::AgentId> {
+    async fn resolve_name(&self, name: &str) -> Option<lingxi_core::types::AgentId> {
         self.inner.resolve_name(name).await
     }
 
@@ -1374,7 +1378,7 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         &self,
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
-    ) -> Result<platform_api::subagent_spawn::AsyncLaunch, SubagentSpawnError> {
+    ) -> Result<lingxi_core::host::subagent_spawn::AsyncLaunch, SubagentSpawnError> {
         self.inner.spawn_async(request, inherit).await
     }
 }
@@ -1618,7 +1622,7 @@ fn make_request(
             .map(std::string::ToString::to_string),
         // Workflow `agent({schema})` keeps the pre-existing forced-every-turn
         // contract (byte-parity with pre-WP2a behavior).
-        structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode::Forced,
+        structured_output_mode: lingxi_core::host::subagent_spawn::StructuredOutputMode::Forced,
         structured_output_parse_retries: structured_output_parse_retries(&opts).unwrap_or(0),
         // `agent(prompt, { effort })` → override the subagent's thinking effort
         // (claude-code `me={...ie,effort:ae}`). A level string or integer, carried
@@ -1898,10 +1902,10 @@ impl WorkflowAgentLiveObserver {
 }
 
 #[async_trait]
-impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver {
-    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
+impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver {
+    async fn on_event(&self, event: lingxi_core::host::subagent_spawn::SubagentObservation) {
         match event {
-            platform_api::subagent_spawn::SubagentObservation::Allocated {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
                 agent_id,
                 agent_type,
                 model,
@@ -1915,7 +1919,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                 self.publish_with(move |state| {
                     state.agent_id = Some(agent_id.to_string());
                     state.agent_type = Some(agent_type);
-                    state.model = Some(platform_api::qualified_model_ref(
+                    state.model = Some(lingxi_core::host::qualified_model_ref(
                         &model,
                         model_profile.as_deref(),
                     ));
@@ -1925,7 +1929,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                 })
                 .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Progress {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Progress {
                 tool_use_count,
                 token_count,
                 ..
@@ -1938,8 +1942,10 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                 })
                 .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Retry {
-                attempt, reason, ..
+            lingxi_core::host::subagent_spawn::SubagentObservation::Retry {
+                attempt,
+                reason,
+                ..
             } => {
                 let now = unix_time_ms_now();
                 self.publish_with(move |state| {
@@ -1950,13 +1956,15 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                 })
                 .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Message { message, .. } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Message { message, .. } => {
                 let now = unix_time_ms_now();
                 self.publish_with(move |state| {
                     state.last_progress_at_ms = Some(now);
-                    if let protocol::ConversationMessage::Assistant { content, .. } = message {
+                    if let lingxi_core::types::ConversationMessage::Assistant { content, .. } =
+                        message
+                    {
                         for block in content {
-                            if let protocol::ContentBlock::ToolUse { name, .. } = block {
+                            if let lingxi_core::types::ContentBlock::ToolUse { name, .. } = block {
                                 state.last_tool_name = Some(name.clone());
                                 state.last_tool_summary = Some(name);
                             }
@@ -1965,7 +1973,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                 })
                 .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Completed {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Completed {
                 total_tool_use_count,
                 total_duration_ms,
                 usage,
@@ -1992,7 +2000,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                         .record_duration(self.call_index, total_duration_ms);
                 }
             }
-            platform_api::subagent_spawn::SubagentObservation::Failed { error, .. } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Failed { error, .. } => {
                 let now = unix_time_ms_now();
                 self.publish_with(move |state| {
                     state.state = Some("error".to_string());
@@ -2001,7 +2009,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                 })
                 .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Killed { .. } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Killed { .. } => {
                 let now = unix_time_ms_now();
                 self.publish_with(move |state| {
                     state.state = Some("error".to_string());
@@ -2025,7 +2033,7 @@ struct OwnSpendBudget {
     spent: Arc<std::sync::atomic::AtomicU64>,
     /// Cumulative output at the start of the turn this workflow was spawned in.
     baseline: u64,
-    output_scope: Option<platform_api::WorkflowOutputScope>,
+    output_scope: Option<lingxi_core::host::WorkflowOutputScope>,
 }
 impl OwnSpendBudget {
     fn turn_spent(&self) -> u64 {
@@ -2051,14 +2059,14 @@ impl workflow::WorkflowBudgetSource for OwnSpendBudget {
 /// report as a fallback. A failed run can still have already-billed output.
 fn known_workflow_agent_output(
     result: &SubagentResult,
-) -> Result<Option<u64>, platform_api::BudgetError> {
+) -> Result<Option<u64>, lingxi_core::host::BudgetError> {
     let usage = match result {
         SubagentResult::Completed {
             usage,
             cumulative_usage,
             ..
         } => {
-            if *cumulative_usage == platform_api::SubagentUsage::default() {
+            if *cumulative_usage == lingxi_core::host::SubagentUsage::default() {
                 usage
             } else {
                 cumulative_usage
@@ -2071,27 +2079,29 @@ fn known_workflow_agent_output(
         .output_tokens
         .checked_add(usage.reasoning_output_tokens)
         .map(Some)
-        .ok_or_else(|| platform_api::BudgetError::Internal("workflow agent output overflow".into()))
+        .ok_or_else(|| {
+            lingxi_core::host::BudgetError::Internal("workflow agent output overflow".into())
+        })
 }
 
 #[cfg(test)]
 mod captured_output_tests {
     use super::*;
-    use platform_api::{
+    use lingxi_core::host::{
         BudgetError, WorkflowOutputAccount, WorkflowOutputEventId, WorkflowOutputScope,
     };
     use std::sync::atomic::Ordering;
 
     struct Account {
-        session: protocol::SessionId,
-        generation: protocol::MessageId,
+        session: lingxi_core::types::SessionId,
+        generation: lingxi_core::types::MessageId,
         spent: AtomicU64,
     }
     impl WorkflowOutputAccount for Account {
-        fn session_id(&self) -> protocol::SessionId {
+        fn session_id(&self) -> lingxi_core::types::SessionId {
             self.session
         }
-        fn generation_id(&self) -> protocol::MessageId {
+        fn generation_id(&self) -> lingxi_core::types::MessageId {
             self.generation
         }
         fn spent(&self) -> u64 {
@@ -2102,10 +2112,10 @@ mod captured_output_tests {
             Ok(())
         }
     }
-    fn scope(session: protocol::SessionId) -> WorkflowOutputScope {
+    fn scope(session: lingxi_core::types::SessionId) -> WorkflowOutputScope {
         WorkflowOutputScope::new(Arc::new(Account {
             session,
-            generation: protocol::MessageId::new(),
+            generation: lingxi_core::types::MessageId::new(),
             spent: AtomicU64::new(0),
         }))
     }
@@ -2119,17 +2129,17 @@ mod captured_output_tests {
     }
 
     struct ExecutionProbe {
-        session: protocol::SessionId,
-        generation: protocol::MessageId,
+        session: lingxi_core::types::SessionId,
+        generation: lingxi_core::types::MessageId,
         events: std::sync::Mutex<HashMap<WorkflowOutputEventId, u64>>,
         calls: AtomicU64,
         result: Option<SubagentResult>,
     }
     impl WorkflowOutputAccount for ExecutionProbe {
-        fn session_id(&self) -> protocol::SessionId {
+        fn session_id(&self) -> lingxi_core::types::SessionId {
             self.session
         }
-        fn generation_id(&self) -> protocol::MessageId {
+        fn generation_id(&self) -> lingxi_core::types::MessageId {
             self.generation
         }
         fn spent(&self) -> u64 {
@@ -2161,9 +2171,9 @@ mod captured_output_tests {
                 return Ok(result.clone());
             }
             Ok(SubagentResult::Completed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 content: Value::String("answer".into()),
-                usage: platform_api::SubagentUsage {
+                usage: lingxi_core::host::SubagentUsage {
                     output_tokens: 7,
                     ..Default::default()
                 },
@@ -2173,7 +2183,7 @@ mod captured_output_tests {
                 assistant_message_count: 0,
                 response_char_count: 0,
                 last_request_id: None,
-                cumulative_usage: platform_api::SubagentUsage::default(),
+                cumulative_usage: lingxi_core::host::SubagentUsage::default(),
                 usage_complete: true,
             })
         }
@@ -2205,8 +2215,8 @@ mod captured_output_tests {
     #[tokio::test]
     async fn captured_output_resume_cache_misses_have_distinct_execution_events() {
         let probe = Arc::new(ExecutionProbe {
-            session: protocol::SessionId::new(),
-            generation: protocol::MessageId::new(),
+            session: lingxi_core::types::SessionId::new(),
+            generation: lingxi_core::types::MessageId::new(),
             events: std::sync::Mutex::new(HashMap::new()),
             calls: AtomicU64::new(0),
             result: None,
@@ -2259,12 +2269,12 @@ mod captured_output_tests {
     fn completed_usage(
         output: u64,
         reasoning: u64,
-        cumulative: platform_api::SubagentUsage,
+        cumulative: lingxi_core::host::SubagentUsage,
     ) -> SubagentResult {
         SubagentResult::Completed {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             content: Value::String("answer".into()),
-            usage: platform_api::SubagentUsage {
+            usage: lingxi_core::host::SubagentUsage {
                 output_tokens: output,
                 reasoning_output_tokens: reasoning,
                 ..Default::default()
@@ -2287,7 +2297,7 @@ mod captured_output_tests {
                 completed_usage(
                     7,
                     3,
-                    platform_api::SubagentUsage {
+                    lingxi_core::host::SubagentUsage {
                         output_tokens: 21,
                         reasoning_output_tokens: 9,
                         ..Default::default()
@@ -2299,7 +2309,7 @@ mod captured_output_tests {
                 completed_usage(
                     7,
                     3,
-                    platform_api::SubagentUsage {
+                    lingxi_core::host::SubagentUsage {
                         reasoning_output_tokens: 11,
                         ..Default::default()
                     },
@@ -2307,14 +2317,14 @@ mod captured_output_tests {
                 11,
             ),
             (
-                completed_usage(7, 3, platform_api::SubagentUsage::default()),
+                completed_usage(7, 3, lingxi_core::host::SubagentUsage::default()),
                 10,
             ),
             (
                 SubagentResult::Failed {
-                    agent_id: protocol::AgentId::new(),
+                    agent_id: lingxi_core::types::AgentId::new(),
                     reason: "after paid round".into(),
-                    usage: platform_api::SubagentUsage {
+                    usage: lingxi_core::host::SubagentUsage {
                         output_tokens: 12,
                         reasoning_output_tokens: 5,
                         ..Default::default()
@@ -2330,8 +2340,8 @@ mod captured_output_tests {
                     _ => 0,
                 };
                 let probe = Arc::new(ExecutionProbe {
-                    session: protocol::SessionId::new(),
-                    generation: protocol::MessageId::new(),
+                    session: lingxi_core::types::SessionId::new(),
+                    generation: lingxi_core::types::MessageId::new(),
                     events: std::sync::Mutex::new(HashMap::new()),
                     calls: AtomicU64::new(0),
                     result: Some(result.clone()),
@@ -2374,11 +2384,11 @@ mod captured_output_tests {
 
     #[test]
     fn captured_output_rejects_overflow_without_inventing_killed_usage() {
-        let overflow = completed_usage(u64::MAX, 1, platform_api::SubagentUsage::default());
+        let overflow = completed_usage(u64::MAX, 1, lingxi_core::host::SubagentUsage::default());
         assert!(known_workflow_agent_output(&overflow).is_err());
         assert_eq!(
             known_workflow_agent_output(&SubagentResult::Killed {
-                agent_id: protocol::AgentId::new()
+                agent_id: lingxi_core::types::AgentId::new()
             })
             .unwrap(),
             None
@@ -2388,14 +2398,14 @@ mod captured_output_tests {
     #[tokio::test]
     async fn captured_output_caught_overflow_cannot_spawn_again() {
         let probe = Arc::new(ExecutionProbe {
-            session: protocol::SessionId::new(),
-            generation: protocol::MessageId::new(),
+            session: lingxi_core::types::SessionId::new(),
+            generation: lingxi_core::types::MessageId::new(),
             events: std::sync::Mutex::new(HashMap::new()),
             calls: AtomicU64::new(0),
             result: Some(completed_usage(
                 u64::MAX,
                 1,
-                platform_api::SubagentUsage::default(),
+                lingxi_core::host::SubagentUsage::default(),
             )),
         });
         let scope = WorkflowOutputScope::new(probe.clone());
@@ -2414,12 +2424,12 @@ mod captured_output_tests {
 
     #[test]
     fn captured_output_workflows_share_main_and_workflow_spend() {
-        let scope = scope(protocol::SessionId::new());
+        let scope = scope(lingxi_core::types::SessionId::new());
         let first = reader(scope.clone());
         let second = reader(scope.clone());
         scope
             .record_legacy(
-                WorkflowOutputEventId::MainResponse(protocol::MessageId::new()),
+                WorkflowOutputEventId::MainResponse(lingxi_core::types::MessageId::new()),
                 7,
             )
             .unwrap();
@@ -2438,7 +2448,7 @@ mod captured_output_tests {
 
     #[test]
     fn captured_output_late_parent_and_nested_reads_keep_original_generation() {
-        let session = protocol::SessionId::new();
+        let session = lingxi_core::types::SessionId::new();
         let old = scope(session);
         let parent = reader(old.clone());
         let nested = reader(old.clone());
@@ -2850,7 +2860,7 @@ async fn run_workflow_script_with_live_updates_recorded(
     agent_count_out: Option<Arc<AtomicU64>>,
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
     workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
-    output_scope: Option<platform_api::WorkflowOutputScope>,
+    output_scope: Option<lingxi_core::host::WorkflowOutputScope>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     let NestedConfig {
         allow_nested,
@@ -2863,7 +2873,7 @@ async fn run_workflow_script_with_live_updates_recorded(
     // Resume reuses the persisted run/journal identity, but a real script
     // execution can issue new calls at the same call indices. Its accounting
     // namespace must therefore be fresh; nested calls share this execution.
-    let output_execution_id = protocol::MessageId::new().to_string();
+    let output_execution_id = lingxi_core::types::MessageId::new().to_string();
     // Script try/catch must not turn an accounting failure into permission
     // for another paid call, including later calls in the same batch.
     let output_accounting_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3100,7 +3110,7 @@ async fn run_workflow_script_with_live_updates_recorded(
                             if let Some(total) = budget_total.filter(|&t| t > 0) {
                                 let turn_spent = output_scope.as_ref().map_or_else(
                                     || spent.load(Ordering::Relaxed).saturating_sub(baseline),
-                                    platform_api::WorkflowOutputScope::spent,
+                                    lingxi_core::host::WorkflowOutputScope::spent,
                                 );
                                 if turn_spent >= total {
                                     let should_emit = {
@@ -3329,7 +3339,7 @@ async fn run_workflow_script_with_live_updates_recorded(
                         let mut request = make_request(&subagent_type, &prompt, &opts_json);
                         request.origin_session_id = workflow_session_uuid
                             .as_deref()
-                            .and_then(protocol::SessionId::parse_prefixed);
+                            .and_then(lingxi_core::types::SessionId::parse_prefixed);
                         let queued_ms = unix_time_ms_now();
                         emit_workflow_agent_queued(
                             ptx.as_ref(),
@@ -3395,10 +3405,10 @@ async fn run_workflow_script_with_live_updates_recorded(
                                     Some(
                                         observer
                                             as Arc<
-                                                dyn platform_api::subagent_spawn::SubagentSpawnObserver,
+                                                dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver,
                                             >,
                                     ),
-                                    platform_api::subagent_spawn::WorkflowQueryWatchdog::default(),
+                                    lingxi_core::host::subagent_spawn::WorkflowQueryWatchdog::default(),
                                 )
                                 .await
                         } else {
@@ -3409,7 +3419,7 @@ async fn run_workflow_script_with_live_updates_recorded(
                             let recorded = known_workflow_agent_output(result).and_then(|tokens| {
                                 tokens.map(|tokens| {
                                     scope.record_legacy(
-                                        platform_api::WorkflowOutputEventId::WorkflowAgent {
+                                        lingxi_core::host::WorkflowOutputEventId::WorkflowAgent {
                                             run_id: output_run_id.clone(),
                                             call_index,
                                         },
@@ -3586,7 +3596,7 @@ async fn resolve_nested_script(
 
 #[async_trait]
 impl Task for LocalWorkflowHandler {
-    async fn process_owner_ids(&self, task_id: &str) -> Vec<protocol::AgentId> {
+    async fn process_owner_ids(&self, task_id: &str) -> Vec<lingxi_core::types::AgentId> {
         let owners = self
             .process_owners
             .lock()
@@ -3652,7 +3662,7 @@ impl Task for LocalWorkflowHandler {
         // standalone hosts that intentionally have no session binding.
         if session_uuid
             .as_deref()
-            .is_some_and(|raw| protocol::SessionId::parse_prefixed(raw).is_none())
+            .is_some_and(|raw| lingxi_core::types::SessionId::parse_prefixed(raw).is_none())
         {
             return Err(TaskError::Internal(
                 "workflow session_uuid must be a valid session id".into(),
@@ -3666,7 +3676,7 @@ impl Task for LocalWorkflowHandler {
             .map(|scopes| {
                 let session = session_uuid
                     .as_deref()
-                    .and_then(protocol::SessionId::parse_prefixed)
+                    .and_then(lingxi_core::types::SessionId::parse_prefixed)
                     .ok_or_else(|| {
                         TaskError::Internal("scoped workflow requires a canonical session".into())
                     })?;
@@ -3742,7 +3752,7 @@ impl Task for LocalWorkflowHandler {
         // composition-root handle.
         let budget = session_uuid
             .as_deref()
-            .and_then(protocol::SessionId::parse_prefixed)
+            .and_then(lingxi_core::types::SessionId::parse_prefixed)
             .and_then(|session_id| self.budget.scoped_for_session(session_id))
             .unwrap_or_else(|| self.budget.clone());
         let status_sink = self.status_sink.clone();
@@ -4166,7 +4176,7 @@ impl Task for LocalWorkflowHandler {
                 let (agents_done, agents_error, agents_skipped, agents_empty_result) =
                     workflow_metrics_snapshot.terminal_counts();
                 let terminal_outcome = match &outcome {
-                    Ok(out) => platform_api::task_registry::WorkflowTerminalOutcome {
+                    Ok(out) => lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                         result: out.result.clone(),
                         failures: out.failures.clone(),
                         agent_count: workflow_metrics_snapshot.call_count,
@@ -4180,7 +4190,7 @@ impl Task for LocalWorkflowHandler {
                         progress_counts_available: true,
                         ..Default::default()
                     },
-                    Err(error) => platform_api::task_registry::WorkflowTerminalOutcome {
+                    Err(error) => lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                         error: Some(error.to_string()),
                         agent_count: workflow_metrics_snapshot.call_count,
                         total_tokens: workflow_metrics_snapshot.total_tokens,

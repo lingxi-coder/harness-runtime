@@ -13,20 +13,20 @@
 //!   retries, and the retried spec carries the new Bearer.
 
 use async_trait::async_trait;
-use mcp::connection::{ConfigScope, McpServerConfig};
-use mcp::oauth::{self, OnAuthorizationUrl};
-use mcp::registry::{McpRegistry, OAuthDeps};
-use platform_api::http::SseStream;
-use platform_api::{
+use lingxi_core::host::http::SseStream;
+use lingxi_core::host::{
     Clock, ElicitRequestDto, ElicitResultDto, HttpError, HttpTransport, McpError,
     McpNotificationStream, McpOAuthConfigDto, McpPromptDto, McpRawConnection,
     McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto, McpTransport,
     McpTransportKind, McpTransportSpec, SecureStorage, SecureStorageBackend, SecureStorageError,
     ServerCapabilitiesDto,
 };
-use protocol::{
+use lingxi_core::types::{
     HttpMethod, HttpRequest, HttpResponse, SecretKindDto, SecureStorageData, SecureStorageMetadata,
 };
+use mcp::connection::{ConfigScope, McpServerConfig};
+use mcp::oauth::{self, OnAuthorizationUrl};
+use mcp::registry::{McpRegistry, OAuthDeps};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -315,7 +315,7 @@ impl McpTransport for RecordingTransport {
             });
         }
         Ok(McpRawConnection {
-            connection_id: protocol::McpConnectionId::new(),
+            connection_id: lingxi_core::types::McpConnectionId::new(),
         })
     }
     async fn initialize(&self, _c: &McpRawConnection) -> Result<ServerCapabilitiesDto, McpError> {
@@ -353,7 +353,7 @@ impl McpTransport for RecordingTransport {
     ) -> Result<McpResourceContentDto, McpError> {
         Err(McpError::Internal("unused".into()))
     }
-    async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+    async fn ping(&self, _id: lingxi_core::types::McpConnectionId) -> Result<(), McpError> {
         Ok(())
     }
     async fn notifications(
@@ -369,7 +369,7 @@ impl McpTransport for RecordingTransport {
     ) -> Result<ElicitResultDto, McpError> {
         Err(McpError::Internal("unused".into()))
     }
-    async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+    async fn disconnect(&self, _id: lingxi_core::types::McpConnectionId) -> Result<(), McpError> {
         Ok(())
     }
     fn supported_transports(&self) -> Vec<McpTransportKind> {
@@ -386,11 +386,11 @@ fn http_cfg(name: &str, oauth: Option<McpOAuthConfigDto>) -> McpServerConfig {
         name: name.into(),
         spec: McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth,
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::Project),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -561,7 +561,7 @@ async fn static_token_server_spec_is_unchanged() {
             xaa_config: None,
         });
 
-    let mut headers = platform_api::McpHeaders::new();
+    let mut headers = lingxi_core::host::McpHeaders::new();
     headers.insert("X-Static".to_string(), "preset".to_string());
     let config = McpServerConfig {
         name: "static".into(),
@@ -571,7 +571,7 @@ async fn static_token_server_spec_is_unchanged() {
             headers_helper: None,
             oauth: None,
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::Project),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -930,7 +930,7 @@ async fn static_authorization_header_survives_oauth_bearer() {
     let clock = TestClock::new(1_000);
     let (on_url, _rx) = url_capture();
 
-    let mut headers = platform_api::McpHeaders::new();
+    let mut headers = lingxi_core::host::McpHeaders::new();
     headers.insert(
         "Authorization".to_string(),
         "Bearer configured-static".into(),
@@ -943,7 +943,7 @@ async fn static_authorization_header_survives_oauth_bearer() {
             headers_helper: None,
             oauth: Some(oauth_block(Some("client-x"))),
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::Project),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -985,7 +985,7 @@ async fn static_authorization_header_survives_oauth_bearer() {
 #[tokio::test]
 async fn static_authorization_header_rejection_is_classified() {
     let transport = RecordingTransport::new(usize::MAX);
-    let mut headers = platform_api::McpHeaders::new();
+    let mut headers = lingxi_core::host::McpHeaders::new();
     headers.insert(
         "Authorization".to_string(),
         "Bearer configured-static".into(),
@@ -998,7 +998,7 @@ async fn static_authorization_header_rejection_is_classified() {
             headers_helper: None,
             oauth: None,
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::Project),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -1039,12 +1039,12 @@ async fn headers_helper_minted_authorization_survives_oauth_bearer() {
         name: "helper-with-oauth".into(),
         spec: McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: Some(r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into()),
             oauth: Some(oauth_block(Some("client-x"))),
         },
         // User scope so the headersHelper trust-dialog check is skipped.
-        scope: ConfigScope::Settings(protocol::SettingsScope::User),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -1063,7 +1063,7 @@ async fn headers_helper_minted_authorization_survives_oauth_bearer() {
     // never-driven interactive OAuth flow when the §19 gate is missing.
     let post_helper_spec = McpTransportSpec::Http {
         url: "https://mcp.example.com/v1".into(),
-        headers: platform_api::McpHeaders::from_iter([(
+        headers: lingxi_core::host::McpHeaders::from_iter([(
             "Authorization".to_string(),
             "Bearer helper-minted".to_string(),
         )]),
@@ -1108,11 +1108,11 @@ async fn headers_helper_minted_authorization_rejection_is_classified() {
         name: "helper-rejected".into(),
         spec: McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: Some(r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into()),
             oauth: None,
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::User),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -1159,11 +1159,11 @@ async fn headers_helper_minting_other_header_does_not_suppress_oauth() {
         name: "helper-other-header".into(),
         spec: McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: Some(r#"printf '{"X-Api-Key":"helper-key"}'"#.into()),
             oauth: Some(oauth_block(Some("client-x"))),
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::User),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -1177,7 +1177,7 @@ async fn headers_helper_minting_other_header_does_not_suppress_oauth() {
     // are `{X-Api-Key: "helper-key"}` when `resolve_oauth_spec` hashes it.
     let post_helper_spec = McpTransportSpec::Http {
         url: "https://mcp.example.com/v1".into(),
-        headers: platform_api::McpHeaders::from_iter([(
+        headers: lingxi_core::host::McpHeaders::from_iter([(
             "X-Api-Key".to_string(),
             "helper-key".to_string(),
         )]),

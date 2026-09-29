@@ -145,7 +145,7 @@ credential is distinct from temporary transport/server failure. Neither a token
 refresh nor a successful login authorizes retrying a model request with an
 unknown execution outcome.
 
-SDK authentication must not depend on platform-api, the host credential manager,
+SDK authentication must not depend on core host capabilities, the host credential manager,
 UI callbacks, process environment conventions or runtime background tasks.
 General MCP OAuth remains a separate host concern. The architecture gate rejects
 provider authentication endpoint implementation outside the SDK alongside model

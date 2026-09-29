@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use coordinator::{CoordinatorStatusSink, SendMessageTool, TeamRegistry};
-use platform_api::runtime::RuntimeSpawner;
-use platform_api::subagent_spawn::{SubagentInheritance, SubagentSpawnRequest};
-use platform_api::swarm::{PaneId, PanePosition, SwarmBackend};
-use platform_api::team_spawn::{PaneLaunchMetadata, TeamSpawnError, TeamSpawnSeam};
-use platform_api::teammate_worker::{PaneTeammateManifest, ParentToWorker, WorkerToParent};
-use platform_api::OutputStream;
-use protocol::{AgentId, SessionId};
+use lingxi_core::host::runtime::RuntimeSpawner;
+use lingxi_core::host::subagent_spawn::{SubagentInheritance, SubagentSpawnRequest};
+use lingxi_core::host::swarm::{PaneId, PanePosition, SwarmBackend};
+use lingxi_core::host::team_spawn::{PaneLaunchMetadata, TeamSpawnError, TeamSpawnSeam};
+use lingxi_core::host::teammate_worker::{PaneTeammateManifest, ParentToWorker, WorkerToParent};
+use lingxi_core::host::OutputStream;
+use lingxi_core::types::{AgentId, SessionId};
 use tasks::handlers::TaskStatusSink;
 use tasks::registry::TaskRegistry;
 use tasks::{TaskSpawnInput, TaskStatus, TaskType};
@@ -679,7 +679,7 @@ impl TeamSpawnSeam for PaneTeammateSpawner {
     async fn apply_plan_approval(
         &self,
         task_id: &str,
-        response: platform_api::teammate_plan::PlanApprovalResponse,
+        response: lingxi_core::host::teammate_plan::PlanApprovalResponse,
     ) -> Result<(), TeamSpawnError> {
         let writer = self
             .tasks
@@ -722,7 +722,7 @@ impl TeamSpawnSeam for PaneTeammateSpawner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::swarm::{SwarmError, SwarmHandle, SwarmLayout};
+    use lingxi_core::host::swarm::{SwarmError, SwarmHandle, SwarmLayout};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn transcript(frames: Vec<WorkerToParent>) -> Vec<u8> {
@@ -836,16 +836,22 @@ mod tests {
     #[async_trait]
     impl OutputStream for QuietOutput {
         async fn emit_text(&self, _: &str) {}
-        async fn emit_tool_call(&self, _: &protocol::ToolUseId, _: &str, _: &serde_json::Value) {}
+        async fn emit_tool_call(
+            &self,
+            _: &lingxi_core::types::ToolUseId,
+            _: &str,
+            _: &serde_json::Value,
+        ) {
+        }
         async fn emit_tool_result(
             &self,
-            _: &protocol::ToolUseId,
+            _: &lingxi_core::types::ToolUseId,
             _: &str,
             _: &str,
             _: &serde_json::Value,
         ) {
         }
-        async fn emit_end_turn(&self, _: &str, _: &platform_api::CostSnapshot) {}
+        async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
     }
 
     struct FailingBackend {
@@ -1464,7 +1470,7 @@ mod tests {
         );
 
         // Exercise the public host handle used by TaskStop, not the pane seam directly.
-        let public: &dyn platform_api::TaskRegistryHandle = registry.as_ref();
+        let public: &dyn lingxi_core::host::TaskRegistryHandle = registry.as_ref();
         let held_config = tool_task::proper_lockfile::lock(&config_path)
             .await
             .unwrap();

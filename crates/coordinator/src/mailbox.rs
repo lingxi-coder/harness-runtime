@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used)] // std mutex poisoning is fatal for us anyway
 
-use protocol::AgentId;
+use lingxi_core::types::AgentId;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};

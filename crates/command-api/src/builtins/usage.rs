@@ -7,7 +7,7 @@
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::{CostSnapshot, OrchestratorHandle};
+use lingxi_core::host::{CostSnapshot, OrchestratorHandle};
 use std::sync::Arc;
 
 const DESCRIPTION: &str = "Show current session usage";
@@ -64,7 +64,7 @@ mod tests {
 
     #[tokio::test]
     async fn renders_cost_summary_block() {
-        use platform_api::orchestrator::ModelUsageRow;
+        use lingxi_core::host::orchestrator::ModelUsageRow;
         let rows = vec![ModelUsageRow {
             model: "claude-opus-4-8".into(),
             provider: None,

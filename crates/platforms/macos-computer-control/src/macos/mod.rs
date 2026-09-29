@@ -13,11 +13,11 @@ mod tcc;
 
 use async_trait::async_trait;
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
-use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
-use objc2_foundation::NSString;
-use platform_api::computer_control::{
+use lingxi_core::host::computer_control::{
     AppInfo, ComputerControl, ComputerError, DisplayInfo, Screenshot,
 };
+use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
+use objc2_foundation::NSString;
 
 fn encode_png(img: image::RgbaImage) -> Result<Vec<u8>, ComputerError> {
     let (width, height) = (img.width(), img.height());

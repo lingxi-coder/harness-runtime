@@ -1182,7 +1182,7 @@ mod tests {
         reset_autonomous_loop_delivered();
         std::env::remove_var("CLAUDE_CODE_LOOP_PERSISTENT");
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
-        platform_api::session_flags::set_agent_push_notif_enabled(false);
+        lingxi_core::host::session_flags::set_agent_push_notif_enabled(false);
         std::env::remove_var("CLAUDE_CODE_LOOP_KEEPALIVE");
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
         g
@@ -1307,9 +1307,9 @@ mod tests {
         // Push: flag alone is not enough.
         telemetry::test_set_flag("tengu_kairos_push_notifications", true);
         assert!(!is_push_notif_enabled());
-        platform_api::session_flags::set_agent_push_notif_enabled(true);
+        lingxi_core::host::session_flags::set_agent_push_notif_enabled(true);
         assert!(is_push_notif_enabled());
-        platform_api::session_flags::set_agent_push_notif_enabled(false);
+        lingxi_core::host::session_flags::set_agent_push_notif_enabled(false);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
     }
 
@@ -1463,7 +1463,7 @@ mod tests {
             let push = case["push"].as_bool().unwrap();
             telemetry::test_set_flag("tengu_kairos_loop_persistent", persistent);
             telemetry::test_set_flag("tengu_kairos_push_notifications", push);
-            platform_api::session_flags::set_agent_push_notif_enabled(push);
+            lingxi_core::host::session_flags::set_agent_push_notif_enabled(push);
             let name = case["name"].as_str().unwrap();
             let actual = match name {
                 "auto_cron" => tick_autonomous_cron(),
@@ -1481,7 +1481,7 @@ mod tests {
         }
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
-        platform_api::session_flags::set_agent_push_notif_enabled(false);
+        lingxi_core::host::session_flags::set_agent_push_notif_enabled(false);
     }
 
     #[test]

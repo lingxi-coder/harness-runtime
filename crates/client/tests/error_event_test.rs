@@ -4,8 +4,8 @@
 //! (F1-03..) inherits the frozen serde conventions (governing decision §0.1,
 //! plan F1-01):
 //!   - internally tagged: `#[serde(tag = "type", rename_all = "snake_case")]`
-//!     (matches `protocol::ContentBlock` / api-client `StreamEvent`),
-//!   - `#[non_exhaustive]` (mirrors `platform_api::OutputEvent`),
+//!     (matches `lingxi_core::types::ContentBlock` / api-client `StreamEvent`),
+//!   - `#[non_exhaustive]` (mirrors `lingxi_core::host::OutputEvent`),
 //!   - `snake_case` field names.
 //!
 //! `serde_json` is a DEV-ONLY dep — the contract crate itself never depends on

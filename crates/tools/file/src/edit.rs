@@ -121,9 +121,9 @@ fn is_perforce_read_only(mode: Option<u32>) -> bool {
 
 /// `cfr()` (binary offset 193219993): `st(process.env.LINGXI_PERFORCE_MODE)`
 /// — env-truthiness (`1`/`true`/`yes`/`on`) of `LINGXI_PERFORCE_MODE`,
-/// mirrored by [`platform_api::env::is_env_truthy`].
+/// mirrored by [`lingxi_core::host::env::is_env_truthy`].
 fn is_perforce_mode_enabled() -> bool {
-    platform_api::env::is_env_truthy(std::env::var("LINGXI_PERFORCE_MODE").ok().as_deref())
+    lingxi_core::host::env::is_env_truthy(std::env::var("LINGXI_PERFORCE_MODE").ok().as_deref())
 }
 
 /// Build the byte-locked patch-truncation suffix with `n` substituted.
@@ -179,7 +179,7 @@ pub const STALE_RECOVERED_NOTE: &str = " (note: the file had been modified on di
 /// and `Mjs` calls `GKe(...)==="applies"` with no flag. This is that pure
 /// predicate. The second half of `Mjs`'s condition — `&& !readNotAutoAllowed()`,
 /// oracle `kq` — is applied at the CALL SITE, where the path is in hand; see
-/// [`platform_api::read_auto_allow`].
+/// [`lingxi_core::host::read_auto_allow`].
 ///
 /// Keeping them separate matters: `GKe` asks whether the edit still applies,
 /// `kq` whether the model was ever allowed to READ the file. Folded together,
@@ -240,26 +240,32 @@ fn edit_rooted_snapshot(
     requested: &std::path::Path,
     approved: &std::path::Path,
     trusted_dirs: &[std::path::PathBuf],
-) -> Result<platform_api::rooted_fs::RootedFileSnapshot, platform_api::rooted_fs::RootedFsError> {
+) -> Result<
+    lingxi_core::host::rooted_fs::RootedFileSnapshot,
+    lingxi_core::host::rooted_fs::RootedFsError,
+> {
     let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
-        return Err(platform_api::rooted_fs::RootedFsError::Fs(
-            platform_api::FsError::OutsideWorkspace(approved.display().to_string()),
+        return Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
+            lingxi_core::host::FsError::OutsideWorkspace(approved.display().to_string()),
         ));
     };
-    platform_api::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
+    lingxi_core::host::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
 }
 
-fn edit_resolution_error(path: &str, error: platform_api::rooted_fs::RootedFsError) -> ToolError {
+fn edit_resolution_error(
+    path: &str,
+    error: lingxi_core::host::rooted_fs::RootedFsError,
+) -> ToolError {
     match error {
-        platform_api::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
+        lingxi_core::host::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
             "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
         )),
-        platform_api::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged => {
+        lingxi_core::host::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged => {
             ToolError::InvalidInput(format!(
                 "Refusing to write {path}: its parent-directory symlink resolution changed after permission was checked."
             ))
         }
-        platform_api::rooted_fs::RootedFsError::SymlinkResolutionChanged => {
+        lingxi_core::host::rooted_fs::RootedFsError::SymlinkResolutionChanged => {
             if std::fs::symlink_metadata(path)
                 .map(|metadata| metadata.file_type().is_symlink())
                 .unwrap_or(false)
@@ -273,10 +279,10 @@ fn edit_resolution_error(path: &str, error: platform_api::rooted_fs::RootedFsErr
                 ))
             }
         }
-        platform_api::rooted_fs::RootedFsError::NotRegularFile => {
+        lingxi_core::host::rooted_fs::RootedFsError::NotRegularFile => {
             ToolError::Io(format!("File {path} is not a regular file"))
         }
-        platform_api::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string()),
+        lingxi_core::host::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string()),
     }
 }
 
@@ -543,7 +549,7 @@ impl Tool for FileEditTool {
         // canonicalizes the parent) so an empty `old_string` can create a file.
         let mut trusted_dirs = self.ctx.trusted_dirs();
         if let Some(root) =
-            platform_api::teammate_plan::own_plan_file_root(ctx.agent_id.as_ref(), &path)
+            lingxi_core::host::teammate_plan::own_plan_file_root(ctx.agent_id.as_ref(), &path)
         {
             trusted_dirs.push(root);
         }
@@ -561,9 +567,9 @@ impl Tool for FileEditTool {
         // the edit itself; no later pathname reopen can cross a symlink swap.
         let initial_snapshot = match edit_rooted_snapshot(&path, &canon, &trusted_dirs) {
             Ok(snapshot) => Some(snapshot),
-            Err(platform_api::rooted_fs::RootedFsError::Fs(platform_api::FsError::NotFound(_))) => {
-                None
-            }
+            Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
+                lingxi_core::host::FsError::NotFound(_),
+            )) => None,
             Err(error) => {
                 self.emit_failed(&invocation_id, "io_read").await;
                 return Err(edit_resolution_error(file_path, error));
@@ -716,7 +722,7 @@ impl Tool for FileEditTool {
                     // landing on unseen content. An un-wired host answers
                     // `false` and simply keeps the stale error.
                     if is_stale_error
-                        && platform_api::read_auto_allow::read_auto_allowed(
+                        && lingxi_core::host::read_auto_allow::read_auto_allowed(
                             &canon.to_string_lossy(),
                         )
                         && stale_edit_applies(&before, old_string, replace_all)
@@ -847,7 +853,7 @@ impl Tool for FileEditTool {
             self.emit_failed(&invocation_id, "path_blocked").await;
             return Err(ToolError::PathBlocked { path });
         };
-        let write_result = match platform_api::rooted_fs::write_file_after_permission(
+        let write_result = match lingxi_core::host::rooted_fs::write_file_after_permission(
             &root, &relative, &path, &canon, &bytes,
         ) {
             Ok(result) => result,

@@ -4,11 +4,11 @@
 //! 2. `LspRegistry::register_config` is NOT callable from outside the
 //!    `lingxi-lsp` crate. A doctest with `compile_fail` proves this.
 
-use lsp::LspRegistry;
-use platform_api::{
+use lingxi_core::host::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
 };
-use protocol::PluginId;
+use lingxi_core::types::PluginId;
+use lsp::LspRegistry;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -42,7 +42,7 @@ impl LspTransport for DummyTransport {
     ) -> Result<(), LspError> {
         Err(LspError::Unavailable)
     }
-    async fn shutdown(&self, _: protocol::McpConnectionId) -> Result<(), LspError> {
+    async fn shutdown(&self, _: lingxi_core::types::McpConnectionId) -> Result<(), LspError> {
         Err(LspError::Unavailable)
     }
     fn is_available(&self) -> bool {
@@ -75,7 +75,7 @@ async fn register_plugin_servers_is_public_and_works() {
 ///
 /// ```compile_fail
 /// use lsp::LspRegistry;
-/// use platform_api::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
+/// use lingxi_core::host::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 /// use std::sync::Arc;
 ///
 /// struct T;
@@ -86,7 +86,7 @@ async fn register_plugin_servers_is_public_and_works() {
 ///     async fn initialize(&self, _: &LspRawConnection, _: &str) -> Result<LspServerCapabilities, LspError> { Err(LspError::Unavailable) }
 ///     async fn request(&self, _: &LspRawConnection, _: &str, _: serde_json::Value) -> Result<serde_json::Value, LspError> { Err(LspError::Unavailable) }
 ///     async fn notify(&self, _: &LspRawConnection, _: &str, _: serde_json::Value) -> Result<(), LspError> { Err(LspError::Unavailable) }
-///     async fn shutdown(&self, _: protocol::McpConnectionId) -> Result<(), LspError> { Err(LspError::Unavailable) }
+///     async fn shutdown(&self, _: lingxi_core::types::McpConnectionId) -> Result<(), LspError> { Err(LspError::Unavailable) }
 ///     fn is_available(&self) -> bool { false }
 /// }
 ///

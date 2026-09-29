@@ -143,7 +143,7 @@ impl CoordinatorMode {
 /// [`tool_api::BuiltinToolContext::coordinator_mode`]. Reads the same atomic
 /// flag as [`CoordinatorMode::is_enabled`], so a mid-session switch is observed
 /// immediately (the fork-subagent gate + slim coordinator prompt stay in sync).
-impl platform_api::coordinator_mode::CoordinatorModeHandle for CoordinatorMode {
+impl lingxi_core::host::coordinator_mode::CoordinatorModeHandle for CoordinatorMode {
     fn is_enabled(&self) -> bool {
         CoordinatorMode::is_enabled(self)
     }

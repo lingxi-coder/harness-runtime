@@ -8,8 +8,8 @@
 //! This is NOT secure on shared systems.
 
 use async_trait::async_trait;
-use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
-use protocol::SecureStorageData;
+use lingxi_core::host::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use lingxi_core::types::SecureStorageData;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;

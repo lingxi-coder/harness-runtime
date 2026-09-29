@@ -46,9 +46,9 @@ use std::sync::Arc;
 
 use crate::protocol::events::{ClientEvent, ErrorKindDto};
 use crate::protocol::message::{MessageBlockDto, MessageDto};
+use lingxi_core::types::ContentBlock;
 use orchestrator::streaming_loop::PumpedTurn;
 use orchestrator::OrchestratorError;
-use protocol::ContentBlock;
 
 use crate::adapter::lowering::value_to_json_string;
 use crate::adapter::sink::ClientEventSink;
@@ -332,7 +332,7 @@ impl TurnEventEmitter {
 mod tests {
     use super::*;
     use crate::adapter::test_support::MockSink;
-    use protocol::{ContentBlock, ToolUseId};
+    use lingxi_core::types::{ContentBlock, ToolUseId};
 
     /// Construct an `LlmError` for the transport-class table rows.
     ///
@@ -500,7 +500,7 @@ mod tests {
             output_tokens: 0,
             assistant_blocks: vec![
                 ContentBlock::Image {
-                    source: protocol::ImageSource::Url {
+                    source: lingxi_core::types::ImageSource::Url {
                         url: "https://example.test/x.png".into(),
                     },
                 },

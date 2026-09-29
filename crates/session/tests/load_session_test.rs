@@ -13,7 +13,7 @@
 //! The strict error variants are RETAINED on `LoaderError` (other code matches
 //! their `Display`) but are no longer produced from this path.
 
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::json;
 use session::jsonl::{load_session, project_dir_name, LoaderError};

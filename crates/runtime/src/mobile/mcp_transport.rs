@@ -5,14 +5,14 @@
 //! registry into the remote transport or infer a route from a server name.
 
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
     McpNotificationStream, McpPromptDto, McpRawConnection, McpResourceContentDto, McpResourceDto,
     McpResourceTemplateDto, McpToolDto, McpToolResultDto, McpTransport, McpTransportKind,
     McpTransportSpec, ServerCapabilitiesDto,
 };
+use lingxi_core::types::McpConnectionId;
 use platform_common::RemoteMcpTransport;
-use protocol::McpConnectionId;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -481,7 +481,7 @@ mod tests {
     }
 
     fn remote_spec(kind: &str, url: String) -> McpTransportSpec {
-        let headers = platform_api::McpHeaders::new();
+        let headers = lingxi_core::host::McpHeaders::new();
         match kind {
             "sse" => McpTransportSpec::Sse {
                 url,
@@ -512,7 +512,7 @@ mod tests {
             .connect_and_initialize(
                 &remote_spec(kind, url),
                 McpConnectOptions {
-                    expected_era: Some(platform_api::McpProtocolEra::Legacy),
+                    expected_era: Some(lingxi_core::host::McpProtocolEra::Legacy),
                     deadline_ms: 10_000,
                     probe_timeout_ms: None,
                 },
@@ -621,7 +621,7 @@ mod tests {
         let unsupported = transport
             .connect(&McpTransportSpec::WebSocket {
                 url: "ws://127.0.0.1:1".into(),
-                headers: platform_api::McpHeaders::new(),
+                headers: lingxi_core::host::McpHeaders::new(),
                 headers_helper: None,
             })
             .await;
@@ -641,7 +641,7 @@ mod tests {
         let connection = transport
             .connect(&McpTransportSpec::Http {
                 url,
-                headers: platform_api::McpHeaders::new(),
+                headers: lingxi_core::host::McpHeaders::new(),
                 headers_helper: None,
                 oauth: None,
             })
@@ -690,12 +690,12 @@ mod tests {
             .connect_and_initialize(
                 &McpTransportSpec::Http {
                     url,
-                    headers: platform_api::McpHeaders::new(),
+                    headers: lingxi_core::host::McpHeaders::new(),
                     headers_helper: None,
                     oauth: None,
                 },
                 McpConnectOptions {
-                    expected_era: Some(platform_api::McpProtocolEra::Legacy),
+                    expected_era: Some(lingxi_core::host::McpProtocolEra::Legacy),
                     deadline_ms: 5_000,
                     probe_timeout_ms: None,
                 },
@@ -723,7 +723,7 @@ mod tests {
                 spec: McpTransportSpec::InProcess {
                     registry_key: "local_apps".into(),
                 },
-                scope: mcp::ConfigScope::Settings(protocol::SettingsScope::Managed),
+                scope: mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
                 disabled: false,
                 timeout_ms: None,
                 always_load: true,
@@ -769,7 +769,7 @@ mod tests {
         let config = mcp::McpServerConfig {
             name: "mobile-cache".into(),
             spec: remote_spec("http", url),
-            scope: mcp::ConfigScope::Settings(protocol::SettingsScope::Project),
+            scope: mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
             disabled: false,
             timeout_ms: None,
             always_load: false,

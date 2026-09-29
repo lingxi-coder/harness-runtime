@@ -188,7 +188,7 @@ async fn api_error_ends_turn_gracefully_as_model_error() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            platform_api::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
+            lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
         )),
         "turn must end with stop_reason model_error; events={events:#?}"
     );

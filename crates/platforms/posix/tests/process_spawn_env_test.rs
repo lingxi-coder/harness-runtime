@@ -4,7 +4,9 @@
 
 #![cfg(unix)]
 
-use platform_api::{ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand, SandboxedTag};
+use lingxi_core::host::{
+    ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand, SandboxedTag,
+};
 use platform_posix::process::PosixProcess;
 use std::collections::HashMap;
 

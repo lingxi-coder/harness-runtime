@@ -3,7 +3,7 @@
 use super::*;
 use crate::budget::{AttemptAdmissionError, BoundAttemptBudget, CostBudgetAttempt};
 use crate::{AttemptBillingMode, AttemptIntent, AttemptLedger};
-use platform_api::BudgetError;
+use lingxi_core::host::BudgetError;
 use tokio::sync::{oneshot, OwnedSemaphorePermit};
 
 enum BeginFailure {

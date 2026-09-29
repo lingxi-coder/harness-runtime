@@ -1,12 +1,12 @@
 //! Scope upgrade: 403 with `required_scopes` re-triggers PKCE preserving the
 //! existing `refresh_token`. On PKCE failure, the old `refresh_token` is preserved.
 
+use lingxi_core::types::Secret;
 use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use lingxi_llm_client::auth::oauth::anthropic::{parse_scope_upgrade, ScopeUpgradeRequired};
 use llm_runtime::auth::anthropic::refresh::AuthState;
 use llm_runtime::auth::anthropic::scope_upgrade::run_scope_upgrade;
 use llm_runtime::auth::anthropic::OAuthError;
-use protocol::Secret;
 use std::time::{Duration, SystemTime};
 
 #[test]

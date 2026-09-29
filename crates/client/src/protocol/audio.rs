@@ -2,7 +2,7 @@
 //! mobile UniFFI surfaces.
 //!
 //! This module contains transport data only. Device configuration and
-//! execution rules live in the device-local AudioService; the platform-api
+//! execution rules live in the device-local AudioService; the core::host
 //! domain types are mapped explicitly at their host boundaries.
 
 use serde::{Deserialize, Serialize};

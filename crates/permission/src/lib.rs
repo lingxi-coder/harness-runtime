@@ -59,14 +59,14 @@ pub mod mode_policy;
 mod model_path;
 pub mod path_constraints;
 pub mod plan_files {
-    //! The session's plan files — see [`platform_api::plan_files`].
+    //! The session's plan files — see [`lingxi_core::host::plan_files`].
     //!
     //! The type lives in `platform-api` because BOTH the permission policy
     //! (for the carve-out) and the orchestrator (for the plan-mode reminder and
     //! `ExitPlanMode`'s read-back) must name the SAME plan file; two
     //! derivations of one path is exactly how the carve-out silently stops
     //! covering the file the model was told to write.
-    pub use platform_api::plan_files::{
+    pub use lingxi_core::host::plan_files::{
         PlanFileIdentity, PlanFileMatcher, PLAN_FILE_READ_ALLOW_REASON,
         PLAN_FILE_WRITE_ALLOW_REASON,
     };

@@ -64,12 +64,12 @@ impl ConnectCredentialWriter for EngineCredentialWriter {
 use command_api::builtins::{
     ChatGptConnectDriver, CopilotConnectDriver, CopilotConnectStep, OAuthConnectDriver,
 };
+use lingxi_core::host::AuthHandle;
 use lingxi_core::settings::enterprise::{
     check_org_membership, ForceLoginOrgPin, OrgMembershipCheck,
 };
 use llm_runtime::auth::openai as openai_oauth;
 use llm_runtime::services::sdk;
-use platform_api::AuthHandle;
 use sdk::auth::oauth::copilot::{CopilotLogin, DeviceCodeResponse, PollOutcome};
 use sdk::transport::Transport;
 use std::sync::Mutex as StdMutex;
@@ -335,7 +335,7 @@ impl OAuthConnectDriver for EngineOAuthConnect {
                         }
                     }
                 }
-                Err(platform_api::AuthError::Cancelled) => Err(ConnectError::Cancelled),
+                Err(lingxi_core::host::AuthError::Cancelled) => Err(ConnectError::Cancelled),
                 Err(e) => Err(ConnectError::Network(e.to_string())),
             },
             "openai-chatgpt" => self.chatgpt.connect().await,
@@ -370,7 +370,7 @@ impl command_api::builtins::LoginOrgPolicy for DesktopLoginOrgPolicy {
 #[cfg(test)]
 mod oauth_connect_tests {
     use super::*;
-    use platform_api::{AuthError, AuthHandle, LoginInfo};
+    use lingxi_core::host::{AuthError, AuthHandle, LoginInfo};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct OkAuth;
@@ -574,11 +574,11 @@ Contact your administrator."
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
+    use lingxi_core::types::SecureStorageData;
     use platform_posix::{PosixClock, PosixHttp};
-    use protocol::SecureStorageData;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
 

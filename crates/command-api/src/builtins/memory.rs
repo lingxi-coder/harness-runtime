@@ -7,14 +7,14 @@ use crate::builtin_support::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::OrchestratorHandle;
+use lingxi_core::host::OrchestratorHandle;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
 
 /// `/memory` handler — opens the user's memory file in `$EDITOR`.
 ///
 /// Calls
-/// [`OrchestratorHandle::open_memory_editor`](platform_api::OrchestratorHandle::open_memory_editor)
+/// [`OrchestratorHandle::open_memory_editor`](lingxi_core::host::OrchestratorHandle::open_memory_editor)
 /// and renders `"Edited {path} (exit {code})."` on success or the locked
 /// `"Could not edit memory: {error}"` prefix on failure.
 #[derive(Clone)]

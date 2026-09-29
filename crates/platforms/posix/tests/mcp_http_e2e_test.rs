@@ -14,7 +14,7 @@ use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use platform_api::{McpTransport, McpTransportSpec};
+use lingxi_core::host::{McpTransport, McpTransportSpec};
 use platform_posix::mcp::PosixMcpTransport;
 
 /// Method-aware mock: switch on `body["method"]`, echo the `id`, return the
@@ -75,7 +75,7 @@ async fn spawn_mock() -> String {
 fn http_spec(url: String) -> McpTransportSpec {
     McpTransportSpec::Http {
         url,
-        headers: platform_api::McpHeaders::new(),
+        headers: lingxi_core::host::McpHeaders::new(),
         headers_helper: None,
         oauth: None,
     }
@@ -149,7 +149,7 @@ async fn full_mcp_surface_roundtrips_over_http() {
     // ping must fail with a connection error rather than hang.
     let after = transport.ping(conn.connection_id).await;
     assert!(
-        matches!(after, Err(platform_api::McpError::Connection(_))),
+        matches!(after, Err(lingxi_core::host::McpError::Connection(_))),
         "ping after disconnect should report a connection error, got {after:?}"
     );
 }

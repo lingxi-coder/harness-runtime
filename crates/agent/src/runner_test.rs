@@ -7,7 +7,7 @@ use crate::definition::{
 use crate::display::{AgentColor, AgentDisplay};
 use async_trait::async_trait;
 use lingxi_core::token::Usage;
-use protocol::{ContentBlock, ConversationMessage, MessageId, RequestId, ToolUseId};
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, RequestId, ToolUseId};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -312,7 +312,7 @@ fn streamed_tool_use_turn(name: &str, stop: &str) -> Vec<llm_runtime::HistoryEve
 /// `ToolInvoker` that counts invocations and returns a canned value.
 struct CountingInvoker {
     calls: AtomicUsize,
-    policies: Mutex<Vec<platform_api::tool_invoker::ToolExecutionPolicy>>,
+    policies: Mutex<Vec<lingxi_core::host::tool_invoker::ToolExecutionPolicy>>,
 }
 impl CountingInvoker {
     fn new() -> Arc<Self> {
@@ -324,18 +324,18 @@ impl CountingInvoker {
     fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
-    fn policies(&self) -> Vec<platform_api::tool_invoker::ToolExecutionPolicy> {
+    fn policies(&self) -> Vec<lingxi_core::host::tool_invoker::ToolExecutionPolicy> {
         self.policies.lock().unwrap().clone()
     }
 }
 #[async_trait]
-impl platform_api::ToolInvoker for CountingInvoker {
+impl lingxi_core::host::ToolInvoker for CountingInvoker {
     async fn invoke(
         &self,
         _name: &str,
         _input: serde_json::Value,
-        ctx: platform_api::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.policies
             .lock()
@@ -351,14 +351,14 @@ impl platform_api::ToolInvoker for CountingInvoker {
 struct AbortInvoker;
 
 #[async_trait]
-impl platform_api::ToolInvoker for AbortInvoker {
+impl lingxi_core::host::ToolInvoker for AbortInvoker {
     async fn invoke(
         &self,
         _name: &str,
         _input: serde_json::Value,
-        _ctx: platform_api::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
-        Err(platform_api::tool_invoker::ToolInvokerError::Abort(
+        _ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        Err(lingxi_core::host::tool_invoker::ToolInvokerError::Abort(
             "Agent aborted: too many classifier denials in headless mode".into(),
         ))
     }
@@ -381,13 +381,13 @@ impl SessionModeRecordingInvoker {
 }
 
 #[async_trait]
-impl platform_api::ToolInvoker for SessionModeRecordingInvoker {
+impl lingxi_core::host::ToolInvoker for SessionModeRecordingInvoker {
     async fn invoke(
         &self,
         _name: &str,
         _input: serde_json::Value,
-        ctx: platform_api::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         *self.captured.lock().unwrap() = Some(ctx.is_non_interactive_session);
         Ok(serde_json::json!("tool-output"))
     }
@@ -406,10 +406,10 @@ struct MockBudget {
     exceeded: bool,
 }
 #[async_trait]
-impl platform_api::budget::BudgetEnforcerHandle for MockBudget {
-    async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::budget::BudgetError> {
+impl lingxi_core::host::budget::BudgetEnforcerHandle for MockBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), lingxi_core::host::budget::BudgetError> {
         if self.exceeded {
-            Err(platform_api::budget::BudgetError::Exceeded {
+            Err(lingxi_core::host::budget::BudgetError::Exceeded {
                 current_nano_usd: 1_500_000_000,
             })
         } else {
@@ -507,7 +507,7 @@ fn tool_use_response_with_usage(
 /// raising `max_turns` so multi-turn loops are reachable.
 fn loop_ctx(
     api_client: Arc<dyn crate::api::SubagentApiClient>,
-    tool_invoker: Option<Arc<dyn platform_api::ToolInvoker>>,
+    tool_invoker: Option<Arc<dyn lingxi_core::host::ToolInvoker>>,
     max_turns: u32,
 ) -> SubagentContext {
     let mut ctx = fresh_subagent_ctx();
@@ -584,12 +584,12 @@ fn fresh_subagent_ctx() -> SubagentContext {
         tool_schemas: vec![],
         schema: None,
         structured_output_parse_retries: 0,
-        structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode::Forced,
+        structured_output_mode: lingxi_core::host::subagent_spawn::StructuredOutputMode::Forced,
         budget: None,
         hook_executor: None,
         strict_plugin_only_hooks: false,
         skill_loader: None,
-        hook_session_id: protocol::SessionId::nil(),
+        hook_session_id: lingxi_core::types::SessionId::nil(),
         hook_cwd: std::path::PathBuf::new(),
         depth: 0,
         observer: None,
@@ -610,7 +610,7 @@ struct OneShotDiagnostics {
 }
 
 #[async_trait]
-impl platform_api::NewDiagnosticsSource for OneShotDiagnostics {
+impl lingxi_core::host::NewDiagnosticsSource for OneShotDiagnostics {
     async fn take_new_diagnostics_block(&self) -> Option<String> {
         self.block.lock().unwrap().take()
     }
@@ -743,7 +743,7 @@ async fn subagent_near_limit_wrap_up_is_exact_and_dispatches_once_through_wrappe
     let api = NearLimitHintApiClient::new(text_response("done", Some("end_turn")), true);
     let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
         api.clone(),
-        platform_api::WorkflowQueryWatchdog {
+        lingxi_core::host::WorkflowQueryWatchdog {
             stall_timeout_ms: 1_000,
             max_retries: 0,
             retry_response_body: false,
@@ -754,7 +754,7 @@ async fn subagent_near_limit_wrap_up_is_exact_and_dispatches_once_through_wrappe
     ctx.depth = 1;
     ctx.session_interactive = Some(true);
     ctx.is_async = true;
-    ctx.hook_session_id = protocol::SessionId::new();
+    ctx.hook_session_id = lingxi_core::types::SessionId::new();
     ctx.hook_cwd = tempdir.path().to_path_buf();
 
     let (event_tx, event_rx) = mpsc::channel(1);
@@ -886,7 +886,7 @@ async fn near_limit_noninteractive_subagent_gets_hint_but_does_not_dispatch_chec
 
 #[tokio::test]
 async fn workflow_watchdog_times_out_stream_open() {
-    let policy = platform_api::WorkflowQueryWatchdog {
+    let policy = lingxi_core::host::WorkflowQueryWatchdog {
         stall_timeout_ms: 10,
         max_retries: 0,
         retry_response_body: false,
@@ -911,7 +911,7 @@ async fn workflow_watchdog_times_out_before_first_event() {
             .boxed();
     let mut watched = with_workflow_stream_watchdog(
         stream,
-        Some(platform_api::WorkflowQueryWatchdog {
+        Some(lingxi_core::host::WorkflowQueryWatchdog {
             stall_timeout_ms: 10,
             max_retries: 0,
             retry_response_body: false,
@@ -938,7 +938,7 @@ async fn workflow_watchdog_resets_between_events_and_has_no_total_deadline() {
     .boxed();
     let watched = with_workflow_stream_watchdog(
         stream,
-        Some(platform_api::WorkflowQueryWatchdog {
+        Some(lingxi_core::host::WorkflowQueryWatchdog {
             stall_timeout_ms: 20,
             max_retries: 0,
             retry_response_body: false,
@@ -957,13 +957,13 @@ struct SlowInvoker {
 }
 
 #[async_trait]
-impl platform_api::ToolInvoker for SlowInvoker {
+impl lingxi_core::host::ToolInvoker for SlowInvoker {
     async fn invoke(
         &self,
         _name: &str,
         _input: serde_json::Value,
-        _ctx: platform_api::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        _ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         tokio::time::sleep(self.delay).await;
         Ok(serde_json::json!("slow-tool-finished"))
     }
@@ -982,14 +982,14 @@ async fn workflow_watchdog_does_not_cover_tool_execution() {
     let api: Arc<dyn crate::api::SubagentApiClient> =
         Arc::new(crate::api::WorkflowWatchdogApiClient::new(
             inner,
-            platform_api::WorkflowQueryWatchdog {
+            lingxi_core::host::WorkflowQueryWatchdog {
                 stall_timeout_ms: 10,
                 max_retries: 0,
                 retry_response_body: false,
             },
             Vec::new(),
         ));
-    let invoker: Arc<dyn platform_api::ToolInvoker> = Arc::new(SlowInvoker {
+    let invoker: Arc<dyn lingxi_core::host::ToolInvoker> = Arc::new(SlowInvoker {
         delay: std::time::Duration::from_millis(35),
     });
     let ctx = loop_ctx(api, Some(invoker), 3);
@@ -1035,9 +1035,9 @@ struct RetryObserver {
 }
 
 #[async_trait]
-impl platform_api::SubagentSpawnObserver for RetryObserver {
-    async fn on_event(&self, event: platform_api::SubagentObservation) {
-        if let platform_api::SubagentObservation::Retry {
+impl lingxi_core::host::SubagentSpawnObserver for RetryObserver {
+    async fn on_event(&self, event: lingxi_core::host::SubagentObservation) {
+        if let lingxi_core::host::SubagentObservation::Retry {
             attempt, reason, ..
         } = event
         {
@@ -1053,11 +1053,11 @@ async fn workflow_watchdog_retries_five_times_then_fails_without_partial_salvage
         calls: AtomicUsize::new(0),
     });
     let observer = Arc::new(RetryObserver::default());
-    let observer_dyn: Arc<dyn platform_api::SubagentSpawnObserver> = observer.clone();
+    let observer_dyn: Arc<dyn lingxi_core::host::SubagentSpawnObserver> = observer.clone();
     let api: Arc<dyn crate::api::SubagentApiClient> =
         Arc::new(crate::api::WorkflowWatchdogApiClient::new(
             inner.clone(),
-            platform_api::WorkflowQueryWatchdog {
+            lingxi_core::host::WorkflowQueryWatchdog {
                 stall_timeout_ms: 10,
                 max_retries: 5,
                 retry_response_body: false,
@@ -1366,7 +1366,7 @@ async fn fusion_panel_tools_receive_the_trusted_deterministic_policy() {
     ]);
     let invoker = CountingInvoker::new();
     let mut ctx = loop_ctx(api, Some(invoker.clone()), 3);
-    ctx.agent_definition.agent_type = platform_api::FUSION_PANEL_TYPE.to_string();
+    ctx.agent_definition.agent_type = lingxi_core::host::FUSION_PANEL_TYPE.to_string();
 
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
@@ -1375,7 +1375,7 @@ async fn fusion_panel_tools_receive_the_trusted_deterministic_policy() {
 
     assert_eq!(
         invoker.policies(),
-        vec![platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel],
+        vec![lingxi_core::host::tool_invoker::ToolExecutionPolicy::FusionPanel],
         "the hidden resolved Fusion definition, not model input, selects deterministic WebFetch"
     );
 }
@@ -1749,7 +1749,7 @@ async fn when_done_uses_auto_tool_choice_until_the_last_turn() {
     let invoker = CountingInvoker::new();
     let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
     ctx.schema = Some(r#"{"type":"object"}"#.to_string());
-    ctx.structured_output_mode = platform_api::subagent_spawn::StructuredOutputMode::WhenDone;
+    ctx.structured_output_mode = lingxi_core::host::subagent_spawn::StructuredOutputMode::WhenDone;
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -1796,7 +1796,7 @@ async fn when_done_forces_the_last_turn_even_with_other_tools_still_advertised()
     let invoker = CountingInvoker::new();
     let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
     ctx.schema = Some(r#"{"type":"object"}"#.to_string());
-    ctx.structured_output_mode = platform_api::subagent_spawn::StructuredOutputMode::WhenDone;
+    ctx.structured_output_mode = lingxi_core::host::subagent_spawn::StructuredOutputMode::WhenDone;
     // The exact shape every real Fusion panel spawns with: MORE than one
     // tool advertised alongside the injected `StructuredOutput`, so
     // `tool_schemas.len() != 1` and the P0-1 `force_tool_choice_for_api`
@@ -1844,7 +1844,7 @@ async fn when_done_forces_after_two_consecutive_idle_turns() {
     ]);
     let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 5);
     ctx.schema = Some(r#"{"type":"object"}"#.to_string());
-    ctx.structured_output_mode = platform_api::subagent_spawn::StructuredOutputMode::WhenDone;
+    ctx.structured_output_mode = lingxi_core::host::subagent_spawn::StructuredOutputMode::WhenDone;
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -1881,7 +1881,7 @@ async fn when_done_idle_turn_appends_a_user_message_before_looping_back() {
     ]);
     let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 5);
     ctx.schema = Some(r#"{"type":"object"}"#.to_string());
-    ctx.structured_output_mode = platform_api::subagent_spawn::StructuredOutputMode::WhenDone;
+    ctx.structured_output_mode = lingxi_core::host::subagent_spawn::StructuredOutputMode::WhenDone;
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -1921,7 +1921,7 @@ async fn forced_mode_forces_every_turn_including_the_first() {
     // `Forced` is also `SubagentContext::structured_output_mode`'s default —
     // set explicitly here so the test documents the invariant rather than
     // relying on the struct's field order.
-    ctx.structured_output_mode = platform_api::subagent_spawn::StructuredOutputMode::Forced;
+    ctx.structured_output_mode = lingxi_core::host::subagent_spawn::StructuredOutputMode::Forced;
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -2612,9 +2612,9 @@ async fn registered_panel_rounds_derive_fresh_calls_and_preserve_registration() 
         text_response("done", Some("end_turn")),
     ]);
     let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 4);
-    let registration = platform_api::ModelAttemptRun::new(Arc::new(()));
+    let registration = lingxi_core::host::ModelAttemptRun::new(Arc::new(()));
     let original = registration
-        .context(platform_api::ModelAttemptStage::Panel, Some(2))
+        .context(lingxi_core::host::ModelAttemptStage::Panel, Some(2))
         .unwrap();
     ctx.model_attempt = Some(original.clone());
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
@@ -2643,7 +2643,7 @@ async fn workflow_watchdog_wrapper_threads_opts_to_the_inner_client() {
     let wrapped: Arc<dyn crate::api::SubagentApiClient> =
         Arc::new(crate::api::WorkflowWatchdogApiClient::new(
             api.clone(),
-            platform_api::WorkflowQueryWatchdog {
+            lingxi_core::host::WorkflowQueryWatchdog {
                 stall_timeout_ms: 60_000,
                 max_retries: 0,
                 retry_response_body: false,
@@ -3265,8 +3265,8 @@ async fn loop_api_error_persists_seed_and_terminal_reason() {
     ctx.transcript_subdir = dir.path().to_path_buf();
     ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
         dir.path().to_path_buf(),
-    )) as Arc<dyn platform_api::FileSystem>);
-    ctx.prompt_messages = vec![protocol::ConversationMessage::user(
+    )) as Arc<dyn lingxi_core::host::FileSystem>);
+    ctx.prompt_messages = vec![lingxi_core::types::ConversationMessage::user(
         MessageId::new(),
         "design the local app".to_string(),
     )];
@@ -3537,7 +3537,7 @@ async fn persist_mode_transcript_distinguishes_idle_from_true_terminal() {
     ctx.transcript_subdir = dir.path().to_path_buf();
     ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
         dir.path().to_path_buf(),
-    )) as Arc<dyn platform_api::FileSystem>);
+    )) as Arc<dyn lingxi_core::host::FileSystem>);
     let agent_id = ctx.agent_id;
     let path = dir.path().join(format!("agent-{agent_id}.jsonl"));
 
@@ -3804,18 +3804,18 @@ impl PendingPermissionInvoker {
     }
 }
 #[async_trait]
-impl platform_api::ToolInvoker for PendingPermissionInvoker {
+impl lingxi_core::host::ToolInvoker for PendingPermissionInvoker {
     async fn invoke(
         &self,
         _name: &str,
         _input: serde_json::Value,
-        _ctx: platform_api::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        _ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.invoke_started.notify_one();
         self.release.notified().await;
         self.resolved.store(true, Ordering::SeqCst);
-        Err(platform_api::tool_invoker::ToolInvokerError::Internal(
+        Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
             "Permission to use SlowTool has been denied.".into(),
         ))
     }
@@ -3874,7 +3874,7 @@ async fn launcher_message_is_direction_not_approval_of_pending_permission() {
     let invoker = PendingPermissionInvoker::new();
     let mut ctx = loop_ctx(
         api.clone(),
-        Some(invoker.clone() as Arc<dyn platform_api::ToolInvoker>),
+        Some(invoker.clone() as Arc<dyn lingxi_core::host::ToolInvoker>),
         4,
     );
     ctx.persistent = true;
@@ -4028,14 +4028,14 @@ async fn exec_with_start_context(context: &str) -> Arc<hooks::HookExecutorImpl> 
     use hooks::events::HookEventType;
     let registry = Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new()));
     registry.write().await.register(HookDefinition {
-        id: protocol::HookId::new(),
+        id: lingxi_core::types::HookId::new(),
         name: "additional-context-start".into(),
         events: vec![HookEventType::SubagentStart],
         if_condition: None,
         executor: HookExecutor::Builtin {
             handler_id: "additional-context-start".into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -4066,14 +4066,14 @@ async fn exec_with_two_start_contexts(c0: &str, c1: &str) -> Arc<hooks::HookExec
     let registry = Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new()));
     for (i, handler_id) in ["start-ctx-0", "start-ctx-1"].iter().enumerate() {
         registry.write().await.register(HookDefinition {
-            id: protocol::HookId::new(),
+            id: lingxi_core::types::HookId::new(),
             name: (*handler_id).into(),
             events: vec![HookEventType::SubagentStart],
             if_condition: None,
             executor: HookExecutor::Builtin {
                 handler_id: (*handler_id).into(),
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             // Distinct DESCENDING priorities pin the firing order so the
@@ -4169,9 +4169,9 @@ impl hooks::executor::BuiltinHookHandler for RecordingStopContextHook {
                 .as_ref()
                 .expect("worker Stop must carry live history");
             assert!(live.messages.iter().any(|message| matches!(message,
-                ConversationMessage::User { content, .. } if content.iter().any(|block| matches!(block, protocol::ContentBlock::Text { text } if text == "go")))));
+                ConversationMessage::User { content, .. } if content.iter().any(|block| matches!(block, lingxi_core::types::ContentBlock::Text { text } if text == "go")))));
             assert!(live.messages.iter().any(|message| matches!(message,
-                ConversationMessage::Assistant { content, .. } if content.iter().any(|block| matches!(block, protocol::ContentBlock::Text { text } if text == "done")))));
+                ConversationMessage::Assistant { content, .. } if content.iter().any(|block| matches!(block, lingxi_core::types::ContentBlock::Text { text } if text == "done")))));
             self.seen
                 .lock()
                 .unwrap()
@@ -4206,14 +4206,14 @@ fn frontmatter_stop_hook(handler_id: &str) -> hooks::definition::HookDefinition 
     use hooks::definition::{HookExecutor, HookSource};
     use hooks::events::HookEventType;
     hooks::definition::HookDefinition {
-        id: protocol::HookId::new(),
+        id: lingxi_core::types::HookId::new(),
         name: handler_id.into(),
         events: vec![HookEventType::Stop],
         if_condition: None,
         executor: HookExecutor::Builtin {
             handler_id: handler_id.into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -4357,14 +4357,14 @@ async fn runner_fires_subagent_start_and_frontmatter_stop_exactly_once_each() {
     // (the runner registers + retargets it to SubagentStop, isAgent=true).
     let registry = Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new()));
     registry.write().await.register(HookDefinition {
-        id: protocol::HookId::new(),
+        id: lingxi_core::types::HookId::new(),
         name: "r7-start".into(),
         events: vec![HookEventType::SubagentStart],
         if_condition: None,
         executor: HookExecutor::Builtin {
             handler_id: "r7-start-stop-counter".into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -4419,15 +4419,15 @@ struct MockSkillLoader {
     content_text: String,
 }
 #[async_trait]
-impl platform_api::skill_loader::SkillLoader for MockSkillLoader {
+impl lingxi_core::host::skill_loader::SkillLoader for MockSkillLoader {
     async fn resolve_and_load(
         &self,
         skill_name: &str,
         _agent_type: &str,
         _cwd: Option<&std::path::Path>,
-    ) -> Result<Option<platform_api::skill_loader::SkillLoad>, String> {
+    ) -> Result<Option<lingxi_core::host::skill_loader::SkillLoad>, String> {
         Ok(if skill_name == self.known {
-            Some(platform_api::skill_loader::SkillLoad {
+            Some(lingxi_core::host::skill_loader::SkillLoad {
                 display_name: skill_name.to_string(),
                 progress_message: None,
                 content: vec![ContentBlock::Text {
@@ -4534,14 +4534,14 @@ async fn exec_with_counting_start_context(
     use hooks::events::HookEventType;
     let registry = Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new()));
     registry.write().await.register(HookDefinition {
-        id: protocol::HookId::new(),
+        id: lingxi_core::types::HookId::new(),
         name: "g008-counting-start".into(),
         events: vec![HookEventType::SubagentStart],
         if_condition: None,
         executor: HookExecutor::Builtin {
             handler_id: "g008-counting-start-hook".into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -4575,7 +4575,7 @@ async fn fusion_panel_agent_type_fires_no_subagent_start_hook() {
     let api = CapturingApiClient::new();
     let mut ctx = loop_ctx(api.clone(), None, 2);
     ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
-    ctx.agent_definition.agent_type = platform_api::FUSION_PANEL_TYPE.into();
+    ctx.agent_definition.agent_type = lingxi_core::host::FUSION_PANEL_TYPE.into();
     ctx.hook_executor = Some(exec_with_counting_start_context(calls.clone(), "panel-marker").await);
 
     let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
@@ -4837,7 +4837,7 @@ struct ResultStreamMockApiClient {
     calls: AtomicUsize,
     histories: Mutex<Vec<Vec<ConversationMessage>>>,
     retry_stop: Mutex<Option<Arc<ParseRetryStop>>>,
-    workflow_watchdog: Option<platform_api::WorkflowQueryWatchdog>,
+    workflow_watchdog: Option<lingxi_core::host::WorkflowQueryWatchdog>,
 }
 impl ResultStreamMockApiClient {
     fn new(turns: Vec<Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>>>) -> Arc<Self> {
@@ -4855,7 +4855,7 @@ impl ResultStreamMockApiClient {
 }
 #[async_trait]
 impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
-    fn workflow_query_watchdog(&self) -> Option<platform_api::WorkflowQueryWatchdog> {
+    fn workflow_query_watchdog(&self) -> Option<lingxi_core::host::WorkflowQueryWatchdog> {
         self.workflow_watchdog
     }
 
@@ -4884,9 +4884,9 @@ impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
     async fn observe_workflow_query_retry(&self, agent_id: AgentId, attempt: u32, reason: String) {
         let stop = self.retry_stop.lock().unwrap().clone();
         if let Some(stop) = stop {
-            platform_api::SubagentSpawnObserver::on_event(
+            lingxi_core::host::SubagentSpawnObserver::on_event(
                 stop.as_ref(),
-                platform_api::SubagentObservation::Retry {
+                lingxi_core::host::SubagentObservation::Retry {
                     agent_id,
                     attempt,
                     reason,
@@ -4965,7 +4965,7 @@ async fn generic_workflow_does_not_retry_response_body_transport_errors() {
     ]);
     let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
         api.clone(),
-        platform_api::WorkflowQueryWatchdog::default(),
+        lingxi_core::host::WorkflowQueryWatchdog::default(),
         Vec::new(),
     ));
     let ctx = loop_ctx(wrapped, None, 6);
@@ -5004,7 +5004,7 @@ async fn generic_workflow_watchdog_preserves_server_content_retry_and_usage_beha
     ]);
     let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
         api.clone(),
-        platform_api::WorkflowQueryWatchdog::default(),
+        lingxi_core::host::WorkflowQueryWatchdog::default(),
         Vec::new(),
     ));
     let ctx = loop_ctx(wrapped, None, 6);
@@ -5046,7 +5046,7 @@ async fn local_app_create_transport_retry_preserves_completed_scaffold_and_read(
     let observer = Arc::new(RetryObserver::default());
     let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
         api.clone(),
-        platform_api::WorkflowQueryWatchdog {
+        lingxi_core::host::WorkflowQueryWatchdog {
             stall_timeout_ms: 60_000,
             max_retries: 1,
             retry_response_body: true,
@@ -5096,7 +5096,7 @@ async fn local_app_create_transport_retry_shares_watchdog_limit_and_fails_closed
     ]);
     let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
         api.clone(),
-        platform_api::WorkflowQueryWatchdog {
+        lingxi_core::host::WorkflowQueryWatchdog {
             stall_timeout_ms: 60_000,
             max_retries: 2,
             retry_response_body: true,
@@ -5134,7 +5134,7 @@ async fn local_app_create_transport_retry_discards_tools_from_interrupted_respon
     let api = ResultStreamMockApiClient::new(vec![interrupted, valid_design_turn()]);
     let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
         api.clone(),
-        platform_api::WorkflowQueryWatchdog {
+        lingxi_core::host::WorkflowQueryWatchdog {
             stall_timeout_ms: 60_000,
             max_retries: 1,
             retry_response_body: true,
@@ -5188,7 +5188,7 @@ async fn local_app_create_transport_retry_never_replays_an_unclosed_server_tool(
         ]);
         let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
             api.clone(),
-            platform_api::WorkflowQueryWatchdog {
+            lingxi_core::host::WorkflowQueryWatchdog {
                 stall_timeout_ms: 60_000,
                 max_retries: 2,
                 retry_response_body: true,
@@ -5234,7 +5234,7 @@ async fn local_app_create_transport_retry_is_not_a_generic_error_retry() {
         let client: Arc<dyn crate::api::SubagentApiClient> = if workflow {
             Arc::new(crate::api::WorkflowWatchdogApiClient::new(
                 api.clone(),
-                platform_api::WorkflowQueryWatchdog {
+                lingxi_core::host::WorkflowQueryWatchdog {
                     stall_timeout_ms: 60_000,
                     max_retries: 2,
                     retry_response_body: true,
@@ -5337,11 +5337,12 @@ fn create_parse_recovery_api(
     turns: Vec<Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>>>,
 ) -> Arc<ResultStreamMockApiClient> {
     let mut api = ResultStreamMockApiClient::new(turns);
-    Arc::get_mut(&mut api).unwrap().workflow_watchdog = Some(platform_api::WorkflowQueryWatchdog {
-        stall_timeout_ms: 60_000,
-        max_retries: 0,
-        retry_response_body: true,
-    });
+    Arc::get_mut(&mut api).unwrap().workflow_watchdog =
+        Some(lingxi_core::host::WorkflowQueryWatchdog {
+            stall_timeout_ms: 60_000,
+            max_retries: 0,
+            retry_response_body: true,
+        });
     api
 }
 
@@ -5556,12 +5557,12 @@ async fn local_app_create_json_correction_requires_host_policy_and_advertised_lo
             Arc::get_mut(&mut api).unwrap().workflow_watchdog = None;
         } else if case == "default workflow" {
             Arc::get_mut(&mut api).unwrap().workflow_watchdog =
-                Some(platform_api::WorkflowQueryWatchdog::default());
+                Some(lingxi_core::host::WorkflowQueryWatchdog::default());
         }
         let invoker = CountingInvoker::new();
         let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 5);
         enable_create_parse_recovery(&mut ctx);
-        let registration = platform_api::ModelAttemptRun::new(Arc::new(()));
+        let registration = lingxi_core::host::ModelAttemptRun::new(Arc::new(()));
         match case {
             "no parse retries" => ctx.structured_output_parse_retries = 0,
             "unadvertised tool" => ctx.tool_schemas.clear(),
@@ -5571,7 +5572,7 @@ async fn local_app_create_json_correction_requires_host_policy_and_advertised_lo
             "registered model attempt" => {
                 ctx.model_attempt = Some(
                     registration
-                        .context(platform_api::ModelAttemptStage::Panel, Some(0))
+                        .context(lingxi_core::host::ModelAttemptStage::Panel, Some(0))
                         .unwrap(),
                 );
             }
@@ -5704,7 +5705,7 @@ async fn design_parse_recovery_preserves_prior_tools_and_reports_retry() {
     let observer = Arc::new(RetryObserver::default());
     let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
         api.clone(),
-        platform_api::WorkflowQueryWatchdog {
+        lingxi_core::host::WorkflowQueryWatchdog {
             stall_timeout_ms: 60_000,
             max_retries: 0,
             retry_response_body: false,
@@ -5877,9 +5878,9 @@ struct ParseRetryStop {
 }
 
 #[async_trait]
-impl platform_api::SubagentSpawnObserver for ParseRetryStop {
-    async fn on_event(&self, event: platform_api::SubagentObservation) {
-        if matches!(event, platform_api::SubagentObservation::Retry { .. }) {
+impl lingxi_core::host::SubagentSpawnObserver for ParseRetryStop {
+    async fn on_event(&self, event: lingxi_core::host::SubagentObservation) {
+        if matches!(event, lingxi_core::host::SubagentObservation::Retry { .. }) {
             if let Some(tx) = &self.cancel {
                 tx.send(lingxi_core::Event::UserInterrupt).await.unwrap();
             } else {
@@ -5890,10 +5891,10 @@ impl platform_api::SubagentSpawnObserver for ParseRetryStop {
 }
 
 #[async_trait]
-impl platform_api::budget::BudgetEnforcerHandle for ParseRetryStop {
-    async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::budget::BudgetError> {
+impl lingxi_core::host::budget::BudgetEnforcerHandle for ParseRetryStop {
+    async fn check_and_charge(&self, _: u64) -> Result<(), lingxi_core::host::budget::BudgetError> {
         if self.exhausted.load(Ordering::SeqCst) {
-            Err(platform_api::budget::BudgetError::Exceeded {
+            Err(lingxi_core::host::budget::BudgetError::Exceeded {
                 current_nano_usd: 1,
             })
         } else {
@@ -5963,7 +5964,7 @@ async fn rate_limit_midstream_recovers_partial_with_cutoff_note() {
     ctx.transcript_subdir = dir.path().to_path_buf();
     ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
         dir.path().to_path_buf(),
-    )) as Arc<dyn platform_api::FileSystem>);
+    )) as Arc<dyn lingxi_core::host::FileSystem>);
     let agent_id = ctx.agent_id;
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
@@ -6088,8 +6089,8 @@ async fn run_subagent_persists_its_conversation_to_the_agent_transcript() {
     ctx.transcript_subdir = dir.path().to_path_buf();
     ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
         dir.path().to_path_buf(),
-    )) as Arc<dyn platform_api::FileSystem>);
-    ctx.prompt_messages = vec![protocol::ConversationMessage::user(
+    )) as Arc<dyn lingxi_core::host::FileSystem>);
+    ctx.prompt_messages = vec![lingxi_core::types::ConversationMessage::user(
         MessageId::new(),
         "do the thing".to_string(),
     )];
@@ -6138,8 +6139,8 @@ async fn run_subagent_exposes_seed_before_first_model_response() {
     ctx.transcript_subdir = dir.path().to_path_buf();
     ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
         dir.path().to_path_buf(),
-    )) as Arc<dyn platform_api::FileSystem>);
-    ctx.prompt_messages = vec![protocol::ConversationMessage::user(
+    )) as Arc<dyn lingxi_core::host::FileSystem>);
+    ctx.prompt_messages = vec![lingxi_core::types::ConversationMessage::user(
         MessageId::new(),
         "design the airplane game".to_string(),
     )];
@@ -6201,15 +6202,15 @@ async fn run_subagent_without_a_transcript_fs_writes_nothing() {
 async fn a_resumed_history_replaces_the_seed_rather_than_prefixing_it() {
     let api = MockSubagentApiClient::new(vec![Ok(text_response("ok", Some("end_turn")))]);
     let mut ctx = loop_ctx(api.clone(), None, 4);
-    ctx.prompt_messages = vec![protocol::ConversationMessage::user(
+    ctx.prompt_messages = vec![lingxi_core::types::ConversationMessage::user(
         MessageId::new(),
         "ORIGINAL PROMPT".to_string(),
     )];
-    ctx.fork_context_messages = Some(vec![protocol::ConversationMessage::user(
+    ctx.fork_context_messages = Some(vec![lingxi_core::types::ConversationMessage::user(
         MessageId::new(),
         "FORK CONTEXT".to_string(),
     )]);
-    ctx.resumed_history = Some(vec![protocol::ConversationMessage::user(
+    ctx.resumed_history = Some(vec![lingxi_core::types::ConversationMessage::user(
         MessageId::new(),
         "RECOVERED".to_string(),
     )]);
@@ -6260,8 +6261,8 @@ async fn a_restored_run_appends_only_new_messages_to_its_transcript() {
     ctx.transcript_subdir = dir.path().to_path_buf();
     ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
         dir.path().to_path_buf(),
-    )) as Arc<dyn platform_api::FileSystem>);
-    ctx.resumed_history = Some(vec![protocol::ConversationMessage::user(
+    )) as Arc<dyn lingxi_core::host::FileSystem>);
+    ctx.resumed_history = Some(vec![lingxi_core::types::ConversationMessage::user(
         MessageId::new(),
         "ALREADY ON DISK".to_string(),
     )]);
@@ -6794,8 +6795,8 @@ struct OwnerNotificationRegistry {
     wake_checked: tokio::sync::Notify,
     drains: AtomicUsize,
     parked_fold: tokio::sync::Notify,
-    owner: protocol::AgentId,
-    pending: Mutex<Vec<platform_api::task_registry::TaskNotification>>,
+    owner: lingxi_core::types::AgentId,
+    pending: Mutex<Vec<lingxi_core::host::task_registry::TaskNotification>>,
     revision: tokio::sync::watch::Sender<u64>,
 }
 impl OwnerNotificationRegistry {
@@ -6803,7 +6804,7 @@ impl OwnerNotificationRegistry {
         self.pending
             .lock()
             .unwrap()
-            .push(platform_api::task_registry::TaskNotification {
+            .push(lingxi_core::host::task_registry::TaskNotification {
                 task_id: "achild".into(),
                 task_type: "local_agent".into(),
                 status: "completed".into(),
@@ -6815,13 +6816,13 @@ impl OwnerNotificationRegistry {
     }
 }
 #[async_trait]
-impl platform_api::task_registry::TaskRegistryHandle for OwnerNotificationRegistry {
+impl lingxi_core::host::task_registry::TaskRegistryHandle for OwnerNotificationRegistry {
     async fn create(
         &self,
-        _: platform_api::task_registry::TaskCreateInput,
+        _: lingxi_core::host::task_registry::TaskCreateInput,
     ) -> Result<
-        platform_api::task_registry::TaskRecord,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!()
     }
@@ -6829,27 +6830,27 @@ impl platform_api::task_registry::TaskRegistryHandle for OwnerNotificationRegist
         &self,
         _: &str,
     ) -> Result<
-        Option<platform_api::task_registry::TaskRecord>,
-        platform_api::task_registry::TaskRegistryError,
+        Option<lingxi_core::host::task_registry::TaskRecord>,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!()
     }
     async fn list(
         &self,
-        _: platform_api::task_registry::TaskListFilter,
+        _: lingxi_core::host::task_registry::TaskListFilter,
     ) -> Result<
-        Vec<platform_api::task_registry::TaskRecord>,
-        platform_api::task_registry::TaskRegistryError,
+        Vec<lingxi_core::host::task_registry::TaskRecord>,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         Ok(vec![])
     }
     async fn update(
         &self,
         _: &str,
-        _: platform_api::task_registry::TaskUpdatePatch,
+        _: lingxi_core::host::task_registry::TaskUpdatePatch,
     ) -> Result<
-        platform_api::task_registry::TaskRecord,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!()
     }
@@ -6858,8 +6859,8 @@ impl platform_api::task_registry::TaskRegistryHandle for OwnerNotificationRegist
         _: &str,
         _: &str,
     ) -> Result<
-        platform_api::task_registry::TaskRecord,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!()
     }
@@ -6867,8 +6868,8 @@ impl platform_api::task_registry::TaskRegistryHandle for OwnerNotificationRegist
         &self,
         _: &str,
     ) -> Result<
-        platform_api::task_registry::TaskRecord,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!()
     }
@@ -6877,20 +6878,20 @@ impl platform_api::task_registry::TaskRegistryHandle for OwnerNotificationRegist
         _: &str,
         _: Option<u64>,
     ) -> Result<
-        platform_api::task_registry::TaskOutputChunk,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskOutputChunk,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!()
     }
     async fn park_foreground_agent(
         &self,
-        agent_id: protocol::AgentId,
-        _: platform_api::task_registry::AgentTerminalOutcome,
+        agent_id: lingxi_core::types::AgentId,
+        _: lingxi_core::host::task_registry::AgentTerminalOutcome,
     ) -> bool {
         assert_eq!(agent_id, self.owner);
         self.park_foreground
     }
-    async fn can_wake_agent_for_task_notification(&self, _: protocol::AgentId) -> bool {
+    async fn can_wake_agent_for_task_notification(&self, _: lingxi_core::types::AgentId) -> bool {
         let acknowledged = self.rest_acknowledged.load(Ordering::SeqCst);
         self.wake_checked.notify_one();
         acknowledged
@@ -6900,10 +6901,10 @@ impl platform_api::task_registry::TaskRegistryHandle for OwnerNotificationRegist
     }
     async fn take_pending_task_notifications_for(
         &self,
-        recipient: Option<protocol::AgentId>,
+        recipient: Option<lingxi_core::types::AgentId>,
     ) -> Result<
-        Vec<platform_api::task_registry::TaskNotification>,
-        platform_api::task_registry::TaskRegistryError,
+        Vec<lingxi_core::host::task_registry::TaskNotification>,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         assert_eq!(recipient, Some(self.owner));
         let pending = std::mem::take(&mut *self.pending.lock().unwrap());
@@ -7202,10 +7203,10 @@ async fn a_subagent_cascade_stops_when_the_chain_is_exhausted() {
 fn a_subagent_refusal_frame_is_scoped_local() {
     let frame = super::refusal_fallback_frame(
         MessageId::new(),
-        &platform_api::refusal_notice::RefusalNotice {
+        &lingxi_core::host::refusal_notice::RefusalNotice {
             origin_model: "refusing-model".to_string(),
             serving_model: "fallback-model".to_string(),
-            ..platform_api::refusal_notice::RefusalNotice::default()
+            ..lingxi_core::host::refusal_notice::RefusalNotice::default()
         },
     );
     match frame {
@@ -7297,7 +7298,7 @@ async fn a_subagent_that_never_refused_carries_no_note() {
 fn retracted_messages_are_dropped_but_notices_survive() {
     let assistant = |text: &str| ConversationMessage::Assistant {
         id: MessageId::new(),
-        content: vec![protocol::ContentBlock::Text {
+        content: vec![lingxi_core::types::ContentBlock::Text {
             text: text.to_string(),
         }],
         stop_reason: None,
@@ -7307,11 +7308,11 @@ fn retracted_messages_are_dropped_but_notices_survive() {
     let kept = assistant("live output");
     let notice = super::refusal_fallback_frame(
         MessageId::new(),
-        &platform_api::refusal_notice::RefusalNotice {
+        &lingxi_core::host::refusal_notice::RefusalNotice {
             origin_model: "refusing".to_string(),
             serving_model: "fallback".to_string(),
             retracted_message_uuids: vec![doomed_uuid],
-            ..platform_api::refusal_notice::RefusalNotice::default()
+            ..lingxi_core::host::refusal_notice::RefusalNotice::default()
         },
     );
 
@@ -7327,7 +7328,7 @@ fn retracted_messages_are_dropped_but_notices_survive() {
         live.iter().any(|m| matches!(
             m,
             ConversationMessage::Assistant { content, .. }
-                if content.iter().any(|b| matches!(b, protocol::ContentBlock::Text { text } if text == "live output"))
+                if content.iter().any(|b| matches!(b, lingxi_core::types::ContentBlock::Text { text } if text == "live output"))
         )),
         "the unretracted message survives"
     );
@@ -7339,9 +7340,9 @@ fn retracted_messages_are_dropped_but_notices_survive() {
 fn a_notice_for_another_model_is_not_picked() {
     let notice = super::refusal_fallback_frame(
         MessageId::new(),
-        &platform_api::refusal_notice::RefusalNotice {
+        &lingxi_core::host::refusal_notice::RefusalNotice {
             serving_model: "hop-one".to_string(),
-            ..platform_api::refusal_notice::RefusalNotice::default()
+            ..lingxi_core::host::refusal_notice::RefusalNotice::default()
         },
     );
     let history = vec![notice];
@@ -7353,13 +7354,13 @@ fn a_notice_for_another_model_is_not_picked() {
 async fn skill_preload_read_error_fails_before_model_request() {
     struct FailingLoader;
     #[async_trait]
-    impl platform_api::skill_loader::SkillLoader for FailingLoader {
+    impl lingxi_core::host::skill_loader::SkillLoader for FailingLoader {
         async fn resolve_and_load(
             &self,
             _: &str,
             _: &str,
             _cwd: Option<&std::path::Path>,
-        ) -> Result<Option<platform_api::skill_loader::SkillLoad>, String> {
+        ) -> Result<Option<lingxi_core::host::skill_loader::SkillLoad>, String> {
             Err("loop.md denied".into())
         }
     }
@@ -7380,26 +7381,26 @@ async fn skill_preload_read_error_fails_before_model_request() {
 async fn tool_reported_error_reaches_model_history_and_message_events() {
     struct ReportedErrorInvoker;
     #[async_trait]
-    impl platform_api::ToolInvoker for ReportedErrorInvoker {
+    impl lingxi_core::host::ToolInvoker for ReportedErrorInvoker {
         async fn invoke(
             &self,
             _: &str,
             _: serde_json::Value,
-            _: platform_api::tool_invoker::SubagentInvocationContext,
-        ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+            _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
             unreachable!("runner must preserve detailed results")
         }
         async fn invoke_detailed(
             &self,
             _: &str,
             _: serde_json::Value,
-            _: platform_api::tool_invoker::SubagentInvocationContext,
+            _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
             _: Option<u64>,
         ) -> Result<
-            platform_api::tool_invoker::ToolInvocationResult,
-            platform_api::tool_invoker::ToolInvokerError,
+            lingxi_core::host::tool_invoker::ToolInvocationResult,
+            lingxi_core::host::tool_invoker::ToolInvokerError,
         > {
-            Ok(platform_api::tool_invoker::ToolInvocationResult {
+            Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
                 data: serde_json::json!({"code": "unavailable"}),
                 model_content: Some("Contract unavailable".into()),
                 is_error: true,

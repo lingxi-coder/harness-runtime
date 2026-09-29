@@ -5,8 +5,8 @@ use crate::registry::TaskRegistry;
 use crate::state::{TaskState, TaskStatus};
 use crate::task_trait::{TaskContext, TaskError, TaskSpawnInput};
 use agent::observer_text as agent_observer_text;
-use platform_api::{SubagentInheritance, SubagentSpawnRequest};
-use protocol::AgentId;
+use lingxi_core::host::{SubagentInheritance, SubagentSpawnRequest};
+use lingxi_core::types::AgentId;
 
 impl TaskRegistry {
     /// File the observed↔observer pairing so `ObserverReport` can resolve a
@@ -20,7 +20,7 @@ impl TaskRegistry {
     /// what makes the brief tell the observer to name the worker in its report.
     fn arm_observer_pairing(
         &self,
-        seed: Option<&platform_api::observer_pairing::ObserverPairingSeed>,
+        seed: Option<&lingxi_core::host::observer_pairing::ObserverPairingSeed>,
         observed_agent_id: AgentId,
         observer_task_id: AgentId,
     ) {
@@ -34,15 +34,15 @@ impl TaskRegistry {
 /// See [`TaskRegistry::arm_observer_pairing`]. Free so the report-target rule
 /// is testable without standing up a whole registry.
 pub(crate) fn arm_pairing(
-    table: &platform_api::observer_pairing::ObserverPairings,
-    seed: &platform_api::observer_pairing::ObserverPairingSeed,
+    table: &lingxi_core::host::observer_pairing::ObserverPairings,
+    seed: &lingxi_core::host::observer_pairing::ObserverPairingSeed,
     observed_agent_id: AgentId,
     observer_task_id: AgentId,
 ) {
     {
         let spec = &seed.spec;
         let envelope = agent_observer_text::envelope_name(&seed.observed_name);
-        let mut pairing = platform_api::observer_pairing::ObserverPairing::armed(
+        let mut pairing = lingxi_core::host::observer_pairing::ObserverPairing::armed(
             observer_task_id,
             spec,
             envelope.clone(),
@@ -97,7 +97,7 @@ impl TaskRegistry {
         inheritance: SubagentInheritance,
         observed_agent_id: AgentId,
         digest: String,
-        seed: Option<platform_api::observer_pairing::ObserverPairingSeed>,
+        seed: Option<lingxi_core::host::observer_pairing::ObserverPairingSeed>,
     ) -> Result<(), TaskError> {
         // Pair lookup and first publication form one transaction, including
         // concurrent lifecycle taps restored for the same observed agent.
@@ -146,7 +146,7 @@ impl TaskRegistry {
         request.observer = None;
         request.run_in_background = true;
         request.query_source_label =
-            Some(platform_api::subagent_spawn::OBSERVER_QUERY_SOURCE.into());
+            Some(lingxi_core::host::subagent_spawn::OBSERVER_QUERY_SOURCE.into());
         request.creator_agent_id = None;
         request.prompt = format!("{}\n\n{}", request.prompt, digest);
         let description = request
@@ -173,9 +173,9 @@ impl TaskRegistry {
 #[cfg(test)]
 mod pairing_tests {
     use super::arm_pairing;
-    use platform_api::observer_pairing::{ObserverPairingSeed, ObserverPairings};
-    use platform_api::subagent_spawn::ObserverSpec;
-    use protocol::AgentId;
+    use lingxi_core::host::observer_pairing::{ObserverPairingSeed, ObserverPairings};
+    use lingxi_core::host::subagent_spawn::ObserverSpec;
+    use lingxi_core::types::AgentId;
 
     fn seed(creator: Option<AgentId>) -> ObserverPairingSeed {
         ObserverPairingSeed {

@@ -41,11 +41,11 @@ const ACCEPT_EDITS_ALLOWED_COMMANDS: [&str; 7] =
 /// before allow), so the source order never changes the allow/deny DECISION —
 /// only which source's rule is reported. (Was the exact reverse of this.)
 const SOURCES_BY_PRIORITY: [PermissionRuleSource; 10] = [
-    PermissionRuleSource::Settings(protocol::SettingsScope::User),
-    PermissionRuleSource::Settings(protocol::SettingsScope::Project),
-    PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+    PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
+    PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
+    PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
     PermissionRuleSource::FlagSettings,
-    PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+    PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
     PermissionRuleSource::CliArg,
     PermissionRuleSource::Command,
     PermissionRuleSource::Session,
@@ -694,7 +694,11 @@ impl PermissionPolicy {
         mode: PermissionMode,
         rules: impl IntoIterator<Item = PermissionRule>,
     ) -> Self {
-        Self::from_rules_confined(mode, rules, platform_api::env::is_eval_confined_session())
+        Self::from_rules_confined(
+            mode,
+            rules,
+            lingxi_core::host::env::is_eval_confined_session(),
+        )
     }
 
     /// [`Self::from_rules`] with the confinement flag passed in rather than read
@@ -4114,7 +4118,7 @@ mod classify_all_shell_policy_test {
                 rule_content: Some(content.into()),
             },
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         }
     }
 
@@ -4289,7 +4293,7 @@ mod restricted_policy_test {
         let allow = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Edit(.git/**)"),
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         };
         let policy = PermissionPolicy::from_rules(PermissionMode::BypassPermissions, [allow])
             .with_roots(roots)

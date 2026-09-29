@@ -143,11 +143,11 @@ fn nano_to_usd(nano: u64) -> f64 {
 /// aligned zero line; otherwise a header plus one right-aligned line per model.
 /// The per-model web-search clause is omitted (no per-model web-search tracking).
 ///
-/// Consumes `platform_api::ModelUsageRow` directly (the orchestrator projects the
+/// Consumes `lingxi_core::host::ModelUsageRow` directly (the orchestrator projects the
 /// session's per-model usage onto these rows). The row's `model` field is the
 /// provider-scoped model name, used as-is for the `${model}:` label.
 #[must_use]
-pub fn usage_by_model_block(by_model: &[platform_api::ModelUsageRow]) -> String {
+pub fn usage_by_model_block(by_model: &[lingxi_core::host::ModelUsageRow]) -> String {
     if by_model.is_empty() {
         return "Usage:                 0 input, 0 output, 0 cache read, 0 cache write".to_string();
     }
@@ -173,7 +173,7 @@ pub fn usage_by_model_block(by_model: &[platform_api::ModelUsageRow]) -> String 
 
 /// Inputs to [`cost_summary`], mapped by the caller from the session's cost
 /// snapshot. The caller maps its `CostSnapshot` onto this input; `by_model`
-/// borrows the snapshot's `Vec<platform_api::ModelUsageRow>` directly.
+/// borrows the snapshot's `Vec<lingxi_core::host::ModelUsageRow>` directly.
 pub struct CostSummaryInput<'a> {
     pub total_usd: f64,
     pub unknown_models: bool,
@@ -181,14 +181,14 @@ pub struct CostSummaryInput<'a> {
     pub wall_duration_ms: u64,
     pub code_lines_added: u64,
     pub code_lines_removed: u64,
-    pub by_model: &'a [platform_api::ModelUsageRow],
+    pub by_model: &'a [lingxi_core::host::ModelUsageRow],
 }
 
-/// Map a session [`platform_api::CostSnapshot`] onto [`CostSummaryInput`] and render the
+/// Map a session [`lingxi_core::host::CostSnapshot`] onto [`CostSummaryInput`] and render the
 /// byte-exact `i6e()` block. Shared by the `/usage` command handler and the TUI
 /// Usage/Stats screen so the field mapping lives in exactly one place.
 #[must_use]
-pub fn cost_summary_from_snapshot(snap: &platform_api::CostSnapshot) -> String {
+pub fn cost_summary_from_snapshot(snap: &lingxi_core::host::CostSnapshot) -> String {
     let block = cost_summary(&CostSummaryInput {
         total_usd: snap.total_usd,
         unknown_models: snap.unknown_models,
@@ -376,7 +376,7 @@ fn miss_cause_clause(attribution: Option<&crate::prompt_cache_ledger::MissAttrib
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::orchestrator::ModelUsageRow;
+    use lingxi_core::host::orchestrator::ModelUsageRow;
 
     #[test]
     fn cbg_empty_and_per_model() {
@@ -516,7 +516,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         }];
-        let snap = platform_api::CostSnapshot {
+        let snap = lingxi_core::host::CostSnapshot {
             total_usd: 0.1234,
             unknown_models: true,
             api_duration: std::time::Duration::from_millis(5_000),
@@ -524,7 +524,7 @@ mod tests {
             code_lines_added: 10,
             code_lines_removed: 1,
             by_model: rows.clone(),
-            ..platform_api::CostSnapshot::default()
+            ..lingxi_core::host::CostSnapshot::default()
         };
         let expected = cost_summary(&CostSummaryInput {
             total_usd: 0.1234,
@@ -591,9 +591,9 @@ mod tests {
 
     #[test]
     fn the_cost_block_gains_the_line_only_when_there_is_one() {
-        let base = platform_api::CostSnapshot {
+        let base = lingxi_core::host::CostSnapshot {
             total_usd: 0.5,
-            ..platform_api::CostSnapshot::default()
+            ..lingxi_core::host::CostSnapshot::default()
         };
         let without = cost_summary_from_snapshot(&base);
         assert!(
@@ -601,7 +601,7 @@ mod tests {
             "a session with no responses must render the block unchanged"
         );
 
-        let with = cost_summary_from_snapshot(&platform_api::CostSnapshot {
+        let with = cost_summary_from_snapshot(&lingxi_core::host::CostSnapshot {
             prompt_cache_line: Some("Prompt cache (main):   1 request".to_string()),
             ..base.clone()
         });
@@ -609,7 +609,7 @@ mod tests {
 
         // An EMPTY line must not add a blank row — `Some("")` is the shape a
         // careless caller produces and it would show as trailing whitespace.
-        let empty = cost_summary_from_snapshot(&platform_api::CostSnapshot {
+        let empty = cost_summary_from_snapshot(&lingxi_core::host::CostSnapshot {
             prompt_cache_line: Some(String::new()),
             ..base
         });

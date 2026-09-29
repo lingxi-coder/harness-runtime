@@ -16,7 +16,7 @@
 
 use crate::team_registry::{TeamRegistry, WorkerStatus};
 use async_trait::async_trait;
-use platform_api::OutputStream;
+use lingxi_core::host::OutputStream;
 use std::sync::Arc;
 use tasks::handlers::TaskStatusSink;
 use tasks::state::TaskStatus;
@@ -147,8 +147,8 @@ impl TaskStatusSink for CoordinatorStatusSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::CostSnapshot;
-    use protocol::AgentId;
+    use lingxi_core::host::CostSnapshot;
+    use lingxi_core::types::AgentId;
     use std::sync::Mutex as StdMutex;
 
     /// Spy [`OutputStream`] recording every `emit_coordinator_status` call as
@@ -156,7 +156,7 @@ mod tests {
     #[derive(Default)]
     struct SpyOutput {
         statuses: StdMutex<Vec<(u32, Option<String>)>>,
-        workers: StdMutex<Vec<platform_api::team_registry::WorkerInfo>>,
+        workers: StdMutex<Vec<lingxi_core::host::team_registry::WorkerInfo>>,
     }
 
     impl SpyOutput {
@@ -173,21 +173,24 @@ mod tests {
         async fn emit_text(&self, _text: &str) {}
         async fn emit_tool_call(
             &self,
-            _id: &protocol::ToolUseId,
+            _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
             _input: &serde_json::Value,
         ) {
         }
         async fn emit_tool_result(
             &self,
-            _id: &protocol::ToolUseId,
+            _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
             _model_text: &str,
             _result: &serde_json::Value,
         ) {
         }
         async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
-        async fn emit_coordinator_worker(&self, worker: &platform_api::team_registry::WorkerInfo) {
+        async fn emit_coordinator_worker(
+            &self,
+            worker: &lingxi_core::host::team_registry::WorkerInfo,
+        ) {
             self.workers.lock().unwrap().push(worker.clone());
         }
         async fn emit_coordinator_status(&self, active_workers: u32, team: Option<&str>) {

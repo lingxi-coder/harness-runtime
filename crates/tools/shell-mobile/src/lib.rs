@@ -40,8 +40,8 @@ use tool_api::tool_trait::{
 use tool_api::util::output_truncation::{truncate_shell_output, MAX_TOOL_OUTPUT_LENGTH};
 use tool_api::BuiltinToolContext;
 
-use platform_api::process::ProcessError;
-use platform_api::sandbox::{
+use lingxi_core::host::process::ProcessError;
+use lingxi_core::host::sandbox::{
     NetworkPolicy, ProcessCommand, ResourceLimits, SandboxError, SandboxPolicy,
 };
 
@@ -495,8 +495,8 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::process::{ProcessHandle, ProcessOutput, ProcessRunner};
-    use platform_api::sandbox::{
+    use lingxi_core::host::process::{ProcessHandle, ProcessOutput, ProcessRunner};
+    use lingxi_core::host::sandbox::{
         Sandbox, SandboxBackend, SandboxCapability, SandboxFeatures, SandboxedCommand, SandboxedTag,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};

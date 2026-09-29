@@ -280,7 +280,7 @@ fn catalog_entries(ctx: &SkillsAdminContext) -> Result<Vec<SkillCatalogEntry>, S
     for project_root in project_skill_roots(&ctx.cwd, &ctx.lingxi_home) {
         entries.extend(scan_root(&project_root, "project", true)?);
     }
-    let managed_root = platform_api::live_sessions::managed_settings_dir()
+    let managed_root = lingxi_core::host::live_sessions::managed_settings_dir()
         .join(branding::DOT_DIR)
         .join("skills");
     entries.extend(scan_root(&managed_root, "managed", false)?);
@@ -658,9 +658,9 @@ fn validate_skill_markdown(markdown: &str, scope: &str) -> Result<(), String> {
         return Err("SKILL.md exceeds the 512 KiB limit".to_string());
     }
     let source = if scope == "user" {
-        skill_api::SkillSource::Settings(protocol::SettingsScope::User)
+        skill_api::SkillSource::Settings(lingxi_core::types::SettingsScope::User)
     } else {
-        skill_api::SkillSource::Settings(protocol::SettingsScope::Project)
+        skill_api::SkillSource::Settings(lingxi_core::types::SettingsScope::Project)
     };
     skill_api::parse_skill_markdown(
         markdown,
@@ -824,7 +824,7 @@ fn inspect_markdown(markdown: &str) -> Inspection {
     match skill_api::parse_skill_markdown(
         markdown,
         PathBuf::from(SKILL_FILE),
-        skill_api::SkillSource::Settings(protocol::SettingsScope::User),
+        skill_api::SkillSource::Settings(lingxi_core::types::SettingsScope::User),
         skill_api::LoadedFrom::Skills,
     ) {
         Ok(skill) => Inspection {

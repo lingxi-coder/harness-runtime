@@ -241,7 +241,7 @@ struct SettlementProbe(Arc<Mutex<Vec<&'static str>>>);
 impl crate::ModelAttemptHooks for SettlementProbe {
     async fn begin(
         &self,
-        _: &platform_api::ModelAttemptContext,
+        _: &lingxi_core::host::ModelAttemptContext,
         _: &LlmRequest,
         _: &crate::PreparedLlmCall,
     ) -> Result<Box<dyn crate::ModelAttemptLease>, LlmError> {
@@ -287,8 +287,8 @@ async fn a_hosted_failure_settles_its_registered_attempt_before_returning() {
             service.set_model_attempt_hooks(Arc::new(probe.clone()));
             let mut request = request(true);
             request.execution.model_attempt = Some(
-                platform_api::ModelAttemptRun::new(Arc::new(()))
-                    .context(platform_api::ModelAttemptStage::Panel, Some(0))
+                lingxi_core::host::ModelAttemptRun::new(Arc::new(()))
+                    .context(lingxi_core::host::ModelAttemptStage::Panel, Some(0))
                     .unwrap(),
             );
             if streaming {

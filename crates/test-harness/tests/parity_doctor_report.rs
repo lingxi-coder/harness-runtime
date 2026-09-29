@@ -1,7 +1,7 @@
 //! Byte-locked /doctor report layout vs golden text fixture (M5-11 T14).
 
 use command_api::builtins::doctor::render_doctor;
-use platform_api::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
+use lingxi_core::host::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
 
 const GOLDEN: &str = include_str!("../src/parity/fixtures/parity_doctor_report.txt");
 

@@ -16,7 +16,7 @@ pub use find::{find_relevant, RelevanceInputs};
 pub use paths::{memdir_path, MemdirRoots, MEMDIR_SUBDIR, TEAM_MEM_SUBDIR};
 pub use scan::{scan_memdir, MemdirSnapshot};
 
-use protocol::{MemoryEntry, MemoryEntryTier};
+use lingxi_core::types::{MemoryEntry, MemoryEntryTier};
 use std::sync::Arc;
 
 /// Telemetry event name emitted once per memory-load operation.
@@ -81,7 +81,7 @@ pub async fn emit_agent_memory_loaded(
 #[cfg(test)]
 mod telemetry_tests {
     use super::*;
-    use protocol::{MemoryEntry, MemoryEntryTier};
+    use lingxi_core::types::{MemoryEntry, MemoryEntryTier};
     use std::sync::{Arc, Mutex};
     use telemetry::{sink::LogEventMetadata, AnalyticsBus, AnalyticsSink, AnalyticsValue};
 

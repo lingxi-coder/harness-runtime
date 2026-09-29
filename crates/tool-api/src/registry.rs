@@ -21,7 +21,7 @@ use crate::defer::DeferralState;
 use crate::tool_search_view::{SharedToolSearchView, ToolSearchEntry};
 use crate::tool_trait::{Tool, ToolStaticContext};
 use crate::wire::locale_cmp;
-use protocol::{McpConnectionId, PluginId};
+use lingxi_core::types::{McpConnectionId, PluginId};
 use std::sync::{Arc, RwLock};
 
 /// Built-in tools that can execute commands/code, plus WebFetch's explicitly

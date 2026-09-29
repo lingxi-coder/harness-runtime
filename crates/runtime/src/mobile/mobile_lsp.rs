@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use jsonrpc::Connection;
+use lingxi_core::types::McpConnectionId;
 use lsp::{LspClient, LspPathMapper};
 use lsp_types::Url;
-use protocol::McpConnectionId;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -14,7 +14,7 @@ use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
-use platform_api::{
+use lingxi_core::host::{
     mobile_linux::map_host_path_to_guest, LspError, LspRawConnection, LspServerCapabilities,
     LspServerConfig, LspTransport, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy,
     NewDiagnosticsSource, RawStdioOpenRequest, RawStdioSessionHandle, ResourceLimits,
@@ -24,8 +24,8 @@ use platform_api::{
 pub(crate) const GLOBAL_TYPESCRIPT_LSP_SERVER_NAME: &str =
     "plugin:lingxi-typescript-lsp:typescript-native";
 
-pub(crate) fn global_typescript_lsp_plugin_id() -> protocol::PluginId {
-    protocol::PluginId::parse_prefixed("7a63cd80-0da6-4e77-9c47-a358da94f5bb")
+pub(crate) fn global_typescript_lsp_plugin_id() -> lingxi_core::types::PluginId {
+    lingxi_core::types::PluginId::parse_prefixed("7a63cd80-0da6-4e77-9c47-a358da94f5bb")
         .expect("hard-coded TypeScript LSP plugin id")
 }
 

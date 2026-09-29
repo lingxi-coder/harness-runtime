@@ -37,7 +37,7 @@ use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata};
 
 use crate::plugin_policy;
 use crate::plugin_settings::{parse_scope_str, scope_label, scope_path};
-use protocol::WritableScope;
+use lingxi_core::types::WritableScope;
 
 fn registry_error_kind(error: &str) -> &'static str {
     if error.contains("expected value")
@@ -82,11 +82,11 @@ pub fn load_installed(plugins_dir: &Path) -> Value {
 pub fn write_installed(plugins_dir: &Path, doc: &Value) -> Result<(), String> {
     std::fs::create_dir_all(plugins_dir).map_err(|error| error.to_string())?;
     let serialized = serde_json::to_string_pretty(doc).map_err(|error| error.to_string())?;
-    platform_api::rooted_fs::atomic_write(
+    lingxi_core::host::rooted_fs::atomic_write(
         plugins_dir,
         Path::new("installed_plugins.json"),
         serialized.as_bytes(),
-        platform_api::AtomicWriteOptions::default(),
+        lingxi_core::host::AtomicWriteOptions::default(),
     )
     .map_err(|error| error.to_string())
 }

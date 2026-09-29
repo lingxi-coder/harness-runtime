@@ -78,6 +78,9 @@ use command_api::builtins::{
     register_core_batch_4, register_core_batch_5,
 };
 use cost::CostHydrator;
+use lingxi_core::host::{
+    AuthHandle, CredentialStoragePolicy, McpTransport, OrchestratorHandle, OutputStream,
+};
 use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use llm_runtime::auth::anthropic::handle::OAuthHandle;
 use llm_runtime::auth::anthropic::{OAuthCredentialProvider, RefreshDriver};
@@ -91,9 +94,6 @@ use orchestrator::{
     QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK,
 };
 use permission::gate::PermissionGate;
-use platform_api::{
-    AuthHandle, CredentialStoragePolicy, McpTransport, OrchestratorHandle, OutputStream,
-};
 use platform_posix::{
     PosixClock, PosixFileSystem, PosixHttp, PosixProcess, PosixRuntime, PosixSandbox,
     PosixWorktreeManager,
@@ -175,7 +175,7 @@ fn mcp_hook_text_content(value: &serde_json::Value) -> Vec<String> {
 }
 
 fn map_hook_mcp_tool_result(
-    result: platform_api::McpToolResultDto,
+    result: lingxi_core::host::McpToolResultDto,
 ) -> hooks::HookMcpInvocationResult {
     let text_content = mcp_hook_text_content(&result.content);
     if result.is_error {
@@ -238,13 +238,13 @@ mod desktop_hook_mcp_invoker_tests {
         DesktopHookMcpInvoker,
     };
     use hooks::HookMcpInvoker;
-    use platform_api::{
+    use lingxi_core::host::{
         ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
         McpHeaders, McpNotificationStream, McpProtocolEra, McpRawConnection, McpResourceContentDto,
         McpResourceDto, McpResourceTemplateDto, McpToolResultDto, McpTransport, McpTransportKind,
         McpTransportSpec, ServerCapabilitiesDto,
     };
-    use protocol::McpConnectionId;
+    use lingxi_core::types::McpConnectionId;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -272,7 +272,7 @@ mod desktop_hook_mcp_invoker_tests {
             Ok(McpConnectResult {
                 connection: conn,
                 capabilities,
-                negotiated: platform_api::McpNegotiatedProtocol {
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
                     era: McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
@@ -297,7 +297,7 @@ mod desktop_hook_mcp_invoker_tests {
         async fn list_tools(
             &self,
             _conn: &McpRawConnection,
-        ) -> Result<Vec<platform_api::McpToolDto>, McpError> {
+        ) -> Result<Vec<lingxi_core::host::McpToolDto>, McpError> {
             Ok(Vec::new())
         }
 
@@ -318,7 +318,7 @@ mod desktop_hook_mcp_invoker_tests {
         async fn list_prompts(
             &self,
             _conn: &McpRawConnection,
-        ) -> Result<Vec<platform_api::McpPromptDto>, McpError> {
+        ) -> Result<Vec<lingxi_core::host::McpPromptDto>, McpError> {
             Ok(Vec::new())
         }
 
@@ -378,7 +378,7 @@ mod desktop_hook_mcp_invoker_tests {
                 headers_helper: None,
                 oauth: None,
             },
-            scope: mcp::ConfigScope::Settings(protocol::SettingsScope::User),
+            scope: mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             discovery_cache: None,
@@ -530,7 +530,7 @@ mod desktop_hook_mcp_invoker_tests {
                     experimental: HashMap::new(),
                     extensions: HashMap::new(),
                 },
-                negotiated: platform_api::McpNegotiatedProtocol {
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
                     era: McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
@@ -579,7 +579,7 @@ mod desktop_hook_mcp_invoker_tests {
 #[cfg(test)]
 mod mcp_transport_wiring_tests {
     use super::new_desktop_mcp_transport;
-    use platform_api::{McpTransport, McpTransportKind};
+    use lingxi_core::host::{McpTransport, McpTransportKind};
     use std::sync::Arc;
 
     /// Compile-time coverage for the production composition boundary. The
@@ -613,8 +613,8 @@ struct DesktopWebSearchConfigProvider {
 }
 
 #[async_trait::async_trait]
-impl platform_api::WebSearchConfigProvider for DesktopWebSearchConfigProvider {
-    async fn load_web_search_config(&self) -> platform_api::WebSearchRuntimeConfig {
+impl lingxi_core::host::WebSearchConfigProvider for DesktopWebSearchConfigProvider {
+    async fn load_web_search_config(&self) -> lingxi_core::host::WebSearchRuntimeConfig {
         let settings_path = self.lingxi_home.join("settings.json");
         let parsed = std::fs::read_to_string(&settings_path)
             .ok()
@@ -635,7 +635,7 @@ impl platform_api::WebSearchConfigProvider for DesktopWebSearchConfigProvider {
             .ok()
             .flatten()
             .map(|s| s.expose_secret().clone());
-        platform_api::WebSearchRuntimeConfig {
+        lingxi_core::host::WebSearchRuntimeConfig {
             provider: Some(parsed.provider.as_str().to_string()),
             searxng_url: parsed.searxng_url,
             tavily_key,
@@ -654,9 +654,9 @@ enum ApiProvider {
 }
 
 /// Port of `isEnvTruthy` (`envUtils.ts:32-37`); value test delegated to
-/// [`platform_api::env::is_env_truthy`].
+/// [`lingxi_core::host::env::is_env_truthy`].
 fn is_env_truthy(key: &str) -> bool {
-    platform_api::env::is_env_truthy(std::env::var(key).ok().as_deref())
+    lingxi_core::host::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
 /// Session-memory writes persist into the same memdir-backed Session tier that
@@ -724,7 +724,10 @@ fn utf16_code_units_len(value: &str) -> u32 {
 }
 
 fn registered_mcp_tool_count(
-    tools: &[(protocol::McpConnectionId, Vec<Arc<dyn tool_api::Tool>>)],
+    tools: &[(
+        lingxi_core::types::McpConnectionId,
+        Vec<Arc<dyn tool_api::Tool>>,
+    )],
 ) -> u32 {
     tools.iter().fold(0u32, |total, (_, tools)| {
         total.saturating_add(u32::try_from(tools.len()).unwrap_or(u32::MAX))
@@ -741,10 +744,12 @@ fn mcp_servers_inventory_payload(
             // enterprise-managed settings tier. The 2.1.252 oracle has no
             // separate `managed` inventory bucket.
             mcp::ConfigScope::Enterprise
-            | mcp::ConfigScope::Settings(protocol::SettingsScope::Managed) => "enterprise",
-            mcp::ConfigScope::Settings(protocol::SettingsScope::User) => "global",
-            mcp::ConfigScope::Settings(protocol::SettingsScope::Project) => "project",
-            mcp::ConfigScope::Settings(protocol::SettingsScope::Local) => "user",
+            | mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed) => {
+                "enterprise"
+            }
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User) => "global",
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project) => "project",
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Local) => "user",
             mcp::ConfigScope::Dynamic => "plugin",
             mcp::ConfigScope::Agent => "agent",
             mcp::ConfigScope::ClaudeAi => "claudeai",
@@ -801,8 +806,8 @@ fn mcp_tools_commands_loaded_payload(
 #[cfg(test)]
 mod mcp_telemetry_helper_tests {
     use super::{mcp_servers_inventory_payload, mcp_tools_commands_loaded_payload};
-    use platform_api::McpTransportSpec;
-    use protocol::McpConnectionId;
+    use lingxi_core::host::McpTransportSpec;
+    use lingxi_core::types::McpConnectionId;
     use std::collections::HashMap;
 
     fn stdio_config(name: &str, scope: mcp::ConfigScope) -> mcp::McpServerConfig {
@@ -831,19 +836,19 @@ mod mcp_telemetry_helper_tests {
             stdio_config("enterprise", mcp::ConfigScope::Enterprise),
             stdio_config(
                 "managed",
-                mcp::ConfigScope::Settings(protocol::SettingsScope::Managed),
+                mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
             ),
             stdio_config(
                 "global",
-                mcp::ConfigScope::Settings(protocol::SettingsScope::User),
+                mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             ),
             stdio_config(
                 "project",
-                mcp::ConfigScope::Settings(protocol::SettingsScope::Project),
+                mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
             ),
             stdio_config(
                 "user",
-                mcp::ConfigScope::Settings(protocol::SettingsScope::Local),
+                mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Local),
             ),
             stdio_config("dynamic", mcp::ConfigScope::Dynamic),
             stdio_config("agent", mcp::ConfigScope::Agent),
@@ -864,10 +869,10 @@ mod mcp_telemetry_helper_tests {
         let prompts = [(
             "srv".to_string(),
             McpConnectionId::new(),
-            platform_api::McpPromptDto {
+            lingxi_core::host::McpPromptDto {
                 name: "emoji".to_string(),
                 description: Some("desc😀".to_string()),
-                arguments: vec![platform_api::McpPromptArgumentDto {
+                arguments: vec![lingxi_core::host::McpPromptArgumentDto {
                     name: "旗".to_string(),
                     description: None,
                     required: true,
@@ -1032,10 +1037,10 @@ fn ephemeral_session_home() -> Result<std::path::PathBuf, BuildError> {
     let name = format!(
         "lingxi-ephemeral-{}-{}",
         std::process::id(),
-        protocol::SessionId::new().as_uuid().simple()
+        lingxi_core::types::SessionId::new().as_uuid().simple()
     );
     let root = std::env::temp_dir();
-    platform_api::rooted_fs::ensure_private_directory(
+    lingxi_core::host::rooted_fs::ensure_private_directory(
         &root,
         std::path::Path::new(&name),
         session::jsonl::journal::SESSION_STATE_DIR_MODE,
@@ -1264,7 +1269,7 @@ struct BootPermissionTiers {
 ///   the allowed-source set, so managed rules can NEVER be excluded.
 /// - Managed tiers (`managed-settings.json` + `managed-settings.d/*.json`,
 ///   already ascending from `managed_settings_raw_tiers`) parse with
-///   `PermissionRuleSource::Settings(protocol::SettingsScope::Managed)` (`RKt()→Fwt("policySettings")`),
+///   `PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)` (`RKt()→Fwt("policySettings")`),
 ///   so enterprise deny/ask/allow rules bind on the boot policy and decisions
 ///   cite "enterprise managed settings". Managed `defaultMode` /
 ///   `disableBypassPermissionsMode` / `additionalDirectories` fold like any
@@ -1305,17 +1310,17 @@ async fn load_boot_permission_tiers_with_flag(
     for (path, source, included) in [
         (
             lingxi_home.join("settings.json"),
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             incl_user_settings,
         ),
         (
             cwd.join(branding::DOT_DIR).join("settings.json"),
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             incl_project_settings,
         ),
         (
             cwd.join(branding::DOT_DIR).join("settings.local.json"),
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
             incl_project_settings,
         ),
     ] {
@@ -1441,7 +1446,7 @@ async fn load_boot_permission_tiers_with_flag(
     for raw in &managed_tiers {
         match permission::permission_rules_from_settings_json(
             raw,
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
         ) {
             Ok(mut r) => {
                 // parity 2.1.210: same file-matcher warning for managed rules.
@@ -1473,7 +1478,7 @@ async fn load_boot_permission_tiers_with_flag(
         }
         additional_working_dirs.extend_from_source(
             permission::additional_directories_from_settings_json(raw),
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
         );
         if permission::block_reads_outside_working_directories_from_settings_json(raw) {
             block_reads_outside_working_directories = true; // managed arming binds (sticky)
@@ -1484,7 +1489,10 @@ async fn load_boot_permission_tiers_with_flag(
         .any(|raw| permission::allow_managed_permission_rules_only_from_settings_json(raw));
     if allow_managed_permission_rules_only {
         rules.retain(|r| {
-            r.source == permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
+            r.source
+                == permission::PermissionRuleSource::Settings(
+                    lingxi_core::types::SettingsScope::Managed,
+                )
         });
     }
     let mode_preference_allowed = !managed_tiers
@@ -1555,9 +1563,9 @@ fn managed_model_policy_source(
 fn model_provenance_for_config(
     cfg: &DesktopConfig,
     effective_settings: Option<&lingxi_core::settings::EffectiveSettings>,
-) -> platform_api::ModelProvenance {
+) -> lingxi_core::host::ModelProvenance {
     if cfg.default_model_explicit || cfg.default_model_env_pinned {
-        return platform_api::ModelProvenance::UserOrEnv;
+        return lingxi_core::host::ModelProvenance::UserOrEnv;
     }
     match effective_settings
         .and_then(|settings| settings.effective_for("model"))
@@ -1568,7 +1576,7 @@ fn model_provenance_for_config(
                 .and_then(|settings| settings.settings.model.as_deref())
                 .is_some_and(|model| !model.trim().is_empty()) =>
         {
-            platform_api::ModelProvenance::ManagedAdministratorDefault
+            lingxi_core::host::ModelProvenance::ManagedAdministratorDefault
         }
         Some(
             lingxi_core::settings::tracer::Source::Env
@@ -1576,12 +1584,12 @@ fn model_provenance_for_config(
             | lingxi_core::settings::tracer::Source::Project
             | lingxi_core::settings::tracer::Source::Local
             | lingxi_core::settings::tracer::Source::Cli,
-        ) => platform_api::ModelProvenance::UserOrEnv,
+        ) => lingxi_core::host::ModelProvenance::UserOrEnv,
         Some(lingxi_core::settings::tracer::Source::Managed) => {
-            platform_api::ModelProvenance::ProviderCatalogTier
+            lingxi_core::host::ModelProvenance::ProviderCatalogTier
         }
         Some(lingxi_core::settings::tracer::Source::Defaults) | None => {
-            platform_api::ModelProvenance::ProviderCatalogTier
+            lingxi_core::host::ModelProvenance::ProviderCatalogTier
         }
     }
 }
@@ -2262,7 +2270,7 @@ pub fn platform_in_enabled_list(
     }
 }
 
-/// M10 (T13): a late-bound [`platform_api::tool_invoker::ToolInvoker`] resolving the
+/// M10 (T13): a late-bound [`lingxi_core::host::tool_invoker::ToolInvoker`] resolving the
 /// composition-root construction cycle.
 ///
 /// The teammate handler is registered into the `TaskRegistry` (which needs
@@ -2280,7 +2288,7 @@ pub fn platform_in_enabled_list(
 /// a tool before `build()` returns, so the cell is always filled before first
 /// use.
 struct DeferredToolInvoker {
-    inner: std::sync::OnceLock<Arc<dyn platform_api::tool_invoker::ToolInvoker>>,
+    inner: std::sync::OnceLock<Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>>,
 }
 
 impl DeferredToolInvoker {
@@ -2292,22 +2300,22 @@ impl DeferredToolInvoker {
 
     /// Fill the cell with the real invoker. Idempotent-safe: a second call is a
     /// no-op (the first binding wins), matching the build-once semantics.
-    fn set(&self, invoker: Arc<dyn platform_api::tool_invoker::ToolInvoker>) {
+    fn set(&self, invoker: Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>) {
         let _ = self.inner.set(invoker);
     }
 }
 
 #[async_trait::async_trait]
-impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
+impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
     async fn invoke_detailed(
         &self,
         name: &str,
         input: serde_json::Value,
-        ctx: platform_api::tool_invoker::SubagentInvocationContext,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
     ) -> Result<
-        platform_api::tool_invoker::ToolInvocationResult,
-        platform_api::tool_invoker::ToolInvokerError,
+        lingxi_core::host::tool_invoker::ToolInvocationResult,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
     > {
         match self.inner.get() {
             Some(invoker) => {
@@ -2315,7 +2323,7 @@ impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
                     .invoke_detailed(name, input, ctx, workspace_lease_token)
                     .await
             }
-            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
+            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
             )),
@@ -2326,11 +2334,11 @@ impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
         &self,
         name: &str,
         input: serde_json::Value,
-        ctx: platform_api::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => invoker.invoke(name, input, ctx).await,
-            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
+            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
             )),
@@ -2349,16 +2357,16 @@ impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
         &self,
         name: &str,
         input: serde_json::Value,
-        ctx: platform_api::tool_invoker::SubagentInvocationContext,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => {
                 invoker
                     .invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
                     .await
             }
-            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
+            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
             )),
@@ -2391,7 +2399,7 @@ struct CoordinatorTeammateDefinitionResolver {
 impl tasks::handlers::TeammateDefinitionResolver for CoordinatorTeammateDefinitionResolver {
     async fn resolve(
         &self,
-        agent_id: &protocol::AgentId,
+        agent_id: &lingxi_core::types::AgentId,
         display_name: &str,
     ) -> Option<agent::AgentDefinition> {
         let agent_type = self
@@ -2514,8 +2522,8 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
         &self,
         task_id: &str,
         result: Option<String>,
-        usage: Option<platform_api::task_registry::AgentRunUsage>,
-        agent_id: Option<protocol::AgentId>,
+        usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
+        agent_id: Option<lingxi_core::types::AgentId>,
         agent_name: Option<String>,
         team_name: Option<String>,
     ) {
@@ -2544,7 +2552,7 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
     async fn set_agent_outcome(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::AgentTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::AgentTerminalOutcome,
     ) {
         tasks::handlers::TaskStatusSink::set_agent_outcome(
             self.task_registry.as_ref(),
@@ -2612,7 +2620,7 @@ pub struct CoordinatorWiring {
     /// Shared per-session member registry.
     pub team: Arc<coordinator::TeamRegistry>,
     /// Backing task cancellation and message delivery.
-    pub spawn_seam: Arc<dyn platform_api::team_spawn::TeamSpawnSeam>,
+    pub spawn_seam: Arc<dyn lingxi_core::host::team_spawn::TeamSpawnSeam>,
 }
 
 fn teammate_backend_selector(
@@ -2625,7 +2633,7 @@ fn teammate_backend_selector(
     };
     let backends = std::sync::Mutex::new(std::collections::HashMap::<
         &'static str,
-        Arc<dyn platform_api::SwarmBackend>,
+        Arc<dyn lingxi_core::host::SwarmBackend>,
     >::new());
     Arc::new(move || {
         let mode = match flag_mode
@@ -2637,7 +2645,7 @@ fn teammate_backend_selector(
             _ => TeammateMode::Auto,
         };
         let terminal = detect_terminal_env();
-        let interactive = is_tty && !platform_api::session_flags::is_non_interactive_session();
+        let interactive = is_tty && !lingxi_core::host::session_flags::is_non_interactive_session();
         let selection = select_backend(&terminal, mode, interactive, false);
         let acquisition_error = if mode == TeammateMode::Auto
             && interactive
@@ -2820,7 +2828,8 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 // the latter, so normalize once at this trusted host
                 // boundary rather than splitting a resumed workflow across
                 // two session directories.
-                protocol::SessionId::parse_prefixed(&raw).map_or(raw, |id| id.as_uuid().to_string())
+                lingxi_core::types::SessionId::parse_prefixed(&raw)
+                    .map_or(raw, |id| id.as_uuid().to_string())
             })
             .unwrap_or_else(|| self.session_uuid.clone());
         let cwd = self
@@ -3083,7 +3092,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                         creator_agent_id: spec
                             .creator_agent_id
                             .as_deref()
-                            .and_then(protocol::AgentId::parse_prefixed),
+                            .and_then(lingxi_core::types::AgentId::parse_prefixed),
                         // Desktop hosts no Local Apps: no app store and no
                         // delete guard, so there is nothing for a scope to
                         // authorize. `None` rather than a purpose invented at
@@ -3138,7 +3147,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
 /// holds, plus the shared `current_cwd` cell, and maps both sources through the
 /// orchestrator's pure `build_background_tasks` / `build_session_crons` builders.
 struct RegistryStopHookSnapshot {
-    registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     /// Cron storage is anchored to the session's project root. A Bash `cd`
     /// changes hook payload cwd, but must not silently switch which project's
     /// durable schedules appear in Stop hooks.
@@ -3154,7 +3163,7 @@ impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
         // turn.
         let records = self
             .registry
-            .list(platform_api::task_registry::TaskListFilter::default())
+            .list(lingxi_core::host::task_registry::TaskListFilter::default())
             .await
             .unwrap_or_default();
         orchestrator::build_background_tasks(&records)
@@ -3168,7 +3177,7 @@ impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
     ) {
         let records = self
             .registry
-            .list(platform_api::task_registry::TaskListFilter::default())
+            .list(lingxi_core::host::task_registry::TaskListFilter::default())
             .await
             .unwrap_or_default();
         let start_times = records
@@ -3268,12 +3277,12 @@ impl tool_api::WorktreeStatePersister for JsonlWorktreeStatePersister {
 fn desktop_fusion_catalog_row(
     profile: &str,
     model: &llm_runtime::ModelProfile,
-    billing_mode: platform_api::ModelBillingMode,
+    billing_mode: lingxi_core::host::ModelBillingMode,
     protocol: &llm_runtime::ProtocolFamily,
 ) -> fusion::CatalogModel {
     let mut hints = llm_runtime::hints_for(profile, &model.request_model).unwrap_or_default();
-    if billing_mode == platform_api::ModelBillingMode::Subscription {
-        hints.cost_class = platform_api::FusionCostClass::Subscription;
+    if billing_mode == lingxi_core::host::ModelBillingMode::Subscription {
+        hints.cost_class = lingxi_core::host::FusionCostClass::Subscription;
     }
     fusion::CatalogModel {
         profile: profile.to_string(),
@@ -4420,24 +4429,26 @@ struct FusionCatalogClearingAuth {
 
 #[async_trait::async_trait]
 impl AuthHandle for FusionCatalogClearingAuth {
-    async fn login(&self) -> Result<platform_api::auth::LoginInfo, platform_api::auth::AuthError> {
+    async fn login(
+        &self,
+    ) -> Result<lingxi_core::host::auth::LoginInfo, lingxi_core::host::auth::AuthError> {
         let info = self.inner.login().await?;
         if !note_fusion_catalog_credential_route(&self.catalog_registry, "anthropic-oauth").await {
-            return Err(platform_api::auth::AuthError::ServerError(
+            return Err(lingxi_core::host::auth::AuthError::ServerError(
                 fusion_credential_restart_required_message("anthropic-oauth"),
             ));
         }
         Ok(info)
     }
 
-    async fn logout(&self) -> Result<(), platform_api::auth::AuthError> {
+    async fn logout(&self) -> Result<(), lingxi_core::host::auth::AuthError> {
         self.inner.logout().await?;
         refresh_fusion_catalog_after_credential_delete(&self.catalog_registry, "anthropic-oauth")
             .await;
         Ok(())
     }
 
-    async fn current_user(&self) -> Option<platform_api::auth::LoginInfo> {
+    async fn current_user(&self) -> Option<lingxi_core::host::auth::LoginInfo> {
         self.inner.current_user().await
     }
 }
@@ -4528,7 +4539,7 @@ struct DesktopFusionPriceBook {
 /// cache-write token count it likewise has no 1h/5m split for — this mirrors
 /// that precedent rather than inventing a second rule.
 fn prompt_cache_write_ttl_1h_enabled() -> bool {
-    platform_api::env::is_env_truthy(std::env::var("ENABLE_PROMPT_CACHING_1H").ok().as_deref())
+    lingxi_core::host::env::is_env_truthy(std::env::var("ENABLE_PROMPT_CACHING_1H").ok().as_deref())
 }
 
 impl DesktopFusionPriceBook {
@@ -4910,7 +4921,7 @@ mod desktop_fusion_catalog_row_test {
         let row = desktop_fusion_catalog_row(
             "anthropic",
             opus,
-            platform_api::ModelBillingMode::PerToken,
+            lingxi_core::host::ModelBillingMode::PerToken,
             &llm_runtime::ProtocolFamily::AnthropicMessages,
         );
         assert_eq!(row.profile, "anthropic");
@@ -4936,18 +4947,18 @@ mod desktop_fusion_catalog_row_test {
             billing_model: "claude-sonnet-4.6".to_string(),
             aliases: Vec::new(),
             description: None,
-            metadata: platform_api::ModelMetadata::default(),
+            metadata: lingxi_core::host::ModelMetadata::default(),
             capabilities: llm_runtime::Capabilities::default(),
         };
         let row = desktop_fusion_catalog_row(
             "github-copilot",
             &unhinted,
-            platform_api::ModelBillingMode::Subscription,
+            lingxi_core::host::ModelBillingMode::Subscription,
             &llm_runtime::ProtocolFamily::OpenAiChat,
         );
         assert_eq!(
             row.hints.cost_class,
-            platform_api::FusionCostClass::Subscription,
+            lingxi_core::host::FusionCostClass::Subscription,
             "a model unlisted in fusion_hints must inherit its profile's Subscription billing, \
 not fall back to FusionModelHints::default()'s cost_class: Medium"
         );
@@ -4965,16 +4976,19 @@ not fall back to FusionModelHints::default()'s cost_class: Medium"
             billing_model: "some-new-model".to_string(),
             aliases: Vec::new(),
             description: None,
-            metadata: platform_api::ModelMetadata::default(),
+            metadata: lingxi_core::host::ModelMetadata::default(),
             capabilities: llm_runtime::Capabilities::default(),
         };
         let row = desktop_fusion_catalog_row(
             "openai",
             &unhinted,
-            platform_api::ModelBillingMode::PerToken,
+            lingxi_core::host::ModelBillingMode::PerToken,
             &llm_runtime::ProtocolFamily::OpenAiResponses,
         );
-        assert_eq!(row.hints.cost_class, platform_api::FusionCostClass::Medium);
+        assert_eq!(
+            row.hints.cost_class,
+            lingxi_core::host::FusionCostClass::Medium
+        );
     }
 
     /// The SDK Gemini codec supports structured output when the model does.
@@ -5063,7 +5077,7 @@ not fall back to FusionModelHints::default()'s cost_class: Medium"
             billing_model: "m".to_string(),
             aliases: Vec::new(),
             description: None,
-            metadata: platform_api::ModelMetadata::default(),
+            metadata: lingxi_core::host::ModelMetadata::default(),
             capabilities: caps,
         };
         let mut incapable = capable.clone();
@@ -5078,7 +5092,7 @@ not fall back to FusionModelHints::default()'s cost_class: Medium"
                 desktop_fusion_catalog_row(
                     "p",
                     &capable,
-                    platform_api::ModelBillingMode::PerToken,
+                    lingxi_core::host::ModelBillingMode::PerToken,
                     &family,
                 )
                 .structured_output,
@@ -5088,7 +5102,7 @@ not fall back to FusionModelHints::default()'s cost_class: Medium"
                 !desktop_fusion_catalog_row(
                     "p",
                     &incapable,
-                    platform_api::ModelBillingMode::PerToken,
+                    lingxi_core::host::ModelBillingMode::PerToken,
                     &family,
                 )
                 .structured_output,
@@ -5108,14 +5122,14 @@ not fall back to FusionModelHints::default()'s cost_class: Medium"
 /// F007 finding).
 fn desktop_fusion_runtime_config(
     cfg: &DesktopConfig,
-) -> Result<fusion::FusionRuntimeConfig, platform_api::FusionError> {
+) -> Result<fusion::FusionRuntimeConfig, lingxi_core::host::FusionError> {
     // Managed policy is intentionally read at the call boundary.  Keeping a
     // boot-time `Vec<String>` here makes `FusionConfigSource::load()` and the
     // executor's preflight disagree with the next on-disk policy edit.
     let managed_raw_tiers = managed_settings_raw_tiers_sync();
     let effective =
         load_effective_settings_for_config(cfg, &managed_raw_tiers).ok_or_else(|| {
-            platform_api::FusionError::InvalidConfiguration("settings failed to load".into())
+            lingxi_core::host::FusionError::InvalidConfiguration("settings failed to load".into())
         })?;
     let requested_auto_approve = effective
         .settings
@@ -5187,7 +5201,7 @@ struct DesktopFusionConfigSource {
 }
 
 impl fusion::FusionConfigSource for DesktopFusionConfigSource {
-    fn load(&self) -> Result<fusion::FusionRuntimeConfig, platform_api::FusionError> {
+    fn load(&self) -> Result<fusion::FusionRuntimeConfig, lingxi_core::host::FusionError> {
         desktop_fusion_runtime_config(&self.cfg)
     }
 }
@@ -5207,11 +5221,11 @@ struct DesktopFusionExecutor {
 }
 
 #[async_trait::async_trait]
-impl platform_api::FusionExecutor for DesktopFusionExecutor {
+impl lingxi_core::host::FusionExecutor for DesktopFusionExecutor {
     fn prepare(
         self: Arc<Self>,
-        submission: platform_api::FusionSubmission,
-    ) -> Result<platform_api::PreparedFusionRun, platform_api::FusionError> {
+        submission: lingxi_core::host::FusionSubmission,
+    ) -> Result<lingxi_core::host::PreparedFusionRun, lingxi_core::host::FusionError> {
         Arc::clone(&self.inner).prepare(submission)
     }
 
@@ -5219,18 +5233,18 @@ impl platform_api::FusionExecutor for DesktopFusionExecutor {
         self.inner.effective_timeout_ms()
     }
 
-    fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+    fn agent_surface(&self) -> lingxi_core::host::FusionAgentSurface {
         self.inner.agent_surface()
     }
 
-    fn preflight_error(&self) -> Option<platform_api::FusionError> {
+    fn preflight_error(&self) -> Option<lingxi_core::host::FusionError> {
         desktop_fusion_runtime_config(&self.cfg).err()
     }
 
     fn implement_confirmation(
         &self,
-        request: &platform_api::FusionRequest,
-    ) -> platform_api::ImplementConfirmation {
+        request: &lingxi_core::host::FusionRequest,
+    ) -> lingxi_core::host::ImplementConfirmation {
         self.inner.implement_confirmation(request)
     }
 
@@ -5252,7 +5266,7 @@ fn desktop_fusion_attempts(
     budget: Arc<cost::BudgetEnforcer>,
     tracker: Arc<cost::CostTracker>,
     pricing: Arc<cost::PricingCatalog>,
-    outputs: Arc<dyn platform_api::WorkflowOutputScopes>,
+    outputs: Arc<dyn lingxi_core::host::WorkflowOutputScopes>,
 ) -> Arc<fusion_attempts::DesktopFusionAttempts> {
     let attempts = fusion_attempts::DesktopFusionAttempts::new(
         service.clone(),
@@ -5266,7 +5280,7 @@ fn desktop_fusion_attempts(
 }
 
 fn desktop_fusion_executor(
-    spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner>,
+    spawner: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner>,
     side_query: Arc<dyn sidequery::SideQueryClient>,
     cfg: &DesktopConfig,
     attempts: Arc<fusion_attempts::DesktopFusionAttempts>,
@@ -5280,8 +5294,8 @@ fn desktop_fusion_executor(
     pricing: Arc<cost::PricingCatalog>,
     // `None` leaves implement mode unavailable (nothing can confine or verify
     // the panels' worktrees).
-    implement_host: Option<Arc<dyn platform_api::FusionImplementHost>>,
-) -> Arc<dyn platform_api::FusionExecutor> {
+    implement_host: Option<Arc<dyn lingxi_core::host::FusionImplementHost>>,
+) -> Arc<dyn lingxi_core::host::FusionExecutor> {
     // Boot-time validation: surface the FIRST invalid `fusion.*` value
     // through a log line, but always build the live orchestrator below —
     // its `config_source` (and `DesktopFusionExecutor::preflight_error`)
@@ -5345,7 +5359,7 @@ mod desktop_fusion_executor_boot_test {
         let pricing = Arc::new(cost::PricingCatalog::builtin_reference());
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let tracker = Arc::new(cost::CostTracker::new(
-            protocol::SessionId::new(),
+            lingxi_core::types::SessionId::new(),
             pricing.clone(),
             tx,
         ));
@@ -5381,14 +5395,14 @@ mod desktop_fusion_executor_boot_test {
     /// directly and must not spawn a panel or issue a side query.
     struct UnreachableSpawner;
     #[async_trait::async_trait]
-    impl platform_api::subagent_spawn::SubagentSpawner for UnreachableSpawner {
+    impl lingxi_core::host::subagent_spawn::SubagentSpawner for UnreachableSpawner {
         async fn spawn(
             &self,
-            _request: platform_api::subagent_spawn::SubagentSpawnRequest,
-            _inherit: platform_api::subagent_spawn::SubagentInheritance,
+            _request: lingxi_core::host::subagent_spawn::SubagentSpawnRequest,
+            _inherit: lingxi_core::host::subagent_spawn::SubagentInheritance,
         ) -> Result<
-            platform_api::subagent_spawn::SubagentResult,
-            platform_api::subagent_spawn::SubagentSpawnError,
+            lingxi_core::host::subagent_spawn::SubagentResult,
+            lingxi_core::host::subagent_spawn::SubagentSpawnError,
         > {
             panic!("preflight_error() must not spawn a panel");
         }
@@ -5459,7 +5473,7 @@ mod desktop_fusion_executor_boot_test {
         let boot_error = executor
             .preflight_error()
             .expect("the invalid merged config must surface as a preflight error");
-        let platform_api::FusionError::InvalidConfiguration(msg) = boot_error else {
+        let lingxi_core::host::FusionError::InvalidConfiguration(msg) = boot_error else {
             panic!("expected InvalidConfiguration, got {boot_error:?}");
         };
         assert!(
@@ -5541,7 +5555,7 @@ pub fn register_desktop_tools(
     web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
     live_cwd: Option<tool_api::LiveCwdCell>,
     worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
-    fusion: Option<Arc<dyn platform_api::FusionExecutor>>,
+    fusion: Option<Arc<dyn lingxi_core::host::FusionExecutor>>,
 ) -> (
     tool_cron::WakeupSchedulerCell,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -5582,9 +5596,9 @@ pub fn register_desktop_tools_with_fusion_recorder(
     web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
     live_cwd: Option<tool_api::LiveCwdCell>,
     worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
-    fusion: Option<Arc<dyn platform_api::FusionExecutor>>,
-    fusion_recorder: Option<Arc<dyn platform_api::FusionRunRecorder>>,
-    fusion_recorder_factory: Option<Arc<dyn platform_api::FusionRunRecorderFactory>>,
+    fusion: Option<Arc<dyn lingxi_core::host::FusionExecutor>>,
+    fusion_recorder: Option<Arc<dyn lingxi_core::host::FusionRunRecorder>>,
+    fusion_recorder_factory: Option<Arc<dyn lingxi_core::host::FusionRunRecorderFactory>>,
 ) -> (
     tool_cron::WakeupSchedulerCell,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -5746,7 +5760,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 #[derive(Clone)]
 pub struct DesktopAudio {
     /// App-scoped device audio service.
-    pub service: Arc<dyn platform_api::audio::AudioService>,
+    pub service: Arc<dyn lingxi_core::host::audio::AudioService>,
 }
 
 impl DesktopAudio {
@@ -5754,7 +5768,7 @@ impl DesktopAudio {
     #[must_use]
     pub fn from_single<T>(implementation: Arc<T>) -> Self
     where
-        T: platform_api::audio::AudioService + 'static,
+        T: lingxi_core::host::audio::AudioService + 'static,
     {
         Self {
             service: implementation,
@@ -5810,7 +5824,7 @@ impl std::fmt::Debug for DesktopAudio {
 ///     api_base: "https://api.anthropic.com".to_string(),
 ///     api_key: "sk-test".to_string(),
 ///     isolated_credential_storage: false,
-///     credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
+///     credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::NativePreferred,
 ///     injected_plugin_secrets: BTreeMap::new(),
 ///     api_key_helper: None,
 ///     managed_oauth_only: false,
@@ -6127,7 +6141,7 @@ pub struct DesktopConfig {
     /// Construction-only writer claim acquired by the host. When present the
     /// engine consumes this exact Arc instead of opening a second OS lock;
     /// None keeps standalone desktop/test hosts on the local claim path.
-    pub session_writer_lease: Option<platform_api::live_sessions::SharedSessionWriterLease>,
+    pub session_writer_lease: Option<lingxi_core::host::live_sessions::SharedSessionWriterLease>,
     /// Source session id for a forked transcript. When present it is appended
     /// to Anthropic's JSON-string `metadata.user_id` as `parent_session_id`.
     /// Ordinary fresh/resumed sessions leave this unset.
@@ -6287,7 +6301,7 @@ pub struct DesktopConfig {
     /// variant fails with a clear `ActionFailed` — INERT boot. The concrete impl
     /// lives in `apps/cli` (which owns the daemon dispatch machinery); injecting
     /// it here keeps the leaf `orchestrator` crate off an `apps/cli` dependency.
-    pub bg_session_forker: Option<Arc<dyn platform_api::bg_session_forker::BgSessionForker>>,
+    pub bg_session_forker: Option<Arc<dyn lingxi_core::host::bg_session_forker::BgSessionForker>>,
     /// Optional per-runtime TUI AskUserQuestion bridge sender. Interactive TUI
     /// hosts fill this so questionnaire tools open the mounted bottom-pane
     /// view; non-TUI hosts leave it `None`.
@@ -6304,7 +6318,7 @@ pub struct DesktopConfig {
     /// message events. The bridge supplies this after it creates its outbound
     /// event sink; CLI/TUI hosts leave it unset so their behavior is unchanged.
     pub session_agent_observer:
-        Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
     /// Optional app-scoped device-audio service (capture / live recognition /
     /// synthesis / playback).
     ///
@@ -7261,8 +7275,8 @@ struct ProcessSessionActivationObserver;
 impl orchestrator::conversation::SessionActivationObserver for ProcessSessionActivationObserver {
     async fn session_activated(
         &self,
-        previous: protocol::SessionId,
-        current: protocol::SessionId,
+        previous: lingxi_core::types::SessionId,
+        current: lingxi_core::types::SessionId,
     ) -> Result<(), String> {
         refresh_process_session_presence(previous, current).await
     }
@@ -7273,20 +7287,20 @@ impl orchestrator::conversation::SessionActivationObserver for ProcessSessionAct
 /// failures are returned as post-commit warnings and stale socket fields are
 /// removed rather than advertising an endpoint under the wrong session.
 pub async fn refresh_process_session_presence(
-    previous: protocol::SessionId,
-    current: protocol::SessionId,
+    previous: lingxi_core::types::SessionId,
+    current: lingxi_core::types::SessionId,
 ) -> Result<(), String> {
     if previous == current {
         return Ok(());
     }
-    let Some(dir) = platform_api::live_sessions::process_dir() else {
+    let Some(dir) = lingxi_core::host::live_sessions::process_dir() else {
         return Ok(());
     };
     let pid = std::process::id();
     let current_text = current.as_uuid().to_string();
-    let observed = platform_api::live_sessions::process_session_id()
+    let observed = lingxi_core::host::live_sessions::process_session_id()
         .as_deref()
-        .and_then(protocol::SessionId::parse_prefixed)
+        .and_then(lingxi_core::types::SessionId::parse_prefixed)
         .ok_or_else(|| "live process has no valid scoped session identity".to_string())?;
     if observed != previous && observed != current {
         return Err(format!(
@@ -7295,38 +7309,38 @@ pub async fn refresh_process_session_presence(
     }
     let already_current = observed == current;
     let socket = if already_current {
-        platform_api::uds_inbox::process_socket_path()
+        lingxi_core::host::uds_inbox::process_socket_path()
     } else {
         let inbox_session = current_text.clone();
         match tokio::task::spawn_blocking(move || {
-            platform_api::uds_inbox::retarget_process_inbox(&inbox_session)
+            lingxi_core::host::uds_inbox::retarget_process_inbox(&inbox_session)
         })
         .await
         {
             Ok(Ok(path)) => Some(path),
             Ok(Err(error)) => {
-                platform_api::live_sessions::set_process_session_id(&current_text);
+                lingxi_core::host::live_sessions::set_process_session_id(&current_text);
                 let _ = dir.upsert_identity(
                     pid,
                     &current_text,
-                    platform_api::live_sessions::process_name().as_deref(),
+                    lingxi_core::host::live_sessions::process_name().as_deref(),
                     None,
                     None,
-                    platform_api::live_sessions::process_permission_class().as_deref(),
+                    lingxi_core::host::live_sessions::process_permission_class().as_deref(),
                 );
                 let _ = dir.clear_messaging_socket_if_session(pid, &current_text);
                 let _ = dir.clear_messaging_socket_if_session(pid, &previous.to_string());
                 return Err(format!("cross-session inbox is unavailable: {error}"));
             }
             Err(error) => {
-                platform_api::live_sessions::set_process_session_id(&current_text);
+                lingxi_core::host::live_sessions::set_process_session_id(&current_text);
                 let _ = dir.upsert_identity(
                     pid,
                     &current_text,
-                    platform_api::live_sessions::process_name().as_deref(),
+                    lingxi_core::host::live_sessions::process_name().as_deref(),
                     None,
                     None,
-                    platform_api::live_sessions::process_permission_class().as_deref(),
+                    lingxi_core::host::live_sessions::process_permission_class().as_deref(),
                 );
                 let _ = dir.clear_messaging_socket_if_session(pid, &current_text);
                 let _ = dir.clear_messaging_socket_if_session(pid, &previous.to_string());
@@ -7334,14 +7348,14 @@ pub async fn refresh_process_session_presence(
             }
         }
     };
-    platform_api::live_sessions::set_process_session_id(&current_text);
+    lingxi_core::host::live_sessions::set_process_session_id(&current_text);
     if let Err(error) = dir.upsert_identity(
         pid,
         &current_text,
-        platform_api::live_sessions::process_name().as_deref(),
+        lingxi_core::host::live_sessions::process_name().as_deref(),
         None,
         socket.as_deref(),
-        platform_api::live_sessions::process_permission_class().as_deref(),
+        lingxi_core::host::live_sessions::process_permission_class().as_deref(),
     ) {
         let _ = dir.clear_messaging_socket_if_session(pid, &previous.to_string());
         return Err(format!(
@@ -7386,7 +7400,7 @@ pub struct DesktopSessionShutdownReport {
     /// Persistence/producer failures observed after all possible drains ran.
     pub errors: Vec<String>,
     /// Final durable publication states for every known Slash outbox.
-    pub publications: Vec<platform_api::FusionPublicationReceipt>,
+    pub publications: Vec<lingxi_core::host::FusionPublicationReceipt>,
 }
 
 impl DesktopSessionLifecycle {
@@ -7525,8 +7539,8 @@ impl DesktopSessionLifecycle {
         for receipt in &report.publications {
             if !matches!(
                 receipt.status,
-                platform_api::FusionPublicationStatus::Published
-                    | platform_api::FusionPublicationStatus::Queued
+                lingxi_core::host::FusionPublicationStatus::Published
+                    | lingxi_core::host::FusionPublicationStatus::Queued
             ) {
                 report.errors.push(
                     receipt
@@ -7584,7 +7598,7 @@ pub struct DesktopRuntime {
     /// home rather than no ledger at all.
     pub session_state: Arc<session_state::SessionStateCoordinator>,
     /// Common Fusion recorder pinned to the boot session's coordinator.
-    pub fusion_recorder: Arc<dyn platform_api::FusionRunRecorder>,
+    pub fusion_recorder: Arc<dyn lingxi_core::host::FusionRunRecorder>,
     /// Per-session Fusion recorder factory retained for host shutdown/remount
     /// draining. It owns recorders for every mounted session, not just boot A.
     pub fusion_recorder_factory: Arc<fusion_recorder::DesktopFusionRecorderFactory>,
@@ -7660,14 +7674,14 @@ pub struct DesktopRuntime {
     /// Bridge-server uses this handle for source-scoped atomic hot reloads.
     pub hook_registry: Arc<RwLock<hooks::HookRegistry>>,
     /// Live skill/plugin catalog refresher shared with runtime root reloads.
-    pub repo_root_reloader: Arc<dyn platform_api::RepoRootReloader>,
+    pub repo_root_reloader: Arc<dyn lingxi_core::host::RepoRootReloader>,
     /// Shared Claude.ai subscription snapshot (Task 4). Seeded at build time
     /// with the scope-derived `is_subscriber` flag; for subscribers a
     /// background OAuth profile + roles fetch overwrites it with the full
     /// tier/billing/role snapshot once the endpoints respond. UI layers read
     /// it at compose time and treat `None` / a poisoned lock as the
     /// conservative default snapshot.
-    pub subscription: platform_api::subscription::SharedSubscription,
+    pub subscription: lingxi_core::host::subscription::SharedSubscription,
     /// (`/sandbox`) The shared fast-toggle cell for bash-command sandboxing.
     /// The SAME `Arc<AtomicBool>` the bash tool reads via
     /// `BuiltinToolContext::sandbox_enabled_override`; the TUI mount threads a
@@ -7704,7 +7718,7 @@ pub struct DesktopRuntime {
     /// Provenance of the model that the engine selected for the session's
     /// initial/default row. Provider-neutral so managed policy is not inferred
     /// from an Anthropic-specific auth or profile name.
-    pub model_provenance: platform_api::ModelProvenance,
+    pub model_provenance: lingxi_core::host::ModelProvenance,
     /// (T2a) Per-provider login method tag, keyed by profile_name, derived from
     /// the real catalog auth strategy: "api_key" | "copilot_device" | "oauth".
     /// Threaded into the TUI so the /connect picker shows the real method.
@@ -7727,7 +7741,7 @@ pub struct DesktopRuntime {
     /// `Arc` the orchestrator already holds — no second store is constructed.
     pub credentials: Arc<secret::CredentialManager>,
     /// Shared HTTP transport for TUI-owned client-side WebSearch test runs.
-    pub http: Arc<dyn platform_api::HttpTransport>,
+    pub http: Arc<dyn lingxi_core::host::HttpTransport>,
     /// Structured-output capture slot — `Some` only when `--json-schema` is set
     /// (`DesktopConfig.json_schema`). The forced `StructuredOutput` tool writes
     /// the model's result here; the print path reads it after each turn to
@@ -7745,7 +7759,7 @@ pub struct DesktopRuntime {
     /// enqueues a `/loop` self-wakeup). A fresh stateless `PosixRuntime` — the
     /// same seam every in-`build` spawner uses (D17: never a direct
     /// `tokio::spawn`).
-    pub runtime_spawner: Arc<dyn platform_api::RuntimeSpawner>,
+    pub runtime_spawner: Arc<dyn lingxi_core::host::RuntimeSpawner>,
     /// (`!` bash mode) The sandboxed Bash runner for the TUI's `!command` path,
     /// built over the SAME `BuiltinToolContext` (sandbox runner + runtime config)
     /// the model's `Bash` tool uses. The CLI threads it into the TUI `Runtime`
@@ -7782,7 +7796,7 @@ pub struct DesktopRuntime {
     /// Provider-neutral local IDE endpoint lifecycle. The handle owns secure
     /// lockfile discovery and local auth tokens; callers only see redacted
     /// status and action results.
-    pub ide_handle: Arc<dyn platform_api::IdeHandle>,
+    pub ide_handle: Arc<dyn lingxi_core::host::IdeHandle>,
     /// The assembled tool registry — the SAME `Arc` the orchestrator dispatches
     /// through.
     ///
@@ -7949,7 +7963,7 @@ fn sandbox_network_ask_callback(permission_gate: Arc<dyn PermissionGate>) -> san
             });
             let allow = matches!(
                 permission_gate.check(SANDBOX_NETWORK_TOOL, &input).await,
-                platform_api::PermissionDecision::Allow
+                lingxi_core::host::PermissionDecision::Allow
             );
             if !allow {
                 blocked
@@ -8047,7 +8061,7 @@ pub enum BuildError {
 /// moved from env/argv to `cfg`, and the output/permission sinks become
 /// connection-scoped parameters:
 ///
-/// - `output` is the [`platform_api::OutputStream`] the orchestrator pushes turn
+/// - `output` is the [`lingxi_core::host::OutputStream`] the orchestrator pushes turn
 ///   events to. The CLI supplies its NDJSON/plain/TUI sink; the bridge-server
 ///   supplies a `client::adapter::AdapterOutputStream`. The SAME `build` serves
 ///   both.
@@ -8112,12 +8126,12 @@ fn subscription_seed(
     scopes: &[String],
     subscription_type: Option<&String>,
     rate_limit_tier: Option<&String>,
-) -> platform_api::subscription::SubscriptionSnapshot {
+) -> lingxi_core::host::subscription::SubscriptionSnapshot {
     let oauth_effective = matches!(
         source,
         llm_runtime::auth::anthropic::resolver::AuthSource::OAuthClaudeAi
     );
-    platform_api::subscription::SubscriptionSnapshot {
+    lingxi_core::host::subscription::SubscriptionSnapshot {
         is_subscriber: oauth_subscriber_flag(source, scopes),
         subscription_type: oauth_effective
             .then(|| subscription_type.cloned())
@@ -8137,12 +8151,12 @@ fn subscription_snapshot_from(
     is_subscriber: bool,
     profile: Option<&lingxi_llm_client::auth::oauth::anthropic::OAuthProfileResponse>,
     roles: Option<&lingxi_llm_client::auth::oauth::anthropic::UserRolesResponse>,
-) -> platform_api::subscription::SubscriptionSnapshot {
+) -> lingxi_core::host::subscription::SubscriptionSnapshot {
     let org = profile.and_then(|p| p.organization.as_ref());
     let subscription_type = profile
         .and_then(lingxi_llm_client::auth::oauth::anthropic::subscription_type)
         .and_then(lingxi_llm_client::auth::oauth::anthropic::paid_subscription_type);
-    platform_api::subscription::SubscriptionSnapshot {
+    lingxi_core::host::subscription::SubscriptionSnapshot {
         is_subscriber,
         subscription_type: subscription_type.map(str::to_owned),
         rate_limit_tier: org.and_then(|o| o.rate_limit_tier.clone()),
@@ -8172,7 +8186,7 @@ fn provider_profile_label(profile_name: &str) -> String {
     // `<group>:<connection>` (+ `#<n>` per extra key slot). Label it after its
     // VENDOR plus the connection, so the `/model` header reads "DeepSeek · cn"
     // rather than the title-cased id "Deepseek:cn".
-    let (group, connection, slot) = platform_api::split_connection_profile(profile_name);
+    let (group, connection, slot) = lingxi_core::host::split_connection_profile(profile_name);
     if connection.is_some() || slot.is_some() {
         let base = provider_profile_label(group);
         return match (connection, slot) {
@@ -8359,8 +8373,8 @@ struct DefaultModelFallback {
 ///
 /// Preference: (1) the most recent `/model` pick (`settings.recentModels`) on
 /// a connected provider whose model still exists in the catalog; (2) the first
-/// connected provider in [`platform_api::provider_fallback_order`], on its
-/// [`platform_api::provider_default_model`]; (3) any remaining connected provider
+/// connected provider in [`lingxi_core::host::provider_fallback_order`], on its
+/// [`lingxi_core::host::provider_default_model`]; (3) any remaining connected provider
 /// (user-defined — no curated default), on its first listed model. Every
 /// candidate is validated against the live `listings` so the reroute can never
 /// select an id `switch_model`/the wire would reject.
@@ -8377,7 +8391,7 @@ fn connected_provider_fallback(
     anthropic_probe_definitive: bool,
     model_providers: &std::collections::BTreeMap<String, (String, String)>,
     availability: &std::collections::BTreeMap<String, bool>,
-    listings: &[platform_api::ModelListing],
+    listings: &[lingxi_core::host::ModelListing],
     recents: &[RecentModelRef],
 ) -> Option<DefaultModelFallback> {
     // Effective provider of the configured default — the same resolution the
@@ -8414,11 +8428,11 @@ fn connected_provider_fallback(
         }
     }
     // (2) Deterministic provider order, each on its curated boot default.
-    for p in platform_api::provider_fallback_order() {
+    for p in lingxi_core::host::provider_fallback_order() {
         if !connected(p) {
             continue;
         }
-        if let Some(m) = platform_api::provider_default_model(p) {
+        if let Some(m) = lingxi_core::host::provider_default_model(p) {
             if in_listings(p, m) {
                 return Some(route(m.to_string(), p));
             }
@@ -8759,7 +8773,7 @@ fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
 /// fork/subtask surface is disabled exactly like `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`
 /// (binary `I2i()` — `settings.disableAgentView === true`), threaded into
 /// [`command_api::builtins::register_core_batch_8`] via
-/// [`platform_api::agent_view::is_enabled_with_setting`] (M-03). Returns `false` on any
+/// [`lingxi_core::host::agent_view::is_enabled_with_setting`] (M-03). Returns `false` on any
 /// load failure or when the key is unset — the frozen default (agent view
 /// enabled; the env half still applies independently).
 fn load_merged_disable_agent_view(project_dir: &std::path::Path) -> bool {
@@ -8895,7 +8909,7 @@ fn agent_source_is_trusted(source: agent::AgentSource) -> bool {
         source,
         agent::AgentSource::BuiltIn
             | agent::AgentSource::Plugin
-            | agent::AgentSource::Settings(protocol::SettingsScope::Managed)
+            | agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Managed)
     )
 }
 
@@ -8971,7 +8985,7 @@ struct AgentMcpMergeGates {
 ///    server BEATS a same-named discovered `.mcp.json`/user/local server and
 ///    loses only to a `--mcp-config` one. `dynamic_names` is that bucket's key
 ///    set, which this port cannot recover from the flattened list (CLI servers
-///    are parsed at `ConfigScope::Settings(protocol::SettingsScope::Project)`).
+///    are parsed at `ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)`).
 fn merge_agent_frontmatter_mcp_servers(
     existing: &mut Vec<mcp::McpServerConfig>,
     dynamic_names: &[String],
@@ -9105,7 +9119,7 @@ async fn build_agent_mcp_tool_set(
     mcp_tool_ctx: tool_api::BuiltinToolContext,
     strict_plugin_only_mcp: bool,
     strict_mcp_config: bool,
-    agent_id: protocol::AgentId,
+    agent_id: lingxi_core::types::AgentId,
     def: agent::AgentDefinition,
     lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>,
 ) -> agent::agent_mcp_tools::AgentMcpToolSet {
@@ -9182,7 +9196,7 @@ async fn build_agent_mcp_tool_set(
                 }),
             });
         }
-        let dtos: Vec<platform_api::McpToolDto> = {
+        let dtos: Vec<lingxi_core::host::McpToolDto> = {
             let conns = mcp_registry.connections.read().await;
             match conns.get(&table_key) {
                 // §11 Stage 2: `connect`/`connect_agent_scoped` above may have
@@ -9418,7 +9432,7 @@ async fn discover_plugin_set(
     flag_settings: Option<&lingxi_core::settings::SettingsJson>,
     analytics_bus: &Arc<telemetry::AnalyticsBus>,
 ) -> Vec<(
-    protocol::PluginId,
+    lingxi_core::types::PluginId,
     plugin::PluginManifest,
     std::path::PathBuf,
 )> {
@@ -9525,11 +9539,11 @@ impl DesktopRepoRootReloader {
 }
 
 #[async_trait::async_trait]
-impl platform_api::RepoRootReloader for DesktopRepoRootReloader {
+impl lingxi_core::host::RepoRootReloader for DesktopRepoRootReloader {
     async fn reload(
         &self,
-        request: platform_api::RepoRootReloadRequest,
-    ) -> platform_api::RepoRootReloadOutcome {
+        request: lingxi_core::host::RepoRootReloadRequest,
+    ) -> lingxi_core::host::RepoRootReloadOutcome {
         {
             let mut roots = self.registered_roots.write().await;
             if !roots.contains(&request.root) {
@@ -9537,7 +9551,7 @@ impl platform_api::RepoRootReloader for DesktopRepoRootReloader {
             }
         }
 
-        let mut outcome = platform_api::RepoRootReloadOutcome::default();
+        let mut outcome = lingxi_core::host::RepoRootReloadOutcome::default();
         if request.reload_skills {
             let roots = self.registered_roots.read().await.clone();
             let additional_skill_dirs = roots
@@ -9961,7 +9975,7 @@ fn sanitize_path_component(name: &str) -> String {
 /// `checkReadableInternalPath`.
 #[must_use]
 pub fn session_task_output_dir(cwd: &std::path::Path, session_id: &str) -> std::path::PathBuf {
-    platform_api::task_output::session_output_dir(&lingxi_temp_dir_path(), cwd, session_id)
+    lingxi_core::host::task_output::session_output_dir(&lingxi_temp_dir_path(), cwd, session_id)
 }
 
 fn session_kind_for_job_tmp() -> Option<String> {
@@ -10209,13 +10223,13 @@ pub struct LlmStack {
     /// See [`build`] for the resolution rules behind `clock`.
     pub clock: Arc<PosixClock>,
     /// See [`build`] for the resolution rules behind `mcp_oauth_storage`.
-    pub mcp_oauth_storage: Arc<dyn platform_api::SecureStorage>,
+    pub mcp_oauth_storage: Arc<dyn lingxi_core::host::SecureStorage>,
     /// See [`build`] for the resolution rules behind `credentials`.
     pub credentials: Arc<CredentialManager>,
     /// See [`build`] for the resolution rules behind `auth`.
     pub auth: Arc<dyn AuthHandle>,
     /// See [`build`] for the resolution rules behind `subscription`.
-    pub subscription: platform_api::subscription::SharedSubscription,
+    pub subscription: lingxi_core::host::subscription::SharedSubscription,
     /// See [`build`] for the resolution rules behind `resolved_anthropic_api_key`.
     pub resolved_anthropic_api_key: Option<String>,
     /// See [`build`] for the resolution rules behind `is_subscriber`.
@@ -10246,7 +10260,7 @@ pub struct LlmStack {
     /// [`FusionCatalogRefresher::refresh`].
     pub fusion_catalog_refresher: FusionCatalogRefresher,
     /// See [`build`] for the resolution rules behind `default_listings`.
-    pub default_listings: Vec<platform_api::ModelListing>,
+    pub default_listings: Vec<lingxi_core::host::ModelListing>,
     /// See [`build`] for the resolution rules behind `default_model_id`.
     pub default_model_id: String,
     /// See [`build`] for the resolution rules behind `default_model_profile`.
@@ -10262,7 +10276,7 @@ pub struct LlmStack {
     /// See [`build`] for the resolution rules behind `default_model_fallback`.
     pub default_model_fallback: Option<DefaultModelFallbackNotice>,
     /// See [`build`] for the resolution rules behind `model_provenance`.
-    pub model_provenance: platform_api::ModelProvenance,
+    pub model_provenance: lingxi_core::host::ModelProvenance,
     /// See [`build`] for the resolution rules behind `session_model_restriction`.
     pub session_model_restriction:
         Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
@@ -10301,7 +10315,7 @@ pub struct SharedCredentialStack {
     /// Platform clock used by the credential manager.
     pub clock: Arc<PosixClock>,
     /// Shared storage handle, also reused by MCP OAuth persistence.
-    pub storage: Arc<dyn platform_api::SecureStorage>,
+    pub storage: Arc<dyn lingxi_core::host::SecureStorage>,
     /// Canonical provider/OAuth credential manager.
     pub credentials: Arc<CredentialManager>,
 }
@@ -10417,7 +10431,7 @@ async fn build_shared_credential_stack_for_config(
 
 async fn build_platform_plaintext_secure_storage(
     credentials_path: PathBuf,
-) -> Result<Arc<dyn platform_api::SecureStorage>, platform_api::SecureStorageError> {
+) -> Result<Arc<dyn lingxi_core::host::SecureStorage>, lingxi_core::host::SecureStorageError> {
     #[cfg(windows)]
     {
         platform_windows::plaintext_secure_storage(credentials_path).await
@@ -10433,7 +10447,7 @@ async fn build_platform_secure_storage(
     lingxi_home: PathBuf,
     credentials_path: PathBuf,
     policy: CredentialStoragePolicy,
-) -> Result<Arc<dyn platform_api::SecureStorage>, platform_api::SecureStorageError> {
+) -> Result<Arc<dyn lingxi_core::host::SecureStorage>, lingxi_core::host::SecureStorageError> {
     #[cfg(windows)]
     {
         platform_windows::secure_storage_for_policy(user, lingxi_home, credentials_path, policy)
@@ -10517,9 +10531,9 @@ async fn resolve_llm_stack_with_credentials(
     // `Ok(Some(tokens))` arm below re-seeds it with the resolved subscriber
     // flag, and (for subscribers) a background profile+roles fetch overwrites
     // it with the full snapshot once the endpoints respond.
-    let subscription: platform_api::subscription::SharedSubscription =
+    let subscription: lingxi_core::host::subscription::SharedSubscription =
         std::sync::Arc::new(std::sync::RwLock::new(Some(
-            platform_api::subscription::SubscriptionSnapshot::default(),
+            lingxi_core::host::subscription::SubscriptionSnapshot::default(),
         )));
     // `mcp_oauth_storage` and `credentials` originate from the same shared
     // stack, so provider keys and MCP OAuth never split across backends.
@@ -10652,7 +10666,8 @@ async fn resolve_llm_stack_with_credentials(
             if let Ok(mut guard) = subscription.write() {
                 *guard = Some(seed);
             }
-            let profile_token = protocol::Secret::new(tokens.access_token.expose_secret().clone());
+            let profile_token =
+                lingxi_core::types::Secret::new(tokens.access_token.expose_secret().clone());
             match llm_runtime::auth::anthropic::login::init_refresh_driver(
                 oauth_cfg,
                 tokens.access_token,
@@ -10938,30 +10953,32 @@ async fn resolve_llm_stack_with_credentials(
     // configured default_model so a shared id routes deterministically on the
     // first turn.  Must run while `assembled.client_config.providers` is still
     // owned (before `from_config` moves it).
-    let default_listings: Vec<platform_api::ModelListing> = assembled
+    let default_listings: Vec<lingxi_core::host::ModelListing> = assembled
         .client_config
         .providers
         .iter()
         .flat_map(|p| {
             let profile = p.profile_name.clone();
             let label = provider_profile_label(&p.profile_name);
-            p.models.iter().map(move |m| platform_api::ModelListing {
-                display_model: m.display_model.clone(),
-                request_model: m.request_model.clone(),
-                provider_id: profile.clone(),
-                provider_label: label.clone(),
-                description: m.description.clone(),
-                metadata: Default::default(),
-                capabilities: Default::default(),
-                reasoning: Default::default(),
-                supports_reasoning: m.capabilities.reasoning,
-                fusion_analyst_capable: false,
-                connection: Default::default(),
-            })
+            p.models
+                .iter()
+                .map(move |m| lingxi_core::host::ModelListing {
+                    display_model: m.display_model.clone(),
+                    request_model: m.request_model.clone(),
+                    provider_id: profile.clone(),
+                    provider_label: label.clone(),
+                    description: m.description.clone(),
+                    metadata: Default::default(),
+                    capabilities: Default::default(),
+                    reasoning: Default::default(),
+                    supports_reasoning: m.capabilities.reasoning,
+                    fusion_analyst_capable: false,
+                    connection: Default::default(),
+                })
         })
         .collect();
     let (mut default_model_id, mut default_model_profile) =
-        platform_api::parse_model_ref(&configured_model, &default_listings);
+        lingxi_core::host::parse_model_ref(&configured_model, &default_listings);
 
     // Per-profile Claude provider tag, captured while
     // `assembled.client_config.providers` is still owned (`from_config` moves it
@@ -11121,7 +11138,7 @@ async fn resolve_llm_stack_with_credentials(
             // A disconnected-provider fallback is a catalog choice, not an
             // administrator default, even when the displaced model came from
             // a lower-priority settings source.
-            model_provenance = platform_api::ModelProvenance::ProviderCatalogTier;
+            model_provenance = lingxi_core::host::ModelProvenance::ProviderCatalogTier;
             default_model_id = fb.model;
             default_model_profile = Some(fb.profile);
         }
@@ -11189,7 +11206,8 @@ async fn resolve_llm_stack_with_credentials(
                         "default model is not in the managed availableModels allowlist; \
                          resolving Default to the first allowed availableModels entry"
                     );
-                    model_provenance = platform_api::ModelProvenance::ManagedAdministratorDefault;
+                    model_provenance =
+                        lingxi_core::host::ModelProvenance::ManagedAdministratorDefault;
                     default_model_id = picked;
                     default_model_profile = picked_profile.or(default_model_profile);
                 }
@@ -11637,14 +11655,14 @@ fn aws_auth_refresher(
 fn capture_legacy_opening_balance(
     config_path: Option<&Path>,
     cwd: &Path,
-) -> Option<(protocol::SessionId, u64)> {
+) -> Option<(lingxi_core::types::SessionId, u64)> {
     let config_path = config_path?;
     let project_key = migrations::global_config::project_path_for_config(cwd);
     let project = migrations::global_config::get_project_config(config_path, &project_key).ok()?;
     let session = project
         .get("lastSessionId")
         .and_then(serde_json::Value::as_str)?;
-    let session_id = protocol::SessionId::parse_prefixed(session)?;
+    let session_id = lingxi_core::types::SessionId::parse_prefixed(session)?;
     let dollars = project
         .get("lastCost")
         .and_then(serde_json::Value::as_f64)?;
@@ -11692,7 +11710,7 @@ mod legacy_opening_balance_test {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join(branding::GLOBAL_CONFIG_FILE);
         let cwd = Path::new("/proj/alpha");
-        let session = protocol::SessionId::new();
+        let session = lingxi_core::types::SessionId::new();
         // Exactly what `save_session_cost` writes: `session_id.to_string()`.
         write(
             &config,
@@ -11711,7 +11729,7 @@ mod legacy_opening_balance_test {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join(branding::GLOBAL_CONFIG_FILE);
         let cwd = Path::new("/proj/alpha");
-        let session = protocol::SessionId::new();
+        let session = lingxi_core::types::SessionId::new();
         write(
             &config,
             cwd,
@@ -11734,7 +11752,7 @@ mod legacy_opening_balance_test {
     fn rejects_values_that_are_not_a_positive_finite_amount() {
         let directory = tempfile::tempdir().unwrap();
         let cwd = Path::new("/proj/alpha");
-        let session = protocol::SessionId::new().to_string();
+        let session = lingxi_core::types::SessionId::new().to_string();
         for cost in [
             serde_json::json!(0.0),
             serde_json::json!(-1.0),
@@ -11776,7 +11794,7 @@ mod legacy_opening_balance_test {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join(branding::GLOBAL_CONFIG_FILE);
         let cwd = Path::new("/proj/alpha");
-        let session = protocol::SessionId::new();
+        let session = lingxi_core::types::SessionId::new();
         write(
             &config,
             cwd,
@@ -11873,7 +11891,7 @@ pub async fn build_with_credential_stack(
     let main_session_id = cfg
         .session_id_override
         .as_deref()
-        .and_then(protocol::SessionId::parse_prefixed)
+        .and_then(lingxi_core::types::SessionId::parse_prefixed)
         .unwrap_or_default();
     let main_session_uuid = main_session_id.as_uuid().to_string();
     // (/rewind) One shared file-history checkpoint store: cloned into the
@@ -11895,7 +11913,7 @@ pub async fn build_with_credential_stack(
     // durable transaction; legacy/no-persistence hosts keep compatibility.
     let main_jsonl_writer = session::jsonl::writer::JsonlWriter::new(
         main_transcript_path.clone(),
-        Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>,
+        Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn lingxi_core::host::FileSystem>,
     );
     // Resume the live file-history index before the first restored turn. The
     // `/rewind` command can parse snapshots directly from disk, but the edit
@@ -12186,7 +12204,7 @@ pub async fn build_with_credential_stack(
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
     // / "default" / unknown ⇒ no section (prompt byte-identical to before).
     orch_cfg.output_style = output_style;
-    platform_api::session_flags::set_show_thinking_summaries(if cfg.restricted {
+    lingxi_core::host::session_flags::set_show_thinking_summaries(if cfg.restricted {
         effective_settings
             .as_ref()
             .and_then(|settings| settings.settings.show_thinking_summaries)
@@ -12194,7 +12212,7 @@ pub async fn build_with_credential_stack(
     } else {
         load_merged_show_thinking_summaries(&cfg.cwd)
     });
-    platform_api::session_flags::set_agent_push_notif_enabled(if cfg.restricted {
+    lingxi_core::host::session_flags::set_agent_push_notif_enabled(if cfg.restricted {
         effective_settings
             .as_ref()
             .and_then(|settings| settings.settings.agent_push_notif_enabled)
@@ -12205,7 +12223,7 @@ pub async fn build_with_credential_stack(
     // `settings.taskOutputMaxChars` — the soft cap `TaskOutput` truncates a
     // task's model-facing output to, and the base its result budget is derived
     // from. Published RAW; `tool_task` applies the oracle's `see()` clamp.
-    platform_api::session_flags::set_task_output_max_chars(if cfg.restricted {
+    lingxi_core::host::session_flags::set_task_output_max_chars(if cfg.restricted {
         effective_settings
             .as_ref()
             .and_then(|settings| settings.settings.task_output_max_chars)
@@ -12214,7 +12232,7 @@ pub async fn build_with_credential_stack(
     });
     // `settings.bashOutputMaxChars` (2.1.261) — the same shape for Bash output.
     // Published RAW; `tool_shell` applies the `see()` clamp.
-    platform_api::session_flags::set_bash_output_max_chars(if cfg.restricted {
+    lingxi_core::host::session_flags::set_bash_output_max_chars(if cfg.restricted {
         effective_settings
             .as_ref()
             .and_then(|settings| settings.settings.bash_output_max_chars)
@@ -12239,9 +12257,9 @@ pub async fn build_with_credential_stack(
     } else {
         load_merged_attribution(&cfg.cwd)
     };
-    platform_api::session_flags::set_attribution(attribution_commit, attribution_pr);
-    platform_api::session_flags::set_include_co_authored_by(include_co_authored_by);
-    platform_api::session_flags::set_include_git_instructions(if cfg.restricted {
+    lingxi_core::host::session_flags::set_attribution(attribution_commit, attribution_pr);
+    lingxi_core::host::session_flags::set_include_co_authored_by(include_co_authored_by);
+    lingxi_core::host::session_flags::set_include_git_instructions(if cfg.restricted {
         effective_settings
             .as_ref()
             .and_then(|settings| settings.settings.include_git_instructions)
@@ -12286,8 +12304,8 @@ pub async fn build_with_credential_stack(
     // seed source, so it takes the unseeded form.
     let plans_dir =
         orchestrator::ConversationOrchestrator::plans_dir(&cwd, cfg.plans_directory.as_deref());
-    let plan_slug = platform_api::plan_slug::generate_slug(None, &|candidate| {
-        platform_api::plan_slug::slug_taken_in(&plans_dir, candidate)
+    let plan_slug = lingxi_core::host::plan_slug::generate_slug(None, &|candidate| {
+        lingxi_core::host::plan_slug::slug_taken_in(&plans_dir, candidate)
     });
     let plan_files = std::sync::Arc::new(permission::plan_files::PlanFileMatcher::with_identity(
         permission::plan_files::PlanFileIdentity {
@@ -12361,7 +12379,7 @@ pub async fn build_with_credential_stack(
     let session_state_manager = {
         let legacy_shadow = legacy_opening_balance.map(|(legacy_session_id, amount)| {
             Arc::new(move |session_id| (session_id == legacy_session_id).then_some(amount))
-                as Arc<dyn Fn(protocol::SessionId) -> Option<u64> + Send + Sync + 'static>
+                as Arc<dyn Fn(lingxi_core::types::SessionId) -> Option<u64> + Send + Sync + 'static>
         });
         session_state::SessionStateManager::new_with_legacy_shadow(
             ledger_home.clone(),
@@ -12372,7 +12390,7 @@ pub async fn build_with_credential_stack(
         let lease = if let Some(lease) = construction_writer_lease {
             lease
         } else {
-            platform_api::live_sessions::LiveSessionDir::at_live(ledger_home.join("sessions"))
+            lingxi_core::host::live_sessions::LiveSessionDir::at_live(ledger_home.join("sessions"))
                 .claim_session_id(&main_session_id.to_string(), std::process::id())
                 .map_err(|error| BuildError::DurableSession(error.to_string()))?
                 .into_shared()
@@ -12455,9 +12473,9 @@ pub async fn build_with_credential_stack(
         .recorder_for_session(main_session_id)
         .expect("boot durable session is registered before recorder wiring");
     let fusion_recorder =
-        fusion_recovery_recorder.clone() as Arc<dyn platform_api::FusionRunRecorder>;
-    let fusion_recorder_factory =
-        fusion_recorder_factory_impl.clone() as Arc<dyn platform_api::FusionRunRecorderFactory>;
+        fusion_recovery_recorder.clone() as Arc<dyn lingxi_core::host::FusionRunRecorder>;
+    let fusion_recorder_factory = fusion_recorder_factory_impl.clone()
+        as Arc<dyn lingxi_core::host::FusionRunRecorderFactory>;
 
     // One CostTracker per process. The ephemeral path retains compatibility
     // with hosts that explicitly disabled session persistence; production
@@ -12506,7 +12524,7 @@ pub async fn build_with_credential_stack(
     //       the legacy stub completion.
     let subagent_pool = Arc::new(agent::StateMachinePool::new(
         Arc::new(PosixRuntime::new()),
-        platform_api::subagent_spawn::max_concurrent_subagents(),
+        lingxi_core::host::subagent_spawn::max_concurrent_subagents(),
     ));
     // Clone the subagent model seam BEFORE it is moved into the spawner — the
     // M10 coordinator teammate handler (T13) hands the SAME seam to every
@@ -12583,14 +12601,14 @@ pub async fn build_with_credential_stack(
         .with_subagents_dir_for_session_provider(Arc::new({
             let lingxi_home = cfg.lingxi_home.clone();
             let project_cwd = cwd.to_string_lossy().into_owned();
-            move |session_id: protocol::SessionId| {
+            move |session_id: lingxi_core::types::SessionId| {
                 let dir = orchestrator::transcript_paths::subagents_dir(
                     &lingxi_home,
                     &project_cwd,
                     &session_id.as_uuid().to_string(),
                 );
                 std::fs::create_dir_all(&dir).map_err(|error| {
-                    platform_api::subagent_spawn::SubagentSpawnError::Runtime(format!(
+                    lingxi_core::host::subagent_spawn::SubagentSpawnError::Runtime(format!(
                         "cannot create subagent transcript directory {}: {error}",
                         dir.display(),
                     ))
@@ -12602,7 +12620,7 @@ pub async fn build_with_credential_stack(
         // Without it `agent_transcript_path` pointed at nothing, and a
         // background agent's conversation existed only in memory.
         .with_transcript_fs(
-            Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>
+            Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn lingxi_core::host::FileSystem>
         )
         // Every subagent gets its own passive-diagnostics cursor. Sharing the
         // main registry as a source would make diagnostics first-reader-wins
@@ -12676,7 +12694,7 @@ pub async fn build_with_credential_stack(
     // the streaming half to make a backgrounded agent "come to rest" + resume.
     let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
     let lifecycle_subagent_spawner = subagent_spawner_arc.clone();
-    let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
+    let subagent_spawner: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
     let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> =
         subagent_spawner_arc.clone();
@@ -12704,7 +12722,7 @@ pub async fn build_with_credential_stack(
         if let Err(error) = workflow_output_scopes
             .ensure_current(
                 main_session_id,
-                protocol::MessageId::new(),
+                lingxi_core::types::MessageId::new(),
                 orch_cfg.token_budget,
             )
             .await
@@ -12729,7 +12747,7 @@ pub async fn build_with_credential_stack(
         pricing.clone(),
         workflow_output_scopes.clone(),
     );
-    let budget_enforcer: Arc<dyn platform_api::budget::BudgetEnforcerHandle> =
+    let budget_enforcer: Arc<dyn lingxi_core::host::budget::BudgetEnforcerHandle> =
         shared_budget_enforcer;
 
     // (5) Memory filler + the permission gate. The gate is the F2-01 branch
@@ -12896,7 +12914,7 @@ pub async fn build_with_credential_stack(
             matches!(
                 cfg.scope,
                 mcp::ConfigScope::Enterprise
-                    | mcp::ConfigScope::Settings(protocol::SettingsScope::Managed)
+                    | mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed)
             )
         });
     }
@@ -12966,7 +12984,7 @@ pub async fn build_with_credential_stack(
             agent::catalog::policy_agent_dir(
                 &crate::desktop::settings_watch::managed_settings_dir(),
             ),
-            agent::definition::AgentSource::Settings(protocol::SettingsScope::Managed),
+            agent::definition::AgentSource::Settings(lingxi_core::types::SettingsScope::Managed),
         )])
         .await;
         agent::catalog::merge_agents_later_wins(&mut agents, policy_agents);
@@ -12989,8 +13007,8 @@ pub async fn build_with_credential_stack(
     ) = match cfg.cli_agent.clone() {
         Some(w) => (Some(w), None, false),
         None if cfg.session_id_override.is_some() => {
-            let snapshot_fs =
-                Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>;
+            let snapshot_fs = Arc::new(PosixFileSystem::new(cwd.clone()))
+                as Arc<dyn lingxi_core::host::FileSystem>;
             let (persisted, snapshot) = session::jsonl::read_agent_resume_state(
                 &main_transcript_path,
                 snapshot_fs,
@@ -13115,17 +13133,17 @@ pub async fn build_with_credential_stack(
     for (path, source, included) in [
         (
             user_settings_path,
-            hooks::definition::HookSource::Settings(protocol::SettingsScope::User),
+            hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::User),
             incl_user_settings,
         ),
         (
             project_settings_path,
-            hooks::definition::HookSource::Settings(protocol::SettingsScope::Project),
+            hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             incl_project_settings,
         ),
         (
             local_settings_path,
-            hooks::definition::HookSource::Settings(protocol::SettingsScope::Local),
+            hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::Local),
             incl_project_settings,
         ),
     ] {
@@ -13172,7 +13190,7 @@ pub async fn build_with_credential_stack(
         for raw in &managed_settings_for_strict {
             match hooks::parse_hooks_from_settings_json(
                 raw,
-                hooks::definition::HookSource::Settings(protocol::SettingsScope::Managed),
+                hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::Managed),
             ) {
                 Ok(hooks_vec) => {
                     for hook in hooks_vec {
@@ -13302,7 +13320,7 @@ pub async fn build_with_credential_stack(
         // inside the clamp, because `CLAUDE_CODE_EVAL_CONFINED` is a process global
         // and an env-reading gate makes a parallel test suite flaky.
         let _ = subagent_bypass_gates_cell.set(agent::permission_mode::SpawnBypassGates {
-            confined: platform_api::env::is_eval_confined_session(),
+            confined: lingxi_core::host::env::is_eval_confined_session(),
             bypass_disabled,
             restricted: cfg.restricted,
         });
@@ -13360,7 +13378,7 @@ pub async fn build_with_credential_stack(
         // CLI overrides but above settings `defaultMode`. An explicit CLI
         // `default` still suppresses the agent mode, so we must key off the
         // RAW request rather than the resolved `cfg.permission_mode` alone.
-        let env_scrub_active = platform_api::env::is_env_truthy(
+        let env_scrub_active = lingxi_core::host::env::is_env_truthy(
             std::env::var("LINGXI_SUBPROCESS_ENV_SCRUB").ok().as_deref(),
         );
         if mode_preference_allowed && !env_scrub_active && !cfg.restricted {
@@ -13520,7 +13538,7 @@ pub async fn build_with_credential_stack(
     // loaded, so `disableBypassPermissionsMode` is unknown (⇒ `false`). A no-op
     // when the enforcing arm above already filled the cell.
     let _ = subagent_bypass_gates_cell.set(agent::permission_mode::SpawnBypassGates {
-        confined: platform_api::env::is_eval_confined_session(),
+        confined: lingxi_core::host::env::is_eval_confined_session(),
         bypass_disabled: false,
         restricted: cfg.restricted,
     });
@@ -13576,9 +13594,9 @@ pub async fn build_with_credential_stack(
     //         this wiring is a no-op for the common case (byte-identical).
     let hook_runtime = Arc::new(PosixRuntime::new());
     let (async_hook_completion_tx, mut async_hook_completion_rx) =
-        tokio::sync::mpsc::channel::<(protocol::HookId, hooks::HookResult)>(64);
+        tokio::sync::mpsc::channel::<(lingxi_core::types::HookId, hooks::HookResult)>(64);
     let async_hook_registry = Arc::new(hooks::AsyncHookRegistry::new(
-        hook_runtime.clone() as Arc<dyn platform_api::RuntimeSpawner>,
+        hook_runtime.clone() as Arc<dyn lingxi_core::host::RuntimeSpawner>,
         async_hook_completion_tx,
     ));
     // B5 fold-back (claude-code `getAsyncHookResponseAttachments` +
@@ -13650,7 +13668,7 @@ pub async fn build_with_credential_stack(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
             http.clone(),
-            hook_runtime as Arc<dyn platform_api::RuntimeSpawner>,
+            hook_runtime as Arc<dyn lingxi_core::host::RuntimeSpawner>,
         )
         .with_policy_disable_all_hooks(if cfg.restricted {
             effective_settings
@@ -13662,8 +13680,8 @@ pub async fn build_with_credential_stack(
         })
         .with_http_hook_policy(http_hook_urls, http_hook_env_vars)
         .with_process_runner(
-            Arc::new(PosixProcess::new()) as Arc<dyn platform_api::ProcessRunner>,
-            Arc::new(PosixSandbox::new()) as Arc<dyn platform_api::Sandbox>,
+            Arc::new(PosixProcess::new()) as Arc<dyn lingxi_core::host::ProcessRunner>,
+            Arc::new(PosixSandbox::new()) as Arc<dyn lingxi_core::host::Sandbox>,
         )
         .with_prompt_runner(hook_prompt_runner.clone() as Arc<dyn hooks::HookPromptRunner>)
         .with_async_registry(async_hook_registry)
@@ -13741,8 +13759,8 @@ pub async fn build_with_credential_stack(
                 mcp_configs.iter().map(|c| (c.name.as_str(), &c.spec)),
             );
             Arc::new(mcp::XaaIdpConfigProvider::new(
-                http.clone() as Arc<dyn platform_api::HttpTransport>,
-                clock.clone() as Arc<dyn platform_api::Clock>,
+                http.clone() as Arc<dyn lingxi_core::host::HttpTransport>,
+                clock.clone() as Arc<dyn lingxi_core::host::Clock>,
                 mcp_oauth_storage.clone(),
                 mcp_on_auth_url.clone(),
                 settings,
@@ -13751,8 +13769,8 @@ pub async fn build_with_credential_stack(
         })
     };
     let mcp_oauth_deps = mcp::registry::OAuthDeps {
-        http: http.clone() as Arc<dyn platform_api::HttpTransport>,
-        clock: clock.clone() as Arc<dyn platform_api::Clock>,
+        http: http.clone() as Arc<dyn lingxi_core::host::HttpTransport>,
+        clock: clock.clone() as Arc<dyn lingxi_core::host::Clock>,
         storage: mcp_oauth_storage,
         on_authorization_url: mcp_on_auth_url,
         xaa_config,
@@ -13938,7 +13956,7 @@ pub async fn build_with_credential_stack(
     //        coordinator (the registry is built-once-and-moved, so mode-exclusive
     //        tool selection must be decided here); a default session leaves it
     //        DISABLED so the build is byte-identical to the pre-M10 build.
-    let coordinator_id = protocol::AgentId::new();
+    let coordinator_id = lingxi_core::types::AgentId::new();
     let coordinator = Arc::new(
         coordinator::TeamRegistry::new(coordinator_id).with_config_home(cfg.lingxi_home.clone()),
     );
@@ -13970,9 +13988,8 @@ pub async fn build_with_credential_stack(
         }
         Arc::new(mode)
     };
-    let _ = subagent_coordinator_mode_cell
-        .set(coordinator_mode.clone()
-            as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>);
+    let _ = subagent_coordinator_mode_cell.set(coordinator_mode.clone()
+        as Arc<dyn lingxi_core::host::coordinator_mode::CoordinatorModeHandle>);
 
     // (5.46-prompt) D1 ITEM 4: coordinator-mode system prompt + user context.
     //        Mirrors TS `buildEffectiveSystemPrompt` (systemPrompt.ts:59-75):
@@ -14058,7 +14075,9 @@ pub async fn build_with_credential_stack(
         team: coordinator.clone(),
         catalog: agent_catalog.clone(),
     }))
-    .with_tool_invoker(teammate_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>)
+    .with_tool_invoker(
+        teammate_invoker.clone() as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>
+    )
     // Anchor the teammate's `AgentModel::Inherit` / family aliases to the parent
     // model — the same seam the `PoolSubagentSpawner` gets above. #15: resolve
     // the alias to the concrete main-loop wire id (claude `getMainLoopModel()`)
@@ -14152,7 +14171,7 @@ pub async fn build_with_credential_stack(
     tasks::registry::register_dream_handler(
         &mut task_registry_inner,
         subagent_spawner.clone(),
-        dream_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+        dream_invoker.clone() as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
         budget_enforcer.clone(),
         dream_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
     );
@@ -14193,7 +14212,7 @@ pub async fn build_with_credential_stack(
     // worktree + judges it on the SYNC path) and the LocalAgent handler (which
     // judges it when a BACKGROUND agent reaches a terminal state — claude-code's
     // `getWorktreeResult` closure handed to the detached lifecycle).
-    let worktree_manager: Arc<dyn platform_api::worktree::WorktreeManager> =
+    let worktree_manager: Arc<dyn lingxi_core::host::worktree::WorktreeManager> =
         Arc::new(PosixWorktreeManager::new(cwd.clone()));
     // The forked-skill resume gate. Its skill resolver is bound LATER (the
     // command registry does not exist yet — the same registration cycle the
@@ -14212,7 +14231,8 @@ pub async fn build_with_credential_stack(
         Arc::new(
             tasks::handlers::LocalAgentHandler::new(
                 subagent_spawner.clone(),
-                local_agent_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+                local_agent_invoker.clone()
+                    as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
                 budget_enforcer.clone(),
                 task_registry_inner.output_manager.clone(),
             )
@@ -14229,15 +14249,14 @@ pub async fn build_with_credential_stack(
             // Refuse to resume a forked skill whose permission scoping cannot
             // be re-established — resuming one unscoped would run it under the
             // parent's (strictly wider) permissions.
-            .with_fork_resume_gate(
-                fork_resume_gate.clone() as Arc<dyn platform_api::fork_resume_gate::ForkResumeGate>
-            )
+            .with_fork_resume_gate(fork_resume_gate.clone()
+                as Arc<dyn lingxi_core::host::fork_resume_gate::ForkResumeGate>)
             // Record each parked agent so a LATER process can rebuild it; the
             // record is erased the moment it terminates.
             .with_parked_agent_store(Arc::new(agent_restore::DesktopParkedAgentStore {
                 subagents_dir: main_subagents_dir.clone(),
             })
-                as Arc<dyn platform_api::parked_agent_store::ParkedAgentStore>),
+                as Arc<dyn lingxi_core::host::parked_agent_store::ParkedAgentStore>),
         ),
     );
 
@@ -14295,7 +14314,7 @@ pub async fn build_with_credential_stack(
         cwd.clone(),
     ));
     let fusion_implement_ctx = fusion_implement_host.context_cell();
-    let fusion_executor: Arc<dyn platform_api::FusionExecutor> = desktop_fusion_executor(
+    let fusion_executor: Arc<dyn lingxi_core::host::FusionExecutor> = desktop_fusion_executor(
         subagent_spawner.clone(),
         Arc::new(sidequery::ProviderSideQueryClient::from_service(
             api_service.clone(),
@@ -14305,11 +14324,11 @@ pub async fn build_with_credential_stack(
         fusion_catalog_source.clone(),
         analytics_bus.clone(),
         pricing.clone(),
-        Some(fusion_implement_host.clone() as Arc<dyn platform_api::FusionImplementHost>),
+        Some(fusion_implement_host.clone() as Arc<dyn lingxi_core::host::FusionImplementHost>),
     );
     let local_workflow_handler = tasks::handlers::LocalWorkflowHandler::new(
         subagent_spawner.clone(),
-        local_workflow_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+        local_workflow_invoker.clone() as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
         budget_enforcer.clone(),
         task_registry_inner.output_manager.clone(),
     )
@@ -14343,8 +14362,8 @@ pub async fn build_with_credential_stack(
     tasks::registry::register_fusion_handler_with_recorder_factory(
         &mut task_registry_inner,
         fusion_executor.clone(),
-        fusion_completion_sink.clone() as Arc<dyn platform_api::FusionCompletionSink>,
-        fusion_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+        fusion_completion_sink.clone() as Arc<dyn lingxi_core::host::FusionCompletionSink>,
+        fusion_invoker.clone() as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
         budget_enforcer.clone(),
         fusion_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
         Some(fusion_recorder.clone()),
@@ -14357,7 +14376,7 @@ pub async fn build_with_credential_stack(
     // via the orchestrator below. Two tables would look wired and answer
     // "not armed" forever, so this is created once and shared, never cloned
     // from a second `ObserverPairings::new()`.
-    let observer_pairings = Arc::new(platform_api::observer_pairing::ObserverPairings::new());
+    let observer_pairings = Arc::new(lingxi_core::host::observer_pairing::ObserverPairings::new());
     task_registry.set_observer_pairings(observer_pairings.clone());
     subagent_spawner_arc.set_task_registry(task_registry.clone());
     teammate_registry_status_sink.bind(task_registry.clone());
@@ -14408,7 +14427,7 @@ pub async fn build_with_credential_stack(
                             .is_none_or(|profile| &listing.provider_id == profile)
                 })
                 .map(|listing| {
-                    platform_api::qualified_model_ref(
+                    lingxi_core::host::qualified_model_ref(
                         &listing.request_model,
                         Some(&listing.provider_id),
                     )
@@ -14467,8 +14486,8 @@ pub async fn build_with_credential_stack(
     };
 
     // Share task delivery and cancellation with the implicit team service.
-    let spawn_seam: Arc<dyn platform_api::team_spawn::TeamSpawnSeam> =
-        if platform_api::env::agent_swarms_enabled() {
+    let spawn_seam: Arc<dyn lingxi_core::host::team_spawn::TeamSpawnSeam> =
+        if lingxi_core::host::env::agent_swarms_enabled() {
             let executable = std::env::current_exe()
                 .ok()
                 .filter(|path| {
@@ -14504,13 +14523,13 @@ pub async fn build_with_credential_stack(
             task_registry.clone()
         };
 
-    let departure_owner: Arc<dyn platform_api::team_spawn::TeammateDepartureCleanup> =
+    let departure_owner: Arc<dyn lingxi_core::host::team_spawn::TeammateDepartureCleanup> =
         coordinator.clone();
     task_registry
         .set_teammate_departure_cleanup(Arc::downgrade(&departure_owner))
         .await;
 
-    if platform_api::env::agent_swarms_enabled() {
+    if lingxi_core::host::env::agent_swarms_enabled() {
         task_registry
             .set_external_teammate_controller(Arc::downgrade(&spawn_seam))
             .await;
@@ -14528,9 +14547,9 @@ pub async fn build_with_credential_stack(
     // always resolves a running async agent. Non-async default sessions are
     // unaffected — with no teammates/agents registered a send resolves to
     // `NotFound`, the same effective outcome as the prior `None`.
-    let coordinator_mailbox: Option<Arc<dyn platform_api::mailbox::MailboxRouterHandle>> =
+    let coordinator_mailbox: Option<Arc<dyn lingxi_core::host::mailbox::MailboxRouterHandle>> =
         Some(coordinator.mailbox_router.clone()
-            as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
+            as Arc<dyn lingxi_core::host::mailbox::MailboxRouterHandle>);
     // (SANDBOX.1) Make the bash sandbox path LIVE (parity §0.2 / §B). Previously
     // `sandbox_available` was hardcoded `false`, so bash NEVER sandboxed — even
     // when the user enabled it in settings — leaving the macOS SBPL / Linux bwrap /
@@ -14716,7 +14735,7 @@ pub async fn build_with_credential_stack(
     // after `task_registry` exists — so NO deferred cell is needed; the
     // one-shot / teammate / workflow handlers keep the raw spawner captured
     // earlier (they only use the sync `spawn`, which the decorator delegates).
-    let teammate_spawner = if platform_api::env::agent_swarms_enabled() {
+    let teammate_spawner = if lingxi_core::host::env::agent_swarms_enabled() {
         let spawner = Arc::new(coordinator::ImplicitTeammateSpawner::new(
             coordinator.clone(),
             spawn_seam.clone(),
@@ -14729,13 +14748,13 @@ pub async fn build_with_credential_stack(
     } else {
         None
     };
-    let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
+    let subagent_spawner: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner> =
         Arc::new(background_agent::BackgroundAgentSpawner {
             inner: subagent_spawner,
             teammate_spawner,
             registry: task_registry.clone(),
             mailbox_router: coordinator.mailbox_router.clone(),
-            runtime: Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
+            runtime: Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
             // Where a forked skill's scoping sidecars land — beside the
             // background agent's own transcript in this session's
             // `subagents/` directory.
@@ -14791,7 +14810,7 @@ pub async fn build_with_credential_stack(
     // Local IDE endpoints are discovered lazily by the provider-neutral
     // controller. The same MCP registry owns their live JSON-RPC connection;
     // no Anthropic credential or cloud auth path participates here.
-    let ide_handle: Arc<dyn platform_api::IdeHandle> = Arc::new(DesktopIdeHandle::new(
+    let ide_handle: Arc<dyn lingxi_core::host::IdeHandle> = Arc::new(DesktopIdeHandle::new(
         cfg.lingxi_home.join("ide"),
         mcp_registry.clone(),
     ));
@@ -14815,7 +14834,7 @@ pub async fn build_with_credential_stack(
     // refinements — not needed to close the ExitWorktree-after-resume no-op.)
     let worktree_session_cell = tool_api::worktree_session::new_worktree_session_cell();
     if cfg.session_id_override.is_some() {
-        let restore_fs: Arc<dyn platform_api::FileSystem> =
+        let restore_fs: Arc<dyn lingxi_core::host::FileSystem> =
             Arc::new(PosixFileSystem::new(cwd.clone()));
         if let Some(payload) = session::jsonl::loader::read_worktree_state(
             &main_transcript_path,
@@ -14968,7 +14987,7 @@ pub async fn build_with_credential_stack(
         worktree: worktree_manager.clone(),
         subagent_spawner: Some(subagent_spawner.clone()),
         task_registry: Some(
-            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>
         ),
         mailbox_router: coordinator_mailbox,
         budget_enforcer: Some(budget_enforcer.clone()),
@@ -14988,7 +15007,7 @@ pub async fn build_with_credential_stack(
             }
         })),
         coordinator_mode: Some(coordinator_mode.clone()
-            as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>),
+            as Arc<dyn lingxi_core::host::coordinator_mode::CoordinatorModeHandle>),
         // (3b) AgentTool threads this into the subagent's RegistryToolInvoker so
         // spawned subagents are gated by the same boot gate as the main loop.
         permission_gate: Some(perms.clone()),
@@ -15055,7 +15074,7 @@ pub async fn build_with_credential_stack(
     // for that worktree — independently inert when `None` (see the function
     // doc); a tmux failure is logged, not a hard boot failure.
     apply_worktree_launch(&cfg.worktree_launch, &cfg.tmux_launch, &tool_ctx).await?;
-    let coordinator_wiring = (platform_api::env::agent_swarms_enabled()
+    let coordinator_wiring = (lingxi_core::host::env::agent_swarms_enabled()
         || cfg.session_started_as_coordinator)
         .then(|| CoordinatorWiring {
             team: coordinator.clone(),
@@ -15122,7 +15141,7 @@ pub async fn build_with_credential_stack(
     // so the `Skill` tool substitutes `${LINGXI_SESSION_ID}` in the body (TS
     // `getSessionId()`, a per-process session value). Generated once here at build
     // time; format mirrors the engine's `SessionId` Display (`sess:<uuid>`).
-    let skill_session_id = protocol::SessionId::new().to_string();
+    let skill_session_id = lingxi_core::types::SessionId::new().to_string();
     let monitor_runtime = repo_root_reloader.clone();
     let skill_invocation_observer: command_api::SkillInvocationObserver = Arc::new(move |skill| {
         let monitor_runtime = monitor_runtime.clone();
@@ -15141,11 +15160,11 @@ pub async fn build_with_credential_stack(
         .with_invocation_observer(skill_invocation_observer.clone()),
     );
     // G5: fill the subagent spawner's skill-loader cell with a
-    // `platform_api::skill_loader::SkillLoader` over the SAME shared command registry,
+    // `lingxi_core::host::skill_loader::SkillLoader` over the SAME shared command registry,
     // so a child agent runner can preload its frontmatter `skills:` (claude
     // runAgent.ts:577-646). First fill wins; the registry is filled at (6) before
     // any spawn fires, so the loader never reads the empty registry.
-    let skill_loader_arc: Arc<dyn platform_api::skill_loader::SkillLoader> = Arc::new(
+    let skill_loader_arc: Arc<dyn lingxi_core::host::skill_loader::SkillLoader> = Arc::new(
         agent_skill_loader::AgentSkillLoader::new(
             shared_command_registry.clone(),
             Some(skill_session_id),
@@ -15200,19 +15219,19 @@ pub async fn build_with_credential_stack(
     // session `<uuid>.jsonl` the resume loader reads. Gated on
     // `session_persistence` (no writer ⇒ nothing to resume from), mirroring the
     // `main_jsonl_writer` wiring below.
-    let worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>> = if cfg
-        .session_persistence
-    {
-        Some(Arc::new(JsonlWorktreeStatePersister {
-            writer: Arc::new(session::jsonl::writer::JsonlWriter::new(
-                main_transcript_path.clone(),
-                Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>,
-            )),
-            session_uuid: main_session_uuid.clone(),
-        }))
-    } else {
-        None
-    };
+    let worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>> =
+        if cfg.session_persistence {
+            Some(Arc::new(JsonlWorktreeStatePersister {
+                writer: Arc::new(session::jsonl::writer::JsonlWriter::new(
+                    main_transcript_path.clone(),
+                    Arc::new(PosixFileSystem::new(cwd.clone()))
+                        as Arc<dyn lingxi_core::host::FileSystem>,
+                )),
+                session_uuid: main_session_uuid.clone(),
+            }))
+        } else {
+            None
+        };
     // Keep a slash-command façade over the SAME context + persister before the
     // tool registry consumes `tool_ctx`. The handler itself is registered only
     // in the desktop command registry below, leaving the locked upstream
@@ -15293,7 +15312,7 @@ pub async fn build_with_credential_stack(
         let (workflow_size_guideline, managed_workflow, default_workflow) =
             resolve_workflow_size_guideline(&cfg, &cwd, &managed_workflow_layers);
         workflow_size_guideline_state =
-            platform_api::session_flags::WorkflowSizeGuidelineState::new(
+            lingxi_core::host::session_flags::WorkflowSizeGuidelineState::new(
                 workflow_size_guideline.as_wire(),
                 managed_workflow,
                 default_workflow,
@@ -15315,7 +15334,7 @@ pub async fn build_with_credential_stack(
         })
         .unwrap_or(false);
         let workflow_policy_enabled = tool_workflow::workflows_enabled(managed_disable_workflows);
-        dynamic_workflows_gate = platform_api::session_flags::DynamicWorkflowsGate::new(
+        dynamic_workflows_gate = lingxi_core::host::session_flags::DynamicWorkflowsGate::new(
             workflow_policy_enabled && workflow_session_enabled,
             workflow_session_managed || !workflow_policy_enabled,
         );
@@ -15404,7 +15423,7 @@ pub async fn build_with_credential_stack(
     // the probe stays unpublished and `read_auto_allowed` keeps answering
     // `false` — the fail-safe answer.
     if let Some(policy) = boot_permission_policy.clone() {
-        platform_api::read_auto_allow::set_read_auto_allow_probe(std::sync::Arc::new(
+        lingxi_core::host::read_auto_allow::set_read_auto_allow_probe(std::sync::Arc::new(
             permission::read_auto_allow::PolicyReadAutoAllow::new(policy, tools.all_names()),
         ));
     }
@@ -15641,7 +15660,7 @@ pub async fn build_with_credential_stack(
     // move into the orchestrator. The actual cold restore runs later, after the
     // live model/provider selection cell is published.
     let parked_agent_restore_inheritance = cfg.session_id_override.is_some().then(|| {
-        platform_api::subagent_spawn::SubagentInheritance {
+        lingxi_core::host::subagent_spawn::SubagentInheritance {
             tool_invoker: Arc::new(
                 tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
                     .with_gate(perms.clone()),
@@ -15808,7 +15827,7 @@ pub async fn build_with_credential_stack(
         .with_loop_usage_opt(
             cron_scheduler
                 .clone()
-                .map(|scheduler| scheduler as Arc<dyn platform_api::LoopUsageProvider>),
+                .map(|scheduler| scheduler as Arc<dyn lingxi_core::host::LoopUsageProvider>),
         )
         .with_cost_session_switcher_opt(Some(session_state_manager.clone()))
         .with_session_activation_observer(Arc::new(ProcessSessionActivationObserver))
@@ -15837,7 +15856,7 @@ pub async fn build_with_credential_stack(
         // Surface LSP `<new-diagnostics>` to the model each turn (the same sink the
         // LSP registry drains publishDiagnostics into).
         .with_new_diagnostics_source(
-            Arc::new(lsp_diagnostics.clone()) as Arc<dyn platform_api::NewDiagnosticsSource>
+            Arc::new(lsp_diagnostics.clone()) as Arc<dyn lingxi_core::host::NewDiagnosticsSource>
         )
         // SKILLLIST.1: enumerate model-invocable skills each turn so the model
         // can discover them. Reads `shared_command_registry` lazily at turn time
@@ -15856,7 +15875,7 @@ pub async fn build_with_credential_stack(
         // context above; the provider drains the registry's terminal-not-notified
         // tasks each turn (mark-notified + evict ⇒ each completion surfaces once).
         .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
-            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
         )))
         // hook-bg-fields: populate the `Stop` / `SubagentStop` hook payload's
         // `background_tasks` (claude-code `Lic(taskRegistry.all())`) +
@@ -15867,7 +15886,7 @@ pub async fn build_with_credential_stack(
         // (claude's tool-use-context `s` gate).
         .with_stop_hook_snapshot(Arc::new(RegistryStopHookSnapshot {
             registry: task_registry.clone()
-                as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+                as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
             project_root: watch_cwd.clone(),
         }))
         // Finding #73: supply the V2 task list to the per-turn `task_reminder`
@@ -15907,7 +15926,7 @@ pub async fn build_with_credential_stack(
         (true, Some(home)) => {
             orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
                 side_query_client.clone(),
-                Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
+                Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
                 &home,
                 &cfg.cwd,
             ))
@@ -15922,9 +15941,8 @@ pub async fn build_with_credential_stack(
     // the `ScheduleWakeup` that armed a wakeup (binary's lone-wakeup arm). Same
     // `Arc` the tool raises.
     let orch_builder = orch_builder.with_loop_wakeup_armed_slot(loop_wakeup_armed);
-    let orch_builder = orch_builder
-        .with_coordinator_mode(coordinator_mode.clone()
-            as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>);
+    let orch_builder = orch_builder.with_coordinator_mode(coordinator_mode.clone()
+        as Arc<dyn lingxi_core::host::coordinator_mode::CoordinatorModeHandle>);
     let orch_builder = match end_conversation_slot.clone() {
         Some(slot) => orch_builder.with_end_conversation_slot(slot),
         None => orch_builder,
@@ -15966,7 +15984,7 @@ pub async fn build_with_credential_stack(
         orch_builder.with_skill_discovery_prefetch(Arc::new(
             skill_api::SkillDiscoveryPrefetch::new(
                 source,
-                Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
+                Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
             ),
         ))
     } else {
@@ -15989,7 +16007,7 @@ pub async fn build_with_credential_stack(
                 0,
                 0,
                 &home,
-                Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
+                Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
             ))
         }
         _ => orch_builder,
@@ -16256,7 +16274,7 @@ pub async fn build_with_credential_stack(
     // same registry-backed text projection for headless/bridge dispatch paths.
     reg.register_builtin_handler(Arc::new(
         command_api::builtins::WorkflowsHandler::with_registry(
-            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>
         ),
     ));
     reg.register_builtin_handler(worktree_command_handler);
@@ -16278,7 +16296,7 @@ pub async fn build_with_credential_stack(
         .with_durable_publication_available(cfg.session_persistence)
         .with_publication_retrier(Some(fusion_recorder_factory_impl.clone()))
         .with_implement_host(Some(
-            fusion_implement_host.clone() as Arc<dyn platform_api::FusionImplementHost>
+            fusion_implement_host.clone() as Arc<dyn lingxi_core::host::FusionImplementHost>
         )),
     ));
 
@@ -16475,9 +16493,8 @@ pub async fn build_with_credential_stack(
             .with_safe_mode(cfg.customization_gates.safe_mode)
             .with_plugin_workflows(plugin_workflow_registry.clone())
             .with_project_dir(cwd_for_plugins.clone())
-            .with_task_registry(
-                task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
-            ),
+            .with_task_registry(task_registry.clone()
+                as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>),
         );
         for (id, manifest, dir) in discovered {
             let plugin_name = manifest.name.clone();
@@ -16902,12 +16919,12 @@ pub async fn build_with_credential_stack(
     //       keeps boot cheap and avoids holding an OS watch handle nobody
     //       consumes.
     #[cfg(not(test))]
-    let watch_fs: Arc<dyn platform_api::FileSystem> =
+    let watch_fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(PosixFileSystem::new(watch_cwd.clone()));
     // Unit tests exercise the real watcher lifecycle with cancellable streams,
     // without depending on the host FSEvents daemon's blocking startup/stop RPCs.
     #[cfg(test)]
-    let watch_fs: Arc<dyn platform_api::FileSystem> =
+    let watch_fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(watcher_test_support::WatchFs::new(watch_cwd.clone()));
     let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
     let settings_watcher =
@@ -16940,10 +16957,10 @@ pub async fn build_with_credential_stack(
     let watcher =
         file_changed_watch::FileChangedWatcher::new(&matcher_refs, &watch_cwd, file_changed_firer);
     #[cfg(not(test))]
-    let watch_fs: Arc<dyn platform_api::FileSystem> =
+    let watch_fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(PosixFileSystem::new(watch_cwd.clone()));
     #[cfg(test)]
-    let watch_fs: Arc<dyn platform_api::FileSystem> =
+    let watch_fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(watcher_test_support::WatchFs::new(watch_cwd.clone()));
     let file_changed_watcher = watcher.spawn(watch_fs).await;
     // Fill the `CwdChanged` firer's deferred rebinder cell now that the watcher
@@ -17060,10 +17077,11 @@ pub async fn build_with_credential_stack(
         model_providers,
         provider_adapter: provider_adapter_handle,
         credentials,
-        http: http.clone() as Arc<dyn platform_api::HttpTransport>,
+        http: http.clone() as Arc<dyn lingxi_core::host::HttpTransport>,
         structured_output_slot,
         wakeup_scheduler_cell,
-        runtime_spawner: Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
+        runtime_spawner: Arc::new(PosixRuntime::new())
+            as Arc<dyn lingxi_core::host::RuntimeSpawner>,
         bash_runner,
         shell_expansion: shell_expansion_provider,
         connect_copilot,
@@ -17153,9 +17171,9 @@ mod tests {
 
         // A coordinator opened under it behaves like any other: this is the
         // same ledger code, only rooted somewhere disposable.
-        let session_id = protocol::SessionId::new();
+        let session_id = lingxi_core::types::SessionId::new();
         struct Lease(String);
-        impl platform_api::live_sessions::SessionWriterLease for Lease {
+        impl lingxi_core::host::live_sessions::SessionWriterLease for Lease {
             fn session_id(&self) -> &str {
                 &self.0
             }
@@ -17184,14 +17202,14 @@ mod tests {
         let mut cfg = DesktopConfig::default();
         cfg.lingxi_home = home.path().to_path_buf();
         cfg.isolated_credential_storage = false;
-        cfg.credential_storage_policy = platform_api::CredentialStoragePolicy::NativeOrMemory;
+        cfg.credential_storage_policy = lingxi_core::host::CredentialStoragePolicy::NativeOrMemory;
 
         let stack = build_shared_credential_stack_for_config(&cfg)
             .await
             .expect("credential stack");
         assert_eq!(
             stack.storage.backend(),
-            platform_api::SecureStorageBackend::MemorySession
+            lingxi_core::host::SecureStorageBackend::MemorySession
         );
     }
 
@@ -17319,16 +17337,16 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl platform_api::PermissionGate for RecordingNetworkPermissionGate {
-        async fn check(&self, name: &str, input: &Value) -> platform_api::PermissionDecision {
+    impl lingxi_core::host::PermissionGate for RecordingNetworkPermissionGate {
+        async fn check(&self, name: &str, input: &Value) -> lingxi_core::host::PermissionDecision {
             assert_eq!(name, "SandboxNetworkAccess");
             assert_eq!(input["host"], "api.example.test");
             assert_eq!(input["port"], 8443);
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.allow {
-                platform_api::PermissionDecision::Allow
+                lingxi_core::host::PermissionDecision::Allow
             } else {
-                platform_api::PermissionDecision::Deny {
+                lingxi_core::host::PermissionDecision::Deny {
                     reason: "blocked".into(),
                 }
             }
@@ -17639,7 +17657,7 @@ mod tests {
             ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
             CopilotConnectStep,
         };
-        use platform_api::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
+        use lingxi_core::host::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
 
         // Minimal `AuthHandle` double — no sibling registry test exists in this
         // module, so we construct the lightest object-safe stand-in here.
@@ -17726,7 +17744,7 @@ mod tests {
             ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
             CopilotConnectStep,
         };
-        use platform_api::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
+        use lingxi_core::host::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
 
         struct MockAuth;
         #[async_trait]
@@ -17849,7 +17867,7 @@ mod tests {
             ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
             CopilotConnectStep,
         };
-        use platform_api::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
+        use lingxi_core::host::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
 
         struct MockAuth;
         #[async_trait]
@@ -17945,7 +17963,7 @@ mod tests {
         use super::connect::{EngineCredentialWriter, SecureKeyPrompt};
         use async_trait::async_trait;
         use command_api::builtins::ConnectCredentialWriter;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
         use std::collections::HashMap;
@@ -17954,7 +17972,7 @@ mod tests {
         // In-memory secure store (the posix-minimal stub does not persist).
         #[derive(Default)]
         struct MemStorage {
-            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+            map: StdMutex<HashMap<(String, String), lingxi_core::types::SecureStorageData>>,
         }
         #[async_trait]
         impl SecureStorage for MemStorage {
@@ -17962,7 +17980,7 @@ mod tests {
                 &self,
                 service: &str,
                 account: &str,
-                data: protocol::SecureStorageData,
+                data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 self.map
                     .lock()
@@ -17974,7 +17992,8 @@ mod tests {
                 &self,
                 service: &str,
                 account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(self
                     .map
                     .lock()
@@ -18047,7 +18066,7 @@ mod tests {
         use super::connect::{EngineCredentialWriter, SecureKeyPrompt};
         use async_trait::async_trait;
         use command_api::builtins::ConnectCredentialWriter;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
         use std::collections::HashMap;
@@ -18055,7 +18074,7 @@ mod tests {
 
         #[derive(Default)]
         struct MemStorage {
-            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+            map: StdMutex<HashMap<(String, String), lingxi_core::types::SecureStorageData>>,
         }
         #[async_trait]
         impl SecureStorage for MemStorage {
@@ -18063,7 +18082,7 @@ mod tests {
                 &self,
                 service: &str,
                 account: &str,
-                data: protocol::SecureStorageData,
+                data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 self.map
                     .lock()
@@ -18075,7 +18094,8 @@ mod tests {
                 &self,
                 service: &str,
                 account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(self
                     .map
                     .lock()
@@ -18184,7 +18204,7 @@ with no restart and no ModelSource reconstruction"
     async fn oauth_connect_publishes_before_return_and_starts_one_detached_refresh() {
         use async_trait::async_trait;
         use command_api::builtins::OAuthConnectDriver;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
 
@@ -18209,7 +18229,7 @@ with no restart and no ModelSource reconstruction"
                 &self,
                 _service: &str,
                 _account: &str,
-                _data: protocol::SecureStorageData,
+                _data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 Ok(())
             }
@@ -18217,7 +18237,8 @@ with no restart and no ModelSource reconstruction"
                 &self,
                 _service: &str,
                 _account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(None)
             }
             async fn contains(
@@ -18405,7 +18426,7 @@ with no restart and no ModelSource reconstruction"
     #[tokio::test]
     async fn a_degraded_reprobe_must_not_erase_known_good_availability() {
         use async_trait::async_trait;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
 
@@ -18418,7 +18439,7 @@ with no restart and no ModelSource reconstruction"
                 &self,
                 _service: &str,
                 _account: &str,
-                _data: protocol::SecureStorageData,
+                _data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 Ok(())
             }
@@ -18426,7 +18447,8 @@ with no restart and no ModelSource reconstruction"
                 &self,
                 _service: &str,
                 _account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(None)
             }
             async fn delete(
@@ -18588,7 +18610,7 @@ when the degraded backend cannot read it back; map after refresh was {map:?}"
     async fn the_scoped_notifier_reaches_a_registered_refresher() {
         let catalog_registry = super::FusionCatalogRegistry::default();
         use async_trait::async_trait;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
         use std::collections::HashMap;
@@ -18596,7 +18618,7 @@ when the degraded backend cannot read it back; map after refresh was {map:?}"
 
         #[derive(Default)]
         struct MemStorage {
-            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+            map: StdMutex<HashMap<(String, String), lingxi_core::types::SecureStorageData>>,
         }
         #[async_trait]
         impl SecureStorage for MemStorage {
@@ -18604,7 +18626,7 @@ when the degraded backend cannot read it back; map after refresh was {map:?}"
                 &self,
                 service: &str,
                 account: &str,
-                data: protocol::SecureStorageData,
+                data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 self.map
                     .lock()
@@ -18616,7 +18638,8 @@ when the degraded backend cannot read it back; map after refresh was {map:?}"
                 &self,
                 service: &str,
                 account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(self
                     .map
                     .lock()
@@ -18803,11 +18826,11 @@ too much empties Fusion's catalog, the mirror-image defect: {published:?}"
     async fn signing_out_clears_the_anthropic_entry_a_sign_in_published() {
         let catalog_registry = super::FusionCatalogRegistry::default();
         use async_trait::async_trait;
-        use platform_api::auth::{AuthError, LoginInfo};
+        use lingxi_core::host::auth::{AuthError, LoginInfo};
 
         struct OkLogout;
         #[async_trait]
-        impl platform_api::AuthHandle for OkLogout {
+        impl lingxi_core::host::AuthHandle for OkLogout {
             async fn login(&self) -> Result<LoginInfo, AuthError> {
                 Err(AuthError::Cancelled)
             }
@@ -18846,7 +18869,7 @@ too much empties Fusion's catalog, the mirror-image defect: {published:?}"
             },
         );
 
-        let auth: Arc<dyn platform_api::AuthHandle> = Arc::new(FusionCatalogClearingAuth {
+        let auth: Arc<dyn lingxi_core::host::AuthHandle> = Arc::new(FusionCatalogClearingAuth {
             catalog_registry: catalog_registry.clone(),
             inner: Arc::new(OkLogout),
         });
@@ -19318,7 +19341,7 @@ route and resurrects the stale `true`"
     /// secret/src/credential.rs).
     fn fusion_test_credentials_with_stored_anthropic_key() -> Arc<secret::CredentialManager> {
         use async_trait::async_trait;
-        use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
+        use lingxi_core::host::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
         struct AnthropicKeyPresentStorage;
         #[async_trait]
@@ -19327,7 +19350,7 @@ route and resurrects the stale `true`"
                 &self,
                 _service: &str,
                 _account: &str,
-                _data: protocol::SecureStorageData,
+                _data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 Ok(())
             }
@@ -19335,7 +19358,8 @@ route and resurrects the stale `true`"
                 &self,
                 _service: &str,
                 _account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(None)
             }
             async fn delete(
@@ -19376,7 +19400,7 @@ route and resurrects the stale `true`"
     /// pass for the wrong reason.
     fn fusion_delete_test_credentials() -> Arc<secret::CredentialManager> {
         use async_trait::async_trait;
-        use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
+        use lingxi_core::host::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
         struct InertStorage;
         #[async_trait]
@@ -19385,7 +19409,7 @@ route and resurrects the stale `true`"
                 &self,
                 _service: &str,
                 _account: &str,
-                _data: protocol::SecureStorageData,
+                _data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 Ok(())
             }
@@ -19393,7 +19417,8 @@ route and resurrects the stale `true`"
                 &self,
                 _service: &str,
                 _account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(None)
             }
             async fn delete(
@@ -19434,7 +19459,7 @@ route and resurrects the stale `true`"
     #[tokio::test]
     async fn isolated_refresher_does_not_count_ambient_env_var_credentials() {
         use async_trait::async_trait;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
 
@@ -19449,7 +19474,7 @@ route and resurrects the stale `true`"
                 &self,
                 _service: &str,
                 _account: &str,
-                _data: protocol::SecureStorageData,
+                _data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 Ok(())
             }
@@ -19457,7 +19482,8 @@ route and resurrects the stale `true`"
                 &self,
                 _service: &str,
                 _account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(None)
             }
             async fn delete(
@@ -19891,7 +19917,7 @@ still flip to available"
             .expect("flag settings deny rule must parse"),
         );
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let permission_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -19927,7 +19953,7 @@ still flip to available"
             agent::parse_agent_from_json(
                 name,
                 &serde_json::json!({"description": "from dir", "prompt": "p"}),
-                agent::AgentSource::Settings(protocol::SettingsScope::Project),
+                agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
             )
             .expect("valid dir agent")
         }
@@ -19984,12 +20010,12 @@ still flip to available"
         fn existing(name: &str) -> mcp::McpServerConfig {
             mcp::McpServerConfig {
                 name: name.to_string(),
-                spec: platform_api::McpTransportSpec::Stdio {
+                spec: lingxi_core::host::McpTransportSpec::Stdio {
                     command: "prior".into(),
                     args: vec![],
                     env: std::collections::HashMap::new(),
                 },
-                scope: mcp::ConfigScope::Settings(protocol::SettingsScope::Project),
+                scope: mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
                 disabled: false,
                 timeout_ms: None,
                 always_load: false,
@@ -20026,7 +20052,7 @@ still flip to available"
         // scope Agent, exactly like a `--mcp-config` server.
         let def = agent_with_server(
             "docs",
-            agent::AgentSource::Settings(protocol::SettingsScope::Project),
+            agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         let mut configs = vec![existing("keep")];
         let blocked = super::merge_agent_frontmatter_mcp_servers(
@@ -20054,7 +20080,7 @@ still flip to available"
         assert_eq!(configs.len(), 2);
         assert_eq!(configs[0].name, "docs");
         assert!(
-            matches!(&configs[0].spec, platform_api::McpTransportSpec::Stdio { command, .. } if command == "npx"),
+            matches!(&configs[0].spec, lingxi_core::host::McpTransportSpec::Stdio { command, .. } if command == "npx"),
             "the agent's config must win over a discovered one"
         );
         assert_eq!(configs[0].scope, mcp::ConfigScope::Agent);
@@ -20090,12 +20116,12 @@ still flip to available"
         );
         assert_eq!(configs.len(), 1);
         assert!(
-            matches!(&configs[0].spec, platform_api::McpTransportSpec::Stdio { command, .. } if command == "prior"),
+            matches!(&configs[0].spec, lingxi_core::host::McpTransportSpec::Stdio { command, .. } if command == "prior"),
             "a --mcp-config server must win on name collision"
         );
         assert_eq!(
             configs[0].scope,
-            mcp::ConfigScope::Settings(protocol::SettingsScope::Project)
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
         );
 
         // Gl(): safe mode → no merge.
@@ -20171,7 +20197,7 @@ still flip to available"
         // warning), an allowed sibling still merges.
         let mut two = agent_with_server(
             "docs",
-            agent::AgentSource::Settings(protocol::SettingsScope::Project),
+            agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         let mut denied = serde_json::Map::new();
         denied.insert("denied".to_string(), serde_json::json!({"command": "evil"}));
@@ -20202,16 +20228,16 @@ still flip to available"
     fn mcp_tool_policy_rules_are_composed_into_the_boot_policy() {
         let server = mcp::McpServerConfig {
             name: "remote.server".into(),
-            spec: platform_api::McpTransportSpec::InProcess {
+            spec: lingxi_core::host::McpTransportSpec::InProcess {
                 registry_key: "remote.server".into(),
             },
             scope: mcp::ConfigScope::Dynamic,
             disabled: false,
             timeout_ms: None,
             always_load: false,
-            tools: vec![platform_api::McpConfiguredToolPolicyDto {
+            tools: vec![lingxi_core::host::McpConfiguredToolPolicyDto {
                 name: "delete_data".into(),
-                permission_policy: Some(platform_api::McpToolPermissionPolicy::AlwaysDeny),
+                permission_policy: Some(lingxi_core::host::McpToolPermissionPolicy::AlwaysDeny),
                 org_max_permission: None,
             }],
             tool_permissions: std::collections::BTreeMap::new(),
@@ -20236,7 +20262,7 @@ still flip to available"
 
     #[tokio::test]
     async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         let config_json = serde_json::json!({
             "command": "unused-in-test",
             "tools": [
@@ -20252,21 +20278,22 @@ still flip to available"
             mcp::build_server_from_json_entry("srv", &config_json, mcp::ConfigScope::Agent)
                 .expect("agent MCP config parses");
         let table_key = mcp::registry::agent_scope_table_key(agent_id, "srv");
-        let dto = |tool_name: &str, requires_user_interaction: bool| platform_api::McpToolDto {
-            server_name: "srv".into(),
-            tool_name: tool_name.into(),
-            description: tool_name.into(),
-            input_schema: serde_json::json!({"type": "object"}),
-            output_schema: None,
-            annotations: None,
-            icons: Vec::new(),
-            meta: None,
-            full_name: format!("mcp__srv__{tool_name}"),
-            search_hint: None,
-            always_load: None,
-            requires_user_interaction,
-        };
-        let connection_id = protocol::McpConnectionId::new();
+        let dto =
+            |tool_name: &str, requires_user_interaction: bool| lingxi_core::host::McpToolDto {
+                server_name: "srv".into(),
+                tool_name: tool_name.into(),
+                description: tool_name.into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                output_schema: None,
+                annotations: None,
+                icons: Vec::new(),
+                meta: None,
+                full_name: format!("mcp__srv__{tool_name}"),
+                search_hint: None,
+                always_load: None,
+                requires_user_interaction,
+            };
+        let connection_id = lingxi_core::types::McpConnectionId::new();
         let registry = Arc::new(mcp::McpRegistry::new(Arc::new(
             platform_posix::PosixMcpTransport::new(),
         )));
@@ -20275,7 +20302,7 @@ still flip to available"
             mcp::McpConnectionState::Connected {
                 config,
                 connection_id,
-                capabilities: platform_api::ServerCapabilitiesDto {
+                capabilities: lingxi_core::host::ServerCapabilitiesDto {
                     tools: true,
                     resources: false,
                     prompts: false,
@@ -20284,8 +20311,8 @@ still flip to available"
                     experimental: std::collections::HashMap::new(),
                     extensions: std::collections::HashMap::new(),
                 },
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![
@@ -20302,7 +20329,7 @@ still flip to available"
         let mut def = agent::parse_agent_from_json(
             "tester",
             &serde_json::json!({"description": "d", "prompt": "p"}),
-            agent::AgentSource::Settings(protocol::SettingsScope::Project),
+            agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .expect("agent definition parses");
         let mut server = serde_json::Map::new();
@@ -20495,7 +20522,7 @@ still flip to available"
         config_b.isolated_credential_storage = true;
         let output = || {
             Arc::new(orchestrator::test_support::MockOutputStream::new())
-                as Arc<dyn platform_api::OutputStream>
+                as Arc<dyn lingxi_core::host::OutputStream>
         };
         let harness_a =
             super::build_harness(config_a, output(), Arc::new(permission::DenyOnAskGate))
@@ -20528,7 +20555,7 @@ still flip to available"
             enable_automation_scheduler: true,
             host_workspace_trusted: None,
             isolated_credential_storage: false,
-            credential_storage_policy: platform_api::CredentialStoragePolicy::NativeOrMemory,
+            credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::NativeOrMemory,
             injected_plugin_secrets: std::collections::BTreeMap::new(),
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
@@ -20661,7 +20688,7 @@ still flip to available"
             vec![boot_cwd.clone()],
         );
         let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-        ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
+        ctx.worktree = mock.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>;
 
         super::apply_worktree_launch(&Some("feat".to_string()), &None, &ctx)
             .await
@@ -20762,11 +20789,11 @@ still flip to available"
     }
 
     #[async_trait::async_trait]
-    impl platform_api::ProcessRunner for RecordingProcessRunner {
+    impl lingxi_core::host::ProcessRunner for RecordingProcessRunner {
         async fn run(
             &self,
-            cmd: &platform_api::SandboxedCommand,
-        ) -> Result<platform_api::ProcessOutput, platform_api::ProcessError> {
+            cmd: &lingxi_core::host::SandboxedCommand,
+        ) -> Result<lingxi_core::host::ProcessOutput, lingxi_core::host::ProcessError> {
             let inner = cmd.inner();
             let exit_code = if inner.args == vec!["-V".to_string()] {
                 self.probe_exit
@@ -20777,7 +20804,7 @@ still flip to available"
                 .lock()
                 .unwrap()
                 .push((inner.command.clone(), inner.args.clone()));
-            Ok(platform_api::ProcessOutput {
+            Ok(lingxi_core::host::ProcessOutput {
                 stdout: String::new(),
                 stderr: if exit_code == 0 {
                     String::new()
@@ -20791,15 +20818,15 @@ still flip to available"
 
         async fn spawn_background(
             &self,
-            _cmd: &platform_api::SandboxedCommand,
-        ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
-            Err(platform_api::ProcessError::Unsupported)
+            _cmd: &lingxi_core::host::SandboxedCommand,
+        ) -> Result<lingxi_core::host::ProcessHandle, lingxi_core::host::ProcessError> {
+            Err(lingxi_core::host::ProcessError::Unsupported)
         }
 
         async fn kill(
             &self,
-            _handle: &platform_api::ProcessHandle,
-        ) -> Result<(), platform_api::ProcessError> {
+            _handle: &lingxi_core::host::ProcessHandle,
+        ) -> Result<(), lingxi_core::host::ProcessError> {
             Ok(())
         }
 
@@ -20824,9 +20851,9 @@ still flip to available"
             vec![boot_cwd.clone()],
         );
         let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-        ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
+        ctx.worktree = mock.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>;
         let runner = Arc::new(RecordingProcessRunner::new(0));
-        ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
+        ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
         super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
             .await
@@ -20863,9 +20890,9 @@ still flip to available"
             vec![boot_cwd.clone()],
         );
         let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-        ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
+        ctx.worktree = mock.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>;
         let runner = Arc::new(RecordingProcessRunner::new(1));
-        ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
+        ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
         super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
             .await
@@ -20901,9 +20928,9 @@ still flip to available"
             vec![boot_cwd.clone()],
         );
         let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-        ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
+        ctx.worktree = mock.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>;
         let runner = Arc::new(RecordingProcessRunner::new(0));
-        ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
+        ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
         super::apply_worktree_launch(&Some("feat".to_string()), &None, &ctx)
             .await
@@ -20964,11 +20991,11 @@ still flip to available"
             vec![boot_cwd.clone()],
         );
         let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-        ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
+        ctx.worktree = mock.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>;
         // `tmux -V` probe returns non-zero ⇒ "not installed"; create exit is
         // irrelevant (never reached).
         let runner = Arc::new(RecordingProcessRunner::with_exits(127, 0));
-        ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
+        ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
         let err =
             super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
@@ -21013,11 +21040,11 @@ still flip to available"
             vec![boot_cwd.clone()],
         );
         let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-        ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
+        ctx.worktree = mock.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>;
         // Probe would report "not installed" IF it ran; create fails. Classic
         // must not run the probe, and the create failure must be non-fatal.
         let runner = Arc::new(RecordingProcessRunner::with_exits(127, 1));
-        ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
+        ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
         super::apply_worktree_launch(
             &Some("feat".to_string()),
@@ -21061,7 +21088,7 @@ still flip to available"
         init_git_repo_for_worktree_launch_test(tmp.path()).await;
         cfg.worktree_launch = Some("feat".to_string());
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21096,7 +21123,7 @@ still flip to available"
             "test_config's default must be inert"
         );
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21150,7 +21177,7 @@ still flip to available"
     #[tokio::test]
     async fn build_constructs_runtime_deterministically() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21264,7 +21291,7 @@ still flip to available"
     #[tokio::test]
     async fn drained_desktop_composition_releases_registry_and_session_claim() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21348,7 +21375,7 @@ still flip to available"
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn desktop_shutdown_waits_for_blocked_known_cost_wal_ack() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21358,7 +21385,7 @@ still flip to available"
         let weak_lease = Arc::downgrade(&writer_lease);
         drop(writer_lease);
         let journal = coordinator.journal();
-        let journal_lock = platform_api::rooted_fs::lock_exclusive_pinned(
+        let journal_lock = lingxi_core::host::rooted_fs::lock_exclusive_pinned(
             journal.root(),
             std::path::Path::new(session::jsonl::JOURNAL_LOCK_FILE_NAME),
             session::jsonl::journal::SESSION_STATE_DIR_MODE,
@@ -21465,7 +21492,7 @@ still flip to available"
         std::fs::create_dir_all(&extra).expect("mkdir extra");
         cfg.add_dir = vec![extra.clone()];
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21513,7 +21540,7 @@ still flip to available"
         cfg.add_dir = vec![std::path::PathBuf::from("data")];
         let expected = cfg.cwd.join("data"); // expand_trusted_dir(relative) = cwd.join
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21546,7 +21573,7 @@ still flip to available"
     #[tokio::test]
     async fn build_wires_mcp_oauth_seam() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21571,7 +21598,7 @@ still flip to available"
     #[tokio::test]
     async fn build_wires_mcp_discovery_cache_store() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21600,7 +21627,7 @@ still flip to available"
         )
         .unwrap();
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21634,7 +21661,7 @@ still flip to available"
         )
         .unwrap();
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21669,7 +21696,7 @@ still flip to available"
     #[tokio::test]
     async fn build_exposes_dispatcher_shared_command_registry() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21717,7 +21744,7 @@ still flip to available"
         )
         .unwrap();
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21742,7 +21769,7 @@ still flip to available"
     #[tokio::test]
     async fn build_with_no_plugins_dir_is_a_noop() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21759,7 +21786,7 @@ still flip to available"
         // and surfaces its capture slot for the print path.
         let (_tmp, mut cfg) = test_config(true);
         cfg.json_schema = Some(serde_json::json!({ "type": "object" }));
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21773,7 +21800,7 @@ still flip to available"
     #[tokio::test]
     async fn build_without_json_schema_has_no_structured_output_slot() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21909,7 +21936,7 @@ still flip to available"
     #[tokio::test]
     async fn build_surfaces_provider_availability_and_adapter() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -21962,7 +21989,7 @@ still flip to available"
         });
         // Unique test-only var: guarantees ≥1 connected provider on any host.
         std::env::set_var("LINGXI_TEST_REROUTE_KEY", "k");
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -22016,7 +22043,7 @@ still flip to available"
             m
         });
         std::env::set_var("LINGXI_TEST_REROUTE_KEY_EXPLICIT", "k");
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -22053,7 +22080,7 @@ still flip to available"
             m
         });
         std::env::set_var("LINGXI_TEST_REROUTE_KEY_ENVPIN", "k");
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -22073,7 +22100,7 @@ still flip to available"
     #[tokio::test]
     async fn build_surfaces_provider_auth_methods_from_catalog() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -22126,7 +22153,7 @@ still flip to available"
             }
         }));
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -22199,7 +22226,7 @@ still flip to available"
         fusion::CatalogModel {
             profile: profile.to_string(),
             model: model.to_string(),
-            hints: platform_api::FusionModelHints::default(),
+            hints: lingxi_core::host::FusionModelHints::default(),
             structured_output: false,
             limits: fusion::ModelLimits {
                 context_window_tokens: Some(200_000),
@@ -22493,7 +22520,7 @@ reconstruction — got: {after:?}"
     async fn a_completed_reprobe_re_arms_availability_filtering_after_a_boot_probe_timeout() {
         use async_trait::async_trait;
         use fusion::ModelSource as _;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
         use std::collections::HashMap;
@@ -22501,7 +22528,7 @@ reconstruction — got: {after:?}"
 
         #[derive(Default)]
         struct MemStorage {
-            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+            map: StdMutex<HashMap<(String, String), lingxi_core::types::SecureStorageData>>,
         }
         #[async_trait]
         impl SecureStorage for MemStorage {
@@ -22509,7 +22536,7 @@ reconstruction — got: {after:?}"
                 &self,
                 service: &str,
                 account: &str,
-                data: protocol::SecureStorageData,
+                data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 self.map
                     .lock()
@@ -22521,7 +22548,8 @@ reconstruction — got: {after:?}"
                 &self,
                 service: &str,
                 account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(self
                     .map
                     .lock()
@@ -22649,7 +22677,7 @@ providers with no credential: got {after:?}"
     #[tokio::test]
     async fn a_late_write_probe_cannot_resurrect_a_newer_delete() {
         use async_trait::async_trait;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
 
@@ -22663,7 +22691,7 @@ providers with no credential: got {after:?}"
                 &self,
                 _service: &str,
                 _account: &str,
-                _data: protocol::SecureStorageData,
+                _data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 Ok(())
             }
@@ -22671,7 +22699,8 @@ providers with no credential: got {after:?}"
                 &self,
                 _service: &str,
                 _account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(None)
             }
             async fn contains(
@@ -22764,7 +22793,7 @@ providers with no credential: got {after:?}"
     async fn a_degraded_reprobe_must_not_re_arm_availability_filtering() {
         use async_trait::async_trait;
         use fusion::ModelSource as _;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
 
@@ -22775,7 +22804,7 @@ providers with no credential: got {after:?}"
                 &self,
                 _service: &str,
                 _account: &str,
-                _data: protocol::SecureStorageData,
+                _data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 Ok(())
             }
@@ -22783,7 +22812,8 @@ providers with no credential: got {after:?}"
                 &self,
                 _service: &str,
                 _account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(None)
             }
             async fn delete(
@@ -22885,7 +22915,7 @@ from a degraded credential broker and must NOT re-arm filtering"
     async fn a_frozen_anthropic_boot_boolean_must_not_re_arm_availability_filtering() {
         use async_trait::async_trait;
         use fusion::ModelSource as _;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
 
@@ -22898,7 +22928,7 @@ from a degraded credential broker and must NOT re-arm filtering"
                 &self,
                 _service: &str,
                 _account: &str,
-                _data: protocol::SecureStorageData,
+                _data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 Ok(())
             }
@@ -22906,7 +22936,8 @@ from a degraded credential broker and must NOT re-arm filtering"
                 &self,
                 _service: &str,
                 _account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(None)
             }
             async fn delete(
@@ -23017,7 +23048,7 @@ Fusion's catalog for the rest of the process: got {after:?}"
     async fn an_env_var_only_row_must_not_re_arm_availability_filtering() {
         use async_trait::async_trait;
         use fusion::ModelSource as _;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
 
@@ -23028,7 +23059,7 @@ Fusion's catalog for the rest of the process: got {after:?}"
                 &self,
                 _service: &str,
                 _account: &str,
-                _data: protocol::SecureStorageData,
+                _data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 Ok(())
             }
@@ -23036,7 +23067,8 @@ Fusion's catalog for the rest of the process: got {after:?}"
                 &self,
                 _service: &str,
                 _account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(None)
             }
             async fn delete(
@@ -23153,7 +23185,7 @@ env-derived: got {after:?}"
     async fn an_anthropic_only_install_can_still_re_arm_availability_filtering() {
         use async_trait::async_trait;
         use fusion::ModelSource as _;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
 
@@ -23168,7 +23200,7 @@ env-derived: got {after:?}"
                 &self,
                 _service: &str,
                 _account: &str,
-                _data: protocol::SecureStorageData,
+                _data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 Ok(())
             }
@@ -23176,7 +23208,8 @@ env-derived: got {after:?}"
                 &self,
                 _service: &str,
                 _account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(None)
             }
             async fn delete(
@@ -23280,7 +23313,7 @@ got {after:?}"
     async fn an_all_env_var_install_can_still_re_arm_availability_filtering() {
         use async_trait::async_trait;
         use fusion::ModelSource as _;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
 
@@ -23291,7 +23324,7 @@ got {after:?}"
                 &self,
                 _service: &str,
                 _account: &str,
-                _data: protocol::SecureStorageData,
+                _data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 Ok(())
             }
@@ -23299,7 +23332,8 @@ got {after:?}"
                 &self,
                 _service: &str,
                 _account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(None)
             }
             async fn delete(
@@ -23470,7 +23504,7 @@ must be filtered out: got {after:?}"
     #[tokio::test]
     async fn build_with_noop_gate_uses_noop() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23485,7 +23519,7 @@ must be filtered out: got {after:?}"
 
     #[tokio::test]
     async fn build_applies_persisted_reasoning_default_before_the_first_turn() {
-        use platform_api::OrchestratorHandle as _;
+        use lingxi_core::host::OrchestratorHandle as _;
 
         let (_tmp, mut cfg) = test_config(true);
         cfg.default_model = "claude-opus-4-8".to_string();
@@ -23495,7 +23529,7 @@ must be filtered out: got {after:?}"
             r#"{"reasoning":{"defaultSelection":{"type":"level","id":"high"}}}"#,
         )
         .expect("write persisted reasoning default");
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23510,11 +23544,11 @@ must be filtered out: got {after:?}"
             .expect("conversation controls should be available");
         assert_eq!(
             controls.requested_reasoning_selection,
-            platform_api::ReasoningSelection::Level { id: "high".into() }
+            lingxi_core::host::ReasoningSelection::Level { id: "high".into() }
         );
         assert_eq!(
             controls.effective_reasoning_selection,
-            platform_api::ReasoningSelection::Level { id: "high".into() }
+            lingxi_core::host::ReasoningSelection::Level { id: "high".into() }
         );
     }
 
@@ -23530,7 +23564,7 @@ must be filtered out: got {after:?}"
         // injected gate must win.
         let (_tmp, mut cfg) = test_config(true);
         cfg.injected_permission_gate = Some(Arc::new(permission::DenyOnAskGate));
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23552,7 +23586,7 @@ must be filtered out: got {after:?}"
     #[tokio::test]
     async fn build_default_uses_adapter_gate() {
         let (_tmp, cfg) = test_config(false);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let sink = Arc::new(RecordingPermissionSink::default());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> = sink.clone();
@@ -23625,7 +23659,7 @@ must be filtered out: got {after:?}"
     #[tokio::test]
     async fn runtime_exposes_coordinator_handles() {
         let (_tmp, cfg) = test_config(true);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23657,7 +23691,7 @@ must be filtered out: got {after:?}"
     /// hook the wired `fire_session_start("startup")` call dispatched against.
     #[tokio::test]
     async fn build_fires_session_start_against_a_registered_hook() {
-        use platform_api::OrchestratorHandle as _;
+        use lingxi_core::host::OrchestratorHandle as _;
 
         let (_tmp, cfg) = test_config(true);
         // Project settings the hooks loader reads at boot
@@ -23672,7 +23706,7 @@ must be filtered out: got {after:?}"
         )
         .expect("write settings.json");
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23701,7 +23735,7 @@ must be filtered out: got {after:?}"
     /// frontmatter bucket), proving the boot path installed the agent's hook.
     #[tokio::test]
     async fn build_registers_main_thread_agent_frontmatter_hooks() {
-        use platform_api::OrchestratorHandle as _;
+        use lingxi_core::host::OrchestratorHandle as _;
 
         let (_tmp, mut cfg) = test_config(true);
         // `--agents` flag agent declaring a frontmatter `Stop` hook. `--agent`
@@ -23718,7 +23752,7 @@ must be filtered out: got {after:?}"
         );
         cfg.cli_agent = Some("tester".to_string());
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23758,7 +23792,7 @@ must be filtered out: got {after:?}"
         );
         cfg.cli_agent = Some("tester".to_string());
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23791,7 +23825,7 @@ must be filtered out: got {after:?}"
         );
         cfg.cli_agent = Some("tester".to_string());
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23829,7 +23863,7 @@ must be filtered out: got {after:?}"
         );
         cfg.cli_agent = Some("tester".to_string());
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23868,7 +23902,7 @@ must be filtered out: got {after:?}"
         );
         cfg.cli_agent = None;
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23894,7 +23928,7 @@ must be filtered out: got {after:?}"
     /// on-disk `<uuid>.jsonl`.
     #[tokio::test]
     async fn build_persists_and_restores_agent_setting_on_resume() {
-        use platform_api::OrchestratorHandle as _;
+        use lingxi_core::host::OrchestratorHandle as _;
 
         let (_tmp, mut cfg) = test_config(true);
         let agents = r#"{ "tester": {
@@ -23917,7 +23951,7 @@ must be filtered out: got {after:?}"
 
         // First boot: `--agent tester` applies + persists the `agent-setting`.
         cfg.cli_agent = Some("tester".to_string());
-        let output1: Arc<dyn platform_api::OutputStream> =
+        let output1: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm1: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23928,7 +23962,7 @@ must be filtered out: got {after:?}"
         drop(rt1);
 
         // Resume boot: no `--agent`; `rVe` reads the persisted record and re-adopts.
-        let output2: Arc<dyn platform_api::OutputStream> =
+        let output2: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm2: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23966,7 +24000,7 @@ must be filtered out: got {after:?}"
         resume_cfg.cli_agent = None;
         cfg.cli_agent = Some("tester".to_string());
 
-        let output1: Arc<dyn platform_api::OutputStream> =
+        let output1: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm1: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23976,7 +24010,7 @@ must be filtered out: got {after:?}"
         assert!(rt1.session_lifecycle.shutdown_and_drain().await.complete);
         drop(rt1);
 
-        let output2: Arc<dyn platform_api::OutputStream> =
+        let output2: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm2: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -23994,7 +24028,7 @@ must be filtered out: got {after:?}"
     /// therefore fall back to the default when the name is unavailable.
     #[tokio::test]
     async fn build_resume_missing_catalog_agent_uses_persisted_snapshot() {
-        use platform_api::OrchestratorHandle as _;
+        use lingxi_core::host::OrchestratorHandle as _;
 
         let (_tmp, mut cfg) = test_config(true);
         let agents = r#"{ "tester": {
@@ -24015,7 +24049,7 @@ must be filtered out: got {after:?}"
         resume_cfg.cli_agents_json = None;
 
         cfg.cli_agent = Some("tester".to_string());
-        let output1: Arc<dyn platform_api::OutputStream> =
+        let output1: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm1: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -24025,7 +24059,7 @@ must be filtered out: got {after:?}"
         assert!(rt1.session_lifecycle.shutdown_and_drain().await.complete);
         drop(rt1);
 
-        let output2: Arc<dyn platform_api::OutputStream> =
+        let output2: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm2: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -24046,7 +24080,7 @@ must be filtered out: got {after:?}"
     /// when that catalog entry is no longer available.
     #[tokio::test]
     async fn build_resume_legacy_missing_agent_falls_back_to_default() {
-        use platform_api::OrchestratorHandle as _;
+        use lingxi_core::host::OrchestratorHandle as _;
 
         let (_tmp, mut cfg) = test_config(true);
         let session_id = "55555555-6666-7777-8888-999999999999";
@@ -24056,14 +24090,14 @@ must be filtered out: got {after:?}"
 
         let transcript_path =
             session::jsonl::session_path(&cfg.lingxi_home, &cfg.cwd.to_string_lossy(), session_id);
-        let fs: Arc<dyn platform_api::FileSystem> =
+        let fs: Arc<dyn lingxi_core::host::FileSystem> =
             Arc::new(platform_posix::fs::PosixFileSystem::new(cfg.cwd.clone()));
         session::jsonl::JsonlWriter::new(transcript_path, fs)
             .append_agent_setting(session_id, "tester")
             .await
             .expect("write legacy agent-setting");
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let permission_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -24087,13 +24121,13 @@ must be filtered out: got {after:?}"
         assert!(super::agent_source_is_trusted(agent::AgentSource::BuiltIn));
         assert!(super::agent_source_is_trusted(agent::AgentSource::Plugin));
         assert!(super::agent_source_is_trusted(
-            agent::AgentSource::Settings(protocol::SettingsScope::Managed)
+            agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Managed)
         ));
         assert!(!super::agent_source_is_trusted(
-            agent::AgentSource::Settings(protocol::SettingsScope::User)
+            agent::AgentSource::Settings(lingxi_core::types::SettingsScope::User)
         ));
         assert!(!super::agent_source_is_trusted(
-            agent::AgentSource::Settings(protocol::SettingsScope::Project)
+            agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Project)
         ));
         assert!(!super::agent_source_is_trusted(agent::AgentSource::Flag));
         assert!(!super::agent_source_is_trusted(
@@ -24225,7 +24259,7 @@ must be filtered out: got {after:?}"
     #[tokio::test]
     async fn safe_mode_and_bare_skip_settings_hooks_at_boot() {
         use super::CustomizationGates;
-        use platform_api::OrchestratorHandle as _;
+        use lingxi_core::host::OrchestratorHandle as _;
 
         for gates in [
             CustomizationGates {
@@ -24249,7 +24283,7 @@ must be filtered out: got {after:?}"
             )
             .expect("write settings.json");
 
-            let output: Arc<dyn platform_api::OutputStream> =
+            let output: Arc<dyn lingxi_core::host::OutputStream> =
                 Arc::new(orchestrator::test_support::MockOutputStream::new());
             let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
                 Arc::new(RecordingPermissionSink::default());
@@ -24271,7 +24305,7 @@ must be filtered out: got {after:?}"
         for (persist, want_writer) in [(true, true), (false, false)] {
             let (_tmp, mut cfg) = test_config(true);
             cfg.session_persistence = persist;
-            let output: Arc<dyn platform_api::OutputStream> =
+            let output: Arc<dyn lingxi_core::host::OutputStream> =
                 Arc::new(orchestrator::test_support::MockOutputStream::new());
             let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
                 Arc::new(RecordingPermissionSink::default());
@@ -24290,12 +24324,12 @@ must be filtered out: got {after:?}"
                     .into_iter()
                     .filter(|state| state.base().task_type == tasks::TaskType::LocalFusion)
                     .count();
-                let dispatched = platform_api::SlashCommandDispatcher::dispatch(
+                let dispatched = lingxi_core::host::SlashCommandDispatcher::dispatch(
                     &rt.dispatcher,
                     "/fusion compare these approaches",
                 )
                 .await;
-                let platform_api::SlashDispatchResult::Handled { display } = dispatched else {
+                let lingxi_core::host::SlashDispatchResult::Handled { display } = dispatched else {
                     panic!("expected handled /fusion preflight, got {dispatched:?}");
                 };
                 assert!(
@@ -24343,7 +24377,7 @@ must be filtered out: got {after:?}"
     /// (never the real filesystem).
     #[tokio::test]
     async fn build_fires_instructions_loaded_against_a_registered_hook() {
-        use platform_api::OrchestratorHandle as _;
+        use lingxi_core::host::OrchestratorHandle as _;
 
         let (_tmp, cfg) = test_config(true);
         // Project settings the hooks loader reads at boot
@@ -24358,7 +24392,7 @@ must be filtered out: got {after:?}"
         )
         .expect("write settings.json");
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -24407,7 +24441,7 @@ must be filtered out: got {after:?}"
     /// runs over the injected file (best-effort) inside `build()`.
     #[tokio::test]
     async fn build_with_injected_memory_reaches_system_prompt() {
-        use platform_api::OrchestratorHandle as _;
+        use lingxi_core::host::OrchestratorHandle as _;
 
         let (_tmp, mut cfg) = test_config(true);
 
@@ -24442,7 +24476,7 @@ must be filtered out: got {after:?}"
             orchestrator::test_support::StaticMemoryProvider::with_files(vec![memory_file]),
         ));
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -24506,7 +24540,7 @@ must be filtered out: got {after:?}"
             cfg.memory_provider.is_none(),
             "default config must leave memory_provider None (empty, deterministic)"
         );
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -24535,7 +24569,7 @@ must be filtered out: got {after:?}"
         let (_tmp, mut cfg) = test_config(true);
         cfg.session_started_as_coordinator = true;
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -24571,7 +24605,7 @@ must be filtered out: got {after:?}"
         let (_tmp, cfg) = test_config(true);
         assert!(!cfg.session_started_as_coordinator);
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -24591,20 +24625,20 @@ must be filtered out: got {after:?}"
     struct NoopSeam;
 
     #[async_trait::async_trait]
-    impl platform_api::team_spawn::TeamSpawnSeam for NoopSeam {
+    impl lingxi_core::host::team_spawn::TeamSpawnSeam for NoopSeam {
         async fn spawn_teammate(
             &self,
-            _agent_id: protocol::AgentId,
+            _agent_id: lingxi_core::types::AgentId,
             _name: String,
             _team_name: String,
             _description: String,
-        ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
+        ) -> Result<String, lingxi_core::host::team_spawn::TeamSpawnError> {
             Ok(String::new())
         }
         async fn kill(
             &self,
             _task_id: &str,
-        ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+        ) -> Result<(), lingxi_core::host::team_spawn::TeamSpawnError> {
             Ok(())
         }
     }
@@ -24612,7 +24646,7 @@ must be filtered out: got {after:?}"
     /// A fully-stubbed `BuiltinToolContext` — enough to enumerate registered
     /// names and probe per-tool behavior markers; no tool is ever invoked.
     fn stub_tool_ctx() -> tool_api::BuiltinToolContext {
-        tool_api::test_support::shell_test_ctx(platform_api::process::ProcessOutput {
+        tool_api::test_support::shell_test_ctx(lingxi_core::host::process::ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,
@@ -24622,7 +24656,9 @@ must be filtered out: got {after:?}"
 
     fn coordinator_wiring() -> CoordinatorWiring {
         CoordinatorWiring {
-            team: Arc::new(coordinator::TeamRegistry::new(protocol::AgentId::new())),
+            team: Arc::new(coordinator::TeamRegistry::new(
+                lingxi_core::types::AgentId::new(),
+            )),
             spawn_seam: Arc::new(NoopSeam),
         }
     }
@@ -24658,7 +24694,7 @@ must be filtered out: got {after:?}"
     async fn build_coordinator_session_enters_mode() {
         let (_tmp, mut cfg) = test_config(true);
         cfg.session_started_as_coordinator = true;
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -24684,7 +24720,7 @@ must be filtered out: got {after:?}"
     async fn restricted_build_hides_default_restricted_builtins_from_advertising() {
         let (_tmp, mut cfg) = test_config(true);
         cfg.restricted = true;
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -24718,7 +24754,7 @@ must be filtered out: got {after:?}"
         let (_tmp, mut cfg) = test_config(true);
         cfg.restricted = true;
         cfg.restricted_tools = Some(vec!["Bash".into(), "WebFetch".into()]);
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -24763,7 +24799,9 @@ must be filtered out: got {after:?}"
     async fn mailbox_router_is_wired_when_coordinator() {
         // The shared coordinator router — exactly what `build()` clones into
         // `tool_ctx.mailbox_router` on the coordinator branch.
-        let team = Arc::new(coordinator::TeamRegistry::new(protocol::AgentId::new()));
+        let team = Arc::new(coordinator::TeamRegistry::new(
+            lingxi_core::types::AgentId::new(),
+        ));
         let worker = team
             .spawn_worker("explorer".into(), "alpha".into(), String::new())
             .await
@@ -24774,9 +24812,9 @@ must be filtered out: got {after:?}"
         // context (still wired for the tools that read it), plus the coordinator
         // wiring that splices the coordinator `SendMessage` in.
         let mut ctx = stub_tool_ctx();
-        ctx.mailbox_router = Some(
-            team.mailbox_router.clone() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>
-        );
+        ctx.mailbox_router =
+            Some(team.mailbox_router.clone()
+                as Arc<dyn lingxi_core::host::mailbox::MailboxRouterHandle>);
         let wiring = CoordinatorWiring {
             team: team.clone(),
             spawn_seam: Arc::new(NoopSeam),
@@ -25614,7 +25652,7 @@ must be filtered out: got {after:?}"
         );
         assert_eq!(
             super::model_provenance_for_config(&cfg, Some(&managed)),
-            platform_api::ModelProvenance::ManagedAdministratorDefault
+            lingxi_core::host::ModelProvenance::ManagedAdministratorDefault
         );
         assert_eq!(
             super::managed_model_setting_for_config(&cfg, Some(&managed)).as_deref(),
@@ -25624,7 +25662,7 @@ must be filtered out: got {after:?}"
         let blank_managed = effective_model(" ", lingxi_core::settings::tracer::Source::Managed);
         assert_eq!(
             super::model_provenance_for_config(&cfg, Some(&blank_managed)),
-            platform_api::ModelProvenance::ProviderCatalogTier
+            lingxi_core::host::ModelProvenance::ProviderCatalogTier
         );
         assert!(
             super::managed_model_setting_for_config(&cfg, Some(&blank_managed)).is_none(),
@@ -25637,7 +25675,7 @@ must be filtered out: got {after:?}"
         );
         assert_eq!(
             super::model_provenance_for_config(&cfg, Some(&user)),
-            platform_api::ModelProvenance::UserOrEnv
+            lingxi_core::host::ModelProvenance::UserOrEnv
         );
         assert!(super::managed_model_setting_for_config(&cfg, Some(&user)).is_none());
 
@@ -25647,14 +25685,14 @@ must be filtered out: got {after:?}"
         );
         assert_eq!(
             super::model_provenance_for_config(&cfg, Some(&catalog)),
-            platform_api::ModelProvenance::ProviderCatalogTier
+            lingxi_core::host::ModelProvenance::ProviderCatalogTier
         );
 
         let mut explicit = cfg.clone();
         explicit.default_model_explicit = true;
         assert_eq!(
             super::model_provenance_for_config(&explicit, Some(&managed)),
-            platform_api::ModelProvenance::UserOrEnv
+            lingxi_core::host::ModelProvenance::UserOrEnv
         );
         assert!(super::managed_model_setting_for_config(&explicit, Some(&managed)).is_none());
 
@@ -25662,7 +25700,7 @@ must be filtered out: got {after:?}"
         env_pinned.default_model_env_pinned = true;
         assert_eq!(
             super::model_provenance_for_config(&env_pinned, Some(&managed)),
-            platform_api::ModelProvenance::UserOrEnv
+            lingxi_core::host::ModelProvenance::UserOrEnv
         );
     }
 
@@ -25751,8 +25789,8 @@ must be filtered out: got {after:?}"
             tiers
                 .rules
                 .iter()
-                .any(|r| r.source == permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)),
-            "managed tier rules must parse with PermissionRuleSource::Settings(protocol::SettingsScope::Managed)"
+                .any(|r| r.source == permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)),
+            "managed tier rules must parse with PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)"
         );
         // The managed raw text also feeds the sandbox derivation (appended last).
         assert_eq!(
@@ -25767,7 +25805,9 @@ must be filtered out: got {after:?}"
             permission::PermissionResult::Deny { reason, .. } => match reason {
                 permission::PermissionDecisionReason::MatchedRule { rule } => assert_eq!(
                     rule.source,
-                    permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+                    permission::PermissionRuleSource::Settings(
+                        lingxi_core::types::SettingsScope::Managed
+                    ),
                     "the deny must cite the managed (enterprise) rule"
                 ),
                 other => panic!("expected MatchedRule reason, got {other:?}"),
@@ -25859,7 +25899,7 @@ must be filtered out: got {after:?}"
         assert_eq!(tiers.rules.len(), 1, "only the managed rule loads");
         assert_eq!(
             tiers.rules[0].source,
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)
         );
 
         std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
@@ -25900,7 +25940,7 @@ must be filtered out: got {after:?}"
         assert!(tiers.allow_managed_permission_rules_only);
         assert_eq!(
             tiers.rules[0].source,
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)
         );
         assert_eq!(tiers.rules[0].value.tool_name, "Bash");
 
@@ -25933,7 +25973,9 @@ must be filtered out: got {after:?}"
         let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
         assert_eq!(tiers.rules.len(), 2, "base + drop-in rules both accumulate");
         assert!(tiers.rules.iter().all(|r| r.source
-            == permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)));
+            == permission::PermissionRuleSource::Settings(
+                lingxi_core::types::SettingsScope::Managed
+            )));
         assert_eq!(
             tiers.mode,
             permission::PermissionMode::Plan,
@@ -25977,7 +26019,7 @@ must be filtered out: got {after:?}"
             "aliases": { "llama": "groq/llama-3.3-70b-versatile" }
         }));
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -26052,7 +26094,7 @@ must be filtered out: got {after:?}"
         }));
 
         // Composition-root assertion: build() succeeds with routing-only settings.
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -26288,7 +26330,7 @@ must be filtered out: got {after:?}"
         // Construct the same listing shape the composition root builds from
         // `assembled.client_config.providers`.
         let listings = vec![
-            platform_api::ModelListing {
+            lingxi_core::host::ModelListing {
                 display_model: "gpt-4o".to_string(),
                 request_model: "gpt-4o".to_string(),
                 provider_id: "openai".to_string(),
@@ -26301,7 +26343,7 @@ must be filtered out: got {after:?}"
                 fusion_analyst_capable: false,
                 connection: Default::default(),
             },
-            platform_api::ModelListing {
+            lingxi_core::host::ModelListing {
                 display_model: "gpt-4o".to_string(),
                 request_model: "gpt-4o".to_string(),
                 provider_id: "github-copilot".to_string(),
@@ -26314,7 +26356,7 @@ must be filtered out: got {after:?}"
                 fusion_analyst_capable: false,
                 connection: Default::default(),
             },
-            platform_api::ModelListing {
+            lingxi_core::host::ModelListing {
                 display_model: "claude-sonnet-4-6".to_string(),
                 request_model: "claude-sonnet-4-6".to_string(),
                 provider_id: "anthropic".to_string(),
@@ -26330,7 +26372,7 @@ must be filtered out: got {after:?}"
         ];
 
         // Qualified: "openai/gpt-4o" → bare id "gpt-4o" + profile "openai"
-        let (id, profile) = platform_api::parse_model_ref("openai/gpt-4o", &listings);
+        let (id, profile) = lingxi_core::host::parse_model_ref("openai/gpt-4o", &listings);
         assert_eq!(id, "gpt-4o", "qualified ref must strip the profile prefix");
         assert_eq!(
             profile.as_deref(),
@@ -26339,12 +26381,13 @@ must be filtered out: got {after:?}"
         );
 
         // Bare: "claude-sonnet-4-6" → same id, no profile (no-op seed path)
-        let (id2, profile2) = platform_api::parse_model_ref("claude-sonnet-4-6", &listings);
+        let (id2, profile2) = lingxi_core::host::parse_model_ref("claude-sonnet-4-6", &listings);
         assert_eq!(id2, "claude-sonnet-4-6", "bare model id must pass through");
         assert!(profile2.is_none(), "bare model must yield None profile");
 
         // Shared id with two providers and explicit profile qualifier
-        let (id3, profile3) = platform_api::parse_model_ref("github-copilot/gpt-4o", &listings);
+        let (id3, profile3) =
+            lingxi_core::host::parse_model_ref("github-copilot/gpt-4o", &listings);
         assert_eq!(id3, "gpt-4o");
         assert_eq!(profile3.as_deref(), Some("github-copilot"));
     }
@@ -26931,21 +26974,21 @@ must be filtered out: got {after:?}"
     }
 
     #[async_trait::async_trait]
-    impl platform_api::McpTransport for FailOnceReloadPluginTransport {
+    impl lingxi_core::host::McpTransport for FailOnceReloadPluginTransport {
         async fn connect(
             &self,
-            _s: &platform_api::McpTransportSpec,
-        ) -> Result<platform_api::McpRawConnection, platform_api::McpError> {
-            Ok(platform_api::McpRawConnection {
-                connection_id: protocol::McpConnectionId::new(),
+            _s: &lingxi_core::host::McpTransportSpec,
+        ) -> Result<lingxi_core::host::McpRawConnection, lingxi_core::host::McpError> {
+            Ok(lingxi_core::host::McpRawConnection {
+                connection_id: lingxi_core::types::McpConnectionId::new(),
             })
         }
 
         async fn initialize(
             &self,
-            _c: &platform_api::McpRawConnection,
-        ) -> Result<platform_api::ServerCapabilitiesDto, platform_api::McpError> {
-            Ok(platform_api::ServerCapabilitiesDto {
+            _c: &lingxi_core::host::McpRawConnection,
+        ) -> Result<lingxi_core::host::ServerCapabilitiesDto, lingxi_core::host::McpError> {
+            Ok(lingxi_core::host::ServerCapabilitiesDto {
                 tools: false,
                 resources: false,
                 prompts: false,
@@ -26958,94 +27001,100 @@ must be filtered out: got {after:?}"
 
         async fn list_tools(
             &self,
-            _c: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpToolDto>, platform_api::McpError> {
+            _c: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpToolDto>, lingxi_core::host::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_resources(
             &self,
-            _c: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpResourceDto>, platform_api::McpError> {
+            _c: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpResourceDto>, lingxi_core::host::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_resource_templates(
             &self,
-            _c: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpResourceTemplateDto>, platform_api::McpError> {
+            _c: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpResourceTemplateDto>, lingxi_core::host::McpError>
+        {
             Ok(Vec::new())
         }
 
         async fn list_prompts(
             &self,
-            _c: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpPromptDto>, platform_api::McpError> {
+            _c: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpPromptDto>, lingxi_core::host::McpError> {
             Ok(Vec::new())
         }
 
         async fn call_tool(
             &self,
-            _c: &platform_api::McpRawConnection,
+            _c: &lingxi_core::host::McpRawConnection,
             _t: &str,
             _i: serde_json::Value,
-        ) -> Result<platform_api::McpToolResultDto, platform_api::McpError> {
+        ) -> Result<lingxi_core::host::McpToolResultDto, lingxi_core::host::McpError> {
             unreachable!("unused in reload test")
         }
 
         async fn read_resource(
             &self,
-            _c: &platform_api::McpRawConnection,
+            _c: &lingxi_core::host::McpRawConnection,
             _u: &str,
-        ) -> Result<platform_api::McpResourceContentDto, platform_api::McpError> {
+        ) -> Result<lingxi_core::host::McpResourceContentDto, lingxi_core::host::McpError> {
             unreachable!("unused in reload test")
         }
 
-        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), platform_api::McpError> {
+        async fn ping(
+            &self,
+            _id: lingxi_core::types::McpConnectionId,
+        ) -> Result<(), lingxi_core::host::McpError> {
             Ok(())
         }
 
         async fn notifications(
             &self,
-            _c: &platform_api::McpRawConnection,
-        ) -> Result<platform_api::McpNotificationStream, platform_api::McpError> {
+            _c: &lingxi_core::host::McpRawConnection,
+        ) -> Result<lingxi_core::host::McpNotificationStream, lingxi_core::host::McpError> {
             unreachable!("unused in reload test")
         }
 
         async fn handle_elicitation(
             &self,
-            _c: &platform_api::McpRawConnection,
-            _r: platform_api::ElicitRequestDto,
-        ) -> Result<platform_api::ElicitResultDto, platform_api::McpError> {
+            _c: &lingxi_core::host::McpRawConnection,
+            _r: lingxi_core::host::ElicitRequestDto,
+        ) -> Result<lingxi_core::host::ElicitResultDto, lingxi_core::host::McpError> {
             unreachable!("unused in reload test")
         }
 
         async fn disconnect(
             &self,
-            _id: protocol::McpConnectionId,
-        ) -> Result<(), platform_api::McpError> {
+            _id: lingxi_core::types::McpConnectionId,
+        ) -> Result<(), lingxi_core::host::McpError> {
             if self
                 .disconnect_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 == 0
             {
-                Err(platform_api::McpError::Internal("disconnect failed".into()))
+                Err(lingxi_core::host::McpError::Internal(
+                    "disconnect failed".into(),
+                ))
             } else {
                 Ok(())
             }
         }
 
-        fn supported_transports(&self) -> Vec<platform_api::McpTransportKind> {
-            vec![platform_api::McpTransportKind::Stdio]
+        fn supported_transports(&self) -> Vec<lingxi_core::host::McpTransportKind> {
+            vec![lingxi_core::host::McpTransportKind::Stdio]
         }
     }
 
     #[async_trait::async_trait]
-    impl platform_api::McpTransport for BlockingReloadPluginTransport {
+    impl lingxi_core::host::McpTransport for BlockingReloadPluginTransport {
         async fn connect(
             &self,
-            _s: &platform_api::McpTransportSpec,
-        ) -> Result<platform_api::McpRawConnection, platform_api::McpError> {
+            _s: &lingxi_core::host::McpTransportSpec,
+        ) -> Result<lingxi_core::host::McpRawConnection, lingxi_core::host::McpError> {
             let call = self
                 .connect_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -27058,16 +27107,16 @@ must be filtered out: got {after:?}"
             {
                 self.connect_release.notified().await;
             }
-            Ok(platform_api::McpRawConnection {
-                connection_id: protocol::McpConnectionId::new(),
+            Ok(lingxi_core::host::McpRawConnection {
+                connection_id: lingxi_core::types::McpConnectionId::new(),
             })
         }
 
         async fn initialize(
             &self,
-            _c: &platform_api::McpRawConnection,
-        ) -> Result<platform_api::ServerCapabilitiesDto, platform_api::McpError> {
-            Ok(platform_api::ServerCapabilitiesDto {
+            _c: &lingxi_core::host::McpRawConnection,
+        ) -> Result<lingxi_core::host::ServerCapabilitiesDto, lingxi_core::host::McpError> {
+            Ok(lingxi_core::host::ServerCapabilitiesDto {
                 tools: false,
                 resources: false,
                 prompts: false,
@@ -27080,77 +27129,81 @@ must be filtered out: got {after:?}"
 
         async fn list_tools(
             &self,
-            _c: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpToolDto>, platform_api::McpError> {
+            _c: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpToolDto>, lingxi_core::host::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_resources(
             &self,
-            _c: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpResourceDto>, platform_api::McpError> {
+            _c: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpResourceDto>, lingxi_core::host::McpError> {
             Ok(Vec::new())
         }
 
         async fn list_resource_templates(
             &self,
-            _c: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpResourceTemplateDto>, platform_api::McpError> {
+            _c: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpResourceTemplateDto>, lingxi_core::host::McpError>
+        {
             Ok(Vec::new())
         }
 
         async fn list_prompts(
             &self,
-            _c: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpPromptDto>, platform_api::McpError> {
+            _c: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpPromptDto>, lingxi_core::host::McpError> {
             Ok(Vec::new())
         }
 
         async fn call_tool(
             &self,
-            _c: &platform_api::McpRawConnection,
+            _c: &lingxi_core::host::McpRawConnection,
             _t: &str,
             _i: serde_json::Value,
-        ) -> Result<platform_api::McpToolResultDto, platform_api::McpError> {
+        ) -> Result<lingxi_core::host::McpToolResultDto, lingxi_core::host::McpError> {
             unreachable!("unused in concurrent refresh test")
         }
 
         async fn read_resource(
             &self,
-            _c: &platform_api::McpRawConnection,
+            _c: &lingxi_core::host::McpRawConnection,
             _u: &str,
-        ) -> Result<platform_api::McpResourceContentDto, platform_api::McpError> {
+        ) -> Result<lingxi_core::host::McpResourceContentDto, lingxi_core::host::McpError> {
             unreachable!("unused in concurrent refresh test")
         }
 
-        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), platform_api::McpError> {
+        async fn ping(
+            &self,
+            _id: lingxi_core::types::McpConnectionId,
+        ) -> Result<(), lingxi_core::host::McpError> {
             Ok(())
         }
 
         async fn notifications(
             &self,
-            _c: &platform_api::McpRawConnection,
-        ) -> Result<platform_api::McpNotificationStream, platform_api::McpError> {
+            _c: &lingxi_core::host::McpRawConnection,
+        ) -> Result<lingxi_core::host::McpNotificationStream, lingxi_core::host::McpError> {
             unreachable!("unused in concurrent refresh test")
         }
 
         async fn handle_elicitation(
             &self,
-            _c: &platform_api::McpRawConnection,
-            _r: platform_api::ElicitRequestDto,
-        ) -> Result<platform_api::ElicitResultDto, platform_api::McpError> {
+            _c: &lingxi_core::host::McpRawConnection,
+            _r: lingxi_core::host::ElicitRequestDto,
+        ) -> Result<lingxi_core::host::ElicitResultDto, lingxi_core::host::McpError> {
             unreachable!("unused in concurrent refresh test")
         }
 
         async fn disconnect(
             &self,
-            _id: protocol::McpConnectionId,
-        ) -> Result<(), platform_api::McpError> {
+            _id: lingxi_core::types::McpConnectionId,
+        ) -> Result<(), lingxi_core::host::McpError> {
             Ok(())
         }
 
-        fn supported_transports(&self) -> Vec<platform_api::McpTransportKind> {
-            vec![platform_api::McpTransportKind::Stdio]
+        fn supported_transports(&self) -> Vec<lingxi_core::host::McpTransportKind> {
+            vec![lingxi_core::host::McpTransportKind::Stdio]
         }
     }
 
@@ -27223,7 +27276,7 @@ must be filtered out: got {after:?}"
         // the absence assertions further down prove nothing about the loader.
         let control = agent::parse_agent_markdown(
             ROGUE_AGENT_MD,
-            agent::AgentSource::Settings(protocol::SettingsScope::User),
+            agent::AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             std::path::PathBuf::from("/agents"),
             std::path::Path::new("/agents/rogue.md"),
         )
@@ -27952,8 +28005,8 @@ mod connected_fallback_tests {
     use super::{connected_provider_fallback, RecentModelRef};
     use std::collections::BTreeMap;
 
-    fn listing(provider_id: &str, request_model: &str) -> platform_api::ModelListing {
-        platform_api::ModelListing {
+    fn listing(provider_id: &str, request_model: &str) -> lingxi_core::host::ModelListing {
+        lingxi_core::host::ModelListing {
             display_model: request_model.to_string(),
             request_model: request_model.to_string(),
             provider_id: provider_id.to_string(),
@@ -27969,7 +28022,7 @@ mod connected_fallback_tests {
     }
 
     /// Catalog fixture: anthropic + a few presets + a user-defined "groq".
-    fn listings() -> Vec<platform_api::ModelListing> {
+    fn listings() -> Vec<lingxi_core::host::ModelListing> {
         vec![
             listing("anthropic", "claude-sonnet-5"),
             listing("anthropic", "claude-opus-4-8"),
@@ -28245,7 +28298,7 @@ mod connected_fallback_tests {
     /// serves it.
     #[test]
     fn curated_default_missing_from_catalog_falls_to_first_listing() {
-        let listings: Vec<platform_api::ModelListing> = vec![
+        let listings: Vec<lingxi_core::host::ModelListing> = vec![
             listing("anthropic", "claude-sonnet-5"),
             listing("deepseek", "deepseek-reasoner"), // no deepseek-chat
         ];
@@ -28268,7 +28321,9 @@ mod connected_fallback_tests {
 mod workspace_lease_forwarding_tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use lingxi_core::host::tool_invoker::{
+        SubagentInvocationContext, ToolInvoker, ToolInvokerError,
+    };
 
     /// Terminal invoker that records the lease token it was dispatched with.
     struct RecordingInvoker {
@@ -28283,9 +28338,10 @@ mod workspace_lease_forwarding_tests {
             _input: serde_json::Value,
             _ctx: SubagentInvocationContext,
             workspace_lease_token: Option<u64>,
-        ) -> Result<platform_api::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+        ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError>
+        {
             *self.seen.lock().unwrap() = Some(workspace_lease_token);
-            Ok(platform_api::tool_invoker::ToolInvocationResult {
+            Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
                 is_error: false,
                 data: serde_json::json!({"awaitingLeaderApproval": true}),
                 model_content: Some("Wait for the team lead to review your plan".into()),
@@ -28323,7 +28379,7 @@ mod workspace_lease_forwarding_tests {
             permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
-            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+            tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: None,
             team_name: None,
             is_async: false,
@@ -28390,12 +28446,12 @@ mod workspace_lease_forwarding_tests {
 /// its half-built `cleanups` vec had no owner at all.
 #[cfg(test)]
 mod desktop_agent_mcp_cleanup_guard_tests {
-    use platform_api::{
+    use lingxi_core::host::{
         ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
         McpNotificationStream, McpRawConnection, McpResourceContentDto, McpResourceDto,
         McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
     };
-    use protocol::McpConnectionId;
+    use lingxi_core::types::McpConnectionId;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -28438,7 +28494,7 @@ mod desktop_agent_mcp_cleanup_guard_tests {
         async fn list_tools(
             &self,
             _conn: &McpRawConnection,
-        ) -> Result<Vec<platform_api::McpToolDto>, McpError> {
+        ) -> Result<Vec<lingxi_core::host::McpToolDto>, McpError> {
             Ok(Vec::new())
         }
 
@@ -28452,7 +28508,7 @@ mod desktop_agent_mcp_cleanup_guard_tests {
         async fn list_prompts(
             &self,
             _conn: &McpRawConnection,
-        ) -> Result<Vec<platform_api::McpPromptDto>, McpError> {
+        ) -> Result<Vec<lingxi_core::host::McpPromptDto>, McpError> {
             Ok(Vec::new())
         }
 
@@ -28513,14 +28569,14 @@ mod desktop_agent_mcp_cleanup_guard_tests {
     }
 
     async fn connect_loop_fixture() -> (
-        protocol::AgentId,
+        lingxi_core::types::AgentId,
         String,
         Arc<mcp::McpRegistry>,
         tool_api::BuiltinToolContext,
         agent::AgentDefinition,
         Arc<tokio::sync::Notify>,
     ) {
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         let opened_key = mcp::registry::agent_scope_table_key(agent_id, "opened");
         let entered = Arc::new(tokio::sync::Notify::new());
         let registry = Arc::new(mcp::McpRegistry::new(Arc::new(HangingConnectTransport {
@@ -28539,8 +28595,8 @@ mod desktop_agent_mcp_cleanup_guard_tests {
             opened_key.clone(),
             mcp::McpConnectionState::Connected {
                 config,
-                connection_id: protocol::McpConnectionId::new(),
-                capabilities: platform_api::ServerCapabilitiesDto {
+                connection_id: lingxi_core::types::McpConnectionId::new(),
+                capabilities: lingxi_core::host::ServerCapabilitiesDto {
                     tools: true,
                     resources: false,
                     prompts: false,
@@ -28549,8 +28605,8 @@ mod desktop_agent_mcp_cleanup_guard_tests {
                     experimental: std::collections::HashMap::new(),
                     extensions: std::collections::HashMap::new(),
                 },
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: vec![],
@@ -28564,7 +28620,7 @@ mod desktop_agent_mcp_cleanup_guard_tests {
         let mut def = agent::parse_agent_from_json(
             "tester",
             &serde_json::json!({"description": "d", "prompt": "p"}),
-            agent::AgentSource::Settings(protocol::SettingsScope::Project),
+            agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .expect("agent definition parses");
         def.mcp_servers = vec![record_spec("opened"), record_spec("hangs")];
@@ -28625,7 +28681,7 @@ a plain local that no caller has ever seen, so nothing else can ever tear it dow
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         struct NoWork;
         #[async_trait::async_trait]
-        impl platform_api::ToolInvoker for NoWork {
+        impl lingxi_core::host::ToolInvoker for NoWork {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -28633,15 +28689,15 @@ a plain local that no caller has ever seen, so nothing else can ever tear it dow
                 &self,
                 _: &str,
                 _: serde_json::Value,
-                _: platform_api::tool_invoker::SubagentInvocationContext,
-            ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError>
+                _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+            ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError>
             {
                 Ok(serde_json::Value::Null)
             }
         }
         #[async_trait::async_trait]
-        impl platform_api::BudgetEnforcerHandle for NoWork {
-            async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::BudgetError> {
+        impl lingxi_core::host::BudgetEnforcerHandle for NoWork {
+            async fn check_and_charge(&self, _: u64) -> Result<(), lingxi_core::host::BudgetError> {
                 Ok(())
             }
             async fn snapshot_total_nano_usd(&self) -> u64 {
@@ -28649,8 +28705,8 @@ a plain local that no caller has ever seen, so nothing else can ever tear it dow
             }
         }
         #[async_trait::async_trait]
-        impl platform_api::subagent_spawn::SubagentSpawnObserver for NoWork {
-            async fn on_event(&self, _: platform_api::subagent_spawn::SubagentObservation) {}
+        impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for NoWork {
+            async fn on_event(&self, _: lingxi_core::host::subagent_spawn::SubagentObservation) {}
         }
         struct LeaseProbe {
             _lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>,
@@ -28694,15 +28750,15 @@ a plain local that no caller has ever seen, so nothing else can ever tear it dow
         ));
         let spawner =
             Arc::new(agent::PoolSubagentSpawner::new(pool).with_mcp_tool_builder(builder));
-        let request = platform_api::SubagentSpawnRequest {
+        let request = lingxi_core::host::SubagentSpawnRequest {
             subagent_type: "general-purpose".into(),
-            resumed_history: Some(vec![protocol::ConversationMessage::user(
-                protocol::MessageId::new(),
+            resumed_history: Some(vec![lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
                 "restored history".into(),
             )]),
             ..Default::default()
         };
-        let inherit = || platform_api::SubagentInheritance {
+        let inherit = || lingxi_core::host::SubagentInheritance {
             tool_invoker: Arc::new(NoWork),
             budget: Arc::new(NoWork),
         };
@@ -28787,7 +28843,7 @@ pub use platform_windows::process::supervisor as shell_supervisor;
 #[cfg(any(unix, windows))]
 pub fn supervisor_exit_sink(
     path: &std::path::Path,
-) -> std::sync::Arc<dyn platform_api::BackgroundExitSink> {
+) -> std::sync::Arc<dyn lingxi_core::host::BackgroundExitSink> {
     let root = path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("/"))

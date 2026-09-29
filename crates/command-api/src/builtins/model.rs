@@ -15,7 +15,7 @@ use crate::builtin_support::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::{ModelListing, OrchestratorHandle};
+use lingxi_core::host::{ModelListing, OrchestratorHandle};
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
 
@@ -26,8 +26,10 @@ fn provider_for_ref<'a>(
     listings
         .iter()
         .find(|listing| {
-            platform_api::qualified_model_ref(&listing.request_model, Some(&listing.provider_id))
-                == model_ref
+            lingxi_core::host::qualified_model_ref(
+                &listing.request_model,
+                Some(&listing.provider_id),
+            ) == model_ref
         })
         .or_else(|| {
             let (provider, _) = model_ref.split_once('/')?;
@@ -101,7 +103,7 @@ impl BuiltinCommandHandler for ModelHandler {
         let trimmed = args.raw_args.trim();
         if trimmed.is_empty() {
             // List mode. Curate to the "latest few" per provider (the shared
-            // `platform_api::curated_model_refs`, same whitelist as the TUI picker +
+            // `lingxi_core::host::curated_model_refs`, same whitelist as the TUI picker +
             // mobile listing) instead of joining the full assembled catalog
             // (~hundreds of ids — every preset is injected into the live config by
             // `provider_config::assemble`). Qualified refs preserve provider
@@ -110,7 +112,7 @@ impl BuiltinCommandHandler for ModelHandler {
             let available = self.handle.list_available_models().await;
             let listings = self.handle.list_model_listings().await;
             let snap = self.handle.get_status_snapshot().await;
-            let models = platform_api::curated_model_refs(
+            let models = lingxi_core::host::curated_model_refs(
                 &listings,
                 &available,
                 &snap.model,
@@ -123,7 +125,10 @@ impl BuiltinCommandHandler for ModelHandler {
                 String::new()
             } else {
                 models.first().cloned().unwrap_or_else(|| {
-                    platform_api::qualified_model_ref(&snap.model, snap.model_profile.as_deref())
+                    lingxi_core::host::qualified_model_ref(
+                        &snap.model,
+                        snap.model_profile.as_deref(),
+                    )
                 })
             };
             let available = render_grouped_model_refs(&models, &listings);
@@ -140,7 +145,7 @@ impl BuiltinCommandHandler for ModelHandler {
         // Switch mode. Resolve an optional `profile/model` qualifier so a shared
         // id (offered by multiple providers) routes deterministically.
         let listings = self.handle.list_model_listings().await;
-        let (model, profile) = platform_api::parse_model_ref(trimmed, &listings);
+        let (model, profile) = lingxi_core::host::parse_model_ref(trimmed, &listings);
         match self
             .handle
             .switch_model_with_source(&model, profile.as_deref(), "command")
@@ -186,9 +191,9 @@ mod tests {
     async fn list_mode_when_no_args() {
         let mock = Arc::new(MockOrchestratorHandle::new());
         mock.set_available_models(vec!["claude-opus-4-7".into(), "claude-sonnet-4-6".into()]);
-        let snap = platform_api::StatusSnapshot {
+        let snap = lingxi_core::host::StatusSnapshot {
             model: "claude-opus-4-7".into(),
-            ..platform_api::StatusSnapshot::default()
+            ..lingxi_core::host::StatusSnapshot::default()
         };
         mock.set_status_snapshot(snap);
         let h = ModelHandler::new(mock);
@@ -228,10 +233,10 @@ mod tests {
             listing("openai", "OpenAI", "gpt-4o"),
             listing("github-copilot", "GitHub Copilot", "gpt-5.6-sol"),
         ]);
-        mock.set_status_snapshot(platform_api::StatusSnapshot {
+        mock.set_status_snapshot(lingxi_core::host::StatusSnapshot {
             model: "gpt-5.6-sol".into(),
             model_profile: Some("github-copilot".into()),
-            ..platform_api::StatusSnapshot::default()
+            ..lingxi_core::host::StatusSnapshot::default()
         });
 
         let h = ModelHandler::new(mock);
@@ -270,10 +275,10 @@ mod tests {
             fusion_analyst_capable: false,
             connection: Default::default(),
         }]);
-        mock.set_status_snapshot(platform_api::StatusSnapshot {
+        mock.set_status_snapshot(lingxi_core::host::StatusSnapshot {
             model: "deepseek-flash".into(),
             model_profile: None,
-            ..platform_api::StatusSnapshot::default()
+            ..lingxi_core::host::StatusSnapshot::default()
         });
 
         let h = ModelHandler::new(mock);
@@ -338,7 +343,7 @@ mod tests {
     /// `("gpt-4.1", None)`.
     #[tokio::test]
     async fn model_switch_parses_profile_qualified_ref() {
-        use platform_api::ModelListing;
+        use lingxi_core::host::ModelListing;
         fn listing(provider_id: &str, request_model: &str) -> ModelListing {
             ModelListing {
                 display_model: request_model.to_string(),

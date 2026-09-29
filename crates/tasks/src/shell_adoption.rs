@@ -1,8 +1,8 @@
 //! Two-phase shell ownership transfer. Included as a child of registry so row
 //! publication and removal use the same lock as notification claims.
 use super::*;
-use platform_api::process::{BackgroundExitSink, ProcessHandle, ShellProcessHandoff};
-use platform_api::shell_handoff::ShellTaskHandoff;
+use lingxi_core::host::process::{BackgroundExitSink, ProcessHandle, ShellProcessHandoff};
+use lingxi_core::host::shell_handoff::ShellTaskHandoff;
 
 struct AdoptedExitSink {
     status: Arc<dyn crate::handlers::TaskStatusSink>,
@@ -61,7 +61,7 @@ struct AdoptedKiller {
     handoff: ShellProcessHandoff,
 }
 #[async_trait::async_trait]
-impl platform_api::task_registry::TaskKiller for AdoptedKiller {
+impl lingxi_core::host::task_registry::TaskKiller for AdoptedKiller {
     async fn kill(&self) {
         // Validation proves the live supervisor still holds this child. The
         // native runner routes kill through that supervisor, never a raw PID.
@@ -226,7 +226,7 @@ impl TaskRegistry {
                 .await
             {
                 Ok(native) => native,
-                Err(platform_api::ProcessError::Unsupported) => {
+                Err(lingxi_core::host::ProcessError::Unsupported) => {
                     self.release_shell_transfer_fences(&[shell.base.id]);
                     continue;
                 }
@@ -425,7 +425,7 @@ impl TaskRegistry {
                 let killer = Arc::new(AdoptedKiller { process: process.clone(), handoff: record.process.clone() });
                 let cleanup: TaskCleanup = Arc::new(move || {
                     let killer = killer.clone();
-                    tokio::spawn(async move { platform_api::task_registry::TaskKiller::kill(killer.as_ref()).await; });
+                    tokio::spawn(async move { lingxi_core::host::task_registry::TaskKiller::kill(killer.as_ref()).await; });
                 });
                 cleanups.insert(record.task_id.clone(), cleanup);
                 tasks.insert(record.task_id.clone(), state.clone());

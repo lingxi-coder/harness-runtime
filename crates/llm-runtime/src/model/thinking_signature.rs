@@ -126,10 +126,10 @@ pub fn strip_thinking_blocks_for_signature_recovery(messages: &mut [Message]) ->
 /// Apply Claude's CCt to identity-scoped historical blocks before normalization.
 /// Partial markers preserve the prefix before the selected thinking block.
 pub fn strip_marked_conversation_thinking(
-    messages: &mut [protocol::ConversationMessage],
-    marked: &std::collections::HashMap<protocol::MessageId, usize>,
+    messages: &mut [lingxi_core::types::ConversationMessage],
+    marked: &std::collections::HashMap<lingxi_core::types::MessageId, usize>,
 ) {
-    use protocol::{ContentBlock as Block, ConversationMessage};
+    use lingxi_core::types::{ContentBlock as Block, ConversationMessage};
     for message in messages {
         let ConversationMessage::Assistant { id, content, .. } = message else {
             continue;
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn partial_marker_preserves_prefix_and_fresh_assistant_thinking() {
-        use protocol::{ContentBlock as Block, ConversationMessage, MessageId};
+        use lingxi_core::types::{ContentBlock as Block, ConversationMessage, MessageId};
         let old = MessageId::new();
         let fresh = MessageId::new();
         let thinking = || Block::Thinking {

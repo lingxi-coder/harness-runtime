@@ -6,15 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+core = { path = "../core" }
 llm-runtime = { path = "../llm-runtime" }
 secret = { path = "../secret" }
-protocol = { path = "../protocol" }
 cost = { path = "../cost" }
 # Promoted from dev-dependencies: `cost_translate` reads `ModelBillingMode` at
 # library level, so a test-only dependency no longer resolves. The test doubles
 # in `availability.rs` that originally justified the dev-only entry still work —
 # a normal dependency is visible to tests too.
-platform-api = { path = "../platform-api" }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

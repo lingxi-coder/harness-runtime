@@ -6,12 +6,12 @@
 //! - ADOPTS the named session id (resume does NOT mint a fresh one, unlike
 //!   `clear_session`), and
 //! - leaves the live model UNCHANGED (resume keeps the running model).
+use lingxi_core::host::OrchestratorHandle;
+use lingxi_core::types::{ConversationMessage, MessageId, SessionId};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::OrchestratorHandle;
-use protocol::{ConversationMessage, MessageId, SessionId};
 use std::sync::Arc;
 
 fn make_orch() -> Arc<ConversationOrchestrator> {
@@ -58,7 +58,7 @@ async fn resume_session_adopts_history_named_id_and_runtime_model() {
         ConversationMessage::user(MessageId::new(), "prior user turn".to_string()),
         ConversationMessage::Assistant {
             id: MessageId::new(),
-            content: vec![protocol::ContentBlock::Text {
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "prior assistant turn".to_string(),
             }],
             stop_reason: Some("end_turn".to_string()),
@@ -71,11 +71,11 @@ async fn resume_session_adopts_history_named_id_and_runtime_model() {
             history.clone(),
             Some("11111111-1111-4111-8111-111111111111".to_string()),
             None,
-            platform_api::ResumeRuntimeSnapshot {
+            lingxi_core::host::ResumeRuntimeSnapshot {
                 model: "claude-opus-4-1".to_string(),
                 model_profile: Some("anthropic".to_string()),
                 effort: Some("high".to_string()),
-                ..platform_api::ResumeRuntimeSnapshot::default()
+                ..lingxi_core::host::ResumeRuntimeSnapshot::default()
             },
         )
         .await
@@ -125,7 +125,7 @@ async fn resume_session_default_runtime_keeps_live_model_for_legacy_callers() {
             )],
             None,
             None,
-            platform_api::ResumeRuntimeSnapshot::default(),
+            lingxi_core::host::ResumeRuntimeSnapshot::default(),
         )
         .await
         .expect("legacy resume_session call must still succeed");
@@ -141,7 +141,7 @@ async fn resume_session_default_runtime_keeps_live_model_for_legacy_callers() {
 async fn resume_without_persisted_human_defaults_preserves_application_reasoning() {
     let orch = make_orch();
     let model = orch.session().lock().await.model.clone();
-    let selection = platform_api::ReasoningSelection::Level { id: "high".into() };
+    let selection = lingxi_core::host::ReasoningSelection::Level { id: "high".into() };
     assert_eq!(
         orch.initialize_reasoning_selection_for_model(&model, None, selection.clone()),
         selection
@@ -151,7 +151,7 @@ async fn resume_without_persisted_human_defaults_preserves_application_reasoning
         Vec::new(),
         None,
         None,
-        platform_api::ResumeRuntimeSnapshot::default(),
+        lingxi_core::host::ResumeRuntimeSnapshot::default(),
     )
     .await
     .unwrap();

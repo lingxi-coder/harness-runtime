@@ -6,9 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-protocol = { path = "../protocol" }
+core = { path = "../core" }
 client = { path = "../client" }
-platform-api = { path = "../platform-api" }
 branding.workspace = true
 secret = { path = "../secret" }
 jsonrpc = { path = "../jsonrpc" }

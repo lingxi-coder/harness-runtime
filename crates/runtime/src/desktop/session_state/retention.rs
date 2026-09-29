@@ -329,15 +329,15 @@ mod tests {
         f.mount(pending).await;
         let pending_view = f.manager.coordinator(pending).unwrap();
         let identity = FusionRunIdentity::new(
-            platform_api::FusionRunId::generated(),
+            lingxi_core::host::FusionRunId::generated(),
             Some(pending),
-            platform_api::FusionOrigin::Slash,
+            lingxi_core::host::FusionOrigin::Slash,
             None,
         );
         let outbox = DurableFusionOutboxRecord {
             delivery_id: fusion_delivery_id(&identity),
             session_id: pending,
-            message_uuid: protocol::MessageId::new().to_string(),
+            message_uuid: lingxi_core::types::MessageId::new().to_string(),
             payload: serde_json::json!({"message": "saved"}),
             attempt: 0,
             retry_cycle_end: 4,
@@ -347,8 +347,8 @@ mod tests {
             .append_fusion_terminal(DurableFusionTerminalRecord {
                 event_id: fusion_terminal_event_id(&identity),
                 identity,
-                result: Err(platform_api::FusionError::Internal),
-                facts: platform_api::FusionRunFacts::default(),
+                result: Err(lingxi_core::host::FusionError::Internal),
+                facts: lingxi_core::host::FusionRunFacts::default(),
                 publication: FusionPublicationReceipt::queued(),
                 outbox: Some(outbox.clone()),
             })
@@ -483,10 +483,12 @@ mod tests {
         let weak_cost = Arc::downgrade(&scoped);
         drop(scoped);
         assert!(weak_cost.upgrade().is_none());
-        assert!(platform_api::live_sessions::same_writer_lease_authority(
-            &lease,
-            &core.writer_lease_core()
-        ));
+        assert!(
+            lingxi_core::host::live_sessions::same_writer_lease_authority(
+                &lease,
+                &core.writer_lease_core()
+            )
+        );
         drop(lease);
         assert!(f
             .tracker
@@ -597,9 +599,10 @@ mod tests {
         drop(budget);
         drop(tracker);
         drop(fixture_manager);
-        let claim =
-            platform_api::live_sessions::LiveSessionDir::at_live(directory.path().join("sessions"))
-                .claim_session_id(&active.to_string(), std::process::id());
+        let claim = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
+            directory.path().join("sessions"),
+        )
+        .claim_session_id(&active.to_string(), std::process::id());
         assert!(
             claim.is_ok(),
             "unpolled maintenance cannot delay shutdown claim release"

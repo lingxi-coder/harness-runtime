@@ -2,7 +2,7 @@
 //! cumulative session cost crosses the configured ceiling.
 
 use cost::{BudgetConfig, BudgetEnforcer, BudgetExceedPolicy, CostTracker, PricingCatalog};
-use protocol::SessionId;
+use lingxi_core::types::SessionId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 

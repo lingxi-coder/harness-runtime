@@ -16,9 +16,9 @@ fn valid(model: &str) -> bool {
 
 pub(super) fn resolve(
     model: &str,
-    listings: &[platform_api::ModelListing],
+    listings: &[lingxi_core::host::ModelListing],
 ) -> Option<(String, Option<String>)> {
-    let (id, profile) = platform_api::parse_model_ref(model, listings);
+    let (id, profile) = lingxi_core::host::parse_model_ref(model, listings);
     listings
         .iter()
         .any(|entry| {
@@ -37,11 +37,11 @@ pub(super) fn save(home: &Path, model: &str) -> Result<(), String> {
     std::fs::create_dir_all(home).map_err(|error| error.to_string())?;
     let bytes = serde_json::to_vec(&serde_json::json!({ "model": model }))
         .map_err(|error| error.to_string())?;
-    platform_api::rooted_fs::atomic_write(
+    lingxi_core::host::rooted_fs::atomic_write(
         home,
         Path::new("last-model.json"),
         &bytes,
-        platform_api::rooted_fs::AtomicWriteOptions::default(),
+        lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
     )
     .map_err(|error| error.to_string())
 }

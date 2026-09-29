@@ -1,14 +1,14 @@
 //! Runtime-neutral dynamic-loop timer used by local host composition roots.
 use crate::{LoopRuntime, WakeupScheduler};
 use async_trait::async_trait;
-use platform_api::{BackgroundTaskHandle, RuntimeSpawner};
+use lingxi_core::host::{BackgroundTaskHandle, RuntimeSpawner};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Identity captured when a dynamic task is armed, before its timer can fire.
 #[derive(Clone, Debug)]
 pub struct WakeupTask {
-    pub fire_id: protocol::MessageId,
+    pub fire_id: lingxi_core::types::MessageId,
     pub task_id: String,
     pub cron: String,
     pub display_prompt: String,
@@ -76,7 +76,7 @@ impl WakeupTask {
         }
         .to_owned();
         Self {
-            fire_id: protocol::MessageId::new(),
+            fire_id: lingxi_core::types::MessageId::new(),
             task_id,
             cron: format!("{minute} {hour} * * *"),
             display_prompt,
@@ -200,7 +200,7 @@ impl WakeupScheduler for RuntimeWakeupScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::RuntimeError;
+    use lingxi_core::host::RuntimeError;
     #[test]
     fn scheduled_identity_uses_target_clock_and_exact_default_sentinels() {
         let seconds = 1_700_000_040;

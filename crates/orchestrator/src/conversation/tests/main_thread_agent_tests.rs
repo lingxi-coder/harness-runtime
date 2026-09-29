@@ -44,8 +44,8 @@ impl PermissionGate for LiveModeGate {
         &self,
         _tool_name: &str,
         _input: &serde_json::Value,
-    ) -> platform_api::PermissionDecision {
-        platform_api::PermissionDecision::Allow
+    ) -> lingxi_core::host::PermissionDecision {
+        lingxi_core::host::PermissionDecision::Allow
     }
 
     async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
@@ -245,7 +245,7 @@ async fn a_real_403_keeps_the_message_the_auth_branches_gate_on() {
 /// the case the panel exists to report.
 #[tokio::test]
 async fn large_memory_warnings_are_recomputed_from_the_live_memory_set() {
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     // The default model is `claude-opus-4-8`, a 1M-context model, so the
     // threshold is 200_000 chars — NOT the 40_000 floor. Sizing the fixture
@@ -480,23 +480,25 @@ async fn lifecycle_hook_ctx_uses_trimmed_last_assistant_text() {
     {
         let session_handle = orch.session();
         let mut session = session_handle.lock().await;
-        session.history.push(protocol::ConversationMessage::user(
-            protocol::MessageId::new(),
-            "earlier user".to_string(),
-        ));
         session
             .history
-            .push(protocol::ConversationMessage::Assistant {
-                id: protocol::MessageId::new(),
+            .push(lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "earlier user".to_string(),
+            ));
+        session
+            .history
+            .push(lingxi_core::types::ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
                 content: vec![
-                    protocol::ContentBlock::Text {
+                    lingxi_core::types::ContentBlock::Text {
                         text: " first line ".to_string(),
                     },
-                    protocol::ContentBlock::Thinking {
+                    lingxi_core::types::ContentBlock::Thinking {
                         thinking: "hidden".to_string(),
                         signature: None,
                     },
-                    protocol::ContentBlock::Text {
+                    lingxi_core::types::ContentBlock::Text {
                         text: "second line ".to_string(),
                     },
                 ],
@@ -526,9 +528,9 @@ async fn lifecycle_hook_ctx_uses_trimmed_last_assistant_text() {
         .lock()
         .await
         .history
-        .push(protocol::ConversationMessage::Assistant {
-            id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::Text {
+        .push(lingxi_core::types::ConversationMessage::Assistant {
+            id: lingxi_core::types::MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "   ".to_string(),
             }],
             stop_reason: Some("end_turn".to_string()),
@@ -604,21 +606,22 @@ async fn main_thread_agent_disallowed_tools_subtract() {
 #[tokio::test]
 async fn mobile_runtime_reminder_is_stable_across_agent_tool_filters() {
     let orch = orch_with_tools(&["Read", "Shell"]);
-    let orch = orch.with_mobile_runtime_environment(platform_api::MobileRuntimeEnvironment::new(
-        platform_api::MobileHostEnvironment::new(
-            platform_api::MobileHostOs::Ios,
-            Some("19.0".into()),
-            platform_api::MobileDeviceClass::Phone,
-            platform_api::MobileExecutionTarget::PhysicalDevice,
-            platform_api::MobileLaunchMode::Interactive,
-        ),
-        platform_api::MobileToolRuntime::MobileLinuxGuest,
-        Some("/workspace/a".into()),
-        Some("/bin/sh".into()),
-        Some("Mobile Linux sh".into()),
-        platform_api::MobileNetworkPolicy::PermissionMediated,
-        platform_api::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
-    ));
+    let orch =
+        orch.with_mobile_runtime_environment(lingxi_core::host::MobileRuntimeEnvironment::new(
+            lingxi_core::host::MobileHostEnvironment::new(
+                lingxi_core::host::MobileHostOs::Ios,
+                Some("19.0".into()),
+                lingxi_core::host::MobileDeviceClass::Phone,
+                lingxi_core::host::MobileExecutionTarget::PhysicalDevice,
+                lingxi_core::host::MobileLaunchMode::Interactive,
+            ),
+            lingxi_core::host::MobileToolRuntime::MobileLinuxGuest,
+            Some("/workspace/a".into()),
+            Some("/bin/sh".into()),
+            Some("Mobile Linux sh".into()),
+            lingxi_core::host::MobileNetworkPolicy::PermissionMediated,
+            lingxi_core::host::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
+        ));
 
     let before = orch
         .mobile_runtime_environment_preview()

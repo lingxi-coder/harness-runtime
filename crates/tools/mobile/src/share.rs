@@ -4,10 +4,10 @@
 //! composition roots wire a native Swift / Kotlin impl via `UniFFI` (P12).
 
 use async_trait::async_trait;
+use lingxi_core::host::share::{ShareError, SharePayload, ShareResult};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::share::{ShareError, SharePayload, ShareResult};
 use serde_json::{json, Value};
 
 use tool_api::context::ToolUseContext;

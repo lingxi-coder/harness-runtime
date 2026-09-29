@@ -2,7 +2,7 @@
 //! `changeDetector.ts:118` which calls .split(sep).some(d => d === '.git')).
 
 use futures_util::StreamExt;
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use platform_posix::PosixFileSystem;
 use std::time::Duration;
 use tempfile::tempdir;

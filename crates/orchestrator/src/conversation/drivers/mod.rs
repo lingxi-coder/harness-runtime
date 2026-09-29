@@ -23,8 +23,8 @@ mod prepare;
 mod streaming;
 
 use super::*;
+use lingxi_core::types::ContentBlock;
 use loop_state::{StepExit, TurnEndVerdict};
-use protocol::ContentBlock;
 use streaming::StreamingTurnDriver;
 
 /// One queued prompt, retaining its own transcript identity and origin class.
@@ -226,7 +226,7 @@ impl ConversationOrchestrator {
     /// `<cross-session-message>` envelopes (2.1.232 `isMeta:!0`). Policy is
     /// applied at receive; this only injects already-accepted bodies.
     pub(crate) async fn drain_peer_inbox(&self, mid_turn: bool) -> bool {
-        let reminders = platform_api::live_sessions::take_accepted_peer_reminders(mid_turn);
+        let reminders = lingxi_core::host::live_sessions::take_accepted_peer_reminders(mid_turn);
         if reminders.is_empty() {
             return false;
         }
@@ -334,7 +334,7 @@ impl ConversationOrchestrator {
     /// the staged 429 into `self.api`'s caches (via
     /// [`crate::provider_adapter::ProviderApiAdapter::promote_pending_429`]),
     /// so these emit-on-change helpers flow the rejected snapshot (+ raw
-    /// windows) out as an [`platform_api::OutputEvent::RateLimit`] (+ `RawUtilization`).
+    /// windows) out as an [`lingxi_core::host::OutputEvent::RateLimit`] (+ `RawUtilization`).
     ///
     /// Gated on the rate-limited discriminant a terminal error carries BEFORE
     /// enrichment — `ApiCall(RateLimited)` (batched) or `Streaming(RateLimited)`
@@ -629,7 +629,7 @@ impl ConversationOrchestrator {
     /// permission lifecycle before entering here. Recheck under the turn gate.
     pub async fn run_task_notification_rewake(
         &self,
-        registry: &dyn platform_api::task_registry::TaskRegistryHandle,
+        registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
         let _turn_guard = self.turn_gate.lock().await;
@@ -712,7 +712,7 @@ impl ConversationOrchestrator {
         &self,
         exec: &mut crate::streaming_executor::StreamingToolExecutor<'_>,
         pumped: &crate::streaming_loop::PumpedTurn,
-        tool_use_parent_uuids: &std::collections::HashMap<protocol::ToolUseId, String>,
+        tool_use_parent_uuids: &std::collections::HashMap<lingxi_core::types::ToolUseId, String>,
         assistant_uuid: &Option<String>,
     ) -> (bool, Vec<hooks::events::PostToolBatchCall>) {
         // 5. Drive tools through the StreamingToolExecutor (faithful port of
@@ -1330,7 +1330,7 @@ impl ConversationOrchestrator {
     async fn try_run_turn_streaming(
         &self,
         prompt: &str,
-        images: Vec<protocol::ImageSource>,
+        images: Vec<lingxi_core::types::ImageSource>,
         user_cancel: Option<CancellationToken>,
         message_id: Option<MessageId>,
         transient_rewake: bool,
@@ -1352,7 +1352,7 @@ impl ConversationOrchestrator {
     async fn try_run_turn_streaming_inputs(
         &self,
         prompt: &str,
-        images: Vec<protocol::ImageSource>,
+        images: Vec<lingxi_core::types::ImageSource>,
         user_cancel: Option<CancellationToken>,
         message_id: Option<MessageId>,
         transient_rewake: bool,
@@ -1623,11 +1623,11 @@ impl ConversationOrchestrator {
     }
 
     /// As [`Self::run_turn_streaming_with_cancel_images`], but taking
-    /// ALREADY-DECODED [`protocol::ImageSource`]s instead of file paths.
+    /// ALREADY-DECODED [`lingxi_core::types::ImageSource`]s instead of file paths.
     ///
     /// This is the entry the desktop bridge adapter drives: pasted/attached images
     /// arrive over the wire as inline base64 (`ImageRefDto`) and are converted
-    /// straight to [`protocol::ImageSource::Base64`] with NO temp-file round-trip.
+    /// straight to [`lingxi_core::types::ImageSource::Base64`] with NO temp-file round-trip.
     /// The path-based entry above decodes its paths via [`Self::load_images`] then
     /// delegates here, so both paths share this cancel race and the single
     /// [`Self::try_run_turn_streaming`] core — which appends the images to the
@@ -1636,7 +1636,7 @@ impl ConversationOrchestrator {
     pub async fn run_turn_streaming_with_cancel_image_sources(
         &self,
         prompt: &str,
-        images: Vec<protocol::ImageSource>,
+        images: Vec<lingxi_core::types::ImageSource>,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
         self.run_turn_streaming_with_cancel_image_sources_and_message_id(
@@ -1650,7 +1650,7 @@ impl ConversationOrchestrator {
     pub async fn run_turn_streaming_with_cancel_image_sources_and_message_id(
         &self,
         prompt: &str,
-        images: Vec<protocol::ImageSource>,
+        images: Vec<lingxi_core::types::ImageSource>,
         cancel: CancellationToken,
         message_id: Option<MessageId>,
     ) -> Result<TurnOutcome, OrchestratorError> {
@@ -1662,7 +1662,7 @@ impl ConversationOrchestrator {
     pub async fn run_turn_streaming_with_origin(
         &self,
         prompt: &str,
-        images: Vec<protocol::ImageSource>,
+        images: Vec<lingxi_core::types::ImageSource>,
         cancel: CancellationToken,
         message_id: Option<MessageId>,
         in_human_turn: bool,
@@ -1721,7 +1721,7 @@ impl ConversationOrchestrator {
         &self,
         _turn_guard: &tokio::sync::MutexGuard<'_, ()>,
         prompt: &str,
-        images: Vec<protocol::ImageSource>,
+        images: Vec<lingxi_core::types::ImageSource>,
         cancel: CancellationToken,
         message_id: Option<MessageId>,
         in_human_turn: bool,
@@ -1743,7 +1743,7 @@ impl ConversationOrchestrator {
         &self,
         _turn_guard: &tokio::sync::MutexGuard<'_, ()>,
         prompt: &str,
-        images: Vec<protocol::ImageSource>,
+        images: Vec<lingxi_core::types::ImageSource>,
         cancel: CancellationToken,
         message_id: Option<MessageId>,
         in_human_turn: bool,
@@ -1878,7 +1878,7 @@ impl ConversationOrchestrator {
     /// Load + base64-encode each pasted image path into an [`ImageSource`].
     fn load_images(
         image_paths: &[std::path::PathBuf],
-    ) -> Result<Vec<protocol::ImageSource>, OrchestratorError> {
+    ) -> Result<Vec<lingxi_core::types::ImageSource>, OrchestratorError> {
         image_paths
             .iter()
             .map(|p| crate::image_input::load_image_source(p))
@@ -1892,7 +1892,7 @@ impl ConversationOrchestrator {
 /// so the remainder of the streaming turn handler works unchanged.
 ///
 /// Mirrors the batched path's `translate_response_blocks` call: content blocks
-/// are translated to `protocol::ContentBlock`; `ToolCall` blocks additionally
+/// are translated to `lingxi_core::types::ContentBlock`; `ToolCall` blocks additionally
 /// populate the `tool_uses` vec so the concurrent dispatch runs exactly as in a
 /// real stream.
 /// Whether the turn's assistant blocks contain any user-visible text, mirroring
@@ -1901,12 +1901,12 @@ impl ConversationOrchestrator {
 /// `ie.some(msg => msg.content.some(b => b.type === "text" && b.text.trim().length > 0))`.
 ///
 /// A `false` return = a thinking-only (or otherwise text-empty) response. Only
-/// [`protocol::ContentBlock::Text`] blocks with a non-whitespace body count;
+/// [`lingxi_core::types::ContentBlock::Text`] blocks with a non-whitespace body count;
 /// `Thinking`, `ToolUse`, etc. are not "visible output" for this gate. (Tool
 /// uses live in `PumpedTurn::tool_uses`, not `assistant_blocks`, and this gate
 /// only fires on `end_turn`/`stop_sequence` where no `tool_use` is present.)
-pub(super) fn pumped_has_visible_text(blocks: &[protocol::ContentBlock]) -> bool {
-    use protocol::ContentBlock;
+pub(super) fn pumped_has_visible_text(blocks: &[lingxi_core::types::ContentBlock]) -> bool {
+    use lingxi_core::types::ContentBlock;
     blocks
         .iter()
         .any(|b| matches!(b, ContentBlock::Text { text } if !text.trim().is_empty()))
@@ -1917,7 +1917,7 @@ pub(super) fn llm_response_to_pumped_turn(
 ) -> crate::streaming_loop::PumpedTurn {
     use crate::streaming_loop::{ObservedToolUse, PumpedTurn};
     use crate::turn_loop::translate_response_blocks;
-    use protocol::ContentBlock;
+    use lingxi_core::types::ContentBlock;
 
     let output_tokens = resp
         .usage
@@ -1930,7 +1930,7 @@ pub(super) fn llm_response_to_pumped_turn(
     // call (seeded) whose response includes the authoritative usage.
     let usage = Some(resp.usage.clone());
 
-    // Translate HistoryResponse content → protocol::ContentBlock (same as batched path).
+    // Translate HistoryResponse content → lingxi_core::types::ContentBlock (same as batched path).
     // Then split into (assistant_blocks, tool_uses): text/thinking go into
     // assistant_blocks; ToolUse blocks go into tool_uses for the concurrent dispatch.
     // The streaming loop step 4 re-assembles them into the assistant message by

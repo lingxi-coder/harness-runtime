@@ -9,7 +9,7 @@
 //! apps/<app-id>/workspace/.lingxi/app.json — { schemaVersion, app } mirror
 //! ```
 //!
-//! Every write goes through [`platform_api::rooted_fs::atomic_write`] (same-directory
+//! Every write goes through [`lingxi_core::host::rooted_fs::atomic_write`] (same-directory
 //! temp file + rename, no symlink traversal below the root), so a crash can
 //! only ever leave an orphan `*.tmp-<pid>-<seq>` file behind — loaders address
 //! exact file names and therefore ignore orphans naturally. Every document
@@ -76,8 +76,8 @@ use crate::types::{
     AppDependencyRecord, AppDependencyState, AppRecord, AppRuntimeRecord, AppRuntimeState,
     APPS_SCHEMA_VERSION,
 };
-use platform_api::rooted_fs::{self, AtomicWriteOptions};
-use platform_api::FsError;
+use lingxi_core::host::rooted_fs::{self, AtomicWriteOptions};
+use lingxi_core::host::FsError;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

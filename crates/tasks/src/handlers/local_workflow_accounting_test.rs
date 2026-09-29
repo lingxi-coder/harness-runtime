@@ -1,13 +1,13 @@
 use super::*;
-use platform_api::{
+use lingxi_core::host::{
     BudgetError, WorkflowOutputAccount, WorkflowOutputEventId, WorkflowOutputScope,
 };
 use std::sync::atomic::Ordering;
 use tokio::sync::Semaphore;
 
 struct BatchProbe {
-    session: protocol::SessionId,
-    generation: protocol::MessageId,
+    session: lingxi_core::types::SessionId,
+    generation: lingxi_core::types::MessageId,
     listings: AtomicU64,
     spawned: std::sync::Mutex<Vec<String>>,
     b_listing_entered: Semaphore,
@@ -17,12 +17,12 @@ struct BatchProbe {
 
 #[async_trait]
 impl SubagentSpawner for BatchProbe {
-    async fn agent_listing(&self) -> Vec<platform_api::subagent_spawn::SubagentListingEntry> {
+    async fn agent_listing(&self) -> Vec<lingxi_core::host::subagent_spawn::SubagentListingEntry> {
         if self.listings.fetch_add(1, Ordering::SeqCst) == 1 {
             self.b_listing_entered.add_permits(1);
             self.release_b.acquire().await.unwrap().forget();
         }
-        vec![platform_api::subagent_spawn::SubagentListingEntry {
+        vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
             agent_type: "probe".into(),
             when_to_use: String::new(),
             when_to_use_lean: None,
@@ -42,9 +42,9 @@ impl SubagentSpawner for BatchProbe {
             self.b_listing_entered.acquire().await.unwrap().forget();
         }
         Ok(SubagentResult::Completed {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             content: Value::String("answer".into()),
-            usage: platform_api::SubagentUsage {
+            usage: lingxi_core::host::SubagentUsage {
                 output_tokens: 1,
                 ..Default::default()
             },
@@ -54,17 +54,17 @@ impl SubagentSpawner for BatchProbe {
             assistant_message_count: 0,
             response_char_count: 0,
             last_request_id: None,
-            cumulative_usage: platform_api::SubagentUsage::default(),
+            cumulative_usage: lingxi_core::host::SubagentUsage::default(),
             usage_complete: true,
         })
     }
 }
 
 impl WorkflowOutputAccount for BatchProbe {
-    fn session_id(&self) -> protocol::SessionId {
+    fn session_id(&self) -> lingxi_core::types::SessionId {
         self.session
     }
-    fn generation_id(&self) -> protocol::MessageId {
+    fn generation_id(&self) -> lingxi_core::types::MessageId {
         self.generation
     }
     fn spent(&self) -> u64 {
@@ -105,8 +105,8 @@ impl BudgetEnforcerHandle for BatchProbe {
 async fn output_accounting_failure_blocks_peer_after_awaited_listing() {
     assert!(concurrency_cap() >= 2);
     let probe = Arc::new(BatchProbe {
-        session: protocol::SessionId::new(),
-        generation: protocol::MessageId::new(),
+        session: lingxi_core::types::SessionId::new(),
+        generation: lingxi_core::types::MessageId::new(),
         listings: AtomicU64::new(0),
         spawned: std::sync::Mutex::new(Vec::new()),
         b_listing_entered: Semaphore::new(0),

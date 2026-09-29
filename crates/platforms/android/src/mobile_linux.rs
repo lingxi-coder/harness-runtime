@@ -2,7 +2,7 @@
 //! Execution and rootfs lifecycle are owned by the standalone SDK.
 
 use async_trait::async_trait;
-use platform_api::*;
+use lingxi_core::host::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -57,7 +57,7 @@ impl AndroidProotRuntime {
 }
 
 fn product_build_profile() -> mobile_linux_android::IsolatedBuildProfile {
-    use platform_api::mobile_linux::guest_paths;
+    use lingxi_core::host::mobile_linux::guest_paths;
     mobile_linux_android::IsolatedBuildProfile {
         guest_root: guest_paths::LOCAL_APP_BUILD_ROOT.into(),
         project_directory: guest_paths::LOCAL_APP_BUILD_PROJECT_DIR.into(),

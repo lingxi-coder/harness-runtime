@@ -11,7 +11,7 @@
 //! on — `AppContainer` / Job Objects work is not part of claude-code parity.
 
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures,
     SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
@@ -67,7 +67,7 @@ impl Sandbox for WindowsSandbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::{
+    use lingxi_core::host::{
         NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend, SandboxPolicy,
     };
     use std::collections::HashMap;
@@ -108,7 +108,7 @@ mod tests {
         let err = WindowsSandbox::new()
             .prepare(empty_cmd(), &empty_policy())
             .unwrap_err();
-        assert!(matches!(err, platform_api::SandboxError::Unsupported));
+        assert!(matches!(err, lingxi_core::host::SandboxError::Unsupported));
     }
 
     #[test]
@@ -117,7 +117,7 @@ mod tests {
         // on unsupported platforms an explicit audit grant must still produce
         // a usable command.
         let wrapped = WindowsSandbox::new().bypass_with_audit(empty_cmd(), "explicit override");
-        let _: platform_api::SandboxedCommand = wrapped;
+        let _: lingxi_core::host::SandboxedCommand = wrapped;
     }
 
     #[tokio::test]

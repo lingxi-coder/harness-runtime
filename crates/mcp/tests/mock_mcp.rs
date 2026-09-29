@@ -20,8 +20,8 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::Registry;
 
+use lingxi_core::host::{McpNegotiatedProtocol, McpProtocolEra};
 use mcp::McpClient;
-use platform_api::{McpNegotiatedProtocol, McpProtocolEra};
 
 /// Records every outgoing JSON-RPC payload received from the client end.
 /// Tests inspect this to assert literal byte content.

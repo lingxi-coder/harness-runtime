@@ -1,8 +1,10 @@
 //! Session-owned persistent teammate creation, invoked by Agent.
 use crate::{TeamRegistry, WorkerStatus};
-use platform_api::subagent_spawn::{SubagentInheritance, SubagentSpawnError, SubagentSpawnRequest};
-use platform_api::team_spawn::{TeamSpawnSeam, TeammateLaunch};
-use platform_api::{OutputStream, RuntimeSpawner};
+use lingxi_core::host::subagent_spawn::{
+    SubagentInheritance, SubagentSpawnError, SubagentSpawnRequest,
+};
+use lingxi_core::host::team_spawn::{TeamSpawnSeam, TeammateLaunch};
+use lingxi_core::host::{OutputStream, RuntimeSpawner};
 use std::sync::Arc;
 
 /// Coordinates identity reservation, task startup and mailbox delivery.
@@ -18,7 +20,7 @@ pub struct ImplicitTeammateSpawner {
 }
 struct StartedTeammate {
     launch: TeammateLaunch,
-    agent_id: protocol::AgentId,
+    agent_id: lingxi_core::types::AgentId,
     task_id: String,
 }
 
@@ -79,7 +81,7 @@ impl ImplicitTeammateSpawner {
             let _ = std::fs::create_dir_all(crate::team_file::task_dir(home, &team_name));
         }
         self.team.set_team_name(Some(team_name.clone())).await;
-        platform_api::team_registry::set_leader_team_name_for_session(
+        lingxi_core::host::team_registry::set_leader_team_name_for_session(
             &self.session_id,
             Some(&team_name),
         );
@@ -112,7 +114,7 @@ impl ImplicitTeammateSpawner {
             .await;
         self.team.mailbox_router.set_color("team-lead", "red").await;
     }
-    async fn rollback(&self, team_name: &str, name: &str, agent_id: &protocol::AgentId) {
+    async fn rollback(&self, team_name: &str, name: &str, agent_id: &lingxi_core::types::AgentId) {
         self.team.delete_worker(agent_id).await;
         if let Some(home) = &self.home {
             let _ = crate::team_file::remove_team_member(
@@ -249,7 +251,9 @@ impl ImplicitTeammateSpawner {
             Err(e) => {
                 self.rollback(&team_name, &name, &agent_id).await;
                 return Err(match e {
-                    platform_api::team_spawn::TeamSpawnError::Internal(message) => error(&message),
+                    lingxi_core::host::team_spawn::TeamSpawnError::Internal(message) => {
+                        error(&message)
+                    }
                     other => error(&other.to_string()),
                 });
             }
@@ -410,8 +414,8 @@ fn is_reserved_agent_id(name: &str) -> bool {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::team_spawn::TeamSpawnError;
-    use protocol::AgentId;
+    use lingxi_core::host::team_spawn::TeamSpawnError;
+    use lingxi_core::types::AgentId;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     struct Harness {
         failed_spawn: AtomicBool,
@@ -499,12 +503,13 @@ mod tests {
             &self,
             name: &str,
             task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
             if name.starts_with("teammate-pump:") && self.failed_pump.load(Ordering::SeqCst) {
-                return Err(platform_api::RuntimeError::ShuttingDown);
+                return Err(lingxi_core::host::RuntimeError::ShuttingDown);
             }
             tokio::spawn(task);
-            Ok(platform_api::BackgroundTaskHandle {
+            Ok(lingxi_core::host::BackgroundTaskHandle {
                 task_name: name.into(),
                 task_id: 0,
             })
@@ -514,33 +519,39 @@ mod tests {
         }
         async fn cancel(
             &self,
-            _: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
     #[async_trait]
     impl OutputStream for Harness {
         async fn emit_text(&self, _: &str) {}
-        async fn emit_tool_call(&self, _: &protocol::ToolUseId, _: &str, _: &serde_json::Value) {}
+        async fn emit_tool_call(
+            &self,
+            _: &lingxi_core::types::ToolUseId,
+            _: &str,
+            _: &serde_json::Value,
+        ) {
+        }
         async fn emit_tool_result(
             &self,
-            _: &protocol::ToolUseId,
+            _: &lingxi_core::types::ToolUseId,
             _: &str,
             _: &str,
             _: &serde_json::Value,
         ) {
         }
-        async fn emit_end_turn(&self, _: &str, _: &platform_api::CostSnapshot) {}
+        async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
     }
     #[async_trait]
-    impl platform_api::ToolInvoker for Harness {
+    impl lingxi_core::host::ToolInvoker for Harness {
         async fn invoke(
             &self,
             _: &str,
             _: serde_json::Value,
-            _: platform_api::tool_invoker::SubagentInvocationContext,
-        ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+            _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
             Ok(serde_json::Value::Null)
         }
         fn as_any(&self) -> &dyn std::any::Any {
@@ -548,8 +559,11 @@ mod tests {
         }
     }
     #[async_trait]
-    impl platform_api::budget::BudgetEnforcerHandle for Harness {
-        async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::budget::BudgetError> {
+    impl lingxi_core::host::budget::BudgetEnforcerHandle for Harness {
+        async fn check_and_charge(
+            &self,
+            _: u64,
+        ) -> Result<(), lingxi_core::host::budget::BudgetError> {
             Ok(())
         }
         async fn snapshot_total_nano_usd(&self) -> u64 {
@@ -636,11 +650,11 @@ mod tests {
     }
     #[tokio::test]
     async fn teammate_message_to_main_reaches_leader_inbox() {
-        use platform_api::mailbox::MailboxRouterHandle;
+        use lingxi_core::host::mailbox::MailboxRouterHandle;
         let (service, team, h, _tmp) = setup();
         service.initialize().await;
         let launched = service.spawn(request(), inherit(&h)).await.unwrap();
-        let message = platform_api::mailbox::MailboxMessage {
+        let message = lingxi_core::host::mailbox::MailboxMessage {
             content: "finished the inspection".into(),
             color: None,
             message_id: "message-1".into(),

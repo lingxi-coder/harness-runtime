@@ -310,8 +310,8 @@ fn fixture_scenarios_names_unique_and_outcomes_valid() {
 async fn parity_cost_after_one_turn() {
     use cost::pricing::PricingCatalog;
     use cost::CostTracker;
-    use platform_api::OrchestratorHandle;
-    use protocol::SessionId;
+    use lingxi_core::host::OrchestratorHandle;
+    use lingxi_core::types::SessionId;
     use tokio::sync::mpsc;
 
     let response = llm_runtime::HistoryResponse {
@@ -386,8 +386,8 @@ async fn parity_cost_after_one_turn() {
 #[tokio::test]
 async fn parity_force_compact_50_messages() {
     use compaction::CompactionOrchestrator;
-    use platform_api::OrchestratorHandle;
-    use protocol::{ConversationMessage, MessageId};
+    use lingxi_core::host::OrchestratorHandle;
+    use lingxi_core::types::{ConversationMessage, MessageId};
 
     // Drive the assertion from the fixture so the scenario fields are
     // load-bearing (matches the cost_after_one_turn convention).
@@ -474,7 +474,7 @@ async fn parity_force_compact_50_messages() {
             } else {
                 hist.history.push(ConversationMessage::Assistant {
                     id: MessageId::new(),
-                    content: vec![protocol::ContentBlock::Text {
+                    content: vec![lingxi_core::types::ContentBlock::Text {
                         text: format!("reply-{i}"),
                     }],
                     stop_reason: Some("end_turn".into()),

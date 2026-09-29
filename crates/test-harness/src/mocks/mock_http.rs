@@ -10,8 +10,8 @@
 
 use async_trait::async_trait;
 use futures_core::stream::Stream;
-use platform_api::{HttpError, HttpTransport, ResolvedAddressOverride};
-use protocol::{HttpRequest, HttpResponse, SseEvent};
+use lingxi_core::host::{HttpError, HttpTransport, ResolvedAddressOverride};
+use lingxi_core::types::{HttpRequest, HttpResponse, SseEvent};
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -105,7 +105,7 @@ impl HttpTransport for MockHttpTransport {
     async fn stream_sse(
         &self,
         req: HttpRequest,
-    ) -> Result<platform_api::http::SseStream, HttpError> {
+    ) -> Result<lingxi_core::host::http::SseStream, HttpError> {
         self.received.lock().unwrap().push(req);
         match self.queue.lock().unwrap().pop_front() {
             Some(ScriptedResponse::Stream(events)) => Ok(Box::pin(ScriptedSseStream {

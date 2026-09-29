@@ -168,7 +168,7 @@ mod tests {
 
     struct SwitchableReadAutoAllow;
 
-    impl platform_api::read_auto_allow::ReadAutoAllow for SwitchableReadAutoAllow {
+    impl lingxi_core::host::read_auto_allow::ReadAutoAllow for SwitchableReadAutoAllow {
         fn read_auto_allowed(&self, _path: &str) -> bool {
             KQ_ANSWER.load(std::sync::atomic::Ordering::SeqCst)
         }
@@ -177,7 +177,7 @@ mod tests {
     fn set_kq_answer(allowed: bool) {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            platform_api::read_auto_allow::set_read_auto_allow_probe(std::sync::Arc::new(
+            lingxi_core::host::read_auto_allow::set_read_auto_allow_probe(std::sync::Arc::new(
                 SwitchableReadAutoAllow,
             ));
         });

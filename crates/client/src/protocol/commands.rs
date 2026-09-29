@@ -22,8 +22,8 @@
 //!
 //! Frozen serde conventions (decision §0.1):
 //! - internally tagged: `#[serde(tag = "type", rename_all = "snake_case")]`
-//!   (matches `protocol::ContentBlock` / api-client `StreamEvent`),
-//! - the top-level enum is `#[non_exhaustive]` (mirrors `platform_api::OutputEvent`),
+//!   (matches `lingxi_core::types::ContentBlock` / api-client `StreamEvent`),
+//! - the top-level enum is `#[non_exhaustive]` (mirrors `lingxi_core::host::OutputEvent`),
 //! - every optional field uses
 //!   `#[serde(default, skip_serializing_if = "Option::is_none")]`.
 //!
@@ -200,7 +200,7 @@ pub struct HookAdminCommandDto {
 
 /// The inbound command envelope a client sends to the engine.
 ///
-/// `#[non_exhaustive]` (mirrors `platform_api::OutputEvent`) so adding a command is
+/// `#[non_exhaustive]` (mirrors `lingxi_core::host::OutputEvent`) so adding a command is
 /// additive (no major bump). Internally tagged on `type`, `snake_case`
 /// (decision §0.1).
 ///
@@ -990,7 +990,7 @@ pub enum ClientCommand {
 /// `Defaults`; `Dynamic`, `Enterprise`) are omitted rather than accepted and
 /// rejected at runtime. One concept, so one type.
 ///
-/// The lowered [`protocol::WritableScope`]. A bare wire STRING
+/// The lowered [`lingxi_core::types::WritableScope`]. A bare wire STRING
 /// (`"user"` / `"project"` / `"local"`).
 ///
 /// - `User` → `<lingxi_home>/settings.json`; for MCP, `~/.lingxi.json`

@@ -8,8 +8,8 @@
 use crate::auth::anthropic::login::OAuthError;
 use crate::auth::anthropic::refresh::{AuthState, TokenInfo};
 use async_trait::async_trait;
+use lingxi_core::types::Secret;
 use lingxi_llm_client::auth::oauth::anthropic::ScopeUpgradeRequired;
-use protocol::Secret;
 use std::sync::Arc;
 use std::time::SystemTime;
 

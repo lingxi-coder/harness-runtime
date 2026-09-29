@@ -6,9 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+core = { path = "../core" }
 # SubscriptionType for the subscriber-gated migrations' fail-closed context.
 llm-runtime = { path = "../llm-runtime" }
-protocol = { path = "../protocol" }
 telemetry = { path = "../telemetry" }
 branding.workspace = true
 serde_json.workspace = true

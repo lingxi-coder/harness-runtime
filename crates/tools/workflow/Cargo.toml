@@ -12,10 +12,9 @@ license.workspace = true
 # composition root over the task registry).
 
 [dependencies]
+core = { path = "../../core" }
 tool-api = { path = "../../tool-api" }
 permission = { path = "../../permission" }
-protocol = { path = "../../protocol" }
-platform-api = { path = "../../platform-api" }
 branding.workspace = true
 workflow = { path = "../../workflow" }
 async-trait.workspace = true

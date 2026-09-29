@@ -4,7 +4,7 @@
 //! specs to the shared connectors rather than returning
 //! `UnsupportedTransport`.
 
-use platform_api::{McpError, McpHeaders, McpTransport, McpTransportKind, McpTransportSpec};
+use lingxi_core::host::{McpError, McpHeaders, McpTransport, McpTransportKind, McpTransportSpec};
 use platform_windows::WindowsMcpTransport;
 
 #[tokio::test]

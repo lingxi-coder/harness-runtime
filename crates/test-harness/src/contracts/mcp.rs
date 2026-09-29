@@ -13,8 +13,8 @@
 //! * `disconnect(unknown_id)` is idempotent (returns Ok or a transport error;
 //!   never panics).
 
-use platform_api::mcp::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
-use protocol::McpConnectionId;
+use lingxi_core::host::mcp::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
+use lingxi_core::types::McpConnectionId;
 
 /// Run the standard [`McpTransport`] contract against an impl.
 ///

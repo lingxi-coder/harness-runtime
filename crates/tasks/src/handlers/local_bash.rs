@@ -42,7 +42,7 @@ use crate::output_manager::TaskOutputManager;
 use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     BackgroundTaskHandle, ProcessCommand, ProcessError, ProcessOutput, ProcessRunner,
     RuntimeSpawner, Sandbox,
 };
@@ -95,12 +95,14 @@ pub trait TaskStatusSink: Send + Sync {
     async fn bind_agent_id(
         &self,
         _task_id: &str,
-        _agent_id: protocol::AgentId,
+        _agent_id: lingxi_core::types::AgentId,
     ) -> Result<(), String> {
         Ok(())
     }
     /// Shared registry for recipient-scoped child notifications.
-    fn task_registry(&self) -> Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>> {
+    fn task_registry(
+        &self,
+    ) -> Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>> {
         None
     }
     /// Whether handler workers must remain prepared-but-paused until their
@@ -168,8 +170,8 @@ pub trait TaskStatusSink: Send + Sync {
         &self,
         _task_id: &str,
         _result: Option<String>,
-        _usage: Option<platform_api::task_registry::AgentRunUsage>,
-        _agent_id: Option<protocol::AgentId>,
+        _usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
+        _agent_id: Option<lingxi_core::types::AgentId>,
         _agent_name: Option<String>,
         _team_name: Option<String>,
     ) {
@@ -194,7 +196,7 @@ pub trait TaskStatusSink: Send + Sync {
     async fn set_agent_outcome(
         &self,
         _task_id: &str,
-        _outcome: platform_api::task_registry::AgentTerminalOutcome,
+        _outcome: lingxi_core::host::task_registry::AgentTerminalOutcome,
     ) {
     }
 
@@ -204,7 +206,7 @@ pub trait TaskStatusSink: Send + Sync {
     async fn set_workflow_outcome(
         &self,
         _task_id: &str,
-        _outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        _outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
     ) {
     }
 
@@ -224,7 +226,7 @@ pub trait TaskStatusSink: Send + Sync {
         &self,
         _task_id: &str,
         _egress_profiles: Vec<String>,
-        _usage: Option<platform_api::task_registry::AgentRunUsage>,
+        _usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
     ) {
     }
 
@@ -243,7 +245,7 @@ pub trait TaskStatusSink: Send + Sync {
     async fn set_fusion_publication(
         &self,
         _task_id: &str,
-        _receipt: platform_api::FusionPublicationReceipt,
+        _receipt: lingxi_core::host::FusionPublicationReceipt,
     ) {
     }
 
@@ -269,7 +271,7 @@ pub trait TaskStatusSink: Send + Sync {
     async fn finish_workflow_terminal(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
         status: TaskStatus,
     ) {
         self.set_workflow_outcome(task_id, outcome).await;
@@ -324,7 +326,7 @@ impl TaskStatusSink for NoopStatusSink {
 pub struct LocalBashHandler {
     /// Runs the sandboxed bash command.
     process: Arc<dyn ProcessRunner>,
-    /// Mints the [`platform_api::SandboxedCommand`] the runner accepts (D2 / A1).
+    /// Mints the [`lingxi_core::host::SandboxedCommand`] the runner accepts (D2 / A1).
     sandbox: Arc<dyn Sandbox>,
     /// Owns the spool directory + path allocation for stdout/stderr.
     output_manager: Arc<TaskOutputManager>,
@@ -618,9 +620,9 @@ impl Task for LocalBashHandler {
 mod tests {
     use super::*;
     use crate::state::TaskStatus;
-    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use platform_api::{
+    use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use lingxi_core::host::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use lingxi_core::host::{
         ProcessCommand, ProcessHandle, SandboxError, SandboxPolicy, SandboxedCommand,
     };
     use std::collections::HashMap as StdHashMap;
@@ -870,7 +872,7 @@ mod tests {
             SandboxCapability {
                 available: true,
                 reason: None,
-                features: platform_api::SandboxFeatures::default(),
+                features: lingxi_core::host::SandboxFeatures::default(),
             }
         }
     }

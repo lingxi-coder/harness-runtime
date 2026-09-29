@@ -1,7 +1,7 @@
 //! Hook definition + executor / source taxonomy (spec §9.2, §9.3).
 
 use crate::events::HookEventType;
-use protocol::HookId;
+use lingxi_core::types::HookId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -342,7 +342,7 @@ pub struct HookCondition {
 pub enum HookSource {
     /// A settings tier's `hooks.json` — `~/.lingxi/`, the committed project
     /// file, the developer-local override, or managed policy.
-    Settings(protocol::SettingsScope),
+    Settings(lingxi_core::types::SettingsScope),
     /// Hook supplied by an installed plugin.
     Plugin,
     /// Hook embedded in an agent file's front-matter.
@@ -390,19 +390,19 @@ mod tests {
     fn deferred_label_folds_the_settings_tiers_and_keeps_each_origin_distinct() {
         for (source, expected) in [
             (
-                HookSource::Settings(protocol::SettingsScope::User),
+                HookSource::Settings(lingxi_core::types::SettingsScope::User),
                 "settings",
             ),
             (
-                HookSource::Settings(protocol::SettingsScope::Project),
+                HookSource::Settings(lingxi_core::types::SettingsScope::Project),
                 "settings",
             ),
             (
-                HookSource::Settings(protocol::SettingsScope::Local),
+                HookSource::Settings(lingxi_core::types::SettingsScope::Local),
                 "settings",
             ),
             (
-                HookSource::Settings(protocol::SettingsScope::Managed),
+                HookSource::Settings(lingxi_core::types::SettingsScope::Managed),
                 "settings",
             ),
             (HookSource::Plugin, "plugin"),

@@ -1,11 +1,11 @@
 //! Host Anthropic login adapter: SDK authentication plus stored credentials and clock.
 
 use crate::auth::anthropic::refresh::{AuthState, RefreshDriver};
+use lingxi_core::host::Clock;
+use lingxi_core::types::Secret;
 use lingxi_llm_client::auth::oauth::anthropic as sdk;
 use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use lingxi_llm_client::transport::Transport;
-use platform_api::Clock;
-use protocol::Secret;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
@@ -90,10 +90,10 @@ pub async fn init_refresh_driver(
     refresh_token: Option<Secret<String>>,
     expires_at: SystemTime,
     http: Arc<dyn Transport>,
-    clock: Arc<dyn platform_api::Clock>,
+    clock: Arc<dyn lingxi_core::host::Clock>,
     bus: Option<Arc<telemetry::AnalyticsBus>>,
     credentials: Option<Arc<secret::CredentialManager>>,
-    spawner: Arc<dyn platform_api::RuntimeSpawner>,
+    spawner: Arc<dyn lingxi_core::host::RuntimeSpawner>,
 ) -> Result<Arc<AuthState>, OAuthError> {
     let state = AuthState::new(
         config,

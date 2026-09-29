@@ -42,10 +42,10 @@
 #![allow(dead_code)]
 
 use async_trait::async_trait;
+use lingxi_core::host::computer_control::ComputerError;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::computer_control::ComputerError;
 use serde_json::{json, Value};
 use std::sync::Mutex;
 
@@ -338,7 +338,9 @@ fn map_err(e: &ComputerError) -> ToolError {
 /// is connected — the schema's only real way to discover monitor names
 /// (there's no standalone `list_displays` action exposed to the model).
 /// `None` when there's nothing to switch between (0 or 1 display).
-fn multi_display_note(displays: &[platform_api::computer_control::DisplayInfo]) -> Option<String> {
+fn multi_display_note(
+    displays: &[lingxi_core::host::computer_control::DisplayInfo],
+) -> Option<String> {
     if displays.len() < 2 {
         return None;
     }
@@ -372,7 +374,7 @@ fn multi_display_note(displays: &[platform_api::computer_control::DisplayInfo]) 
 /// Retina screenshot (often 3000+ px wide) is well past both Anthropic's
 /// image size limit and this crate's own multi-MB context-bloat concern.
 fn image_action_result(
-    shot: platform_api::computer_control::Screenshot,
+    shot: lingxi_core::host::computer_control::Screenshot,
     extra_note: Option<&str>,
 ) -> Result<Value, ToolError> {
     let original_size = u64::try_from(shot.png_bytes.len()).unwrap_or(u64::MAX);
@@ -1421,7 +1423,7 @@ mod tests {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use platform_api::computer_control::{
+    use lingxi_core::host::computer_control::{
         AppInfo, ComputerControl, ComputerError, DisplayInfo, Screenshot,
     };
     use std::sync::Mutex as StdMutex;

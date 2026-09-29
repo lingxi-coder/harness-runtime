@@ -1,7 +1,7 @@
 //! Finite Agent schema contract captured from the real 2.1.263 executable.
 //! Source excerpts in the fixture document additional, not yet asserted surfaces.
 
-use platform_api::ProcessOutput;
+use lingxi_core::host::ProcessOutput;
 use serde_json::Value;
 use test_harness::parity::load_fixture;
 use tool_api::tool_trait::Tool;

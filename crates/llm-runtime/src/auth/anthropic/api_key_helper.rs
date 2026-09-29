@@ -69,7 +69,7 @@ pub fn resolve_ttl_ms(raw: &str) -> u64 {
     // `Z.CLAUDE_CODE_API_KEY_HELPER_TTL_MS` is coerced by the shared `hp` helper
     // (2.1.211+: scientific notation + digit separators), then `jMc` keeps it
     // when `!Number.isNaN(e) && e >= 0`.
-    let t = platform_api::env::parse_int_env(raw);
+    let t = lingxi_core::host::env::parse_int_env(raw);
     if !t.is_nan() && t >= 0.0 {
         return t as u64;
     }

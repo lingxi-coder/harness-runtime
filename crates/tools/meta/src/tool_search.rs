@@ -644,7 +644,7 @@ impl Tool for ToolSearchTool {
                     .await
                     .into_iter()
                     .filter_map(|(name, state)| {
-                        matches!(state, platform_api::McpActionState::Pending).then_some(name)
+                        matches!(state, lingxi_core::host::McpActionState::Pending).then_some(name)
                     })
                     .collect(),
                 None => Vec::new(),
@@ -814,7 +814,7 @@ fn empty_result_model_content(pending: &[String], failed: &[(String, Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::process::ProcessOutput;
+    use lingxi_core::host::process::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     fn dummy_out() -> ProcessOutput {
@@ -1273,79 +1273,79 @@ mod tests {
     struct NeverDialledTransport;
 
     #[async_trait::async_trait]
-    impl platform_api::McpTransport for NeverDialledTransport {
+    impl lingxi_core::host::McpTransport for NeverDialledTransport {
         async fn connect(
             &self,
-            _spec: &platform_api::McpTransportSpec,
-        ) -> Result<platform_api::McpRawConnection, platform_api::McpError> {
+            _spec: &lingxi_core::host::McpTransportSpec,
+        ) -> Result<lingxi_core::host::McpRawConnection, lingxi_core::host::McpError> {
             unreachable!()
         }
         async fn initialize(
             &self,
-            _conn: &platform_api::McpRawConnection,
-        ) -> Result<platform_api::ServerCapabilitiesDto, platform_api::McpError> {
+            _conn: &lingxi_core::host::McpRawConnection,
+        ) -> Result<lingxi_core::host::ServerCapabilitiesDto, lingxi_core::host::McpError> {
             unreachable!()
         }
         async fn list_tools(
             &self,
-            _conn: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpToolDto>, platform_api::McpError> {
+            _conn: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpToolDto>, lingxi_core::host::McpError> {
             unreachable!()
         }
         async fn list_resources(
             &self,
-            _conn: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpResourceDto>, platform_api::McpError> {
+            _conn: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpResourceDto>, lingxi_core::host::McpError> {
             unreachable!()
         }
         async fn list_prompts(
             &self,
-            _conn: &platform_api::McpRawConnection,
-        ) -> Result<Vec<platform_api::McpPromptDto>, platform_api::McpError> {
+            _conn: &lingxi_core::host::McpRawConnection,
+        ) -> Result<Vec<lingxi_core::host::McpPromptDto>, lingxi_core::host::McpError> {
             unreachable!()
         }
         async fn call_tool(
             &self,
-            _conn: &platform_api::McpRawConnection,
+            _conn: &lingxi_core::host::McpRawConnection,
             _tool: &str,
             _input: serde_json::Value,
-        ) -> Result<platform_api::McpToolResultDto, platform_api::McpError> {
+        ) -> Result<lingxi_core::host::McpToolResultDto, lingxi_core::host::McpError> {
             unreachable!()
         }
         async fn read_resource(
             &self,
-            _conn: &platform_api::McpRawConnection,
+            _conn: &lingxi_core::host::McpRawConnection,
             _uri: &str,
-        ) -> Result<platform_api::McpResourceContentDto, platform_api::McpError> {
+        ) -> Result<lingxi_core::host::McpResourceContentDto, lingxi_core::host::McpError> {
             unreachable!()
         }
         async fn ping(
             &self,
-            _conn_id: protocol::McpConnectionId,
-        ) -> Result<(), platform_api::McpError> {
+            _conn_id: lingxi_core::types::McpConnectionId,
+        ) -> Result<(), lingxi_core::host::McpError> {
             unreachable!()
         }
         async fn notifications(
             &self,
-            _conn: &platform_api::McpRawConnection,
-        ) -> Result<platform_api::McpNotificationStream, platform_api::McpError> {
+            _conn: &lingxi_core::host::McpRawConnection,
+        ) -> Result<lingxi_core::host::McpNotificationStream, lingxi_core::host::McpError> {
             unreachable!()
         }
         async fn handle_elicitation(
             &self,
-            _conn: &platform_api::McpRawConnection,
-            _req: platform_api::ElicitRequestDto,
-        ) -> Result<platform_api::ElicitResultDto, platform_api::McpError> {
+            _conn: &lingxi_core::host::McpRawConnection,
+            _req: lingxi_core::host::ElicitRequestDto,
+        ) -> Result<lingxi_core::host::ElicitResultDto, lingxi_core::host::McpError> {
             unreachable!()
         }
         async fn disconnect(
             &self,
-            _conn_id: protocol::McpConnectionId,
-        ) -> Result<(), platform_api::McpError> {
+            _conn_id: lingxi_core::types::McpConnectionId,
+        ) -> Result<(), lingxi_core::host::McpError> {
             unreachable!()
         }
-        fn supported_transports(&self) -> Vec<platform_api::McpTransportKind> {
-            vec![platform_api::McpTransportKind::Stdio]
+        fn supported_transports(&self) -> Vec<lingxi_core::host::McpTransportKind> {
+            vec![lingxi_core::host::McpTransportKind::Stdio]
         }
     }
 
@@ -1362,18 +1362,18 @@ mod tests {
         let registry = std::sync::Arc::new(mcp::registry::McpRegistry::new(std::sync::Arc::new(
             NeverDialledTransport,
         )
-            as std::sync::Arc<dyn platform_api::McpTransport>));
+            as std::sync::Arc<dyn lingxi_core::host::McpTransport>));
         registry.connections.write().await.insert(
             "flaky".into(),
             mcp::McpConnectionState::Failed {
                 config: mcp::McpServerConfig {
                     name: "flaky".into(),
-                    spec: platform_api::McpTransportSpec::Stdio {
+                    spec: lingxi_core::host::McpTransportSpec::Stdio {
                         command: "x".into(),
                         args: vec![],
                         env: Default::default(),
                     },
-                    scope: mcp::ConfigScope::Settings(protocol::SettingsScope::User),
+                    scope: mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
                     disabled: false,
                     timeout_ms: None,
                     always_load: false,

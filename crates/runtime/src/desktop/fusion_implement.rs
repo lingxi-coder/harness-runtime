@@ -12,9 +12,9 @@
 //! Until then every request is refused rather than run unconfined.
 
 use async_trait::async_trait;
-use platform_api::process::{ProcessError, ProcessStreamSink};
-use platform_api::sandbox::ProcessCommand;
-use platform_api::{
+use lingxi_core::host::process::{ProcessError, ProcessStreamSink};
+use lingxi_core::host::sandbox::ProcessCommand;
+use lingxi_core::host::{
     truncate_tail, FusionImplementHost, VerificationOutcome, VerificationRun, WorktreeManager,
     FUSION_VERIFICATION_OUTPUT_BYTE_CAP,
 };

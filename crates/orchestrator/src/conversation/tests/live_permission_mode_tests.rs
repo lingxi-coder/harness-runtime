@@ -6,13 +6,13 @@ use crate::test_support::{
 struct LivePermissionGate(std::sync::RwLock<String>);
 
 #[async_trait::async_trait]
-impl platform_api::PermissionGate for LivePermissionGate {
+impl lingxi_core::host::PermissionGate for LivePermissionGate {
     async fn check(
         &self,
         _tool_name: &str,
         _input: &serde_json::Value,
-    ) -> platform_api::PermissionDecision {
-        platform_api::PermissionDecision::Allow
+    ) -> lingxi_core::host::PermissionDecision {
+        lingxi_core::host::PermissionDecision::Allow
     }
 
     async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {

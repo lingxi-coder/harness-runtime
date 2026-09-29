@@ -6,7 +6,7 @@ use std::time::Duration;
 
 pub(super) const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-pub(super) use platform_api::shell_watchdog::ShellWatchdog;
+pub(super) use lingxi_core::host::shell_watchdog::ShellWatchdog;
 
 /// Read an OS pressure signal, never infer pressure from our own RSS. Unsupported
 /// kernels and failed reads decline to reap. macOS publishes the memorystatus

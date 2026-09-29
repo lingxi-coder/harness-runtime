@@ -5,12 +5,12 @@ use crate::{
     CostHydration, CostMutationId, CostPersistAck, CostPersistError, CostPersistence, CostState,
     CostStateVector, PricingCatalog, Usage,
 };
-use platform_api::WorkflowOutputScope;
-use protocol::{MessageId, SessionId};
+use lingxi_core::host::WorkflowOutputScope;
+use lingxi_core::types::{MessageId, SessionId};
 use tokio::sync::mpsc;
 
 struct Lease(String);
-impl platform_api::live_sessions::SessionWriterLease for Lease {
+impl lingxi_core::host::live_sessions::SessionWriterLease for Lease {
     fn session_id(&self) -> &str {
         &self.0
     }

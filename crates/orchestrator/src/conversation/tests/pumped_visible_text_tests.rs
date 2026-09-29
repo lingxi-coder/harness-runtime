@@ -1,5 +1,5 @@
 use super::super::drivers_impl::pumped_has_visible_text;
-use protocol::ContentBlock;
+use lingxi_core::types::ContentBlock;
 
 fn text(s: &str) -> ContentBlock {
     ContentBlock::Text {

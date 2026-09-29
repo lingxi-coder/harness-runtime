@@ -17,14 +17,14 @@ use tool_api::registry::ToolRegistry;
 /// instantaneous.
 struct InlineRuntime;
 #[async_trait]
-impl platform_api::RuntimeSpawner for InlineRuntime {
+impl lingxi_core::host::RuntimeSpawner for InlineRuntime {
     async fn spawn(
         &self,
         name: &str,
         task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError> {
         tokio::spawn(task);
-        Ok(platform_api::BackgroundTaskHandle {
+        Ok(lingxi_core::host::BackgroundTaskHandle {
             task_name: name.to_string(),
             task_id: 0,
         })
@@ -32,8 +32,8 @@ impl platform_api::RuntimeSpawner for InlineRuntime {
     async fn sleep(&self, _d: std::time::Duration) {}
     async fn cancel(
         &self,
-        _h: &platform_api::BackgroundTaskHandle,
-    ) -> Result<(), platform_api::RuntimeError> {
+        _h: &lingxi_core::host::BackgroundTaskHandle,
+    ) -> Result<(), lingxi_core::host::RuntimeError> {
         Ok(())
     }
 }
@@ -76,7 +76,7 @@ async fn maybe_extract_session_memory_is_noop_without_handle() {
 
 /// Build an orchestrator whose prefetch resolves to `seed`.
 fn orch_with_seed(seed: Vec<SurfacedMemory>) -> ConversationOrchestrator {
-    let runtime: Arc<dyn platform_api::RuntimeSpawner> = Arc::new(InlineRuntime);
+    let runtime: Arc<dyn lingxi_core::host::RuntimeSpawner> = Arc::new(InlineRuntime);
     let prefetch = Arc::new(memory::prefetch::MemoryPrefetch::with_fixed_result(
         runtime, seed,
     ));

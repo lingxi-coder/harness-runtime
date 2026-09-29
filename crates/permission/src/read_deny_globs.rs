@@ -301,7 +301,7 @@ mod tests {
         let p = policy_with(
             vec![read_deny(
                 "./secrets/**",
-                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             )],
             "/proj",
         );
@@ -315,7 +315,7 @@ mod tests {
         let p = policy_with(
             vec![read_deny(
                 ".env",
-                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             )],
             "/proj",
         );
@@ -330,7 +330,7 @@ mod tests {
         let p = policy_with(
             vec![read_deny(
                 "/secrets/**",
-                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             )],
             "/proj",
         );
@@ -345,7 +345,7 @@ mod tests {
         let p = policy_with(
             vec![read_deny(
                 "/x/**",
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             )],
             "/home/u/.lingxi",
         );
@@ -360,7 +360,7 @@ mod tests {
         let p = policy_with(
             vec![read_deny(
                 "/secret/**",
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             )],
             "/proj",
         );
@@ -375,7 +375,7 @@ mod tests {
         let p = policy_with(
             vec![read_deny(
                 "/c/**",
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             )],
             "/home/u",
         );
@@ -390,7 +390,7 @@ mod tests {
         let p = policy_with(
             vec![read_deny(
                 "~/private/**",
-                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             )],
             "/home/u",
         );
@@ -407,7 +407,7 @@ mod tests {
                 rule_content: Some("/secrets/**".into()),
             },
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
         let p = policy_with(vec![edit], "/proj");
         assert!(read_deny_exclude_globs(&p, Path::new("/proj")).is_empty());
@@ -422,7 +422,7 @@ mod tests {
                 rule_content: Some("/secrets/**".into()),
             },
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
         let p = policy_with(vec![allow], "/proj");
         assert!(read_deny_exclude_globs(&p, Path::new("/proj")).is_empty());
@@ -439,7 +439,7 @@ mod tests {
                     rule_content: None,
                 },
                 behavior: PermissionBehavior::Deny,
-                source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             }],
         )
         .with_roots(roots("/proj"));
@@ -460,11 +460,11 @@ mod tests {
             vec![
                 read_deny(
                     "./secrets/**",
-                    PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                    PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
                 ),
                 read_deny(
                     "./secrets/**",
-                    PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+                    PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
                 ),
             ],
             "/proj",
@@ -478,7 +478,7 @@ mod tests {
         let p = policy_with(
             vec![read_deny(
                 "/a//b///c/**",
-                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             )],
             "/proj",
         );

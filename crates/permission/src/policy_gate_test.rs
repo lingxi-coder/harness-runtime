@@ -143,7 +143,7 @@ mod tests {
     fn local_settings_policy(raw: &str) -> Arc<PermissionPolicy> {
         let rules = crate::loader::permission_rules_from_settings_json(
             raw,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         )
         .unwrap();
         Arc::new(
@@ -278,7 +278,7 @@ mod tests {
     async fn a_mode_deny_on_the_host_form_does_not_suppress_a_guest_allow() {
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": { "allow": ["Edit(//workspace/ws/**)"] } }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         )
         .unwrap();
         let policy = Arc::new(
@@ -312,7 +312,7 @@ mod tests {
     /// authorize path fixes one layer up.
     #[tokio::test]
     async fn read_deny_excludes_are_computed_in_host_coordinates() {
-        use platform_api::permission_gate::PermissionGate as _;
+        use lingxi_core::host::permission_gate::PermissionGate as _;
 
         // A ROOTED pattern: `/secrets/**` resolves to `root_path_for_source`
         // (= roots.cwd), so it must be REBASED onto the search cwd. An
@@ -429,7 +429,7 @@ mod tests {
     /// through a denied directory.
     #[tokio::test]
     async fn a_fenced_guest_region_withholds_the_exclusion_list() {
-        use platform_api::permission_gate::PermissionGate as _;
+        use lingxi_core::host::permission_gate::PermissionGate as _;
 
         let policy =
             local_settings_policy(r#"{ "permissions": { "deny": ["Read(/secrets/**)"] } }"#);
@@ -461,7 +461,7 @@ mod tests {
     async fn plan_mode_still_gates_a_mutating_local_app_tool() {
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": {} }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         )
         .unwrap();
         let policy = Arc::new(PermissionPolicy::from_rules(PermissionMode::Plan, rules));
@@ -518,7 +518,7 @@ mod tests {
     fn policy_with(raw: &str, mode: PermissionMode) -> Arc<PermissionPolicy> {
         let rules = crate::loader::permission_rules_from_settings_json(
             raw,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         Arc::new(PermissionPolicy::from_rules(mode, rules))
@@ -527,7 +527,7 @@ mod tests {
     fn policy_with_roots(raw: &str, mode: PermissionMode) -> Arc<PermissionPolicy> {
         let rules = crate::loader::permission_rules_from_settings_json(
             raw,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         Arc::new(
@@ -1429,7 +1429,7 @@ mod tests {
         let rule = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Bash"),
             behavior: crate::rule::PermissionBehavior::Ask,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         };
         assert_eq!(
             serialize_decision_reason(&PermissionDecisionReason::MatchedRule { rule }),
@@ -1516,7 +1516,7 @@ mod tests {
         let rule = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Bash"),
             behavior: crate::rule::PermissionBehavior::Ask,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         };
         // The four where decision_reason TEXT is None → the type carries the info.
         assert_eq!(
@@ -1709,7 +1709,7 @@ mod tests {
             outcome,
             PermissionOutcome::Allow {
                 decision_classification: Some(
-                    platform_api::permission_gate::ToolDecisionClassification::UserTemporary
+                    lingxi_core::host::permission_gate::ToolDecisionClassification::UserTemporary
                 ),
                 ..
             }
@@ -2597,7 +2597,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     async fn auto_mode_skips_dangerous_allow_rules_before_classifier() {
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": { "allow": ["Bash(python:*)"] } }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         let policy = Arc::new(PermissionPolicy::from_rules(PermissionMode::Auto, rules));
@@ -3488,7 +3488,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
 
     #[test]
     fn noninteractive_shell_check_reads_live_rules_mode_and_transient_allows() {
-        use platform_api::permission_gate::NonInteractivePermissionDecision;
+        use lingxi_core::host::permission_gate::NonInteractivePermissionDecision;
 
         let policy = Arc::new(
             PermissionPolicy::from_rules(PermissionMode::Default, Vec::new())
@@ -3850,7 +3850,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     fn gate_with_rules(raw: &str) -> PolicyPermissionGate {
         let rules = crate::loader::permission_rules_from_settings_json(
             raw,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         )
         .expect("settings fixture parses");
         let policy = Arc::new(

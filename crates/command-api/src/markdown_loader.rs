@@ -451,23 +451,23 @@ pub async fn load_command_markdown_files(
     }
 
     // Answers: which tier's markdown command wins a name clash.
-    // One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
+    // One of several orderings over these rungs; `lingxi_core::types::scope`'s module docs index them all and say which question each answers.
     //
     // Load each layer. Order: managed, user, then project dirs (most- to
     // least-specific). Combined priority: managed > user > project.
     let mut all_files: Vec<MarkdownCommandFile> = Vec::new();
     all_files.extend(load_markdown_dir(
         &managed_commands_dir,
-        CommandSource::Settings(protocol::SettingsScope::Managed),
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Managed),
     ));
     all_files.extend(load_markdown_dir(
         &user_dir,
-        CommandSource::Settings(protocol::SettingsScope::User),
+        CommandSource::Settings(lingxi_core::types::SettingsScope::User),
     ));
     for project_dir in &project_dirs {
         all_files.extend(load_markdown_dir(
             project_dir,
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         ));
     }
 
@@ -480,7 +480,7 @@ pub async fn load_command_markdown_files(
 pub async fn load_managed_command_markdown_files(managed_dir: &Path) -> Vec<MarkdownCommandFile> {
     deduplicate_by_inode(load_markdown_dir(
         &managed_dir.join(branding::DOT_DIR).join("commands"),
-        CommandSource::Settings(protocol::SettingsScope::Managed),
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Managed),
     ))
 }
 
@@ -512,23 +512,23 @@ pub async fn load_skill_markdown_files_with_roots(
     if let Some(managed_dir) = managed_dir {
         all_files.extend(load_skill_dir(
             &managed_dir.join(branding::DOT_DIR).join("skills"),
-            CommandSource::Settings(protocol::SettingsScope::Managed),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Managed),
         ));
     }
     all_files.extend(load_skill_dir(
         &lingxi_home.join("skills"),
-        CommandSource::Settings(protocol::SettingsScope::User),
+        CommandSource::Settings(lingxi_core::types::SettingsScope::User),
     ));
     for project_dir in project_dirs_up_to_home("skills", cwd, home) {
         all_files.extend(load_skill_dir(
             &project_dir,
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         ));
     }
     for dir in additional_skill_dirs {
         all_files.extend(load_skill_dir(
             dir,
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         ));
     }
     deduplicate_skill_files_by_inode(all_files)
@@ -542,7 +542,7 @@ pub async fn load_managed_skill_markdown_files(
 ) -> Vec<SkillMarkdownCommandFile> {
     deduplicate_skill_files_by_inode(load_skill_dir(
         &managed_dir.join(branding::DOT_DIR).join("skills"),
-        CommandSource::Settings(protocol::SettingsScope::Managed),
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Managed),
     ))
 }
 
@@ -1300,11 +1300,11 @@ mod tests {
             base_dir: PathBuf::from("/root/.lingxi/commands"),
             frontmatter: CommandFrontmatter::default(),
             content: "# Foo Title\n\nHello $1".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
         let cmd = build_markdown_command(
             &file,
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert_eq!(cmd.name, "foo");
         assert_eq!(cmd.description, "Foo Title");
@@ -1327,11 +1327,11 @@ mod tests {
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
             content: "# Ignored Title".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::User),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::User),
         };
         let cmd = build_markdown_command(
             &file,
-            CommandSource::Settings(protocol::SettingsScope::User),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         assert_eq!(cmd.description, "explicit");
     }
@@ -1349,11 +1349,11 @@ mod tests {
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
             content: "# Body".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
         let cmd = build_markdown_command(
             &file,
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert_eq!(cmd.argument_hint.as_deref(), Some("<file> [flags]"));
         assert_eq!(cmd.loaded_from.as_deref(), Some("commands_DEPRECATED"));
@@ -1372,11 +1372,11 @@ mod tests {
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
             content: "# Body".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
         let cmd = build_markdown_command(
             &file,
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert_eq!(
             cmd.argument_names,
@@ -1392,11 +1392,11 @@ mod tests {
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: CommandFrontmatter::default(),
             content: "# Body".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
         let cmd = build_markdown_command(
             &file,
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert!(cmd.argument_names.is_empty());
     }
@@ -1488,11 +1488,11 @@ mod tests {
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
             content: "# Body".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
         let cmd = build_markdown_command(
             &file,
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert_eq!(cmd.when_to_use.as_deref(), Some("use for X"));
     }
@@ -1507,11 +1507,11 @@ mod tests {
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: fm,
             content: "# Body".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
         let cmd = build_markdown_command(
             &file,
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert!(cmd.disable_model_invocation);
     }
@@ -1525,11 +1525,11 @@ mod tests {
             base_dir: PathBuf::from("/r/.lingxi/commands"),
             frontmatter: CommandFrontmatter::default(),
             content: "# Body".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         };
         let cmd = build_markdown_command(
             &file,
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert_eq!(cmd.argument_hint, None);
         assert_eq!(cmd.loaded_from.as_deref(), Some("commands_DEPRECATED"));
@@ -1609,7 +1609,7 @@ mod tests {
         assert_eq!(shared.len(), 1, "inode dedup should keep exactly one");
         assert_eq!(
             shared[0].source,
-            CommandSource::Settings(protocol::SettingsScope::Managed),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Managed),
             "managed must win over project"
         );
 
@@ -1746,7 +1746,7 @@ mod tests {
         for file in &files {
             let cmd = build_skill_command(
                 file,
-                CommandSource::Settings(protocol::SettingsScope::Project),
+                CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             );
             let want = match cmd.name.as_str() {
                 "hidden" => Some(false),
@@ -1784,7 +1784,7 @@ mod tests {
 
         let cmd = build_skill_command(
             &skill_files[0],
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert_eq!(cmd.name, "demo");
         assert_eq!(cmd.description, "Demo skill");
@@ -1849,7 +1849,7 @@ mod tests {
             .expect("dup skill should load");
         assert_eq!(
             first_dup.source,
-            CommandSource::Settings(protocol::SettingsScope::User)
+            CommandSource::Settings(lingxi_core::types::SettingsScope::User)
         );
         assert_eq!(first_dup.frontmatter.description, "User skill");
 
@@ -1913,19 +1913,19 @@ mod tests {
         assert_eq!(names, vec!["dup", "dup", "dup", "extra"]);
         assert_eq!(
             skill_files[0].source,
-            CommandSource::Settings(protocol::SettingsScope::Managed)
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Managed)
         );
         assert_eq!(
             skill_files[1].source,
-            CommandSource::Settings(protocol::SettingsScope::User)
+            CommandSource::Settings(lingxi_core::types::SettingsScope::User)
         );
         assert_eq!(
             skill_files[2].source,
-            CommandSource::Settings(protocol::SettingsScope::Project)
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project)
         );
         assert_eq!(
             skill_files[3].source,
-            CommandSource::Settings(protocol::SettingsScope::Project)
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project)
         );
 
         fs::remove_dir_all(&root).ok();

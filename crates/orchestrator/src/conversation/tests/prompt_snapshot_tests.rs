@@ -3,7 +3,7 @@ use crate::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use crate::OrchestratorConfig;
-use platform_api::{PromptSnapshot, PromptToolDescription};
+use lingxi_core::host::{PromptSnapshot, PromptToolDescription};
 use serde_json::json;
 use session::jsonl::JsonlMessage;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -173,7 +173,7 @@ async fn a_plain_session_records_its_prompt_without_any_env_opt_in() {
     std::env::remove_var("CLAUDE_CODE_SIMPLE");
     std::env::remove_var("CLAUDE_CODE_CARVED_SLATE");
     std::env::remove_var("LINGXI_SESSION_KIND");
-    platform_api::session_flags::set_system_prompt_snapshot(None);
+    lingxi_core::host::session_flags::set_system_prompt_snapshot(None);
 
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -205,7 +205,7 @@ async fn the_off_flag_stops_recording_a_session_that_would_otherwise_record() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     std::env::remove_var("CLAUDE_CODE_SIMPLE");
     std::env::remove_var("LINGXI_SESSION_KIND");
-    platform_api::session_flags::set_system_prompt_snapshot(Some(false));
+    lingxi_core::host::session_flags::set_system_prompt_snapshot(Some(false));
 
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -224,5 +224,5 @@ async fn the_off_flag_stops_recording_a_session_that_would_otherwise_record() {
         orch.prompt_runtime.prompt_snapshot.lock().await.is_none(),
         "`off` must mean no record at all"
     );
-    platform_api::session_flags::set_system_prompt_snapshot(None);
+    lingxi_core::host::session_flags::set_system_prompt_snapshot(None);
 }

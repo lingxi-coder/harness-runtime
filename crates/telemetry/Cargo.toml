@@ -6,8 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
+core = { path = "../core" }
 telemetry-macros = { path = "../telemetry-macros" }
 serde.workspace = true
 serde_json.workspace = true
@@ -25,6 +24,7 @@ reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-
 tonic = { version = "=0.12.3", default-features = false, features = ["transport", "tls", "codegen", "prost"] }
 
 [dev-dependencies]
+tempfile = "3.13"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "net", "io-util", "time"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 

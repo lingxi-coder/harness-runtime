@@ -4,7 +4,7 @@ use hooks::{
     HookExecutor, HookExecutorImpl, HookOutcome, HookRegistry, HookResponse, HookResult,
     HookSource,
 };
-use protocol::{HookId, SessionId, ToolUseId};
+use lingxi_core::types::{HookId, SessionId, ToolUseId};
 use std::sync::Arc;
 use test_harness::mocks::{MockHttpTransport, MockRuntimeSpawner};
 use tokio::sync::RwLock;
@@ -95,7 +95,7 @@ async fn pretooluse_block_short_circuits() {
         executor: HookExecutor::Builtin {
             handler_id: "blocking-test".into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 100,

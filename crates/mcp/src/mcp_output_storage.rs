@@ -16,7 +16,7 @@
 //! the caller (a session/tool-results dir in production, a `tempfile::TempDir`
 //! in tests) so no real home directory is ever written during tests.
 
-use platform_api::McpResourceContentsRich;
+use lingxi_core::host::McpResourceContentsRich;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 

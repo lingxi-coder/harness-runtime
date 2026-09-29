@@ -3,7 +3,7 @@
 //!
 //! See spec §18 for the Skill subsystem overview.
 
-use protocol::PluginId;
+use lingxi_core::types::PluginId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::path::PathBuf;
@@ -230,7 +230,7 @@ where
 
 /// Where the skill originally came from (provenance classification).
 ///
-/// The settings rungs are the shared [`protocol::SettingsScope`]; the other
+/// The settings rungs are the shared [`lingxi_core::types::SettingsScope`]; the other
 /// three are this subsystem's own producers. Distinct from [`LoadedFrom`]
 /// below, which says which *loader* ran — the two differ only for the
 /// file-backed case, where `LoadedFrom` separates the `skills/` layout from the
@@ -240,7 +240,7 @@ pub enum SkillSource {
     /// Compiled into the binary.
     Bundled,
     /// Read from a settings tier's `skills/` directory.
-    Settings(protocol::SettingsScope),
+    Settings(lingxi_core::types::SettingsScope),
     /// Loaded by an installed plugin.
     Plugin,
     /// Derived from an MCP server tool definition.

@@ -2,13 +2,13 @@
 //!
 //! One MCP server is modelled as a config plus a state. The registry
 //! (`registry.rs`) drives transitions between the variants below using
-//! the platform-supplied [`platform_api::McpTransport`].
+//! the platform-supplied [`lingxi_core::host::McpTransport`].
 
-use platform_api::{
+use lingxi_core::host::{
     McpConfiguredToolPolicyDto, McpPermissionCeiling, McpPromptDto, McpResourceDto,
     McpResourceTemplateDto, McpToolDto, McpTransportSpec, ServerCapabilitiesDto,
 };
-use protocol::McpConnectionId;
+use lingxi_core::types::McpConnectionId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::SystemTime;
@@ -261,7 +261,7 @@ fn is_false(b: &bool) -> bool {
 #[allow(missing_docs)]
 pub enum ConfigScope {
     /// A settings tier's `.mcp.json` / `settings.json` servers.
-    Settings(protocol::SettingsScope),
+    Settings(lingxi_core::types::SettingsScope),
     Dynamic,
     /// Enterprise-pushed servers. Kept separate from
     /// `Settings(SettingsScope::Managed)`: this port splits the one
@@ -313,7 +313,7 @@ pub enum McpConnectionState {
         /// Server capabilities returned by `initialize`.
         capabilities: ServerCapabilitiesDto,
         /// Protocol family/version negotiated for this live connection.
-        negotiated: platform_api::McpNegotiatedProtocol,
+        negotiated: lingxi_core::host::McpNegotiatedProtocol,
         /// Tools advertised by the server.
         tools: Vec<McpToolDto>,
         /// Resources advertised by the server.
@@ -354,7 +354,7 @@ pub enum McpConnectionState {
         capabilities: ServerCapabilitiesDto,
         /// Protocol family/version recorded when the cached catalog was
         /// populated. No transport is live in this state.
-        negotiated: platform_api::McpNegotiatedProtocol,
+        negotiated: lingxi_core::host::McpNegotiatedProtocol,
         /// Tools from the cached `tools/list` round.
         tools: Vec<McpToolDto>,
         /// Resources from the cached `resources/list` round.
@@ -459,13 +459,13 @@ impl McpConnectionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::McpHeaders;
+    use lingxi_core::host::McpHeaders;
 
     fn cfg(spec: McpTransportSpec, config_error: Option<&str>) -> McpServerConfig {
         McpServerConfig {
             name: "srv".to_string(),
             spec,
-            scope: ConfigScope::Settings(protocol::SettingsScope::User),
+            scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             discovery_cache: None,

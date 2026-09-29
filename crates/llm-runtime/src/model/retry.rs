@@ -119,7 +119,7 @@ static MAX_RETRIES_CLAMP_WARNED: std::sync::atomic::AtomicBool =
 /// everything else (incl. absent) is OFF — the watchdog is opt-in.
 #[must_use]
 pub fn retry_watchdog_from_values(lingxi: Option<&str>, claude: Option<&str>) -> bool {
-    platform_api::env::is_env_truthy(lingxi.or(claude))
+    lingxi_core::host::env::is_env_truthy(lingxi.or(claude))
 }
 
 /// Read the retry-watchdog flag from the process environment

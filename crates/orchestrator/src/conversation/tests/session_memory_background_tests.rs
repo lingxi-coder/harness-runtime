@@ -11,14 +11,14 @@ use tool_api::context::ToolUseOptions;
 struct TokioRuntime;
 
 #[async_trait]
-impl platform_api::RuntimeSpawner for TokioRuntime {
+impl lingxi_core::host::RuntimeSpawner for TokioRuntime {
     async fn spawn(
         &self,
         name: &str,
         task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError> {
         tokio::spawn(task);
-        Ok(platform_api::BackgroundTaskHandle {
+        Ok(lingxi_core::host::BackgroundTaskHandle {
             task_name: name.to_string(),
             task_id: 0,
         })
@@ -30,8 +30,8 @@ impl platform_api::RuntimeSpawner for TokioRuntime {
 
     async fn cancel(
         &self,
-        _handle: &platform_api::BackgroundTaskHandle,
-    ) -> Result<(), platform_api::RuntimeError> {
+        _handle: &lingxi_core::host::BackgroundTaskHandle,
+    ) -> Result<(), lingxi_core::host::RuntimeError> {
         Ok(())
     }
 }
@@ -173,7 +173,7 @@ async fn clear_does_not_wait_for_network_extraction_or_commit_stale_result() {
 
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        platform_api::OrchestratorHandle::clear_session(&orch),
+        lingxi_core::host::OrchestratorHandle::clear_session(&orch),
     )
     .await
     .expect("clear must not wait for the side query")

@@ -2,7 +2,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use platform_api::Clock;
+use lingxi_core::host::Clock;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

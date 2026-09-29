@@ -55,7 +55,7 @@ impl AnalyticsBus {
         if self.killswitch.is_active() {
             return;
         }
-        if platform_api::traffic_mode::is_telemetry_disabled() {
+        if lingxi_core::host::traffic_mode::is_telemetry_disabled() {
             return;
         }
         mirror_analytics_event(name, &metadata);

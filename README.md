@@ -43,8 +43,7 @@ harness-runtime = { git = "https://github.com/lingxi-coder/harness-runtime.git",
 宿主装配好 `Harness` 后，可通过统一会话接口运行回合：
 
 ```rust
-use harness_runtime::api::{CancellationToken, HandleError, RunInput, TurnOutcome};
-use harness_runtime::Harness;
+use harness_runtime::{CancellationToken, HandleError, Harness, RunInput, TurnOutcome};
 
 async fn run_turn(harness: &Harness, prompt: String) -> Result<TurnOutcome, HandleError> {
     harness.session().run(
@@ -54,6 +53,9 @@ async fn run_turn(harness: &Harness, prompt: String) -> Result<TurnOutcome, Hand
 }
 ```
 
+启用 `desktop` feature 时可用 `harness_runtime::build_harness` 装配生产桌面运行时；
+移动宿主通过 `harness_runtime::mobile::build_mobile_engine` 接入对应平台能力。
+
 模型请求通过 `harness_runtime::models::llm` 接入独立的 `llm-client`。托管 Web Search/Web Fetch、远程 Skills、音频、文件及实时会话的类型、职责边界和示例见 [llm-client 能力接入](docs/llm-client-upgrade.md)。
 
 ## 仓库结构
@@ -61,13 +63,14 @@ async fn run_turn(harness: &Harness, prompt: String) -> Result<TurnOutcome, Hand
 | 路径 | 内容 |
 | --- | --- |
 | [`crates/runtime`](crates/runtime) | 对外组合入口及桌面、移动端装配。 |
-| [`crates/core`](crates/core)、[`crates/agent`](crates/agent)、[`crates/orchestrator`](crates/orchestrator) | 状态与 Agent 执行组件。 |
-| [`crates/client`](crates/client)、[`crates/protocol`](crates/protocol) | 客户端协议、展示与运行时适配。 |
+| [`crates/core`](crates/core) | 项目内部共享类型、宿主契约与基础状态规则。 |
+| [`crates/agent`](crates/agent)、[`crates/orchestrator`](crates/orchestrator)、[`crates/session`](crates/session) | 各领域拥有自己的执行逻辑和状态。 |
+| [`crates/client`](crates/client) | 客户端协议、展示与运行时适配。 |
 | [`crates/tools`](crates/tools)、[`crates/platforms`](crates/platforms) | 工具实现与平台能力。 |
 | [`deps/llm-client`](deps/llm-client)、[`third_party`](third_party) | 独立 SDK 子模块及带各自补丁和许可证的第三方源码。 |
 | [`scripts`](scripts)、[`docs`](docs) | 构建/边界检查及设计、迁移文档。 |
 
-依赖方向由 `scripts/check-deps.sh` 检查；模型提供方通信由 `llm-client` 负责，宿主保留凭证、会话、权限、工具执行和持久化职责。移动 Linux 资源供应链及宿主接口见 [运行时来源契约](docs/mobile-linux/RUNTIME-SOURCE-CONTRACT.md)。
+宿主通过 `harness-runtime` 的公开 API 接入；仓库内部组件依赖 `core` 的共享类型和契约。依赖方向由 `scripts/check-deps.sh` 检查；模型提供方通信由 `llm-client` 负责，宿主保留凭证、会话、权限、工具执行和持久化职责。移动 Linux 资源供应链及宿主接口见 [运行时来源契约](docs/mobile-linux/RUNTIME-SOURCE-CONTRACT.md)。
 
 ## 开发与验证
 

@@ -79,8 +79,8 @@ enum ShadowResult<'a> {
 pub fn is_shared_setting_source(source: PermissionRuleSource) -> bool {
     matches!(
         source,
-        PermissionRuleSource::Settings(protocol::SettingsScope::Project)
-            | PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project)
+            | PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)
             | PermissionRuleSource::Command
     )
 }
@@ -93,13 +93,15 @@ pub fn is_shared_setting_source(source: PermissionRuleSource) -> bool {
 #[must_use]
 pub(crate) fn format_source(source: PermissionRuleSource) -> &'static str {
     match source {
-        PermissionRuleSource::Settings(protocol::SettingsScope::User) => "user settings",
-        PermissionRuleSource::Settings(protocol::SettingsScope::Project) => {
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User) => "user settings",
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project) => {
             "shared project settings"
         }
-        PermissionRuleSource::Settings(protocol::SettingsScope::Local) => "project local settings",
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local) => {
+            "project local settings"
+        }
         PermissionRuleSource::FlagSettings => "command line arguments",
-        PermissionRuleSource::Settings(protocol::SettingsScope::Managed) => {
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed) => {
             "enterprise managed settings"
         }
         PermissionRuleSource::CliArg => "CLI argument",
@@ -308,10 +310,10 @@ mod tests {
     #[test]
     fn shared_sources_are_project_policy_command() {
         assert!(is_shared_setting_source(PermissionRuleSource::Settings(
-            protocol::SettingsScope::Project
+            lingxi_core::types::SettingsScope::Project
         )));
         assert!(is_shared_setting_source(PermissionRuleSource::Settings(
-            protocol::SettingsScope::Managed
+            lingxi_core::types::SettingsScope::Managed
         )));
         assert!(is_shared_setting_source(PermissionRuleSource::Command));
     }
@@ -319,8 +321,8 @@ mod tests {
     #[test]
     fn personal_sources_are_not_shared() {
         for s in [
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
             PermissionRuleSource::FlagSettings,
             PermissionRuleSource::CliArg,
             PermissionRuleSource::Session,
@@ -336,12 +338,12 @@ mod tests {
         let allow_rules = [allow(
             "Bash",
             Some("ls:*"),
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )];
         let deny_rules = [deny(
             "Bash",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )];
         let out = detect_unreachable_rules(&allow_rules, &[], &deny_rules, false);
         assert_eq!(out.len(), 1);
@@ -360,17 +362,17 @@ mod tests {
         let allow_rules = [allow(
             "Bash",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )];
         let deny_rules = [deny(
             "Bash",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )];
         let ask_rules = [ask(
             "Bash",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &deny_rules, false);
         assert!(out.is_empty());
@@ -382,17 +384,17 @@ mod tests {
         let allow_rules = [allow(
             "Bash",
             Some("ls:*"),
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )];
         let ask_rules = [ask(
             "Bash",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )];
         let deny_rules = [deny(
             "Bash",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &deny_rules, false);
         assert_eq!(out.len(), 1);
@@ -404,12 +406,12 @@ mod tests {
         let allow_rules = [allow(
             "Bash",
             Some("ls:*"),
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )];
         let deny_rules = [deny(
             "Edit",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )];
         let out = detect_unreachable_rules(&allow_rules, &[], &deny_rules, false);
         assert!(out.is_empty());
@@ -421,12 +423,12 @@ mod tests {
         let allow_rules = [allow(
             "Bash",
             Some("ls:*"),
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )];
         let deny_rules = [deny(
             "Bash",
             Some("rm:*"),
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )];
         let out = detect_unreachable_rules(&allow_rules, &[], &deny_rules, false);
         assert!(out.is_empty());
@@ -439,12 +441,12 @@ mod tests {
         let allow_rules = [allow(
             "Bash",
             Some("ls:*"),
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )];
         let ask_rules = [ask(
             "Bash",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], false);
         assert_eq!(out.len(), 1);
@@ -462,12 +464,12 @@ mod tests {
         let allow_rules = [allow(
             "Edit",
             Some("src/**"),
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )];
         let ask_rules = [ask(
             "Edit",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], true);
         assert_eq!(out.len(), 1);
@@ -480,8 +482,8 @@ mod tests {
     fn bash_ask_from_personal_source_with_sandbox_not_shadowed() {
         // Bash ask from a PERSONAL source + sandbox_auto_allow → NOT shadowed.
         for personal in [
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
             PermissionRuleSource::FlagSettings,
             PermissionRuleSource::CliArg,
             PermissionRuleSource::Session,
@@ -489,7 +491,7 @@ mod tests {
             let allow_rules = [allow(
                 "Bash",
                 Some("ls:*"),
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             )];
             let ask_rules = [ask("Bash", None, personal)];
             let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], true);
@@ -506,12 +508,12 @@ mod tests {
         let allow_rules = [allow(
             "Bash",
             Some("ls:*"),
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )];
         let ask_rules = [ask(
             "Bash",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], false);
         assert_eq!(out.len(), 1);
@@ -525,12 +527,12 @@ mod tests {
         let allow_rules = [allow(
             "Bash",
             Some("ls:*"),
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         )];
         let ask_rules = [ask(
             "Bash",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], true);
         assert_eq!(out.len(), 1);
@@ -544,12 +546,12 @@ mod tests {
         let allow_rules = [allow(
             "Bash",
             Some("ls:*"),
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         )];
         let deny_rules = [deny(
             "Bash",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )];
         let out = detect_unreachable_rules(&allow_rules, &[], &deny_rules, false);
         assert_eq!(
@@ -564,12 +566,12 @@ mod tests {
         let allow_rules = [allow(
             "Bash",
             Some("ls:*"),
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         )];
         let ask_rules = [ask(
             "Bash",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], false);
         assert_eq!(
@@ -587,23 +589,23 @@ mod tests {
             allow(
                 "Bash",
                 Some("ls:*"),
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ),
             allow(
                 "Bash",
                 Some("cat:*"),
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ),
             allow(
                 "Edit",
                 Some("src/**"),
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ), // not shadowed
         ];
         let deny_rules = [deny(
             "Bash",
             None,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
         )];
         let out = detect_unreachable_rules(&allow_rules, &[], &deny_rules, false);
         assert_eq!(out.len(), 2);
@@ -622,19 +624,19 @@ mod tests {
     fn format_source_matches_ts_display_strings() {
         assert_eq!(
             format_source(PermissionRuleSource::Settings(
-                protocol::SettingsScope::User
+                lingxi_core::types::SettingsScope::User
             )),
             "user settings"
         );
         assert_eq!(
             format_source(PermissionRuleSource::Settings(
-                protocol::SettingsScope::Project
+                lingxi_core::types::SettingsScope::Project
             )),
             "shared project settings"
         );
         assert_eq!(
             format_source(PermissionRuleSource::Settings(
-                protocol::SettingsScope::Local
+                lingxi_core::types::SettingsScope::Local
             )),
             "project local settings"
         );
@@ -644,7 +646,7 @@ mod tests {
         );
         assert_eq!(
             format_source(PermissionRuleSource::Settings(
-                protocol::SettingsScope::Managed
+                lingxi_core::types::SettingsScope::Managed
             )),
             "enterprise managed settings"
         );
@@ -681,7 +683,7 @@ mod tests {
         );
         // userSettings still highest (walk head wins citation).
         assert!(
-            PermissionRuleSource::Settings(protocol::SettingsScope::User).priority()
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User).priority()
                 > PermissionRuleSource::Session.priority()
         );
         assert!(!is_shared_setting_source(

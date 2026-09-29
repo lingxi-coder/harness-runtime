@@ -11,10 +11,10 @@ license.workspace = true
 # semantics as claude-code's AsyncFunction-based executor.
 
 [dependencies]
+core = { path = "../core" }
 # The Workflow tool description + authoring reference (`description.rs`) live
 # here because both the tool and the `workflow-authoring` bundled skill read
 # them, and §8.1 forbids a command crate depending on a tool crate.
-platform-api = { path = "../platform-api" }
 serde.workspace = true
 once_cell = "1"
 

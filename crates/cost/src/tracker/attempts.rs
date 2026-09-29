@@ -22,7 +22,7 @@ pub struct CostAttemptSettlement {
 
 pub(super) struct AttemptSlot {
     mutation: AttemptPersistMutation,
-    publication_key: Option<protocol::MessageId>,
+    publication_key: Option<lingxi_core::types::MessageId>,
     result: std::sync::Mutex<Option<AttemptSlotOutcome>>,
     lifecycle: Option<Arc<AttemptLifecycle>>,
     notify: tokio::sync::Notify,
@@ -70,7 +70,7 @@ impl AttemptRegistry {
 #[derive(Clone)]
 enum AttemptSlotOutcome {
     Persisted(Result<CostAttemptSettlement, CostPersistError>),
-    NotAdmitted(platform_api::BudgetError),
+    NotAdmitted(lingxi_core::host::BudgetError),
 }
 
 /// No account/lease backedge. Intent acknowledgement ends its durability
@@ -413,7 +413,7 @@ mod tests {
     use super::*;
 
     struct TestLease(String);
-    impl platform_api::live_sessions::SessionWriterLease for TestLease {
+    impl lingxi_core::host::live_sessions::SessionWriterLease for TestLease {
         fn session_id(&self) -> &str {
             &self.0
         }

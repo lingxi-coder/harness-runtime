@@ -6,7 +6,7 @@
 //! The aggregate [`DoctorReport`] is what the `/doctor` slash-command
 //! handler renders (one row per check) into the Summary text panel.
 
-use platform_api::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
+use lingxi_core::host::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
 use std::path::Path;
 
 /// Run all doctor checks against the supplied config-dir root (the `tr()`-rooted

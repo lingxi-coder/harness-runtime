@@ -8,7 +8,7 @@
 //! * **Real multi-turn loop** (`api_client = Some`): an imperative loop that
 //!   mirrors the orchestrator's `execute_one_turn` — call the model, append
 //!   the assistant turn, dispatch any `tool_use` blocks through the inherited
-//!   [`platform_api::ToolInvoker`], feed the results back as a user message, and
+//!   [`lingxi_core::host::ToolInvoker`], feed the results back as a user message, and
 //!   repeat until the model stops (`end_turn` / no tool use) or `max_turns`
 //!   is hit. A `UserExit` / `UserInterrupt` arriving on `event_rx` aborts the
 //!   loop and surfaces [`SubagentEvent::Killed`]. When
@@ -22,9 +22,9 @@
 
 use crate::context::SubagentContext;
 use futures::StreamExt;
+use lingxi_core::host::WorkflowQueryWatchdog;
+use lingxi_core::types::{AgentId, ConversationMessage, MessageId};
 use llm_runtime::{HistoryEvent, LlmError};
-use platform_api::WorkflowQueryWatchdog;
-use protocol::{AgentId, ConversationMessage, MessageId};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::Duration;
@@ -49,7 +49,7 @@ pub enum SubagentEvent {
         /// Final result payload (free-form JSON).
         result: serde_json::Value,
         /// Wire usage from the FINAL model response (the spawner translates this
-        /// into `platform_api::SubagentUsage` + the result-level token total). The
+        /// into `lingxi_core::host::SubagentUsage` + the result-level token total). The
         /// legacy stub path has no real round-trips and emits `ExecutionUsage::default()`.
         usage: llm_runtime::ExecutionUsage,
         /// Number of tool-use blocks executed across the run (claude
@@ -114,7 +114,7 @@ pub enum SubagentEvent {
 }
 
 /// `#[serde(default = ...)]` for [`SubagentEvent::Completed::usage_complete`]
-/// / [`platform_api::subagent_spawn::SubagentResult::Completed::usage_complete`]
+/// / [`lingxi_core::host::subagent_spawn::SubagentResult::Completed::usage_complete`]
 /// — an older wire payload with no such field must decode as `true` (a
 /// normal complete usage rollup), not `bool::default()`'s `false`.
 fn usage_complete_default() -> bool {
@@ -273,8 +273,8 @@ fn with_workflow_stream_watchdog(
 /// A cancelled/dropped worker future must not leave a pending hook snapshot.
 struct PromptTranscriptCancellationGuard {
     executor: Option<std::sync::Arc<hooks::HookExecutorImpl>>,
-    session_id: protocol::SessionId,
-    agent_id: protocol::AgentId,
+    session_id: lingxi_core::types::SessionId,
+    agent_id: lingxi_core::types::AgentId,
     completed: bool,
 }
 
@@ -319,7 +319,7 @@ pub async fn run_subagent(
         wants_1h_cache,
         llm_runtime::thinking_scope::scope_thinking_recovery(
             llm_runtime::thinking_scope::ThinkingRecoveryScope::default(),
-            platform_api::session_flags::scope_non_interactive_session(
+            lingxi_core::host::session_flags::scope_non_interactive_session(
                 non_interactive,
                 run_subagent_inner(ctx, event_rx, out_tx),
             ),
@@ -625,14 +625,14 @@ pub(crate) fn resolve_model(ctx: &SubagentContext) -> String {
 /// text strings (one per surviving text block) in source order — the caller maps
 /// them into claude's `content: [{type:'text', text}]` array.
 fn final_text_blocks(
-    history: &[protocol::ConversationMessage],
-    final_assistant_blocks: &[protocol::ContentBlock],
+    history: &[lingxi_core::types::ConversationMessage],
+    final_assistant_blocks: &[lingxi_core::types::ContentBlock],
 ) -> Vec<String> {
-    let texts_of = |blocks: &[protocol::ContentBlock]| -> Vec<String> {
+    let texts_of = |blocks: &[lingxi_core::types::ContentBlock]| -> Vec<String> {
         blocks
             .iter()
             .filter_map(|b| match b {
-                protocol::ContentBlock::Text { text } => Some(text.clone()),
+                lingxi_core::types::ContentBlock::Text { text } => Some(text.clone()),
                 _ => None,
             })
             .collect::<Vec<String>>()
@@ -644,7 +644,7 @@ fn final_text_blocks(
     }
     // 2. Backward scan: most recent assistant message WITH text.
     for msg in history.iter().rev() {
-        if let protocol::ConversationMessage::Assistant { content, .. } = msg {
+        if let lingxi_core::types::ConversationMessage::Assistant { content, .. } = msg {
             let t = texts_of(content);
             if !t.is_empty() {
                 return t;
@@ -663,8 +663,8 @@ fn final_text_blocks(
 /// build claude's structured result + model-facing trailer; the joined `text`
 /// stays for back-compat (`tasks::handlers::local_agent` / `dream`).
 fn build_completed_result(
-    history: &[protocol::ConversationMessage],
-    final_assistant_blocks: &[protocol::ContentBlock],
+    history: &[lingxi_core::types::ConversationMessage],
+    final_assistant_blocks: &[lingxi_core::types::ContentBlock],
     stop_reason: Option<&str>,
     serving_model: &str,
 ) -> serde_json::Value {
@@ -772,8 +772,8 @@ fn classify_api_termination(e: &llm_runtime::LlmError) -> Option<(&'static str, 
 /// prepended as the FIRST text block — claude's sync-agent recovery
 /// (`On.content=[{type:"text",text:Dn},...On.content]`, status `"completed"`).
 fn build_recovered_result(
-    history: &[protocol::ConversationMessage],
-    final_assistant_blocks: &[protocol::ContentBlock],
+    history: &[lingxi_core::types::ConversationMessage],
+    final_assistant_blocks: &[lingxi_core::types::ContentBlock],
     cutoff_note: &str,
 ) -> serde_json::Value {
     let mut blocks = final_text_blocks(history, final_assistant_blocks);
@@ -829,8 +829,8 @@ fn format_skill_loading_metadata(skill_name: &str) -> String {
 /// legacy.
 async fn build_preload_messages(
     ctx: &SubagentContext,
-) -> Result<Vec<protocol::ConversationMessage>, String> {
-    use protocol::{ContentBlock, ConversationMessage, MessageId};
+) -> Result<Vec<lingxi_core::types::ConversationMessage>, String> {
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
     let agent_type = ctx.agent_definition.agent_type.clone();
     let mut out: Vec<ConversationMessage> = Vec::new();
@@ -856,7 +856,7 @@ async fn build_preload_messages(
     // `agent_type` on EVERY entrypoint (Agent tool, `/fusion`, workflow), so a
     // Fusion run's hook activity is exactly the chokepoint's one pair.
     if let Some(hooks) = &ctx.hook_executor {
-        if !platform_api::is_fusion_panel_type(&agent_type) {
+        if !lingxi_core::host::is_fusion_panel_type(&agent_type) {
             let hook_ctx = hooks::registry::HookContext {
                 session_id: ctx.hook_session_id,
                 agent_id: Some(ctx.agent_id),
@@ -936,32 +936,34 @@ async fn build_preload_messages(
 /// Mirrors the orchestrator's `translate_response_blocks`: `Text` /
 /// `ToolCall` / `Reasoning` map through; server-side and other variants
 /// are dropped.
-fn translate_response_blocks(content: &[llm_runtime::ContentBlock]) -> Vec<protocol::ContentBlock> {
+fn translate_response_blocks(
+    content: &[llm_runtime::ContentBlock],
+) -> Vec<lingxi_core::types::ContentBlock> {
     content
         .iter()
         .filter_map(|b| match b {
-            llm_runtime::ContentBlock::ProviderContent { protocol, value } => Some(protocol::ContentBlock::ProviderContent { protocol: protocol.clone(), value: value.clone() }),
+            llm_runtime::ContentBlock::ProviderContent { protocol, value } => Some(lingxi_core::types::ContentBlock::ProviderContent { protocol: protocol.clone(), value: value.clone() }),
 
             llm_runtime::ContentBlock::Text { text, .. }
             | llm_runtime::ContentBlock::TextJsUtf16 { text, .. } => {
-                Some(protocol::ContentBlock::Text { text: text.clone() })
+                Some(lingxi_core::types::ContentBlock::Text { text: text.clone() })
             }
             llm_runtime::ContentBlock::ToolCall { id, name, input } => {
                 // (cc 2.1.218 `jYd`) Same literal-`\uXXXX` repair the orchestrator
                 // applies — a subagent's tool inputs must be normalized too.
                 let (input, _stats) =
                     llm_runtime::unicode_repair::repair_tool_input(name, input);
-                Some(protocol::ContentBlock::ToolUse {
+                Some(lingxi_core::types::ContentBlock::ToolUse {
                     // The provider-issued id IS the canonical ToolUseId (byte
                     // parity with claude-code); the provider_id sidecar stays None.
-                    id: protocol::ToolUseId::from(id.clone()),
+                    id: lingxi_core::types::ToolUseId::from(id.clone()),
                     name: name.clone(),
                     input,
                     provider_id: None,
                 })
             }
             llm_runtime::ContentBlock::Reasoning { text, signature } => {
-                Some(protocol::ContentBlock::Thinking {
+                Some(lingxi_core::types::ContentBlock::Thinking {
                     thinking: text.clone(),
                     signature: signature.clone(),
                 })
@@ -969,10 +971,10 @@ fn translate_response_blocks(content: &[llm_runtime::ContentBlock]) -> Vec<proto
             // Low-frequency server-side blocks: PRESERVED verbatim for resume/replay
             // byte parity (matches orchestrator::turn_loop::translate_response_blocks).
             llm_runtime::ContentBlock::RedactedThinking { data } => {
-                Some(protocol::ContentBlock::RedactedThinking { data: data.clone() })
+                Some(lingxi_core::types::ContentBlock::RedactedThinking { data: data.clone() })
             }
             llm_runtime::ContentBlock::ServerToolUse { id, name, input } => {
-                Some(protocol::ContentBlock::ServerToolUse {
+                Some(lingxi_core::types::ContentBlock::ServerToolUse {
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
@@ -981,7 +983,7 @@ fn translate_response_blocks(content: &[llm_runtime::ContentBlock]) -> Vec<proto
             llm_runtime::ContentBlock::ConnectorText {
                 connector_text,
                 signature,
-            } => Some(protocol::ContentBlock::ConnectorText {
+            } => Some(lingxi_core::types::ContentBlock::ConnectorText {
                 connector_text: connector_text.clone(),
                 signature: signature.clone(),
             }),
@@ -989,7 +991,7 @@ fn translate_response_blocks(content: &[llm_runtime::ContentBlock]) -> Vec<proto
                 tool_use_id,
                 content,
                 is_error,
-            } => Some(protocol::ContentBlock::AdvisorToolResult {
+            } => Some(lingxi_core::types::ContentBlock::AdvisorToolResult {
                 tool_use_id: tool_use_id.clone(),
                 content: content.clone(),
                 is_error: *is_error,
@@ -1009,7 +1011,7 @@ fn translate_response_blocks(content: &[llm_runtime::ContentBlock]) -> Vec<proto
 async fn emit_message(
     out_tx: &mpsc::Sender<SubagentEvent>,
     agent_id: AgentId,
-    msg: &protocol::ConversationMessage,
+    msg: &lingxi_core::types::ConversationMessage,
 ) {
     let _ = out_tx
         .send(SubagentEvent::Message {
@@ -1026,8 +1028,8 @@ async fn emit_parked(out_tx: &mpsc::Sender<SubagentEvent>, agent_id: AgentId) {
     emit_message(
         out_tx,
         agent_id,
-        &protocol::ConversationMessage::System {
-            id: protocol::MessageId::new(),
+        &lingxi_core::types::ConversationMessage::System {
+            id: lingxi_core::types::MessageId::new(),
             content: "idle".to_string(),
             subtype: Some("agent_idle".to_string()),
             compact_metadata: None,
@@ -1054,7 +1056,7 @@ async fn emit_progress(
 
 async fn flush_transcript(
     transcript: Option<&crate::transcript::AgentTranscriptWriter>,
-    history: &[protocol::ConversationMessage],
+    history: &[lingxi_core::types::ConversationMessage],
     written: &mut usize,
 ) {
     let Some(writer) = transcript else {
@@ -1074,7 +1076,7 @@ async fn flush_transcript(
 
 fn publish_prompt_hook_transcript(
     ctx: &SubagentContext,
-    history: &[protocol::ConversationMessage],
+    history: &[lingxi_core::types::ConversationMessage],
     usage: &llm_runtime::ExecutionUsage,
 ) {
     if let Some(executor) = &ctx.hook_executor {
@@ -1106,7 +1108,7 @@ fn publish_prompt_hook_transcript(
 async fn emit_failed(
     out_tx: &mpsc::Sender<SubagentEvent>,
     transcript: Option<&crate::transcript::AgentTranscriptWriter>,
-    history: &[protocol::ConversationMessage],
+    history: &[lingxi_core::types::ConversationMessage],
     written: &mut usize,
     agent_id: AgentId,
     error: String,
@@ -1128,7 +1130,7 @@ async fn emit_failed(
 async fn emit_killed(
     out_tx: &mpsc::Sender<SubagentEvent>,
     transcript: Option<&crate::transcript::AgentTranscriptWriter>,
-    history: &[protocol::ConversationMessage],
+    history: &[lingxi_core::types::ConversationMessage],
     written: &mut usize,
     agent_id: AgentId,
 ) {
@@ -1195,7 +1197,7 @@ fn companion_note_for_disallowed_tool(tool_name: &str, is_ant: bool) -> Option<S
 ///
 /// Imperative — mirrors `orchestrator::turn_loop::execute_one_turn`: call the
 /// model, append the assistant turn, dispatch `tool_use` blocks through the
-/// inherited [`platform_api::ToolInvoker`], feed results back as a user message,
+/// inherited [`lingxi_core::host::ToolInvoker`], feed results back as a user message,
 /// and repeat. Each model round-trip goes over the streaming seam
 /// ([`crate::api::SubagentApiClient::messages_create_stream`] drained through
 /// `crate::accumulator::accumulate_stream`) and races a `UserExit` /
@@ -1211,7 +1213,7 @@ async fn run_subagent_loop(
     out_tx: mpsc::Sender<SubagentEvent>,
     live_hook_transcript: &mut hooks::PromptHookTranscript,
 ) {
-    use protocol::{ContentBlock, ConversationMessage, MessageId};
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
     let agent_id = ctx.agent_id;
     let api_client = ctx
@@ -1226,7 +1228,7 @@ async fn run_subagent_loop(
     // Per-run refusal cascade. claude-code's subagents share the main thread's
     // because they share its query generator; here the loops are separate, so
     // each run walks its own chain (handed down on the context).
-    let mut refusal_cascade = platform_api::refusal_driver::RefusalCascadeState::default();
+    let mut refusal_cascade = lingxi_core::host::refusal_driver::RefusalCascadeState::default();
     let system: Option<String> = ctx
         .rendered_system_prompt
         .as_ref()
@@ -1328,7 +1330,7 @@ async fn run_subagent_loop(
     let mut whendone_idle_turns: u32 = 0;
     let force_every_turn = matches!(
         ctx.structured_output_mode,
-        platform_api::subagent_spawn::StructuredOutputMode::Forced
+        lingxi_core::host::subagent_spawn::StructuredOutputMode::Forced
     );
     // Per-agent tool allow-list enforced at dispatch (see below). Empty = no
     // restriction (the resolver has not filtered, e.g. `AgentToolPolicy::All`).
@@ -1543,7 +1545,7 @@ async fn run_subagent_loop(
             // the same current/maximum bytes as Claude Code 2.1.217's background
             // task budget halt when the configured ceiling is available.
             if let Some(b) = &budget {
-                if let Err(platform_api::budget::BudgetError::Exceeded { current_nano_usd }) =
+                if let Err(lingxi_core::host::budget::BudgetError::Exceeded { current_nano_usd }) =
                     b.check_and_charge(0).await
                 {
                     // Stop with the 2.1.217 background-agent budget string.
@@ -2016,7 +2018,7 @@ async fn run_subagent_loop(
                             agent_id,
                             format!(
                                 "{} {e}",
-                                platform_api::subagent_spawn::SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX
+                                lingxi_core::host::subagent_spawn::SUBAGENT_QUERY_TIMEOUT_REASON_PREFIX
                             ),
                             cumulative_usage.clone(),
                         )
@@ -2169,7 +2171,7 @@ async fn run_subagent_loop(
 
             // Extract tool_use blocks.
             let tool_uses: Vec<(
-                protocol::ToolUseId,
+                lingxi_core::types::ToolUseId,
                 String,
                 serde_json::Value,
                 Option<String>,
@@ -2300,11 +2302,13 @@ async fn run_subagent_loop(
                         });
                         continue;
                     }
-                    let inv_ctx = platform_api::tool_invoker::SubagentInvocationContext {
+                    let inv_ctx = lingxi_core::host::tool_invoker::SubagentInvocationContext {
                         permission_pause_observer: ctx.task_registry.clone().map(|registry| {
-                            platform_api::permission_gate::PermissionPauseObserver::new(move |ms| {
-                                registry.add_permission_paused_ms(agent_id, ms);
-                            })
+                            lingxi_core::host::permission_gate::PermissionPauseObserver::new(
+                                move |ms| {
+                                    registry.add_permission_paused_ms(agent_id, ms);
+                                },
+                            )
                         }),
                         // The tools run on behalf of THIS agent. The field is
                         // named parent because it becomes the parent of any
@@ -2315,12 +2319,12 @@ async fn run_subagent_loop(
                         // never from the model's tool input or telemetry. The
                         // hidden Fusion panel definition opts into deterministic
                         // WebFetch; every other Agent keeps ordinary behavior.
-                        tool_execution_policy: if platform_api::is_fusion_panel_type(
+                        tool_execution_policy: if lingxi_core::host::is_fusion_panel_type(
                             &ctx.agent_definition.agent_type,
                         ) {
-                            platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel
+                            lingxi_core::host::tool_invoker::ToolExecutionPolicy::FusionPanel
                         } else {
-                            platform_api::tool_invoker::ToolExecutionPolicy::Ordinary
+                            lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary
                         },
                         // Swarm identity (claude-code `getAgentName()` /
                         // `getTeammateContext()?.teamName`): a teammate's dispatched
@@ -2333,7 +2337,8 @@ async fn run_subagent_loop(
                         // is_non_interactive_session=true (claude-code runAgent.ts:668-672).
                         is_async: ctx.is_async,
                         is_non_interactive_session: ctx.is_async
-                            || platform_api::session_flags::effective_non_interactive_session(),
+                            || lingxi_core::host::session_flags::effective_non_interactive_session(
+                            ),
                         // Whether this worker may surface a permission prompt to the
                         // user — drives the worker attribution on the prompt dialog
                         // (claude-code's worker permission badge).
@@ -2427,7 +2432,7 @@ async fn run_subagent_loop(
                                 content_blocks,
                             });
                         }
-                        Err(platform_api::tool_invoker::ToolInvokerError::Abort(error)) => {
+                        Err(lingxi_core::host::tool_invoker::ToolInvokerError::Abort(error)) => {
                             publish_prompt_hook_transcript(&ctx, history, &last_usage);
                             emit_failed(
                                 &out_tx,
@@ -2928,12 +2933,12 @@ async fn park_foreground_owner(
     registry
         .park_foreground_agent(
             ctx.agent_id,
-            platform_api::task_registry::AgentTerminalOutcome {
+            lingxi_core::host::task_registry::AgentTerminalOutcome {
                 result: result
                     .get("text")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string),
-                usage: Some(platform_api::task_registry::AgentRunUsage {
+                usage: Some(lingxi_core::host::task_registry::AgentRunUsage {
                     subagent_tokens: crate::handle::subagent_usage_from_llm_usage(usage)
                         .total_tokens,
                     tool_uses,
@@ -2958,7 +2963,7 @@ async fn fold_task_notifications(
         .take_pending_task_notifications_for(Some(ctx.agent_id))
         .await
         .unwrap_or_default();
-    let reminders = platform_api::task_notification::render_reminders_with_options(
+    let reminders = lingxi_core::host::task_notification::render_reminders_with_options(
         &notifications,
         false,
         telemetry::push_notifications_enabled(),
@@ -2990,8 +2995,8 @@ async fn run_subagent_stub(
     mut event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
 ) {
+    use lingxi_core::types::SessionId;
     use lingxi_core::{reduce, ConversationState, SessionState};
-    use protocol::SessionId;
 
     let agent_id = ctx.agent_id;
 
@@ -3142,22 +3147,22 @@ fn accumulate_usage(acc: &mut llm_runtime::ExecutionUsage, turn: &llm_runtime::E
 /// `tool_result` with no matching `tool_use` in the same request (and vice
 /// versa), so [`cap_input_bytes`] must never keep one half of such a pair.
 fn tool_pair_units(
-    messages: &[protocol::ConversationMessage],
-) -> Vec<&[protocol::ConversationMessage]> {
+    messages: &[lingxi_core::types::ConversationMessage],
+) -> Vec<&[lingxi_core::types::ConversationMessage]> {
     let mut units = Vec::new();
     let mut i = 0;
     while i < messages.len() {
         let is_tool_use_turn = matches!(
             &messages[i],
-            protocol::ConversationMessage::Assistant { content, .. }
-                if content.iter().any(|b| matches!(b, protocol::ContentBlock::ToolUse { .. }))
+            lingxi_core::types::ConversationMessage::Assistant { content, .. }
+                if content.iter().any(|b| matches!(b, lingxi_core::types::ContentBlock::ToolUse { .. }))
         );
         if is_tool_use_turn && i + 1 < messages.len() {
             let next_is_all_tool_result = matches!(
                 &messages[i + 1],
-                protocol::ConversationMessage::User { content, .. }
+                lingxi_core::types::ConversationMessage::User { content, .. }
                     if !content.is_empty()
-                        && content.iter().all(|b| matches!(b, protocol::ContentBlock::ToolResult { .. }))
+                        && content.iter().all(|b| matches!(b, lingxi_core::types::ContentBlock::ToolResult { .. }))
             );
             if next_is_all_tool_result {
                 units.push(&messages[i..=i + 1]);
@@ -3222,7 +3227,7 @@ fn cap_input_measurements() -> (usize, u64) {
 }
 
 fn measure_serialized_input_unit(
-    messages: &[protocol::ConversationMessage],
+    messages: &[lingxi_core::types::ConversationMessage],
 ) -> SerializedInputUnit {
     // A slice serializes as the same compact JSON array as the old flattened
     // Vec. Count the borrowed serialization directly instead of allocating a
@@ -3261,9 +3266,9 @@ fn append_serialized_input_unit(current_bytes: u64, unit: &SerializedInputUnit) 
 }
 
 fn cap_input_bytes(
-    messages: &[protocol::ConversationMessage],
+    messages: &[lingxi_core::types::ConversationMessage],
     max_bytes: Option<u64>,
-) -> Result<Vec<protocol::ConversationMessage>, String> {
+) -> Result<Vec<lingxi_core::types::ConversationMessage>, String> {
     let Some(max) = max_bytes else {
         return Ok(messages.to_vec());
     };
@@ -3290,7 +3295,7 @@ fn cap_input_bytes(
     // result pair) and is also mandatory. Reject when preserving it together
     // with the seed would exceed the cap rather than silently sending stale,
     // incomplete history. Older units may be dropped as whole units.
-    let mut selected_tail: Vec<&[protocol::ConversationMessage]> = Vec::new();
+    let mut selected_tail: Vec<&[lingxi_core::types::ConversationMessage]> = Vec::new();
     let mut selected_bytes = head_bytes;
     if let Some(newest) = units.get(1..).and_then(|tail| tail.last()).copied() {
         let newest_measurement = measure_serialized_input_unit(newest);
@@ -3349,7 +3354,7 @@ mod runner_test;
 /// lasts for this run only and does not touch the session model.
 fn refusal_fallback_frame(
     id: MessageId,
-    banner: &platform_api::refusal_notice::RefusalNotice,
+    banner: &lingxi_core::host::refusal_notice::RefusalNotice,
 ) -> ConversationMessage {
     ConversationMessage::System {
         id,
@@ -3359,7 +3364,7 @@ fn refusal_fallback_frame(
         ),
         subtype: Some("model_refusal_fallback".to_string()),
         compact_metadata: None,
-        refusal_fallback: Some(protocol::RefusalFallbackMetadata {
+        refusal_fallback: Some(lingxi_core::types::RefusalFallbackMetadata {
             trigger: "refusal".to_string(),
             direction: "retry".to_string(),
             scope: Some("local".to_string()),

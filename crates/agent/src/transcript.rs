@@ -4,8 +4,8 @@
 //! [`ConversationMessage`] to a transcript file under the agent's transcript
 //! subdir.
 
-use platform_api::FileSystem;
-use protocol::{AgentId, ConversationMessage};
+use lingxi_core::host::FileSystem;
+use lingxi_core::types::{AgentId, ConversationMessage};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -108,7 +108,10 @@ impl AgentTranscriptWriter {
     }
 
     /// Append one [`TranscriptEntry`] for `message`.
-    pub async fn record(&self, message: &ConversationMessage) -> Result<(), platform_api::FsError> {
+    pub async fn record(
+        &self,
+        message: &ConversationMessage,
+    ) -> Result<(), lingxi_core::host::FsError> {
         let entry = TranscriptEntry {
             agent_id: self.agent_id,
             timestamp: SystemTime::now(),
@@ -127,10 +130,10 @@ impl AgentTranscriptWriter {
     /// Persist explicit historical thinking ranges before the provider retry.
     pub async fn record_thinking_recovery(
         &self,
-        messages: std::collections::HashMap<protocol::MessageId, usize>,
-    ) -> Result<(), platform_api::FsError> {
+        messages: std::collections::HashMap<lingxi_core::types::MessageId, usize>,
+    ) -> Result<(), lingxi_core::host::FsError> {
         self.record(&ConversationMessage::System {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content: serde_json::to_string(&messages).expect("thinking ranges serialize"),
             subtype: Some("thinking_stripped".into()),
             compact_metadata: None,
@@ -145,13 +148,13 @@ impl AgentTranscriptWriter {
         &self,
         status: &str,
         error: Option<&str>,
-    ) -> Result<(), platform_api::FsError> {
+    ) -> Result<(), lingxi_core::host::FsError> {
         let detail = error.unwrap_or(status);
         let entry = TranscriptEntry {
             agent_id: self.agent_id,
             timestamp: SystemTime::now(),
             message: ConversationMessage::System {
-                id: protocol::MessageId::new(),
+                id: lingxi_core::types::MessageId::new(),
                 content: detail.to_string(),
                 subtype: Some(format!("agent_{status}")),
                 compact_metadata: None,
@@ -168,7 +171,10 @@ impl AgentTranscriptWriter {
         self.append_entry(&entry).await
     }
 
-    async fn append_entry(&self, entry: &TranscriptEntry) -> Result<(), platform_api::FsError> {
+    async fn append_entry(
+        &self,
+        entry: &TranscriptEntry,
+    ) -> Result<(), lingxi_core::host::FsError> {
         let line = format!(
             "{}\n",
             serde_json::to_string(entry).expect("transcript serialization")
@@ -229,22 +235,22 @@ mod tests {
         let assistant = |id, text: &str| ConversationMessage::Assistant {
             id,
             content: vec![
-                protocol::ContentBlock::Thinking {
+                lingxi_core::types::ContentBlock::Thinking {
                     thinking: "keep-prefix".into(),
                     signature: Some("valid".into()),
                 },
-                protocol::ContentBlock::Thinking {
+                lingxi_core::types::ContentBlock::Thinking {
                     thinking: text.into(),
                     signature: Some("sig".into()),
                 },
-                protocol::ContentBlock::Text {
+                lingxi_core::types::ContentBlock::Text {
                     text: "answer".into(),
                 },
             ],
             stop_reason: Some("end_turn".into()),
         };
-        let old = assistant(protocol::MessageId::new(), "rejected");
-        let fresh = assistant(protocol::MessageId::new(), "fresh");
+        let old = assistant(lingxi_core::types::MessageId::new(), "rejected");
+        let fresh = assistant(lingxi_core::types::MessageId::new(), "fresh");
         writer.record(&old).await.unwrap();
         writer
             .record_thinking_recovery([(old.id(), 1)].into_iter().collect())
@@ -273,7 +279,7 @@ mod tests {
             panic!("assistant")
         };
         assert!(
-            matches!(&content[0], protocol::ContentBlock::Thinking { thinking, .. } if thinking == "keep-prefix")
+            matches!(&content[0], lingxi_core::types::ContentBlock::Thinking { thinking, .. } if thinking == "keep-prefix")
         );
         assert_eq!(content.len(), 2);
         assert_eq!(history[1], fresh);

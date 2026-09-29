@@ -10,7 +10,7 @@
 //! onto `AppOperationFailed { code, message }`.
 //!
 //! Storage layout under the injected data root (all writes atomic via
-//! `platform_api::rooted_fs`; every file carries `schemaVersion`):
+//! `lingxi_core::host::rooted_fs`; every file carries `schemaVersion`):
 //!
 //! ```text
 //! apps/index.json                          — { schemaVersion, apps: [AppRecord] }

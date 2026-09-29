@@ -1,8 +1,8 @@
 use super::*;
 use async_trait::async_trait;
-use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-use platform_api::panel_pool::PanelAdmissionCancellation as CancellationToken;
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+use lingxi_core::host::panel_pool::PanelAdmissionCancellation as CancellationToken;
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use serde_json::Value;
 use test_harness::mocks::MockRuntimeSpawner;
 use tokio::sync::{Barrier, Notify};
@@ -56,7 +56,7 @@ fn pool(count: usize) -> Arc<StateMachinePool> {
     ))
 }
 
-async fn reserve(spawner: &PoolSubagentSpawner, count: usize) -> platform_api::PanelPoolLease {
+async fn reserve(spawner: &PoolSubagentSpawner, count: usize) -> lingxi_core::host::PanelPoolLease {
     spawner
         .reserve_fusion_panel_group(
             count,
@@ -78,7 +78,7 @@ impl crate::api::SubagentApiClient for Api {
         &self,
         _: &str,
         _: Option<&str>,
-        _: Vec<protocol::ConversationMessage>,
+        _: Vec<lingxi_core::types::ConversationMessage>,
         _: Vec<Value>,
     ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         self.entered.notify_one();
@@ -220,6 +220,6 @@ async fn panel_admission_context_rejection_and_running_cancellation_return_capac
         "and never the ordinary subagent pool"
     );
     drop(running);
-    drop(reserve(&spawner, platform_api::FUSION_PANEL_POOL_CAP).await);
+    drop(reserve(&spawner, lingxi_core::host::FUSION_PANEL_POOL_CAP).await);
     assert_eq!(spawner.panel_pool().slot_count().await, 0);
 }

@@ -17,20 +17,20 @@
 
 use async_trait::async_trait;
 use fusion::{CatalogModel, FusionOrchestrator, FusionRuntimeConfig, ModelLimits};
-use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-use platform_api::subagent_spawn::{
+use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+use lingxi_core::host::subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
     SubagentUsage,
 };
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-use platform_api::{
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use lingxi_core::host::{
     FusionExecutor, FusionImplementHost, FusionInheritance, FusionModelHints, FusionModelRef,
     FusionOrigin, FusionPanelMode, FusionPreset, FusionRequest, FusionStatus, PanelClaim,
     PanelEvidence, PanelReport, PanelVerification, VerificationOutcome, VerificationRun,
     WorktreeManager, DEFAULT_IMPLEMENT_FUSION_DIMENSIONS,
 };
+use lingxi_core::types::AgentId;
 use platform_posix::worktree::PosixWorktreeManager;
-use protocol::AgentId;
 use serde_json::{json, Value};
 use sidequery::{
     SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
@@ -137,7 +137,7 @@ fn panel_report(answer: &str) -> PanelReport {
         }],
         evidence: vec![PanelEvidence {
             id: "e1".into(),
-            kind: platform_api::EvidenceKind::File,
+            kind: lingxi_core::host::EvidenceKind::File,
             locator: "src/lib.rs".into(),
             excerpt: None,
         }],
@@ -154,7 +154,10 @@ impl SubagentSpawner for EditingPanels {
         request: SubagentSpawnRequest,
         _: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError> {
-        assert_eq!(request.subagent_type, platform_api::FUSION_IMPLEMENTER_TYPE);
+        assert_eq!(
+            request.subagent_type,
+            lingxi_core::host::FUSION_IMPLEMENTER_TYPE
+        );
         let model = request.model.clone().unwrap_or_default();
         let cwd = PathBuf::from(
             request
@@ -236,10 +239,10 @@ impl SideQueryClient for CannedAnalyst {
         request: StrictStructuredQueryRequest,
     ) -> Result<StrictStructuredQueryResponse, SideQueryError> {
         let user = match request.messages.first() {
-            Some(protocol::ConversationMessage::User { content, .. }) => content
+            Some(lingxi_core::types::ConversationMessage::User { content, .. }) => content
                 .iter()
                 .find_map(|block| match block {
-                    protocol::ContentBlock::Text { text, .. } => Some(text.clone()),
+                    lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.clone()),
                     _ => None,
                 })
                 .unwrap_or_default(),
@@ -341,9 +344,9 @@ fn config() -> FusionRuntimeConfig {
     let mut cfg = FusionRuntimeConfig::defaults();
     cfg.panel_models = MODELS
         .iter()
-        .map(|model| platform_api::FusionModelChoice::new("p", *model))
+        .map(|model| lingxi_core::host::FusionModelChoice::new("p", *model))
         .collect();
-    cfg.analyst_model = Some(platform_api::FusionModelChoice::new("p", "m-judge"));
+    cfg.analyst_model = Some(lingxi_core::host::FusionModelChoice::new("p", "m-judge"));
     cfg.min_successful_panels = 2;
     cfg.implement.verify_commands = vec![
         // Only m-a's worktree has this file.
@@ -357,7 +360,7 @@ fn config() -> FusionRuntimeConfig {
 fn request() -> FusionRequest {
     FusionRequest {
         verify_claims: false,
-        schema_version: platform_api::FUSION_SCHEMA_VERSION,
+        schema_version: lingxi_core::host::FUSION_SCHEMA_VERSION,
         origin: FusionOrigin::Slash,
         prompt: "raise the retry cap to 3".into(),
         preset: FusionPreset::Quality,
@@ -408,7 +411,7 @@ fn worktree_dirs(repo: &Path) -> Vec<String> {
 async fn run_fusion(
     repo: &Path,
 ) -> (
-    platform_api::FusionResult,
+    lingxi_core::host::FusionResult,
     Arc<EditingPanels>,
     Arc<CannedAnalyst>,
 ) {
@@ -419,7 +422,7 @@ async fn run_fusion_with(
     repo: &Path,
     fail_after_editing: Option<&'static str>,
 ) -> (
-    platform_api::FusionResult,
+    lingxi_core::host::FusionResult,
     Arc<EditingPanels>,
     Arc<CannedAnalyst>,
 ) {
@@ -450,17 +453,18 @@ async fn run_fusion_with(
     );
 
     // The same entry a host uses: prepare, then activate.
-    let identity = platform_api::FusionRunIdentity::new(
-        platform_api::FusionRunId::generated(),
+    let identity = lingxi_core::host::FusionRunIdentity::new(
+        lingxi_core::host::FusionRunId::generated(),
         None,
         FusionOrigin::Slash,
         None,
     );
-    let submission = platform_api::FusionSubmission::new(request(), inherit, identity).unwrap();
+    let submission =
+        lingxi_core::host::FusionSubmission::new(request(), inherit, identity).unwrap();
     let result = Arc::new(orchestrator)
         .prepare(submission)
         .expect("the run prepares")
-        .activate(platform_api::FusionActivation::now(), None)
+        .activate(lingxi_core::host::FusionActivation::now(), None)
         .await
         .result
         .expect("the run completes");
@@ -576,7 +580,7 @@ async fn implement_run_against_a_real_repo_snapshots_the_users_work_and_leaves_i
     };
     assert_eq!(
         status_of("old.txt").0,
-        platform_api::PatchFileStatus::Deleted
+        lingxi_core::host::PatchFileStatus::Deleted
     );
     assert!(
         status_of("data.bin").1,
@@ -584,7 +588,7 @@ async fn implement_run_against_a_real_repo_snapshots_the_users_work_and_leaves_i
     );
     assert_eq!(
         status_of("src/lib.rs").0,
-        platform_api::PatchFileStatus::Modified
+        lingxi_core::host::PatchFileStatus::Modified
     );
     assert_ne!(
         patch_a.base_commit, "",
@@ -598,7 +602,7 @@ async fn implement_run_against_a_real_repo_snapshots_the_users_work_and_leaves_i
     );
 
     // ── Verification ran per worktree ─────────────────────────────────────
-    let outcomes = |panel: &platform_api::PanelMaterial| match panel.verification.as_ref() {
+    let outcomes = |panel: &lingxi_core::host::PanelMaterial| match panel.verification.as_ref() {
         Some(PanelVerification::Runs(runs)) => runs
             .iter()
             .map(|run| run.outcome.label())
@@ -777,7 +781,7 @@ async fn a_panel_that_fails_midway_still_hands_over_what_it_changed() {
     let failed: Vec<_> = result
         .panels
         .iter()
-        .filter(|panel| panel.status != platform_api::PanelRunStatus::Completed)
+        .filter(|panel| panel.status != lingxi_core::host::PanelRunStatus::Completed)
         .collect();
     assert_eq!(failed.len(), 1, "{:?}", result.panels);
     // Its half change is in the material, marked incomplete, and was verified

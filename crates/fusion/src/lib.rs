@@ -1,7 +1,7 @@
 //! Fusion multi-model deliberation orchestrator.
 //!
 //! This crate implements the Fusion state machine. Callers depend on
-//! [`platform_api::FusionExecutor`]; composition roots inject a
+//! [`lingxi_core::host::FusionExecutor`]; composition roots inject a
 //! [`FusionOrchestrator`]. There is no public Agent / slash / workflow entry
 //! here — those land in later PRs.
 

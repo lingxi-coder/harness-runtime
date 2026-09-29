@@ -22,8 +22,8 @@
 
 use crate::secure_storage::helpers::full_service_name;
 use async_trait::async_trait;
-use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
-use protocol::SecureStorageData;
+use lingxi_core::host::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use lingxi_core::types::SecureStorageData;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;

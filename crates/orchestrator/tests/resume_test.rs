@@ -1,12 +1,12 @@
 //! from an on-disk JSONL so the next live turn's append chains correctly.
 
+use lingxi_core::host::FileSystem;
 use lingxi_core::session::{ActiveGoalState, GoalOrigin};
+use lingxi_core::types::ConversationMessage;
 use orchestrator::{
     replay_session_state, runtime_metadata_from_messages, state_from_messages, ResumeError,
 };
-use platform_api::FileSystem;
 use platform_posix::fs::PosixFileSystem;
-use protocol::ConversationMessage;
 use serde_json::json;
 use session::jsonl::project_dir_name;
 use std::sync::Arc;
@@ -116,7 +116,7 @@ async fn cold_resume_consumes_physical_retry_removal_without_breaking_chain() {
         .state
         .history
         .iter()
-        .any(|message| message.id() == protocol::MessageId::from_uuid(discarded)));
+        .any(|message| message.id() == lingxi_core::types::MessageId::from_uuid(discarded)));
 }
 
 #[tokio::test]
@@ -156,7 +156,7 @@ async fn cold_resume_restores_trailing_thinking_marker_scope() {
         replayed
             .state
             .thinking_stripped_messages
-            .get(&protocol::MessageId::from_uuid(thinking_id)),
+            .get(&lingxi_core::types::MessageId::from_uuid(thinking_id)),
         Some(&0)
     );
     assert_eq!(replayed.state.history.len(), 3);
@@ -445,7 +445,7 @@ fn resume_restores_model_exclusion_for_assistant_transcript_messages() {
     assert!(
         state
             .model_context_excluded_messages
-            .contains(&protocol::MessageId::from_uuid(message_id)),
+            .contains(&lingxi_core::types::MessageId::from_uuid(message_id)),
         "a persisted slash result must remain excluded from model input after resume",
     );
 }
@@ -550,41 +550,51 @@ fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
 fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
     let sid = Uuid::new_v4();
     let set_at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-    let snapshot = platform_api::ActiveGoalSnapshot {
+    let snapshot = lingxi_core::host::ActiveGoalSnapshot {
         condition: "ship it".to_string(),
         set_at,
         last_reason: Some("tests pending".to_string()),
         iterations: 2,
         tokens_at_start: 500,
     };
-    let attachment = |status, goal_state: Option<platform_api::ActiveGoalSnapshot>| match status {
-        platform_api::GoalStatusKind::Set => {
-            platform_api::GoalStatusAttachment::sentinel_set("ship it".to_string(), goal_state)
-        }
-        platform_api::GoalStatusKind::Cleared => {
-            platform_api::GoalStatusAttachment::sentinel_cleared("ship it".to_string())
-        }
-        platform_api::GoalStatusKind::Achieved => platform_api::GoalStatusAttachment::achieved(
-            "ship it".to_string(),
-            Some("tests pending".to_string()),
-            2,
-            1000,
-            200,
-        ),
-        platform_api::GoalStatusKind::Failed => platform_api::GoalStatusAttachment::failed(
-            "ship it".to_string(),
-            Some("tests pending".to_string()),
-            2,
-            1000,
-            200,
-        ),
-        platform_api::GoalStatusKind::NotMet => platform_api::GoalStatusAttachment::not_met(
-            "ship it".to_string(),
-            Some("tests pending".to_string()),
-            goal_state,
-        ),
-    };
-    let line = |payload: platform_api::GoalStatusAttachment| {
+    let attachment =
+        |status, goal_state: Option<lingxi_core::host::ActiveGoalSnapshot>| match status {
+            lingxi_core::host::GoalStatusKind::Set => {
+                lingxi_core::host::GoalStatusAttachment::sentinel_set(
+                    "ship it".to_string(),
+                    goal_state,
+                )
+            }
+            lingxi_core::host::GoalStatusKind::Cleared => {
+                lingxi_core::host::GoalStatusAttachment::sentinel_cleared("ship it".to_string())
+            }
+            lingxi_core::host::GoalStatusKind::Achieved => {
+                lingxi_core::host::GoalStatusAttachment::achieved(
+                    "ship it".to_string(),
+                    Some("tests pending".to_string()),
+                    2,
+                    1000,
+                    200,
+                )
+            }
+            lingxi_core::host::GoalStatusKind::Failed => {
+                lingxi_core::host::GoalStatusAttachment::failed(
+                    "ship it".to_string(),
+                    Some("tests pending".to_string()),
+                    2,
+                    1000,
+                    200,
+                )
+            }
+            lingxi_core::host::GoalStatusKind::NotMet => {
+                lingxi_core::host::GoalStatusAttachment::not_met(
+                    "ship it".to_string(),
+                    Some("tests pending".to_string()),
+                    goal_state,
+                )
+            }
+        };
+    let line = |payload: lingxi_core::host::GoalStatusAttachment| {
         serde_json::from_value(json!({
             "type":"attachment", "attachment":payload,
             "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
@@ -594,7 +604,7 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
         .unwrap()
     };
     let active = line(attachment(
-        platform_api::GoalStatusKind::Set,
+        lingxi_core::host::GoalStatusKind::Set,
         Some(snapshot.clone()),
     ));
     let state = state_from_messages(sid, &[active]);
@@ -606,9 +616,9 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
     assert_eq!(goal.origin, GoalOrigin::Restored);
 
     for status in [
-        platform_api::GoalStatusKind::Achieved,
-        platform_api::GoalStatusKind::Failed,
-        platform_api::GoalStatusKind::Cleared,
+        lingxi_core::host::GoalStatusKind::Achieved,
+        lingxi_core::host::GoalStatusKind::Failed,
+        lingxi_core::host::GoalStatusKind::Cleared,
     ] {
         let terminal = line(attachment(status, None));
         assert!(state_from_messages(sid, &[terminal]).active_goal.is_none());
@@ -617,7 +627,7 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
     // A not-met turn is NOT terminal: the goal keeps running, refreshed from the
     // snapshot the record carries.
     let not_met = line(attachment(
-        platform_api::GoalStatusKind::NotMet,
+        lingxi_core::host::GoalStatusKind::NotMet,
         Some(snapshot.clone()),
     ));
     let still_running = state_from_messages(sid, &[not_met])
@@ -740,10 +750,10 @@ fn resume_drops_malformed_text_blocks_without_losing_valid_siblings() {
         assert_eq!(
             content,
             &vec![
-                protocol::ContentBlock::Text {
+                lingxi_core::types::ContentBlock::Text {
                     text: "before".into()
                 },
-                protocol::ContentBlock::Text {
+                lingxi_core::types::ContentBlock::Text {
                     text: "after".into()
                 },
             ]
@@ -901,12 +911,12 @@ fn resume_thinking_markers_are_scoped_to_preceding_history() {
         assert_eq!(
             state
                 .thinking_stripped_messages
-                .get(&protocol::MessageId::from_uuid(old)),
+                .get(&lingxi_core::types::MessageId::from_uuid(old)),
             Some(&expected)
         );
         assert!(!state
             .thinking_stripped_messages
-            .contains_key(&protocol::MessageId::from_uuid(fresh)));
+            .contains_key(&lingxi_core::types::MessageId::from_uuid(fresh)));
         assert_eq!(
             state.history.len(),
             2,
@@ -1275,11 +1285,11 @@ fn resume_merges_per_block_assistant_rows_sharing_one_inner_message_id() {
             assert_eq!(content.len(), 2, "merged turn keeps both blocks, in order");
             assert!(matches!(
                 &content[0],
-                protocol::ContentBlock::Thinking { thinking, .. } if thinking == "let me think"
+                lingxi_core::types::ContentBlock::Thinking { thinking, .. } if thinking == "let me think"
             ));
             assert!(matches!(
                 &content[1],
-                protocol::ContentBlock::ToolUse { .. }
+                lingxi_core::types::ContentBlock::ToolUse { .. }
             ));
         }
         other => panic!("expected a merged Assistant turn, got {other:?}"),
@@ -1296,11 +1306,11 @@ mod deferred_tool_resume_tests {
     use hooks::registry::{HookContext, HookRegistry};
     use hooks::response::{HookOutcome, HookResponse, HookResult};
     use hooks::HookExecutorImpl;
+    use lingxi_core::types::{ContentBlock, HookId};
     use orchestrator::test_support::{
         MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
     };
     use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-    use protocol::{ContentBlock, HookId};
     use serde_json::Value;
     use session::jsonl::JsonlWriter;
     use std::path::PathBuf;
@@ -1419,39 +1429,44 @@ mod deferred_tool_resume_tests {
 
     struct UnusedHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for UnusedHttp {
+    impl lingxi_core::host::HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
 
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
     struct UnusedRuntime;
     #[async_trait]
-    impl platform_api::RuntimeSpawner for UnusedRuntime {
+    impl lingxi_core::host::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-            Err(platform_api::RuntimeError::Internal("unused".into()))
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal("unused".into()))
         }
 
         async fn sleep(&self, _d: std::time::Duration) {}
 
         async fn cancel(
             &self,
-            _h: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _h: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
@@ -1713,7 +1728,7 @@ async fn scheduled_actual_settings_do_not_replace_persisted_human_defaults() {
             assert_eq!(snapshot.effort.as_deref(), Some("low"));
             assert_eq!(
                 snapshot.reasoning_selection,
-                Some(platform_api::ReasoningSelection::Level { id: "low".into() })
+                Some(lingxi_core::host::ReasoningSelection::Level { id: "low".into() })
             );
         } else {
             assert!(
@@ -1914,7 +1929,7 @@ async fn resume_restores_latest_api_usage_from_disk_without_summing_split_rows()
     let usage = replayed.handle_runtime_snapshot().current_usage.unwrap();
     assert_eq!(
         usage,
-        platform_api::CurrentUsageSnapshot {
+        lingxi_core::host::CurrentUsageSnapshot {
             input_tokens: 1200,
             output_tokens: 80,
             cache_read_input_tokens: 3000,
@@ -1967,7 +1982,7 @@ async fn resume_restores_latest_api_usage_from_disk_without_summing_split_rows()
         serde_json::Value::Null;
     assert_eq!(
         runtime_metadata_from_messages(&messages).current_usage,
-        Some(platform_api::CurrentUsageSnapshot {
+        Some(lingxi_core::host::CurrentUsageSnapshot {
             input_tokens: 50,
             output_tokens: 2,
             ..Default::default()
