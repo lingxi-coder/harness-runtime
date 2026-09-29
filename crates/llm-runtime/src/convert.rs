@@ -799,3 +799,9 @@ fn convert_tool_declaration(value: Value) -> Result<ToolDeclaration, LlmError> {
 #[cfg(test)]
 #[path = "convert_test.rs"]
 mod convert_test;
+
+/// Consume normalized durable history once into canonical SDK model input.
+/// Exact JavaScript UTF-16 strings are retained outside model input for sealing.
+pub use input_projection::history_input;
+#[path = "history_input.rs"]
+pub(crate) mod input_projection;

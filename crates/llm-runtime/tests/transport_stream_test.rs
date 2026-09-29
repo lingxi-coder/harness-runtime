@@ -1,13 +1,14 @@
+use lingxi_llm_client::protocol::{LlmError as SdkError, StopReason, StreamEvent};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use llm_runtime::client::DefaultLlmClient;
+use llm_runtime::client::ModelRuntime;
 use llm_runtime::{
-    AuthStrategy, BoxFuture, Capabilities, ClientConfig, ContentDelta, CredentialConfig,
-    FrameStream, LlmError, LlmEvent, LlmRequest, Message, ModelProfile, PricingConfig,
-    ProtocolFamily, ProviderId, ProviderProfile, ProviderRequest, ProviderResponse, RawStreamFrame,
-    ResponsesWebSocketSession, ResponsesWebSocketTransportSession, StreamingResponse, Transport,
+    AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig, FrameStream, LlmError,
+    LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
+    ProviderRequest, ProviderResponse, RawStreamFrame, ResponsesSession,
+    ResponsesWebSocketTransportSession, StreamingResponse, Transport,
 };
 
 struct ScriptedFrames {
@@ -96,8 +97,8 @@ fn frame(payload: &str) -> Result<RawStreamFrame, LlmError> {
     Ok(RawStreamFrame::new(payload.as_bytes().to_vec()))
 }
 
-fn client(protocol: ProtocolFamily, provider_id: ProviderId, base_url: &str) -> DefaultLlmClient {
-    DefaultLlmClient::from_config(ClientConfig {
+fn client(protocol: ProtocolFamily, provider_id: ProviderId, base_url: &str) -> ModelRuntime {
+    ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: llm_runtime::Region::all(),
@@ -133,7 +134,7 @@ fn client(protocol: ProtocolFamily, provider_id: ProviderId, base_url: &str) -> 
     .expect("client")
 }
 
-fn anthropic_client() -> DefaultLlmClient {
+fn anthropic_client() -> ModelRuntime {
     client(
         ProtocolFamily::AnthropicMessages,
         ProviderId::AnthropicFirstParty,
@@ -141,7 +142,7 @@ fn anthropic_client() -> DefaultLlmClient {
     )
 }
 
-fn openai_responses_client() -> DefaultLlmClient {
+fn openai_responses_client() -> ModelRuntime {
     client(
         ProtocolFamily::OpenAiResponses,
         ProviderId::OpenAICompatible {
@@ -151,8 +152,8 @@ fn openai_responses_client() -> DefaultLlmClient {
     )
 }
 
-fn openai_responses_websocket_client() -> DefaultLlmClient {
-    DefaultLlmClient::from_config(ClientConfig {
+fn openai_responses_websocket_client() -> ModelRuntime {
+    ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: lingxi_llm_client::protocol::Region::all(),
@@ -195,26 +196,25 @@ fn streaming_request() -> LlmRequest {
 }
 
 fn append_user_text(request: &mut LlmRequest, text: &str) {
-    request.messages.push(Message {
-        role: "user".to_string(),
-        content: vec![llm_runtime::ContentBlock::Text {
-            text: text.to_string(),
-            cache_control: None,
-        }],
-    });
+    request
+        .input
+        .messages
+        .push(lingxi_llm_client::protocol::ConversationMessage::user_text(
+            text,
+        ));
 }
 
 async fn collect_events(
-    stream: &mut llm_runtime::LlmEventStream,
-) -> (Vec<LlmEvent>, Option<LlmError>) {
+    stream: &mut lingxi_llm_client::ModelStream,
+) -> (Vec<StreamEvent>, Option<SdkError>) {
     let mut events = Vec::new();
-    loop {
-        match stream.next_event().await {
-            Ok(Some(event)) => events.push(event),
-            Ok(None) => return (events, None),
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(event) => events.push(event),
             Err(error) => return (events, Some(error)),
         }
     }
+    (events, None)
 }
 
 struct ScriptedWsSession {
@@ -372,7 +372,7 @@ fn responses_completed(id: &str) -> Vec<Result<RawStreamFrame, LlmError>> {
             r#"{{"type":"response.created","response":{{"id":"{id}","model":"p-model"}}}}"#
         )),
         frame(&format!(
-            r#"{{"type":"response.completed","response":{{"id":"{id}","model":"p-model","status":"completed"}}}}"#
+            r#"{{"type":"response.completed","response":{{"id":"{id}","model":"p-model","status":"completed","output":[]}}}}"#
         )),
     ]
 }
@@ -407,18 +407,20 @@ async fn execute_stream_decodes_anthropic_event_sequence() {
     let (events, error) = collect_events(&mut stream).await;
 
     assert!(error.is_none(), "unexpected error: {error:?}");
-    assert!(matches!(events[0], LlmEvent::MessageStart { .. }));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::Start { .. })));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::TextDelta { text, .. } if text == "hi")));
     assert!(matches!(
-        events[2],
-        LlmEvent::ContentBlockDelta { delta: ContentDelta::TextDelta { ref text }, .. } if text == "hi"
+        events.last(),
+        Some(StreamEvent::End {
+            stop_reason: StopReason::EndTurn,
+            ..
+        })
     ));
-    assert!(matches!(
-        events[4],
-        LlmEvent::MessageDelta { delta: llm_runtime::MessageDeltaPayload { stop_reason: Some(ref reason), stop_details: None }, .. }
-            if reason == "end_turn"
-    ));
-    assert!(matches!(events.last(), Some(LlmEvent::MessageStop)));
-    assert!(stream.next_event().await.expect("after end").is_none());
+    assert!(stream.next().await.is_none());
 }
 
 #[tokio::test]
@@ -449,14 +451,15 @@ async fn execute_stream_threads_provider_metadata_headers_to_responses_decoder()
     let (events, error) = collect_events(&mut stream).await;
 
     assert!(error.is_none(), "unexpected stream error: {error:?}");
-    assert!(matches!(
-        &events[0],
-        LlmEvent::MessageStart { response }
-            if response.provider_metadata["openai-model"] == "gpt-5-2026-06-01"
-                && response.provider_metadata["x-models-etag"] == "etag-1"
-                && response.provider_metadata["x-codex-turn-state"] == "turn-state"
-                && response.provider_metadata["x-ratelimit-limit-requests"] == "1000"
-    ));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::Start { .. })));
+    for (name, expected) in &headers {
+        assert!(stream
+            .headers()
+            .iter()
+            .any(|(key, value)| key == name && value == expected));
+    }
 }
 
 #[tokio::test]
@@ -465,7 +468,7 @@ async fn prewarm_websocket_sends_generate_false_and_records_response_id() {
     let transport = Arc::new(ResponsesWsTransport::new(vec![responses_completed(
         "resp_warm",
     )]));
-    let mut session = ResponsesWebSocketSession::new();
+    let mut session = ResponsesSession::new();
 
     client
         .prewarm_websocket(&streaming_request(), transport.clone(), &mut session)
@@ -486,7 +489,7 @@ async fn prewarmed_response_id_is_consumed_as_wire_delta_without_replacing_logic
         responses_completed("resp_warm"),
         responses_completed("resp_real"),
     ]));
-    let mut session = ResponsesWebSocketSession::new();
+    let mut session = ResponsesSession::new();
     let request = streaming_request();
 
     client
@@ -523,7 +526,7 @@ async fn responses_websocket_session_close_resets_state_and_closes_transport() {
     let transport = Arc::new(ResponsesWsTransport::new(vec![responses_completed(
         "resp_1",
     )]));
-    let mut session = ResponsesWebSocketSession::new();
+    let mut session = ResponsesSession::new();
 
     let mut stream = client
         .execute_stream_with_session(&streaming_request(), transport.clone(), &mut session)
@@ -543,11 +546,14 @@ async fn responses_websocket_session_close_resets_state_and_closes_transport() {
 #[tokio::test]
 async fn websocket_session_second_compatible_request_uses_previous_response_delta() {
     let client = openai_responses_websocket_client();
+    let mut first_response = responses_completed("resp_1");
+    let assistant_output = serde_json::json!({"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer","annotations":[]}]});
+    *first_response.last_mut().unwrap() = frame(&serde_json::json!({"type":"response.completed","response":{"id":"resp_1","model":"p-model","status":"completed","output":[assistant_output]}}).to_string());
     let transport = Arc::new(ResponsesWsTransport::new(vec![
-        responses_completed("resp_1"),
+        first_response,
         responses_completed("resp_2"),
     ]));
-    let mut session = ResponsesWebSocketSession::new();
+    let mut session = ResponsesSession::new();
 
     let first_request = streaming_request();
     let mut first_stream = client
@@ -558,6 +564,14 @@ async fn websocket_session_second_compatible_request_uses_previous_response_delt
     assert!(first_error.is_none(), "first error: {first_error:?}");
 
     let mut second_request = first_request.clone();
+    second_request.input.messages.push(
+        lingxi_llm_client::protocol::ConversationMessage::assistant(vec![
+            lingxi_llm_client::protocol::ContentBlock::Text {
+                text: "answer".into(),
+                thought_signature: None,
+            },
+        ]),
+    );
     append_user_text(&mut second_request, "again");
     let mut second_stream = client
         .execute_stream_with_session(&second_request, transport.clone(), &mut session)
@@ -584,7 +598,7 @@ async fn websocket_session_non_input_change_disables_incremental_delta() {
         responses_completed("resp_1"),
         responses_completed("resp_2"),
     ]));
-    let mut session = ResponsesWebSocketSession::new();
+    let mut session = ResponsesSession::new();
 
     let first_request = streaming_request();
     let mut first_stream = client
@@ -595,7 +609,7 @@ async fn websocket_session_non_input_change_disables_incremental_delta() {
     assert!(first_error.is_none(), "first error: {first_error:?}");
 
     let mut second_request = first_request.clone();
-    second_request.temperature = Some(0.7);
+    second_request.input.temperature = Some(0.7);
     append_user_text(&mut second_request, "again");
     let mut second_stream = client
         .execute_stream_with_session(&second_request, transport.clone(), &mut session)
@@ -624,7 +638,7 @@ async fn websocket_session_incomplete_response_disables_next_incremental_delta()
         incomplete,
         responses_completed("resp_2"),
     ]));
-    let mut session = ResponsesWebSocketSession::new();
+    let mut session = ResponsesSession::new();
 
     let first_request = streaming_request();
     let mut first_stream = client
@@ -656,7 +670,7 @@ async fn websocket_session_426_fallback_latches_http_for_later_streams() {
         responses_completed("http_1"),
         responses_completed("http_2"),
     ]));
-    let mut session = ResponsesWebSocketSession::new();
+    let mut session = ResponsesSession::new();
 
     let mut first_stream = client
         .execute_stream_with_session(&streaming_request(), transport.clone(), &mut session)
@@ -699,15 +713,10 @@ async fn finish_emits_terminal_events_when_frames_end() {
     let (events, error) = collect_events(&mut stream).await;
 
     assert!(error.is_none(), "unexpected error: {error:?}");
-    assert!(matches!(
-        events.first(),
-        Some(LlmEvent::MessageStart { .. })
-    ));
-    assert!(matches!(
-        events.iter().find(|event| matches!(event, LlmEvent::MessageDelta { .. })),
-        Some(LlmEvent::MessageDelta { usage: Some(usage), .. }) if usage.billable_tokens.input == 2
-    ));
-    assert!(matches!(events.last(), Some(LlmEvent::MessageStop)));
+    assert!(matches!(events.first(), Some(StreamEvent::Start { .. })));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { usage, .. }) if usage.complete().is_some_and(|usage| usage.input_tokens == 2))
+    );
 }
 
 #[tokio::test]
@@ -721,7 +730,8 @@ async fn execute_stream_requires_stream_flag() {
             transport.clone(),
         )
         .await
-        .expect_err("must require stream flag");
+        .err()
+        .expect("must require stream flag");
 
     assert!(matches!(error, LlmError::InvalidRequest { message } if message.contains("stream")));
 }
@@ -746,7 +756,8 @@ async fn error_status_drains_frames_into_taxonomy() {
     let error = client
         .execute_stream(&streaming_request(), transport.clone())
         .await
-        .expect_err("error status");
+        .err()
+        .expect("error status");
 
     assert!(matches!(
         error,
@@ -774,15 +785,14 @@ async fn mid_stream_failure_after_events_is_stream_interrupted() {
         .await
         .expect("stream");
 
-    assert!(matches!(
-        stream.next_event().await.expect("first event"),
-        Some(LlmEvent::MessageStart { .. })
-    ));
-    assert!(matches!(
-        stream.next_event().await.expect_err("interrupted"),
-        LlmError::StreamInterrupted { message } if message.contains("connection reset")
-    ));
-    assert!(stream.next_event().await.expect("terminal").is_none());
+    let (events, error) = collect_events(&mut stream).await;
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::Start { .. })));
+    assert!(
+        matches!(error, Some(SdkError::StreamInterrupted { message }) if message.contains("connection reset"))
+    );
+    assert!(stream.next().await.is_none());
 }
 
 #[tokio::test]
@@ -801,10 +811,10 @@ async fn failure_before_any_event_stays_transport() {
         .expect("stream");
 
     assert!(matches!(
-        stream.next_event().await.expect_err("transport failure"),
-        LlmError::Transport { message } if message.contains("connection refused")
+        stream.next().await.expect("error event").expect_err("transport failure"),
+        SdkError::Transport { message } if message.contains("connection refused")
     ));
-    assert!(stream.next_event().await.expect("terminal").is_none());
+    assert!(stream.next().await.is_none());
 }
 
 #[tokio::test]
@@ -817,7 +827,7 @@ async fn cancelling_a_websocket_response_invalidates_continuation_and_connection
         )],
         responses_completed("after"),
     ]));
-    let mut session = ResponsesWebSocketSession::new();
+    let mut session = ResponsesSession::new();
     let mut request = streaming_request();
     let mut stream = client
         .execute_stream_with_session(&request, transport.clone(), &mut session)
@@ -851,7 +861,7 @@ async fn responses_stream_exposes_continuation_only_after_completion() {
         responses_completed("resp_scoped"),
     ));
     let mut request = streaming_request();
-    request.account_scope = Some("account-a".into());
+    request.execution.account_scope = Some("account-a".into());
     let mut stream = client
         .execute_stream(&request, transport)
         .await
@@ -866,7 +876,7 @@ async fn responses_stream_exposes_continuation_only_after_completion() {
     assert_eq!(continuation.profile_name, "p");
     assert_eq!(continuation.request_model, "p-model");
 
-    request.continuation = Some(continuation.clone());
+    request.input.continuation = Some(continuation.clone());
     let prepared = client
         .prepare(&request)
         .await
@@ -875,7 +885,7 @@ async fn responses_stream_exposes_continuation_only_after_completion() {
         prepared.provider_request.body_json["previous_response_id"],
         "resp_scoped"
     );
-    request.account_scope = Some("account-b".into());
+    request.execution.account_scope = Some("account-b".into());
     assert!(matches!(
         client.prepare(&request).await,
         Err(LlmError::InvalidRequest { .. })
@@ -897,7 +907,7 @@ async fn interrupted_responses_stream_does_not_expose_continuation() {
         ],
     ));
     let mut request = streaming_request();
-    request.account_scope = Some("account-a".into());
+    request.execution.account_scope = Some("account-a".into());
     let mut stream = client
         .execute_stream(&request, transport)
         .await
@@ -914,9 +924,9 @@ async fn responses_websocket_account_change_rebinds_session() {
         responses_completed("resp_account_a"),
         responses_completed("resp_account_b"),
     ]));
-    let mut session = ResponsesWebSocketSession::new();
+    let mut session = ResponsesSession::new();
     let mut first_request = streaming_request();
-    first_request.account_scope = Some("account-a".into());
+    first_request.execution.account_scope = Some("account-a".into());
     let mut first_stream = client
         .execute_stream_with_session(&first_request, transport.clone(), &mut session)
         .await
@@ -931,7 +941,7 @@ async fn responses_websocket_account_change_rebinds_session() {
     );
 
     let mut second_request = first_request.clone();
-    second_request.account_scope = Some("account-b".into());
+    second_request.execution.account_scope = Some("account-b".into());
     append_user_text(&mut second_request, "continue under account b");
     let mut second_stream = client
         .execute_stream_with_session(&second_request, transport.clone(), &mut session)
@@ -959,9 +969,9 @@ async fn responses_websocket_preserves_explicit_continuation() {
         responses_completed("resp_session_cached"),
         responses_completed("resp_after_explicit"),
     ]));
-    let mut session = ResponsesWebSocketSession::new();
+    let mut session = ResponsesSession::new();
     let mut first_request = streaming_request();
-    first_request.account_scope = Some("account-a".into());
+    first_request.execution.account_scope = Some("account-a".into());
     let mut first_stream = client
         .execute_stream_with_session(&first_request, transport.clone(), &mut session)
         .await
@@ -974,7 +984,7 @@ async fn responses_websocket_preserves_explicit_continuation() {
     explicit.response_id = lingxi_llm_client::protocol::ResponseId::new("resp_external_branch");
 
     let mut second_request = first_request.clone();
-    second_request.continuation = Some(explicit);
+    second_request.input.continuation = Some(explicit);
     append_user_text(&mut second_request, "continue the explicitly chosen branch");
     let prepared = client
         .prepare(&second_request)

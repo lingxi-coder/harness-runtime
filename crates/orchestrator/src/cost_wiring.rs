@@ -2,9 +2,9 @@
 //! `cost::Usage` plus model-string → `ProviderId` resolution.
 //!
 //! Also contains the bridge that populates an `llm_runtime::PricingCatalog` from
-//! the `cost::PricingCatalog` so `LlmResponse.cost` carries real estimates.
+//! the `cost::PricingCatalog` so `HistoryResponse.cost` carries real estimates.
 //!
-//! Used by M6-06 to feed `LlmResponse.usage` into `CostTracker`.
+//! Used by M6-06 to feed `HistoryResponse.usage` into `CostTracker`.
 
 use cost::pricing::{ProviderId, TokenClass};
 use cost::usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};

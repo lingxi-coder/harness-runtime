@@ -1,7 +1,7 @@
 //! `count_tokens` facade: real endpoint on Anthropic routes, documented
 //! character-based approximation elsewhere.
 
-use crate::{client::DefaultLlmClient, LlmError, LlmRequest, Transport};
+use crate::{client::ModelRuntime, LlmError, LlmRequest, Transport};
 use std::sync::Arc;
 
 /// Coarse divisor shared by transcript-size estimates. Request-fit estimation
@@ -20,7 +20,7 @@ const APPROX_MEDIA_TOKENS: u64 = 2_048;
 
 /// Count input tokens for `request`'s resolved route.
 pub async fn count_tokens(
-    client: &DefaultLlmClient,
+    client: &ModelRuntime,
     transport: Arc<dyn Transport>,
     request: &LlmRequest,
 ) -> Result<u64, LlmError> {
@@ -35,7 +35,7 @@ pub async fn count_tokens(
 /// fallback rather than mistaking the generic text approximation for an exact
 /// tool-schema count.
 pub async fn try_count_tokens_exact(
-    client: &DefaultLlmClient,
+    client: &ModelRuntime,
     transport: Arc<dyn Transport>,
     request: &LlmRequest,
 ) -> Result<Option<u64>, LlmError> {
@@ -52,17 +52,39 @@ pub async fn try_count_tokens_exact(
 /// rounded down.
 #[must_use]
 pub fn approximate_tokens(request: &LlmRequest) -> u64 {
+    let input = &request.input;
     let mut byte_len = 0u64;
-    for block in &request.system {
+    for block in &input.system {
         byte_len = byte_len.saturating_add(serialized_len(block));
     }
-    for message in &request.messages {
+    for (message_index, message) in input.messages.iter().enumerate() {
         byte_len = byte_len.saturating_add(serialized_len(&message.role));
-        for block in &message.content {
+        for (block_index, block) in message.content.iter().enumerate() {
             byte_len = byte_len.saturating_add(estimated_block_bytes(block));
+            use lingxi_llm_client::protocol::ContentBlock;
+            let exact_text = match block {
+                ContentBlock::Text { text, .. } => Some(("text", text)),
+                ContentBlock::ToolResult { content, .. } => Some(("content", content)),
+                _ => None,
+            };
+            if let Some((field, display)) = exact_text {
+                if let Some(units) = request
+                    .execution
+                    .message_json_string_overrides
+                    .get(&format!(
+                        "/messages/{message_index}/content/{block_index}/{field}"
+                    ))
+                {
+                    byte_len = byte_len
+                        .saturating_sub(serialized_len(display))
+                        .saturating_add(lingxi_llm_client::exact_json::json_string_len_from_utf16(
+                            units,
+                        ));
+                }
+            }
         }
     }
-    for tool in &request.tools {
+    for tool in &input.tools {
         // Account for the provider's function/tool wrapper in addition to the
         // canonical declaration itself.  The server may add further chat
         // template text; the request-level fit margin covers that uncertainty.
@@ -70,22 +92,19 @@ pub fn approximate_tokens(request: &LlmRequest) -> u64 {
             .saturating_add(serialized_len(tool))
             .saturating_add(48);
     }
-    for tool in &request.hosted_tools {
+    for tool in &input.hosted_tools {
         byte_len = byte_len
             .saturating_add(serialized_len(tool))
             .saturating_add(48);
     }
-    for options in &request.native_options {
+    for options in &input.native_options {
         byte_len = byte_len.saturating_add(serialized_len(options));
     }
-    if request.output_format != lingxi_llm_client::protocol::OutputFormat::Text {
-        byte_len = byte_len.saturating_add(serialized_len(&request.output_format));
+    if input.output_format != lingxi_llm_client::protocol::OutputFormat::Text {
+        byte_len = byte_len.saturating_add(serialized_len(&input.output_format));
     }
-    if let Some(tool_choice) = &request.tool_choice {
-        byte_len = byte_len.saturating_add(serialized_len(tool_choice));
-    }
-    if let Some(response_format) = &request.response_format {
-        byte_len = byte_len.saturating_add(serialized_len(response_format));
+    if input.tool_choice != lingxi_llm_client::protocol::ToolChoice::Auto {
+        byte_len = byte_len.saturating_add(serialized_len(&input.tool_choice));
     }
 
     approximate_tokens_for_bytes(byte_len)
@@ -106,36 +125,37 @@ fn serialized_len<T: serde::Serialize>(value: &T) -> u64 {
     serde_json::to_vec(value).map_or(0, |bytes| bytes.len() as u64)
 }
 
-fn estimated_block_bytes(block: &crate::ContentBlock) -> u64 {
+fn estimated_block_bytes(block: &lingxi_llm_client::protocol::ContentBlock) -> u64 {
+    use lingxi_llm_client::protocol::{ContentBlock, DocumentSource, ImageSource};
     const TEXT_BLOCK_WRAPPER_BYTES: u64 = 30;
-
+    let media_bytes = APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN;
     match block {
-        crate::ContentBlock::Text { text, .. } => {
+        ContentBlock::Text { text, .. } => {
             serialized_len(text).saturating_add(TEXT_BLOCK_WRAPPER_BYTES)
         }
-        crate::ContentBlock::TextJsUtf16 {
-            utf16_code_units, ..
-        } => crate::protocol::json_string_len_from_utf16(utf16_code_units)
-            .saturating_add(TEXT_BLOCK_WRAPPER_BYTES),
-        crate::ContentBlock::ToolResult { output, .. }
-            if protocol::js_utf16::tool_result_units(output).is_some() =>
-        {
-            let units = protocol::js_utf16::tool_result_units(output).unwrap();
-            let text = String::from_utf16_lossy(&units);
-            let mut display = block.clone();
-            if let crate::ContentBlock::ToolResult { output, .. } = &mut display {
-                *output = serde_json::Value::String(text.clone());
-            }
-            serialized_len(&display)
-                .saturating_sub(serialized_len(&text))
-                .saturating_add(crate::protocol::json_string_len_from_utf16(&units))
+        ContentBlock::Image {
+            source: ImageSource::Url { url },
+        } => media_bytes.saturating_add(url.len() as u64),
+        ContentBlock::Image { .. } => media_bytes,
+        ContentBlock::Document {
+            source: DocumentSource::Base64 { data, .. },
+            ..
+        } => {
+            // Count decoded document bytes, never the base64 transport expansion.
+            let padding = data.bytes().rev().take_while(|byte| *byte == b'=').count() as u64;
+            media_bytes.max(
+                (data.len() as u64)
+                    .saturating_mul(3)
+                    .div_euclid(4)
+                    .saturating_sub(padding),
+            )
         }
-        crate::ContentBlock::Image { .. } => APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN,
-        crate::ContentBlock::ImageUrl { url } => {
-            (APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN).saturating_add(url.len() as u64)
-        }
-        crate::ContentBlock::Document { bytes, .. } => {
-            (APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN).max(bytes.len() as u64)
+        ContentBlock::Document {
+            source: DocumentSource::Text { data, .. },
+            ..
+        } => media_bytes.max(data.len() as u64),
+        ContentBlock::Document { .. } | ContentBlock::Video { .. } | ContentBlock::Audio { .. } => {
+            media_bytes
         }
         _ => serialized_len(block),
     }
@@ -144,14 +164,42 @@ fn estimated_block_bytes(block: &crate::ContentBlock) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::DefaultLlmClient;
+    use crate::client::ModelRuntime;
     use crate::{
         AuthStrategy, BoxFuture, Capabilities, ClientConfig, ContentBlock, CredentialConfig,
         LlmRequest, Message, ModelProfile, PricingConfig, ProtocolFamily, ProviderId,
-        ProviderProfile, ProviderRequest, ProviderResponse, StreamingResponse, SystemBlock,
-        ToolDeclaration, Transport,
+        ProviderProfile, ProviderRequest, ProviderResponse, StreamingResponse, ToolDeclaration,
+        Transport,
     };
     use std::sync::Mutex;
+
+    fn push_history(request: &mut LlmRequest, message: Message) {
+        let (input, overrides) = crate::convert::history_input(
+            "model",
+            &[message],
+            &[],
+            &[],
+            ProtocolFamily::AnthropicMessages,
+        )
+        .unwrap();
+        request.input.messages.extend(input.messages);
+        request
+            .execution
+            .message_json_string_overrides
+            .extend(overrides);
+    }
+
+    fn push_tool(request: &mut LlmRequest, tool: ToolDeclaration) {
+        let (input, _) = crate::convert::history_input(
+            "model",
+            &[],
+            &[],
+            &[tool],
+            ProtocolFamily::AnthropicMessages,
+        )
+        .unwrap();
+        request.input.tools.extend(input.tools);
+    }
 
     // ----------------------------------------------------------------
     // Byte-length approximation math tests
@@ -193,15 +241,15 @@ mod tests {
     fn approximate_tokens_includes_text_envelope() {
         let req =
             LlmRequest::new("model").with_user_text("1234567890123456789012345678901234567890");
-        assert_eq!(req.messages[0].content.len(), 1);
+        assert_eq!(req.input.messages[0].content.len(), 1);
         assert!(approximate_tokens(&req) > 10);
     }
 
     #[test]
     fn approximate_tokens_uses_ceiling_division() {
         let req = LlmRequest::new("model").with_user_text("12345");
-        let byte_len = serialized_len(&req.messages[0].role)
-            + estimated_block_bytes(&req.messages[0].content[0]);
+        let byte_len = serialized_len(&req.input.messages[0].role)
+            + estimated_block_bytes(&req.input.messages[0].content[0]);
         assert_eq!(
             approximate_tokens(&req),
             byte_len.div_ceil(REQUEST_BYTES_PER_TOKEN)
@@ -211,60 +259,73 @@ mod tests {
     #[test]
     fn approximate_tokens_system_blocks_are_counted() {
         let mut req = LlmRequest::new("model");
-        req.system.push(SystemBlock::text("12345678")); // 8 bytes
+        req.input
+            .system
+            .push(lingxi_llm_client::protocol::SystemBlock {
+                text: "12345678".into(),
+            }); // 8 bytes
         assert!(approximate_tokens(&req) >= 2);
     }
 
     #[test]
     fn approximate_tokens_counts_media_blocks_without_base64_inflation() {
         let mut req = LlmRequest::new("model");
-        req.messages.push(Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::Image {
-                media_type: "image/png".to_string(),
-                bytes: vec![0u8; 100],
-            }],
-        });
+        push_history(
+            &mut req,
+            Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    bytes: vec![0u8; 100],
+                }],
+            },
+        );
         assert_eq!(approximate_tokens(&req), APPROX_MEDIA_TOKENS + 2);
     }
 
     #[test]
     fn approximate_tokens_counts_structured_messages_and_tools() {
         let mut req = LlmRequest::new("model");
-        req.messages.push(Message {
-            role: "assistant".to_string(),
-            content: vec![
-                ContentBlock::TextJsUtf16 {
-                    text: "structured text".to_string(),
-                    utf16_code_units: "structured text".encode_utf16().collect(),
-                    cache_control: None,
-                },
-                ContentBlock::ToolCall {
-                    id: "call-1".to_string(),
-                    name: "lookup".to_string(),
-                    input: serde_json::json!({"query": "weather in San Francisco"}),
-                },
-                ContentBlock::ToolResult {
-                    tool_call_id: "call-1".to_string(),
-                    output: serde_json::json!({"temperature": 18, "unit": "celsius"}),
-                    is_error: false,
-                    cache_control: None,
-                    cache_reference: None,
-                },
-            ],
-        });
-        req.tools.push(ToolDeclaration {
-            name: "lookup".to_string(),
-            description: "Look up current information for a location".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search query"}
-                },
-                "required": ["query"]
-            }),
-            ..Default::default()
-        });
+        push_history(
+            &mut req,
+            Message {
+                role: "assistant".to_string(),
+                content: vec![
+                    ContentBlock::TextJsUtf16 {
+                        text: "structured text".to_string(),
+                        utf16_code_units: "structured text".encode_utf16().collect(),
+                        cache_control: None,
+                    },
+                    ContentBlock::ToolCall {
+                        id: "call-1".to_string(),
+                        name: "lookup".to_string(),
+                        input: serde_json::json!({"query": "weather in San Francisco"}),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_call_id: "call-1".to_string(),
+                        output: serde_json::json!({"temperature": 18, "unit": "celsius"}),
+                        is_error: false,
+                        cache_control: None,
+                        cache_reference: None,
+                    },
+                ],
+            },
+        );
+        push_tool(
+            &mut req,
+            ToolDeclaration {
+                name: "lookup".to_string(),
+                description: "Look up current information for a location".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"}
+                    },
+                    "required": ["query"]
+                }),
+                ..Default::default()
+            },
+        );
 
         assert!(
             approximate_tokens(&req) > 1,
@@ -279,6 +340,7 @@ mod tests {
         let mut request = LlmRequest::new("model").with_user_text("find sources");
         let without_tools = approximate_tokens(&request);
         request
+            .input
             .hosted_tools
             .push(HostedTool::WebSearch(WebSearchConfig {
                 allowed_domains: vec!["example.com".into()],
@@ -287,7 +349,7 @@ mod tests {
         let with_tools = approximate_tokens(&request);
         assert!(with_tools > without_tools);
 
-        let HostedTool::WebSearch(config) = &mut request.hosted_tools[0] else {
+        let HostedTool::WebSearch(config) = &mut request.input.hosted_tools[0] else {
             unreachable!()
         };
         config
@@ -302,7 +364,7 @@ mod tests {
 
         let mut request = LlmRequest::new("model").with_user_text("produce a result");
         let plain = approximate_tokens(&request);
-        request.output_format = OutputFormat::JsonSchema {
+        request.input.output_format = OutputFormat::JsonSchema {
             name: "result".into(),
             schema: serde_json::json!({
                 "type": "object",
@@ -319,24 +381,51 @@ mod tests {
     fn text_js_utf16_ascii_estimate_matches_plain_text() {
         let text = "restored ASCII skill content".repeat(100);
         let mut plain = LlmRequest::new("model");
-        plain.messages.push(Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::Text {
-                text: text.clone(),
-                cache_control: None,
-            }],
-        });
+        push_history(
+            &mut plain,
+            Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: text.clone(),
+                    cache_control: None,
+                }],
+            },
+        );
         let mut exact_utf16 = LlmRequest::new("model");
-        exact_utf16.messages.push(Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::TextJsUtf16 {
-                utf16_code_units: text.encode_utf16().collect(),
-                text,
-                cache_control: None,
-            }],
-        });
+        push_history(
+            &mut exact_utf16,
+            Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::TextJsUtf16 {
+                    utf16_code_units: text.encode_utf16().collect(),
+                    text,
+                    cache_control: None,
+                }],
+            },
+        );
 
         assert_eq!(approximate_tokens(&exact_utf16), approximate_tokens(&plain));
+    }
+
+    #[test]
+    fn exact_utf16_escape_bytes_remain_in_the_fit_estimate() {
+        let display = "�".repeat(300);
+        let plain = LlmRequest::new("model").with_user_text(display.clone());
+        let mut exact = LlmRequest::new("model");
+        push_history(
+            &mut exact,
+            Message {
+                role: "user".into(),
+                content: vec![ContentBlock::TextJsUtf16 {
+                    text: display,
+                    utf16_code_units: vec![0xd800; 300],
+                    cache_control: None,
+                }],
+            },
+        );
+        // Each lone surrogate is six JSON bytes; its replacement glyph is
+        // three UTF-8 bytes. The 900 extra bytes contribute 300 fit tokens.
+        assert_eq!(approximate_tokens(&exact), approximate_tokens(&plain) + 300);
     }
 
     // ----------------------------------------------------------------
@@ -421,9 +510,9 @@ mod tests {
         }
     }
 
-    fn anthropic_client() -> DefaultLlmClient {
+    fn anthropic_client() -> ModelRuntime {
         std::env::set_var("LLM_COUNT_TOKENS_TEST_KEY", "ct-test-key");
-        DefaultLlmClient::from_config(ClientConfig {
+        ModelRuntime::from_config(ClientConfig {
             providers: vec![ProviderProfile {
                 wire_profile: None,
                 regions: lingxi_llm_client::protocol::Region::all(),
@@ -461,8 +550,8 @@ mod tests {
         .expect("client")
     }
 
-    fn openai_client() -> DefaultLlmClient {
-        DefaultLlmClient::from_config(ClientConfig {
+    fn openai_client() -> ModelRuntime {
+        ModelRuntime::from_config(ClientConfig {
             providers: vec![ProviderProfile {
                 wire_profile: None,
                 regions: lingxi_llm_client::protocol::Region::all(),

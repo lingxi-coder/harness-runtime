@@ -1,75 +1,47 @@
-use llm_runtime::{LlmRequest, ProviderRequest, ProviderResponse, Usage, WireCodec};
-use serde_json::Value;
+use lingxi_llm_client::{self as sdk, protocol as wire, WireCodec};
+use llm_runtime::{ProviderRequest, ProviderResponse};
+use serde_json::json;
 
-#[derive(Debug)]
-struct DummyCodec;
-
-impl WireCodec for DummyCodec {
-    fn encode_request(
-        &self,
-        request: &LlmRequest,
-    ) -> Result<ProviderRequest, llm_runtime::LlmError> {
-        Ok(ProviderRequest::post_json(
-            "https://example.test/v1/messages",
-            serde_json::json!({"model": request.model}),
-        ))
-    }
-
-    fn decode_response(
-        &self,
-        response: ProviderResponse,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
-        assert_eq!(response.status, 200);
-        Ok(llm_runtime::LlmResponse {
-            id: "id".to_string(),
-            model: "model".to_string(),
-            content: vec![],
-            stop_reason: None,
-            stop_details: None,
-            usage: Usage::default(),
-            cost: None,
-            provider_metadata: Value::default(),
-        })
-    }
-
-    fn stream_decoder(&self) -> Box<dyn llm_runtime::StreamDecoder> {
-        Box::new(llm_runtime::NoopStreamDecoder)
-    }
-
-    fn clone_box(&self) -> Box<dyn WireCodec> {
-        Box::new(DummyCodec)
-    }
-}
-
-fn wire_codec_round_trip(codec: &dyn WireCodec) -> (ProviderRequest, llm_runtime::LlmResponse) {
-    let request = codec
-        .encode_request(&LlmRequest::new("model-a"))
-        .expect("request");
-    let response = codec
-        .decode_response(ProviderResponse::json(200, serde_json::json!({"ok": true})))
-        .expect("response");
-
-    (request, response)
+fn profile() -> wire::ProviderProfile {
+    serde_json::from_value(json!({
+        "provider_id":"openai", "profile_name":"openai",
+        "base_url":"https://example.test/v1", "protocol":wire::ProtocolFamily::OpenAiChat,
+        "auth":"none", "models":[]
+    }))
+    .unwrap()
 }
 
 #[test]
-fn codec_returns_post_json_provider_request() {
-    let request = DummyCodec
-        .encode_request(&LlmRequest::new("model-a"))
+fn sdk_codec_returns_post_json_provider_request() {
+    let profile = profile();
+    let context = sdk::CodecContext::new(&profile, "model-a", sdk::RequestMode::Complete);
+    let input =
+        serde_json::from_value::<wire::ChatRequest>(json!({"model":"model-a", "messages":[]}))
+            .unwrap();
+    let request = sdk::OpenAiChatCodec
+        .encode_request(sdk::EncodeRequest::new(&input), &context)
         .unwrap();
-
     assert_eq!(request.method, "POST");
-    assert_eq!(request.url, "https://example.test/v1/messages");
-    assert_eq!(request.body_json["model"], "model-a");
+    assert_eq!(request.url, "https://example.test/v1/chat/completions");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["model"],
+        "model-a"
+    );
 }
 
 #[test]
-fn codec_works_through_trait_object_and_json_response() {
-    let codec: Box<dyn WireCodec> = Box::new(DummyCodec);
-    let (request, response) = wire_codec_round_trip(codec.as_ref());
-
-    assert_eq!(request.method, "POST");
-    assert_eq!(response.id, "id");
+fn sdk_codec_works_through_trait_object_and_json_response() {
+    let profile = profile();
+    let context = sdk::CodecContext::new(&profile, "model-a", sdk::RequestMode::Complete);
+    let codec: Box<dyn WireCodec> = Box::new(sdk::OpenAiChatCodec);
+    let response = sdk::HttpResponse {
+        status: 200,
+        headers: Default::default(),
+        body: serde_json::to_vec(&json!({"id":"id", "model":"model-a", "choices":[{"message":{"role":"assistant", "content":"hello"}, "finish_reason":"stop"}]})).unwrap().into(),
+    };
+    let decoded = codec.decode_response(&response, &context).unwrap();
+    assert_eq!(decoded.model, "model-a");
+    assert!(decoded.response_id.is_some());
 }
 
 #[test]

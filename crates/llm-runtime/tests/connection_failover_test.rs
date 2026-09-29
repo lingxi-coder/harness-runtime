@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use llm_runtime::model::user_agent::UserAgentEnv;
 use llm_runtime::{
     ApiService, AuthStrategy, Capabilities, ClientConfig, ConnectionSpec, CredentialConfig,
-    DefaultLlmClient, FailoverTriggers, LlmError, ModelProfile, PricingConfig, ProtocolFamily,
-    ProviderId, ProviderProfile, SubscriberState, Transport,
+    FailoverTriggers, LlmError, ModelProfile, ModelRuntime, PricingConfig, ProtocolFamily,
+    ProviderId, ProviderProfile, SubscriberState,
 };
 use llm_runtime::{BoxFuture, ProviderRequest, ProviderResponse, StreamingResponse};
 
@@ -81,7 +81,14 @@ impl llm_runtime::test_support::FixtureTransport for ScriptedTransport {
             Ok(ProviderResponse {
                 status,
                 headers: BTreeMap::new(),
-                body_json: if status == 200 {
+                body_json: if status == 200 && request.url.ends_with("/chat/completions") {
+                    assert!(request
+                        .body_json
+                        .to_string()
+                        .find("cache_control")
+                        .is_none());
+                    serde_json::json!({"id":"chat_1","model":"shared-model","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}})
+                } else if status == 200 {
                     ok_body()
                 } else {
                     serde_json::json!({ "error": { "message": "boom" } })
@@ -159,7 +166,7 @@ fn connection(conn_id: &str, base_url: &str, order: u32) -> ProviderProfile {
 
 fn service(transport: Arc<ScriptedTransport>) -> ApiService {
     let client = Arc::new(
-        DefaultLlmClient::from_config(ClientConfig {
+        ModelRuntime::from_config(ClientConfig {
             providers: vec![connection("intl", INTL, 0), connection("cn", CN, 1)],
         })
         .expect("client"),
@@ -261,7 +268,7 @@ async fn a_single_connection_provider_does_not_fail_over() {
     only.profile_name = "solo".to_string();
     only.connection = ConnectionSpec::default();
     let client = Arc::new(
-        DefaultLlmClient::from_config(ClientConfig {
+        ModelRuntime::from_config(ClientConfig {
             providers: vec![only],
         })
         .expect("client"),
@@ -285,4 +292,106 @@ async fn a_single_connection_provider_does_not_fail_over() {
         hops.iter().all(|c| c == "intl"),
         "with no connections configured nothing may be re-pointed; got {hops:?}"
     );
+}
+
+/// A sibling connection can expose the same model through a different wire.
+#[tokio::test]
+async fn cross_protocol_failover_adapts_cached_history_for_both_drivers() {
+    for streaming in [false, true] {
+        let transport = ScriptedTransport::new(vec![429, 200]);
+        let first = connection("intl", INTL, 0);
+        let mut second = connection("cn", CN, 1);
+        second.protocol = ProtocolFamily::OpenAiChat;
+        let client = Arc::new(
+            ModelRuntime::from_config(ClientConfig {
+                providers: vec![first, second],
+            })
+            .unwrap(),
+        );
+        let api = ApiService::new(
+            client,
+            transport.clone(),
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        );
+        let mut request = llm_runtime::LlmRequest::new("shared-model").with_user_text("hello");
+        request
+            .input
+            .prompt_cache
+            .breakpoints
+            .push(lingxi_llm_client::protocol::CacheBreakpoint {
+                position: lingxi_llm_client::protocol::CachePosition::Message {
+                    index: 0,
+                    block: 0,
+                },
+                scope: None,
+                ttl: lingxi_llm_client::protocol::CacheTtl::FiveMinutes,
+            });
+        if streaming {
+            let error = api
+                .stream_request(request)
+                .await
+                .err()
+                .expect("second connection sentinel");
+            assert!(
+                matches!(error, LlmError::InvalidRequest {message} if message == "reached-the-good-connection")
+            );
+        } else {
+            let response = api
+                .execute_side_query_request(request)
+                .await
+                .expect("adapted fallback request");
+            assert_eq!(response.model, "shared-model");
+        }
+        assert_eq!(transport.connections(), vec!["intl", "cn"]);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn cross_protocol_model_fallback_rebuilds_history_cache_policy() {
+    let transport = ScriptedTransport::new(vec![529, 529, 529, 200]);
+    let mut primary = connection("intl", INTL, 0);
+    primary.connection = Default::default();
+    primary.provider_id = ProviderId::Custom {
+        name: "primary".into(),
+    };
+    primary.models[0].display_model = "claude-opus-4-6".into();
+    primary.models[0].request_model = "claude-opus-4-6".into();
+    let mut fallback = connection("cn", CN, 1);
+    fallback.connection = Default::default();
+    fallback.provider_id = ProviderId::Custom {
+        name: "secondary".into(),
+    };
+    fallback.protocol = ProtocolFamily::OpenAiChat;
+    let client = Arc::new(
+        ModelRuntime::from_config(ClientConfig {
+            providers: vec![primary, fallback],
+        })
+        .unwrap(),
+    );
+    let api = ApiService::new(
+        client,
+        transport.clone(),
+        SubscriberState::default(),
+        UserAgentEnv::default(),
+        "test",
+        None,
+        None,
+    );
+    api.messages_create_with_fallback(
+        "claude-opus-4-6",
+        None,
+        Some("cached system"),
+        vec![],
+        vec![],
+        Some("shared-model"),
+        false,
+        false,
+    )
+    .await
+    .expect("cross-protocol model fallback must succeed");
+    assert_eq!(transport.connections(), vec!["intl", "intl", "intl", "cn"]);
 }

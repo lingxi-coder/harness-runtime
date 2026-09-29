@@ -1,7 +1,7 @@
 //! Provider overflow recovery preserves original history until a real summary succeeds.
 use async_trait::async_trait;
 use compaction::CompactionOrchestrator;
-use llm_runtime::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
+use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
 use orchestrator::test_support::{
     mock_message_response, noop_hook_executor, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -13,16 +13,16 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// A mock API client whose queue is `Result<LlmResponse, LlmError>` so a
+/// A mock API client whose queue is `Result<HistoryResponse, LlmError>` so a
 /// test can script `LlmError::ContextOverflow` responses. Captures per-call
 /// message counts so the test can assert head-truncation shrank the prompt.
 struct PtlMockApi {
-    queue: Mutex<VecDeque<Result<LlmResponse, LlmError>>>,
+    queue: Mutex<VecDeque<Result<HistoryResponse, LlmError>>>,
     captured_lens: Mutex<Vec<usize>>,
 }
 
 impl PtlMockApi {
-    fn new(script: Vec<Result<LlmResponse, LlmError>>) -> Self {
+    fn new(script: Vec<Result<HistoryResponse, LlmError>>) -> Self {
         Self {
             queue: Mutex::new(VecDeque::from(script)),
             captured_lens: Mutex::new(Vec::new()),
@@ -42,7 +42,7 @@ impl OrchestratorApiClient for PtlMockApi {
         _system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.captured_lens.lock().await.push(msgs.len());
         let mut q = self.queue.lock().await;
         q.pop_front().unwrap_or_else(|| {
@@ -53,14 +53,14 @@ impl OrchestratorApiClient for PtlMockApi {
     }
 }
 
-fn ptl_err(token_gap: u64) -> Result<LlmResponse, LlmError> {
+fn ptl_err(token_gap: u64) -> Result<HistoryResponse, LlmError> {
     Err(LlmError::ContextOverflow { token_gap })
 }
 
 // The `Result` wrap is required: `ok_text` is pushed into the same scripted
 // response vec as `ptl_err` (which returns `Err`), so the type must match.
 #[allow(clippy::unnecessary_wraps)]
-fn ok_text(text: &str) -> Result<LlmResponse, LlmError> {
+fn ok_text(text: &str) -> Result<HistoryResponse, LlmError> {
     Ok(mock_message_response(
         vec![LlmContentBlock::Text {
             text: text.to_string(),

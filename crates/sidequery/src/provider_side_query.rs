@@ -2,7 +2,7 @@
 //!
 //! A side query is a stateless one-shot LLM call (see [`crate::side_query`]).
 //! [`ProviderSideQueryClient`] wires the [`SideQueryRequest`] DTO to the
-//! configured provider and decodes the [`LlmResponse`] back into a
+//! configured provider and decodes the [`HistoryResponse`] back into a
 //! [`SideQueryResponse`]. Utility callers can construct an isolated Anthropic
 //! client with [`ProviderSideQueryClient::new`]. Session-bound compaction and
 //! recap use [`ProviderSideQueryClient::from_service`] so the fork reuses the
@@ -36,12 +36,12 @@ use crate::side_query::{
 use async_trait::async_trait;
 use llm_runtime::Transport;
 use llm_runtime::{
-    AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, DefaultLlmClient,
-    LlmError, LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
+    AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, LlmError, LlmRequest,
+    ModelProfile, ModelRuntime, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
     StaticCredentialProvider, SystemBlock,
 };
 #[cfg(test)]
-use platform_api::http::{RawByteStream, SseStream};
+use platform_api::http::SseStream;
 #[cfg(test)]
 use platform_api::{HttpError, HttpTransport};
 use protocol::MediaAnalysis;
@@ -58,7 +58,7 @@ const SIDEQUERY_CRED_ID: &str = "sidequery_key";
 enum ProviderSideQueryBackend {
     /// Standalone utility-query client built from a raw Anthropic API key.
     Direct {
-        client: DefaultLlmClient,
+        client: ModelRuntime,
         transport: Arc<dyn Transport>,
     },
     /// The live session service used by compaction/recap.
@@ -114,7 +114,7 @@ impl ProviderSideQueryClient {
                 // entry keyed on the empty prefix so that ANY model string is
                 // accepted, then override at request time with the actual model.
                 //
-                // Because `DefaultLlmClient::prepare` resolves models by exact
+                // Because `ModelRuntime::prepare` resolves models by exact
                 // `display_model` or `aliases` match, we must register the
                 // models that callers actually request. The known set is:
                 //   - claude-haiku-4-5 (memory selector)
@@ -129,7 +129,7 @@ impl ProviderSideQueryClient {
         };
 
         let cred_provider = Arc::new(StaticCredentialProvider::new(Credential::ApiKey(api_key)));
-        let client = DefaultLlmClient::from_config(config)
+        let client = ModelRuntime::from_config(config)
             .expect("sidequery ClientConfig is structurally valid")
             .with_credential_provider(cred_provider);
 
@@ -217,7 +217,7 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
     ]
 }
 
-/// Decode an [`llm_runtime::LlmResponse`] into the side-query response shape.
+/// Decode an [`llm_runtime::HistoryResponse`] into the side-query response shape.
 ///
 /// * `Text` blocks are concatenated into the flattened `text`, except compact
 ///   responses, where cc 2.1.261 N0e selects the first text block only.
@@ -233,7 +233,7 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
 ///   same cross-naming the provider's own cost path uses: API `cache_write` →
 ///   cost `cache_write`, API `cache_read` → cost `cache_read`.
 fn decode_response(
-    resp: llm_runtime::LlmResponse,
+    resp: llm_runtime::HistoryResponse,
     want_structured: bool,
     first_text_only: bool,
     separate_text_blocks: bool,
@@ -416,7 +416,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                 request.temperature,
                 Some(query_source),
             )?;
-            canonical.model_attempt = request.model_attempt;
+            canonical.execution.model_attempt = request.model_attempt;
             let resp = service.execute_side_query_request(canonical).await?;
             return Ok(decode_response(
                 resp,
@@ -467,28 +467,39 @@ impl SideQueryClient for ProviderSideQueryClient {
         });
 
         let query_source = request.query_source.as_str().to_string();
-        let llm_req = LlmRequest {
-            model: request.model,
+        let family = client.protocol_for_model(&request.model, request.profile.as_deref())?;
+        let (input, overrides) = llm_runtime::convert::history_input(
+            &request.model,
+            &messages,
+            &system,
+            &tools,
+            family,
+        )?;
+        let mut llm_req = LlmRequest {
+            input,
             profile: request.profile,
-            system,
-            messages,
-            tools,
-            // output_format drives the structured text decode (NOT
-            // response_format); max_retries is a caller-side budget.
-            tool_choice: convert_tool_choice(request.tool_choice.as_ref()),
-            stop_sequences: request.stop_sequences,
-            max_tokens: Some(request.max_tokens),
-            temperature: request.temperature.map(f64::from),
-            reasoning,
-            effort: request.effort,
-            capture_retry_count: true,
-            query_source: Some(query_source),
-            ..LlmRequest::default()
+            stream: false,
+            execution: llm_runtime::ExecutionContext {
+                input_protocol: Some(family),
+                capture_retry_count: true,
+                query_source: Some(query_source),
+                message_json_string_overrides: overrides,
+                ..Default::default()
+            },
         };
+        llm_req.set_tool_choice(convert_tool_choice(request.tool_choice.as_ref()));
+        llm_req.input.stop_sequences = request.stop_sequences;
+        llm_req.input.max_tokens = Some(request.max_tokens);
+        llm_req.input.temperature = request.temperature;
+        llm_req.set_reasoning(reasoning);
+        llm_req.set_effort(request.effort)?;
 
         // Dispatch directly through the shared SDK transport.
 
-        let resp = client.execute(&llm_req, transport.clone()).await?;
+        let resp = llm_runtime::HistoryResponse::from_model(
+            client.execute(&llm_req, transport.clone()).await?,
+            family,
+        )?;
 
         Ok(decode_response(
             resp,
@@ -541,7 +552,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                         Some(query_source.as_str()),
                     )
                     .map_err(map_structured_llm_error)?;
-                canonical.model_attempt = request.model_attempt;
+                canonical.execution.model_attempt = request.model_attempt;
                 let stream = service
                     .stream_request(canonical)
                     .await
@@ -568,26 +579,45 @@ impl SideQueryClient for ProviderSideQueryClient {
                     &request.model,
                     request.temperature,
                 );
-                let llm_req = LlmRequest {
-                    model: request.model,
+                let family = client
+                    .protocol_for_model(&request.model, request.profile.as_deref())
+                    .map_err(map_structured_llm_error)?;
+                let (input, overrides) = llm_runtime::convert::history_input(
+                    &request.model,
+                    &messages,
+                    &system,
+                    &[],
+                    family,
+                )
+                .map_err(map_structured_llm_error)?;
+                let mut llm_req = LlmRequest {
+                    input,
                     profile: request.profile,
-                    system,
-                    messages,
-                    tools: Vec::new(),
-                    max_tokens: Some(request.max_tokens),
-                    temperature: temperature.map(f64::from),
-                    capture_retry_count: true,
-                    query_source: Some(request.query_source.as_str().to_string()),
-                    response_format: Some(llm_runtime::ResponseFormat::JsonSchema {
-                        schema: request.schema,
-                    }),
-                    ..LlmRequest::default()
+                    stream: false,
+                    execution: llm_runtime::ExecutionContext {
+                        input_protocol: Some(family),
+                        capture_retry_count: true,
+                        query_source: Some(request.query_source.as_str().to_string()),
+                        message_json_string_overrides: overrides,
+                        ..Default::default()
+                    },
                 };
-
-                client
-                    .execute(&llm_req, transport.clone())
-                    .await
-                    .map_err(map_structured_llm_error)?
+                llm_req.input.max_tokens = Some(request.max_tokens);
+                llm_req.input.temperature = temperature;
+                llm_req.input.output_format =
+                    llm_runtime::services::sdk::protocol::OutputFormat::JsonSchema {
+                        name: "response".into(),
+                        schema: request.schema,
+                        strict: true,
+                    };
+                llm_runtime::HistoryResponse::from_model(
+                    client
+                        .execute(&llm_req, transport.clone())
+                        .await
+                        .map_err(map_structured_llm_error)?,
+                    family,
+                )
+                .map_err(map_structured_llm_error)?
             }
         };
         let request_id = (!resp.id.is_empty()).then(|| resp.id.clone());
@@ -690,9 +720,9 @@ fn map_structured_llm_error(err: llm_runtime::LlmError) -> SideQueryError {
     SideQueryError::Api(err)
 }
 
-/// Drive a `query_json_schema` event stream to its final [`llm_runtime::LlmResponse`].
+/// Drive a `query_json_schema` event stream to its final [`llm_runtime::HistoryResponse`].
 ///
-/// F003: this previously scanned for an [`llm_runtime::LlmEvent::Completed`]
+/// F003: this previously scanned for an [`llm_runtime::HistoryEvent::Completed`]
 /// event by hand — but the Anthropic codec (the provider every real Fusion
 /// analyst call over the Session backend uses) never emits `Completed`; a
 /// normal stream ends `MessageStart` → `ContentBlockStart/Delta/Stop` →
@@ -706,10 +736,10 @@ fn map_structured_llm_error(err: llm_runtime::LlmError) -> SideQueryError {
 /// when a provider does send it) the same way every other streaming call in
 /// the codebase does.
 async fn collect_completed_response(
-    stream: impl futures_util::Stream<Item = Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>
+    stream: impl futures_util::Stream<Item = Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>>
         + Send
         + 'static,
-) -> Result<llm_runtime::LlmResponse, SideQueryError> {
+) -> Result<llm_runtime::HistoryResponse, SideQueryError> {
     llm_runtime::stream_accumulator::accumulate_stream_salvaging(Box::pin(stream))
         .await
         .map_err(|(_partial_content, err)| map_structured_llm_error(err))
@@ -1221,7 +1251,7 @@ mod tests {
                 connection: Default::default(),
             }],
         };
-        let parent_client = DefaultLlmClient::from_config(config)
+        let parent_client = ModelRuntime::from_config(config)
             .expect("parent client config")
             .with_credential_provider(Arc::new(StaticCredentialProvider::new(
                 Credential::BearerToken("parent-oauth-token".to_string()),
@@ -1772,7 +1802,7 @@ mod tests {
                 connection: Default::default(),
             }],
         };
-        let session_client = DefaultLlmClient::from_config(config)
+        let session_client = ModelRuntime::from_config(config)
             .expect("session client config")
             .with_credential_provider(Arc::new(StaticCredentialProvider::new(
                 Credential::BearerToken("session-oauth-token".to_string()),
@@ -2081,7 +2111,7 @@ mod tests {
                 connection: Default::default(),
             }],
         };
-        let session_client = DefaultLlmClient::from_config(config)
+        let session_client = ModelRuntime::from_config(config)
             .expect("session client config")
             .with_credential_provider(Arc::new(StaticCredentialProvider::new(
                 Credential::BearerToken("session-oauth-token".to_string()),

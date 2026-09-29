@@ -44,7 +44,7 @@ impl agent::SubagentApiClient for HumanApi {
         _: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
         _: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         let history = serde_json::to_string(&messages).unwrap();
         let index = {
             let mut calls = self.calls.lock().unwrap();
@@ -96,7 +96,7 @@ impl agent::SubagentApiClient for HumanApi {
             self.call_release.notified().await;
             in_flight.finished = true;
         }
-        Ok(llm_runtime::LlmResponse {
+        Ok(llm_runtime::HistoryResponse {
             id: "human-response".into(),
             model: "mock".into(),
             content: vec![llm_runtime::ContentBlock::Text {

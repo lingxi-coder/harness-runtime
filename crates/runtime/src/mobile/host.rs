@@ -82,8 +82,8 @@ use llm_runtime::oauth::anthropic::handle::OAuthHandle;
 use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
 use llm_runtime::oauth::openai as openai_oauth;
 use llm_runtime::{
-    Credential, CredentialConfig, CredentialProvider, CredentialScope, DefaultLlmClient,
-    ProviderId, Transport,
+    Credential, CredentialConfig, CredentialProvider, CredentialScope, ModelRuntime, ProviderId,
+    Transport,
 };
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
@@ -3320,7 +3320,7 @@ async fn build_mobile_inner_with_ask(
         .cloned()
         .unwrap_or_else(|| "firstParty".to_string());
 
-    let mut client = DefaultLlmClient::from_config(assembled.client_config)
+    let mut client = ModelRuntime::from_config(assembled.client_config)
         .map_err(|e| MobileBuildError::ApiBase(format!("llm-runtime config: {e}")))?;
     // §6.1: ONE composite credential slot for ALL providers. OAuth delegates
     // serve `anthropic-oauth` and `openai-chatgpt` without exposing tokens to
@@ -3382,7 +3382,7 @@ async fn build_mobile_inner_with_ask(
     };
 
     // 3c-T3: build the cost estimator from the assembled pricing catalog so
-    // LlmResponse.cost is populated on every successful decode. The catalog
+    // HistoryResponse.cost is populated on every successful decode. The catalog
     // already carries the built-in reference tiers + non-Anthropic preset rows +
     // any settings per-profile pricing overrides folded in by `assemble`. Unpriced
     // / unknown models leave cost = None (never an error).
@@ -3394,7 +3394,7 @@ async fn build_mobile_inner_with_ask(
     };
 
     // Audit #15: session CostTracker (desktop parity). The `cost_estimator` above
-    // populates per-response `LlmResponse.cost`; the CostTracker accumulates the
+    // populates per-response `HistoryResponse.cost`; the CostTracker accumulates the
     // running SESSION total the orchestrator records each turn. The persist
     // channel is DRAINED by a spawned recv-loop that discards each `CostState` —
     // byte-for-byte mirroring harness-runtime::desktop (which also just drains it): mobile

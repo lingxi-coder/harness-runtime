@@ -202,7 +202,7 @@ fn service_on(
         profiles.push(profile(1));
     }
     let client = Arc::new(
-        DefaultLlmClient::from_config(ClientConfig {
+        ModelRuntime::from_config(ClientConfig {
             providers: profiles,
         })
         .unwrap(),
@@ -224,9 +224,10 @@ fn service_on(
 
 fn request(hosted: bool) -> LlmRequest {
     let mut request = LlmRequest::new(MODEL).with_user_text("Find the answer");
-    request.max_tokens = Some(100);
+    request.input.max_tokens = Some(100);
     if hosted {
         request
+            .input
             .hosted_tools
             .push(wire::HostedTool::WebSearch(Default::default()));
     }
@@ -280,7 +281,7 @@ async fn a_hosted_failure_settles_its_registered_attempt_before_returning() {
             let probe = SettlementProbe::default();
             service.set_model_attempt_hooks(Arc::new(probe.clone()));
             let mut request = request(true);
-            request.model_attempt = Some(
+            request.execution.model_attempt = Some(
                 platform_api::ModelAttemptRun::new(Arc::new(()))
                     .context(platform_api::ModelAttemptStage::Panel, Some(0))
                     .unwrap(),
@@ -351,6 +352,7 @@ async fn native_hosted_tool_failure_is_dispatched_once() {
             let service = service(transport.clone(), true);
             let mut request = request(false);
             request
+                .input
                 .hosted_tools
                 .push(AnthropicHostedTool::WebFetch(Default::default()).into());
             if streaming {
@@ -386,7 +388,7 @@ async fn native_client_toolsets_preserve_ordinary_retry() {
             TOOLSET_MODEL,
         );
         let mut request = LlmRequest::new(TOOLSET_MODEL).with_user_text("List open tabs");
-        request.native_options.push(client_toolset_options());
+        request.input.native_options.push(client_toolset_options());
         if streaming {
             let stream = service.stream_request(request).await.unwrap();
             assert!(stream.collect::<Vec<_>>().await.iter().all(Result::is_ok));
@@ -483,8 +485,8 @@ async fn scoped_continuation_transport_failure_is_dispatched_once() {
             "gpt-4.1",
         );
         let mut request = LlmRequest::new("gpt-4.1").with_user_text("Continue");
-        request.account_scope = Some("account".into());
-        request.continuation = Some(wire::ContinuationRef {
+        request.execution.account_scope = Some("account".into());
+        request.input.continuation = Some(wire::ContinuationRef {
             response_id: wire::ResponseId::new("resp_previous"),
             provider_id: wire::ProviderId::new("openai"),
             profile_name: "hosted-retry-0".into(),
@@ -521,17 +523,17 @@ fn native_execution_history_and_continuations_disable_replay() {
         json!({"type":"mcp_tool_result"}),
         json!({"type":"bash_code_execution_tool_result"}),
         json!({"executableCode":{"code":"print(1)"}}),
-        json!({"type":"lingxi_replay_metadata","block":{"type":"tool_use","caller":{"type":"code_execution_20260521"}}}),
-        json!({"type":"lingxi_replay_metadata","block":{"type":"provider_content","value":{"type":"mcp_tool_result"}}}),
+        json!({"type":"tool_use","caller":{"type":"code_execution_20260521"}}),
+        json!({"type":"tool_use","toolset_name":"browser"}),
     ] {
-        request.messages[0].content = vec![crate::ContentBlock::ProviderContent {
-            protocol: "anthropic_messages".into(),
+        request.input.messages[0].content = vec![wire::ContentBlock::ProviderContent {
+            protocol: wire::ProtocolFamily::AnthropicMessages,
             value,
         }];
         assert!(!allows_automatic_replay(&request));
     }
-    request.messages.clear();
-    request.continuation = Some(wire::ContinuationRef {
+    request.input.messages.clear();
+    request.input.continuation = Some(wire::ContinuationRef {
         response_id: wire::ResponseId::new("resp_previous"),
         provider_id: wire::ProviderId::new("openai"),
         profile_name: "openai".into(),
@@ -549,15 +551,12 @@ fn ordinary_native_reasoning_and_client_tool_metadata_preserve_retry() {
     for value in [
         json!({"type":"reasoning","encrypted_content":"opaque"}),
         json!({"type":"chat_reasoning","reasoning_content":"thought"}),
-        json!({"type":"lingxi_replay_metadata","block":{"type":"text","thought_signature":"signed"}}),
-        json!({"type":"lingxi_replay_metadata","block":{"type":"tool_use","caller":{"type":"direct"}}}),
-        json!({"type":"lingxi_replay_metadata","block":{"type":"tool_use","toolset_name":"browser"}}),
-        json!({"type":"lingxi_replay_metadata","block":{"type":"provider_content","protocol":"anthropic_messages","value":{"type":"text","text":"cited text","citations":[{"type":"web_search_result_location","url":"https://example.com"}]}}}),
-        json!({"type":"lingxi_replay_metadata","block":{"type":"provider_content","value":{"type":"reasoning","encrypted_content":"opaque"}}}),
-        json!({"type":"lingxi_observation","kind":"native_metadata","payload":{"container":{"id":"previous-container"}}}),
+        json!({"type":"text","text":"signed text","thought_signature":"signed"}),
+        json!({"type":"tool_use","caller":{"type":"direct"}}),
+        json!({"type":"text","text":"cited text","citations":[{"type":"web_search_result_location","url":"https://example.com"}]}),
     ] {
-        request.messages[0].content = vec![crate::ContentBlock::ProviderContent {
-            protocol: "openai_responses".into(),
+        request.input.messages[0].content = vec![wire::ContentBlock::ProviderContent {
+            protocol: wire::ProtocolFamily::OpenAiResponses,
             value,
         }];
         assert!(allows_automatic_replay(&request));
@@ -565,10 +564,113 @@ fn ordinary_native_reasoning_and_client_tool_metadata_preserve_retry() {
 }
 
 #[test]
+fn durable_replay_companions_are_classified_after_canonical_conversion() {
+    for (family, block, replayable) in [
+        (
+            wire::ProtocolFamily::GeminiGenerateContent,
+            json!({"type":"text","text":"signed","thought_signature":"signature"}),
+            true,
+        ),
+        (
+            wire::ProtocolFamily::AnthropicMessages,
+            json!({"type":"tool_use","id":"call","name":"lookup","input":{},"caller":{"type":"direct"}}),
+            true,
+        ),
+        (
+            wire::ProtocolFamily::AnthropicMessages,
+            json!({"type":"tool_use","id":"call","name":"lookup","input":{},"caller":{"type":"code_execution_20260120"}}),
+            false,
+        ),
+        (
+            wire::ProtocolFamily::AnthropicMessages,
+            json!({"type":"tool_use","id":"call","name":"click","input":{},"toolset_name":"browser"}),
+            false,
+        ),
+        (
+            wire::ProtocolFamily::AnthropicMessages,
+            json!({"type":"provider_content","protocol":"anthropic_messages","value":{"type":"text","text":"cited","citations":[{"type":"web_search_result_location","url":"https://example.com"}]}}),
+            true,
+        ),
+        (
+            wire::ProtocolFamily::OpenAiResponses,
+            json!({"type":"provider_content","protocol":"open_ai_responses","value":{"type":"reasoning","encrypted_content":"opaque"}}),
+            true,
+        ),
+        (
+            wire::ProtocolFamily::AnthropicMessages,
+            json!({"type":"provider_content","protocol":"anthropic_messages","value":{"type":"mcp_tool_result","tool_use_id":"mcp1","content":[]}}),
+            false,
+        ),
+    ] {
+        let decoded = serde_json::from_value(json!({
+            "model":MODEL, "message":{"role":"assistant","content":[block]},
+            "stop_reason":"end_turn", "usage":wire::UsageReport::default(),
+        }))
+        .unwrap();
+        let history = crate::history_projection::project_response(
+            decoded,
+            ProviderResponse::json(200, json!({})),
+            family,
+        )
+        .unwrap();
+        let (input, _) = crate::convert::history_input(
+            MODEL,
+            &[crate::Message {
+                role: "assistant".into(),
+                content: history.content,
+            }],
+            &[],
+            &[],
+            family,
+        )
+        .unwrap();
+        assert!(
+            !input.messages.is_empty(),
+            "classification must see replayed input"
+        );
+        let mut request = request(false);
+        request.input = input;
+        assert_eq!(allows_automatic_replay(&request), replayable, "{block}");
+    }
+}
+
+#[test]
+fn durable_observations_are_removed_before_sdk_execution_classification() {
+    let mut request = request(false);
+    let (input, _) = crate::convert::history_input(
+        MODEL,
+        &[crate::Message {
+            role: "assistant".into(),
+            content: vec![crate::ContentBlock::ProviderContent {
+                protocol: "anthropic_messages".into(),
+                value: json!({"type":"lingxi_observation","kind":"native_metadata","payload":{"container":{"id":"previous-container"}}}),
+            }],
+        }],
+        &[], &[], wire::ProtocolFamily::AnthropicMessages,
+    ).unwrap();
+    request.input = input;
+    assert!(request.input.messages.is_empty());
+    assert!(allows_automatic_replay(&request));
+}
+
+#[test]
+fn canonical_message_extensions_and_previous_response_id_disable_replay() {
+    let mut request = request(false);
+    request.input.controls.responses.previous_response_id = Some("previous".into());
+    assert!(!allows_automatic_replay(&request));
+    request.input.controls.responses.previous_response_id = None;
+    request.input.messages[0].native_options.push(
+        wire::NativeExtension::new("future.message_state.v1", json!({"thread":"previous"}))
+            .unwrap(),
+    );
+    assert!(!allows_automatic_replay(&request));
+}
+
+#[test]
 fn native_options_only_allow_known_client_toolset_policy_to_replay() {
     use wire::NativeType;
     let mut request = request(false);
-    request.native_options.push(client_toolset_options());
+    request.input.native_options.push(client_toolset_options());
     assert!(allows_automatic_replay(&request));
     for (format, data) in [
         (
@@ -588,7 +690,7 @@ fn native_options_only_allow_known_client_toolset_policy_to_replay() {
             json!({"client_toolsets":42}),
         ),
     ] {
-        request.native_options = vec![wire::NativeExtension::new(format, data).unwrap()];
+        request.input.native_options = vec![wire::NativeExtension::new(format, data).unwrap()];
         assert!(
             !allows_automatic_replay(&request),
             "unrecognized native state cannot authorize replay"

@@ -29,12 +29,15 @@ extern crate self as llm_runtime;
 pub mod test_support;
 pub use lingxi_llm_client::protocol::Region;
 #[cfg(any(test, feature = "test-support"))]
-pub use test_support::{FrameStream, ResponsesWebSocketTransportSession, StreamingResponse};
+pub use test_support::{
+    FrameStream, RawStreamFrame, ResponsesWebSocketTransportSession, StreamingResponse,
+};
 mod attempt_pricing;
+#[cfg(test)]
+mod codec_tests;
 pub use attempt_pricing::{AttemptPriceBounds, AttemptTokenRates};
 
 pub mod anthropic;
-pub mod auth;
 pub mod aws_auth;
 pub mod catalog;
 #[allow(missing_docs)]
@@ -47,15 +50,17 @@ pub mod cost;
 pub mod credentials;
 pub mod error;
 mod execution;
+mod execution_context;
+pub use execution_context::ExecutionContext;
 pub mod fusion_hints;
+pub mod history;
+mod history_projection;
 pub mod model;
 pub mod model_attempt;
 pub mod oauth;
 pub mod prompt_format;
 pub mod protocol;
 pub mod provider_settings;
-#[allow(missing_docs)]
-pub mod providers;
 pub mod reasoning_controls;
 pub mod redaction;
 pub mod registry;
@@ -68,7 +73,6 @@ pub mod services;
 pub mod sigv4;
 pub mod ssl;
 pub mod stream_accumulator;
-pub mod strict_schema;
 pub mod thinking_scope;
 pub mod transport;
 pub mod types;
@@ -76,15 +80,14 @@ pub mod unicode_repair;
 mod upstream;
 
 pub use anthropic::normalize_anthropic_usage;
-pub use auth::{ApiKeyAuthenticator, Authenticator, BearerAuthenticator, ChatGptAuthenticator};
 pub use aws_auth::{
     AwsAuthProcess, AwsAuthRefresh, AwsAuthRefresher, AwsAuthSettings, AwsExportedCredentials,
     ShellAwsAuthProcess,
 };
 pub use catalog::{builtin_presets, BuiltinCatalog};
 pub use client::{
-    DefaultLlmClient, FileActivationPoll, LlmEventStream, PreparedLlmCall,
-    ResponsesWebSocketRequestSnapshot, ResponsesWebSocketSession,
+    FileActivationPoll, ModelRuntime, PreparedLlmCall, ResponsesSession,
+    ResponsesWebSocketRequestSnapshot,
 };
 pub use cloud_provider_env::{
     bedrock_base_url_override, foundry_base_host, foundry_base_host_from_env,
@@ -98,9 +101,7 @@ pub use config::{
     AuthStrategy, AzureConfig, Capabilities, ClientConfig, ConnectionSpec, CredentialConfig,
     FailoverTriggers, ModelProfile, PricingConfig, ProtocolFamily, ProviderProfile, SigningConfig,
 };
-pub use copilot::{
-    CopilotAuthenticator, CopilotHttp, CopilotLogin, CopilotSecret, DeviceCodeResponse, PollOutcome,
-};
+pub use copilot::{CopilotHttp, CopilotLogin, CopilotSecret, DeviceCodeResponse, PollOutcome};
 pub use cost::{CostEstimator, PricingCatalog, PricingPolicy, TokenPricing};
 pub use credentials::{
     CopilotExchangeCredentialProvider, Credential, CredentialProvider, CredentialScope,
@@ -115,27 +116,20 @@ pub use lingxi_llm_client::protocol::{
     ContinuationRef, HostedTool, NativeExtension, NativeType, OutputFormat, PromptCachePolicy,
     WebSearchConfig,
 };
+pub use lingxi_llm_client::providers::google::files_wire::GeminiFile;
 pub use lingxi_llm_client::SseFrameSplitter;
 pub use model_attempt::{
     ModelAttemptHooks, ModelAttemptLease, ModelAttemptSettlement, ModelAttemptUsageCompleteness,
 };
 pub use platform_api::ModelBillingMode;
 pub use protocol::{
-    stream_content_order, stream_provider_metadata_from_headers, validate_capabilities,
-    CacheControl, CacheEdit, CacheScope, ContentBlock, ContentDelta, LlmEvent, LlmRequest,
-    LlmResponse, Message, MessageDeltaPayload, NoopStreamDecoder, OpenAiResponsesRequestOptions,
-    ProviderRequest, ProviderResponse, ProviderStreamTransport, RawStreamFrame, ReasoningConfig,
-    RequestMetadata, ResponseFormat, StopDetails, StreamDecoder, StreamFraming, SystemBlock,
-    ToolChoice, ToolDeclaration, WireCodec,
+    stream_content_order, stream_provider_metadata_from_headers, validate_capabilities, LlmRequest,
+    ProviderRequest, ProviderResponse, ProviderStreamTransport, ReasoningConfig, RequestMetadata,
 };
 pub use provider_settings::{
     anthropic_model_profiles, anthropic_provider_profile, parse_provider_profiles_lenient,
     parse_provider_profiles_strict, pricing_provider_id_for_profile, split_profile_model,
     ParsedUserProvider, ProviderCredentialMode, ProviderKind, ProviderParseOptions,
-};
-pub use providers::{
-    AnthropicMessagesCodec, AzureOpenAiCodec, BedrockClaudeCodec, FoundryClaudeCodec, GeminiCodec,
-    GeminiFile, OpenAiChatCodec, OpenAiResponsesCodec, VertexClaudeCodec, VertexGeminiCodec,
 };
 pub use reasoning_controls::{
     apply_reasoning_selection, reasoning_control_spec, ReasoningControlSpec, ReasoningSelection,
@@ -184,3 +178,12 @@ pub async fn scope_agent_cache_ttl<F: std::future::Future>(wants_1h: bool, futur
     let future = Box::pin(future);
     AGENT_CACHE_TTL_1H.scope(wants_1h, future).await
 }
+
+pub use history::{
+    HistoryContentDelta, HistoryEvent, HistoryMessageDelta, HistoryResponse, HistoryStopDetails,
+};
+
+pub use history::{
+    CacheControl, CacheEdit, CacheScope, ContentBlock, Message, ResponseFormat, SystemBlock,
+    ToolChoice, ToolDeclaration,
+};

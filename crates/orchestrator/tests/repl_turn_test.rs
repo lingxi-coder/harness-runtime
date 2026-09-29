@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 fn build_orch_with_response(
-    response: llm_runtime::LlmResponse,
+    response: llm_runtime::HistoryResponse,
 ) -> (
     ConversationOrchestrator,
     Arc<MockApiClient>,

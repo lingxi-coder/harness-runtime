@@ -117,7 +117,7 @@ fn service() -> Arc<llm_runtime::ApiService> {
     };
     Arc::new(llm_runtime::ApiService::new(
         Arc::new(
-            llm_runtime::DefaultLlmClient::from_config(llm_runtime::ClientConfig {
+            llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
                 providers: vec![profile],
             })
             .unwrap(),

@@ -627,7 +627,7 @@ impl Tool for EndTurnTool {
     }
 }
 
-fn streaming_round_calling(tool: &str, id: ToolUseId) -> Vec<llm_runtime::LlmEvent> {
+fn streaming_round_calling(tool: &str, id: ToolUseId) -> Vec<llm_runtime::HistoryEvent> {
     vec![
         message_start("m1", "claude-opus-4-7"),
         orchestrator::test_support_stream::content_block_start_tool_use(0, id, tool),
@@ -638,7 +638,7 @@ fn streaming_round_calling(tool: &str, id: ToolUseId) -> Vec<llm_runtime::LlmEve
     ]
 }
 
-fn text_round(id: &str, text: &str) -> Vec<llm_runtime::LlmEvent> {
+fn text_round(id: &str, text: &str) -> Vec<llm_runtime::HistoryEvent> {
     vec![
         message_start(id, "claude-opus-4-7"),
         content_block_start_text(0),

@@ -1,11 +1,11 @@
-//! GitHub Copilot provider support: device-flow login + request authenticator.
+//! GitHub Copilot provider support: device-flow login and host credential lifecycle.
 
 pub mod auth;
 pub mod login;
 
 pub use auth::{
-    CopilotAuthenticator, CopilotSecret, COPILOT_API_VERSION, COPILOT_EDITOR_PLUGIN_VERSION,
-    COPILOT_EDITOR_VERSION, COPILOT_INTEGRATION_ID, COPILOT_USER_AGENT,
+    CopilotSecret, COPILOT_API_VERSION, COPILOT_EDITOR_PLUGIN_VERSION, COPILOT_EDITOR_VERSION,
+    COPILOT_INTEGRATION_ID, COPILOT_USER_AGENT,
 };
 pub use login::{
     exchange_copilot_token, CopilotHttp, CopilotLogin, DeviceCodeResponse, ExchangedToken,

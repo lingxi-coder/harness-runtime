@@ -1,9 +1,8 @@
+use crate::upstream::codec_fixtures::HistoryFixture;
+use crate::upstream::codec_fixtures::{FixtureCodec, OpenAiResponsesCodec};
 use base64::Engine as _;
-use llm_runtime::providers::OpenAiResponsesCodec;
-use llm_runtime::{
-    ContentBlock, LlmRequest, Message, OpenAiResponsesRequestOptions, ToolChoice, ToolDeclaration,
-    WireCodec,
-};
+
+use llm_runtime::{ContentBlock, Message, ToolChoice, ToolDeclaration};
 
 const BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -16,7 +15,7 @@ fn codec() -> OpenAiResponsesCodec {
 #[test]
 fn encode_request_posts_to_responses_url() {
     let provider_request = codec()
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
     assert_eq!(provider_request.method, "POST");
@@ -27,7 +26,7 @@ fn encode_request_posts_to_responses_url() {
 fn encode_request_trims_trailing_slash_on_base_url() {
     let codec = OpenAiResponsesCodec::new("https://api.openai.com/v1/");
     let provider_request = codec
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
     assert_eq!(provider_request.url, "https://api.openai.com/v1/responses");
@@ -36,7 +35,7 @@ fn encode_request_trims_trailing_slash_on_base_url() {
 #[test]
 fn encode_request_sets_content_type_header_only() {
     let provider_request = codec()
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
     assert_eq!(
@@ -46,14 +45,14 @@ fn encode_request_sets_content_type_header_only() {
             .map(String::as_str),
         Some("application/json")
     );
-    // Auth is added later by DefaultLlmClient::authenticate, never by the codec.
+    // Auth is added later by ModelRuntime::authenticate, never by the codec.
     assert_eq!(provider_request.headers.len(), 1);
 }
 
 #[test]
 fn automatic_reasoning_omits_provider_override() {
     let provider_request = codec()
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
     assert!(provider_request.body_json.get("reasoning").is_none());
@@ -61,8 +60,11 @@ fn automatic_reasoning_omits_provider_override() {
 
 #[test]
 fn disabled_reasoning_encodes_explicit_none_effort() {
-    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
-    request.effort = Some(serde_json::json!("none"));
+    let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
+    request
+        .request
+        .set_effort(Some(serde_json::json!("none")))
+        .unwrap();
 
     let provider_request = codec().encode_request(&request).unwrap();
 
@@ -76,7 +78,7 @@ fn disabled_reasoning_encodes_explicit_none_effort() {
 
 #[test]
 fn system_blocks_join_into_instructions() {
-    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
+    let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
     request.system = vec![
         llm_runtime::SystemBlock::text("a"),
         llm_runtime::SystemBlock::text("b"),
@@ -90,7 +92,7 @@ fn system_blocks_join_into_instructions() {
 #[test]
 fn empty_system_omits_instructions() {
     let provider_request = codec()
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
     assert!(provider_request.body_json.get("instructions").is_none());
@@ -101,7 +103,7 @@ fn empty_system_omits_instructions() {
 #[test]
 fn user_text_message_encodes_input_text_message_item() {
     let provider_request = codec()
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hello"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hello"))
         .unwrap();
 
     assert_eq!(
@@ -116,7 +118,7 @@ fn user_text_message_encodes_input_text_message_item() {
 
 #[test]
 fn assistant_text_message_encodes_output_text_parts() {
-    let mut request = LlmRequest::new("gpt-5");
+    let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
         role: "assistant".to_string(),
         content: vec![ContentBlock::Text {
@@ -139,7 +141,7 @@ fn assistant_text_message_encodes_output_text_parts() {
 
 #[test]
 fn tool_call_block_encodes_top_level_function_call_item() {
-    let mut request = LlmRequest::new("gpt-5");
+    let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
         role: "assistant".to_string(),
         content: vec![
@@ -181,7 +183,7 @@ fn tool_call_block_encodes_top_level_function_call_item() {
 
 #[test]
 fn tool_result_block_encodes_function_call_output_item() {
-    let mut request = LlmRequest::new("gpt-5");
+    let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
@@ -207,7 +209,7 @@ fn tool_result_block_encodes_function_call_output_item() {
 
 #[test]
 fn tool_result_non_string_output_is_stringified() {
-    let mut request = LlmRequest::new("gpt-5");
+    let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
@@ -232,7 +234,7 @@ fn tool_result_non_string_output_is_stringified() {
 #[test]
 fn image_bytes_encode_input_image_data_uri() {
     let bytes = vec![1u8, 2, 3];
-    let mut request = LlmRequest::new("gpt-5");
+    let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::Image {
@@ -259,7 +261,7 @@ fn image_bytes_encode_input_image_data_uri() {
 
 #[test]
 fn image_url_encodes_input_image_url() {
-    let mut request = LlmRequest::new("gpt-5");
+    let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::ImageUrl {
@@ -281,7 +283,7 @@ fn image_url_encodes_input_image_url() {
 #[test]
 fn document_encodes_input_file_data_uri() {
     let pdf_bytes = vec![0x25u8, 0x50, 0x44, 0x46]; // %PDF
-    let mut request = LlmRequest::new("gpt-5");
+    let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::Document {
@@ -305,7 +307,7 @@ fn document_encodes_input_file_data_uri() {
 
 #[test]
 fn mixed_text_and_image_stay_one_message_item_in_order() {
-    let mut request = LlmRequest::new("gpt-5");
+    let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![
@@ -333,7 +335,7 @@ fn mixed_text_and_image_stay_one_message_item_in_order() {
 
 #[test]
 fn tools_encode_flattened_responses_shape() {
-    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
+    let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
     request.tools = vec![ToolDeclaration {
         name: "Read".to_string(),
         description: "read a file".to_string(),
@@ -359,7 +361,7 @@ fn tools_encode_flattened_responses_shape() {
 #[test]
 fn no_tools_omits_tools_key() {
     let provider_request = codec()
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
     assert!(provider_request.body_json.get("tools").is_none());
@@ -368,7 +370,7 @@ fn no_tools_omits_tools_key() {
 #[test]
 fn default_tool_choice_is_auto_for_responses_parity() {
     let provider_request = codec()
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
     assert!(provider_request.body_json.get("tool_choice").is_none());
@@ -388,13 +390,13 @@ fn tool_choice_variants_encode() {
         ),
     ];
     for (tool_choice, expected) in cases {
-        let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
+        let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
         request.tools.push(ToolDeclaration {
             name: "Read".into(),
             input_schema: serde_json::json!({"type":"object"}),
             ..Default::default()
         });
-        request.tool_choice = Some(tool_choice);
+        request.request.set_tool_choice(Some(tool_choice));
         let provider_request = codec().encode_request(&request).unwrap();
         assert_eq!(provider_request.body_json["tool_choice"], expected);
     }
@@ -404,8 +406,8 @@ fn tool_choice_variants_encode() {
 
 #[test]
 fn max_tokens_maps_to_max_output_tokens() {
-    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
-    request.max_tokens = Some(1024);
+    let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
+    request.request.input.max_tokens = Some(1024);
 
     let provider_request = codec().encode_request(&request).unwrap();
 
@@ -415,9 +417,9 @@ fn max_tokens_maps_to_max_output_tokens() {
 
 #[test]
 fn temperature_and_top_p_pass_through() {
-    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
-    request.temperature = Some(0.5);
-    request.top_p = Some(0.9);
+    let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
+    request.request.input.temperature = Some(0.5);
+    request.request.input.controls.top_p = Some(0.9);
 
     let provider_request = codec().encode_request(&request).unwrap();
 
@@ -425,7 +427,7 @@ fn temperature_and_top_p_pass_through() {
     assert_eq!(provider_request.body_json["top_p"], 0.9);
 
     let bare = codec()
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
     assert!(bare.body_json.get("max_output_tokens").is_none());
     assert!(bare.body_json.get("temperature").is_none());
@@ -434,8 +436,8 @@ fn temperature_and_top_p_pass_through() {
 
 #[test]
 fn stop_sequences_are_rejected() {
-    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
-    request.stop_sequences = vec!["END".to_string()];
+    let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
+    request.request.input.stop_sequences = vec!["END".to_string()];
 
     let err = codec().encode_request(&request).unwrap_err();
 
@@ -449,10 +451,12 @@ fn stop_sequences_are_rejected() {
 
 #[test]
 fn numeric_budget_is_rejected_instead_of_approximating_effort() {
-    let mut request = LlmRequest::new("gpt-5");
-    request.reasoning = Some(llm_runtime::ReasoningConfig::Enabled {
-        budget_tokens: 2048,
-    });
+    let mut request = HistoryFixture::new("gpt-5");
+    request
+        .request
+        .set_reasoning(Some(llm_runtime::ReasoningConfig::Enabled {
+            budget_tokens: 2048,
+        }));
     assert!(matches!(
         codec().encode_request(&request),
         Err(llm_runtime::LlmError::UnsupportedCapability { .. })
@@ -462,7 +466,7 @@ fn numeric_budget_is_rejected_instead_of_approximating_effort() {
 #[test]
 fn no_reasoning_config_omits_reasoning_key() {
     let provider_request = codec()
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
     assert!(provider_request.body_json.get("reasoning").is_none());
@@ -473,8 +477,8 @@ fn no_reasoning_config_omits_reasoning_key() {
 
 #[test]
 fn response_format_json_object_encodes_text_format() {
-    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
-    request.response_format = Some(llm_runtime::ResponseFormat::JsonObject);
+    let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
+    request.request.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonObject;
 
     let provider_request = codec().encode_request(&request).unwrap();
 
@@ -490,10 +494,12 @@ fn response_format_json_schema_encodes_text_format() {
         "type": "object", "properties": {"x": {"type": "string"}},
         "required": ["x"], "additionalProperties": false
     });
-    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
-    request.response_format = Some(llm_runtime::ResponseFormat::JsonSchema {
+    let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
+    request.request.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonSchema {
+        name: "response".into(),
+        strict: true,
         schema: schema.clone(),
-    });
+    };
 
     let provider_request = codec().encode_request(&request).unwrap();
 
@@ -514,7 +520,7 @@ fn response_format_json_schema_encodes_text_format() {
 #[test]
 fn no_response_format_omits_text_key() {
     let provider_request = codec()
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
     assert!(provider_request.body_json.get("text").is_none());
@@ -524,22 +530,18 @@ fn no_response_format_omits_text_key() {
 
 #[test]
 fn stream_true_sets_stream_in_body() {
-    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
-    request.stream = true;
+    let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
+    request.request.stream = true;
 
     let provider_request = codec().encode_request(&request).unwrap();
 
     assert_eq!(provider_request.body_json["stream"], true);
-    assert_eq!(
-        provider_request.stream_framing,
-        llm_runtime::StreamFraming::Sse
-    );
 }
 
 #[test]
 fn stream_false_omits_stream_key() {
     let provider_request = codec()
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
     assert!(provider_request.body_json.get("stream").is_none());
@@ -548,7 +550,7 @@ fn stream_false_omits_stream_key() {
 #[test]
 fn store_defaults_false_for_non_azure() {
     let provider_request = codec()
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
     assert_eq!(provider_request.body_json["store"], false);
@@ -558,7 +560,7 @@ fn store_defaults_false_for_non_azure() {
 fn store_defaults_false_for_every_responses_connection() {
     let codec = OpenAiResponsesCodec::new("https://foo.openai.azure.com/openai");
     let provider_request = codec
-        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
     assert_eq!(provider_request.body_json["store"], false);
@@ -567,8 +569,8 @@ fn store_defaults_false_for_every_responses_connection() {
 #[test]
 fn explicit_store_override_wins_over_azure_detection() {
     let codec = OpenAiResponsesCodec::new("https://foo.openai.azure.com/openai");
-    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
-    request.openai_responses.store = Some(false);
+    let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
+    request.request.input.controls.responses.store = Some(false);
 
     let provider_request = codec.encode_request(&request).unwrap();
 
@@ -579,11 +581,11 @@ fn explicit_store_override_wins_over_azure_detection() {
 fn codex_responses_options_encode_extra_request_fields() {
     let mut client_metadata = std::collections::BTreeMap::new();
     client_metadata.insert("session_id".to_string(), "sess_1".to_string());
-    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
-    request.openai_responses = OpenAiResponsesRequestOptions {
+    let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
+    request.request.input.service_tier = Some(lingxi_llm_client::protocol::ServiceTier::Fast);
+    request.request.input.controls.responses = lingxi_llm_client::protocol::ResponsesControls {
         parallel_tool_calls: Some(true),
         include: vec!["file_search_call.results".to_string()],
-        service_tier: Some("priority".to_string()),
         prompt_cache_key: Some("cache-key".to_string()),
         client_metadata,
         store: None,
@@ -608,9 +610,13 @@ fn codex_responses_options_encode_extra_request_fields() {
 
 #[test]
 fn reasoning_adds_encrypted_content_include_once() {
-    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
-    request.effort = Some(serde_json::json!("medium"));
-    request.openai_responses.include = vec!["reasoning.encrypted_content".to_string()];
+    let mut request = HistoryFixture::new("gpt-5").with_user_text("hi");
+    request
+        .request
+        .set_effort(Some(serde_json::json!("medium")))
+        .unwrap();
+    request.request.input.controls.responses.include =
+        vec!["reasoning.encrypted_content".to_string()];
 
     let provider_request = codec().encode_request(&request).unwrap();
 
@@ -638,7 +644,7 @@ fn reasoning_history_blocks_are_skipped_not_rejected() {
             data: "opaque".to_string(),
         },
     ] {
-        let mut request = LlmRequest::new("gpt-5").with_user_text("hello");
+        let mut request = HistoryFixture::new("gpt-5").with_user_text("hello");
         // A prior assistant turn whose content is just a reasoning/thinking block.
         request.messages.insert(
             0,
@@ -681,7 +687,7 @@ fn foreign_server_generated_blocks_are_omitted_from_replay() {
             is_error: false,
         },
     ] {
-        let mut request = LlmRequest::new("gpt-5").with_user_text("hello");
+        let mut request = HistoryFixture::new("gpt-5").with_user_text("hello");
         request.messages.insert(
             0,
             Message {
@@ -702,18 +708,21 @@ fn foreign_server_generated_blocks_are_omitted_from_replay() {
 
 #[test]
 fn encode_request_full_body_golden() {
-    let mut request = LlmRequest::new("gpt-5").with_user_text("hello");
+    let mut request = HistoryFixture::new("gpt-5").with_user_text("hello");
     request.system = vec![llm_runtime::SystemBlock::text("sys")];
-    request.stream = true;
-    request.max_tokens = Some(4096);
+    request.request.stream = true;
+    request.request.input.max_tokens = Some(4096);
     request.tools = vec![ToolDeclaration {
         name: "Bash".to_string(),
         description: "run a command".to_string(),
         input_schema: serde_json::json!({"type": "object"}),
         ..Default::default()
     }];
-    request.tool_choice = Some(ToolChoice::Auto);
-    request.effort = Some(serde_json::json!("medium"));
+    request.request.set_tool_choice(Some(ToolChoice::Auto));
+    request
+        .request
+        .set_effort(Some(serde_json::json!("medium")))
+        .unwrap();
 
     let provider_request = codec().encode_request(&request).unwrap();
 
@@ -754,7 +763,7 @@ fn encode_request_full_body_golden() {
 //  reasoning{summary:[{type:"summary_text",text}]}),
 // usage per codex-rs/codex-api/src/sse/responses.rs ResponseCompletedUsage.
 
-fn decode(body: serde_json::Value) -> llm_runtime::LlmResponse {
+fn decode(body: serde_json::Value) -> llm_runtime::HistoryResponse {
     codec()
         .decode_response(llm_runtime::ProviderResponse::json(200, body))
         .unwrap()
@@ -862,7 +871,7 @@ fn native_reasoning_and_display_summary_are_both_preserved() {
         })
         .collect();
     assert_eq!(texts, vec!["first", "second"]);
-    let mut request = LlmRequest::new("gpt-5");
+    let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
         role: "assistant".into(),
         content: response.content,
@@ -1141,11 +1150,12 @@ fn decode_response_http_400_maps_invalid_request_with_message() {
 // ── stream decoder ────────────────────────────────────────────────────────────
 
 use llm_runtime::{
-    ContentDelta, LlmEvent, LlmResponse, MessageDeltaPayload, RawStreamFrame, TokenUsage, Usage,
+    HistoryContentDelta, HistoryEvent, HistoryMessageDelta, HistoryResponse, RawStreamFrame,
+    TokenUsage, Usage,
 };
 
 /// Feed SSE data payloads (already de-framed) through a fresh stream decoder.
-fn decode_stream(frames: &[serde_json::Value]) -> Vec<LlmEvent> {
+fn decode_stream(frames: &[serde_json::Value]) -> Vec<HistoryEvent> {
     let mut decoder = codec().stream_decoder();
     let mut events = Vec::new();
     for frame in frames {
@@ -1161,7 +1171,7 @@ fn decode_stream(frames: &[serde_json::Value]) -> Vec<LlmEvent> {
 fn decode_stream_with_metadata(
     frames: &[serde_json::Value],
     metadata: serde_json::Value,
-) -> Vec<LlmEvent> {
+) -> Vec<HistoryEvent> {
     let mut decoder = codec().stream_decoder();
     decoder.set_provider_metadata(metadata);
     let mut events = Vec::new();
@@ -1213,12 +1223,12 @@ fn stream_provider_metadata_is_retained_on_start_and_terminal_usage() {
 
     assert!(matches!(
         &events[0],
-        LlmEvent::MessageStart { response }
+        HistoryEvent::MessageStart { response }
             if response.provider_metadata == metadata
     ));
     assert!(matches!(
         &events[1],
-        LlmEvent::MessageDelta { usage: Some(usage), .. }
+        HistoryEvent::MessageDelta { usage: Some(usage), .. }
             if usage.provider_metadata["stream"] == metadata && usage.billable_tokens.input == 2 && usage.billable_tokens.output == 3
     ));
 }
@@ -1229,8 +1239,8 @@ fn stream_created_emits_message_start_snapshot() {
 
     assert_eq!(
         events,
-        vec![LlmEvent::MessageStart {
-            response: Box::new(LlmResponse {
+        vec![HistoryEvent::MessageStart {
+            response: Box::new(HistoryResponse {
                 id: "resp_1".to_string(),
                 model: "gpt-5".to_string(),
                 content: Vec::new(),
@@ -1263,7 +1273,7 @@ fn stream_text_delta_opens_block_once_then_deltas() {
     assert_eq!(events.len(), 4);
     assert_eq!(
         events[1],
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: ContentBlock::Text {
                 text: String::new(),
@@ -1273,18 +1283,18 @@ fn stream_text_delta_opens_block_once_then_deltas() {
     );
     assert_eq!(
         events[2],
-        LlmEvent::ContentBlockDelta {
+        HistoryEvent::ContentBlockDelta {
             index: 0,
-            delta: ContentDelta::TextDelta {
+            delta: HistoryContentDelta::TextDelta {
                 text: "Hel".to_string()
             },
         }
     );
     assert_eq!(
         events[3],
-        LlmEvent::ContentBlockDelta {
+        HistoryEvent::ContentBlockDelta {
             index: 0,
-            delta: ContentDelta::TextDelta {
+            delta: HistoryContentDelta::TextDelta {
                 text: "lo".to_string()
             },
         }
@@ -1304,7 +1314,7 @@ fn stream_function_call_added_starts_tool_block_with_empty_input() {
 
     assert_eq!(
         events[1],
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: ContentBlock::ToolCall {
                 id: "call_1".to_string(),
@@ -1339,15 +1349,15 @@ fn stream_function_call_arguments_delta_emits_input_json_delta() {
     assert_eq!(
         &events[2..],
         &[
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::InputJsonDelta {
+                delta: HistoryContentDelta::InputJsonDelta {
                     partial_json: "{\"command\":".to_string(),
                 },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::InputJsonDelta {
+                delta: HistoryContentDelta::InputJsonDelta {
                     partial_json: "\"ls\"}".to_string(),
                 },
             },
@@ -1374,7 +1384,7 @@ fn stream_reasoning_text_delta_opens_reasoning_block_once() {
     assert_eq!(events.len(), 4);
     assert_eq!(
         events[1],
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: ContentBlock::Reasoning {
                 text: String::new(),
@@ -1384,9 +1394,9 @@ fn stream_reasoning_text_delta_opens_reasoning_block_once() {
     );
     assert_eq!(
         events[2],
-        LlmEvent::ContentBlockDelta {
+        HistoryEvent::ContentBlockDelta {
             index: 0,
-            delta: ContentDelta::ThinkingDelta {
+            delta: HistoryContentDelta::ThinkingDelta {
                 thinking: "thinking ".to_string(),
             },
         }
@@ -1413,14 +1423,14 @@ fn stream_reasoning_summary_delta_shares_reasoning_block() {
 
     let starts = events
         .iter()
-        .filter(|event| matches!(event, LlmEvent::ContentBlockStart { .. }))
+        .filter(|event| matches!(event, HistoryEvent::ContentBlockStart { .. }))
         .count();
     assert_eq!(starts, 1);
     let thinking: String = events
         .iter()
         .filter_map(|event| match event {
-            LlmEvent::ContentBlockDelta {
-                delta: ContentDelta::ThinkingDelta { thinking },
+            HistoryEvent::ContentBlockDelta {
+                delta: HistoryContentDelta::ThinkingDelta { thinking },
                 ..
             } => Some(thinking.clone()),
             _ => None,
@@ -1447,7 +1457,7 @@ fn stream_output_item_done_emits_content_block_stop() {
 
     assert_eq!(
         events.last(),
-        Some(&LlmEvent::ContentBlockStop { index: 0 })
+        Some(&HistoryEvent::ContentBlockStop { index: 0 })
     );
 }
 
@@ -1476,7 +1486,7 @@ fn stream_output_index_keys_block_mapping() {
 
     assert_eq!(
         events[1],
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: ContentBlock::Reasoning {
                 text: String::new(),
@@ -1486,7 +1496,7 @@ fn stream_output_index_keys_block_mapping() {
     );
     assert_eq!(
         events[3],
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             index: 1,
             content_block: ContentBlock::Text {
                 text: String::new(),
@@ -1496,9 +1506,9 @@ fn stream_output_index_keys_block_mapping() {
     );
     assert_eq!(
         events[5],
-        LlmEvent::ContentBlockDelta {
+        HistoryEvent::ContentBlockDelta {
             index: 0,
-            delta: ContentDelta::ThinkingDelta {
+            delta: HistoryContentDelta::ThinkingDelta {
                 thinking: " more".to_string(),
             },
         }
@@ -1534,9 +1544,9 @@ fn stream_completed_closes_open_blocks_then_message_delta_and_stop() {
     assert_eq!(
         &events[3..],
         &[
-            LlmEvent::ContentBlockStop { index: 0 },
-            LlmEvent::MessageDelta {
-                delta: MessageDeltaPayload {
+            HistoryEvent::ContentBlockStop { index: 0 },
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
                     stop_reason: Some("end_turn".to_string()),
                     stop_details: None,
                 },
@@ -1554,7 +1564,7 @@ fn stream_completed_closes_open_blocks_then_message_delta_and_stop() {
                     ..Default::default()
                 }),
             },
-            LlmEvent::MessageStop,
+            HistoryEvent::MessageStop,
         ]
     );
 }
@@ -1582,7 +1592,7 @@ fn stream_completed_after_function_call_maps_tool_use() {
     let stop_reason = events
         .iter()
         .find_map(|event| match event {
-            LlmEvent::MessageDelta { delta, .. } => delta.stop_reason.clone(),
+            HistoryEvent::MessageDelta { delta, .. } => delta.stop_reason.clone(),
             _ => None,
         })
         .expect("terminal stop reason");
@@ -1605,14 +1615,14 @@ fn stream_incomplete_max_output_tokens_maps_max_tokens() {
     assert_eq!(
         &events[1..],
         &[
-            LlmEvent::MessageDelta {
-                delta: MessageDeltaPayload {
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
                     stop_reason: Some("max_tokens".to_string()),
                     stop_details: None,
                 },
                 usage: None,
             },
-            LlmEvent::MessageStop,
+            HistoryEvent::MessageStop,
         ]
     );
 }
@@ -1861,7 +1871,7 @@ fn stream_done_sentinel_is_tolerated() {
                 .unwrap(),
         );
     }
-    assert_eq!(events.last(), Some(&LlmEvent::MessageStop));
+    assert_eq!(events.last(), Some(&HistoryEvent::MessageStop));
     let terminal_count = events.len();
 
     let extra = decoder
@@ -1886,8 +1896,8 @@ fn stream_content_delta_before_created_emits_synthetic_message_start() {
     assert_eq!(
         &events[..2],
         &[
-            LlmEvent::MessageStart {
-                response: Box::new(LlmResponse {
+            HistoryEvent::MessageStart {
+                response: Box::new(HistoryResponse {
                     id: String::new(),
                     model: String::new(),
                     content: Vec::new(),
@@ -1898,7 +1908,7 @@ fn stream_content_delta_before_created_emits_synthetic_message_start() {
                     provider_metadata: serde_json::Value::Null,
                 }),
             },
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index: 0,
                 content_block: ContentBlock::Text {
                     text: String::new(),
@@ -1919,7 +1929,7 @@ fn stream_unknown_event_types_ignored() {
     ]);
 
     assert_eq!(events.len(), 1);
-    assert!(matches!(events[0], LlmEvent::MessageStart { .. }));
+    assert!(matches!(events[0], HistoryEvent::MessageStart { .. }));
 }
 
 #[test]
@@ -1949,14 +1959,14 @@ fn stream_delta_without_output_index_defaults_to_slot_zero() {
 
     let starts = events
         .iter()
-        .filter(|event| matches!(event, LlmEvent::ContentBlockStart { .. }))
+        .filter(|event| matches!(event, HistoryEvent::ContentBlockStart { .. }))
         .count();
     assert_eq!(starts, 1);
     let text: String = events
         .iter()
         .filter_map(|event| match event {
-            LlmEvent::ContentBlockDelta {
-                delta: ContentDelta::TextDelta { text },
+            HistoryEvent::ContentBlockDelta {
+                delta: HistoryContentDelta::TextDelta { text },
                 ..
             } => Some(text.clone()),
             _ => None,
@@ -2029,8 +2039,8 @@ fn stream_happy_path_exact_event_sequence() {
     assert_eq!(
         events,
         vec![
-            LlmEvent::MessageStart {
-                response: Box::new(LlmResponse {
+            HistoryEvent::MessageStart {
+                response: Box::new(HistoryResponse {
                     id: "resp_1".to_string(),
                     model: "gpt-5".to_string(),
                     content: Vec::new(),
@@ -2041,27 +2051,27 @@ fn stream_happy_path_exact_event_sequence() {
                     provider_metadata: serde_json::Value::Null,
                 }),
             },
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index: 0,
                 content_block: ContentBlock::Text {
                     text: String::new(),
                     cache_control: None,
                 },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::TextDelta {
+                delta: HistoryContentDelta::TextDelta {
                     text: "On ".to_string()
                 },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::TextDelta {
+                delta: HistoryContentDelta::TextDelta {
                     text: "it.".to_string()
                 },
             },
-            LlmEvent::ContentBlockStop { index: 0 },
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStop { index: 0 },
+            HistoryEvent::ContentBlockStart {
                 index: 1,
                 content_block: ContentBlock::ToolCall {
                     id: "call_1".to_string(),
@@ -2069,21 +2079,21 @@ fn stream_happy_path_exact_event_sequence() {
                     input: serde_json::Value::Object(serde_json::Map::new()),
                 },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 1,
-                delta: ContentDelta::InputJsonDelta {
+                delta: HistoryContentDelta::InputJsonDelta {
                     partial_json: "{\"command\":".to_string(),
                 },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 1,
-                delta: ContentDelta::InputJsonDelta {
+                delta: HistoryContentDelta::InputJsonDelta {
                     partial_json: "\"ls\"}".to_string(),
                 },
             },
-            LlmEvent::ContentBlockStop { index: 1 },
-            LlmEvent::MessageDelta {
-                delta: MessageDeltaPayload {
+            HistoryEvent::ContentBlockStop { index: 1 },
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
                     stop_reason: Some("tool_use".to_string()),
                     stop_details: None,
                 },
@@ -2101,7 +2111,7 @@ fn stream_happy_path_exact_event_sequence() {
                     ..Default::default()
                 }),
             },
-            LlmEvent::MessageStop,
+            HistoryEvent::MessageStop,
         ]
     );
 }
@@ -2126,7 +2136,7 @@ async fn native_reasoning_received_at_completion_keeps_its_replay_position() {
     )
     .await
     .unwrap();
-    let mut request = LlmRequest::new("gpt-5");
+    let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
         role: "assistant".into(),
         content: response.content,

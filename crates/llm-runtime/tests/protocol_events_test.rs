@@ -1,7 +1,9 @@
-use llm_runtime::{ContentBlock, ContentDelta, LlmEvent, LlmResponse, MessageDeltaPayload, Usage};
+use llm_runtime::{
+    ContentBlock, HistoryContentDelta, HistoryEvent, HistoryMessageDelta, HistoryResponse, Usage,
+};
 
-fn sample_response() -> LlmResponse {
-    LlmResponse {
+fn sample_response() -> HistoryResponse {
+    HistoryResponse {
         id: "resp_1".to_string(),
         model: "model-a".to_string(),
         content: vec![],
@@ -15,59 +17,62 @@ fn sample_response() -> LlmResponse {
 
 #[test]
 fn stream_events_support_block_lifecycle_and_terminal_delta() {
-    let start = LlmEvent::MessageStart {
+    let start = HistoryEvent::MessageStart {
         response: Box::new(sample_response()),
     };
-    let block_start = LlmEvent::ContentBlockStart {
+    let block_start = HistoryEvent::ContentBlockStart {
         index: 0,
         content_block: ContentBlock::Text {
             text: String::new(),
             cache_control: None,
         },
     };
-    let delta = LlmEvent::ContentBlockDelta {
+    let delta = HistoryEvent::ContentBlockDelta {
         index: 0,
-        delta: ContentDelta::TextDelta {
+        delta: HistoryContentDelta::TextDelta {
             text: "hi".to_string(),
         },
     };
-    let stop = LlmEvent::ContentBlockStop { index: 0 };
-    let terminal = LlmEvent::MessageDelta {
-        delta: MessageDeltaPayload {
+    let stop = HistoryEvent::ContentBlockStop { index: 0 };
+    let terminal = HistoryEvent::MessageDelta {
+        delta: HistoryMessageDelta {
             stop_reason: Some("end_turn".to_string()),
             stop_details: None,
         },
         usage: None,
     };
 
-    assert!(matches!(start, LlmEvent::MessageStart { .. }));
-    assert!(matches!(block_start, LlmEvent::ContentBlockStart { .. }));
-    assert!(matches!(delta, LlmEvent::ContentBlockDelta { .. }));
-    assert!(matches!(stop, LlmEvent::ContentBlockStop { .. }));
-    assert!(matches!(terminal, LlmEvent::MessageDelta { .. }));
+    assert!(matches!(start, HistoryEvent::MessageStart { .. }));
+    assert!(matches!(
+        block_start,
+        HistoryEvent::ContentBlockStart { .. }
+    ));
+    assert!(matches!(delta, HistoryEvent::ContentBlockDelta { .. }));
+    assert!(matches!(stop, HistoryEvent::ContentBlockStop { .. }));
+    assert!(matches!(terminal, HistoryEvent::MessageDelta { .. }));
 }
 
 #[test]
 fn stream_event_json_has_expected_shape_and_round_trips() {
-    let start = LlmEvent::MessageStart {
+    let start = HistoryEvent::MessageStart {
         response: Box::new(sample_response()),
     };
-    let block_start = LlmEvent::ContentBlockStart {
+    let block_start = HistoryEvent::ContentBlockStart {
         index: 0,
         content_block: ContentBlock::Text {
             text: String::new(),
             cache_control: None,
         },
     };
-    let delta = LlmEvent::ContentBlockDelta {
+    let delta = HistoryEvent::ContentBlockDelta {
         index: 0,
-        delta: ContentDelta::InputJsonDelta {
+        delta: HistoryContentDelta::InputJsonDelta {
             partial_json: "{\"a\":1".to_string(),
         },
     };
-    let stop = LlmEvent::ContentBlockStop { index: 0 };
-    let terminal = LlmEvent::MessageDelta {
-        delta: MessageDeltaPayload {
+    let stop = HistoryEvent::ContentBlockStop { index: 0 };
+    let terminal = HistoryEvent::MessageDelta {
+        delta: HistoryMessageDelta {
             stop_reason: Some("end_turn".to_string()),
             stop_details: None,
         },
@@ -114,6 +119,6 @@ fn stream_event_json_has_expected_shape_and_round_trips() {
     assert_eq!(serde_json::to_value(&stop).unwrap(), stop_json);
     assert_eq!(serde_json::to_value(&terminal).unwrap(), terminal_json);
 
-    let round_trip: LlmEvent = serde_json::from_value(terminal_json).unwrap();
-    assert!(matches!(round_trip, LlmEvent::MessageDelta { .. }));
+    let round_trip: HistoryEvent = serde_json::from_value(terminal_json).unwrap();
+    assert!(matches!(round_trip, HistoryEvent::MessageDelta { .. }));
 }

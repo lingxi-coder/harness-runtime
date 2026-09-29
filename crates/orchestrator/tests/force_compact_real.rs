@@ -481,10 +481,10 @@ fn history_is_valid(history: &[ConversationMessage]) -> bool {
 
 #[tokio::test]
 async fn compaction_safety_gate() {
-    use llm_runtime::{LlmResponse, Usage};
+    use llm_runtime::{HistoryResponse, Usage};
 
     // Scripted end_turn response so the post-compaction turn can run.
-    let response = LlmResponse {
+    let response = HistoryResponse {
         id: "msg_gate".into(),
         model: "claude-opus-4-7".into(),
         content: vec![LlmContentBlock::Text {

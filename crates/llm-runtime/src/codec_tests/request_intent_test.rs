@@ -1,8 +1,9 @@
-use llm_runtime::providers::{GeminiCodec, OpenAiChatCodec};
-use llm_runtime::{
-    AnthropicMessagesCodec, ContentBlock, LlmError, LlmRequest, ResponseFormat, ToolChoice,
-    ToolDeclaration, WireCodec,
+use crate::upstream::codec_fixtures::HistoryFixture;
+use crate::upstream::codec_fixtures::{
+    AnthropicMessagesCodec, FixtureCodec, GeminiCodec, OpenAiChatCodec,
 };
+
+use llm_runtime::{ContentBlock, LlmError, ToolChoice, ToolDeclaration};
 
 fn openai_codec() -> OpenAiChatCodec {
     OpenAiChatCodec::new("https://api.openai.com/v1")
@@ -16,8 +17,8 @@ fn anthropic_codec() -> AnthropicMessagesCodec {
     AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01")
 }
 
-fn request_with_block(model: &str, block: ContentBlock) -> LlmRequest {
-    let mut request = LlmRequest::new(model);
+fn request_with_block(model: &str, block: ContentBlock) -> HistoryFixture {
+    let mut request = HistoryFixture::new(model);
     request.messages.push(llm_runtime::Message {
         role: "user".to_string(),
         content: vec![block],
@@ -27,8 +28,8 @@ fn request_with_block(model: &str, block: ContentBlock) -> LlmRequest {
 
 #[test]
 fn anthropic_encodes_stream_true() {
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
-    request.stream = true;
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
+    request.request.stream = true;
 
     let provider_request = anthropic_codec().encode_request(&request).unwrap();
 
@@ -37,8 +38,8 @@ fn anthropic_encodes_stream_true() {
 
 #[test]
 fn openai_encodes_stream_true() {
-    let mut request = LlmRequest::new("gpt-4o");
-    request.stream = true;
+    let mut request = HistoryFixture::new("gpt-4o");
+    request.request.stream = true;
 
     let provider_request = openai_codec().encode_request(&request).unwrap();
 
@@ -55,11 +56,13 @@ fn openai_encodes_response_format_variants() {
     });
     let cases = [
         (
-            ResponseFormat::JsonObject,
+            lingxi_llm_client::protocol::OutputFormat::JsonObject,
             serde_json::json!({"type": "json_object"}),
         ),
         (
-            ResponseFormat::JsonSchema {
+            lingxi_llm_client::protocol::OutputFormat::JsonSchema {
+                name: "response".into(),
+                strict: true,
                 schema: schema.clone(),
             },
             serde_json::json!({"type": "json_schema", "json_schema": {"name": "response", "strict": true, "schema": schema}}),
@@ -67,8 +70,8 @@ fn openai_encodes_response_format_variants() {
     ];
 
     for (response_format, expected) in cases {
-        let mut request = LlmRequest::new("gpt-4o");
-        request.response_format = Some(response_format);
+        let mut request = HistoryFixture::new("gpt-4o");
+        request.request.input.output_format = response_format;
 
         let provider_request = openai_codec().encode_request(&request).unwrap();
 
@@ -83,11 +86,13 @@ fn gemini_encodes_response_format_requests() {
     });
     let cases = [
         (
-            ResponseFormat::JsonObject,
+            lingxi_llm_client::protocol::OutputFormat::JsonObject,
             serde_json::json!({"text": {"mimeType": "application/json"}}),
         ),
         (
-            ResponseFormat::JsonSchema {
+            lingxi_llm_client::protocol::OutputFormat::JsonSchema {
+                name: "response".into(),
+                strict: true,
                 schema: schema.clone(),
             },
             serde_json::json!({"text": {"mimeType": "application/json", "schema": schema}}),
@@ -95,8 +100,8 @@ fn gemini_encodes_response_format_requests() {
     ];
 
     for (response_format, expected) in cases {
-        let mut request = LlmRequest::new("gemini-2.0-flash");
-        request.response_format = Some(response_format);
+        let mut request = HistoryFixture::new("gemini-2.0-flash");
+        request.request.input.output_format = response_format;
 
         let encoded = gemini_codec().encode_request(&request).unwrap();
         assert_eq!(
@@ -118,8 +123,13 @@ fn openai_rejects_response_schemas_that_are_not_valid_for_strict_output() {
             "additionalProperties": false
         }),
     ] {
-        let mut request = LlmRequest::new("gpt-4o");
-        request.response_format = Some(ResponseFormat::JsonSchema { schema });
+        let mut request = HistoryFixture::new("gpt-4o");
+        request.request.input.output_format =
+            lingxi_llm_client::protocol::OutputFormat::JsonSchema {
+                name: "response".into(),
+                strict: true,
+                schema,
+            };
         assert!(matches!(
             openai_codec().encode_request(&request),
             Err(LlmError::InvalidRequest { .. })
@@ -142,8 +152,8 @@ fn openai_encodes_tool_choice_variants() {
     ];
 
     for (tool_choice, expected) in cases {
-        let mut request = LlmRequest::new("gpt-4o");
-        request.tool_choice = Some(tool_choice);
+        let mut request = HistoryFixture::new("gpt-4o");
+        request.request.set_tool_choice(Some(tool_choice));
         request.tools = vec![ToolDeclaration {
             name: "Read".to_string(),
             description: "d".to_string(),
@@ -170,8 +180,8 @@ fn gemini_encodes_tool_choice_variants() {
     ];
 
     for tool_choice in cases {
-        let mut request = LlmRequest::new("gemini-2.0-flash");
-        request.tool_choice = Some(tool_choice);
+        let mut request = HistoryFixture::new("gemini-2.0-flash");
+        request.request.set_tool_choice(Some(tool_choice));
         request.tools = vec![ToolDeclaration {
             name: "Read".to_string(),
             description: "d".to_string(),

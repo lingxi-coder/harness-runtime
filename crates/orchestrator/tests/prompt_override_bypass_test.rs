@@ -8,7 +8,7 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
-fn end_turn() -> llm_runtime::LlmResponse {
+fn end_turn() -> llm_runtime::HistoryResponse {
     mock_message_response(
         vec![LlmContentBlock::Text {
             text: "ok".into(),

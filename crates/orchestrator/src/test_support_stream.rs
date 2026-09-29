@@ -1,7 +1,7 @@
 //! Test fixtures for the streaming path.
 //!
 //! - [`MockStreamingApiClient`] — implements [`crate::conversation::StreamingApiClient`]
-//!   over a per-turn `Vec<LlmEvent>` script.
+//!   over a per-turn `Vec<HistoryEvent>` script.
 //! - [`scripted!`] — declarative macro for assembling event sequences
 //!   with the high-level vocabulary `text`, `tool_use`, `end_turn`,
 //!   `tool_use_stop`, etc.
@@ -18,8 +18,8 @@ use crate::conversation::StreamingApiClient;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use llm_runtime::{
-    ContentBlock as LlmContentBlock, ContentDelta, LlmError, LlmEvent, LlmResponse,
-    MessageDeltaPayload, Usage,
+    ContentBlock as LlmContentBlock, HistoryContentDelta, HistoryEvent, HistoryMessageDelta,
+    HistoryResponse, LlmError, Usage,
 };
 use protocol::{ConversationMessage, ToolUseId};
 use serde_json::Value;
@@ -47,7 +47,7 @@ pub struct CapturedStreamCall {
 /// time `stream` is called. If the queue is exhausted, returns
 /// `LlmError::Transport { message: "streaming script exhausted" }`.
 pub struct MockStreamingApiClient {
-    turns: Mutex<std::collections::VecDeque<Vec<Result<LlmEvent, LlmError>>>>,
+    turns: Mutex<std::collections::VecDeque<Vec<Result<HistoryEvent, LlmError>>>>,
     captured: Arc<Mutex<Vec<CapturedStreamCall>>>,
     /// One-shot connect-phase error returned by the NEXT `stream()` call (then
     /// cleared), so a test can mimic the real adapter returning `Err` from
@@ -67,8 +67,8 @@ impl MockStreamingApiClient {
     /// Construct from a Vec where each inner Vec is the scripted event
     /// sequence for one turn.
     #[must_use]
-    pub fn with_turns(turns: Vec<Vec<LlmEvent>>) -> Self {
-        let mapped: Vec<Vec<Result<LlmEvent, LlmError>>> = turns
+    pub fn with_turns(turns: Vec<Vec<HistoryEvent>>) -> Self {
+        let mapped: Vec<Vec<Result<HistoryEvent, LlmError>>> = turns
             .into_iter()
             .map(|t| t.into_iter().map(Ok).collect())
             .collect();
@@ -82,7 +82,7 @@ impl MockStreamingApiClient {
     /// Construct from already-fallible turns (used to inject an `Err`
     /// mid-stream for the error-propagation test).
     #[must_use]
-    pub fn with_fallible_turns(turns: Vec<Vec<Result<LlmEvent, LlmError>>>) -> Self {
+    pub fn with_fallible_turns(turns: Vec<Vec<Result<HistoryEvent, LlmError>>>) -> Self {
         Self {
             turns: Mutex::new(turns.into()),
             captured: Arc::new(Mutex::new(Vec::new())),
@@ -95,7 +95,7 @@ impl MockStreamingApiClient {
     /// returning `Err` on a >= 400 connect response — e.g. a 413/PTL). The
     /// remaining `turns` script serves any subsequent calls.
     #[must_use]
-    pub fn with_open_error(err: LlmError, turns: Vec<Vec<LlmEvent>>) -> Self {
+    pub fn with_open_error(err: LlmError, turns: Vec<Vec<HistoryEvent>>) -> Self {
         let mut me = Self::with_turns(turns);
         me.open_error = Mutex::new(Some(err));
         me
@@ -116,7 +116,7 @@ impl StreamingApiClient for MockStreamingApiClient {
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.captured.lock().await.push(CapturedStreamCall {
             model: model.to_string(),
             profile: profile.map(str::to_string),
@@ -167,9 +167,9 @@ fn default_usage() -> Usage {
 
 /// `message_start` event with the given id + model.
 #[must_use]
-pub fn message_start(id: &str, model: &str) -> LlmEvent {
-    LlmEvent::MessageStart {
-        response: Box::new(LlmResponse {
+pub fn message_start(id: &str, model: &str) -> HistoryEvent {
+    HistoryEvent::MessageStart {
+        response: Box::new(HistoryResponse {
             id: id.to_string(),
             model: model.to_string(),
             content: Vec::new(),
@@ -188,9 +188,9 @@ pub fn message_start(id: &str, model: &str) -> LlmEvent {
 /// `input_tokens` + cache counts; `output_tokens` is `0` here and
 /// arrives later in `message_delta.usage`.
 #[must_use]
-pub fn message_start_with_usage(id: &str, model: &str, usage: Usage) -> LlmEvent {
-    LlmEvent::MessageStart {
-        response: Box::new(LlmResponse {
+pub fn message_start_with_usage(id: &str, model: &str, usage: Usage) -> HistoryEvent {
+    HistoryEvent::MessageStart {
+        response: Box::new(HistoryResponse {
             id: id.to_string(),
             model: model.to_string(),
             content: Vec::new(),
@@ -205,8 +205,8 @@ pub fn message_start_with_usage(id: &str, model: &str, usage: Usage) -> LlmEvent
 
 /// `content_block_start` for a `text` block at `index`.
 #[must_use]
-pub fn content_block_start_text(index: u32) -> LlmEvent {
-    LlmEvent::ContentBlockStart {
+pub fn content_block_start_text(index: u32) -> HistoryEvent {
+    HistoryEvent::ContentBlockStart {
         index,
         content_block: LlmContentBlock::Text {
             text: String::new(),
@@ -219,8 +219,8 @@ pub fn content_block_start_text(index: u32) -> LlmEvent {
 /// parameter accepts a raw `ToolUseId` so test scripts can correlate
 /// dispatches with the eventual `ToolResult`.
 #[must_use]
-pub fn content_block_start_tool_use(index: u32, id: ToolUseId, name: &str) -> LlmEvent {
-    LlmEvent::ContentBlockStart {
+pub fn content_block_start_tool_use(index: u32, id: ToolUseId, name: &str) -> HistoryEvent {
+    HistoryEvent::ContentBlockStart {
         index,
         content_block: LlmContentBlock::ToolCall {
             id: id.to_string(),
@@ -232,10 +232,10 @@ pub fn content_block_start_tool_use(index: u32, id: ToolUseId, name: &str) -> Ll
 
 /// `content_block_delta { delta: TextDelta { text } }`.
 #[must_use]
-pub fn text_delta(index: u32, text: &str) -> LlmEvent {
-    LlmEvent::ContentBlockDelta {
+pub fn text_delta(index: u32, text: &str) -> HistoryEvent {
+    HistoryEvent::ContentBlockDelta {
         index,
-        delta: ContentDelta::TextDelta {
+        delta: HistoryContentDelta::TextDelta {
             text: text.to_string(),
         },
     }
@@ -243,10 +243,10 @@ pub fn text_delta(index: u32, text: &str) -> LlmEvent {
 
 /// `content_block_delta { delta: InputJsonDelta { partial_json } }`.
 #[must_use]
-pub fn input_json_delta(index: u32, partial: &str) -> LlmEvent {
-    LlmEvent::ContentBlockDelta {
+pub fn input_json_delta(index: u32, partial: &str) -> HistoryEvent {
+    HistoryEvent::ContentBlockDelta {
         index,
-        delta: ContentDelta::InputJsonDelta {
+        delta: HistoryContentDelta::InputJsonDelta {
             partial_json: partial.to_string(),
         },
     }
@@ -254,15 +254,15 @@ pub fn input_json_delta(index: u32, partial: &str) -> LlmEvent {
 
 /// `content_block_stop { index }`.
 #[must_use]
-pub fn content_block_stop(index: u32) -> LlmEvent {
-    LlmEvent::ContentBlockStop { index }
+pub fn content_block_stop(index: u32) -> HistoryEvent {
+    HistoryEvent::ContentBlockStop { index }
 }
 
 /// `message_delta { delta: { stop_reason } }`.
 #[must_use]
-pub fn message_delta_stop(stop_reason: &str) -> LlmEvent {
-    LlmEvent::MessageDelta {
-        delta: MessageDeltaPayload {
+pub fn message_delta_stop(stop_reason: &str) -> HistoryEvent {
+    HistoryEvent::MessageDelta {
+        delta: HistoryMessageDelta {
             stop_reason: Some(stop_reason.to_string()),
             stop_details: None,
         },
@@ -273,8 +273,8 @@ pub fn message_delta_stop(stop_reason: &str) -> LlmEvent {
 /// `content_block_start` for a `thinking` (Reasoning) block at `index`. (§0.7
 /// "light up thinking/usage" test vocabulary.)
 #[must_use]
-pub fn content_block_start_thinking(index: u32) -> LlmEvent {
-    LlmEvent::ContentBlockStart {
+pub fn content_block_start_thinking(index: u32) -> HistoryEvent {
+    HistoryEvent::ContentBlockStart {
         index,
         content_block: LlmContentBlock::Reasoning {
             text: String::new(),
@@ -286,10 +286,10 @@ pub fn content_block_start_thinking(index: u32) -> LlmEvent {
 /// `content_block_delta { delta: ThinkingDelta { thinking } }`. (§0.7
 /// "light up thinking/usage" test vocabulary.)
 #[must_use]
-pub fn thinking_delta(index: u32, thinking: &str) -> LlmEvent {
-    LlmEvent::ContentBlockDelta {
+pub fn thinking_delta(index: u32, thinking: &str) -> HistoryEvent {
+    HistoryEvent::ContentBlockDelta {
         index,
-        delta: ContentDelta::ThinkingDelta {
+        delta: HistoryContentDelta::ThinkingDelta {
             thinking: thinking.to_string(),
         },
     }
@@ -298,9 +298,9 @@ pub fn thinking_delta(index: u32, thinking: &str) -> LlmEvent {
 /// `message_delta` carrying a `stop_reason` AND a final `usage` snapshot.
 /// (§0.7 "light up thinking/usage" test vocabulary.)
 #[must_use]
-pub fn message_delta_stop_with_usage(stop_reason: &str, usage: Usage) -> LlmEvent {
-    LlmEvent::MessageDelta {
-        delta: MessageDeltaPayload {
+pub fn message_delta_stop_with_usage(stop_reason: &str, usage: Usage) -> HistoryEvent {
+    HistoryEvent::MessageDelta {
+        delta: HistoryMessageDelta {
             stop_reason: Some(stop_reason.to_string()),
             stop_details: None,
         },
@@ -310,11 +310,11 @@ pub fn message_delta_stop_with_usage(stop_reason: &str, usage: Usage) -> LlmEven
 
 /// `message_stop`.
 #[must_use]
-pub fn message_stop() -> LlmEvent {
-    LlmEvent::MessageStop
+pub fn message_stop() -> HistoryEvent {
+    HistoryEvent::MessageStop
 }
 
-/// No-op keepalive — `LlmEvent` has no `Ping` variant so this just returns
+/// No-op keepalive — `HistoryEvent` has no `Ping` variant so this just returns
 /// a `MessageStop` as a harmless stand-in for any keepalive-like event in
 /// tests that use it as a filler. Most callers should use `message_stop()`
 /// directly instead.
@@ -324,16 +324,16 @@ pub fn message_stop() -> LlmEvent {
 /// `MessageStop` — tests that used `ping()` as a mid-stream no-op should
 /// be updated to remove the call or replace it with a real event.
 #[must_use]
-pub fn ping() -> LlmEvent {
-    // LlmEvent has no Ping; emit a harmless ContentBlockStop at a dummy
+pub fn ping() -> HistoryEvent {
+    // HistoryEvent has no Ping; emit a harmless ContentBlockStop at a dummy
     // index (u32::MAX) that the accumulator will treat as "skipped"
     // because no block was started at that index.  Not ideal but preserves
     // compilation for legacy callers — migrate them to remove ping() calls.
-    LlmEvent::ContentBlockStop { index: u32::MAX }
+    HistoryEvent::ContentBlockStop { index: u32::MAX }
 }
 
 /// Declarative macro for assembling an event sequence. Pass any
-/// expression that evaluates to a `LlmEvent`. Example:
+/// expression that evaluates to a `HistoryEvent`. Example:
 /// ```ignore
 /// let s = scripted![
 ///     message_start("msg_1", "claude-opus-4-7"),
@@ -367,8 +367,11 @@ mod tests {
             .expect("first turn");
         let collected: Vec<_> = s.collect().await;
         assert_eq!(collected.len(), 2);
-        assert!(matches!(collected[0], Ok(LlmEvent::MessageStart { .. })));
-        assert!(matches!(collected[1], Ok(LlmEvent::MessageStop)));
+        assert!(matches!(
+            collected[0],
+            Ok(HistoryEvent::MessageStart { .. })
+        ));
+        assert!(matches!(collected[1], Ok(HistoryEvent::MessageStop)));
 
         let result = mock
             .stream("claude-opus-4-7", None, None, Vec::new(), Vec::new())

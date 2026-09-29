@@ -15,7 +15,7 @@
 //! output was visible on screen. Provider/server errors retain their existing
 //! fallback behavior until a block completes.
 
-use llm_runtime::{LlmError, LlmEvent};
+use llm_runtime::{HistoryEvent, LlmError};
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_start, text_delta, MockApiClient,
     MockOutputStream, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
@@ -43,7 +43,7 @@ fn meta_bool(v: Option<&AnalyticsValue>) -> Option<bool> {
 
 /// Build a stream that yields one COMPLETED text block ("useful") then errors
 /// mid-stream with `err`.
-fn completed_block_then_error(err: LlmError) -> Vec<Result<LlmEvent, LlmError>> {
+fn completed_block_then_error(err: LlmError) -> Vec<Result<HistoryEvent, LlmError>> {
     vec![
         Ok(message_start("m1", "claude-opus-4-7")),
         Ok(content_block_start_text(0)),

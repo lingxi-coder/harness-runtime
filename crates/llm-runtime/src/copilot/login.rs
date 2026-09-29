@@ -224,7 +224,7 @@ pub struct ExchangedToken {
 }
 
 impl ExchangedToken {
-    /// The bearer credential, ready to hand to [`crate::copilot::auth::CopilotAuthenticator`].
+    /// The bearer credential, ready for SDK request authentication.
     #[must_use]
     pub fn secret(&self) -> &CopilotSecret {
         &self.secret

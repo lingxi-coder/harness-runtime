@@ -1,7 +1,7 @@
 //! Extracted tests for `platforms::common::llm_config`.
 
 use super::*;
-use llm_runtime::{DefaultLlmClient, LlmError, PricingConfig, ProtocolFamily, ProviderId};
+use llm_runtime::{LlmError, ModelRuntime, PricingConfig, ProtocolFamily, ProviderId};
 
 /// Build a test config with `AuthStrategy::None` + `CredentialConfig::None`
 /// so `prepare()` never attempts a credential lookup (no env var needed).
@@ -21,7 +21,7 @@ fn test_config(api_base: &str) -> ClientConfig {
 #[test]
 fn all_table_entries_resolvable() {
     let cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-    let client = DefaultLlmClient::from_config(cfg).expect("config must be valid");
+    let client = ModelRuntime::from_config(cfg).expect("config must be valid");
     let available: Vec<String> = client
         .available_models()
         .into_iter()
@@ -54,7 +54,7 @@ fn all_table_entries_resolvable() {
 #[tokio::test]
 async fn default_model_resolves() {
     let cfg = test_config("https://api.anthropic.com");
-    let client = DefaultLlmClient::from_config(cfg).expect("config must be valid");
+    let client = ModelRuntime::from_config(cfg).expect("config must be valid");
 
     // `prepare()` exercises registry resolution + codec encoding + auth —
     // with AuthStrategy::None it short-circuits before any network call.
@@ -72,7 +72,7 @@ async fn default_model_resolves() {
 #[tokio::test]
 async fn unknown_model_yields_model_unavailable() {
     let cfg = test_config("https://api.anthropic.com");
-    let client = DefaultLlmClient::from_config(cfg).expect("config must be valid");
+    let client = ModelRuntime::from_config(cfg).expect("config must be valid");
 
     let req = llm_runtime::LlmRequest::new("claude-unknown-999");
     let err = client
@@ -889,7 +889,7 @@ fn pricing_overrides_optional_fields_may_be_absent() {
 // ── azure-openai settings type (Task 5) tests ─────────────────────────────
 
 /// E2E: an azure-openai profile parses correctly, is built into a
-/// `DefaultLlmClient`, and `prepare()` produces:
+/// `ModelRuntime`, and `prepare()` produces:
 /// - A URL with `/openai/deployments/<model>/chat/completions?api-version=...`
 /// - An `api-key` header (AzureToken auth)
 /// - No `model` key in the request body
@@ -934,7 +934,7 @@ async fn azure_profile_prepare_url_and_api_key_header() {
     );
 
     // Build a client and prepare a request.
-    let client = DefaultLlmClient::from_config(cfg).expect("client must build");
+    let client = ModelRuntime::from_config(cfg).expect("client must build");
     let req = llm_runtime::LlmRequest::new("gpt-4o-deployment");
     let prepared = client.prepare(&req).await.expect("prepare must succeed");
 
@@ -1161,7 +1161,7 @@ fn bedrock_claude_missing_region_is_error() {
 }
 
 /// E2E: a `bedrock-claude` profile parsed from settings builds a
-/// [`DefaultLlmClient`], and `prepare_at` with a fixed clock produces:
+/// [`ModelRuntime`], and `prepare_at` with a fixed clock produces:
 /// - URL: `{base_url}/model/{model_id}/invoke`
 /// - `x-amz-date` header present
 /// - `x-amz-content-sha256` header present
@@ -1172,7 +1172,7 @@ fn bedrock_claude_missing_region_is_error() {
 /// Test name: `bedrock_claude_prepare_e2e_sigv4_headers`
 #[tokio::test]
 async fn bedrock_claude_prepare_e2e_sigv4_headers() {
-    use llm_runtime::{Credential, DefaultLlmClient, StaticCredentialProvider};
+    use llm_runtime::{Credential, ModelRuntime, StaticCredentialProvider};
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -1197,7 +1197,7 @@ async fn bedrock_claude_prepare_e2e_sigv4_headers() {
         session_token: None,
     }));
 
-    let client = DefaultLlmClient::from_config(cfg)
+    let client = ModelRuntime::from_config(cfg)
         .expect("client must build")
         .with_credential_provider(credentials);
 
@@ -1352,7 +1352,7 @@ fn vertex_claude_missing_base_url_is_error() {
 }
 
 /// E2E: a `vertex-claude` profile parsed from settings builds a
-/// [`DefaultLlmClient`], and `prepare()` with a token env var produces:
+/// [`ModelRuntime`], and `prepare()` with a token env var produces:
 /// - URL: `{base_url}/publishers/anthropic/models/{model}:rawPredict`
 /// - `Authorization: Bearer <token>` header
 /// - No `model` key in body
@@ -1363,7 +1363,7 @@ fn vertex_claude_missing_base_url_is_error() {
 /// `EnvCredentialProvider` to load the env var as `Credential::ApiKey(value)`.
 /// The `GcpToken` authenticate arm calls `load_secret()`, which accepts both
 /// `Credential::ApiKey` and `Credential::BearerToken` as a plain string and
-/// passes it to `BearerAuthenticator` → `Authorization: Bearer <value>`.
+/// passes it to SDK authentication → `Authorization: Bearer <value>`.
 #[tokio::test]
 async fn vertex_claude_prepare_e2e_bearer_header() {
     std::env::set_var(
@@ -1385,7 +1385,7 @@ async fn vertex_claude_prepare_e2e_bearer_header() {
 
     apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
-    let client = DefaultLlmClient::from_config(cfg).expect("client must build");
+    let client = ModelRuntime::from_config(cfg).expect("client must build");
     let req = llm_runtime::LlmRequest::new("claude-sonnet-4@20250514");
     let prepared = client.prepare(&req).await.expect("prepare must succeed");
 
@@ -1478,7 +1478,7 @@ fn vertex_gemini_profile_parses() {
 }
 
 /// E2E: a `vertex-gemini` profile parsed from settings builds a
-/// [`DefaultLlmClient`], and `prepare()` with a token env var produces:
+/// [`ModelRuntime`], and `prepare()` with a token env var produces:
 /// - URL: `{base_url}/publishers/google/models/{model}:generateContent`
 /// - `Authorization: Bearer <token>` header
 /// - `contents` array in body (Gemini format)
@@ -1503,7 +1503,7 @@ async fn vertex_gemini_prepare_e2e_bearer_header() {
 
     apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
-    let client = DefaultLlmClient::from_config(cfg).expect("client must build");
+    let client = ModelRuntime::from_config(cfg).expect("client must build");
     let req = llm_runtime::LlmRequest::new("gemini-2.0-flash");
     let prepared = client.prepare(&req).await.expect("prepare must succeed");
 
@@ -1681,7 +1681,7 @@ fn openai_responses_missing_api_key_env_is_error() {
 }
 
 /// E2E: an `openai-responses` profile parsed from settings builds a
-/// [`DefaultLlmClient`], and `prepare()` with a key env var produces:
+/// [`ModelRuntime`], and `prepare()` with a key env var produces:
 /// - URL: `{base_url}/responses`, method POST
 /// - `Authorization: Bearer <key>` header (OpenAI family ApiKey auth)
 #[tokio::test]
@@ -1708,7 +1708,7 @@ async fn openai_responses_prepare_e2e_responses_url_and_bearer_header() {
 
     apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
-    let client = DefaultLlmClient::from_config(cfg).expect("client must build");
+    let client = ModelRuntime::from_config(cfg).expect("client must build");
     let req = llm_runtime::LlmRequest::new("gpt-4o");
     let prepared = client.prepare(&req).await.expect("prepare must succeed");
 

@@ -435,6 +435,7 @@ impl llm_runtime::ModelAttemptHooks for DesktopFusionAttempts {
         prepared: &llm_runtime::PreparedLlmCall,
     ) -> Result<Box<dyn llm_runtime::ModelAttemptLease>, LlmError> {
         let attached = request
+            .execution
             .model_attempt
             .as_ref()
             .ok_or_else(|| unavailable("registered request lacks its context"))?;

@@ -1,7 +1,9 @@
+use crate::upstream::codec_fixtures::{
+    AnthropicMessagesCodec, FixtureCodec, GeminiCodec, OpenAiChatCodec,
+};
 use std::time::Duration;
 
-use llm_runtime::providers::GeminiCodec;
-use llm_runtime::{AnthropicMessagesCodec, LlmError, OpenAiChatCodec, ProviderResponse, WireCodec};
+use llm_runtime::{LlmError, ProviderResponse};
 
 fn anthropic_codec() -> AnthropicMessagesCodec {
     AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01")

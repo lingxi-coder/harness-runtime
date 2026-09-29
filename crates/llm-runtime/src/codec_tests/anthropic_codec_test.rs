@@ -1,6 +1,8 @@
+use crate::upstream::codec_fixtures::HistoryFixture;
+use crate::upstream::codec_fixtures::{AnthropicMessagesCodec, FixtureCodec};
 use llm_runtime::{
-    AnthropicMessagesCodec, ContentBlock, ContentDelta, LlmEvent, LlmRequest, Message,
-    ProviderResponse, ResponseFormat, ToolChoice, ToolDeclaration, WireCodec,
+    ContentBlock, HistoryContentDelta, HistoryEvent, Message, ProviderResponse, ToolChoice,
+    ToolDeclaration,
 };
 
 // ── ImageUrl encode test ──────────────────────────────────────────────────────
@@ -8,7 +10,7 @@ use llm_runtime::{
 #[test]
 fn encode_image_url_block_emits_url_source() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::ImageUrl {
@@ -93,9 +95,9 @@ fn stream_citations_delta_decodes() {
     )).unwrap();
     assert!(matches!(
         &events[0],
-        LlmEvent::ContentBlockDelta {
+        HistoryEvent::ContentBlockDelta {
             index: 0,
-            delta: ContentDelta::CitationsDelta { .. }
+            delta: HistoryContentDelta::CitationsDelta { .. }
         }
     ));
 }
@@ -118,7 +120,7 @@ fn stream_connector_text_delta_decodes() {
                 .unwrap(),
         );
     }
-    assert!(events.iter().any(|event| matches!(event, LlmEvent::ContentBlockStart { content_block:ContentBlock::ConnectorText { connector_text, signature }, .. } if connector_text == "initial more text" && signature.as_deref() == Some("sig"))));
+    assert!(events.iter().any(|event| matches!(event, HistoryEvent::ContentBlockStart { content_block:ContentBlock::ConnectorText { connector_text, signature }, .. } if connector_text == "initial more text" && signature.as_deref() == Some("sig"))));
 }
 
 #[test]
@@ -144,7 +146,7 @@ fn usage_speed_absent_is_none() {
 #[test]
 fn server_tool_use_round_trip_encode() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
         role: "assistant".to_string(),
         content: vec![ContentBlock::ServerToolUse {
@@ -164,7 +166,7 @@ fn server_tool_use_round_trip_encode() {
 #[test]
 fn connector_text_encode_preserves_native_content() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
         role: "assistant".to_string(),
         content: vec![ContentBlock::ConnectorText {
@@ -182,7 +184,7 @@ fn connector_text_encode_preserves_native_content() {
 #[test]
 fn advisor_tool_result_encode_preserves_native_content() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::AdvisorToolResult {
@@ -201,7 +203,7 @@ fn advisor_tool_result_encode_preserves_native_content() {
 #[test]
 fn encode_request_shape_is_anthropic_messages() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.system = vec![llm_runtime::SystemBlock::text("sys")];
     request.messages.push(Message {
         role: "user".to_string(),
@@ -240,7 +242,7 @@ fn encode_request_hosted_computer_use_tool_passthrough_and_beta_header() {
     // emitted as a typed passthrough (`type`/`name` + extra wire fields) and
     // the request carries `anthropic-beta: computer-use-2025-01-24`.
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::Text {
@@ -280,7 +282,7 @@ fn encode_request_hosted_computer_use_tool_passthrough_and_beta_header() {
 fn encode_request_no_beta_header_without_hosted_tool() {
     // A caller-defined tool must not trigger the computer-use beta header.
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::Text {
@@ -302,7 +304,7 @@ fn encode_request_no_beta_header_without_hosted_tool() {
 #[test]
 fn encode_request_maps_image_and_tool_result_blocks() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![
@@ -359,7 +361,7 @@ fn encode_request_passes_tool_result_content_block_array_verbatim() {
     // passes the MCP content array directly (images stay viewable), NOT
     // stringified. (An object output, above, still stringifies.)
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
@@ -390,7 +392,7 @@ fn encode_request_emits_cache_edits_and_cache_reference() {
     // 1P experimental cache-editing wire shape (claude.ts:3052-3055, 3201-3203):
     // a tool_result carrying cache_reference + a cache_edits delete block.
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![
@@ -430,7 +432,7 @@ fn encode_request_emits_cache_edits_and_cache_reference() {
 fn encode_request_omits_cache_reference_when_absent() {
     // Default path: cache_reference None → the key is absent (byte-unchanged).
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
@@ -468,13 +470,13 @@ fn encode_request_maps_supported_tool_choice_variants() {
     ];
 
     for (choice, expected_type, expected_name) in cases {
-        let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+        let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
         request.tools.push(ToolDeclaration {
             name: "Read".into(),
             input_schema: serde_json::json!({"type":"object"}),
             ..Default::default()
         });
-        request.tool_choice = Some(choice);
+        request.request.set_tool_choice(Some(choice));
 
         let provider_request = codec.encode_request(&request).unwrap();
 
@@ -492,8 +494,9 @@ fn encode_request_maps_supported_tool_choice_variants() {
 fn encode_request_rejects_response_format_explicitly() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
 
-    let mut response_format_request = LlmRequest::new("claude-sonnet-4-20250514");
-    response_format_request.response_format = Some(ResponseFormat::JsonObject);
+    let mut response_format_request = HistoryFixture::new("claude-sonnet-4-20250514");
+    response_format_request.request.input.output_format =
+        lingxi_llm_client::protocol::OutputFormat::JsonObject;
 
     let response_format_err = codec.encode_request(&response_format_request).unwrap_err();
     assert!(matches!(
@@ -507,11 +510,11 @@ fn encode_omits_empty_tools_array() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
 
     let bare = codec
-        .encode_request(&LlmRequest::new("claude-sonnet-4-20250514"))
+        .encode_request(&HistoryFixture::new("claude-sonnet-4-20250514"))
         .unwrap();
     assert!(bare.body_json.get("tools").is_none());
 
-    let mut with_tools = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut with_tools = HistoryFixture::new("claude-sonnet-4-20250514");
     with_tools.tools.push(ToolDeclaration {
         name: "Read".to_string(),
         description: "d".to_string(),
@@ -528,7 +531,7 @@ fn encode_omits_empty_tools_array() {
 #[test]
 fn encode_strict_tool_sends_converted_schema_and_strict_flag() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.tools.push(ToolDeclaration {
         name: "StructuredOutput".to_string(),
         description: "emit".to_string(),
@@ -552,7 +555,7 @@ fn encode_strict_tool_sends_converted_schema_and_strict_flag() {
 #[test]
 fn encode_strict_tool_with_bad_schema_falls_back_to_non_strict() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     // A root that is not an object cannot be made strict → non-strict fallback.
     let schema = serde_json::json!({ "type": "string" });
     request.tools.push(ToolDeclaration {
@@ -570,7 +573,7 @@ fn encode_strict_tool_with_bad_schema_falls_back_to_non_strict() {
 #[test]
 fn encode_request_pins_default_max_tokens_to_4096() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let request = LlmRequest::new("claude-sonnet-4-20250514");
+    let request = HistoryFixture::new("claude-sonnet-4-20250514");
 
     let provider_request = codec.encode_request(&request).unwrap();
 
@@ -603,7 +606,7 @@ fn decode_text_response_maps_usage_and_stop_reason() {
 fn encode_thinking_round_trip_requires_signature() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
 
-    let mut signed = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut signed = HistoryFixture::new("claude-sonnet-4-20250514");
     signed.messages.push(Message {
         role: "assistant".to_string(),
         content: vec![ContentBlock::Reasoning {
@@ -617,7 +620,7 @@ fn encode_thinking_round_trip_requires_signature() {
     assert_eq!(block["thinking"], "pondering");
     assert_eq!(block["signature"], "sig_abc");
 
-    let mut unsigned = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut unsigned = HistoryFixture::new("claude-sonnet-4-20250514");
     unsigned.messages.push(Message {
         role: "assistant".to_string(),
         content: vec![ContentBlock::Reasoning {
@@ -650,7 +653,7 @@ fn redacted_thinking_round_trips() {
         [ContentBlock::RedactedThinking { data }] if data == "opaque-bytes"
     ));
 
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
         role: "assistant".to_string(),
         content: decoded.content,
@@ -672,9 +675,9 @@ fn stream_signature_delta_maps_to_signature_delta() {
 
     assert!(matches!(
         events.last().unwrap(),
-        LlmEvent::ContentBlockDelta {
+        HistoryEvent::ContentBlockDelta {
             index: 1,
-            delta: ContentDelta::SignatureDelta { signature },
+            delta: HistoryContentDelta::SignatureDelta { signature },
         } if signature == "sig_abc"
     ));
 }
@@ -682,7 +685,7 @@ fn stream_signature_delta_maps_to_signature_delta() {
 #[test]
 fn encode_tool_result_error_flag() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![
@@ -713,11 +716,11 @@ fn encode_tool_result_error_flag() {
 #[test]
 fn encode_sampling_controls() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
-    request.max_tokens = Some(1024);
-    request.temperature = Some(0.5);
-    request.top_p = Some(0.9);
-    request.stop_sequences = vec!["END".to_string()];
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
+    request.request.input.max_tokens = Some(1024);
+    request.request.input.temperature = Some(0.5);
+    request.request.input.controls.top_p = Some(0.9);
+    request.request.input.stop_sequences = vec!["END".to_string()];
 
     let provider_request = codec.encode_request(&request).unwrap();
 
@@ -730,7 +733,7 @@ fn encode_sampling_controls() {
     );
 
     let bare = codec
-        .encode_request(&LlmRequest::new("claude-sonnet-4-20250514"))
+        .encode_request(&HistoryFixture::new("claude-sonnet-4-20250514"))
         .unwrap();
     assert!(bare.body_json.get("temperature").is_none());
     assert!(bare.body_json.get("top_p").is_none());
@@ -768,7 +771,7 @@ fn stream_decoder_maps_text_delta_and_rejects_garbage() {
 
     assert!(matches!(
         events.last().unwrap(),
-        LlmEvent::ContentBlockDelta { index: 0, delta: ContentDelta::TextDelta { text } } if text == "hi"
+        HistoryEvent::ContentBlockDelta { index: 0, delta: HistoryContentDelta::TextDelta { text } } if text == "hi"
     ));
     assert!(decoder
         .decode_frame(llm_runtime::RawStreamFrame::new(b"not json".to_vec()))
@@ -798,11 +801,11 @@ fn stream_decoder_covers_required_event_paths_and_reasoning_blocks() {
         );
     }
     assert!(
-        matches!(events.first(),Some(LlmEvent::MessageStart { response }) if response.id == "msg")
+        matches!(events.first(),Some(HistoryEvent::MessageStart { response }) if response.id == "msg")
     );
-    assert!(events.iter().any(|e| matches!(e,LlmEvent::ContentBlockDelta { delta:ContentDelta::ThinkingDelta { thinking }, .. } if thinking == "ponder")));
-    assert!(events.iter().any(|e| matches!(e,LlmEvent::ContentBlockDelta { delta:ContentDelta::SignatureDelta { signature }, .. } if signature == "sig")));
-    assert!(matches!(events.last(), Some(LlmEvent::MessageStop)));
+    assert!(events.iter().any(|e| matches!(e,HistoryEvent::ContentBlockDelta { delta:HistoryContentDelta::ThinkingDelta { thinking }, .. } if thinking == "ponder")));
+    assert!(events.iter().any(|e| matches!(e,HistoryEvent::ContentBlockDelta { delta:HistoryContentDelta::SignatureDelta { signature }, .. } if signature == "sig")));
+    assert!(matches!(events.last(), Some(HistoryEvent::MessageStop)));
     assert!(decoder.finish().unwrap().is_empty());
     assert_eq!(
         decoder.observed_usage().unwrap().1,
@@ -838,7 +841,7 @@ fn decode_preserves_unknown_content_block_types() {
 }
 
 #[test]
-fn stream_decoder_ignores_unknown_event_and_delta_types() {
+fn stream_decoder_preserves_hosted_observations_without_fabricating_deltas() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut decoder = codec.stream_decoder();
 
@@ -852,19 +855,43 @@ fn stream_decoder_ignores_unknown_event_and_delta_types() {
     let unknown_block_start = decoder.decode_frame(llm_runtime::RawStreamFrame::new(
         br#"{"type":"content_block_start","index":0,"content_block":{"type":"web_search_tool_result","content":[]}}"#.to_vec(),
     )).unwrap();
-    assert!(unknown_block_start.is_empty());
+    assert!(
+        unknown_block_start.iter().any(|event| matches!(event,
+            llm_runtime::HistoryEvent::WebSearch { result }
+                if result.metadata["events"][0]["content_block"]["type"] == "web_search_tool_result"
+        )),
+        "{unknown_block_start:?}"
+    );
+    assert!(!unknown_block_start.iter().any(|event| matches!(
+        event,
+        llm_runtime::HistoryEvent::ContentBlockStart {
+            content_block: ContentBlock::ToolCall { .. },
+            ..
+        }
+    )));
 
     let unknown_delta = decoder.decode_frame(llm_runtime::RawStreamFrame::new(
         br#"{"type":"content_block_delta","index":0,"delta":{"type":"some_future_delta_type","data":"x"}}"#.to_vec(),
     )).unwrap();
-    assert!(unknown_delta.is_empty());
+    assert!(
+        unknown_delta
+            .iter()
+            .all(|event| matches!(event, llm_runtime::HistoryEvent::WebSearch { .. })),
+        "{unknown_delta:?}"
+    );
+    assert!(
+        unknown_delta.iter().any(
+            |event| matches!(event, llm_runtime::HistoryEvent::WebSearch { result }
+                if result.metadata["events"][0]["delta"]["type"] == "some_future_delta_type"
+            )
+        ),
+        "{unknown_delta:?}"
+    );
 }
 
 #[test]
 fn stream_error_events_map_to_error_taxonomy() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut decoder = codec.stream_decoder();
-
     let mut decoder = codec.stream_decoder();
     assert!(matches!(
         decoder.decode_frame(llm_runtime::RawStreamFrame::new(
@@ -901,10 +928,12 @@ fn stream_error_events_map_to_error_taxonomy() {
 #[test]
 fn encode_reasoning_budget_as_thinking() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
-    request.reasoning = Some(llm_runtime::ReasoningConfig::Enabled {
-        budget_tokens: 2048,
-    });
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
+    request
+        .request
+        .set_reasoning(Some(llm_runtime::ReasoningConfig::Enabled {
+            budget_tokens: 2048,
+        }));
 
     let provider_request = codec.encode_request(&request).unwrap();
 
@@ -915,7 +944,7 @@ fn encode_reasoning_budget_as_thinking() {
     );
 
     let bare = codec
-        .encode_request(&LlmRequest::new("claude-sonnet-4-20250514"))
+        .encode_request(&HistoryFixture::new("claude-sonnet-4-20250514"))
         .unwrap();
     assert!(bare.body_json.get("thinking").is_none());
 }
@@ -923,8 +952,10 @@ fn encode_reasoning_budget_as_thinking() {
 #[test]
 fn encode_adaptive_reasoning_as_thinking() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-opus-4-8");
-    request.reasoning = Some(llm_runtime::ReasoningConfig::Adaptive);
+    let mut request = HistoryFixture::new("claude-opus-4-8");
+    request
+        .request
+        .set_reasoning(Some(llm_runtime::ReasoningConfig::Adaptive));
 
     let provider_request = codec.encode_request(&request).unwrap();
 
@@ -937,9 +968,9 @@ fn encode_adaptive_reasoning_as_thinking() {
 #[test]
 fn encode_metadata_user_id() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-opus-4-8");
-    request.metadata = Some(llm_runtime::RequestMetadata {
-        user_id: "{\"device_id\":\"abc\",\"session_id\":\"s1\"}".to_string(),
+    let mut request = HistoryFixture::new("claude-opus-4-8");
+    request.request.input.metadata = serde_json::json!({
+        "user_id": "{\"device_id\":\"abc\",\"session_id\":\"s1\"}",
     });
 
     let provider_request = codec.encode_request(&request).unwrap();
@@ -951,7 +982,7 @@ fn encode_metadata_user_id() {
 
     // Absent metadata → no key.
     let bare = codec
-        .encode_request(&LlmRequest::new("claude-opus-4-8"))
+        .encode_request(&HistoryFixture::new("claude-opus-4-8"))
         .unwrap();
     assert!(bare.body_json.get("metadata").is_none());
 }
@@ -959,7 +990,7 @@ fn encode_metadata_user_id() {
 #[test]
 fn encode_system_blocks_and_cache_control() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.system = vec![
         llm_runtime::SystemBlock {
             text: "stable prefix".to_string(),
@@ -1004,7 +1035,7 @@ fn encode_system_blocks_and_cache_control() {
     );
 
     let bare = codec
-        .encode_request(&LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("claude-sonnet-4-20250514").with_user_text("hi"))
         .unwrap();
     assert!(bare.body_json.get("system").is_none());
     assert!(bare.body_json["messages"][0]["content"][0]
@@ -1017,7 +1048,7 @@ fn encode_cache_control_scope_and_ttl() {
     // getCacheControl parity: scope:'global' + ttl:'1h' serialize as extra keys
     // on {"type":"ephemeral"}; the plain Ephemeral emits neither.
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514").with_user_text("hi");
     request.system = vec![
         llm_runtime::SystemBlock {
             text: "global static".to_string(),
@@ -1058,7 +1089,7 @@ fn encode_cache_control_scope_and_ttl() {
 #[test]
 fn count_tokens_request_and_response_round_trip() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hello");
+    let mut request = HistoryFixture::new("claude-sonnet-4-20250514").with_user_text("hello");
     request.system = vec![llm_runtime::SystemBlock::text("sys")];
 
     let provider_request = codec.encode_count_tokens_request(&request).unwrap();

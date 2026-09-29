@@ -1,7 +1,7 @@
 //! What happens when a settings provider is named like a built-in preset.
 //!
 //! `assemble` pushes every catalog preset and then appends every user provider
-//! with no name check, while `DefaultLlmClient::from_config` rejects a repeated
+//! with no name check, while `ModelRuntime::from_config` rejects a repeated
 //! `profile_name` outright. This pins which of the two wins, because the mobile
 //! clients decide whether to emit a provider entry based on the answer.
 
@@ -58,7 +58,7 @@ fn a_user_provider_named_like_a_preset_is_not_silently_dropped() {
     // The consequence, not just the count: this config is what the engine hands
     // to the client, and a repeated profile_name fails the WHOLE build — every
     // provider becomes unusable, not just this one.
-    let built = llm_runtime::DefaultLlmClient::from_config(out.client_config);
+    let built = llm_runtime::ModelRuntime::from_config(out.client_config);
     match &built {
         Ok(_) => {}
         Err(error) => println!("from_config rejected the assembled config: {error}"),

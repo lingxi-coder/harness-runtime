@@ -51,7 +51,7 @@ fn delta_usage_with_output(output: u64) -> Usage {
 /// scripted `MockStreamingApiClient`. Returns (orch, rx) where rx is the
 /// `CostTracker`'s persist channel.
 fn make_streaming_orch_with_tracker(
-    turns: Vec<Vec<llm_runtime::LlmEvent>>,
+    turns: Vec<Vec<llm_runtime::HistoryEvent>>,
 ) -> (
     Arc<ConversationOrchestrator>,
     tokio::sync::mpsc::Receiver<CostState>,

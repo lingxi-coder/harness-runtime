@@ -24,7 +24,7 @@ const NUDGE: &str = "Output token limit hit. Resume directly \u{2014} no apology
 
 /// One streaming turn that ends with the given `stop_reason`, emitting one
 /// short text block.
-fn turn_ending_with(idx: u32, stop_reason: &str) -> Vec<llm_runtime::LlmEvent> {
+fn turn_ending_with(idx: u32, stop_reason: &str) -> Vec<llm_runtime::HistoryEvent> {
     scripted![
         message_start(&format!("m{idx}"), "claude-opus-4-7"),
         content_block_start_text(0),
@@ -36,7 +36,7 @@ fn turn_ending_with(idx: u32, stop_reason: &str) -> Vec<llm_runtime::LlmEvent> {
 }
 
 fn build_orch(
-    turns: Vec<Vec<llm_runtime::LlmEvent>>,
+    turns: Vec<Vec<llm_runtime::HistoryEvent>>,
 ) -> (
     Arc<MockStreamingApiClient>,
     Arc<MockOutputStream>,

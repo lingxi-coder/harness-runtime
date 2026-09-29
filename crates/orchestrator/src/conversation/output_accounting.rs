@@ -86,10 +86,10 @@ impl Drop for MainOutputObservation {
 pub(crate) fn account_stream(
     stream: futures::stream::BoxStream<
         'static,
-        Result<llm_runtime::LlmEvent, llm_runtime::LlmError>,
+        Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
     >,
     observation: Option<MainOutputObservation>,
-) -> futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>> {
+) -> futures::stream::BoxStream<'static, Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>> {
     let Some(observation) = observation else {
         return stream;
     };
@@ -100,36 +100,38 @@ pub(crate) fn account_stream(
 }
 
 struct OutputStream {
-    stream:
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+    stream: futures::stream::BoxStream<
+        'static,
+        Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+    >,
     observation: MainOutputObservation,
 }
 
 impl futures::Stream for OutputStream {
-    type Item = Result<llm_runtime::LlmEvent, llm_runtime::LlmError>;
+    type Item = Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>;
     fn poll_next(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        use llm_runtime::LlmEvent;
+        use llm_runtime::HistoryEvent;
         use std::task::Poll;
         let this = self.get_mut();
         let polled = this.stream.as_mut().poll_next(cx);
         let terminal = match &polled {
             Poll::Ready(Some(Ok(event))) => {
                 match event {
-                    LlmEvent::MessageStart { response } => {
+                    HistoryEvent::MessageStart { response } => {
                         this.observation.observe(&response.usage)
                     }
-                    LlmEvent::Completed { response } => {
+                    HistoryEvent::Completed { response } => {
                         this.observation.observe_completed(&response.usage)
                     }
-                    LlmEvent::MessageDelta {
+                    HistoryEvent::MessageDelta {
                         usage: Some(usage), ..
                     } => this.observation.observe(usage),
                     _ => {}
                 }
-                matches!(event, LlmEvent::Completed { .. })
+                matches!(event, HistoryEvent::Completed { .. })
             }
             Poll::Ready(None | Some(Err(_))) => true,
             Poll::Pending => false,
@@ -382,7 +384,7 @@ mod tests {
                 .ok_or_else(|| BudgetError::Internal("missing scope".into()))
         }
     }
-    fn orch(responses: Vec<llm_runtime::LlmResponse>) -> ConversationOrchestrator {
+    fn orch(responses: Vec<llm_runtime::HistoryResponse>) -> ConversationOrchestrator {
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(responses)),
@@ -526,14 +528,15 @@ mod tests {
         response.usage = usage(40, 60);
         let expected = response.usage.clone();
         let stream = futures::stream::iter(vec![
-            Ok(llm_runtime::LlmEvent::Completed {
+            Ok(llm_runtime::HistoryEvent::Completed {
                 response: Box::new(response),
             }),
             Err(llm_runtime::LlmError::Overloaded { repeated: false }),
         ])
         .boxed();
         let mut wrapped = account_stream(stream, Some(observation));
-        let Some(Ok(llm_runtime::LlmEvent::Completed { response })) = wrapped.next().await else {
+        let Some(Ok(llm_runtime::HistoryEvent::Completed { response })) = wrapped.next().await
+        else {
             panic!("output failure replaced final paid usage");
         };
         assert_eq!(response.usage, expected);
@@ -581,8 +584,8 @@ mod tests {
             content_block_start_text(0),
             text_delta(0, "done"),
             content_block_stop(0),
-            llm_runtime::LlmEvent::MessageDelta {
-                delta: llm_runtime::MessageDeltaPayload {
+            llm_runtime::HistoryEvent::MessageDelta {
+                delta: llm_runtime::HistoryMessageDelta {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
@@ -679,8 +682,8 @@ mod tests {
         let scope = scopes
             .capture(orch.session.lock().await.session_id)
             .unwrap();
-        let event = llm_runtime::LlmEvent::MessageDelta {
-            delta: llm_runtime::MessageDeltaPayload {
+        let event = llm_runtime::HistoryEvent::MessageDelta {
+            delta: llm_runtime::HistoryMessageDelta {
                 stop_reason: None,
                 stop_details: None,
             },
@@ -707,16 +710,16 @@ mod tests {
         let mut response = mock_message_response(vec![], Some("end_turn"));
         response.usage = usage(40, 60);
         let stream = futures::stream::iter(vec![
-            Ok(llm_runtime::LlmEvent::MessageDelta {
-                delta: llm_runtime::MessageDeltaPayload {
+            Ok(llm_runtime::HistoryEvent::MessageDelta {
+                delta: llm_runtime::HistoryMessageDelta {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
                 // The final provider snapshot reclassifies provisional visible output.
                 usage: Some(usage(100, 0)),
             }),
-            Ok(llm_runtime::LlmEvent::MessageStop),
-            Ok(llm_runtime::LlmEvent::Completed {
+            Ok(llm_runtime::HistoryEvent::MessageStop),
+            Ok(llm_runtime::HistoryEvent::Completed {
                 response: Box::new(response),
             }),
         ])

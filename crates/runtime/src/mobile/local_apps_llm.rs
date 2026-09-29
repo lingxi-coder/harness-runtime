@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
-use llm_runtime::{ApiService, ContentBlock, LlmEvent};
+use llm_runtime::{ApiService, ContentBlock, HistoryEvent};
 use local_apps::AppError;
 use protocol::{ConversationMessage, MediaAnalysis, MessageId, MessageRole};
 use sha2::{Digest, Sha256};
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, RwLock};
 /// Pull-based provider events exposed to the Local App host. The host lowers
 /// only text deltas to the page stream; reasoning, tool and provider metadata
 /// stay inside the trusted engine boundary.
-pub type LocalAppsModelStream = Pin<Box<dyn Stream<Item = Result<LlmEvent, AppError>> + Send>>;
+pub type LocalAppsModelStream = Pin<Box<dyn Stream<Item = Result<HistoryEvent, AppError>> + Send>>;
 
 /// Who wrote one turn of an app-initiated chat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

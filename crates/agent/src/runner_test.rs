@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 /// one per `messages_create` call. Counts calls so tests can assert the
 /// number of model round-trips (`max_turns` bound, multi-turn loop).
 struct MockSubagentApiClient {
-    responses: Mutex<VecDeque<Result<llm_runtime::LlmResponse, llm_runtime::LlmError>>>,
+    responses: Mutex<VecDeque<Result<llm_runtime::HistoryResponse, llm_runtime::LlmError>>>,
     calls: AtomicUsize,
     /// The messages the LAST call was given — lets a test assert what the
     /// runner actually seeded the conversation with.
@@ -27,7 +27,9 @@ struct MockSubagentApiClient {
 }
 
 impl MockSubagentApiClient {
-    fn new(responses: Vec<Result<llm_runtime::LlmResponse, llm_runtime::LlmError>>) -> Arc<Self> {
+    fn new(
+        responses: Vec<Result<llm_runtime::HistoryResponse, llm_runtime::LlmError>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             responses: Mutex::new(responses.into_iter().collect()),
             calls: AtomicUsize::new(0),
@@ -50,7 +52,7 @@ impl crate::api::SubagentApiClient for MockSubagentApiClient {
         _system: Option<&str>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         *self.last_messages.lock().unwrap() = _messages.clone();
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.responses
@@ -66,12 +68,12 @@ impl crate::api::SubagentApiClient for MockSubagentApiClient {
 }
 
 /// `SubagentApiClient` that OVERRIDES the streaming seam with scripted
-/// `LlmEvent` sequences (one `Vec` per turn) and makes the non-streaming
+/// `HistoryEvent` sequences (one `Vec` per turn) and makes the non-streaming
 /// `messages_create` unreachable — proving the runner drives the loop
 /// through `messages_create_stream` + `accumulate_stream`, not the
 /// non-streaming fallback.
 struct StreamingMockApiClient {
-    turns: Mutex<VecDeque<Vec<llm_runtime::LlmEvent>>>,
+    turns: Mutex<VecDeque<Vec<llm_runtime::HistoryEvent>>>,
     calls: AtomicUsize,
     /// Tools seen on the most recent `messages_create_stream` call — lets a
     /// test prove `ctx.tool_schemas` threads through the seam.
@@ -82,7 +84,7 @@ struct StreamingMockApiClient {
 }
 
 impl StreamingMockApiClient {
-    fn new(turns: Vec<Vec<llm_runtime::LlmEvent>>) -> Arc<Self> {
+    fn new(turns: Vec<Vec<llm_runtime::HistoryEvent>>) -> Arc<Self> {
         Arc::new(Self {
             turns: Mutex::new(turns.into_iter().collect()),
             calls: AtomicUsize::new(0),
@@ -110,7 +112,7 @@ impl crate::api::SubagentApiClient for StreamingMockApiClient {
         _system: Option<&str>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         unreachable!("streaming mock must be driven through messages_create_stream")
     }
 
@@ -122,7 +124,10 @@ impl crate::api::SubagentApiClient for StreamingMockApiClient {
         tools: Vec<serde_json::Value>,
         _effort: Option<serde_json::Value>,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         use futures::StreamExt;
@@ -158,7 +163,7 @@ impl Drop for NearLimitWrapUpFlagOn {
 }
 
 struct NearLimitHintApiClient {
-    response: llm_runtime::LlmResponse,
+    response: llm_runtime::HistoryResponse,
     last_messages: Mutex<Vec<ConversationMessage>>,
     pending_hint: AtomicBool,
     consume_calls: AtomicUsize,
@@ -167,7 +172,7 @@ struct NearLimitHintApiClient {
 }
 
 impl NearLimitHintApiClient {
-    fn new(response: llm_runtime::LlmResponse, pending_hint: bool) -> Arc<Self> {
+    fn new(response: llm_runtime::HistoryResponse, pending_hint: bool) -> Arc<Self> {
         Arc::new(Self {
             response,
             last_messages: Mutex::new(Vec::new()),
@@ -208,16 +213,16 @@ impl crate::api::SubagentApiClient for NearLimitHintApiClient {
         _system: Option<&str>,
         messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         *self.last_messages.lock().unwrap() = messages;
         Ok(self.response.clone())
     }
 }
 
 /// Build the `message_start` envelope shared by the streamed-turn builders.
-fn ev_message_start() -> llm_runtime::LlmEvent {
-    llm_runtime::LlmEvent::MessageStart {
-        response: Box::new(llm_runtime::LlmResponse {
+fn ev_message_start() -> llm_runtime::HistoryEvent {
+    llm_runtime::HistoryEvent::MessageStart {
+        response: Box::new(llm_runtime::HistoryResponse {
             id: "mock".into(),
             model: "mock".into(),
             content: vec![],
@@ -231,39 +236,39 @@ fn ev_message_start() -> llm_runtime::LlmEvent {
 }
 
 /// One streamed turn carrying a single text block + `stop` reason.
-fn streamed_text_turn(text: &str, stop: &str) -> Vec<llm_runtime::LlmEvent> {
-    use llm_runtime::{ContentBlock, ContentDelta, LlmEvent, MessageDeltaPayload};
+fn streamed_text_turn(text: &str, stop: &str) -> Vec<llm_runtime::HistoryEvent> {
+    use llm_runtime::{ContentBlock, HistoryContentDelta, HistoryEvent, HistoryMessageDelta};
     vec![
         ev_message_start(),
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: ContentBlock::Text {
                 text: String::new(),
                 cache_control: None,
             },
         },
-        LlmEvent::ContentBlockDelta {
+        HistoryEvent::ContentBlockDelta {
             index: 0,
-            delta: ContentDelta::TextDelta { text: text.into() },
+            delta: HistoryContentDelta::TextDelta { text: text.into() },
         },
-        LlmEvent::ContentBlockStop { index: 0 },
-        LlmEvent::MessageDelta {
-            delta: MessageDeltaPayload {
+        HistoryEvent::ContentBlockStop { index: 0 },
+        HistoryEvent::MessageDelta {
+            delta: HistoryMessageDelta {
                 stop_reason: Some(stop.into()),
                 stop_details: None,
             },
             usage: None,
         },
-        LlmEvent::MessageStop,
+        HistoryEvent::MessageStop,
     ]
 }
 
 /// One streamed turn carrying a single `tool_call` block + `stop` reason.
-fn streamed_tool_use_turn(name: &str, stop: &str) -> Vec<llm_runtime::LlmEvent> {
-    use llm_runtime::{ContentBlock, ContentDelta, LlmEvent, MessageDeltaPayload};
+fn streamed_tool_use_turn(name: &str, stop: &str) -> Vec<llm_runtime::HistoryEvent> {
+    use llm_runtime::{ContentBlock, HistoryContentDelta, HistoryEvent, HistoryMessageDelta};
     vec![
         ev_message_start(),
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: ContentBlock::ToolCall {
                 id: ToolUseId::new().to_string(),
@@ -271,21 +276,21 @@ fn streamed_tool_use_turn(name: &str, stop: &str) -> Vec<llm_runtime::LlmEvent> 
                 input: serde_json::Value::Null,
             },
         },
-        LlmEvent::ContentBlockDelta {
+        HistoryEvent::ContentBlockDelta {
             index: 0,
-            delta: ContentDelta::InputJsonDelta {
+            delta: HistoryContentDelta::InputJsonDelta {
                 partial_json: "{}".into(),
             },
         },
-        LlmEvent::ContentBlockStop { index: 0 },
-        LlmEvent::MessageDelta {
-            delta: MessageDeltaPayload {
+        HistoryEvent::ContentBlockStop { index: 0 },
+        HistoryEvent::MessageDelta {
+            delta: HistoryMessageDelta {
                 stop_reason: Some(stop.into()),
                 stop_details: None,
             },
             usage: None,
         },
-        LlmEvent::MessageStop,
+        HistoryEvent::MessageStop,
     ]
 }
 
@@ -405,9 +410,9 @@ impl platform_api::budget::BudgetEnforcerHandle for MockBudget {
     }
 }
 
-/// Build an `LlmResponse` carrying a single text block.
-fn text_response(text: &str, stop_reason: Option<&str>) -> llm_runtime::LlmResponse {
-    llm_runtime::LlmResponse {
+/// Build an `HistoryResponse` carrying a single text block.
+fn text_response(text: &str, stop_reason: Option<&str>) -> llm_runtime::HistoryResponse {
+    llm_runtime::HistoryResponse {
         id: "mock".into(),
         model: "mock".into(),
         content: vec![llm_runtime::ContentBlock::Text {
@@ -422,9 +427,9 @@ fn text_response(text: &str, stop_reason: Option<&str>) -> llm_runtime::LlmRespo
     }
 }
 
-/// Build an `LlmResponse` carrying one `tool_call` block (+ the given `stop_reason`).
-fn tool_use_response(name: &str, stop_reason: Option<&str>) -> llm_runtime::LlmResponse {
-    llm_runtime::LlmResponse {
+/// Build an `HistoryResponse` carrying one `tool_call` block (+ the given `stop_reason`).
+fn tool_use_response(name: &str, stop_reason: Option<&str>) -> llm_runtime::HistoryResponse {
+    llm_runtime::HistoryResponse {
         id: "mock".into(),
         model: "mock".into(),
         content: vec![llm_runtime::ContentBlock::ToolCall {
@@ -440,15 +445,15 @@ fn tool_use_response(name: &str, stop_reason: Option<&str>) -> llm_runtime::LlmR
     }
 }
 
-/// Build an `LlmResponse` carrying a text block AND a `tool_call` block
+/// Build an `HistoryResponse` carrying a text block AND a `tool_call` block
 /// (+ the given `stop_reason`) — for the G2 backward-scan test (a turn that
 /// surfaces text then a later turn that is tool-only).
 fn text_and_tool_response(
     text: &str,
     name: &str,
     stop_reason: Option<&str>,
-) -> llm_runtime::LlmResponse {
-    llm_runtime::LlmResponse {
+) -> llm_runtime::HistoryResponse {
+    llm_runtime::HistoryResponse {
         id: "mock".into(),
         model: "mock".into(),
         content: vec![
@@ -470,14 +475,14 @@ fn text_and_tool_response(
     }
 }
 
-/// Build an `LlmResponse` carrying one `tool_call` block AND a non-default
+/// Build an `HistoryResponse` carrying one `tool_call` block AND a non-default
 /// `usage` (for the G1 usage-threading test).
 fn tool_use_response_with_usage(
     name: &str,
     stop_reason: Option<&str>,
     usage: llm_runtime::Usage,
-) -> llm_runtime::LlmResponse {
-    llm_runtime::LlmResponse {
+) -> llm_runtime::HistoryResponse {
+    llm_runtime::HistoryResponse {
         usage,
         ..tool_use_response(name, stop_reason)
     }
@@ -614,7 +619,7 @@ impl crate::api::SubagentApiClient for CacheTtlProbeClient {
         _system: Option<&str>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         *self.seen.lock().unwrap() = Some(llm_runtime::agent_cache_ttl_1h_override());
         Ok(text_response("done", Some("end_turn")))
     }
@@ -887,7 +892,8 @@ async fn workflow_watchdog_times_out_stream_open() {
 async fn workflow_watchdog_times_out_before_first_event() {
     use futures::StreamExt;
     let stream =
-        futures::stream::pending::<Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>().boxed();
+        futures::stream::pending::<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>>()
+            .boxed();
     let mut watched = with_workflow_stream_watchdog(
         stream,
         Some(platform_api::WorkflowQueryWatchdog {
@@ -997,7 +1003,7 @@ impl crate::api::SubagentApiClient for TimeoutAfterToolApi {
         _system: Option<&str>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call == 0 {
             Ok(text_and_tool_response("partial", "Read", Some("tool_use")))
@@ -1413,7 +1419,7 @@ async fn schema_forces_structured_output_and_returns_the_tool_input() {
     // With `ctx.schema` set, the runner injects+forces a `StructuredOutput`
     // tool; the model's tool input IS the run's result (it is NOT dispatched).
     let structured = serde_json::json!({ "answer": 42, "ok": true });
-    let resp = llm_runtime::LlmResponse {
+    let resp = llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::ToolCall {
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
@@ -1437,7 +1443,7 @@ async fn schema_forces_structured_output_and_returns_the_tool_input() {
 /// `is_error` result (the model retries); a later VALID call is captured.
 #[tokio::test]
 async fn schema_invalid_output_retried_then_captured() {
-    let so = |input: serde_json::Value| llm_runtime::LlmResponse {
+    let so = |input: serde_json::Value| llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::ToolCall {
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
@@ -1476,7 +1482,7 @@ async fn schema_invalid_output_retried_then_captured() {
 /// retry's, and the rejected payload appears nowhere in it.
 #[tokio::test]
 async fn schema_rejected_attempt_is_not_surfaced_beside_its_retry() {
-    let so = |input: serde_json::Value| llm_runtime::LlmResponse {
+    let so = |input: serde_json::Value| llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::ToolCall {
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
@@ -1520,7 +1526,7 @@ async fn schema_rejected_attempt_is_not_surfaced_beside_its_retry() {
 /// and abort with the byte-exact retry-cap-exceeded message.
 #[tokio::test]
 async fn schema_retry_cap_exceeded_aborts() {
-    let bad_so = || llm_runtime::LlmResponse {
+    let bad_so = || llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::ToolCall {
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
@@ -1594,9 +1600,9 @@ async fn schema_no_call_nudges_twice_then_aborts() {
 /// round-trip, whether the runner went through the FORCED variant (`true`) or
 /// the plain/auto variant (`false`) — the only way to observe `tool_choice`
 /// from outside the wire, since both variants funnel unrelated calls through
-/// the same underlying `LlmResponse` script.
+/// the same underlying `HistoryResponse` script.
 struct StructuredOutputModeCapturingApiClient {
-    responses: Mutex<VecDeque<llm_runtime::LlmResponse>>,
+    responses: Mutex<VecDeque<llm_runtime::HistoryResponse>>,
     forced_calls: Mutex<Vec<bool>>,
     /// The `messages` argument of every round-trip, in call order — lets a
     /// test inspect the REQUEST shape the runner built for a given turn
@@ -1606,7 +1612,7 @@ struct StructuredOutputModeCapturingApiClient {
 }
 
 impl StructuredOutputModeCapturingApiClient {
-    fn new(responses: Vec<llm_runtime::LlmResponse>) -> Arc<Self> {
+    fn new(responses: Vec<llm_runtime::HistoryResponse>) -> Arc<Self> {
         Arc::new(Self {
             responses: Mutex::new(responses.into_iter().collect()),
             forced_calls: Mutex::new(Vec::new()),
@@ -1625,7 +1631,10 @@ impl StructuredOutputModeCapturingApiClient {
     fn next_stream(
         &self,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         use futures::StreamExt;
@@ -1648,7 +1657,7 @@ impl crate::api::SubagentApiClient for StructuredOutputModeCapturingApiClient {
         _system: Option<&str>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         unreachable!("driven only through the _opts streaming seam")
     }
 
@@ -1662,7 +1671,10 @@ impl crate::api::SubagentApiClient for StructuredOutputModeCapturingApiClient {
         _effort: Option<serde_json::Value>,
         _opts: crate::api::SubagentApiCallOpts,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         self.forced_calls.lock().unwrap().push(false);
@@ -1681,7 +1693,10 @@ impl crate::api::SubagentApiClient for StructuredOutputModeCapturingApiClient {
         _effort: Option<serde_json::Value>,
         _opts: crate::api::SubagentApiCallOpts,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         self.forced_calls.lock().unwrap().push(true);
@@ -1690,9 +1705,9 @@ impl crate::api::SubagentApiClient for StructuredOutputModeCapturingApiClient {
     }
 }
 
-/// Build an `LlmResponse` carrying a valid `StructuredOutput` tool call.
-fn structured_output_call_response(input: serde_json::Value) -> llm_runtime::LlmResponse {
-    llm_runtime::LlmResponse {
+/// Build an `HistoryResponse` carrying a valid `StructuredOutput` tool call.
+fn structured_output_call_response(input: serde_json::Value) -> llm_runtime::HistoryResponse {
+    llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::ToolCall {
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
@@ -1916,13 +1931,15 @@ async fn forced_mode_forces_every_turn_including_the_first() {
 /// message history each round was given, so a test can assert the nudge
 /// text rides on a specific round-trip.
 struct RecordingForceApiClient {
-    responses: Mutex<VecDeque<Result<llm_runtime::LlmResponse, llm_runtime::LlmError>>>,
+    responses: Mutex<VecDeque<Result<llm_runtime::HistoryResponse, llm_runtime::LlmError>>>,
     forced_tools: Mutex<Vec<Option<String>>>,
     messages_per_call: Mutex<Vec<Vec<ConversationMessage>>>,
 }
 
 impl RecordingForceApiClient {
-    fn new(responses: Vec<Result<llm_runtime::LlmResponse, llm_runtime::LlmError>>) -> Arc<Self> {
+    fn new(
+        responses: Vec<Result<llm_runtime::HistoryResponse, llm_runtime::LlmError>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             responses: Mutex::new(responses.into_iter().collect()),
             forced_tools: Mutex::new(Vec::new()),
@@ -1938,7 +1955,7 @@ impl RecordingForceApiClient {
         self.messages_per_call.lock().unwrap().clone()
     }
 
-    fn next_response(&self) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    fn next_response(&self) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         self.responses
             .lock()
             .unwrap()
@@ -1951,7 +1968,10 @@ impl RecordingForceApiClient {
         messages: Vec<ConversationMessage>,
         forced_tool: Option<&str>,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         use futures::StreamExt;
@@ -1974,7 +1994,7 @@ impl crate::api::SubagentApiClient for RecordingForceApiClient {
         _system: Option<&str>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         unreachable!("run_subagent_loop drives every round through the _opts streaming seam only")
     }
 
@@ -1988,7 +2008,10 @@ impl crate::api::SubagentApiClient for RecordingForceApiClient {
         _effort: Option<serde_json::Value>,
         _opts: crate::api::SubagentApiCallOpts,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         self.record_and_stream(messages, None)
@@ -2005,7 +2028,10 @@ impl crate::api::SubagentApiClient for RecordingForceApiClient {
         _effort: Option<serde_json::Value>,
         _opts: crate::api::SubagentApiCallOpts,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         self.record_and_stream(messages, forced_tool)
@@ -2029,7 +2055,7 @@ async fn schema_with_other_tools_never_pins_tool_choice_even_after_a_nudge() {
         // at all — triggers the in-conversation nudge.
         Ok(text_response("still thinking", Some("end_turn"))),
         // Round 3 (post-nudge): the model finally calls StructuredOutput.
-        Ok(llm_runtime::LlmResponse {
+        Ok(llm_runtime::HistoryResponse {
             content: vec![llm_runtime::ContentBlock::ToolCall {
                 id: ToolUseId::new().to_string(),
                 name: "StructuredOutput".into(),
@@ -2099,7 +2125,7 @@ async fn schema_with_other_tools_never_pins_tool_choice_even_after_a_nudge() {
 #[tokio::test]
 async fn schema_only_tool_in_registry_forces_from_round_one() {
     let structured = serde_json::json!({ "answer": 7 });
-    let api = RecordingForceApiClient::new(vec![Ok(llm_runtime::LlmResponse {
+    let api = RecordingForceApiClient::new(vec![Ok(llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::ToolCall {
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
@@ -2307,7 +2333,7 @@ async fn loop_g1_completed_carries_final_turn_usage_and_tool_count() {
             Some("tool_use"),
             usage_a,
         )),
-        Ok(llm_runtime::LlmResponse {
+        Ok(llm_runtime::HistoryResponse {
             usage: usage_b.clone(),
             ..text_response("done", Some("end_turn"))
         }),
@@ -2373,7 +2399,7 @@ async fn loop_completed_cumulative_usage_sums_turns_and_reports_real_uncapped_ou
             Some("tool_use"),
             usage_a,
         )),
-        Ok(llm_runtime::LlmResponse {
+        Ok(llm_runtime::HistoryResponse {
             usage: usage_b.clone(),
             ..text_response("done", Some("end_turn"))
         }),
@@ -2457,12 +2483,12 @@ async fn loop_completed_cumulative_usage_sums_turns_and_reports_real_uncapped_ou
 /// non-opts method panics instead of silently dropping `opts`. Records the
 /// `SubagentApiCallOpts` seen on every round-trip.
 struct OptsOnlyCapturingApiClient {
-    responses: Mutex<VecDeque<llm_runtime::LlmResponse>>,
+    responses: Mutex<VecDeque<llm_runtime::HistoryResponse>>,
     opts_seen: Mutex<Vec<crate::api::SubagentApiCallOpts>>,
 }
 
 impl OptsOnlyCapturingApiClient {
-    fn new(responses: Vec<llm_runtime::LlmResponse>) -> Arc<Self> {
+    fn new(responses: Vec<llm_runtime::HistoryResponse>) -> Arc<Self> {
         Arc::new(Self {
             responses: Mutex::new(responses.into_iter().collect()),
             opts_seen: Mutex::new(Vec::new()),
@@ -2477,7 +2503,10 @@ impl OptsOnlyCapturingApiClient {
         &self,
         opts: crate::api::SubagentApiCallOpts,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         use futures::StreamExt;
@@ -2501,7 +2530,7 @@ impl crate::api::SubagentApiClient for OptsOnlyCapturingApiClient {
         _system: Option<&str>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         unreachable!("driven only through the _opts streaming seam")
     }
 
@@ -2515,7 +2544,10 @@ impl crate::api::SubagentApiClient for OptsOnlyCapturingApiClient {
         _effort: Option<serde_json::Value>,
         opts: crate::api::SubagentApiCallOpts,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         self.record_and_stream(opts)
@@ -2532,7 +2564,10 @@ impl crate::api::SubagentApiClient for OptsOnlyCapturingApiClient {
         _effort: Option<serde_json::Value>,
         opts: crate::api::SubagentApiCallOpts,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         self.record_and_stream(opts)
@@ -2759,7 +2794,7 @@ async fn loop_streaming_protocol_error_surfaces_failed() {
     // (same path as a non-streaming api error).
     let truncated = vec![
         ev_message_start(),
-        llm_runtime::LlmEvent::ContentBlockStart {
+        llm_runtime::HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: llm_runtime::ContentBlock::Text {
                 text: String::new(),
@@ -3339,7 +3374,7 @@ async fn persistent_resume_emits_user_message_before_stalled_provider_once() {
             _system: Option<&str>,
             _messages: Vec<ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+        ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
             if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
                 self.started.notify_one();
                 self.release.notified().await;
@@ -3649,7 +3684,7 @@ impl crate::api::SubagentApiClient for StuckThenCapturingApiClient {
         _system: Option<&str>,
         messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
             // Stuck: never resolves. The runner's select must drop this
@@ -3792,7 +3827,7 @@ impl crate::api::SubagentApiClient for ToolUseThenCapturingApiClient {
         _system: Option<&str>,
         messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
             return Ok(tool_use_response("SlowTool", Some("tool_use")));
@@ -3928,7 +3963,7 @@ impl crate::api::SubagentApiClient for CapturingApiClient {
         _system: Option<&str>,
         messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         let mut slot = self.first_messages.lock().unwrap();
         if slot.is_none() {
             *slot = Some(messages);
@@ -4774,19 +4809,19 @@ async fn preload_order_additional_context_then_skills() {
 // `cutoffNote` prepended — instead of failing the tool and discarding the
 // child's work (`Wyd`/`wTy`, AgentTool sync recovery).
 
-/// Streaming mock whose per-turn scripts are RAW `Result<LlmEvent, LlmError>`
+/// Streaming mock whose per-turn scripts are RAW `Result<HistoryEvent, LlmError>`
 /// sequences, so a turn can inject a trailing MID-STREAM `Err` (no
 /// `message_stop`). Overrides the streaming seam; the non-streaming path is
 /// unreachable.
 struct ResultStreamMockApiClient {
-    turns: Mutex<VecDeque<Vec<Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>>>,
+    turns: Mutex<VecDeque<Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>>>>,
     calls: AtomicUsize,
     histories: Mutex<Vec<Vec<ConversationMessage>>>,
     retry_stop: Mutex<Option<Arc<ParseRetryStop>>>,
     workflow_watchdog: Option<platform_api::WorkflowQueryWatchdog>,
 }
 impl ResultStreamMockApiClient {
-    fn new(turns: Vec<Vec<Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>>) -> Arc<Self> {
+    fn new(turns: Vec<Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>>>) -> Arc<Self> {
         Arc::new(Self {
             turns: Mutex::new(turns.into_iter().collect()),
             calls: AtomicUsize::new(0),
@@ -4817,7 +4852,10 @@ impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
         effort: Option<serde_json::Value>,
         _opts: crate::api::SubagentApiCallOpts,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         self.messages_create_stream(model, system, messages, tools, effort)
@@ -4844,7 +4882,7 @@ impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
         _system: Option<&str>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         unreachable!("streaming mock must be driven through messages_create_stream")
     }
     async fn messages_create_stream(
@@ -4855,7 +4893,10 @@ impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
         _tools: Vec<serde_json::Value>,
         _effort: Option<serde_json::Value>,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         use futures::StreamExt;
@@ -4871,22 +4912,22 @@ impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
 fn partial_text_then_err(
     text: &str,
     err: llm_runtime::LlmError,
-) -> Vec<Result<llm_runtime::LlmEvent, llm_runtime::LlmError>> {
-    use llm_runtime::{ContentBlock as LB, ContentDelta, LlmEvent};
+) -> Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>> {
+    use llm_runtime::{ContentBlock as LB, HistoryContentDelta, HistoryEvent};
     vec![
         Ok(ev_message_start()),
-        Ok(LlmEvent::ContentBlockStart {
+        Ok(HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: LB::Text {
                 text: String::new(),
                 cache_control: None,
             },
         }),
-        Ok(LlmEvent::ContentBlockDelta {
+        Ok(HistoryEvent::ContentBlockDelta {
             index: 0,
-            delta: ContentDelta::TextDelta { text: text.into() },
+            delta: HistoryContentDelta::TextDelta { text: text.into() },
         }),
-        Ok(LlmEvent::ContentBlockStop { index: 0 }),
+        Ok(HistoryEvent::ContentBlockStop { index: 0 }),
         Err(err),
     ]
 }
@@ -4924,7 +4965,7 @@ async fn generic_workflow_watchdog_preserves_server_content_retry_and_usage_beha
     let api = ResultStreamMockApiClient::new(vec![
         vec![
             Ok(ev_message_start()),
-            Ok(LlmEvent::ContentBlockStart {
+            Ok(HistoryEvent::ContentBlockStart {
                 index: 0,
                 content_block: llm_runtime::ContentBlock::ServerToolUse {
                     id: "server-1".into(),
@@ -5062,7 +5103,12 @@ async fn local_app_create_transport_retry_shares_watchdog_limit_and_fails_closed
 async fn local_app_create_transport_retry_discards_tools_from_interrupted_response() {
     let mut interrupted: Vec<_> = streamed_tool_use_turn("Write", "tool_use")
         .into_iter()
-        .take_while(|event| !matches!(event, LlmEvent::MessageDelta { .. } | LlmEvent::MessageStop))
+        .take_while(|event| {
+            !matches!(
+                event,
+                HistoryEvent::MessageDelta { .. } | HistoryEvent::MessageStop
+            )
+        })
         .map(Ok)
         .collect();
     interrupted.push(Err(response_body_transport_error()));
@@ -5109,7 +5155,7 @@ async fn local_app_create_transport_retry_never_replays_an_unclosed_server_tool(
         let api = ResultStreamMockApiClient::new(vec![
             vec![
                 Ok(ev_message_start()),
-                Ok(LlmEvent::ContentBlockStart {
+                Ok(HistoryEvent::ContentBlockStart {
                     index: 0,
                     content_block: llm_runtime::ContentBlock::ServerToolUse {
                         id: "server-1".into(),
@@ -5240,11 +5286,11 @@ async fn structured_agent_midstream_error_does_not_complete_with_partial_prose()
 // Drive the real stream parser instead of injecting an already-classified error.
 fn malformed_structured_turn(
     tool: &str,
-) -> Vec<Result<llm_runtime::LlmEvent, llm_runtime::LlmError>> {
+) -> Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>> {
     let mut events = streamed_tool_use_turn(tool, "tool_use");
     for event in &mut events {
-        if let llm_runtime::LlmEvent::ContentBlockDelta {
-            delta: llm_runtime::ContentDelta::InputJsonDelta { partial_json },
+        if let llm_runtime::HistoryEvent::ContentBlockDelta {
+            delta: llm_runtime::HistoryContentDelta::InputJsonDelta { partial_json },
             ..
         } = event
         {
@@ -5254,7 +5300,7 @@ fn malformed_structured_turn(
     events.into_iter().map(Ok).collect()
 }
 
-fn valid_design_turn() -> Vec<Result<llm_runtime::LlmEvent, llm_runtime::LlmError>> {
+fn valid_design_turn() -> Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>> {
     llm_runtime::stream_accumulator::response_to_stream_events(structured_output_call_response(
         serde_json::json!({"design": {}}),
     ))
@@ -5269,7 +5315,7 @@ fn enable_design_parse_recovery(ctx: &mut SubagentContext) {
 }
 
 fn create_parse_recovery_api(
-    turns: Vec<Vec<Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>>,
+    turns: Vec<Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>>>,
 ) -> Arc<ResultStreamMockApiClient> {
     let mut api = ResultStreamMockApiClient::new(turns);
     Arc::get_mut(&mut api).unwrap().workflow_watchdog = Some(platform_api::WorkflowQueryWatchdog {
@@ -5289,8 +5335,9 @@ fn enable_create_parse_recovery(ctx: &mut SubagentContext) {
     ctx.allowed_tools = vec!["Write".into(), "Read".into(), "LocalAppScaffold".into()];
 }
 
-fn reasoning_only_truncated_turn() -> Vec<Result<llm_runtime::LlmEvent, llm_runtime::LlmError>> {
-    crate::accumulator::response_to_stream_events(llm_runtime::LlmResponse {
+fn reasoning_only_truncated_turn() -> Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>>
+{
+    crate::accumulator::response_to_stream_events(llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::Reasoning {
             text: "unfinished reasoning".into(),
             signature: None,
@@ -5566,11 +5613,11 @@ async fn local_app_create_json_correction_rejects_mixed_server_or_incomplete_res
                 }
             };
             let other = [
-                Ok(llm_runtime::LlmEvent::ContentBlockStart {
+                Ok(llm_runtime::HistoryEvent::ContentBlockStart {
                     index: 1,
                     content_block,
                 }),
-                Ok(llm_runtime::LlmEvent::ContentBlockStop { index: 1 }),
+                Ok(llm_runtime::HistoryEvent::ContentBlockStop { index: 1 }),
             ];
             let index = if other_first { 1 } else { malformed.len() - 2 };
             malformed.splice(index..index, other);
@@ -5777,7 +5824,7 @@ async fn design_parse_recovery_does_not_dispatch_or_retry_mixed_tool_response() 
     for other_first in [true, false] {
         let mut mixed = malformed_structured_turn("StructuredOutput");
         let other = vec![
-            Ok(llm_runtime::LlmEvent::ContentBlockStart {
+            Ok(llm_runtime::HistoryEvent::ContentBlockStart {
                 index: 1,
                 content_block: llm_runtime::ContentBlock::ToolCall {
                     id: "other".into(),
@@ -5785,7 +5832,7 @@ async fn design_parse_recovery_does_not_dispatch_or_retry_mixed_tool_response() 
                     input: serde_json::json!({}),
                 },
             }),
-            Ok(llm_runtime::LlmEvent::ContentBlockStop { index: 1 }),
+            Ok(llm_runtime::HistoryEvent::ContentBlockStop { index: 1 }),
         ];
         let index = if other_first { 1 } else { mixed.len() - 2 };
         mixed.splice(index..index, other);
@@ -5878,7 +5925,7 @@ async fn rate_limit_midstream_recovers_partial_with_cutoff_note() {
     let dir = tempfile::tempdir().unwrap();
     // Turn 1: a complete tool_use turn (drives the loop into turn 2 after the
     // tool is dispatched). Turn 2: a partial text block then a mid-stream 429.
-    let turn1: Vec<Result<llm_runtime::LlmEvent, llm_runtime::LlmError>> =
+    let turn1: Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>> =
         streamed_tool_use_turn("Read", "tool_use")
             .into_iter()
             .map(Ok)
@@ -5982,7 +6029,7 @@ async fn qualifying_error_with_no_content_fails() {
 async fn nonqualifying_error_after_content_still_fails() {
     // Turn 1 completes with a tool_use (content in history + tool dispatched);
     // turn 2 errors mid-stream with a NON-CTy kind → no recovery.
-    let turn1: Vec<Result<llm_runtime::LlmEvent, llm_runtime::LlmError>> =
+    let turn1: Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>> =
         streamed_tool_use_turn("Read", "tool_use")
             .into_iter()
             .map(Ok)
@@ -6924,7 +6971,7 @@ impl crate::api::SubagentApiClient for NotificationDuringRequestApi {
         _: Option<&str>,
         messages: Vec<ConversationMessage>,
         _: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         *self.last_messages.lock().unwrap() = messages;
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             self.registry.publish();

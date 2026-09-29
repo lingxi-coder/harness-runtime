@@ -1,9 +1,13 @@
-use llm_runtime::{
-    providers::GeminiCodec, AnthropicMessagesCodec, LlmEvent, OpenAiChatCodec, ProviderResponse,
-    RawStreamFrame, WireCodec,
+use crate::upstream::codec_fixtures::{
+    AnthropicMessagesCodec, FixtureCodec, GeminiCodec, OpenAiChatCodec,
 };
+use llm_runtime::{HistoryEvent, ProviderResponse, RawStreamFrame};
 
-fn decode_jsonl_stream<C: WireCodec>(codec_name: &str, codec: &C, fixture: &str) -> Vec<LlmEvent> {
+fn decode_jsonl_stream<C: FixtureCodec>(
+    codec_name: &str,
+    codec: &C,
+    fixture: &str,
+) -> Vec<HistoryEvent> {
     let mut decoder = codec.stream_decoder();
     let mut events = Vec::new();
 
@@ -29,105 +33,113 @@ fn decode_jsonl_stream<C: WireCodec>(codec_name: &str, codec: &C, fixture: &str)
     events
 }
 
-fn assert_single_message_stop(events: &[LlmEvent]) {
+fn assert_single_message_stop(events: &[HistoryEvent]) {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, LlmEvent::MessageStop))
+            .filter(|event| matches!(event, HistoryEvent::MessageStop))
             .count(),
         1
     );
-    assert!(matches!(events.last(), Some(LlmEvent::MessageStop)));
+    assert!(matches!(events.last(), Some(HistoryEvent::MessageStop)));
 }
 
-fn assert_openai_events(events: &[LlmEvent]) {
-    assert!(matches!(events[0], LlmEvent::MessageStart { .. }));
+fn assert_openai_events(events: &[HistoryEvent]) {
+    assert!(matches!(events[0], HistoryEvent::MessageStart { .. }));
     assert!(matches!(
         events[1],
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: llm_runtime::ContentBlock::Text { .. },
         }
     ));
     assert!(matches!(
         events[2],
-        LlmEvent::ContentBlockDelta {
+        HistoryEvent::ContentBlockDelta {
             index: 0,
-            delta: llm_runtime::ContentDelta::TextDelta { ref text },
+            delta: llm_runtime::HistoryContentDelta::TextDelta { ref text },
         } if text == "On it. "
     ));
     assert!(matches!(
         events[3],
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             index: 1,
             content_block: llm_runtime::ContentBlock::ToolCall { ref name, .. },
         } if name == "Bash"
     ));
     assert!(matches!(
         events[4],
-        LlmEvent::ContentBlockDelta {
+        HistoryEvent::ContentBlockDelta {
             index: 1,
-            delta: llm_runtime::ContentDelta::InputJsonDelta { ref partial_json },
+            delta: llm_runtime::HistoryContentDelta::InputJsonDelta { ref partial_json },
         } if partial_json == "{\"command\":"
     ));
     assert!(matches!(
         events[5],
-        LlmEvent::ContentBlockDelta {
+        HistoryEvent::ContentBlockDelta {
             index: 1,
-            delta: llm_runtime::ContentDelta::InputJsonDelta { ref partial_json },
+            delta: llm_runtime::HistoryContentDelta::InputJsonDelta { ref partial_json },
         } if partial_json == "\"ls\"}"
     ));
-    assert!(matches!(events[6], LlmEvent::ContentBlockStop { index: 0 }));
-    assert!(matches!(events[7], LlmEvent::ContentBlockStop { index: 1 }));
+    assert!(matches!(
+        events[6],
+        HistoryEvent::ContentBlockStop { index: 0 }
+    ));
+    assert!(matches!(
+        events[7],
+        HistoryEvent::ContentBlockStop { index: 1 }
+    ));
     assert!(matches!(
         events[8],
-        LlmEvent::MessageDelta {
-            delta: llm_runtime::MessageDeltaPayload { stop_reason: Some(ref reason), stop_details: None },
+        HistoryEvent::MessageDelta {
+            delta: llm_runtime::HistoryMessageDelta { stop_reason: Some(ref reason), stop_details: None },
             ..
         } if reason == "tool_use"
     ));
     assert_single_message_stop(events);
 }
 
-fn assert_gemini_events(events: &[LlmEvent]) {
-    assert!(matches!(events[0], LlmEvent::MessageStart { .. }));
+fn assert_gemini_events(events: &[HistoryEvent]) {
+    assert!(matches!(events[0], HistoryEvent::MessageStart { .. }));
     assert!(matches!(
         events[1],
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: llm_runtime::ContentBlock::Text { .. },
         }
     ));
     assert!(matches!(
         events[2],
-        LlmEvent::ContentBlockDelta {
+        HistoryEvent::ContentBlockDelta {
             index: 0,
-            delta: llm_runtime::ContentDelta::TextDelta { ref text },
+            delta: llm_runtime::HistoryContentDelta::TextDelta { ref text },
         } if text == "On it."
     ));
     assert!(matches!(
         events[3],
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             index: 1,
             content_block: llm_runtime::ContentBlock::ToolCall { ref name, .. },
         } if name == "Bash"
     ));
     assert!(matches!(
         events[4],
-        LlmEvent::ContentBlockDelta {
+        HistoryEvent::ContentBlockDelta {
             index: 1,
-            delta: llm_runtime::ContentDelta::InputJsonDelta { ref partial_json },
+            delta: llm_runtime::HistoryContentDelta::InputJsonDelta { ref partial_json },
         } if partial_json == "{\"command\":\"ls\"}"
     ));
-    assert!(matches!(events[5], LlmEvent::ContentBlockStop { index: 1 }));
-    assert!(matches!(events[6], LlmEvent::ContentBlockStop { index: 0 }));
     assert!(matches!(
-        events[7],
-        LlmEvent::MessageDelta {
-            delta: llm_runtime::MessageDeltaPayload { stop_reason: Some(ref reason), stop_details: None },
-            ..
-        } if reason == "tool_use"
+        events[5],
+        HistoryEvent::ContentBlockStop { index: 1 }
     ));
+    assert!(matches!(
+        events[6],
+        HistoryEvent::ContentBlockStop { index: 0 }
+    ));
+    assert!(
+        matches!(events[7], HistoryEvent::MessageDelta { delta: llm_runtime::HistoryMessageDelta { stop_reason: Some(ref reason), stop_details: None }, .. } if reason == "tool_use")
+    );
     assert_single_message_stop(events);
 }
 

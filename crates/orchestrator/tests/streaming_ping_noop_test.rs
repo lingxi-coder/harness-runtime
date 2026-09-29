@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
-// `LlmEvent` has no Ping variant — this test verifies that non-content events
+// `HistoryEvent` has no Ping variant — this test verifies that non-content events
 // (no pings to inject) do not disturb the output stream.
 #[tokio::test]
 async fn ping_between_deltas_does_not_disturb_output() {

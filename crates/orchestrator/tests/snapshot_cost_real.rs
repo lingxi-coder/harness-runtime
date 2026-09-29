@@ -6,7 +6,7 @@
 
 use cost::pricing::PricingCatalog;
 use cost::CostTracker;
-use llm_runtime::{ContentBlock, LlmResponse, TokenUsage, Usage};
+use llm_runtime::{ContentBlock, HistoryResponse, TokenUsage, Usage};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -17,8 +17,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tool_api::registry::ToolRegistry;
 
-fn end_turn_response_with_usage(input: u64, output: u64) -> LlmResponse {
-    LlmResponse {
+fn end_turn_response_with_usage(input: u64, output: u64) -> HistoryResponse {
+    HistoryResponse {
         id: "msg_mock".to_string(),
         model: "claude-opus-4-6".to_string(),
         // Visible text: an empty-content end_turn trips the #78 thinking-only

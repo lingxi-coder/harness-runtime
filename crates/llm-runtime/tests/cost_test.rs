@@ -248,7 +248,7 @@ async fn deepseek_override_is_fixed_across_peak_hours_without_changing_sibling_p
     use lingxi_llm_client::protocol::{
         InferenceReport, ServiceTier, Submission, UsageReport, UsageState,
     };
-    use llm_runtime::{client::DefaultLlmClient, ClientConfig, CredentialConfig, LlmRequest};
+    use llm_runtime::{client::ModelRuntime, ClientConfig, CredentialConfig, LlmRequest};
 
     let mut profile = llm_runtime::builtin_presets()
         .providers
@@ -275,7 +275,7 @@ async fn deepseek_override_is_fixed_across_peak_hours_without_changing_sibling_p
     profile.credential = CredentialConfig::Env {
         var: "LLM_DEEPSEEK_OVERRIDE_TEST_KEY".into(),
     };
-    let client = DefaultLlmClient::from_config(ClientConfig {
+    let client = ModelRuntime::from_config(ClientConfig {
         providers: vec![profile],
     })
     .unwrap();
@@ -333,7 +333,7 @@ async fn deepseek_override_is_fixed_across_peak_hours_without_changing_sibling_p
 #[tokio::test]
 async fn api_service_override_prices_omitted_and_explicit_zero_reasoning() {
     use llm_runtime::{
-        client::DefaultLlmClient, parse_provider_profiles_strict, pricing_provider_id_for_profile,
+        client::ModelRuntime, parse_provider_profiles_strict, pricing_provider_id_for_profile,
         ApiService, BoxFuture, ClientConfig, ProviderParseOptions, ProviderRequest,
         ProviderResponse, StreamingResponse, Transport,
     };
@@ -403,7 +403,7 @@ async fn api_service_override_prices_omitted_and_explicit_zero_reasoning() {
             "custom",
             profile.pricing.overrides[0].1,
         );
-        let client = DefaultLlmClient::from_config(ClientConfig {
+        let client = ModelRuntime::from_config(ClientConfig {
             providers: vec![profile],
         })
         .expect("client");

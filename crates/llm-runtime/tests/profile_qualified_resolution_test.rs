@@ -86,7 +86,7 @@ impl llm_runtime::CredentialProvider for ApiKeyStub {
 ///   - "github-copilot"  -> <https://api.githubcopilot.com> (`OpenAiChat`)
 ///
 /// Both use `HostManaged` credentials so `ApiKeyStub` is consulted.
-fn two_profile_client() -> llm_runtime::client::DefaultLlmClient {
+fn two_profile_client() -> llm_runtime::client::ModelRuntime {
     use llm_runtime::{
         AuthStrategy, Capabilities, ClientConfig, CredentialConfig, ModelProfile, PricingConfig,
         ProtocolFamily, ProviderId, ProviderProfile,
@@ -156,7 +156,7 @@ fn two_profile_client() -> llm_runtime::client::DefaultLlmClient {
         ],
     };
 
-    llm_runtime::client::DefaultLlmClient::from_config(config)
+    llm_runtime::client::ModelRuntime::from_config(config)
         .expect("client")
         .with_credential_provider(Arc::new(ApiKeyStub))
 }

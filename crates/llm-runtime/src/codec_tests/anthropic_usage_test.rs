@@ -1,8 +1,6 @@
-//! Anthropic usage normalization and interrupted-stream cache accounting.
-use llm_runtime::{
-    normalize_anthropic_usage, AnthropicMessagesCodec, ModelAttemptUsageCompleteness,
-    RawStreamFrame, WireCodec,
-};
+use crate::upstream::codec_fixtures::{AnthropicMessagesCodec, FixtureCodec};
+// Anthropic usage normalization and interrupted-stream cache accounting.
+use llm_runtime::{normalize_anthropic_usage, ModelAttemptUsageCompleteness, RawStreamFrame};
 
 #[test]
 fn normalizes_anthropic_usage_into_independent_billing_buckets() {

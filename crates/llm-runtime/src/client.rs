@@ -1,28 +1,25 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::sigv4;
 use crate::{
-    validate_capabilities, ApiKeyAuthenticator, AuthStrategy, Authenticator, BearerAuthenticator,
-    ChatGptAuthenticator, ClientConfig, CopilotAuthenticator, Credential, CredentialConfig,
-    CredentialProvider, CredentialScope, EnvCredentialProvider, LlmError, LlmEvent, LlmRequest,
-    LlmResponse, MediaRoute, ModelListing, ModelRegistry, ProtocolFamily, ProviderId,
-    ProviderRequest, ProviderStreamTransport, Route, Transport,
+    validate_capabilities, AuthStrategy, ClientConfig, Credential, CredentialConfig,
+    CredentialProvider, CredentialScope, EnvCredentialProvider, LlmError, LlmRequest, MediaRoute,
+    ModelListing, ModelRegistry, ProtocolFamily, ProviderId, ProviderRequest,
+    ProviderStreamTransport, Route, Transport,
 };
 
-/// Anthropic Messages API version sent by codecs this client constructs.
-const ANTHROPIC_VERSION: &str = "2023-06-01";
-
+/// Host execution composition: immutable routing, request-local credentials,
+/// and shared SDK clients. Protocol execution and stream assembly belong to SDK.
 #[derive(Debug, Clone)]
-pub struct DefaultLlmClient {
+pub struct ModelRuntime {
     cache: Arc<crate::execution::ClientCache>,
     registry: Arc<ModelRegistry>,
     routes: Arc<BTreeMap<String, RouteEntry>>,
     credentials: Option<Arc<dyn CredentialProvider>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct RouteEntry {
     profile: lingxi_llm_client::protocol::ProviderProfile,
     protocol: ProtocolFamily,
@@ -35,7 +32,7 @@ pub(crate) struct RouteEntry {
     websocket_connect_timeout_ms: Option<u64>,
 }
 
-struct ServiceAuthenticator(DefaultLlmClient);
+struct ServiceAuthenticator(ModelRuntime);
 
 #[async_trait::async_trait]
 impl lingxi_llm_client::Authenticator for ServiceAuthenticator {
@@ -81,7 +78,7 @@ impl lingxi_llm_client::Authenticator for ServiceAuthenticator {
     }
 }
 
-/// Polling knobs for [`DefaultLlmClient::wait_for_file_active`]. The defaults
+/// Polling knobs for [`ModelRuntime::wait_for_file_active`]. The defaults
 /// (2s interval, 300s budget) are this crate's own convenience choice — there
 /// is no claude-code/codex counterpart to pin against; tune per call site.
 #[derive(Debug, Clone, Copy)]
@@ -101,53 +98,32 @@ impl Default for FileActivationPoll {
     }
 }
 
-/// Turn-scoped OpenAI Responses WebSocket state.
-///
-/// A session owns one reusable transport connection plus enough Responses state
-/// to send a compatible follow-up as `previous_response_id` + input delta.
-pub struct ResponsesWebSocketSession {
-    shared: lingxi_llm_client::ResponsesSession,
-}
 pub use lingxi_llm_client::websocket::ResponsesWebSocketRequestSnapshot;
-impl Default for ResponsesWebSocketSession {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl ResponsesWebSocketSession {
-    pub fn new() -> Self {
-        Self {
-            shared: lingxi_llm_client::ResponsesSession::new(),
-        }
-    }
-    pub fn fallback_to_http(&self) -> bool {
-        self.shared.fallback_to_http()
-    }
-    pub fn last_response_id(&self) -> Option<String> {
-        self.shared.last_response_id()
-    }
-    pub fn last_added_response_items(&self) -> Vec<serde_json::Value> {
-        self.shared.last_added_response_items()
-    }
-    pub fn last_response_from_prewarm(&self) -> bool {
-        self.shared.last_response_from_prewarm()
-    }
-    pub fn last_request_snapshot(&self) -> ResponsesWebSocketRequestSnapshot {
-        self.shared.last_request_snapshot()
-    }
-    pub async fn close(&mut self) -> Result<(), LlmError> {
-        self.shared.close().await.map_err(crate::upstream::error)
-    }
-}
-impl std::fmt::Debug for ResponsesWebSocketSession {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResponsesWebSocketSession")
-            .field("fallback", &self.fallback_to_http())
-            .finish_non_exhaustive()
-    }
-}
+pub use lingxi_llm_client::ResponsesSession;
 
-impl DefaultLlmClient {
+impl ModelRuntime {
+    /// Resolve the SDK wire family before adapting durable history. Per-model
+    /// protocol selection is provider-owned, while the host selects the route.
+    pub fn protocol_for_model(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<ProtocolFamily, LlmError> {
+        let route = self.registry.resolve_in(model, profile)?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        Ok(
+            lingxi_llm_client::providers::github_copilot::responses_protocol_override(
+                &route.profile_name,
+                &entry.protocol,
+                &route.request_model,
+            )
+            .unwrap_or(entry.protocol),
+        )
+    }
+
     pub(crate) fn search_profile(
         &self,
         model: &str,
@@ -243,18 +219,7 @@ impl DefaultLlmClient {
                 // Conversation preparation disables SDK auth until host sealing.
                 // Independent SDK calls must select the host authenticator, and
                 // file services still need the original explicit-key strategy.
-                use lingxi_llm_client::protocol::AuthStrategy as WireAuth;
-                profile.auth = match entry.auth {
-                    AuthStrategy::ApiKey => WireAuth::ApiKey,
-                    AuthStrategy::Bearer => WireAuth::Bearer,
-                    AuthStrategy::OAuthBearer => WireAuth::OAuthBearer,
-                    AuthStrategy::CopilotBearer => WireAuth::CopilotBearer,
-                    AuthStrategy::ChatGptOAuth => WireAuth::ChatGptOAuth,
-                    AuthStrategy::AwsSigV4 => WireAuth::AwsSigV4,
-                    AuthStrategy::GcpToken => WireAuth::GcpToken,
-                    AuthStrategy::AzureToken => WireAuth::AzureToken,
-                    AuthStrategy::None => WireAuth::None,
-                };
+                profile.auth = entry.auth;
                 profile
             })
             .collect::<Vec<_>>();
@@ -342,29 +307,43 @@ impl DefaultLlmClient {
     ) -> Result<PreparedLlmCall, LlmError> {
         let resolved_route = self
             .registry
-            .resolve_in(&request.model, request.profile.as_deref())?;
+            .resolve_in(&request.input.model, request.profile.as_deref())?;
+
+        let effective_protocol =
+            self.protocol_for_model(&request.input.model, request.profile.as_deref())?;
+        let adapted;
+        let request = if let Some(source) = request.execution.input_protocol.filter(|source| {
+            lingxi_llm_client::replay::native_family(*source)
+                != lingxi_llm_client::replay::native_family(effective_protocol)
+        }) {
+            adapted = crate::upstream::adapt_request(request, source, effective_protocol)?;
+            &adapted
+        } else {
+            request
+        };
 
         // Soft-degrade `reasoning` rather than hard-failing: it is a best-effort
         // enhancement driven by the SESSION thinking config, so switching to a
         // model that doesn't advertise reasoning (e.g. an OpenRouter free model
         // like `qwen/qwen3-coder:free`) must silently drop it — not break the turn
         // with "unsupported capability: reasoning". This covers BOTH the top-level
-        // `request.reasoning` field AND any `Reasoning`/`RedactedThinking` blocks
+        // `request.input.thinking` field AND any `Reasoning`/`RedactedThinking` blocks
         // left in message HISTORY from an earlier thinking-capable model —
         // `validate_capabilities` rejects those blocks independently, so a
         // mid-conversation downgrade (not just a first turn) must strip them from
         // the request that gets validated AND encoded. (streaming / tools /
         // structured_output stay hard errors — they cannot be dropped safely.)
-        let is_reasoning_block = |b: &crate::ContentBlock| {
+        let is_reasoning_block = |b: &lingxi_llm_client::protocol::ContentBlock| {
             matches!(
                 b,
-                crate::ContentBlock::Reasoning { .. }
-                    | crate::ContentBlock::RedactedThinking { .. }
+                lingxi_llm_client::protocol::ContentBlock::Thinking { .. }
+                    | lingxi_llm_client::protocol::ContentBlock::RedactedThinking { .. }
             )
         };
         let needs_reasoning_degrade = !resolved_route.capabilities.reasoning
-            && (request.reasoning.is_some()
+            && (request.input.thinking.is_some()
                 || request
+                    .input
                     .messages
                     .iter()
                     .any(|m| m.content.iter().any(is_reasoning_block)));
@@ -378,20 +357,29 @@ impl DefaultLlmClient {
         // it for custom compatible endpoints, cloud transports, and models
         // without the canonical capability. Doing this before authentication
         // is essential for signed Bedrock/Vertex requests.
-        let needs_speed_degrade =
-            request.speed.is_some() && !route_allows_first_party_fast_mode(&resolved_route, entry);
+        let needs_speed_degrade = matches!(
+            entry.protocol,
+            ProtocolFamily::AnthropicMessages
+                | ProtocolFamily::BedrockClaude
+                | ProtocolFamily::VertexClaude
+                | ProtocolFamily::FoundryClaude
+        ) && request.input.service_tier
+            == Some(lingxi_llm_client::protocol::ServiceTier::Fast)
+            && !route_allows_first_party_fast_mode(&resolved_route, entry);
 
         let mut owned: Option<LlmRequest> = None;
         if needs_reasoning_degrade || needs_speed_degrade {
             let mut r = request.clone();
             if needs_reasoning_degrade {
-                r.reasoning = None;
-                for m in &mut r.messages {
-                    m.content.retain(|b| !is_reasoning_block(b));
-                }
+                r.input.thinking = None;
+                crate::model::thinking_signature::retain_input_blocks(
+                    &mut r,
+                    |_, block| !is_reasoning_block(block),
+                    None,
+                );
             }
             if needs_speed_degrade {
-                r.speed = None;
+                r.input.service_tier = None;
             }
             owned = Some(r);
         }
@@ -399,24 +387,13 @@ impl DefaultLlmClient {
 
         validate_capabilities(request, resolved_route.capabilities)?;
 
-        // Per-model wire override: GitHub Copilot serves its GPT-5.x / codex
-        // models ONLY via the Responses endpoint, though the provider declares a
-        // single OpenAiChat protocol. When the override fires we swap in a
-        // Responses codec bound to the SAME host (`…/responses`), which the
-        // Copilot bearer already authorizes; `effective_protocol` + `codec` then
-        // flow through encode, the websocket gate, and the returned Route.
-        let effective_protocol = copilot_responses_override(
-            &resolved_route.profile_name,
-            &entry.protocol,
-            &resolved_route.request_model,
-        )
-        .unwrap_or_else(|| entry.protocol.clone());
         let mut routed_request;
-        let encoding_request = if request.model == resolved_route.request_model {
+        let encoding_request = if request.input.model == resolved_route.request_model {
             request
         } else {
             routed_request = request.clone();
             routed_request
+                .input
                 .model
                 .clone_from(&resolved_route.request_model);
             &routed_request
@@ -466,7 +443,7 @@ impl DefaultLlmClient {
             host_failure,
             wire_draft: Some(wire_draft),
             wire_call: None,
-            registered_attempt: request.model_attempt.is_some(),
+            registered_attempt: request.execution.model_attempt.is_some(),
             route: Route {
                 resolved_route,
                 protocol: effective_protocol,
@@ -480,8 +457,8 @@ impl DefaultLlmClient {
         &self,
         request: &LlmRequest,
         transport: Arc<dyn Transport>,
-    ) -> Result<LlmResponse, LlmError> {
-        if request.model_attempt.is_some() {
+    ) -> Result<lingxi_llm_client::protocol::ChatResponse, LlmError> {
+        if request.execution.model_attempt.is_some() {
             return Err(crate::model_attempt::missing_hooks_error());
         }
         let mut prepared = self
@@ -502,13 +479,7 @@ impl DefaultLlmClient {
             .collect()
             .await
             .map_err(crate::upstream::error)?;
-        let decoded = crate::execution::decode(&collected).and_then(|response| {
-            crate::upstream::project_response(
-                response,
-                crate::execution::response(collected.response()),
-                crate::upstream::family(&prepared.route.protocol),
-            )
-        });
+        let decoded = crate::execution::decode(&collected);
         collected.finish().await;
         decoded
     }
@@ -516,8 +487,8 @@ impl DefaultLlmClient {
         &self,
         request: &LlmRequest,
         transport: Arc<dyn Transport>,
-    ) -> Result<LlmEventStream, LlmError> {
-        if request.model_attempt.is_some() {
+    ) -> Result<lingxi_llm_client::ModelStream, LlmError> {
+        if request.execution.model_attempt.is_some() {
             return Err(crate::model_attempt::missing_hooks_error());
         }
         if !request.stream {
@@ -539,16 +510,15 @@ impl DefaultLlmClient {
             .dispatch_once_using(transport.as_ref(), || Ok(()))
             .await
             .map_err(crate::upstream::error)?;
-        LlmEventStream::from_received(received, crate::upstream::family(&prepared.route.protocol))
-            .await
+        model_stream(received).await
     }
     pub async fn preconnect_websocket(
         &self,
         request: &LlmRequest,
         transport: Arc<dyn Transport>,
-        session: &mut ResponsesWebSocketSession,
+        session: &mut ResponsesSession,
     ) -> Result<(), LlmError> {
-        if request.model_attempt.is_some() {
+        if request.execution.model_attempt.is_some() {
             return Err(crate::model_attempt::missing_hooks_error());
         }
         if session.fallback_to_http() {
@@ -572,7 +542,6 @@ impl DefaultLlmClient {
         }
         let mut draft = prepared.wire_draft.take().expect("draft");
         session
-            .shared
             .prepare_using(&mut draft, false, true, Some(transport.clone()))
             .await
             .map_err(|error| crate::execution::restore_error(error, &prepared.host_failure))
@@ -581,9 +550,9 @@ impl DefaultLlmClient {
         &self,
         request: &LlmRequest,
         transport: Arc<dyn Transport>,
-        session: &mut ResponsesWebSocketSession,
+        session: &mut ResponsesSession,
     ) -> Result<(), LlmError> {
-        if request.model_attempt.is_some() {
+        if request.execution.model_attempt.is_some() {
             return Err(crate::model_attempt::missing_hooks_error());
         }
         let mut req = request.clone();
@@ -603,7 +572,7 @@ impl DefaultLlmClient {
         &self,
         prepared: PreparedLlmCall,
         transport: Arc<dyn Transport>,
-        session: &mut ResponsesWebSocketSession,
+        session: &mut ResponsesSession,
     ) -> Result<(), LlmError> {
         if prepared.registered_attempt {
             return Err(crate::model_attempt::missing_hooks_error());
@@ -621,24 +590,24 @@ impl DefaultLlmClient {
                         .into(),
             });
         }
-        let (prepared, received) = self
+        let (_prepared, received) = self
             .dispatch_unregistered_stream(prepared, transport, session, true)
             .await?;
-        let mut stream = LlmEventStream::from_received(
-            received,
-            crate::upstream::family(&prepared.route.protocol),
-        )
-        .await?;
-        while stream.next_event().await?.is_some() {}
+        let mut stream = model_stream(received).await?;
+        while let Some(batch) = stream.next_batch().await {
+            for event in batch.events {
+                event.map_err(crate::upstream::error)?;
+            }
+        }
         Ok(())
     }
     pub async fn execute_stream_with_session(
         &self,
         request: &LlmRequest,
         transport: Arc<dyn Transport>,
-        session: &mut ResponsesWebSocketSession,
-    ) -> Result<LlmEventStream, LlmError> {
-        if request.model_attempt.is_some() {
+        session: &mut ResponsesSession,
+    ) -> Result<lingxi_llm_client::ModelStream, LlmError> {
+        if request.execution.model_attempt.is_some() {
             return Err(crate::model_attempt::missing_hooks_error());
         }
         if !request.stream {
@@ -654,17 +623,16 @@ impl DefaultLlmClient {
                 false,
             )
             .await?;
-        let (prepared, received) = self
+        let (_prepared, received) = self
             .dispatch_unregistered_stream(prepared, transport, session, false)
             .await?;
-        LlmEventStream::from_received(received, crate::upstream::family(&prepared.route.protocol))
-            .await
+        model_stream(received).await
     }
     async fn dispatch_unregistered_stream(
         &self,
         mut prepared: PreparedLlmCall,
         transport: Arc<dyn Transport>,
-        session: &mut ResponsesWebSocketSession,
+        session: &mut ResponsesSession,
         prewarm: bool,
     ) -> Result<(PreparedLlmCall, lingxi_llm_client::ReceivedCall), LlmError> {
         let websocket = matches!(
@@ -687,7 +655,6 @@ impl DefaultLlmClient {
             .map_err(crate::upstream::error)?;
         if websocket {
             session
-                .shared
                 .prepare_using(&mut draft, prewarm, !prewarm, Some(raw.clone()))
                 .await
                 .map_err(|error| crate::execution::restore_error(error, &prepared.host_failure))?;
@@ -698,7 +665,6 @@ impl DefaultLlmClient {
             .map_err(|error| crate::execution::restore_error(error, &prepared.host_failure))?;
         let received = if websocket {
             session
-                .shared
                 .dispatch_using(call, || Ok(()), Some(raw.as_ref()))
                 .await
         } else {
@@ -742,7 +708,7 @@ impl DefaultLlmClient {
     > {
         let route = self
             .registry
-            .resolve_in(&request.model, request.profile.as_deref())?;
+            .resolve_in(&request.input.model, request.profile.as_deref())?;
         validate_capabilities(request, route.capabilities)?;
         let entry = self
             .routes
@@ -784,7 +750,7 @@ impl DefaultLlmClient {
     ) -> Result<Option<u64>, LlmError> {
         let route = self
             .registry
-            .resolve_in(&request.model, request.profile.as_deref())?;
+            .resolve_in(&request.input.model, request.profile.as_deref())?;
         if !matches!(
             self.routes
                 .get(&route.profile_name)
@@ -846,7 +812,7 @@ impl DefaultLlmClient {
     /// Non-2xx responses on either leg map through the shared Gemini error
     /// taxonomy. The returned [`crate::GeminiFile`] is NOT polled here:
     /// callers must poll
-    /// [`crate::providers::gemini_files::file_status_request`] until
+    /// [`Self::wait_for_file_active`] until
     /// `state == "ACTIVE"` for video/PDF uploads (or use the
     /// [`Self::wait_for_file_active`] convenience); images are typically
     /// `ACTIVE` immediately. A `FAILED` state passes through as data, not an
@@ -917,214 +883,32 @@ impl DefaultLlmClient {
             .map_err(|e| crate::execution::restore_error(e, &failure))
     }
 
-    // Each auth strategy is a self-contained arm; the length is necessary.
-    #[allow(clippy::too_many_lines)]
-    async fn authenticate(
-        &self,
-        entry: &RouteEntry,
-        profile_name: &str,
-        request: ProviderRequest,
-    ) -> Result<ProviderRequest, LlmError> {
-        use std::time::SystemTime;
-        self.authenticate_at(entry, profile_name, request, SystemTime::now())
-            .await
-    }
-
-    /// Injectable-clock variant used by tests to pin the `SigV4` timestamp.
-    ///
-    /// Production code calls `authenticate` which passes `SystemTime::now()`.
-    /// Called from `prepare_at` (public) so that integration tests can use it
-    /// without needing access to the private `RouteEntry` type.
-    #[allow(clippy::too_many_lines)]
+    /// Preparation inspection uses the same SDK authenticator as live sends.
     async fn authenticate_at(
         &self,
-        entry: &RouteEntry,
+        _entry: &RouteEntry,
         profile_name: &str,
         mut request: ProviderRequest,
         now: std::time::SystemTime,
     ) -> Result<ProviderRequest, LlmError> {
-        match entry.auth {
-            AuthStrategy::None => return Ok(request),
-
-            // ── AWS SigV4 ────────────────────────────────────────────────────
-            // Credential::AwsSigV4 must be loaded via StaticCredentialProvider
-            // or a host-managed store; the single-env-var Env path cannot
-            // express three fields (access key, secret key, session token).
-            AuthStrategy::AwsSigV4 => {
-                // Require signing config (region + service).
-                let signing = entry.signing.as_ref().ok_or_else(|| LlmError::InvalidRequest {
-                    message: format!(
-                        "provider profile '{profile_name}' uses AwsSigV4 but has no signing config; \
-                         set ProviderProfile.signing = Some(SigningConfig {{ region, service }})"
-                    ),
-                })?;
-
-                // Load Credential::AwsSigV4 from the credential store.
-                let credential = self.load_credential(entry, profile_name).await?;
-                let (access_key_id, secret_access_key, session_token) = match credential {
-                    Some(Credential::AwsSigV4 {
-                        access_key_id,
-                        secret_access_key,
-                        session_token,
-                    }) => (access_key_id, secret_access_key, session_token),
-                    Some(other) => {
-                        return Err(LlmError::InvalidRequest {
-                            message: format!(
-                                "provider profile '{profile_name}': AwsSigV4 auth requires \
-                                 Credential::AwsSigV4 but got {other:?}",
-                            ),
-                        });
-                    }
-                    None => {
-                        // CredentialConfig::None — host opted out of signing.
-                        return Ok(request);
-                    }
-                };
-
-                // Body bytes: sign exactly what LlmTransportBridge sends on the wire.
-                let body_bytes = request.wire_body_bytes()?;
-
-                // Use the injected clock (now) for the timestamp.
-                // Production code passes SystemTime::now(); tests pass a fixed instant.
-                let datetime = {
-                    use std::time::UNIX_EPOCH;
-                    let secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-                    // Format as YYYYMMDDTHHMMSSZ from Unix seconds.
-                    let (year, month, day, hour, min, sec) = secs_to_ymdhms(secs);
-                    format!("{year:04}{month:02}{day:02}T{hour:02}{min:02}{sec:02}Z")
-                };
-
-                let signed = sigv4::sign_request(
-                    &request.method,
-                    &request.url,
-                    &request.headers,
-                    &body_bytes,
-                    &access_key_id,
-                    &secret_access_key,
-                    session_token.as_deref(),
-                    &signing.region,
-                    &signing.service,
-                    &datetime,
-                )
-                .map_err(|e| LlmError::InvalidRequest { message: e })?;
-
-                request
-                    .headers
-                    .insert("x-amz-date".to_string(), signed.x_amz_date);
-                request.headers.insert(
-                    "x-amz-content-sha256".to_string(),
-                    signed.x_amz_content_sha256,
-                );
-                if let Some(token) = signed.x_amz_security_token {
-                    request
-                        .headers
-                        .insert("x-amz-security-token".to_string(), token);
-                }
-                request
-                    .headers
-                    .insert("Authorization".to_string(), signed.authorization);
-                return Ok(request);
-            }
-
-            // ── GCP Token (Bearer token) ─────────────────────────────────────
-            // Vertex AI / GCP services use OAuth2 bearer tokens.
-            // Reuse BearerAuthenticator — same wire shape as OpenAI bearer.
-            AuthStrategy::GcpToken => {
-                let Some(secret) = self.load_secret(entry, profile_name).await? else {
-                    return Ok(request);
-                };
-                let authenticator = BearerAuthenticator::new(secret);
-                return authenticator.apply(request);
-            }
-
-            // ── Azure Token (api-key header) ─────────────────────────────────
-            // Azure OpenAI uses `api-key: <key>` rather than `Authorization:
-            // Bearer ...`. The key may come from Credential::ApiKey or
-            // Credential::BearerToken (host-managed stores may use either).
-            //
-            // Reference:
-            // https://learn.microsoft.com/en-us/azure/ai-services/openai/reference
-            AuthStrategy::AzureToken => {
-                let Some(secret) = self.load_secret(entry, profile_name).await? else {
-                    return Ok(request);
-                };
-                let authenticator = ApiKeyAuthenticator::with_header_name("api-key", secret);
-                return authenticator.apply(request);
-            }
-
-            // ── ChatGPT OAuth ────────────────────────────────────────────────
-            // Credential::ChatGptOAuth carries the bearer access token plus the
-            // ChatGPT-Account-ID header (and FedRAMP flag). Must be loaded via
-            // load_credential() — load_secret() rejects it.
-            AuthStrategy::ChatGptOAuth => {
-                let Some(secret) = self.load_credential(entry, profile_name).await? else {
-                    return Ok(request);
-                };
-                let Credential::ChatGptOAuth {
-                    access_token,
-                    account_id,
-                    fedramp,
-                } = secret
-                else {
-                    return Err(LlmError::Authentication {
-                        message: String::new(),
-                    });
-                };
-                // Codex subscription requests use the Responses backend's
-                // restricted shape (OpenCode's Codex plugin also omits its
-                // maxOutputTokens parameter). Keep API-key profiles unchanged.
-                lingxi_llm_client::auth::header_policy::chatgpt_body(&mut request.body_json);
-                let authenticator = ChatGptAuthenticator::new(access_token, account_id, fedramp);
-                request = authenticator.apply(request)?;
-            }
-
-            // ── Standard key / bearer auth ───────────────────────────────────
-            AuthStrategy::ApiKey
-            | AuthStrategy::Bearer
-            | AuthStrategy::OAuthBearer
-            | AuthStrategy::CopilotBearer => {
-                let Some(secret) = self.load_secret(entry, profile_name).await? else {
-                    // CredentialConfig::None: the host opted out of
-                    // client-applied authentication for this profile.
-                    return Ok(request);
-                };
-                let authenticator: Box<dyn Authenticator> = match (&entry.auth, &entry.protocol) {
-                    // GitHub Copilot: GitHub OAuth token used directly as the
-                    // bearer plus the Copilot header set (also strips x-api-key).
-                    (AuthStrategy::CopilotBearer, _) => Box::new(CopilotAuthenticator::new(secret)),
-                    (AuthStrategy::ApiKey, ProtocolFamily::AnthropicMessages) => {
-                        Box::new(ApiKeyAuthenticator::new(secret))
-                    }
-                    // Azure AI Foundry: a plain API key is sent as `x-api-key`
-                    // (CC 2.1.207 `AnthropicFoundry.authHeaders()`:
-                    // string apiKey ⇒ `{"x-api-key": apiKey}`). AAD-token Foundry
-                    // profiles use `AuthStrategy::Bearer` (the `_` arm) which
-                    // emits `Authorization: Bearer`, matching the SDK's
-                    // `azureADTokenProvider` (function) path.
-                    (AuthStrategy::ApiKey, ProtocolFamily::FoundryClaude) => {
-                        Box::new(ApiKeyAuthenticator::new(secret))
-                    }
-                    (AuthStrategy::ApiKey, ProtocolFamily::GeminiGenerateContent) => Box::new(
-                        ApiKeyAuthenticator::with_header_name("x-goog-api-key", secret),
-                    ),
-                    // OpenAI-style APIs send api keys as bearer tokens.
-                    _ => Box::new(BearerAuthenticator::new(secret)),
-                };
-                request = authenticator.apply(request)?;
-            }
+        let mut wire = lingxi_llm_client::HttpRequest {
+            method: request.method.clone(),
+            url: request.url.clone(),
+            headers: request
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            body: request.wire_body_bytes()?.into(),
+            timeout: None,
+        };
+        self.authenticate_wire(profile_name, &mut wire, now).await?;
+        request.headers = wire.headers.into_iter().collect();
+        if let Ok(body) = serde_json::from_slice(&wire.body) {
+            request.body_json = body;
         }
-
-        // Anthropic accepts OAuth bearer tokens only with the oauth beta flag.
-        //
-        // Parity: `constants/oauth.ts:36` OAUTH_BETA_HEADER = 'oauth-2025-04-20';
-        // `utils/betas.ts:251-252` appends it via push() (list element, not clobber).
-        // Use append_beta so that any betas already present (e.g., set by the
-        // orchestrator's betas assembler before authenticate runs) are preserved.
-        if matches!(entry.auth, AuthStrategy::OAuthBearer)
-            && matches!(entry.protocol, ProtocolFamily::AnthropicMessages)
-        {
-            lingxi_llm_client::auth::header_policy::anthropic_oauth(&mut request.headers);
-        }
+        // Preserve the signed byte image, including exact UTF-16 overrides.
+        request.body_bytes = Some(wire.body.to_vec());
         Ok(request)
     }
 
@@ -1160,41 +944,6 @@ impl DefaultLlmClient {
         };
         Ok(Some(credential))
     }
-
-    /// Load a plain string secret for key/bearer auth strategies.
-    ///
-    /// Returns `None` when `CredentialConfig::None` was set (host opted out).
-    /// Returns `Err` when the credential is `AwsSigV4` (use `load_credential`
-    /// instead for that strategy).
-    async fn load_secret(
-        &self,
-        entry: &RouteEntry,
-        profile_name: &str,
-    ) -> Result<Option<String>, LlmError> {
-        let Some(credential) = self.load_credential(entry, profile_name).await? else {
-            return Ok(None);
-        };
-
-        match credential {
-            Credential::ApiKey(secret) | Credential::BearerToken(secret) => Ok(Some(secret)),
-            // AwsSigV4 creds are three-field structs; callers that need them
-            // must use load_credential() directly.
-            Credential::AwsSigV4 { .. } => Err(LlmError::InvalidRequest {
-                message: format!(
-                    "provider profile '{profile_name}': AwsSigV4 credentials must be loaded \
-                     via load_credential(), not load_secret()"
-                ),
-            }),
-            // ChatGptOAuth creds are multi-field structs; callers that need them
-            // must use load_credential() directly.
-            Credential::ChatGptOAuth { .. } => Err(LlmError::InvalidRequest {
-                message: format!(
-                    "provider profile '{profile_name}': ChatGptOAuth credentials must be loaded \
-                     via load_credential(), not load_secret()"
-                ),
-            }),
-        }
-    }
 }
 
 fn route_allows_first_party_fast_mode(route: &crate::ResolvedRoute, entry: &RouteEntry) -> bool {
@@ -1205,63 +954,6 @@ fn route_allows_first_party_fast_mode(route: &crate::ResolvedRoute, entry: &Rout
             &route.request_model,
             platform_api::model_capabilities::ModelCapability::FastMode,
         )
-}
-
-/// Convert Unix epoch seconds to `(year, month, day, hour, minute, second)`.
-///
-/// Used to build the `YYYYMMDDTHHMMSSZ` timestamp for `SigV4` signing without
-/// depending on `chrono` or `time` crates.
-///
-/// Algorithm: Howard Hinnant's `civil_from_days`
-/// (<http://howardhinnant.github.io/date_algorithms.html>).
-// The algorithm uses single-char variable names from the reference paper, large
-// integer constants, signed/unsigned conversions, and boolean-to-int patterns
-// that are idiomatic there but trigger multiple clippy lints.  Suppress them at
-// the function level to keep the code aligned with the reference.
-#[allow(
-    clippy::many_single_char_names,
-    clippy::similar_names,
-    clippy::unreadable_literal,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::bool_to_int_with_if
-)]
-pub(crate) use lingxi_llm_client::auth::sigv4::secs_to_ymdhms;
-
-/// GitHub Copilot serves its GPT-5.x and `codex` models ONLY through the OpenAI
-/// Responses endpoint (`api.githubcopilot.com/responses`); older models use
-/// `/chat/completions`. Our `github-copilot` preset declares a single
-/// `OpenAiChat` protocol for the whole provider, so those newer models 400 with
-/// "model … is not accessible via the /chat/completions endpoint". When we
-/// detect one we route it through a Responses codec bound to the SAME host — the
-/// Copilot bearer authorizes both paths. Mirrors the fix other Copilot gateways
-/// adopted (cherry-studio #13637, opencode #5866): non-`codex` GPT-5+ models
-/// must use `/responses`.
-///
-/// Returns `Some(OpenAiResponses)` only for the `github-copilot` profile on an
-/// `OpenAiChat` route whose model needs Responses; `None` leaves routing intact
-/// (so `openai`/`openrouter`/`deepseek`/etc. are never affected).
-fn copilot_responses_override(
-    profile_name: &str,
-    protocol: &ProtocolFamily,
-    request_model: &str,
-) -> Option<ProtocolFamily> {
-    if profile_name != "github-copilot" || !matches!(protocol, ProtocolFamily::OpenAiChat) {
-        return None;
-    }
-    let model = request_model.to_ascii_lowercase();
-    (model.contains("codex") || is_gpt5_or_newer(&model)).then_some(ProtocolFamily::OpenAiResponses)
-}
-
-/// `true` for `gpt-<major>[…]` with `major >= 5` (`gpt-5`, `gpt-5.5`,
-/// `gpt-5-mini`, `gpt-6`, …); `false` for `gpt-4o`, `gpt-4.1`, non-`gpt-` ids.
-fn is_gpt5_or_newer(model_lower: &str) -> bool {
-    let Some(rest) = model_lower.strip_prefix("gpt-") else {
-        return false;
-    };
-    let major: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    major.parse::<u32>().is_ok_and(|n| n >= 5)
 }
 
 fn validate_provider_profile(provider: &crate::ProviderProfile) -> Result<(), LlmError> {
@@ -1311,91 +1003,20 @@ pub struct PreparedLlmCall {
     pub provider_request: ProviderRequest,
 }
 
-/// Pull-based application events projected from the shared client's stream.
-pub struct LlmEventStream {
-    stream: lingxi_llm_client::ModelStream,
-    projection: crate::upstream::Decoder,
-    queue: VecDeque<LlmEvent>,
-    yielded_any: bool,
-    finished: bool,
-}
-impl LlmEventStream {
-    /// Scoped continuation state from a successfully completed Responses stream.
-    /// Interrupted or still-running streams do not yield a reusable reference.
-    pub fn continuation(&self) -> Option<&lingxi_llm_client::protocol::ContinuationRef> {
-        self.stream.continuation()
-    }
-
-    async fn from_received(
-        received: lingxi_llm_client::ReceivedCall,
-        protocol: lingxi_llm_client::protocol::ProtocolFamily,
-    ) -> Result<Self, LlmError> {
-        let stream = match received.into_stream() {
-            Ok(stream) => stream,
-            Err(received) => {
-                let collected = received.collect().await.map_err(crate::upstream::error)?;
-                let error = crate::execution::decode(&collected)
-                    .err()
-                    .unwrap_or(LlmError::ProviderInternal);
-                collected.finish().await;
-                return Err(error);
-            }
-        };
-        let headers = stream
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
-            .collect();
-        let projection = crate::upstream::Decoder::projection(
-            protocol,
-            crate::stream_provider_metadata_from_headers(&headers),
-        );
-        Ok(Self {
-            stream,
-            projection,
-            queue: VecDeque::new(),
-            yielded_any: false,
-            finished: false,
-        })
-    }
-    pub async fn next_event(&mut self) -> Result<Option<LlmEvent>, LlmError> {
-        loop {
-            if let Some(event) = self.queue.pop_front() {
-                self.yielded_any = true;
-                return Ok(Some(event));
-            }
-            if self.finished {
-                return Ok(None);
-            }
-            let Some(batch) = self.stream.next_batch().await else {
-                self.finished = true;
-                return Ok(None);
-            };
-            self.finished = batch.finished;
-            match self.projection.project_batch(batch) {
-                Ok(events) => self.queue.extend(events),
-                Err(error) => {
-                    self.finished = true;
-                    return Err(match error {
-                        LlmError::Transport { message } if self.yielded_any => {
-                            LlmError::StreamInterrupted { message }
-                        }
-                        other => other,
-                    });
-                }
-            }
+/// Keep provider execution canonical. History projection is the service edge.
+async fn model_stream(
+    received: lingxi_llm_client::ReceivedCall,
+) -> Result<lingxi_llm_client::ModelStream, LlmError> {
+    match received.into_stream() {
+        Ok(stream) => Ok(stream),
+        Err(received) => {
+            let collected = received.collect().await.map_err(crate::upstream::error)?;
+            let error = crate::execution::decode(&collected)
+                .err()
+                .unwrap_or(LlmError::ProviderInternal);
+            collected.finish().await;
+            Err(error)
         }
-    }
-}
-
-impl std::fmt::Debug for LlmEventStream {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("LlmEventStream")
-            .field("queued_events", &self.queue.len())
-            .field("yielded_any", &self.yielded_any)
-            .field("finished", &self.finished)
-            .finish_non_exhaustive()
     }
 }
 
@@ -1417,8 +1038,9 @@ impl std::fmt::Debug for LlmEventStream {
 ///
 /// **`constants/oauth.ts:36`:** `OAUTH_BETA_HEADER = 'oauth-2025-04-20'` is the
 /// beta value passed to this function by `authenticate()` for OAuth sessions.
+#[cfg(test)]
 #[must_use]
-pub(crate) fn append_beta(existing: Option<&str>, beta: &str) -> String {
+fn append_beta(existing: Option<&str>, beta: &str) -> String {
     match existing {
         None => beta.to_string(),
         Some(current) => {
@@ -1434,63 +1056,7 @@ pub(crate) fn append_beta(existing: Option<&str>, beta: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_beta, copilot_responses_override, is_gpt5_or_newer, ProtocolFamily};
-
-    #[test]
-    fn gpt5_plus_detection_covers_majors_and_variants() {
-        for yes in [
-            "gpt-5",
-            "gpt-5.5",
-            "gpt-5-mini",
-            "gpt-5.2-codex",
-            "gpt-6",
-            "gpt-10",
-        ] {
-            assert!(is_gpt5_or_newer(yes), "{yes} should be gpt-5+");
-        }
-        for no in [
-            "gpt-4o",
-            "gpt-4.1",
-            "gpt-4-turbo",
-            "o3",
-            "claude-opus-4-8",
-            "",
-        ] {
-            assert!(!is_gpt5_or_newer(no), "{no} should NOT be gpt-5+");
-        }
-    }
-
-    #[test]
-    fn copilot_override_fires_only_for_copilot_chat_gpt5_and_codex() {
-        let chat = ProtocolFamily::OpenAiChat;
-        // Fires: Copilot + OpenAiChat + gpt-5.x/codex.
-        for m in ["gpt-5.5", "gpt-5-codex", "gpt-5.4-mini"] {
-            assert_eq!(
-                copilot_responses_override("github-copilot", &chat, m),
-                Some(ProtocolFamily::OpenAiResponses),
-                "{m} on copilot should override to Responses"
-            );
-        }
-        // No override: older Copilot model.
-        assert_eq!(
-            copilot_responses_override("github-copilot", &chat, "gpt-4o"),
-            None
-        );
-        // No override: different profile, even for a gpt-5 id.
-        assert_eq!(
-            copilot_responses_override("openrouter", &chat, "gpt-5.5"),
-            None
-        );
-        // No override: already Responses (openai first-party) — nothing to fix.
-        assert_eq!(
-            copilot_responses_override(
-                "github-copilot",
-                &ProtocolFamily::OpenAiResponses,
-                "gpt-5.5"
-            ),
-            None
-        );
-    }
+    use super::append_beta;
 
     // ---- Task 2: `append_beta` pure-fn unit tests ----
     //
@@ -1588,7 +1154,7 @@ impl std::fmt::Debug for PreparedLlmCall {
             .finish_non_exhaustive()
     }
 }
-impl DefaultLlmClient {
+impl ModelRuntime {
     pub(crate) async fn seal_prepared(
         &self,
         prepared: &mut PreparedLlmCall,
@@ -1618,11 +1184,11 @@ impl DefaultLlmClient {
     }
 }
 
-impl DefaultLlmClient {
+impl ModelRuntime {
     pub(crate) async fn prepare_shared_stream(
         &self,
         mut prepared: PreparedLlmCall,
-        session: &mut ResponsesWebSocketSession,
+        session: &mut ResponsesSession,
     ) -> Result<PreparedLlmCall, LlmError> {
         let websocket = matches!(
             prepared.provider_request.stream_transport,
@@ -1649,7 +1215,6 @@ impl DefaultLlmClient {
             .map_err(crate::upstream::error)?;
         if websocket {
             session
-                .shared
                 .prepare(&mut draft, false, true)
                 .await
                 .map_err(crate::upstream::error)?;
@@ -1665,7 +1230,7 @@ impl DefaultLlmClient {
     pub(crate) async fn open_shared_stream(
         &self,
         mut prepared: PreparedLlmCall,
-        session: &mut ResponsesWebSocketSession,
+        session: &mut ResponsesSession,
         on_dispatch: &mut (dyn FnMut() -> Result<(), LlmError> + Send),
     ) -> Result<(PreparedLlmCall, lingxi_llm_client::ReceivedCall), LlmError> {
         let websocket = matches!(
@@ -1680,7 +1245,7 @@ impl DefaultLlmClient {
             })?;
         let mark = || on_dispatch().map_err(crate::execution::wire_error);
         let received = if websocket {
-            session.shared.dispatch(call, mark).await
+            session.dispatch(call, mark).await
         } else {
             call.dispatch_once_with(mark).await
         }
@@ -1689,47 +1254,58 @@ impl DefaultLlmClient {
     }
 }
 
-impl Clone for RouteEntry {
-    fn clone(&self) -> Self {
-        Self {
-            profile: self.profile.clone(),
-            protocol: self.protocol.clone(),
-            provider_id: self.provider_id.clone(),
-            auth: self.auth.clone(),
-            credential: self.credential.clone(),
-            base_url: self.base_url.clone(),
-            signing: self.signing.clone(),
-            supports_websockets: self.supports_websockets,
-            websocket_connect_timeout_ms: self.websocket_connect_timeout_ms,
-        }
-    }
-}
-impl DefaultLlmClient {
+impl ModelRuntime {
     pub(crate) async fn authenticate_wire(
         &self,
         profile: &str,
         request: &mut lingxi_llm_client::HttpRequest,
         now: std::time::SystemTime,
     ) -> Result<(), LlmError> {
+        use lingxi_llm_client::auth::{apply_credential, ClientIdentity, CredentialRef};
         let entry = self.routes.get(profile).ok_or(LlmError::ModelUnavailable)?;
-        let mut host = ProviderRequest::post_json(
-            request.url.clone(),
-            serde_json::from_slice(&request.body).unwrap_or_default(),
-        );
-        host.method.clone_from(&request.method);
-        host.headers = request.headers.iter().cloned().collect();
-        // Non-JSON bodies and exact UTF-16 strings must retain their byte image.
-        if serde_json::from_slice::<serde_json::Value>(&request.body).is_err() {
-            host.body_bytes = Some(request.body.to_vec());
+        if entry.auth == AuthStrategy::None {
+            return Ok(());
         }
-        let host = self.authenticate_at(entry, profile, host, now).await?;
-        request.headers = host
-            .headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        request.body = host.wire_body_bytes()?.into();
-        Ok(())
+        let Some(credential) = self.load_credential(entry, profile).await? else {
+            return Ok(());
+        };
+        let material = match &credential {
+            Credential::ApiKey(secret) | Credential::BearerToken(secret) => {
+                CredentialRef::Token(secret)
+            }
+            Credential::AwsSigV4 {
+                access_key_id,
+                secret_access_key,
+                session_token,
+            } => CredentialRef::Aws {
+                access_key_id,
+                secret_access_key,
+                session_token: session_token.as_deref(),
+            },
+            Credential::ChatGptOAuth {
+                access_token,
+                account_id,
+                fedramp,
+            } => CredentialRef::ChatGpt {
+                access_token,
+                account_id: account_id.as_deref(),
+                fedramp: *fedramp,
+            },
+        };
+        let mut sdk_profile = entry.profile.clone();
+        sdk_profile.auth = entry.auth;
+        apply_credential(
+            request,
+            &sdk_profile,
+            material,
+            ClientIdentity {
+                user_agent: crate::copilot::auth::COPILOT_USER_AGENT,
+                editor_version: crate::copilot::auth::COPILOT_EDITOR_VERSION,
+                plugin_version: crate::copilot::auth::COPILOT_EDITOR_PLUGIN_VERSION,
+            },
+            now,
+        )
+        .map_err(crate::upstream::error)
     }
 }
 
@@ -1755,12 +1331,27 @@ impl PreparedLlmCall {
 mod shared_client_regression {
     use super::*;
     #[tokio::test]
+    async fn canonical_openai_service_tier_survives_host_anthropic_fast_policy() {
+        let config: ClientConfig = serde_json::from_value(serde_json::json!({"providers":[{
+            "provider_id":"open_ai", "profile_name":"openai", "base_url":"https://api.openai.com/v1", "protocol":"open_ai_responses", "auth":"none", "credential":{"type":"none"},
+            "models":[{"display_model":"gpt-5","request_model":"gpt-5","billing_model":"gpt-5","capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":true,"structured_output":true}}]
+        }]})).unwrap();
+        let client = ModelRuntime::from_config(config).unwrap();
+        let mut request = LlmRequest::new("gpt-5").with_user_text("test");
+        request.input.service_tier = Some(lingxi_llm_client::protocol::ServiceTier::Fast);
+        let prepared = client.prepare(&request).await.unwrap();
+        // This configured SDK catalog row uses FastWire::Fast. The host must
+        // preserve the SDK choice instead of removing the selected tier.
+        assert_eq!(prepared.provider_request.body_json["service_tier"], "fast");
+    }
+
+    #[tokio::test]
     async fn configuration_cache_is_reused_without_caching_request_credentials() {
         let config: ClientConfig = serde_json::from_value(serde_json::json!({"providers":[{
             "provider_id":"anthropic_first_party", "profile_name":"test", "base_url":"https://api.anthropic.com", "protocol":"anthropic_messages", "auth":"api_key", "credential":{"type":"host_managed","id":"key"},
             "models":[{"display_model":"claude-test","request_model":"claude-test","billing_model":"claude-test","capabilities":{"streaming":true,"tools":false,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
         }]})).unwrap();
-        let client = DefaultLlmClient::from_config(config).unwrap();
+        let client = ModelRuntime::from_config(config).unwrap();
         for secret in ["account-a", "account-b", "account-a"] {
             let client = client.clone().with_credential_provider(Arc::new(
                 crate::StaticCredentialProvider::new(crate::Credential::ApiKey(secret.into())),

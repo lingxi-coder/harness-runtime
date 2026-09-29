@@ -73,10 +73,10 @@ mod terminal_sequence_tests {
 #[cfg(test)]
 mod terminal_api_error_tests {
     use crate::turn_loop::{refusal_explanation_clause, terminal_api_error_text};
-    use llm_runtime::StopDetails;
+    use llm_runtime::HistoryStopDetails;
 
-    fn details(category: &str, explanation: Option<&str>) -> StopDetails {
-        StopDetails {
+    fn details(category: &str, explanation: Option<&str>) -> HistoryStopDetails {
+        HistoryStopDetails {
             category: Some(category.to_string()),
             explanation: explanation.map(str::to_string),
         }
@@ -1892,16 +1892,16 @@ mod max_output_tokens_recovery_tests {
         MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
     };
     use crate::OrchestratorConfig;
-    use llm_runtime::LlmResponse;
+    use llm_runtime::HistoryResponse;
     use protocol::{ContentBlock, ConversationMessage};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
 
     /// Build an orchestrator whose batched API returns the given scripted
-    /// `LlmResponse`s in order. No tools registered (recovery never needs
+    /// `HistoryResponse`s in order. No tools registered (recovery never needs
     /// them).
-    fn orch_with_responses(responses: Vec<LlmResponse>) -> ConversationOrchestrator {
+    fn orch_with_responses(responses: Vec<HistoryResponse>) -> ConversationOrchestrator {
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(responses)),
@@ -1915,7 +1915,7 @@ mod max_output_tokens_recovery_tests {
     }
 
     /// A `max_tokens` response carrying one text block.
-    fn max_tokens_response() -> LlmResponse {
+    fn max_tokens_response() -> HistoryResponse {
         mock_message_response(
             vec![llm_runtime::ContentBlock::Text {
                 text: "partial".into(),
@@ -2359,7 +2359,7 @@ mod max_output_tokens_recovery_tests {
     }
 
     /// As [`orch_with_responses`] but with the REC.A1 8k→64k escalation enabled.
-    fn orch_with_responses_escalating(responses: Vec<LlmResponse>) -> ConversationOrchestrator {
+    fn orch_with_responses_escalating(responses: Vec<HistoryResponse>) -> ConversationOrchestrator {
         ConversationOrchestrator::new(
             OrchestratorConfig {
                 escalate_max_output_tokens: true,
@@ -2455,7 +2455,7 @@ mod max_output_tokens_recovery_tests {
 }
 // ============================================================================
 // #77 malformed-tool-use retry + #78 thinking-only nudge (BATCHED path).
-// Drives `execute_one_turn_with_recovery_tracked` with a scripted `LlmResponse`
+// Drives `execute_one_turn_with_recovery_tracked` with a scripted `HistoryResponse`
 // whose stop_reason / blocks force each branch, then asserts the byte-exact
 // nudge injection, the per-turn guard transitions, and the disposition.
 // ============================================================================
@@ -2472,13 +2472,13 @@ mod malformed_and_thinking_only_tests {
         MALFORMED_TOOL_USE_RETRY_NUDGE, STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
     };
     use crate::OrchestratorConfig;
-    use llm_runtime::LlmResponse;
+    use llm_runtime::HistoryResponse;
     use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
 
-    fn orch_with_responses(responses: Vec<LlmResponse>) -> ConversationOrchestrator {
+    fn orch_with_responses(responses: Vec<HistoryResponse>) -> ConversationOrchestrator {
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(responses)),
@@ -2493,7 +2493,7 @@ mod malformed_and_thinking_only_tests {
 
     /// A response whose `stop_reason` is `tool_use` but which carries ZERO
     /// `tool_use` blocks (only a text block) — the #77 malformed shape.
-    fn malformed_tool_use_response() -> LlmResponse {
+    fn malformed_tool_use_response() -> HistoryResponse {
         mock_message_response(
             vec![llm_runtime::ContentBlock::Text {
                 text: "I'll call the tool".into(),
@@ -2505,7 +2505,7 @@ mod malformed_and_thinking_only_tests {
 
     /// A thinking-only response: `end_turn` `stop_reason` but only a `Reasoning`
     /// (thinking) block — no visible text. The #78 shape.
-    fn thinking_only_response(stop_reason: &str) -> LlmResponse {
+    fn thinking_only_response(stop_reason: &str) -> HistoryResponse {
         mock_message_response(
             vec![llm_runtime::ContentBlock::Reasoning {
                 text: "thinking quietly".into(),
@@ -4180,7 +4180,7 @@ mod pre_tool_hook_tests {
     fn orch_with(
         hooks: Arc<HookExecutorImpl>,
         perms: Arc<dyn PermissionGate>,
-        responses: Vec<llm_runtime::LlmResponse>,
+        responses: Vec<llm_runtime::HistoryResponse>,
     ) -> ConversationOrchestrator {
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);

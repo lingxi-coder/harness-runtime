@@ -211,7 +211,7 @@ fn orch_with_output(
 /// row of that translation was unexercised: this file drove `run_turn` fifteen
 /// times and `run_turn_streaming` zero.
 fn streaming_orch(
-    streams: Vec<Vec<llm_runtime::LlmEvent>>,
+    streams: Vec<Vec<llm_runtime::HistoryEvent>>,
     hooks: Arc<HookExecutorImpl>,
     config: OrchestratorConfig,
 ) -> Arc<ConversationOrchestrator> {
@@ -229,7 +229,7 @@ fn streaming_orch(
 }
 
 /// One streamed `end_turn` round.
-fn streamed_end_turn(text: &str) -> Vec<llm_runtime::LlmEvent> {
+fn streamed_end_turn(text: &str) -> Vec<llm_runtime::HistoryEvent> {
     use orchestrator::test_support::{
         content_block_start_text, content_block_stop, message_delta_stop, message_start,
         message_stop, text_delta,
@@ -244,7 +244,7 @@ fn streamed_end_turn(text: &str) -> Vec<llm_runtime::LlmEvent> {
     ]
 }
 
-fn end_turn(text: &str) -> llm_runtime::LlmResponse {
+fn end_turn(text: &str) -> llm_runtime::HistoryResponse {
     mock_message_response(
         vec![LlmContentBlock::Text {
             text: text.into(),
@@ -254,8 +254,8 @@ fn end_turn(text: &str) -> llm_runtime::LlmResponse {
     )
 }
 
-fn end_turn_with_usage(text: &str, input: u64, output: u64) -> llm_runtime::LlmResponse {
-    llm_runtime::LlmResponse {
+fn end_turn_with_usage(text: &str, input: u64, output: u64) -> llm_runtime::HistoryResponse {
+    llm_runtime::HistoryResponse {
         id: "msg_goal".to_string(),
         model: "claude-opus-4-6".to_string(),
         content: vec![LlmContentBlock::Text {
@@ -1308,7 +1308,7 @@ impl tool_api::tool_trait::Tool for EndsTurnTool {
     }
 }
 
-fn round_calling_ends_turn() -> Vec<llm_runtime::LlmEvent> {
+fn round_calling_ends_turn() -> Vec<llm_runtime::HistoryEvent> {
     use orchestrator::test_support::{
         content_block_stop, input_json_delta, message_delta_stop, message_start, message_stop,
     };

@@ -1,6 +1,21 @@
 //! Scripted fixtures for SDK Transport. Never enabled in production builds.
-use crate::{BoxFuture, LlmError, ProviderRequest, ProviderResponse, RawStreamFrame};
+use crate::{BoxFuture, LlmError, ProviderRequest, ProviderResponse};
 pub use async_trait::async_trait;
+/// Raw streaming frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawStreamFrame {
+    /// Raw frame bytes.
+    pub bytes: Vec<u8>,
+}
+
+impl RawStreamFrame {
+    /// Create a raw stream frame.
+    #[must_use]
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+}
+
 use lingxi_llm_client::{self as sdk, protocol as wire};
 pub trait FixtureTransport: Send + Sync {
     /// Send a one-shot upload without buffering, replaying, or following

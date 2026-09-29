@@ -1,7 +1,9 @@
-use llm_runtime::providers::GeminiCodec;
+use crate::upstream::codec_fixtures::HistoryFixture;
+use crate::upstream::codec_fixtures::{FixtureCodec, GeminiCodec};
+
 use llm_runtime::{
-    ContentBlock, LlmEvent, LlmRequest, Message, ProviderResponse, RawStreamFrame, ToolChoice,
-    ToolDeclaration, WireCodec,
+    ContentBlock, HistoryEvent, Message, ProviderResponse, RawStreamFrame, ToolChoice,
+    ToolDeclaration,
 };
 
 // ── Item 4: Gemini image+document encode ──────────────────────────────────────
@@ -9,7 +11,7 @@ use llm_runtime::{
 #[test]
 fn encode_image_bytes_as_inline_data() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::Image {
@@ -27,7 +29,7 @@ fn encode_image_bytes_as_inline_data() {
 #[test]
 fn encode_document_bytes_as_inline_data() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::Document {
@@ -46,7 +48,7 @@ fn encode_image_url_produces_file_data_part() {
     // ImageUrl is encoded as a file_data part; mime_type is omitted for https URIs
     // because Gemini v1beta infers it from the Content-Type served at that URL.
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::ImageUrl {
@@ -68,13 +70,13 @@ fn encode_image_url_produces_file_data_part() {
 #[test]
 fn encode_tool_choice_auto() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.tools.push(ToolDeclaration {
         name: "lookup".into(),
         input_schema: serde_json::json!({"type":"object"}),
         ..Default::default()
     });
-    request.tool_choice = Some(ToolChoice::Auto);
+    request.request.set_tool_choice(Some(ToolChoice::Auto));
     let provider_request = codec.encode_request(&request).unwrap();
     assert_eq!(
         provider_request.body_json["toolConfig"]["functionCallingConfig"]["mode"],
@@ -85,13 +87,13 @@ fn encode_tool_choice_auto() {
 #[test]
 fn encode_tool_choice_none() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.tools.push(ToolDeclaration {
         name: "lookup".into(),
         input_schema: serde_json::json!({"type":"object"}),
         ..Default::default()
     });
-    request.tool_choice = Some(ToolChoice::None);
+    request.request.set_tool_choice(Some(ToolChoice::None));
     let provider_request = codec.encode_request(&request).unwrap();
     assert_eq!(
         provider_request.body_json["toolConfig"]["functionCallingConfig"]["mode"],
@@ -102,13 +104,13 @@ fn encode_tool_choice_none() {
 #[test]
 fn encode_tool_choice_required_maps_to_any() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.tools.push(ToolDeclaration {
         name: "lookup".into(),
         input_schema: serde_json::json!({"type":"object"}),
         ..Default::default()
     });
-    request.tool_choice = Some(ToolChoice::Required);
+    request.request.set_tool_choice(Some(ToolChoice::Required));
     let provider_request = codec.encode_request(&request).unwrap();
     assert_eq!(
         provider_request.body_json["toolConfig"]["functionCallingConfig"]["mode"],
@@ -119,15 +121,15 @@ fn encode_tool_choice_required_maps_to_any() {
 #[test]
 fn encode_tool_choice_specific_tool() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.tools.push(ToolDeclaration {
         name: "lookup".into(),
         input_schema: serde_json::json!({"type":"object"}),
         ..Default::default()
     });
-    request.tool_choice = Some(ToolChoice::Tool {
+    request.request.set_tool_choice(Some(ToolChoice::Tool {
         name: "Bash".to_string(),
-    });
+    }));
     let provider_request = codec.encode_request(&request).unwrap();
     let config = &provider_request.body_json["toolConfig"]["functionCallingConfig"];
     assert_eq!(config["mode"], "ANY");
@@ -137,7 +139,7 @@ fn encode_tool_choice_specific_tool() {
 #[test]
 fn omit_tool_config_when_no_tool_choice() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let request = LlmRequest::new("gemini-2.0-flash");
+    let request = HistoryFixture::new("gemini-2.0-flash");
     let provider_request = codec.encode_request(&request).unwrap();
     assert!(provider_request.body_json.get("toolConfig").is_none());
 }
@@ -145,7 +147,7 @@ fn omit_tool_config_when_no_tool_choice() {
 #[test]
 fn encode_request_shape_is_gemini_generate_content() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.system = vec![llm_runtime::SystemBlock::text("sys")];
     request.tools = vec![ToolDeclaration {
         name: "Read".to_string(),
@@ -170,8 +172,8 @@ fn encode_request_shape_is_gemini_generate_content() {
 #[test]
 fn encode_stream_request_targets_stream_generate_content() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
-    request.stream = true;
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
+    request.request.stream = true;
 
     let provider_request = codec.encode_request(&request).unwrap();
 
@@ -213,11 +215,11 @@ fn decode_text_and_function_call() {
 #[test]
 fn encode_generation_config_from_sampling_controls() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
-    request.max_tokens = Some(1024);
-    request.temperature = Some(0.5);
-    request.top_p = Some(0.9);
-    request.stop_sequences = vec!["END".to_string()];
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
+    request.request.input.max_tokens = Some(1024);
+    request.request.input.temperature = Some(0.5);
+    request.request.input.controls.top_p = Some(0.9);
+    request.request.input.stop_sequences = vec!["END".to_string()];
 
     let provider_request = codec.encode_request(&request).unwrap();
     let config = &provider_request.body_json["generationConfig"];
@@ -228,7 +230,7 @@ fn encode_generation_config_from_sampling_controls() {
     assert_eq!(config["stopSequences"], serde_json::json!(["END"]));
 
     let bare = codec
-        .encode_request(&LlmRequest::new("gemini-2.0-flash"))
+        .encode_request(&HistoryFixture::new("gemini-2.0-flash"))
         .unwrap();
     assert!(bare.body_json.get("generationConfig").is_none());
 }
@@ -236,7 +238,7 @@ fn encode_generation_config_from_sampling_controls() {
 #[test]
 fn encode_tool_result_error_uses_error_response_shape() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.messages.push(llm_runtime::Message {
         role: "assistant".to_string(),
         content: vec![ContentBlock::ToolCall {
@@ -267,7 +269,7 @@ fn encode_tool_result_error_uses_error_response_shape() {
 #[test]
 fn encode_tool_result_uses_prior_tool_call_name() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.messages.push(llm_runtime::Message {
         role: "assistant".to_string(),
         content: vec![ContentBlock::ToolCall {
@@ -333,41 +335,41 @@ fn sse_stream_reassembles_text_then_thought_then_function_call() {
 
     assert!(matches!(
         events.first(),
-        Some(LlmEvent::MessageStart { .. })
+        Some(HistoryEvent::MessageStart { .. })
     ));
     assert!(matches!(
         events[1],
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             content_block: ContentBlock::Text { .. },
             ..
         }
     ));
     assert!(
-        matches!(events[2], LlmEvent::ContentBlockDelta { delta: llm_runtime::ContentDelta::TextDelta { ref text }, .. } if text == "On it.")
+        matches!(events[2], HistoryEvent::ContentBlockDelta { delta: llm_runtime::HistoryContentDelta::TextDelta { ref text }, .. } if text == "On it.")
     );
     assert!(matches!(
         events[3],
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             content_block: ContentBlock::Reasoning { .. },
             ..
         }
     ));
     assert!(
-        matches!(events[4], LlmEvent::ContentBlockDelta { delta: llm_runtime::ContentDelta::ThinkingDelta { ref thinking }, .. } if thinking == "thinking")
+        matches!(events[4], HistoryEvent::ContentBlockDelta { delta: llm_runtime::HistoryContentDelta::ThinkingDelta { ref thinking }, .. } if thinking == "thinking")
     );
     assert!(
-        matches!(events[5], LlmEvent::ContentBlockStart { content_block: ContentBlock::ToolCall { ref name, .. }, .. } if name == "Bash")
+        matches!(events[5], HistoryEvent::ContentBlockStart { content_block: ContentBlock::ToolCall { ref name, .. }, .. } if name == "Bash")
     );
     assert!(
-        matches!(events[6], LlmEvent::ContentBlockDelta { delta: llm_runtime::ContentDelta::InputJsonDelta { ref partial_json }, .. } if partial_json == "{\"command\":\"ls\"}")
+        matches!(events[6], HistoryEvent::ContentBlockDelta { delta: llm_runtime::HistoryContentDelta::InputJsonDelta { ref partial_json }, .. } if partial_json == "{\"command\":\"ls\"}")
     );
-    assert!(matches!(events[7], LlmEvent::ContentBlockStop { .. }));
-    assert!(matches!(events[8], LlmEvent::ContentBlockStop { .. }));
-    assert!(matches!(events[9], LlmEvent::ContentBlockStop { .. }));
+    assert!(matches!(events[7], HistoryEvent::ContentBlockStop { .. }));
+    assert!(matches!(events[8], HistoryEvent::ContentBlockStop { .. }));
+    assert!(matches!(events[9], HistoryEvent::ContentBlockStop { .. }));
     assert!(
-        matches!(events[10], LlmEvent::MessageDelta { delta: llm_runtime::MessageDeltaPayload { stop_reason: Some(ref reason), stop_details: None }, .. } if reason == "tool_use")
+        matches!(events[10], HistoryEvent::MessageDelta { delta: llm_runtime::HistoryMessageDelta { stop_reason: Some(ref reason), stop_details: None }, .. } if reason == "tool_use")
     );
-    assert!(matches!(events.last(), Some(LlmEvent::MessageStop)));
+    assert!(matches!(events.last(), Some(HistoryEvent::MessageStop)));
 }
 
 #[test]
@@ -412,7 +414,7 @@ fn stream_usage_only_final_frame_is_not_lost() {
     let usage = events
         .iter()
         .find_map(|event| match event {
-            LlmEvent::MessageDelta {
+            HistoryEvent::MessageDelta {
                 usage: Some(usage), ..
             } => Some(usage.clone()),
             _ => None,
@@ -465,7 +467,7 @@ fn stream_synthesizes_unique_tool_call_ids() {
     let ids: Vec<String> = events
         .iter()
         .filter_map(|event| match event {
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 content_block: ContentBlock::ToolCall { id, .. },
                 ..
             } => Some(id.clone()),
@@ -480,7 +482,7 @@ fn stream_synthesizes_unique_tool_call_ids() {
 #[test]
 fn encode_tool_result_with_unknown_call_id_is_rejected() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.messages.push(llm_runtime::Message {
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
@@ -521,10 +523,12 @@ fn decode_blocked_prompt_reports_block_reason() {
 #[test]
 fn encode_reasoning_budget_as_thinking_config() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
-    request.reasoning = Some(llm_runtime::ReasoningConfig::Enabled {
-        budget_tokens: 2048,
-    });
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
+    request
+        .request
+        .set_reasoning(Some(llm_runtime::ReasoningConfig::Enabled {
+            budget_tokens: 2048,
+        }));
 
     let provider_request = codec.encode_request(&request).unwrap();
 
@@ -537,7 +541,7 @@ fn encode_reasoning_budget_as_thinking_config() {
 #[test]
 fn system_blocks_become_system_instruction_parts() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
-    let mut request = LlmRequest::new("gemini-2.0-flash");
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.system = vec![
         llm_runtime::SystemBlock {
             text: "a".to_string(),
@@ -614,7 +618,7 @@ async fn signed_text_and_tools_survive_both_response_paths_and_replay_once() {
             1,
             "metadata must not become a second executable call"
         );
-        let mut request = LlmRequest::new("gemini-3.1-pro-preview");
+        let mut request = HistoryFixture::new("gemini-3.1-pro-preview");
         request.messages.push(Message {
             role: "assistant".into(),
             content: response.content,

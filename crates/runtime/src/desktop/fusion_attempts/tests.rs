@@ -142,7 +142,7 @@ impl DurableHarness {
                 "pricing":{"input_per_million":0.002,"output_per_million":0.002,"cache_read_per_million":0.002}}]
         })).unwrap());
         let client = Arc::new(
-            llm_runtime::DefaultLlmClient::from_config(llm_runtime::ClientConfig {
+            llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
                 providers: vec![llm_runtime::ProviderProfile {
                     wire_profile,
                     regions: llm_runtime::Region::all(),
@@ -283,8 +283,9 @@ impl DurableHarness {
         service.set_model_attempt_hooks(host);
         let mut request = llm_runtime::LlmRequest::new("wire").with_user_text("hello");
         request.profile = Some("profile".into());
-        request.max_tokens = Some(50);
-        request.model_attempt = Some(run.context(ModelAttemptStage::Panel, Some(0)).unwrap());
+        request.input.max_tokens = Some(50);
+        request.execution.model_attempt =
+            Some(run.context(ModelAttemptStage::Panel, Some(0)).unwrap());
         Self {
             service,
             authority,
@@ -709,7 +710,7 @@ fn tracker_and_budget() -> (Arc<cost::CostTracker>, Arc<cost::BudgetEnforcer>) {
 #[test]
 fn desktop_attempt_service_hook_backedge_is_weak() {
     let service = Arc::new(llm_runtime::ApiService::new(
-        Arc::new(llm_runtime::DefaultLlmClient::from_config(Default::default()).unwrap()),
+        Arc::new(llm_runtime::ModelRuntime::from_config(Default::default()).unwrap()),
         Arc::new(NoTransport),
         Default::default(),
         Default::default(),

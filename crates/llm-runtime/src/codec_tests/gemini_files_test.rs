@@ -1,21 +1,23 @@
-//! Task 6: Gemini File API upload flow — pure builders/parsers + client driver.
-//!
-//! No vendored reference exists; the wire shapes follow the documented Google
-//! resumable-upload protocol and every header byte is pinned here.
+use crate::upstream::codec_fixtures::HistoryFixture;
+use crate::upstream::codec_fixtures::{FixtureCodec, GeminiCodec};
+// Task 6: Gemini File API upload flow — pure builders/parsers + client driver.
+//
+// No vendored reference exists; the wire shapes follow the documented Google
+// resumable-upload protocol and every header byte is pinned here.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use llm_runtime::client::DefaultLlmClient;
-use llm_runtime::providers::gemini_files::{
+use super::gemini_files_fixture::{
     file_status_request, parse_file_status, parse_start_response, parse_upload_response,
     start_upload_request, upload_finalize_request, GeminiFile,
 };
-use llm_runtime::providers::GeminiCodec;
+use llm_runtime::client::ModelRuntime;
+
 use llm_runtime::{
     AuthStrategy, BoxFuture, Capabilities, ClientConfig, ContentBlock, CredentialConfig, LlmError,
-    LlmRequest, Message, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
-    ProviderRequest, ProviderResponse, StreamingResponse, Transport, WireCodec,
+    Message, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
+    ProviderRequest, ProviderResponse, StreamingResponse,
 };
 
 const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -251,7 +253,7 @@ fn provider_request_legacy_json_without_body_bytes_deserializes_to_none() {
     assert_eq!(request.body_bytes, None);
 }
 
-// ── Driver: DefaultLlmClient::upload_file with a scripted mock transport ──────
+// ── Driver: ModelRuntime::upload_file with a scripted mock transport ──────
 
 #[derive(Debug)]
 struct ScriptedTransport {
@@ -299,9 +301,9 @@ impl llm_runtime::test_support::FixtureTransport for ScriptedTransport {
 }
 llm_runtime::impl_fixture_transport!(ScriptedTransport);
 
-fn gemini_client() -> DefaultLlmClient {
+fn gemini_client() -> ModelRuntime {
     std::env::set_var("LLM_CLIENT_GEMINI_FILES_TEST_KEY", "gemini-files-key");
-    DefaultLlmClient::from_config(ClientConfig {
+    ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: lingxi_llm_client::protocol::Region::all(),
@@ -339,9 +341,9 @@ fn gemini_client() -> DefaultLlmClient {
     .expect("client")
 }
 
-fn anthropic_client() -> DefaultLlmClient {
+fn anthropic_client() -> ModelRuntime {
     std::env::set_var("LLM_CLIENT_GEMINI_FILES_TEST_KEY", "gemini-files-key");
-    DefaultLlmClient::from_config(ClientConfig {
+    ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: lingxi_llm_client::protocol::Region::all(),
@@ -568,7 +570,7 @@ fn uploaded_file_uri_round_trips_into_gemini_file_data_encoding() {
     let file = parse_upload_response(&body).expect("file");
 
     let codec = GeminiCodec::new(GEMINI_BASE);
-    let mut request = LlmRequest::new("gemini-2.0-flash");
+    let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::ImageUrl {

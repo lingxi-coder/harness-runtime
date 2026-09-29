@@ -574,7 +574,7 @@ mod tests {
 
     impl VisionAwareMockApiClient {
         fn new(
-            responses: Vec<llm_runtime::LlmResponse>,
+            responses: Vec<llm_runtime::HistoryResponse>,
             route: llm_runtime::MediaRoute,
             result: VisionDelegationResult,
         ) -> Self {
@@ -625,7 +625,7 @@ mod tests {
             system: Option<&str>,
             msgs: Vec<ConversationMessage>,
             tools: Vec<serde_json::Value>,
-        ) -> Result<llm_runtime::LlmResponse, LlmError> {
+        ) -> Result<llm_runtime::HistoryResponse, LlmError> {
             self.inner
                 .messages_create(model, profile, system, msgs, tools)
                 .await

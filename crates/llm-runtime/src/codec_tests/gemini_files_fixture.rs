@@ -1,5 +1,5 @@
-//! Host envelope projection for the upstream Gemini file protocol.
-use crate::{LlmError, ProviderRequest, ProviderResponse};
+//! Private test envelope adapter for SDK Gemini file requests.
+use crate::{LlmError, ProviderRequest};
 use lingxi_llm_client::providers::google::files_wire as wire;
 pub use wire::GeminiFile;
 fn project(request: lingxi_llm_client::HttpRequest) -> ProviderRequest {
@@ -36,16 +36,4 @@ pub fn parse_upload_response(body: &serde_json::Value) -> Result<GeminiFile, Llm
 }
 pub fn parse_file_status(body: &serde_json::Value) -> Result<GeminiFile, LlmError> {
     wire::parse_file_status(body).map_err(crate::upstream::error)
-}
-/// Map a non-2xx File API response through the shared Gemini error taxonomy
-/// (Google `error.status` strings, retry-after headers, HTTP fallback).
-///
-/// Crate-internal seam for the [`crate::client::DefaultLlmClient::upload_file`]
-/// driver; the underlying mapper lives in the (private) `gemini` codec module.
-pub(crate) fn decode_upload_error(response: &ProviderResponse) -> LlmError {
-    use crate::WireCodec;
-    super::GeminiCodec::new("")
-        .decode_response(response.clone())
-        .err()
-        .unwrap_or(LlmError::ProviderInternal)
 }

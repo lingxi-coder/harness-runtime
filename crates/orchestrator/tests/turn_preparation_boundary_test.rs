@@ -23,7 +23,7 @@
 //! through the public entries, so they stay meaningful whether preparation lives
 //! in `turn_loop.rs` (today) or in a `BatchedRound` strategy (after PR 2).
 
-use llm_runtime::{ContentBlock as LlmContentBlock, LlmError, LlmResponse, Usage};
+use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError, Usage};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, MockStreamingApiClient,
     NoOpPermissionGate, StaticMemoryProvider,
@@ -61,8 +61,8 @@ where
     handle.join().expect("large-stack test thread panicked");
 }
 
-fn text_response(text: &str) -> LlmResponse {
-    LlmResponse {
+fn text_response(text: &str) -> HistoryResponse {
+    HistoryResponse {
         id: "msg_prep".into(),
         model: "claude-opus-4-7".into(),
         content: vec![LlmContentBlock::Text {
@@ -84,12 +84,12 @@ fn text_response(text: &str) -> LlmResponse {
 /// `ptl_recovery_test`'s `PtlMockApi` records only message COUNTS — these tests
 /// have to look inside the messages for the reminder text.
 struct ScriptedApi {
-    script: tokio::sync::Mutex<std::collections::VecDeque<Result<LlmResponse, LlmError>>>,
+    script: tokio::sync::Mutex<std::collections::VecDeque<Result<HistoryResponse, LlmError>>>,
     captured: tokio::sync::Mutex<Vec<Vec<ConversationMessage>>>,
 }
 
 impl ScriptedApi {
-    fn new(script: Vec<Result<LlmResponse, LlmError>>) -> Self {
+    fn new(script: Vec<Result<HistoryResponse, LlmError>>) -> Self {
         Self {
             script: tokio::sync::Mutex::new(script.into()),
             captured: tokio::sync::Mutex::new(Vec::new()),
@@ -109,7 +109,7 @@ impl OrchestratorApiClient for ScriptedApi {
         _system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.captured.lock().await.push(msgs);
         self.script.lock().await.pop_front().unwrap_or_else(|| {
             Err(LlmError::Transport {

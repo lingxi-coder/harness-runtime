@@ -7758,7 +7758,7 @@ impl agent::api::SubagentApiClient for ForegroundOwnerFixture {
         _: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
         _: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let content = if call == 0 {
             vec![llm_runtime::ContentBlock::ToolCall {
@@ -7787,7 +7787,7 @@ impl agent::api::SubagentApiClient for ForegroundOwnerFixture {
                 cache_control: None,
             }]
         };
-        Ok(llm_runtime::LlmResponse {
+        Ok(llm_runtime::HistoryResponse {
             id: "owner-model".into(),
             model: "test".into(),
             content,

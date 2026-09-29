@@ -28,7 +28,7 @@ use tasks::TaskType;
 // ---------------------------------------------------------------------------
 
 struct ScriptedApiClient {
-    responses: StdMutex<VecDeque<llm_runtime::LlmResponse>>,
+    responses: StdMutex<VecDeque<llm_runtime::HistoryResponse>>,
     calls: AtomicUsize,
 }
 
@@ -52,10 +52,10 @@ impl agent::api::SubagentApiClient for ScriptedApiClient {
         _system: Option<&str>,
         _messages: Vec<protocol::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let next = self.responses.lock().unwrap().pop_front();
-        Ok(next.unwrap_or_else(|| llm_runtime::LlmResponse {
+        Ok(next.unwrap_or_else(|| llm_runtime::HistoryResponse {
             id: "scripted".into(),
             model: "scripted".into(),
             content: vec![llm_runtime::ContentBlock::Text {

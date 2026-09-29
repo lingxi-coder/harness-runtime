@@ -1,7 +1,9 @@
+use crate::upstream::codec_fixtures::HistoryFixture;
+use crate::upstream::codec_fixtures::{FixtureCodec, OpenAiChatCodec};
 use base64::Engine as _;
 use llm_runtime::{
-    ContentBlock, ContentDelta, LlmEvent, LlmRequest, Message, OpenAiChatCodec, ProviderResponse,
-    RawStreamFrame, ToolDeclaration, WireCodec,
+    ContentBlock, HistoryContentDelta, HistoryEvent, Message, ProviderResponse, RawStreamFrame,
+    ToolDeclaration,
 };
 
 // ── Item 2: OpenAI content-as-array decode ────────────────────────────────────
@@ -100,7 +102,7 @@ fn decode_content_string_still_works() {
 #[test]
 fn encode_image_bytes_produces_data_uri_part() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let mut request = LlmRequest::new("gpt-4o");
+    let mut request = HistoryFixture::new("gpt-4o");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::Image {
@@ -121,7 +123,7 @@ fn encode_image_bytes_produces_data_uri_part() {
 #[test]
 fn encode_image_url_produces_url_part() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let mut request = LlmRequest::new("gpt-4o");
+    let mut request = HistoryFixture::new("gpt-4o");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::ImageUrl {
@@ -139,7 +141,7 @@ fn encode_image_url_produces_url_part() {
 #[test]
 fn encode_mixed_text_and_image_becomes_array_form() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let mut request = LlmRequest::new("gpt-4o");
+    let mut request = HistoryFixture::new("gpt-4o");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![
@@ -166,7 +168,7 @@ fn encode_mixed_text_and_image_becomes_array_form() {
 #[test]
 fn encode_text_only_message_stays_plain_string() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let request = LlmRequest::new("gpt-4o").with_user_text("just text");
+    let request = HistoryFixture::new("gpt-4o").with_user_text("just text");
     let provider_request = codec.encode_request(&request).unwrap();
     let content = &provider_request.body_json["messages"][0]["content"];
     assert!(
@@ -179,7 +181,7 @@ fn encode_text_only_message_stays_plain_string() {
 fn encode_document_produces_file_part() {
     // Document bytes must be encoded as a {"type":"file"} media part with a data-URI.
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let mut request = LlmRequest::new("gpt-4o");
+    let mut request = HistoryFixture::new("gpt-4o");
     let pdf_bytes = vec![0x25u8, 0x50, 0x44, 0x46]; // %PDF
     request.messages.push(Message {
         role: "user".to_string(),
@@ -208,7 +210,7 @@ fn encode_document_produces_file_part() {
 #[test]
 fn encode_mixed_text_and_document_becomes_array_form() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let mut request = LlmRequest::new("gpt-4o");
+    let mut request = HistoryFixture::new("gpt-4o");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![
@@ -238,7 +240,7 @@ fn encode_mixed_text_and_document_becomes_array_form() {
 #[test]
 fn encode_request_shape_is_openai_chat_completions() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let mut request = LlmRequest::new("gpt-4o");
+    let mut request = HistoryFixture::new("gpt-4o");
     request.system = vec![llm_runtime::SystemBlock::text("sys")];
     request.tools = vec![ToolDeclaration {
         name: "Read".to_string(),
@@ -291,11 +293,11 @@ fn decode_text_and_tool_responses() {
 #[test]
 fn encode_sampling_controls() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let mut request = LlmRequest::new("gpt-4o");
-    request.max_tokens = Some(1024);
-    request.temperature = Some(0.5);
-    request.top_p = Some(0.9);
-    request.stop_sequences = vec!["END".to_string()];
+    let mut request = HistoryFixture::new("gpt-4o");
+    request.request.input.max_tokens = Some(1024);
+    request.request.input.temperature = Some(0.5);
+    request.request.input.controls.top_p = Some(0.9);
+    request.request.input.stop_sequences = vec!["END".to_string()];
 
     let provider_request = codec.encode_request(&request).unwrap();
 
@@ -307,7 +309,9 @@ fn encode_sampling_controls() {
         serde_json::json!(["END"])
     );
 
-    let bare = codec.encode_request(&LlmRequest::new("gpt-4o")).unwrap();
+    let bare = codec
+        .encode_request(&HistoryFixture::new("gpt-4o"))
+        .unwrap();
     assert!(bare.body_json.get("max_tokens").is_none());
     assert!(bare.body_json.get("temperature").is_none());
     assert!(bare.body_json.get("top_p").is_none());
@@ -317,7 +321,7 @@ fn encode_sampling_controls() {
 #[test]
 fn encode_tool_result_as_tool_message_not_tool_call() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let mut request = LlmRequest::new("gpt-4o");
+    let mut request = HistoryFixture::new("gpt-4o");
     request.messages.push(llm_runtime::Message {
         role: "assistant".to_string(),
         content: vec![ContentBlock::ToolResult {
@@ -345,7 +349,7 @@ fn encode_tool_result_as_tool_message_not_tool_call() {
 #[test]
 fn encode_multiple_tool_results_preserves_each_as_tool_message() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let mut request = LlmRequest::new("gpt-4o");
+    let mut request = HistoryFixture::new("gpt-4o");
     request.messages.push(llm_runtime::Message {
         role: "assistant".to_string(),
         content: vec![
@@ -449,20 +453,20 @@ fn sse_stream_reassembles_text_then_tool_call() {
 
     assert!(matches!(
         events.first(),
-        Some(LlmEvent::MessageStart { .. })
+        Some(HistoryEvent::MessageStart { .. })
     ));
     let args: String = events
         .iter()
         .filter_map(|event| match event {
-            LlmEvent::ContentBlockDelta {
-                delta: ContentDelta::InputJsonDelta { partial_json },
+            HistoryEvent::ContentBlockDelta {
+                delta: HistoryContentDelta::InputJsonDelta { partial_json },
                 ..
             } => Some(partial_json.clone()),
             _ => None,
         })
         .collect();
     assert_eq!(args, "{\"command\":\"ls\"}");
-    assert!(matches!(events.last(), Some(LlmEvent::MessageStop)));
+    assert!(matches!(events.last(), Some(HistoryEvent::MessageStop)));
 }
 
 #[test]
@@ -487,7 +491,7 @@ fn stream_usage_keeps_reasoning_and_cached_buckets_independent() {
     let usage = events
         .iter()
         .find_map(|event| match event {
-            LlmEvent::MessageDelta {
+            HistoryEvent::MessageDelta {
                 usage: Some(usage), ..
             } => Some(usage.clone()),
             _ => None,
@@ -503,8 +507,8 @@ fn stream_usage_keeps_reasoning_and_cached_buckets_independent() {
 #[test]
 fn kimi_stream_requests_terminal_usage_and_decodes_top_level_cached_tokens() {
     let codec = OpenAiChatCodec::new("https://api.moonshot.ai/v1").with_profile_name("kimi");
-    let mut request = LlmRequest::new("kimi-k3").with_user_text("hello");
-    request.stream = true;
+    let mut request = HistoryFixture::new("kimi-k3").with_user_text("hello");
+    request.request.stream = true;
 
     let encoded = codec.encode_request(&request).expect("encode Kimi stream");
     assert_eq!(encoded.body_json["stream"], serde_json::json!(true));
@@ -532,7 +536,7 @@ fn kimi_stream_requests_terminal_usage_and_decodes_top_level_cached_tokens() {
     let usage = events
         .iter()
         .find_map(|event| match event {
-            LlmEvent::MessageDelta {
+            HistoryEvent::MessageDelta {
                 usage: Some(usage), ..
             } => Some(usage),
             _ => None,
@@ -590,7 +594,7 @@ fn stream_tool_fragment_without_index_defaults_to_slot_zero() {
         .filter(|event| {
             matches!(
                 event,
-                LlmEvent::ContentBlockStart {
+                HistoryEvent::ContentBlockStart {
                     content_block: ContentBlock::ToolCall { .. },
                     ..
                 }
@@ -602,8 +606,8 @@ fn stream_tool_fragment_without_index_defaults_to_slot_zero() {
     let args: String = events
         .iter()
         .filter_map(|event| match event {
-            LlmEvent::ContentBlockDelta {
-                delta: ContentDelta::InputJsonDelta { partial_json },
+            HistoryEvent::ContentBlockDelta {
+                delta: HistoryContentDelta::InputJsonDelta { partial_json },
                 ..
             } => Some(partial_json.clone()),
             _ => None,
@@ -619,10 +623,12 @@ fn numeric_reasoning_budget_is_not_silently_approximated_on_chat_wire() {
     // this wire is model-id-driven, e.g. deepseek-reasoner). See
     // `providers/openai.rs::encode_request`.
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let mut request = LlmRequest::new("gpt-4o");
-    request.reasoning = Some(llm_runtime::ReasoningConfig::Enabled {
-        budget_tokens: 2048,
-    });
+    let mut request = HistoryFixture::new("gpt-4o");
+    request
+        .request
+        .set_reasoning(Some(llm_runtime::ReasoningConfig::Enabled {
+            budget_tokens: 2048,
+        }));
 
     assert!(matches!(
         codec.encode_request(&request),
@@ -633,7 +639,7 @@ fn numeric_reasoning_budget_is_not_silently_approximated_on_chat_wire() {
 #[test]
 fn system_blocks_join_into_one_system_message() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
-    let mut request = LlmRequest::new("gpt-4o");
+    let mut request = HistoryFixture::new("gpt-4o");
     request.system = vec![
         llm_runtime::SystemBlock {
             text: "a".to_string(),
@@ -654,7 +660,7 @@ fn system_blocks_join_into_one_system_message() {
     );
 
     let bare = codec
-        .encode_request(&LlmRequest::new("gpt-4o").with_user_text("hi"))
+        .encode_request(&HistoryFixture::new("gpt-4o").with_user_text("hi"))
         .unwrap();
     assert_eq!(bare.body_json["messages"][0]["role"], "user");
 }

@@ -39,7 +39,7 @@ fn anthropic_profile(inputs: &AssembleInputs) -> (ProviderProfile, Option<Creden
         )
     } else {
         // Keep the first-party route credential-capable even when the process
-        // boots without a key.  `DefaultLlmClient` resolves the credential on
+        // boots without a key.  `ModelRuntime` resolves the credential on
         // every request, so a bridge that starts unauthenticated can accept a
         // key later in the same process.  Emitting `AuthStrategy::None` here
         // would make the catalog look fixable while permanently bypassing the
@@ -172,7 +172,7 @@ pub fn assemble_for_region(inputs: AssembleInputs, region: llm_runtime::Region) 
         };
         // A settings entry named like a built-in preset REPLACES it. Appending
         // beside it instead produces two profiles with one name, and
-        // `DefaultLlmClient::from_config` rejects a repeated `profile_name` for
+        // `ModelRuntime::from_config` rejects a repeated `profile_name` for
         // the WHOLE config — so a single `"deepseek": {…}` in settings.json took
         // every other provider down with it, not just that one.
         let superseded = providers

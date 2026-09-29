@@ -100,16 +100,16 @@ impl WireAttempt {
         }
     }
 
-    pub(crate) fn observe_events(&mut self, events: &[crate::LlmEvent]) {
+    pub(crate) fn observe_events(&mut self, events: &[crate::HistoryEvent]) {
         if self.lease.is_none() {
             return;
         }
         for event in events {
             match event {
-                crate::LlmEvent::MessageStart { response } => {
+                crate::HistoryEvent::MessageStart { response } => {
                     self.observe(&response.usage, ModelAttemptUsageCompleteness::Partial);
                 }
-                crate::LlmEvent::MessageDelta {
+                crate::HistoryEvent::MessageDelta {
                     usage: Some(usage),
                     delta,
                 } => {
@@ -125,7 +125,7 @@ impl WireAttempt {
                         },
                     );
                 }
-                crate::LlmEvent::Completed { response } => {
+                crate::HistoryEvent::Completed { response } => {
                     if has_usage_report(&response.usage) {
                         self.observe(&response.usage, ModelAttemptUsageCompleteness::Complete);
                     }

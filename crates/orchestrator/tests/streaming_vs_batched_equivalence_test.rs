@@ -3,7 +3,7 @@
 //! Asserts:
 //!   - both paths produce `ConversationOutcome::EndTurn { turn_count: 1, .. }`
 //!   - both paths append identical assistant message bodies to the session.
-use llm_runtime::{ContentBlock as LlmContentBlock, LlmResponse, Usage};
+use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, Usage};
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
@@ -43,8 +43,8 @@ where
 /// `todo_tools_gate` allowlist, or the task reminder stops firing.
 const FIXTURE_MODEL: &str = "claude-opus-4-7";
 
-fn batched_response(text: &str) -> LlmResponse {
-    LlmResponse {
+fn batched_response(text: &str) -> HistoryResponse {
+    HistoryResponse {
         id: "msg_eq".into(),
         model: "claude-opus-4-7".into(),
         content: vec![LlmContentBlock::Text {

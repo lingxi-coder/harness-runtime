@@ -1,10 +1,9 @@
-//! Cited provider text stays visible and is replayed exactly once.
+use crate::upstream::codec_fixtures::HistoryFixture;
+use crate::upstream::codec_fixtures::{AnthropicMessagesCodec, FixtureCodec, OpenAiChatCodec};
+// Cited provider text stays visible and is replayed exactly once.
 use futures::StreamExt;
 use llm_runtime::stream_accumulator::accumulate_stream_salvaging;
-use llm_runtime::{
-    AnthropicMessagesCodec, ContentBlock, LlmRequest, LlmResponse, Message, OpenAiChatCodec,
-    ProviderResponse, RawStreamFrame, WireCodec,
-};
+use llm_runtime::{ContentBlock, HistoryResponse, Message, ProviderResponse, RawStreamFrame};
 use serde_json::{json, Value};
 
 const ANSWER: &str = "The cited answer.";
@@ -20,7 +19,7 @@ fn codec() -> AnthropicMessagesCodec {
     AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01")
 }
 
-async fn streamed_response(plain_first: bool, initial_text: bool) -> LlmResponse {
+async fn streamed_response(plain_first: bool, initial_text: bool) -> HistoryResponse {
     let codec = codec();
     let mut decoder = codec.stream_decoder();
     let mut frames = vec![json!({"type":"message_start","message":{
@@ -64,7 +63,7 @@ async fn streamed_response(plain_first: bool, initial_text: bool) -> LlmResponse
         .unwrap()
 }
 
-fn visible_text(response: &LlmResponse) -> Vec<&str> {
+fn visible_text(response: &HistoryResponse) -> Vec<&str> {
     response
         .content
         .iter()
@@ -75,8 +74,8 @@ fn visible_text(response: &LlmResponse) -> Vec<&str> {
         .collect()
 }
 
-fn replay_request(response: LlmResponse) -> LlmRequest {
-    let mut request = LlmRequest::new("claude-sonnet-4-6");
+fn replay_request(response: HistoryResponse) -> HistoryFixture {
+    let mut request = HistoryFixture::new("claude-sonnet-4-6");
     request.messages.push(Message {
         role: "assistant".into(),
         content: response.content,

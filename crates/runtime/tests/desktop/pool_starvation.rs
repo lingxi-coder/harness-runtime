@@ -67,9 +67,9 @@ impl SubagentApiClient for ScriptedApiClient {
         _system: Option<&str>,
         _messages: Vec<protocol::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         *self.calls.lock().unwrap() += 1;
-        Ok(llm_runtime::LlmResponse {
+        Ok(llm_runtime::HistoryResponse {
             id: "scripted".into(),
             model: "scripted".into(),
             content: vec![llm_runtime::ContentBlock::Text {

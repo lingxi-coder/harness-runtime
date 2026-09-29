@@ -18,7 +18,7 @@ NETWORK_EXCEPTIONS = {
 }
 # This module serializes normalized host events for the CLI, not provider input.
 STREAM_EXCEPTIONS = {"crates/orchestrator/src/sse/event_router.rs"}
-FIXTURES = {"crates/llm-runtime/src/test_support.rs", "crates/tool-api/src/test_support.rs"}
+FIXTURES = {"crates/llm-runtime/src/test_support.rs", "crates/tool-api/src/test_support.rs", "crates/llm-runtime/src/codec_fixtures.rs", "crates/llm-runtime/src/codec_tests/gemini_files_fixture.rs"}
 
 def item_end(source, start):
     """Find the end of a cfg-gated Rust item without counting quoted braces."""
@@ -90,7 +90,7 @@ RULES = {
     "model endpoint belongs in llm-client": re.compile(r'"[^"\n]*(?:/v1/messages|/chat/completions|/backend-api/models|/responses|/embeddings|/audio/(?:speech|transcriptions|translations)|/images/(?:generations|edits)|/v1/models|:generateContent|:streamGenerateContent)[^"\n]*"'),
     "provider stream parsing belongs in llm-client": re.compile(r'"(?:content_block_(?:start|delta|stop)|response\.(?:output_text|output_item|function_call_arguments)\.[^"\n]+)"'),
     "WebSocket implementation requires an explicit non-model exception": re.compile(r'\btokio_tungstenite\s*::'),
-    "removed model adapter must not return": re.compile(r'\b(?:struct\s+AnthropicRequestBuilder|struct\s+LlmTransportBridge|trait\s+ResponsesWebSocketTransportSession|struct\s+StreamReassembler)\b'),
+    "removed model adapter must not return": re.compile(r'\b(?:struct\s+AnthropicRequestBuilder|struct\s+LlmTransportBridge|trait\s+ResponsesWebSocketTransportSession|struct\s+StreamReassembler|struct\s+DefaultLlmClient|struct\s+ResponsesWebSocketSession|trait\s+WireCodec|trait\s+StreamDecoder|struct\s+LlmResponse|enum\s+LlmEvent)\b'),
 }
 
 def findings(source):
@@ -101,6 +101,11 @@ def main():
     if "--selftest" in sys.argv:
         assert findings('fn run() { let url = format!("{base}/v1/messages"); }')
         assert findings('struct AnthropicRequestBuilder {}')
+        assert findings('pub trait WireCodec {}')
+        assert findings('pub trait StreamDecoder {}')
+        assert findings('pub struct DefaultLlmClient {}')
+        assert findings('pub struct LlmResponse {}')
+        assert not findings('pub use lingxi_llm_client::WireCodec;')
         assert findings('match event { \"content_block_delta\" => {} }')
         assert findings('fn connect(){ tokio_tungstenite::connect_async(url); }')
         assert findings('fn run(){ let url="https://provider.test/v1/messages"; }')

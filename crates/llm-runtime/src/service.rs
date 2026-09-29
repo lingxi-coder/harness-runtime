@@ -27,8 +27,8 @@ use crate::model::retry::{
 use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
 use crate::{
-    CacheControl, CostEstimator, DefaultLlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse,
-    MediaRoute, ResponsesWebSocketSession, StreamDecoder, Transport,
+    CacheControl, CostEstimator, HistoryEvent, HistoryResponse, LlmError, LlmRequest, MediaRoute,
+    ModelRuntime, ResponsesSession, Transport,
 };
 use futures::stream::BoxStream;
 use protocol::{is_nested_media_value, ContentBlock, ConversationMessage};
@@ -79,28 +79,28 @@ fn prompt_caching_enabled(model: &str) -> bool {
 
 /// Collapse a [`ReasoningConfig`] to a numeric budget for telemetry labels.
 /// `Adaptive` → 0, `Enabled{b}` → b.
-fn reasoning_budget(reasoning: Option<crate::ReasoningConfig>) -> u32 {
-    match reasoning {
-        Some(crate::ReasoningConfig::Enabled { budget_tokens }) => budget_tokens,
-        Some(crate::ReasoningConfig::Adaptive) | None => 0,
+fn reasoning_budget(thinking: Option<&lingxi_llm_client::protocol::ThinkingConfig>) -> u32 {
+    match thinking.and_then(|thinking| thinking.budget) {
+        Some(lingxi_llm_client::protocol::ThinkingBudget::Tokens(tokens)) => tokens,
+        _ => 0,
     }
 }
 
 /// Remove provider-authenticated assistant blocks before retrying on a different
 /// model. Their signatures are scoped to the model that produced them and must
 /// never be replayed to a fallback provider/model.
-fn strip_signature_blocks(messages: &mut [crate::Message]) {
+fn strip_signature_blocks(messages: &mut [lingxi_llm_client::protocol::ConversationMessage]) {
     for message in messages
         .iter_mut()
-        .filter(|message| message.role == "assistant")
+        .filter(|message| message.role == lingxi_llm_client::protocol::MessageRole::Assistant)
     {
         message.content.retain(|block| {
             !matches!(
                 block,
-                crate::ContentBlock::Reasoning { .. }
-                    | crate::ContentBlock::RedactedThinking { .. }
-                    | crate::ContentBlock::ConnectorText { .. }
-            )
+                lingxi_llm_client::protocol::ContentBlock::Thinking { .. }
+                    | lingxi_llm_client::protocol::ContentBlock::RedactedThinking { .. }
+            ) && !matches!(block, lingxi_llm_client::protocol::ContentBlock::ProviderContent { value, .. }
+                if value["type"] == "connector_text")
         });
     }
 }
@@ -140,13 +140,15 @@ fn advance_connection(
     let hop = chain.get(*index)?;
     *index += 1;
     req.profile = Some(hop.profile_name.clone());
-    req.model.clone_from(&hop.request_model);
+    req.input.model.clone_from(&hop.request_model);
     state.attempt = 0;
     state.consecutive_overloaded = 0;
     Some(hop.profile_name.clone())
 }
 
-fn strip_signature_blocks_for_fallback(messages: &mut [crate::Message]) {
+fn strip_signature_blocks_for_fallback(
+    messages: &mut [lingxi_llm_client::protocol::ConversationMessage],
+) {
     if is_internal_account_class() {
         strip_signature_blocks(messages);
     }
@@ -200,66 +202,11 @@ fn guard_max_tokens_adjustment(
     }
 }
 
-/// Provider execution may have committed work before its response is lost.
-/// The host owns retries when using the SDK's single-dispatch interface, so it
-/// must preserve the SDK's no-replay boundary for hosted tools and scoped
-/// continuations. Apply it to every hosted tool, including future variants.
-/// Native execution history can resume work even without a tool declaration.
+/// The SDK classifies provider execution state; the host combines that fact
+/// with its transport, settlement, and retry policy before any repeat dispatch.
 fn allows_automatic_replay(request: &LlmRequest) -> bool {
-    request.hosted_tools.is_empty()
-        && request.continuation.is_none()
-        && request
-            .native_options
-            .iter()
-            .all(native_options_allow_replay)
-        && !request
-            .messages
-            .iter()
-            .flat_map(|message| &message.content)
-            .any(|block| match block {
-                crate::ContentBlock::ServerToolUse { .. }
-                | crate::ContentBlock::AdvisorToolResult { .. } => true,
-                crate::ContentBlock::ProviderContent { value, .. } => {
-                    native_content_may_execute(value)
-                }
-                _ => false,
-            })
-}
-
-fn native_options_allow_replay(extension: &lingxi_llm_client::protocol::NativeExtension) -> bool {
-    use lingxi_llm_client::providers::anthropic::native::AnthropicRequestOptions;
-
-    // These options only declare tools executed by the host after a completed
-    // model response. Unknown extensions may carry provider-side container or
-    // conversation state, so they must not inherit ordinary chat's retry policy.
-    // Check raw keys too: a future SDK field must be reviewed before it becomes
-    // replayable merely because the typed decoder has learned to accept it.
-    extension
-        .data()
-        .as_object()
-        .is_some_and(|data| data.keys().all(|key| key == "client_toolsets"))
-        && extension.decode::<AnthropicRequestOptions>().is_ok()
-}
-
-fn native_content_may_execute(value: &serde_json::Value) -> bool {
-    match value.get("type").and_then(serde_json::Value::as_str) {
-        // These blocks preserve ordinary conversation state. Unknown native
-        // content stays conservative rather than silently enabling replay for
-        // a newly added server tool.
-        Some(
-            "lingxi_observation" | "text" | "thinking" | "redacted_thinking" | "reasoning"
-            | "chat_reasoning" | "tool_result",
-        ) => false,
-        Some("tool_use") => value.get("caller").is_some_and(|caller| {
-            !caller.is_null()
-                && caller.get("type").and_then(serde_json::Value::as_str) != Some("direct")
-        }),
-        Some("lingxi_replay_metadata") => value.get("block").is_none_or(native_content_may_execute),
-        // SDK replay companions can themselves contain a provider-native
-        // text/ reasoning block (for example cited Anthropic text).
-        Some("provider_content") => value.get("value").is_none_or(native_content_may_execute),
-        _ => true,
-    }
+    lingxi_llm_client::execution_safety::request_replay_safety(&request.input)
+        == lingxi_llm_client::execution_safety::RequestReplaySafety::Stateless
 }
 
 // ── Subscriber state ─────────────────────────────────────────────────────────
@@ -281,7 +228,7 @@ pub struct SubscriberState {
 /// State threaded through the `futures::stream::unfold` loop in `drive_stream`.
 struct StreamState {
     attempt: crate::model_attempt::WireAttempt,
-    decoder: crate::upstream::Decoder,
+    decoder: crate::history_projection::HistoryProjector,
     frames: lingxi_llm_client::ModelStream,
     pricing: Option<lingxi_llm_client::FrozenPricing>,
     pricing_model: crate::PricingModelRef,
@@ -291,7 +238,7 @@ struct StreamState {
     /// error handling stay identical to the un-seeded path. `None` on every
     /// stream that did not carry `anthropic-dispatch-id`.
     seed: Option<Result<Option<lingxi_llm_client::StreamBatch>, LlmError>>,
-    queue: VecDeque<LlmEvent>,
+    queue: VecDeque<HistoryEvent>,
     finished: bool,
     /// Guard against double-emit: once we have fired succeed/fail we never fire again.
     done: bool,
@@ -329,9 +276,9 @@ fn frozen_stream_quote(
     crate::cost::project_estimate(estimate, pricing_model.clone()).ok()
 }
 
-fn attach_frozen_stream_quote(events: &mut [LlmEvent], quote: Option<&crate::CostEstimate>) {
+fn attach_frozen_stream_quote(events: &mut [HistoryEvent], quote: Option<&crate::CostEstimate>) {
     for event in events {
-        if let LlmEvent::MessageDelta {
+        if let HistoryEvent::MessageDelta {
             usage: Some(usage), ..
         } = event
         {
@@ -442,10 +389,10 @@ pub trait RetryReporter: Send + Sync {
     fn report(&self, info: RetryInfo);
 }
 
-/// Production service: drives `DefaultLlmClient` with full retry/rate-limit/betas.
+/// Production service: drives `ModelRuntime` with full retry/rate-limit/betas.
 pub struct ApiService {
     model_attempt_hooks: RwLock<Option<Arc<dyn crate::ModelAttemptHooks>>>,
-    client: Arc<DefaultLlmClient>,
+    client: Arc<ModelRuntime>,
     transport: Arc<dyn Transport>,
     /// Subscriber state for the 429 gate (Task 8 wires real value).
     ///
@@ -480,7 +427,7 @@ pub struct ApiService {
     /// `newCacheEdits`/`pinnedEdits`, claude.ts:3068-3069). LingXi has no
     /// cached-microcompact scheduler to produce these, so the default is
     /// `None`/empty — the gate-armed `cache_reference`-on-tool_results pass
-    /// (the directly-exercised behavior) still runs from `req.messages`. Set
+    /// (the directly-exercised behavior) still runs from `req.input.messages`. Set
     /// only by [`Self::with_cache_editing_inputs`] (test-only today); wiring a
     /// real producer is residual. See module note.
     cache_editing_inputs: CacheEditingInputs,
@@ -537,7 +484,7 @@ pub struct ApiService {
     available_model_ids: Vec<String>,
     /// Full provider-specific model listings for rich picker surfaces.
     model_listings: Vec<crate::ModelListing>,
-    /// Optional cost estimator for populating `LlmResponse.cost`.
+    /// Optional cost estimator for populating `HistoryResponse.cost`.
     ///
     /// When `Some`, a successful `decode_response` triggers a cost estimate using
     /// the model's resolved `PricingModelRef` and usage counters.  Unpriced or
@@ -667,7 +614,7 @@ pub struct ApiService {
     /// one in-flight turn. The underlying `llm-runtime` session still only sends
     /// `previous_response_id` when the new request is a strict compatible
     /// extension of the previous completed request.
-    responses_ws_session: tokio::sync::Mutex<ResponsesWebSocketSession>,
+    responses_ws_session: tokio::sync::Mutex<ResponsesSession>,
 }
 
 /// (cc 2.1.219) Per-QUERY `anthropic-dispatch-id` state — the oracle's `Kt`/
@@ -834,10 +781,10 @@ impl ApiService {
     pub async fn execute_side_query_request(
         &self,
         mut request: LlmRequest,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         request.stream = false;
         let control = resolve_retry_control_with_settings(
-            &request.model,
+            &request.input.model,
             None,
             self.effective_subscriber().is_subscriber,
             &ResolveRetryEnv::from_process_env(),
@@ -852,10 +799,10 @@ impl ApiService {
         &self,
         mut request: LlmRequest,
         max_retries: u32,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         request.stream = false;
         let mut control = resolve_retry_control_with_settings(
-            &request.model,
+            &request.input.model,
             None,
             self.effective_subscriber().is_subscriber,
             &ResolveRetryEnv::from_process_env(),
@@ -870,7 +817,7 @@ impl ApiService {
     pub async fn stream_request(
         &self,
         mut request: LlmRequest,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         request.stream = true;
         self.drive_stream(request).await
     }
@@ -889,14 +836,14 @@ impl ApiService {
         max_tokens: Option<u32>,
         query_source: Option<&str>,
         model_attempt: Option<platform_api::ModelAttemptContext>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let mut request =
             self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
-        request.effort = effort;
-        request.query_source = query_source.map(str::to_string);
-        request.model_attempt = model_attempt;
+        request.set_effort(effort)?;
+        request.execution.query_source = query_source.map(str::to_string);
+        request.execution.model_attempt = model_attempt;
         if let Some(name) = forced_tool {
-            request.tool_choice = Some(crate::ToolChoice::Tool { name: name.into() });
+            request.set_tool_choice(Some(crate::ToolChoice::Tool { name: name.into() }));
         }
         self.drive_stream(request).await
     }
@@ -930,7 +877,7 @@ impl ApiService {
         request: &LlmRequest,
         prepared: &crate::PreparedLlmCall,
     ) -> Result<crate::model_attempt::WireAttempt, LlmError> {
-        let Some(context) = request.model_attempt.as_ref() else {
+        let Some(context) = request.execution.model_attempt.as_ref() else {
             return Ok(crate::model_attempt::WireAttempt::new(None));
         };
         let hooks = self
@@ -946,6 +893,15 @@ impl ApiService {
         Ok(crate::model_attempt::WireAttempt::new(Some(lease)))
     }
     /// Resolve the selected main route plus an optional same-profile vision delegate.
+    /// Protocol selected for the model's canonical request and history adapter.
+    pub fn protocol_for_model(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<crate::ProtocolFamily, LlmError> {
+        self.client.protocol_for_model(model, profile)
+    }
+
     pub fn resolve_media_route(
         &self,
         model: &str,
@@ -964,10 +920,10 @@ impl ApiService {
         use crate::model::thinking::{model_sends_temperature, session_thinking_active};
 
         let has_thinking = thinking.is_some_and(session_thinking_active);
-        req.reasoning = thinking.and_then(|thinking| {
-            crate::model::thinking::reasoning_for_request(thinking, model, req.max_tokens)
-        });
-        req.temperature = temperature.map(f64::from).or_else(|| {
+        req.set_reasoning(thinking.and_then(|thinking| {
+            crate::model::thinking::reasoning_for_request(thinking, model, req.input.max_tokens)
+        }));
+        req.input.temperature = temperature.or_else(|| {
             if thinking.is_some()
                 && !has_thinking
                 && model_sends_temperature(model)
@@ -988,12 +944,12 @@ impl ApiService {
     /// `version` is the build version string embedded in the User-Agent header.
     ///
     /// `estimator` — when `Some`, a successful response decode populates
-    /// `LlmResponse.cost` via the llm-runtime `CostEstimator`.  Pass
+    /// `HistoryResponse.cost` via the llm-runtime `CostEstimator`.  Pass
     /// `None` to leave ordinary cost estimation disabled. Registered attempts
     /// always retain a frozen quote for their host accounting hooks.
     #[must_use]
     pub fn new(
-        client: Arc<DefaultLlmClient>,
+        client: Arc<ModelRuntime>,
         transport: Arc<dyn Transport>,
         subscriber: SubscriberState,
         ua: UserAgentEnv,
@@ -1016,11 +972,11 @@ impl ApiService {
     /// Construct the service with an explicit cost estimator.
     ///
     /// Hosts that have the `cost::PricingCatalog` available (desktop + mobile)
-    /// call this instead of [`Self::new`] to get live `LlmResponse.cost` values.
+    /// call this instead of [`Self::new`] to get live `HistoryResponse.cost` values.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_estimator(
-        client: Arc<DefaultLlmClient>,
+        client: Arc<ModelRuntime>,
         transport: Arc<dyn Transport>,
         subscriber: SubscriberState,
         ua: UserAgentEnv,
@@ -1066,7 +1022,7 @@ impl ApiService {
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_routing(
-        client: Arc<DefaultLlmClient>,
+        client: Arc<ModelRuntime>,
         transport: Arc<dyn Transport>,
         subscriber: SubscriberState,
         ua: UserAgentEnv,
@@ -1133,7 +1089,7 @@ impl ApiService {
             last_rate_limit_record_ts_ms: Mutex::new(None),
             stream_idle_timeout_override: None,
             stream_first_byte_timeout_override: None,
-            responses_ws_session: tokio::sync::Mutex::new(ResponsesWebSocketSession::new()),
+            responses_ws_session: tokio::sync::Mutex::new(ResponsesSession::new()),
         }
     }
 
@@ -1496,7 +1452,8 @@ impl ApiService {
                 ),
             ))
         };
-        let messages = normalize(msgs)?;
+        let mut messages = normalize(msgs)?;
+        let mut system_blocks = Vec::new();
         let tool_decls = to_tool_declarations(tools)?;
 
         let mut req = LlmRequest::new(model);
@@ -1532,19 +1489,18 @@ impl ApiService {
                 global_scope: self.should_use_global_cache_scope(),
                 ttl_1h: self.should_1h_cache_ttl(),
             };
-            req.system =
+            system_blocks =
                 crate::prompt_format::split_system_blocks_with(s, enable_caching, split_opts);
         }
-        req.messages = messages;
-        req.thinking_source_message_ids = thinking_source_message_ids;
-        req.thinking_recovery_scope = Some(thinking_recovery_scope);
+        req.execution.thinking_source_message_ids = thinking_source_message_ids;
+        req.execution.thinking_recovery_scope = Some(thinking_recovery_scope);
 
         // Exactly one message-level breakpoint, on the last cache-eligible content
         // block of the last message (claude.ts addCacheBreakpoints markerIndex =
         // len-1). Skip reasoning/redacted blocks (assistantMessageToMessageParam).
         if enable_caching {
             use crate::ContentBlock as LlmContentBlock;
-            if let Some(last) = req.messages.last_mut() {
+            if let Some(last) = messages.last_mut() {
                 if let Some(block) = last.content.iter_mut().rev().find(|b| {
                     !matches!(
                         b,
@@ -1574,29 +1530,38 @@ impl ApiService {
         // cache_control marker — all with cross-block delete-ref dedup.
         if self.should_use_cache_editing() {
             apply_cache_editing(
-                &mut req.messages,
+                &mut messages,
                 enable_caching,
                 &self.cache_editing_inputs.new_edits,
                 &self.cache_editing_inputs.pinned,
             );
         }
 
-        req.tools = tool_decls; // No tool-array breakpoint (matches TS baseline).
-                                // Forced tool choice (e.g. `--json-schema` → `StructuredOutput`). Unset
-                                // for every normal turn, so the request carries no `tool_choice` and the
-                                // model chooses freely — byte-identical to the pre-feature request.
+        let family = self
+            .client
+            .protocol_for_model(model, profile)
+            .unwrap_or(lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages);
+        let (input, overrides) =
+            crate::convert::history_input(model, &messages, &system_blocks, &tool_decls, family)?;
+        req.input = input;
+        req.execution.input_protocol = Some(family);
+        req.execution.message_json_string_overrides = overrides;
+        // No tool-array breakpoint (matches TS baseline).
+        // Forced tool choice (e.g. `--json-schema` → `StructuredOutput`). Unset
+        // for every normal turn, so the request carries no `tool_choice` and the
+        // model chooses freely — byte-identical to the pre-feature request.
         if let Some(choice) = &self.forced_tool_choice {
-            req.tool_choice = Some(choice.clone());
+            req.set_tool_choice(Some(choice.clone()));
         }
-        if req.model.contains("deepseek") || req.profile.as_deref() == Some("deepseek") {
+        if req.input.model.contains("deepseek") || req.profile.as_deref() == Some("deepseek") {
             tracing::debug!(
                 event = "build_request",
-                model = %req.model,
+                model = %req.input.model,
                 profile = req.profile.as_deref().unwrap_or("<none>"),
-                messages = req.messages.len(),
-                tools = req.tools.len(),
+                messages = messages.len(),
+                tools = req.input.tools.len(),
                 forced_tool_choice = self.forced_tool_choice.is_some(),
-                active_tool_choice = ?req.tool_choice,
+                active_tool_choice = ?req.input.tool_choice,
                 stream = req.stream,
             );
         }
@@ -1610,7 +1575,7 @@ impl ApiService {
             u32::try_from(crate::model::context_window::default_output_tokens_for_model(model))
                 .unwrap_or(u32::MAX)
         });
-        req.max_tokens = Some(
+        req.input.max_tokens = Some(
             crate::model::context_window::known_output_token_limit_for_model(model)
                 .map(|limit| u32::try_from(limit).unwrap_or(u32::MAX))
                 .map_or(requested_max_tokens, |limit| {
@@ -1626,14 +1591,14 @@ impl ApiService {
         let context_window =
             crate::model::context_window::context_window_for_model(model, &self.custom_cli_betas);
         let input_est = crate::model::count_tokens::approximate_tokens(&req);
-        if let Some(mt) = req.max_tokens {
+        if let Some(mt) = req.input.max_tokens {
             let bounded = bound_output_to_context(mt, context_window, input_est);
             if bounded == 0 {
                 return Err(LlmError::ContextOverflow {
                     token_gap: input_est.saturating_sub(context_window),
                 });
             }
-            req.max_tokens = Some(bounded);
+            req.input.max_tokens = Some(bounded);
         }
 
         // thinking (DIV-1) + temperature (DIV-4), mirroring claude.ts:1596-1630
@@ -1650,15 +1615,18 @@ impl ApiService {
             // the SAME session-config resolution the compaction side-query
             // path inherits (cc 2.1.198). Behavior is byte-identical to the
             // previous inline block.
-            req.reasoning =
-                crate::model::thinking::reasoning_for_request(thinking, model, req.max_tokens);
+            req.set_reasoning(crate::model::thinking::reasoning_for_request(
+                thinking,
+                model,
+                req.input.max_tokens,
+            ));
 
             // temperature:1 ONLY when thinking is disabled AND the model is in the
             // `rhn` temperature-gate set (binary @205866168:
             // `!xs && rhn(u) ? temperatureOverride ?? 1 : void 0`). The default
             // opus-4-8 (and 4-7/fable-5/mythos-5/unknowns) are NOT in `rhn` → the
             // field is omitted. The Anthropic codec emits temperature on Some only.
-            req.temperature = if !has_thinking
+            req.input.temperature = if !has_thinking
                 && !matches!(thinking, crate::model::thinking::ThinkingConfig::Automatic)
                 && model_sends_temperature(model)
             {
@@ -1670,7 +1638,11 @@ impl ApiService {
 
         // metadata.user_id (DIV-2): claude-code always sends it. `None` (no
         // identity wired) omits the object — byte-identical to the prior request.
-        req.metadata = self.request_metadata.clone();
+        req.input.metadata = self
+            .request_metadata
+            .as_ref()
+            .map(|m| serde_json::json!({"user_id":m.user_id}))
+            .unwrap_or(serde_json::Value::Null);
 
         Ok(req)
     }
@@ -1841,10 +1813,13 @@ impl ApiService {
         if allowed {
             return;
         }
-        lingxi_llm_client::providers::anthropic::request_policy::remove_fast(
+        lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestPolicy {
+            disallowed_fast_beta: Some(FAST_MODE.to_string()),
+            ..Default::default()
+        }
+        .apply(
             &mut prepared.provider_request.body_json,
             &mut prepared.provider_request.headers,
-            FAST_MODE,
         );
     }
 
@@ -1868,19 +1843,21 @@ impl ApiService {
     /// `User-Agent: LingXi-Code`), which avoids shipping two conflicting UA
     /// headers on a case-sensitive header map.
     fn apply_user_agent(&self, prepared: &mut crate::PreparedLlmCall) {
-        if Self::is_anthropic_family_protocol(&prepared.route.protocol) {
-            prepared.provider_request.headers.insert(
-                "user-agent".to_string(),
-                user_agent(&self.ua, &self.version),
-            );
-        } else if !prepared.provider_request.headers.contains_key("user-agent")
-            && !prepared.provider_request.headers.contains_key("User-Agent")
-        {
-            prepared.provider_request.headers.insert(
-                "user-agent".to_string(),
-                format!("LingXi-Code/{}", self.version),
-            );
-        }
+        use lingxi_llm_client::providers::anthropic::request_policy::{
+            apply_user_agent, UserAgentPolicy,
+        };
+        let anthropic = Self::is_anthropic_family_protocol(&prepared.route.protocol);
+        let value = if anthropic {
+            user_agent(&self.ua, &self.version)
+        } else {
+            format!("LingXi-Code/{}", self.version)
+        };
+        let policy = if anthropic {
+            UserAgentPolicy::Replace(&value)
+        } else {
+            UserAgentPolicy::IfAbsent(&value)
+        };
+        apply_user_agent(&mut prepared.provider_request.headers, policy);
     }
 
     /// Port of claude-code's `B0t` (2.1.207): parse `CLAUDE_CODE_EXTRA_BODY` into a
@@ -1898,6 +1875,7 @@ impl ApiService {
     /// Kept under the original `CLAUDE_CODE_` env name (like the sibling
     /// `CLAUDE_CODE_EXTRA_METADATA` at [`ApiService::build_api_metadata_user_id`])
     /// — these are wire-parity vars preserved verbatim through the `LINGXI_` rename.
+    #[cfg(test)]
     fn parse_extra_body(betas: &[String]) -> serde_json::Map<String, serde_json::Value> {
         lingxi_llm_client::providers::anthropic::request_policy::beta_body(
             extra_body_object().unwrap_or_default(),
@@ -1937,10 +1915,14 @@ impl ApiService {
         } else {
             Vec::new()
         };
-        let extra = Self::parse_extra_body(&body_betas);
-        lingxi_llm_client::providers::anthropic::request_policy::merge_extra(
+        lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestPolicy {
+            extra_body: extra_body_object().unwrap_or_default(),
+            body_betas,
+            ..Default::default()
+        }
+        .apply(
             &mut prepared.provider_request.body_json,
-            extra,
+            &mut prepared.provider_request.headers,
         );
     }
 
@@ -2000,10 +1982,11 @@ impl ApiService {
         {
             return;
         }
-        prepared
-            .provider_request
-            .headers
-            .insert(DISPATCH_ID_HEADER.to_string(), DISPATCH_ID_V2S.to_string());
+        lingxi_llm_client::providers::anthropic::request_policy::set_header(
+            &mut prepared.provider_request.headers,
+            DISPATCH_ID_HEADER,
+            DISPATCH_ID_V2S,
+        );
         // `w(`[dispatch] sent ${S8s}=${Vtp}`)` — default (debug) log level.
         tracing::debug!("[dispatch] sent {DISPATCH_ID_HEADER}={DISPATCH_ID_V2S}");
     }
@@ -2129,10 +2112,11 @@ impl ApiService {
         // User-Agent (Task 3) — provider-aware (see apply_user_agent).
         self.apply_user_agent(prepared);
         // Client-traceable request id (matches api-client header name).
-        prepared
-            .provider_request
-            .headers
-            .insert("x-request-id".to_string(), request_id.to_string());
+        lingxi_llm_client::providers::anthropic::request_policy::set_header(
+            &mut prepared.provider_request.headers,
+            "x-request-id",
+            request_id,
+        );
         // (cc 2.1.219) opt-in dispatch-routing header (see apply_dispatch_header).
         Self::apply_dispatch_header(prepared, dispatch);
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
@@ -2174,10 +2158,11 @@ impl ApiService {
             );
         }
         self.apply_user_agent(prepared);
-        prepared
-            .provider_request
-            .headers
-            .insert("x-request-id".to_string(), request_id.to_string());
+        lingxi_llm_client::providers::anthropic::request_policy::set_header(
+            &mut prepared.provider_request.headers,
+            "x-request-id",
+            request_id,
+        );
         // (cc 2.1.219) opt-in dispatch-routing header (see apply_dispatch_header).
         Self::apply_dispatch_header(prepared, dispatch);
         // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
@@ -2371,10 +2356,8 @@ impl ApiService {
     /// Returns `true` when the caller should retry immediately.
     async fn handle_thinking_signature_strip(&self, req: &mut crate::LlmRequest) -> bool {
         let (signed, unsigned) =
-            crate::model::thinking_signature::count_thinking_signature_blocks(&req.messages);
-        if !crate::model::thinking_signature::strip_thinking_blocks_for_signature_recovery(
-            &mut req.messages,
-        ) {
+            crate::model::thinking_signature::count_input_thinking(&req.input.messages);
+        if !crate::model::thinking_signature::strip_input_thinking(req) {
             return false;
         }
         tracing::warn!(
@@ -2382,18 +2365,20 @@ impl ApiService {
         );
         telemetry::emit_thinking_signature_strip_retry(
             &self.analytics,
-            req.query_source.as_deref(),
-            &req.model,
+            req.execution.query_source.as_deref(),
+            &req.input.model,
             signed,
             unsigned,
         )
         .await;
         let scope = req
+            .execution
             .thinking_recovery_scope
             .clone()
             .unwrap_or_else(|| self.thinking_recovery_scope());
         scope.rejected(
-            req.thinking_source_message_ids
+            req.execution
+                .thinking_source_message_ids
                 .iter()
                 .map(|id| (*id, 0))
                 .collect(),
@@ -2836,7 +2821,7 @@ impl ApiService {
         req: LlmRequest,
         retry_control: RetryControl,
         dispatch: DispatchHeaderState,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.drive_non_stream_seeded_with_chain(req, retry_control, 0, &[], dispatch)
             .await
     }
@@ -2863,7 +2848,7 @@ impl ApiService {
         initial_consecutive_overloaded: u8,
         chain: &'a [String],
         dispatch: DispatchHeaderState,
-    ) -> crate::BoxFuture<'a, Result<LlmResponse, LlmError>> {
+    ) -> crate::BoxFuture<'a, Result<HistoryResponse, LlmError>> {
         Box::pin(self.drive_non_stream_inner(
             req,
             retry_control,
@@ -2881,7 +2866,11 @@ impl ApiService {
         initial_consecutive_overloaded: u8,
         chain: &[String],
         mut dispatch: DispatchHeaderState,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
+        if req.execution.input_protocol.is_none() {
+            req.execution.input_protocol =
+                Some(self.protocol_for_model(&req.input.model, req.profile.as_deref())?);
+        }
         let request_id = new_request_id();
         let started = Instant::now();
         let allow_replay = allows_automatic_replay(&req);
@@ -2892,9 +2881,9 @@ impl ApiService {
         let mut connection_index = 0usize;
         let mut failover = crate::FailoverTriggers::NONE;
         let mut connections_captured = false;
-        telemetry::emit_started(&self.analytics, &req.model, &request_id, false).await;
-        if let Some(query_source) = req.query_source.as_deref() {
-            telemetry::emit_query_source(&self.analytics, &req.model, query_source).await;
+        telemetry::emit_started(&self.analytics, &req.input.model, &request_id, false).await;
+        if let Some(query_source) = req.execution.query_source.as_deref() {
+            telemetry::emit_query_source(&self.analytics, &req.input.model, query_source).await;
         }
 
         // B6-T1: discard any 429 snapshot staged by a PRIOR drive (whose
@@ -2915,11 +2904,11 @@ impl ApiService {
             // Fail FAST on a rate limit that cannot clear in the backoff window
             // (a subscription plan's quota, an OpenRouter free-tier share);
             // API-key routes + Anthropic keep the parity 429-retry.
-            rate_limit_terminal: rate_limit_cannot_clear(req.profile.as_deref(), &req.model),
+            rate_limit_terminal: rate_limit_cannot_clear(req.profile.as_deref(), &req.input.model),
             ..RetryState::default()
         };
         // thinking_budget for telemetry: Adaptive → 0, Enabled{b} → b.
-        let thinking_budget: u32 = reasoning_budget(req.reasoning);
+        let thinking_budget: u32 = reasoning_budget(req.input.thinking.as_ref());
         // Index into `chain` for the NEXT fallback entry to use.
         // chain_idx=0 means chain[0] is the current fallback in `retry_control`.
         // After a Fallback step, chain_idx advances to point at the next entry.
@@ -2936,7 +2925,7 @@ impl ApiService {
             let preparing = tokio::time::Instant::now();
             let prepared = crate::execution::non_stream_bound(timeout, async {
                 let mut prepared = self.client.prepare_on(&req, self.transport.clone()).await?;
-                Self::log_deepseek_prepared_request(&req.model, &prepared, false);
+                Self::log_deepseek_prepared_request(&req.input.model, &prepared, false);
                 self.inject_headers(&mut prepared, &request_id, dispatch);
                 self.client.seal_prepared(&mut prepared).await?;
                 Ok(prepared)
@@ -2947,7 +2936,7 @@ impl ApiService {
                 Err(error) => {
                     telemetry::emit_failed(
                         &self.analytics,
-                        &req.model,
+                        &req.input.model,
                         &request_id,
                         Self::error_kind(&error),
                         Self::status_of(&error),
@@ -2965,18 +2954,19 @@ impl ApiService {
             let remaining = timeout.saturating_sub(preparing.elapsed());
             let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
             let call = prepared.wire_call.take().expect("sealed call");
-            let pricing = (self.estimator.is_some() || req.model_attempt.is_some()).then(|| {
-                let snapshot = call.pricing_snapshot();
-                self.estimator.as_ref().map_or_else(
-                    || snapshot.clone(),
-                    |est| {
-                        est.capture(
-                            snapshot.clone(),
-                            &prepared.route.resolved_route.pricing_model,
-                        )
-                    },
-                )
-            });
+            let pricing =
+                (self.estimator.is_some() || req.execution.model_attempt.is_some()).then(|| {
+                    let snapshot = call.pricing_snapshot();
+                    self.estimator.as_ref().map_or_else(
+                        || snapshot.clone(),
+                        |est| {
+                            est.capture(
+                                snapshot.clone(),
+                                &prepared.route.resolved_route.pricing_model,
+                            )
+                        },
+                    )
+                });
             let resp_result = crate::execution::non_stream_bound(remaining, async {
                 let received = call
                     .dispatch_once_with(|| {
@@ -2996,7 +2986,7 @@ impl ApiService {
                     if !allow_replay {
                         telemetry::emit_failed(
                             &self.analytics,
-                            &req.model,
+                            &req.input.model,
                             &request_id,
                             Self::error_kind(&transport_err),
                             Self::status_of(&transport_err),
@@ -3014,7 +3004,7 @@ impl ApiService {
                     {
                         telemetry::emit_dispatch_header_fallback(
                             &self.analytics,
-                            &req.model,
+                            &req.input.model,
                             reason,
                             status,
                         )
@@ -3051,7 +3041,7 @@ impl ApiService {
                     }
                     telemetry::emit_failed(
                         &self.analytics,
-                        &req.model,
+                        &req.input.model,
                         &request_id,
                         Self::error_kind(&transport_err),
                         None,
@@ -3082,7 +3072,7 @@ impl ApiService {
                         attempt.observe(usage, *completeness);
                     }
                     let decoded = crate::execution::decode(&collected).and_then(|decoded| {
-                        crate::upstream::project_response(
+                        crate::history_projection::project_response(
                             decoded,
                             provider_resp.clone(),
                             crate::upstream::family(&prepared.route.protocol),
@@ -3115,13 +3105,13 @@ impl ApiService {
                                 u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                             telemetry::emit_succeeded(
                                 &self.analytics,
-                                &req.model,
+                                &req.input.model,
                                 &request_id,
                                 elapsed_ms,
                                 provider_resp.status,
                             )
                             .await;
-                            if req.capture_retry_count {
+                            if req.execution.capture_retry_count {
                                 if !response.provider_metadata.is_object() {
                                     response.provider_metadata = serde_json::json!({});
                                 }
@@ -3144,7 +3134,7 @@ impl ApiService {
                             if x_should_retry_false {
                                 telemetry::emit_failed(
                                     &self.analytics,
-                                    &req.model,
+                                    &req.input.model,
                                     &request_id,
                                     Self::error_kind(&decode_err),
                                     Self::status_of(&decode_err),
@@ -3161,12 +3151,12 @@ impl ApiService {
                                 self.record_rate_limit_from_429(
                                     &provider_resp.headers,
                                     Some(&provider_resp.body_json),
-                                    &req.model,
+                                    &req.input.model,
                                 );
                                 let delay = Self::resolve_retry_after(&provider_resp.headers);
                                 telemetry::emit_rate_limited(
                                     &self.analytics,
-                                    &req.model,
+                                    &req.input.model,
                                     u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                                 )
                                 .await;
@@ -3184,7 +3174,7 @@ impl ApiService {
                                 }
                                 telemetry::emit_failed(
                                     &self.analytics,
-                                    &req.model,
+                                    &req.input.model,
                                     &request_id,
                                     Self::error_kind(&decode_err),
                                     Self::status_of(&decode_err),
@@ -3229,14 +3219,15 @@ impl ApiService {
                             // Guarded on fast mode being ON so a genuine 400
                             // without fast mode still terminates; once cleared the
                             // 400 cannot recur (the body carries no `speed`).
-                            if req.speed.as_deref() == Some("fast")
+                            if req.input.service_tier
+                                == Some(lingxi_llm_client::protocol::ServiceTier::Fast)
                                 && Self::is_fast_mode_not_enabled(&decode_err)
                             {
                                 tracing::info!(
                                 event = "fast_mode_disabled_retry",
                                 "fast mode not enabled for this account/model; disabling and retrying"
                             );
-                                req.speed = None;
+                                req.input.service_tier = None;
                                 continue;
                             }
 
@@ -3253,7 +3244,7 @@ impl ApiService {
                             ) {
                                 telemetry::emit_dispatch_header_fallback(
                                     &self.analytics,
-                                    &req.model,
+                                    &req.input.model,
                                     reason,
                                     status,
                                 )
@@ -3284,7 +3275,7 @@ impl ApiService {
                                     thinking_budget,
                                     self.settings_backoff_ms,
                                 ),
-                                req.max_tokens,
+                                req.input.max_tokens,
                                 max_tokens_adjusted,
                             );
                             match step {
@@ -3310,7 +3301,7 @@ impl ApiService {
                                     {
                                         telemetry::emit_max_tokens_overflow_adjustment(
                                             &self.analytics,
-                                            &req.model,
+                                            &req.input.model,
                                             overflow.input_tokens,
                                             overflow.context_limit,
                                             new_max,
@@ -3319,7 +3310,7 @@ impl ApiService {
                                         .await;
                                     }
                                     max_tokens_adjusted = true;
-                                    req.max_tokens = Some(new_max);
+                                    req.input.max_tokens = Some(new_max);
                                     continue;
                                 }
                                 DriveStep::StripThinkingSignature => {
@@ -3328,7 +3319,7 @@ impl ApiService {
                                     }
                                     telemetry::emit_failed(
                                         &self.analytics,
-                                        &req.model,
+                                        &req.input.model,
                                         &request_id,
                                         Self::error_kind(&decode_err),
                                         Self::status_of(&decode_err),
@@ -3337,15 +3328,15 @@ impl ApiService {
                                     return Err(decode_err);
                                 }
                                 DriveStep::Fallback { fallback_model } => {
-                                    if req.model_attempt.is_some() {
+                                    if req.execution.model_attempt.is_some() {
                                         return Err(decode_err);
                                     }
                                     // Switch to the fallback model; advance the
                                     // chain index so the next iteration's ctl
                                     // points at chain[chain_idx] (or is
                                     // exhausted → allow_fallback=false).
-                                    strip_signature_blocks_for_fallback(&mut req.messages);
-                                    req.model = fallback_model;
+                                    strip_signature_blocks_for_fallback(&mut req.input.messages);
+                                    req.input.model = fallback_model;
                                     chain_idx += 1;
                                     // Reset the consecutive-overload counter so
                                     // the new primary model's 529 budget is fresh.
@@ -3355,7 +3346,7 @@ impl ApiService {
                                     let next_fallback = chain.get(chain_idx).cloned();
                                     let allow_fallback = next_fallback.is_some();
                                     retry_control = resolve_retry_control_with_settings(
-                                        &req.model,
+                                        &req.input.model,
                                         next_fallback,
                                         sub.is_subscriber,
                                         &ResolveRetryEnv::from_process_env(),
@@ -3379,7 +3370,7 @@ impl ApiService {
                                     }
                                     telemetry::emit_failed(
                                         &self.analytics,
-                                        &req.model,
+                                        &req.input.model,
                                         &request_id,
                                         Self::error_kind(&decode_err),
                                         Self::status_of(&decode_err),
@@ -3396,7 +3387,7 @@ impl ApiService {
                                     let repeated_err = LlmError::Overloaded { repeated: true };
                                     telemetry::emit_failed(
                                         &self.analytics,
-                                        &req.model,
+                                        &req.input.model,
                                         &request_id,
                                         Self::error_kind(&repeated_err),
                                         Self::status_of(&repeated_err),
@@ -3425,7 +3416,7 @@ impl ApiService {
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         let req = self.build_request(model, profile, system, messages, tools, false, None)?;
         let ctl = resolve_retry_control_with_settings(
             model,
@@ -3455,9 +3446,9 @@ impl ApiService {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         context_hint: Option<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         let mut req = self.build_request(model, profile, system, messages, tools, false, None)?;
-        req.context_hint = context_hint;
+        req.input.controls.anthropic.context_hint = context_hint;
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
@@ -3481,7 +3472,7 @@ impl ApiService {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         max_tokens: u32,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         let req = self.build_request(
             model,
             profile,
@@ -3523,12 +3514,12 @@ impl ApiService {
         let mut req = crate::thinking_scope::isolated(|| {
             self.build_request(model, profile, system, messages, tools, false, max_tokens)
         })?;
-        req.effort = effort;
-        req.tool_choice = tool_choice;
-        req.stop_sequences = stop_sequences;
-        req.capture_retry_count = true;
-        req.query_source = query_source.map(str::to_string);
+        req.set_tool_choice(tool_choice);
+        req.input.stop_sequences = stop_sequences;
+        req.execution.capture_retry_count = true;
+        req.execution.query_source = query_source.map(str::to_string);
         self.apply_side_query_thinking(&mut req, model, thinking, temperature);
+        req.set_effort(effort)?;
         Ok(req)
     }
 
@@ -3557,12 +3548,16 @@ impl ApiService {
             true,
             max_tokens,
         )?;
-        req.tool_choice = None;
-        req.effort = effort;
-        req.response_format = Some(crate::ResponseFormat::JsonSchema { schema });
+        req.input.tool_choice = lingxi_llm_client::protocol::ToolChoice::Auto;
+        req.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonSchema {
+            name: "response".into(),
+            schema,
+            strict: true,
+        };
         self.apply_side_query_thinking(&mut req, model, thinking, temperature);
+        req.set_effort(effort)?;
         if query_source.is_some() {
-            req.query_source = query_source.map(str::to_string);
+            req.execution.query_source = query_source.map(str::to_string);
         }
         Ok(req)
     }
@@ -3599,17 +3594,17 @@ impl ApiService {
         stop_sequences: Vec<String>,
         temperature: Option<f32>,
         query_source: Option<&str>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         let mut req = crate::thinking_scope::isolated(|| {
             self.build_request(model, profile, system, messages, tools, false, max_tokens)
         })?;
 
         // `build_request` applies main-turn-only overrides. A forked summary
         // owns these fields independently, so restore its explicit values.
-        req.tool_choice = tool_choice;
-        req.stop_sequences = stop_sequences;
-        req.temperature = temperature.map(f64::from);
-        req.query_source = query_source.map(str::to_string);
+        req.set_tool_choice(tool_choice);
+        req.input.stop_sequences = stop_sequences;
+        req.input.temperature = temperature;
+        req.execution.query_source = query_source.map(str::to_string);
 
         let ctl = resolve_retry_control_with_settings(
             model,
@@ -3642,7 +3637,7 @@ impl ApiService {
         effort: Option<serde_json::Value>,
         temperature: Option<f32>,
         query_source: Option<&str>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         let req = self.build_side_query_request_with_thinking(
             model,
             profile,
@@ -3685,14 +3680,14 @@ impl ApiService {
         stop_sequences: Vec<String>,
         temperature: Option<f32>,
         query_source: Option<&str>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let mut req = crate::thinking_scope::isolated(|| {
             self.build_request(model, profile, system, messages, tools, true, max_tokens)
         })?;
-        req.tool_choice = tool_choice;
-        req.stop_sequences = stop_sequences;
-        req.temperature = temperature.map(f64::from);
-        req.query_source = query_source.map(str::to_string);
+        req.set_tool_choice(tool_choice);
+        req.input.stop_sequences = stop_sequences;
+        req.input.temperature = temperature;
+        req.execution.query_source = query_source.map(str::to_string);
         self.drive_stream(req).await
     }
 
@@ -3711,13 +3706,13 @@ impl ApiService {
         thinking: Option<crate::model::thinking::ThinkingConfig>,
         temperature: Option<f32>,
         query_source: Option<&str>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let mut req = crate::thinking_scope::isolated(|| {
             self.build_request(model, profile, system, messages, tools, true, max_tokens)
         })?;
-        req.tool_choice = tool_choice;
-        req.stop_sequences = stop_sequences;
-        req.query_source = query_source.map(str::to_string);
+        req.set_tool_choice(tool_choice);
+        req.input.stop_sequences = stop_sequences;
+        req.execution.query_source = query_source.map(str::to_string);
         self.apply_side_query_thinking(&mut req, model, thinking, temperature);
         self.drive_stream(req).await
     }
@@ -3744,7 +3739,7 @@ impl ApiService {
         fallback_model: Option<&str>,
         _is_subscriber: bool,
         _is_enterprise: bool,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         // Per-model settings fallback wins over global fallback_model.
         // Call-site fallback_model (from OrchestratorApiClient) wins over both when
         // it's explicitly passed.
@@ -3856,7 +3851,7 @@ impl ApiService {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         initial_consecutive_overloaded: u8,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         let req = self.build_request(model, profile, system, messages, tools, false, None)?;
         let ctl = resolve_retry_control_with_settings(
             model,
@@ -3973,14 +3968,14 @@ impl ApiService {
     /// override.
     pub async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
         let mut session = self.responses_ws_session.lock().await;
-        session.close().await
+        session.close().await.map_err(crate::upstream::error)
     }
 
     // ── Stream drive (Step 2) ─────────────────────────────────────────────────
 
     /// Drive a streaming call; connect-phase failures retry through the driver.
     ///
-    /// Uses `DefaultLlmClient::execute_stream` which already handles the
+    /// Uses `ModelRuntime::execute_stream` which already handles the
     /// connect-phase error-drain path internally.  For the retry loop we re-prepare
     /// on each attempt so a fresh `PreparedLlmCall` (with correct auth headers) is
     /// sent even after a previous attempt fails.
@@ -3996,7 +3991,7 @@ impl ApiService {
     fn drive_stream(
         &self,
         req: LlmRequest,
-    ) -> crate::BoxFuture<'_, Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError>>
+    ) -> crate::BoxFuture<'_, Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>>
     {
         Box::pin(self.drive_stream_inner(req))
     }
@@ -4005,12 +4000,16 @@ impl ApiService {
     async fn drive_stream_inner(
         &self,
         mut req: LlmRequest,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        if req.execution.input_protocol.is_none() {
+            req.execution.input_protocol =
+                Some(self.protocol_for_model(&req.input.model, req.profile.as_deref())?);
+        }
         let request_id = new_request_id();
         let allow_replay = allows_automatic_replay(&req);
-        telemetry::emit_started(&self.analytics, &req.model, &request_id, true).await;
-        if let Some(query_source) = req.query_source.as_deref() {
-            telemetry::emit_query_source(&self.analytics, &req.model, query_source).await;
+        telemetry::emit_started(&self.analytics, &req.input.model, &request_id, true).await;
+        if let Some(query_source) = req.execution.query_source.as_deref() {
+            telemetry::emit_query_source(&self.analytics, &req.input.model, query_source).await;
         }
 
         // B6-T1: discard any 429 snapshot staged by a PRIOR drive (see the
@@ -4024,18 +4023,18 @@ impl ApiService {
             is_subscriber: sub.is_subscriber,
             is_enterprise: sub.is_enterprise,
             // Subscription / free-tier rate limits fail fast (see non-stream drive).
-            rate_limit_terminal: rate_limit_cannot_clear(req.profile.as_deref(), &req.model),
+            rate_limit_terminal: rate_limit_cannot_clear(req.profile.as_deref(), &req.input.model),
             ..RetryState::default()
         };
         // Stream path uses settings-based retry control (same precedence as non-stream).
         let ctl = resolve_retry_control_with_settings(
-            &req.model,
+            &req.input.model,
             None, // fallback not used on stream connect-phase
             sub.is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
-        let thinking_budget: u32 = reasoning_budget(req.reasoning);
+        let thinking_budget: u32 = reasoning_budget(req.input.thinking.as_ref());
         // Connection failover state — see the non-stream drive for why the chain
         // is captured once. The stream connect phase had NO fallback of any kind
         // before this, which is why `routing.fallback` never ran on desktop or
@@ -4066,8 +4065,8 @@ impl ApiService {
                 connection_chain.clone_from(&prepared.route.resolved_route.connection_chain);
                 failover = prepared.route.resolved_route.failover;
             }
-            Self::log_deepseek_prepared_request(&req.model, &prepared, true);
-            tracing::debug!(model = %req.model, event = "request_prepared");
+            Self::log_deepseek_prepared_request(&req.input.model, &prepared, true);
+            tracing::debug!(model = %req.input.model, event = "request_prepared");
             self.inject_stream_headers(&mut prepared, &request_id, dispatch);
             // Captured before the move below — the dispatch degradation check
             // in the Err arm needs to know whether THIS attempt carried the
@@ -4098,7 +4097,7 @@ impl ApiService {
                 // the WebSocket mutex while an HTTP admission waits for a
                 // durable intent: a concurrent revoked call must reject without
                 // waiting for the first intent's acknowledgement.
-                let mut http_session = ResponsesWebSocketSession::new();
+                let mut http_session = ResponsesSession::new();
                 let mut shared_session = if matches!(
                     prepared.provider_request.stream_transport,
                     crate::ProviderStreamTransport::ResponsesWebSocket
@@ -4137,7 +4136,7 @@ impl ApiService {
                     if !allow_replay {
                         telemetry::emit_failed(
                             &self.analytics,
-                            &req.model,
+                            &req.input.model,
                             &request_id,
                             Self::error_kind(&transport_err),
                             Self::status_of(&transport_err),
@@ -4165,7 +4164,7 @@ impl ApiService {
                     ) {
                         telemetry::emit_dispatch_header_fallback(
                             &self.analytics,
-                            &req.model,
+                            &req.input.model,
                             reason,
                             status,
                         )
@@ -4210,7 +4209,7 @@ impl ApiService {
                         .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
                         .collect();
                     tracing::debug!(
-                        model = %req.model,
+                        model = %req.input.model,
                         event = "stream_opened",
                         status = streaming.status()
                     );
@@ -4267,7 +4266,7 @@ impl ApiService {
                             self.record_rate_limit_from_429(
                                 &response_headers,
                                 Some(&body_json),
-                                &req.model,
+                                &req.input.model,
                             );
                             LlmError::RateLimited {
                                 retry_after: Some(Self::resolve_retry_after(&response_headers)),
@@ -4283,7 +4282,7 @@ impl ApiService {
                             }
                             telemetry::emit_failed(
                                 &self.analytics,
-                                &req.model,
+                                &req.input.model,
                                 &request_id,
                                 Self::error_kind(&decode_err),
                                 Self::status_of(&decode_err),
@@ -4313,14 +4312,15 @@ impl ApiService {
                         // rejects with a 400 "Fast mode is not enabled" clears
                         // `req.speed` and retries (uncounted) instead of failing
                         // the /fast user's streamed turn.
-                        if req.speed.as_deref() == Some("fast")
+                        if req.input.service_tier
+                            == Some(lingxi_llm_client::protocol::ServiceTier::Fast)
                             && Self::is_fast_mode_not_enabled(&decode_err)
                         {
                             tracing::info!(
                             event = "fast_mode_disabled_retry",
                             "fast mode not enabled for this account/model; disabling and retrying (stream)"
                         );
-                            req.speed = None;
+                            req.input.service_tier = None;
                             continue;
                         }
 
@@ -4347,7 +4347,7 @@ impl ApiService {
                                 thinking_budget,
                                 self.settings_backoff_ms,
                             ),
-                            req.max_tokens,
+                            req.input.max_tokens,
                             max_tokens_adjusted,
                         );
                         match step {
@@ -4364,7 +4364,7 @@ impl ApiService {
                                     {
                                         telemetry::emit_max_tokens_overflow_adjustment(
                                             &self.analytics,
-                                            &req.model,
+                                            &req.input.model,
                                             overflow.input_tokens,
                                             overflow.context_limit,
                                             new_max,
@@ -4374,7 +4374,7 @@ impl ApiService {
                                     }
                                 }
                                 max_tokens_adjusted = true;
-                                req.max_tokens = Some(new_max);
+                                req.input.max_tokens = Some(new_max);
                                 continue;
                             }
                             DriveStep::StripThinkingSignature => {
@@ -4396,7 +4396,7 @@ impl ApiService {
                         // (mirrors the non-stream terminal arms).
                         telemetry::emit_failed(
                             &self.analytics,
-                            &req.model,
+                            &req.input.model,
                             &request_id,
                             Self::error_kind(&decode_err),
                             Self::status_of(&decode_err),
@@ -4407,7 +4407,7 @@ impl ApiService {
 
                     self.record_rate_limit_from_headers(&response_headers, &request_id);
                     *self.last_retry_count.lock().unwrap() = state.attempt;
-                    let decoder = crate::upstream::Decoder::projection(
+                    let decoder = crate::history_projection::HistoryProjector::projection(
                         crate::upstream::family(&prepared.route.protocol),
                         crate::stream_provider_metadata_from_headers(&response_headers),
                     );
@@ -4417,7 +4417,9 @@ impl ApiService {
                     let pricing_model = prepared.route.resolved_route.pricing_model.clone();
                     let pricing = frames
                         .pricing_snapshot()
-                        .filter(|_| self.estimator.is_some() || req.model_attempt.is_some())
+                        .filter(|_| {
+                            self.estimator.is_some() || req.execution.model_attempt.is_some()
+                        })
                         .map(|snapshot| {
                             self.estimator.as_ref().map_or_else(
                                 || snapshot.clone(),
@@ -4429,7 +4431,7 @@ impl ApiService {
                     // emit_succeeded / emit_failed can fire from inside the async closure.
                     let stream_started = Instant::now();
                     let stream_analytics = self.analytics.clone();
-                    let stream_model = req.model.clone();
+                    let stream_model = req.input.model.clone();
                     let stream_request_id = request_id.clone();
                     // Streaming idle watchdog (cc 2.1.196 default-on): resolve
                     // the per-event idle timeout from the env once at
@@ -4509,7 +4511,7 @@ impl ApiService {
                                 attempt.finish().await?;
                                 telemetry::emit_dispatch_header_fallback(
                                     &self.analytics,
-                                    &req.model,
+                                    &req.input.model,
                                     "body_phase",
                                     None,
                                 )
@@ -4539,7 +4541,7 @@ impl ApiService {
                         idle_timeout: stream_idle_timeout,
                     };
 
-                    let boxed: BoxStream<'static, Result<LlmEvent, LlmError>> = Box::pin(
+                    let boxed: BoxStream<'static, Result<HistoryEvent, LlmError>> = Box::pin(
                         futures::stream::unfold(stream_state, |mut s| async move {
                             loop {
                                 if let Some(event) = s.queue.pop_front() {
@@ -4547,7 +4549,7 @@ impl ApiService {
                                     // (MessageStop or Completed) — once, guarded by `done`.
                                     let is_terminal = matches!(
                                         event,
-                                        LlmEvent::MessageStop | LlmEvent::Completed { .. }
+                                        HistoryEvent::MessageStop | HistoryEvent::Completed { .. }
                                     );
                                     if is_terminal && !s.done {
                                         if let Err(error) = s.attempt.finish().await {
@@ -4569,6 +4571,22 @@ impl ApiService {
                                         .await;
                                     }
                                     return Some((Ok(event), s));
+                                }
+                                if let Some(error) = s.decoder.take_error() {
+                                    let error = s.attempt.finish().await.err().unwrap_or(error);
+                                    s.finished = true;
+                                    if !s.done {
+                                        s.done = true;
+                                        telemetry::emit_failed(
+                                            &s.analytics,
+                                            &s.model,
+                                            &s.request_id,
+                                            ApiService::error_kind(&error),
+                                            ApiService::status_of(&error),
+                                        )
+                                        .await;
+                                    }
+                                    return Some((Err(error), s));
                                 }
                                 if s.finished {
                                     if let Err(error) = s.attempt.finish().await {
@@ -4606,6 +4624,7 @@ impl ApiService {
                                             &frame.usage,
                                             &frame.inference,
                                         );
+                                        s.decoder.observe_model_metadata(&s.frames);
                                         match s.decoder.project_batch(frame) {
                                             Ok(mut events) => {
                                                 attach_frozen_stream_quote(
@@ -4743,12 +4762,12 @@ impl ApiService {
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
         speed: Option<String>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let mut req = self.build_request(model, profile, system, messages, tools, true, None)?;
-        req.effort = effort;
+        req.set_effort(effort)?;
         // (fast mode) `Some("fast")` from the main loop lights the fast-mode
         // beta via `beta_context`; `None` keeps the body byte-identical.
-        req.speed = speed;
+        req.set_speed(speed)?;
         self.drive_stream(req).await
     }
 
@@ -4765,13 +4784,13 @@ impl ApiService {
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let mut req = self.build_request(model, profile, system, messages, tools, true, None)?;
-        req.effort = effort;
+        req.set_effort(effort)?;
         if let Some(name) = forced_tool {
-            req.tool_choice = Some(crate::ToolChoice::Tool {
+            req.set_tool_choice(Some(crate::ToolChoice::Tool {
                 name: name.to_string(),
-            });
+            }));
         }
         self.drive_stream(req).await
     }
@@ -4793,11 +4812,11 @@ impl ApiService {
         effort: Option<serde_json::Value>,
         max_tokens: Option<u32>,
         query_source: Option<&str>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let mut req =
             self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
-        req.effort = effort;
-        req.query_source = query_source.map(str::to_string);
+        req.set_effort(effort)?;
+        req.execution.query_source = query_source.map(str::to_string);
         self.drive_stream(req).await
     }
 
@@ -4815,16 +4834,16 @@ impl ApiService {
         effort: Option<serde_json::Value>,
         max_tokens: Option<u32>,
         query_source: Option<&str>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let mut req =
             self.build_request(model, profile, system, messages, tools, true, max_tokens)?;
-        req.effort = effort;
+        req.set_effort(effort)?;
         if let Some(name) = forced_tool {
-            req.tool_choice = Some(crate::ToolChoice::Tool {
+            req.set_tool_choice(Some(crate::ToolChoice::Tool {
                 name: name.to_string(),
-            });
+            }));
         }
-        req.query_source = query_source.map(str::to_string);
+        req.execution.query_source = query_source.map(str::to_string);
         self.drive_stream(req).await
     }
 
@@ -4848,7 +4867,7 @@ impl ApiService {
         schema: serde_json::Value,
         max_tokens: Option<u32>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let mut req = self.build_request(
             model,
             profile,
@@ -4862,9 +4881,13 @@ impl ApiService {
         // not forced-tool calls. A parent `--json-schema` turn may have set a
         // session-level `forced_tool_choice`; do not send that choice with the
         // empty tool list used by this request.
-        req.tool_choice = None;
-        req.effort = effort;
-        req.response_format = Some(crate::ResponseFormat::JsonSchema { schema });
+        req.input.tool_choice = lingxi_llm_client::protocol::ToolChoice::Auto;
+        req.set_effort(effort)?;
+        req.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonSchema {
+            name: "response".into(),
+            schema,
+            strict: true,
+        };
         self.drive_stream(req).await
     }
 
@@ -4873,7 +4896,7 @@ impl ApiService {
     /// [`Self::messages_create_side_query_stream_with_thinking`].
     ///
     /// Plain `stream_json_schema` never touches `req.reasoning` or
-    /// `req.temperature` at all — it just inherits whatever `build_request`
+    /// `req.input.temperature` at all — it just inherits whatever `build_request`
     /// already derives from the LIVE session thinking config. That is
     /// correct for a caller (like the auto-mode propose query) that wants to
     /// inherit the session's thinking decision untouched. It is wrong for a
@@ -4902,7 +4925,7 @@ impl ApiService {
         thinking: Option<crate::model::thinking::ThinkingConfig>,
         temperature: Option<f32>,
         query_source: Option<&str>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let req = self.build_json_schema_request_with_thinking(
             model,
             profile,
