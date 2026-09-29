@@ -49,12 +49,12 @@
       "id": "own-web-tooling",
       "kind": "divergence",
       "finding": "Claude Code ships its own web search stack.",
-      "reason": "LingXi implements WebSearch itself (Tavily-backed). Do not port Claude's stack over it.",
+      "reason": "LingXi retains client-side WebSearch providers, including Tavily, for models without hosted search. Do not replace that path with Claude's hosted-only stack.",
       "decided_on": "2026-07-02",
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "crates/tools/web/src/web_search.rs", "text": "Tavily" }
+        { "kind": "present", "path": "crates/tools/web/src/web_search_client.rs", "text": "Tavily" }
       ]
     },
     {
@@ -116,7 +116,7 @@
       "status": "active",
       "anchors": [
         { "kind": "absent", "path": "crates/tools", "text": "ProposeGoal" },
-        { "kind": "absent", "path": "crates/commands", "text": "ProposeGoal" }
+        { "kind": "absent", "path": "crates/command-api", "text": "ProposeGoal" }
       ]
     },
     {
@@ -154,7 +154,7 @@
       "decided_by": "oracle",
       "status": "active",
       "anchors": [
-        { "kind": "absent", "path": "crates/commands/core/src/bundled", "text": "lorem-ipsum" },
+        { "kind": "absent", "path": "crates/command-api/src/builtins/bundled", "text": "lorem-ipsum" },
         { "kind": "present", "path": "crates/test-harness/tests/parity_claude_2_1_267.rs", "text": "lorem-ipsum" }
       ]
     },
@@ -204,7 +204,7 @@
       "decided_by": "oracle",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "crates/commands/core/src/register.rs", "text": "register_alias(\"cost\".to_string(), \"usage\".to_string())" }
+        { "kind": "present", "path": "crates/command-api/src/builtins/register.rs", "text": "register_alias(\"cost\".to_string(), \"usage\".to_string())" }
       ]
     },
     {

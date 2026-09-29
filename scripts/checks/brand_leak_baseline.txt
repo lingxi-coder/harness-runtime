@@ -7,7 +7,7 @@
 # ⚠️ 一条条目断言的是「该文件里该 needle **至少命中一次**」，而不是你以为的
 # 那一次命中。已知的一处不对应：
 #
-#     G2	lingxi-code/platform-api/src/uds_inbox.rs	CLAUDE_CODE_TMPDIR
+#     G2	crates/platform-api/src/uds_inbox.rs	CLAUDE_CODE_TMPDIR
 #
 # 这一条钉住的是**测试**里 uds_inbox.rs:1116 的
 # `std::env::var_os("CLAUDE_CODE_TMPDIR")` 存档/还原，**不是** uds_inbox.rs:123
@@ -18,7 +18,6 @@
 # 消失，那处真读取就变得完全不可见**——而门只会打印「baseline 少了一条」，
 # 一个看起来像「修好了」的信号。改 uds_inbox.rs 的测试时，请一并确认 :123
 # 那处读取仍被某条规则看着。
-
 G1	Cargo.toml	LingXi
 G1	crates/agent/src/builtins.rs	LINGXI
 G1	crates/agent/src/builtins.rs	LingXi
@@ -195,14 +194,29 @@ G1	crates/local-apps/src/storage.rs	LINGXI
 G1	crates/local-apps/src/storage.rs	\.lingxi
 G1	crates/local-apps/templates/runtime-profiles/babylon-3d/r4/.lingxi/source-policy.json	LINGXI
 G1	crates/local-apps/templates/runtime-profiles/babylon-3d/r4/.lingxi/source-policy.json	\.lingxi
+G1	crates/local-apps/templates/runtime-profiles/babylon-3d/r4/app/main.jsx	LingXi
+G1	crates/local-apps/templates/runtime-profiles/babylon-3d/r4/lib/lingxi-bridge.js	LingXi
+G1	crates/local-apps/templates/runtime-profiles/babylon-3d/r4/lib/lingxi-provider.jsx	LingXi
 G1	crates/local-apps/templates/runtime-profiles/canvas-2d/r4/.lingxi/source-policy.json	LINGXI
 G1	crates/local-apps/templates/runtime-profiles/canvas-2d/r4/.lingxi/source-policy.json	\.lingxi
+G1	crates/local-apps/templates/runtime-profiles/canvas-2d/r4/app/main.jsx	LingXi
+G1	crates/local-apps/templates/runtime-profiles/canvas-2d/r4/lib/lingxi-bridge.js	LingXi
+G1	crates/local-apps/templates/runtime-profiles/canvas-2d/r4/lib/lingxi-provider.jsx	LingXi
 G1	crates/local-apps/templates/runtime-profiles/phaser-2d/r4/.lingxi/source-policy.json	LINGXI
 G1	crates/local-apps/templates/runtime-profiles/phaser-2d/r4/.lingxi/source-policy.json	\.lingxi
+G1	crates/local-apps/templates/runtime-profiles/phaser-2d/r4/app/main.jsx	LingXi
+G1	crates/local-apps/templates/runtime-profiles/phaser-2d/r4/lib/lingxi-bridge.js	LingXi
+G1	crates/local-apps/templates/runtime-profiles/phaser-2d/r4/lib/lingxi-provider.jsx	LingXi
 G1	crates/local-apps/templates/runtime-profiles/react-dom/r4/.lingxi/source-policy.json	LINGXI
 G1	crates/local-apps/templates/runtime-profiles/react-dom/r4/.lingxi/source-policy.json	\.lingxi
+G1	crates/local-apps/templates/runtime-profiles/react-dom/r4/app/main.jsx	LingXi
+G1	crates/local-apps/templates/runtime-profiles/react-dom/r4/lib/lingxi-bridge.js	LingXi
+G1	crates/local-apps/templates/runtime-profiles/react-dom/r4/lib/lingxi-provider.jsx	LingXi
 G1	crates/local-apps/templates/runtime-profiles/three-3d/r4/.lingxi/source-policy.json	LINGXI
 G1	crates/local-apps/templates/runtime-profiles/three-3d/r4/.lingxi/source-policy.json	\.lingxi
+G1	crates/local-apps/templates/runtime-profiles/three-3d/r4/app/main.jsx	LingXi
+G1	crates/local-apps/templates/runtime-profiles/three-3d/r4/lib/lingxi-bridge.js	LingXi
+G1	crates/local-apps/templates/runtime-profiles/three-3d/r4/lib/lingxi-provider.jsx	LingXi
 G1	crates/local-apps/tests/serde_compat.rs	\.lingxi
 G1	crates/mcp/src/config_diagnostics.rs	LINGXI
 G1	crates/mcp/src/enterprise_policy.rs	LINGXI
@@ -250,7 +264,6 @@ G1	crates/orchestrator/src/conversation/drivers/streaming.rs	LINGXI
 G1	crates/orchestrator/src/conversation/hooks.rs	LINGXI
 G1	crates/orchestrator/src/conversation/prompt.rs	LINGXI
 G1	crates/orchestrator/src/conversation/prompt.rs	\.claude(?![A-Za-z0-9_.\-])
-G1	crates/orchestrator/src/conversation/prompt.rs	\.lingxi
 G1	crates/orchestrator/src/conversation/reminders.rs	LINGXI
 G1	crates/orchestrator/src/conversation/tests/additional_context_tests.rs	LINGXI
 G1	crates/orchestrator/src/conversation/tests/agent_listing_reminder_tests.rs	LINGXI
@@ -258,6 +271,7 @@ G1	crates/orchestrator/src/conversation/tests/changed_files_reminder_tests.rs	LI
 G1	crates/orchestrator/src/conversation/tests/conditional_rules_reminder_tests.rs	LINGXI
 G1	crates/orchestrator/src/conversation/tests/conditional_rules_reminder_tests.rs	\.lingxi
 G1	crates/orchestrator/src/conversation/tests/main_thread_agent_tests.rs	LINGXI
+G1	crates/orchestrator/src/conversation/tests/plans_dir_tests.rs	\.lingxi
 G1	crates/orchestrator/src/conversation/tests/prompt_snapshot_tests.rs	LINGXI
 G1	crates/orchestrator/src/conversation/tests/task7_midstream_fallback_tests.rs	LINGXI
 G1	crates/orchestrator/src/conversation/tests/todo_reminder_tests.rs	LINGXI
@@ -308,6 +322,7 @@ G1	crates/orchestrator/tests/memory_seed_read_state_test.rs	LINGXI
 G1	crates/orchestrator/tests/memory_seed_read_state_test.rs	LingXi
 G1	crates/orchestrator/tests/memory_seed_read_state_test.rs	\.lingxi
 G1	crates/orchestrator/tests/mid_turn_input_test.rs	LingXi
+G1	crates/orchestrator/tests/proactive_compaction_test.rs	LINGXI
 G1	crates/orchestrator/tests/prompt_assemble_test.rs	LINGXI
 G1	crates/orchestrator/tests/prompt_assemble_test.rs	LingXi
 G1	crates/orchestrator/tests/prompt_assemble_test.rs	\.lingxi
@@ -373,6 +388,7 @@ G1	crates/permission/src/read_deny_globs.rs	\.lingxi
 G1	crates/permission/src/sed_validation.rs	\.lingxi
 G1	crates/permission/src/workspace_lease.rs	LINGXI
 G1	crates/permission/src/workspace_lease.rs	\.lingxi
+G1	crates/permission/tests/auto_mode_classifier_scope.rs	LingXi
 G1	crates/permission/tests/auto_mode_classifier_scope.rs	\.lingxi
 G1	crates/permission/tests/loop_permission_parity.rs	\.lingxi
 G1	crates/permission/tests/powershell_wiring.rs	LingXi
@@ -394,7 +410,6 @@ G1	crates/platform-api/src/traffic_mode.rs	LINGXI
 G1	crates/platform-api/src/uds_inbox.rs	LINGXI
 G1	crates/platform-api/src/worktree.rs	\.lingxi
 G1	crates/platforms/android/src/lib.rs	\.lingxi
-G1	crates/platforms/android/src/mobile_linux.rs	LINGXI
 G1	crates/platforms/android/src/mobile_linux.rs	\.lingxi
 G1	crates/platforms/common/src/mcp_sse.rs	LingXi
 G1	crates/platforms/common/src/mcp_ws.rs	LingXi
@@ -441,15 +456,36 @@ G1	crates/plugin/tests/materialize.rs	\.lingxi
 G1	crates/plugins/lingxi-local-app/.lingxi-plugin/plugin.json	LingXi
 G1	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/.lingxi/source-policy.json	LINGXI
 G1	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/.lingxi/source-policy.json	\.lingxi
+G1	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/app/main.jsx	LingXi
+G1	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/inventory.json	\.lingxi
+G1	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/lib/lingxi-bridge.js	LingXi
+G1	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/lib/lingxi-provider.jsx	LingXi
 G1	crates/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/.lingxi/source-policy.json	LINGXI
 G1	crates/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/.lingxi/source-policy.json	\.lingxi
+G1	crates/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/app/main.jsx	LingXi
+G1	crates/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/inventory.json	\.lingxi
+G1	crates/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/lib/lingxi-bridge.js	LingXi
+G1	crates/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/lib/lingxi-provider.jsx	LingXi
 G1	crates/plugins/lingxi-local-app/assets/templates/phaser-2d/r4/.lingxi/source-policy.json	LINGXI
 G1	crates/plugins/lingxi-local-app/assets/templates/phaser-2d/r4/.lingxi/source-policy.json	\.lingxi
+G1	crates/plugins/lingxi-local-app/assets/templates/phaser-2d/r4/app/main.jsx	LingXi
+G1	crates/plugins/lingxi-local-app/assets/templates/phaser-2d/r4/inventory.json	\.lingxi
+G1	crates/plugins/lingxi-local-app/assets/templates/phaser-2d/r4/lib/lingxi-bridge.js	LingXi
+G1	crates/plugins/lingxi-local-app/assets/templates/phaser-2d/r4/lib/lingxi-provider.jsx	LingXi
 G1	crates/plugins/lingxi-local-app/assets/templates/react-dom/r4/.lingxi/source-policy.json	LINGXI
 G1	crates/plugins/lingxi-local-app/assets/templates/react-dom/r4/.lingxi/source-policy.json	\.lingxi
+G1	crates/plugins/lingxi-local-app/assets/templates/react-dom/r4/app/main.jsx	LingXi
+G1	crates/plugins/lingxi-local-app/assets/templates/react-dom/r4/inventory.json	\.lingxi
+G1	crates/plugins/lingxi-local-app/assets/templates/react-dom/r4/lib/lingxi-bridge.js	LingXi
+G1	crates/plugins/lingxi-local-app/assets/templates/react-dom/r4/lib/lingxi-provider.jsx	LingXi
 G1	crates/plugins/lingxi-local-app/assets/templates/three-3d/r4/.lingxi/source-policy.json	LINGXI
 G1	crates/plugins/lingxi-local-app/assets/templates/three-3d/r4/.lingxi/source-policy.json	\.lingxi
+G1	crates/plugins/lingxi-local-app/assets/templates/three-3d/r4/app/main.jsx	LingXi
+G1	crates/plugins/lingxi-local-app/assets/templates/three-3d/r4/inventory.json	\.lingxi
+G1	crates/plugins/lingxi-local-app/assets/templates/three-3d/r4/lib/lingxi-bridge.js	LingXi
+G1	crates/plugins/lingxi-local-app/assets/templates/three-3d/r4/lib/lingxi-provider.jsx	LingXi
 G1	crates/plugins/lingxi-local-app/skills/accessibility/agents/openai.yaml	LingXi
+G1	crates/plugins/lingxi-local-app/skills/apple-design/agents/openai.yaml	LingXi
 G1	crates/plugins/lingxi-local-app/skills/babylon-3d-local-app/agents/openai.yaml	LingXi
 G1	crates/plugins/lingxi-local-app/skills/canvas-2d-local-app/agents/openai.yaml	LingXi
 G1	crates/plugins/lingxi-local-app/skills/create-local-app/agents/openai.yaml	LingXi
@@ -500,6 +536,7 @@ G1	crates/runtime/src/mobile/local_apps_host/tests/tests.rs	LINGXI
 G1	crates/runtime/src/mobile/local_apps_host/tests/tests.rs	\.lingxi
 G1	crates/runtime/src/mobile/local_apps_mcp.rs	LINGXI
 G1	crates/runtime/src/mobile/local_apps_mcp.rs	\.lingxi
+G1	crates/runtime/src/mobile/skill_loader.rs	LingXi
 G1	crates/runtime/src/mobile/skill_loader.rs	\.lingxi
 G1	crates/runtime/src/mobile/workflow_support.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/runtime/src/mobile/workflow_support.rs	\.lingxi
@@ -534,6 +571,7 @@ G1	crates/skill-api/src/listing.rs	\.lingxi
 G1	crates/task-store/tests/todo_store_multiprocess.rs	LINGXI
 G1	crates/tasks/src/handlers/in_process_teammate.rs	LINGXI
 G1	crates/tasks/src/handlers/in_process_teammate_test.rs	LINGXI
+G1	crates/tasks/src/handlers/in_process_teammate_test.rs	\.lingxi
 G1	crates/tasks/src/handlers/local_agent.rs	\.lingxi
 G1	crates/tasks/src/output_manager.rs	LINGXI
 G1	crates/tasks/src/registry.rs	LINGXI
@@ -655,16 +693,15 @@ G1	scripts/checks/prompt_drift_scan.py	LingXi
 G1	scripts/checks/prompt_drift_scan.py	\.claude(?![A-Za-z0-9_.\-])
 G1	scripts/checks/prompt_drift_scan.py	\.lingxi
 G1	scripts/local-apps/check-authorizations.sh	LINGXI
-G1	scripts/local-apps/check-rootfs-manifest.sh	LINGXI
 G1	scripts/local-apps/check-sbom-and-licenses.sh	LINGXI
 G1	scripts/local-apps/generate-local-app-sbom.py	LingXi
-G1	scripts/local-apps/rootfs-build-inner.sh	LINGXI
 G1	scripts/local-apps/verify-local-app-supply-chain.py	LINGXI
 G1	scripts/local-apps/verify-local-app-supply-chain.py	LingXi
 G1	scripts/local-apps/verify-local-app-supply-chain.py	\.lingxi
 G1	scripts/tests/smoke.sh	LINGXI
 G1	scripts/tests/test-local-app-supply-chain.sh	\.lingxi
 G1	skills/accessibility/agents/openai.yaml	LingXi
+G1	skills/apple-design/agents/openai.yaml	LingXi
 G1	skills/babylon-3d-local-app/agents/openai.yaml	LingXi
 G1	skills/canvas-2d-local-app/agents/openai.yaml	LingXi
 G1	skills/create-local-app/agents/openai.yaml	LingXi
@@ -854,16 +891,31 @@ G3	crates/local-apps/src/service.rs	.lingxi
 G3	crates/local-apps/src/storage.rs	.lingxi
 G3	crates/local-apps/src/storage.rs	.lingxi-*
 G3	crates/local-apps/src/storage.rs	LINGXI.md
+G3	crates/local-apps/templates/runtime-profiles/babylon-3d/r4/.gitignore	.lingxi-*
 G3	crates/local-apps/templates/runtime-profiles/babylon-3d/r4/.lingxi/source-policy.json	.lingxi
 G3	crates/local-apps/templates/runtime-profiles/babylon-3d/r4/.lingxi/source-policy.json	LINGXI.md
+G3	crates/local-apps/templates/runtime-profiles/babylon-3d/r4/lib/lingxi-bridge.js	.lingxi
+G3	crates/local-apps/templates/runtime-profiles/babylon-3d/r4/styles/foundation.css	.lingxi-*
+G3	crates/local-apps/templates/runtime-profiles/canvas-2d/r4/.gitignore	.lingxi-*
 G3	crates/local-apps/templates/runtime-profiles/canvas-2d/r4/.lingxi/source-policy.json	.lingxi
 G3	crates/local-apps/templates/runtime-profiles/canvas-2d/r4/.lingxi/source-policy.json	LINGXI.md
+G3	crates/local-apps/templates/runtime-profiles/canvas-2d/r4/lib/lingxi-bridge.js	.lingxi
+G3	crates/local-apps/templates/runtime-profiles/canvas-2d/r4/styles/foundation.css	.lingxi-*
+G3	crates/local-apps/templates/runtime-profiles/phaser-2d/r4/.gitignore	.lingxi-*
 G3	crates/local-apps/templates/runtime-profiles/phaser-2d/r4/.lingxi/source-policy.json	.lingxi
 G3	crates/local-apps/templates/runtime-profiles/phaser-2d/r4/.lingxi/source-policy.json	LINGXI.md
+G3	crates/local-apps/templates/runtime-profiles/phaser-2d/r4/lib/lingxi-bridge.js	.lingxi
+G3	crates/local-apps/templates/runtime-profiles/phaser-2d/r4/styles/foundation.css	.lingxi-*
+G3	crates/local-apps/templates/runtime-profiles/react-dom/r4/.gitignore	.lingxi-*
 G3	crates/local-apps/templates/runtime-profiles/react-dom/r4/.lingxi/source-policy.json	.lingxi
 G3	crates/local-apps/templates/runtime-profiles/react-dom/r4/.lingxi/source-policy.json	LINGXI.md
+G3	crates/local-apps/templates/runtime-profiles/react-dom/r4/lib/lingxi-bridge.js	.lingxi
+G3	crates/local-apps/templates/runtime-profiles/react-dom/r4/styles/foundation.css	.lingxi-*
+G3	crates/local-apps/templates/runtime-profiles/three-3d/r4/.gitignore	.lingxi-*
 G3	crates/local-apps/templates/runtime-profiles/three-3d/r4/.lingxi/source-policy.json	.lingxi
 G3	crates/local-apps/templates/runtime-profiles/three-3d/r4/.lingxi/source-policy.json	LINGXI.md
+G3	crates/local-apps/templates/runtime-profiles/three-3d/r4/lib/lingxi-bridge.js	.lingxi
+G3	crates/local-apps/templates/runtime-profiles/three-3d/r4/styles/foundation.css	.lingxi-*
 G3	crates/local-apps/tests/fixtures/.gitignore	.lingxi
 G3	crates/local-apps/tests/serde_compat.rs	.lingxi
 G3	crates/mcp/src/json_config.rs	.lingxi.json
@@ -895,12 +947,12 @@ G3	crates/migrations/src/global_config.rs	LINGXI_CONFIG_DIR
 G3	crates/migrations/src/global_config.rs	LINGXI_CONFIG_DIR (case)
 G3	crates/migrations/src/settings_update.rs	.lingxi
 G3	crates/orchestrator/src/config.rs	.lingxi
-G3	crates/orchestrator/src/conversation/prompt.rs	.lingxi
 G3	crates/orchestrator/src/conversation/tests/additional_context_tests.rs	LINGXI.md
 G3	crates/orchestrator/src/conversation/tests/changed_files_reminder_tests.rs	LINGXI.md
 G3	crates/orchestrator/src/conversation/tests/conditional_rules_reminder_tests.rs	.lingxi
 G3	crates/orchestrator/src/conversation/tests/conditional_rules_reminder_tests.rs	LINGXI.md
 G3	crates/orchestrator/src/conversation/tests/main_thread_agent_tests.rs	LINGXI.md
+G3	crates/orchestrator/src/conversation/tests/plans_dir_tests.rs	.lingxi
 G3	crates/orchestrator/src/cwd_changed_firer.rs	.lingxi
 G3	crates/orchestrator/src/diagnostics.rs	.lingxi.json
 G3	crates/orchestrator/src/handle_impl.rs	.lingxi
@@ -994,18 +1046,37 @@ G3	crates/plugin/src/manager.rs	.lingxi-plugin
 G3	crates/plugin/tests/discovery_bootstrap.rs	.lingxi-plugin
 G3	crates/plugin/tests/enabled_discovery.rs	.lingxi-plugin
 G3	crates/plugin/tests/materialize.rs	.lingxi-plugin
+G3	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/.gitignore	.lingxi-*
 G3	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/.lingxi/source-policy.json	.lingxi
 G3	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/.lingxi/source-policy.json	LINGXI.md
+G3	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/inventory.json	.lingxi
+G3	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/lib/lingxi-bridge.js	.lingxi
+G3	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/styles/foundation.css	.lingxi-*
+G3	crates/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/.gitignore	.lingxi-*
 G3	crates/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/.lingxi/source-policy.json	.lingxi
 G3	crates/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/.lingxi/source-policy.json	LINGXI.md
+G3	crates/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/inventory.json	.lingxi
+G3	crates/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/lib/lingxi-bridge.js	.lingxi
+G3	crates/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/styles/foundation.css	.lingxi-*
+G3	crates/plugins/lingxi-local-app/assets/templates/phaser-2d/r4/.gitignore	.lingxi-*
 G3	crates/plugins/lingxi-local-app/assets/templates/phaser-2d/r4/.lingxi/source-policy.json	.lingxi
 G3	crates/plugins/lingxi-local-app/assets/templates/phaser-2d/r4/.lingxi/source-policy.json	LINGXI.md
+G3	crates/plugins/lingxi-local-app/assets/templates/phaser-2d/r4/inventory.json	.lingxi
+G3	crates/plugins/lingxi-local-app/assets/templates/phaser-2d/r4/lib/lingxi-bridge.js	.lingxi
+G3	crates/plugins/lingxi-local-app/assets/templates/phaser-2d/r4/styles/foundation.css	.lingxi-*
+G3	crates/plugins/lingxi-local-app/assets/templates/react-dom/r4/.gitignore	.lingxi-*
 G3	crates/plugins/lingxi-local-app/assets/templates/react-dom/r4/.lingxi/source-policy.json	.lingxi
 G3	crates/plugins/lingxi-local-app/assets/templates/react-dom/r4/.lingxi/source-policy.json	LINGXI.md
+G3	crates/plugins/lingxi-local-app/assets/templates/react-dom/r4/inventory.json	.lingxi
+G3	crates/plugins/lingxi-local-app/assets/templates/react-dom/r4/lib/lingxi-bridge.js	.lingxi
+G3	crates/plugins/lingxi-local-app/assets/templates/react-dom/r4/styles/foundation.css	.lingxi-*
+G3	crates/plugins/lingxi-local-app/assets/templates/three-3d/r4/.gitignore	.lingxi-*
 G3	crates/plugins/lingxi-local-app/assets/templates/three-3d/r4/.lingxi/source-policy.json	.lingxi
 G3	crates/plugins/lingxi-local-app/assets/templates/three-3d/r4/.lingxi/source-policy.json	LINGXI.md
+G3	crates/plugins/lingxi-local-app/assets/templates/three-3d/r4/inventory.json	.lingxi
+G3	crates/plugins/lingxi-local-app/assets/templates/three-3d/r4/lib/lingxi-bridge.js	.lingxi
+G3	crates/plugins/lingxi-local-app/assets/templates/three-3d/r4/styles/foundation.css	.lingxi-*
 G3	crates/plugins/lingxi-local-app/skills/create-local-app/SKILL.md	.lingxi
-G3	crates/plugins/lingxi-local-app/skills/create-local-app/SKILL.md	.lingxi-*
 G3	crates/plugins/lingxi-local-app/skills/create-local-app/SKILL.md	LINGXI.md
 G3	crates/plugins/lingxi-local-app/skills/device/SKILL.md	.lingxi
 G3	crates/plugins/lingxi-local-app/skills/local-app-data/SKILL.md	LINGXI.md
@@ -1067,6 +1138,7 @@ G3	crates/session/tests/jsonl_path_test.rs	.lingxi
 G3	crates/session/tests/session_gap_fixes_test.rs	.lingxi
 G3	crates/skill-api/src/conditional.rs	.lingxi
 G3	crates/skill-api/src/listing.rs	.lingxi
+G3	crates/tasks/src/handlers/in_process_teammate_test.rs	.lingxi
 G3	crates/tasks/src/handlers/local_agent.rs	.lingxi
 G3	crates/tasks/src/registry.rs	.lingxi
 G3	crates/tasks/src/registry_test.rs	.lingxi
@@ -1117,10 +1189,10 @@ G3	scripts/checks/prompt_drift_scan.py	LINGXI.md
 G3	scripts/local-apps/verify-local-app-supply-chain.py	.lingxi
 G3	scripts/local-apps/verify-local-app-supply-chain.py	.lingxi-*
 G3	scripts/local-apps/verify-local-app-supply-chain.py	LINGXI.md
+G3	scripts/tests/test-local-app-r4-libs.mjs	.lingxi
 G3	scripts/tests/test-local-app-supply-chain.sh	.lingxi
 G3	scripts/tests/test-local-app-supply-chain.sh	.lingxi-*
 G3	skills/create-local-app/SKILL.md	.lingxi
-G3	skills/create-local-app/SKILL.md	.lingxi-*
 G3	skills/create-local-app/SKILL.md	LINGXI.md
 G4	crates/agent/src/model_resolution.rs	LINGXI_SUBAGENT_MODEL
 G4	crates/coordinator/src/prompt.rs	LINGXI_SIMPLE
