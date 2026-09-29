@@ -1061,7 +1061,7 @@ pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry)
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::process::ProcessOutput;
+    use mobile_linux_api::ProcessOutput;
     use std::collections::HashMap;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use tool_api::tool_trait::{ToolError, ToolStaticContext};

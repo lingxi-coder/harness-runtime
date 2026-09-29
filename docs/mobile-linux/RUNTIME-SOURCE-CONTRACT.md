@@ -3,7 +3,7 @@
 The runtime Git revision pinned by Cargo owns `docs/mobile-linux` runtime pins,
 SBOM inputs, policy and rootfs schemas, plus `crates/local-apps` and
 `crates/plugins/lingxi-local-app` assets. Runtime checks never require a LingXi
-`clients` checkout. `scripts/mobile-linux/verify-local-app-supply-chain.py`
+`clients` checkout. `scripts/local-apps/verify-local-app-supply-chain.py`
 validates all runtime assets and the generic execution contract independently.
 
 Rootfs and node-module tools accept `--output` / `--output-dir`; rootfs builds

@@ -988,7 +988,7 @@ mod tests {
         assert!(on.contains(&format!("{SECTION}\n## Runtime behavior")));
     }
 
-    use platform_api::process::ProcessOutput;
+    use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx_in};
 
     fn dummy_out() -> ProcessOutput {
@@ -1038,7 +1038,7 @@ mod tests {
         let _serial = cron::autonomous_loop::TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        use platform_api::process::ProcessOutput;
+        use mobile_linux_api::ProcessOutput;
         use tool_api::test_support::shell_test_ctx_in;
         let tool = CronCreateTool::new(shell_test_ctx_in(
             ProcessOutput {

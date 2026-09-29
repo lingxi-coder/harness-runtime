@@ -8,8 +8,9 @@
 //! `taskkill /T /F /PID <pid>`.
 
 use async_trait::async_trait;
-use platform_api::process::ProcessStreamSink;
-use platform_api::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand};
+use mobile_linux_api::ProcessStreamSink;
+use mobile_linux_api::{ProcessError, ProcessOutput};
+use platform_api::{ProcessHandle, ProcessRunner, SandboxedCommand};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};

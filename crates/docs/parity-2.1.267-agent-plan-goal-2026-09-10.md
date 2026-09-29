@@ -163,4 +163,4 @@ it can only recover the condition string from the transcript.
 | cron / compact / teammate / orchestrator | swept; dominated by out-of-scope surfaces, nothing structural |
 | **agent** | **swept; one new feature, dormant upstream** |
 | **plan / goal** | **swept; zero delta** |
-| permission | not swept here — `scripts/perm_verify_literals.py` is the better instrument for that crate |
+| permission | not swept here — `scripts/checks/perm_verify_literals.py` is the better instrument for that crate |

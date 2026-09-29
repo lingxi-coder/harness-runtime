@@ -814,7 +814,7 @@ fn empty_result_model_content(pending: &[String], failed: &[(String, Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::process::ProcessOutput;
+    use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     fn dummy_out() -> ProcessOutput {

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+mobile-linux-api.workspace = true
 protocol = { path = "../protocol" }
 platform-api = { path = "../platform-api" }
 branding.workspace = true

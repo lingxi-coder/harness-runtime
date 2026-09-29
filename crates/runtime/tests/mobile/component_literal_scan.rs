@@ -293,7 +293,7 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// `harness-runtime` → the cargo workspace root (`lingxi-code/`).
+/// `harness-runtime` → the workspace's `crates/` directory.
 fn workspace_root() -> PathBuf {
     manifest_dir()
         .parent()
@@ -2825,7 +2825,7 @@ fn register_verified_builtin_has_exactly_one_call_site_in_the_whole_workspace() 
     // this test would be a slower copy of the narrow one.
     for required in [
         "plugin/src/manager.rs",
-        "runtime/src/desktop/mod.rs",
+        "runtime/src/mobile/host/assembly.rs",
         "runtime/src/mobile/mod.rs",
     ] {
         assert!(

@@ -14201,20 +14201,20 @@
       "source_blob": "fbc586160e062d21746c5265971282d59ea6c05b"
     },
     {
-      "from": "lingxi-code/scripts/brand_frozen_identities.txt",
-      "to": "scripts/brand_frozen_identities.txt",
+      "from": "lingxi-code/scripts/checks/brand_frozen_identities.txt",
+      "to": "scripts/checks/brand_frozen_identities.txt",
       "source_sha256": "682068e16812c694c0a608c351267473b6f588229b09e32786f1de43db03faf7",
       "source_blob": "7649a4f5c298512db4e2f4641345c5fc5d093b8e"
     },
     {
-      "from": "lingxi-code/scripts/brand_leak_baseline.txt",
-      "to": "scripts/brand_leak_baseline.txt",
+      "from": "lingxi-code/scripts/checks/brand_leak_baseline.txt",
+      "to": "scripts/checks/brand_leak_baseline.txt",
       "source_sha256": "3daabd2c36c8b9de579d62e3e051dcb8de56f345708563b066dcd7afe0b58f2e",
       "source_blob": "f09ad178190cd4089a8366b846ed118117910602"
     },
     {
-      "from": "lingxi-code/scripts/check-absolute-symlinks.sh",
-      "to": "scripts/check-absolute-symlinks.sh",
+      "from": "lingxi-code/scripts/checks/check-absolute-symlinks.sh",
+      "to": "scripts/checks/check-absolute-symlinks.sh",
       "source_sha256": "da98e1d4ba3abf229dc3eb7af8b957846228c0d4c138f42d23b790f8590db450",
       "source_blob": "dc97aa3a50c521243bcb1f12dffcc896ae74b411"
     },
@@ -14225,14 +14225,14 @@
       "source_blob": "5fbce65572d3f96618246d98b91da62363641bd5"
     },
     {
-      "from": "lingxi-code/scripts/check-brand-leaks.sh",
-      "to": "scripts/check-brand-leaks.sh",
+      "from": "lingxi-code/scripts/checks/check-brand-leaks.sh",
+      "to": "scripts/checks/check-brand-leaks.sh",
       "source_sha256": "bd307f1b3ec73db9a6ae5c8f22ddabfd80dac8b0e7092ce8d6707dc1253837c1",
       "source_blob": "4c3a669bbb3f822c030830fe3e58f2b2ddc1160b"
     },
     {
-      "from": "lingxi-code/scripts/check-deps.sh",
-      "to": "scripts/check-deps.sh",
+      "from": "lingxi-code/scripts/checks/check-deps.sh",
+      "to": "scripts/checks/check-deps.sh",
       "source_blob": "62f6b1c433dda59cc634066523e2024775c910a4",
       "source_sha256": "00f13d163879c07db9cf9de5d837d4489d79a14fb652b4b05c4d2058b3640505"
     },
@@ -14243,44 +14243,44 @@
       "source_blob": "1933c3503389a07b1caa63dc4c04c450ebb866d5"
     },
     {
-      "from": "lingxi-code/scripts/check-phase2-plugin.py",
-      "to": "scripts/check-phase2-plugin.py",
+      "from": "lingxi-code/scripts/checks/check-phase2-plugin.py",
+      "to": "scripts/checks/check-phase2-plugin.py",
       "source_blob": "61dc592310708ec8728ac12ff674eda8f7fa902e",
       "source_sha256": "277bb3fdf8a65618bc1d56b1954a950e2238e1bbb5f95efb95da9fdc72784d61"
     },
     {
-      "from": "lingxi-code/scripts/check-phase2-plugin.sh",
-      "to": "scripts/check-phase2-plugin.sh",
+      "from": "lingxi-code/scripts/checks/check-phase2-plugin.sh",
+      "to": "scripts/checks/check-phase2-plugin.sh",
       "source_blob": "7c6a2834833e9d87a5ac200efbddbc5603ce9b67",
       "source_sha256": "830f65adf85e3ef6d1d25633d022c1ece45616b609f0d5ca66cb6032b5d38b2b"
     },
     {
-      "from": "lingxi-code/scripts/check-phase6-plugin.py",
-      "to": "scripts/check-phase6-plugin.py",
+      "from": "lingxi-code/scripts/checks/check-phase6-plugin.py",
+      "to": "scripts/checks/check-phase6-plugin.py",
       "source_blob": "42926ff55b971faf50cf595aa5db3bb450347dda",
       "source_sha256": "bfca80a4e7868e3a5a803ffa0a42daa8b741f950d41591bad4042587b5561b72"
     },
     {
-      "from": "lingxi-code/scripts/check-phase6-plugin.sh",
-      "to": "scripts/check-phase6-plugin.sh",
+      "from": "lingxi-code/scripts/checks/check-phase6-plugin.sh",
+      "to": "scripts/checks/check-phase6-plugin.sh",
       "source_blob": "61e7fe6794766fbba2ba4a9dbad36794fcb38cdf",
       "source_sha256": "836b57ca6f5dd43467d981e914ce5408a9eb7cb9276932bd63e2c447906b98dd"
     },
     {
-      "from": "lingxi-code/scripts/check-phase7-plugin.py",
-      "to": "scripts/check-phase7-plugin.py",
+      "from": "lingxi-code/scripts/checks/check-phase7-plugin.py",
+      "to": "scripts/checks/check-phase7-plugin.py",
       "source_blob": "61ea32c7d125ae439d95bd7631f534c1896e32f1",
       "source_sha256": "f7c132b30b76585aac228f2caa5192fcff33646f37d158d2555953698db508b7"
     },
     {
-      "from": "lingxi-code/scripts/check-phase7-plugin.sh",
-      "to": "scripts/check-phase7-plugin.sh",
+      "from": "lingxi-code/scripts/checks/check-phase7-plugin.sh",
+      "to": "scripts/checks/check-phase7-plugin.sh",
       "source_blob": "dd2e467e1287eb3c33526946f81df90245f5d7b6",
       "source_sha256": "536d727e147077fbbc0492fde0dcda9c4e8a4139002ea89f5723e2d801fc54c7"
     },
     {
-      "from": "lingxi-code/scripts/check-skill-frontmatter.sh",
-      "to": "scripts/check-skill-frontmatter.sh",
+      "from": "lingxi-code/scripts/checks/check-skill-frontmatter.sh",
+      "to": "scripts/checks/check-skill-frontmatter.sh",
       "source_blob": "dbbaf49289677945e5f192bb1e0850a017ff16ed",
       "source_sha256": "c66fc609d66517bb65931d9d8bd1dc8206857d82eba8ec8b205b015c19460842"
     },
@@ -14291,20 +14291,20 @@
       "source_blob": "8419395b6ad257f46e4078a7d49f10405479a829"
     },
     {
-      "from": "lingxi-code/scripts/check_absolute_symlinks.py",
-      "to": "scripts/check_absolute_symlinks.py",
+      "from": "lingxi-code/scripts/checks/check_absolute_symlinks.py",
+      "to": "scripts/checks/check_absolute_symlinks.py",
       "source_sha256": "6e364a924185735bac0e17f238510f233b90a4b54952bca2177c75052b0a55fc",
       "source_blob": "0a61cd1c318b142dfee053ef75cbd4f89f275d4c"
     },
     {
-      "from": "lingxi-code/scripts/check_brand_leaks.py",
-      "to": "scripts/check_brand_leaks.py",
+      "from": "lingxi-code/scripts/checks/check_brand_leaks.py",
+      "to": "scripts/checks/check_brand_leaks.py",
       "source_sha256": "8d1f0429f76d8db2684bd505f82f0c60e7bc640f71a43d3b3492492c966aa1ef",
       "source_blob": "71b568d586f065c733d19a486bf24207e0f75819"
     },
     {
-      "from": "lingxi-code/scripts/check_deps.py",
-      "to": "scripts/check_deps.py",
+      "from": "lingxi-code/scripts/checks/check_deps.py",
+      "to": "scripts/checks/check_deps.py",
       "source_blob": "81ff25c519539fc7b08abdf2ed75fc8853c6619d",
       "source_sha256": "7a50392a67f151ebc87deb20e2c14b585f390e744dc336ce0a078ba5ec18a8be"
     },
@@ -14315,20 +14315,20 @@
       "source_blob": "9df5c14efb87f1d84c95a0da347cca232cc5ef7f"
     },
     {
-      "from": "lingxi-code/scripts/check_skill_frontmatter.py",
-      "to": "scripts/check_skill_frontmatter.py",
+      "from": "lingxi-code/scripts/checks/check_skill_frontmatter.py",
+      "to": "scripts/checks/check_skill_frontmatter.py",
       "source_blob": "a4f8a6ab57cfb40c99a9990cc3aa1c7c14541d7c",
       "source_sha256": "49166e829daa518ca7b1fc6169022649b5984f3dd18ac03b461bad9d7d1c53a8"
     },
     {
-      "from": "lingxi-code/scripts/compact_live_oracle.py",
-      "to": "scripts/compact_live_oracle.py",
+      "from": "lingxi-code/scripts/tests/compact_live_oracle.py",
+      "to": "scripts/tests/compact_live_oracle.py",
       "source_blob": "61b80236531f6e88a8c251c3f78d979305eecfd7",
       "source_sha256": "884e02cfda7d843b48f7b5692bfc4cc281ae7c7c1236ee5d60a187047cce4494"
     },
     {
-      "from": "lingxi-code/scripts/compact_prompt_oracle.mjs",
-      "to": "scripts/compact_prompt_oracle.mjs",
+      "from": "lingxi-code/scripts/tests/compact_prompt_oracle.mjs",
+      "to": "scripts/tests/compact_prompt_oracle.mjs",
       "source_blob": "6c01585de23b79fe3ed22b8e05454cc4f9f67e13",
       "source_sha256": "5e7ee2efa4ad51c3916f900dc163fd96b4ff9b98bb7b8cbc1de6e407896a7c02"
     },
@@ -14339,158 +14339,158 @@
       "source_blob": "f9f9bf77faf606abd97a2fa41b1002a9998baf97"
     },
     {
-      "from": "lingxi-code/scripts/lap-gate.sh",
-      "to": "scripts/lap-gate.sh",
+      "from": "lingxi-code/scripts/checks/lap-gate.sh",
+      "to": "scripts/checks/lap-gate.sh",
       "source_blob": "f677ed255d770eabef56f51d3a920d3203f89e91",
       "source_sha256": "79b23aa71919031b4d6680246e554b57024c8c3ebee280b5369037ef25bb7c37"
     },
     {
-      "from": "lingxi-code/scripts/lap_gate.py",
-      "to": "scripts/lap_gate.py",
+      "from": "lingxi-code/scripts/checks/lap_gate.py",
+      "to": "scripts/checks/lap_gate.py",
       "source_blob": "bb3e90aed832a857c299b79569725a8ecb9f1f95",
       "source_sha256": "5039954662e4a33cd2b8c5394a304866a0000affcd2009a3286a3f014ec9c3c6"
     },
     {
-      "from": "lingxi-code/scripts/lap_gate_fixtures/base.txt",
-      "to": "scripts/lap_gate_fixtures/base.txt",
+      "from": "lingxi-code/scripts/tests/fixtures/lap_gate/base.txt",
+      "to": "scripts/tests/fixtures/lap_gate/base.txt",
       "source_blob": "913d84efc74c1aa66ee647524ba68db5957d38c9",
       "source_sha256": "44119cc3fb2a0dd2cb0ddeb9d663c89473286d582e85a890652907d39b878293"
     },
     {
-      "from": "lingxi-code/scripts/lap_gate_fixtures/compilebreak.txt",
-      "to": "scripts/lap_gate_fixtures/compilebreak.txt",
+      "from": "lingxi-code/scripts/tests/fixtures/lap_gate/compilebreak.txt",
+      "to": "scripts/tests/fixtures/lap_gate/compilebreak.txt",
       "source_blob": "2d09fa4358592a7db8fb1a2a9677522626987773",
       "source_sha256": "571c218dcad022c99a5f88cf8b93877db8c699d76a84e0f67eb4eb002d7e26ec"
     },
     {
-      "from": "lingxi-code/scripts/lap_gate_fixtures/newred.txt",
-      "to": "scripts/lap_gate_fixtures/newred.txt",
+      "from": "lingxi-code/scripts/tests/fixtures/lap_gate/newred.txt",
+      "to": "scripts/tests/fixtures/lap_gate/newred.txt",
       "source_blob": "ecc166d30fa497a057c724826c7fdaa77e0543ab",
       "source_sha256": "ea75b8b7e09d682670964a0c2b9cd101a93e8f7ca6e1ab58dde1e2791135dbc3"
     },
     {
-      "from": "lingxi-code/scripts/lap_gate_fixtures/planted_ok.txt",
-      "to": "scripts/lap_gate_fixtures/planted_ok.txt",
+      "from": "lingxi-code/scripts/tests/fixtures/lap_gate/planted_ok.txt",
+      "to": "scripts/tests/fixtures/lap_gate/planted_ok.txt",
       "source_blob": "e0f418236fff429402f51394a5a19f9563282313",
       "source_sha256": "4418453b80cc5347a6ed14397f9de3ce143c0d03ca30fff885ffb61971480740"
     },
     {
-      "from": "lingxi-code/scripts/lap_gate_fixtures/shrunk.txt",
-      "to": "scripts/lap_gate_fixtures/shrunk.txt",
+      "from": "lingxi-code/scripts/tests/fixtures/lap_gate/shrunk.txt",
+      "to": "scripts/tests/fixtures/lap_gate/shrunk.txt",
       "source_blob": "a35f6cb767a521ed57c2939b8e1029bb5520aaf9",
       "source_sha256": "4f2f4e2ce40494f6191663570679463ca1792db0e7f6e535d4a997497461e34d"
     },
     {
-      "from": "lingxi-code/scripts/lap_gate_fixtures/truncated.txt",
-      "to": "scripts/lap_gate_fixtures/truncated.txt",
+      "from": "lingxi-code/scripts/tests/fixtures/lap_gate/truncated.txt",
+      "to": "scripts/tests/fixtures/lap_gate/truncated.txt",
       "source_blob": "9a74d7023364a4ea09f2485726cba99d8762f31e",
       "source_sha256": "9ad25dcfc8b4c413ef4141ed63fa9d5e9b2049cb1300076b5288bb761e7b2ab1"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/build-local-app-node-modules.sh",
-      "to": "scripts/mobile-linux/build-local-app-node-modules.sh",
+      "from": "lingxi-code/scripts/local-apps/build-local-app-node-modules.sh",
+      "to": "scripts/local-apps/build-local-app-node-modules.sh",
       "source_sha256": "eccb9583aeed53e4c45eb4dac7a2e26556ab644b604b12ecea7c91d6cca63524",
       "source_blob": "2911217c06adc19d8efec1c37ce8d55a084301b1"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/build-local-app-rootfs.sh",
-      "to": "scripts/mobile-linux/build-local-app-rootfs.sh",
+      "from": "lingxi-code/scripts/local-apps/build-local-app-rootfs.sh",
+      "to": "scripts/local-apps/build-local-app-rootfs.sh",
       "source_sha256": "fbc69483364d90ffaa05dce9085f6f805620d8ec135260c3985c5ad95fee4c74",
       "source_blob": "a0e83cbdc96bd8be8b976df15fe756c11bf9c811"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/check-authorizations.sh",
-      "to": "scripts/mobile-linux/check-authorizations.sh",
+      "from": "lingxi-code/scripts/local-apps/check-authorizations.sh",
+      "to": "scripts/local-apps/check-authorizations.sh",
       "source_sha256": "ac6b97216b51a2f90d5e6ad33938cea7d36f4acb5eb3658b7b410e8a7c540b95",
       "source_blob": "6aaafa5a721dff01dcf48f2957a6a950de066611"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/check-rootfs-manifest.sh",
-      "to": "scripts/mobile-linux/check-rootfs-manifest.sh",
+      "from": "lingxi-code/scripts/local-apps/check-rootfs-manifest.sh",
+      "to": "scripts/local-apps/check-rootfs-manifest.sh",
       "source_sha256": "74da2b5ab33e85090c1f53b1b96f0e0797356f86b0a19ef878b30f1ea27095f1",
       "source_blob": "274b60401556327a58b4c606bdac225f7d237210"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/check-sbom-and-licenses.sh",
-      "to": "scripts/mobile-linux/check-sbom-and-licenses.sh",
+      "from": "lingxi-code/scripts/local-apps/check-sbom-and-licenses.sh",
+      "to": "scripts/local-apps/check-sbom-and-licenses.sh",
       "source_sha256": "a4d03ddecdd9724d5faa7dbd14a5fef7c3ad1f1b7c078074692ddf05075762ca",
       "source_blob": "92c536d397129942da5b5fb01ef5e60671b9e32b"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/check-store-compliance.sh",
-      "to": "scripts/mobile-linux/check-store-compliance.sh",
+      "from": "lingxi-code/scripts/local-apps/check-store-compliance.sh",
+      "to": "scripts/local-apps/check-store-compliance.sh",
       "source_sha256": "459a98e8231f37fad3b34f0fbc181e13508fe228beeab5fb0bc58954f4210593",
       "source_blob": "dc9c73d7417969e32f59e93af4e710e67c6a2913"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/generate-local-app-sbom.py",
-      "to": "scripts/mobile-linux/generate-local-app-sbom.py",
+      "from": "lingxi-code/scripts/local-apps/generate-local-app-sbom.py",
+      "to": "scripts/local-apps/generate-local-app-sbom.py",
       "source_sha256": "9a32d77eaa075307ba444b1d3acc98c7249c727b01ef84a5ded1861f63b01b3f",
       "source_blob": "7d1f20993d10da6457430b1431afea9aabe5ce51"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/install-local-app-toolchains.py",
-      "to": "scripts/mobile-linux/install-local-app-toolchains.py",
+      "from": "lingxi-code/scripts/local-apps/install-local-app-toolchains.py",
+      "to": "scripts/local-apps/install-local-app-toolchains.py",
       "source_sha256": "5ddc1173b1313f30302a3a712696348faaba188928917f4c8444597fc42f9ccd",
       "source_blob": "89c005b756921533afae2ad1ecebe9cb6a021025"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/package-rootfs-release.sh",
-      "to": "scripts/mobile-linux/package-rootfs-release.sh",
+      "from": "lingxi-code/scripts/local-apps/package-rootfs-release.sh",
+      "to": "scripts/local-apps/package-rootfs-release.sh",
       "source_sha256": "a366bdef6ee176ef7ab9391991b92d2b98074970c6166d2ce98e6398d7d99d8a",
       "source_blob": "487a27edca4ea95582e8dc065064db4123e4a89b"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/rootfs-build-inner.sh",
-      "to": "scripts/mobile-linux/rootfs-build-inner.sh",
+      "from": "lingxi-code/scripts/local-apps/rootfs-build-inner.sh",
+      "to": "scripts/local-apps/rootfs-build-inner.sh",
       "source_sha256": "76c1fb5a3acfa5e5870b2de1bd98e749782a353cbe10276f7aa4ac0fa3796c15",
       "source_blob": "acad906f28e5968ecd1cbd107fa5690537a66b49"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/rootfs_tool.py",
-      "to": "scripts/mobile-linux/rootfs_tool.py",
+      "from": "lingxi-code/scripts/local-apps/rootfs_tool.py",
+      "to": "scripts/local-apps/rootfs_tool.py",
       "source_sha256": "1b6db013f6ba39676b9723f135832f0acadc851f641310e45c6b76775f8125c5",
       "source_blob": "9b8c0c380251b46db24283287fd515ba1d51b255"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/smoke.sh",
-      "to": "scripts/mobile-linux/smoke.sh",
+      "from": "lingxi-code/scripts/tests/smoke.sh",
+      "to": "scripts/tests/smoke.sh",
       "source_sha256": "d6b8855d5d99eedc7424f70bab5f829d2ee53d05abd6725212522cbd00cc763f",
       "source_blob": "6fc2fb977be6a8c3f541e04b8182cf0f34d33998"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/stage-local-app-runtime.py",
-      "to": "scripts/mobile-linux/stage-local-app-runtime.py",
+      "from": "lingxi-code/scripts/local-apps/stage-local-app-runtime.py",
+      "to": "scripts/local-apps/stage-local-app-runtime.py",
       "source_sha256": "318c9ec31d7aec37da7b4430aeb53fede8b21734bb0c6154ea7c4b2ed959d2b0",
       "source_blob": "a0379f9b5eb8347a70c2e6cec3888e93aeca3d02"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/test-local-app-supply-chain.sh",
-      "to": "scripts/mobile-linux/test-local-app-supply-chain.sh",
+      "from": "lingxi-code/scripts/tests/test-local-app-supply-chain.sh",
+      "to": "scripts/tests/test-local-app-supply-chain.sh",
       "source_sha256": "641edf2865e16c2ae036b1f71ba9bd2b7c7eddbc4e0d05ec48431eb11b8a6092",
       "source_blob": "b76b1c302937914bdb8a2a3ba0f4fb0b5dcca586"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/test-rootfs-tooling.sh",
-      "to": "scripts/mobile-linux/test-rootfs-tooling.sh",
+      "from": "lingxi-code/scripts/tests/test-rootfs-tooling.sh",
+      "to": "scripts/tests/test-rootfs-tooling.sh",
       "source_sha256": "a13c91a01f4419697ac81eb85356e97e1289392d747ce05cb77200ca9ce64c65",
       "source_blob": "a017fd853d57a8f5dad31fca97df1200bc24da4d"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/update-local-app-pins.py",
-      "to": "scripts/mobile-linux/update-local-app-pins.py",
+      "from": "lingxi-code/scripts/local-apps/update-local-app-pins.py",
+      "to": "scripts/local-apps/update-local-app-pins.py",
       "source_sha256": "70c00e0e8b0ecfe27a106cea4ade8b195fb7f214385737682b1212372f5e27fc",
       "source_blob": "14eaa457bd18246c4295ddaf1be521e83b603be6"
     },
     {
-      "from": "lingxi-code/scripts/mobile-linux/verify-local-app-supply-chain.py",
-      "to": "scripts/mobile-linux/verify-local-app-supply-chain.py",
+      "from": "lingxi-code/scripts/local-apps/verify-local-app-supply-chain.py",
+      "to": "scripts/local-apps/verify-local-app-supply-chain.py",
       "source_sha256": "bb7240268358f0e4832fbe3fc0a5450b2ad4c1a3a997cd4b04fc61f2223a4578",
       "source_blob": "79eed1e34ebaba4f42bb3a156bb84d5bf42258a3"
     },
     {
-      "from": "lingxi-code/scripts/oracle_prose_delta.py",
-      "to": "scripts/oracle_prose_delta.py",
+      "from": "lingxi-code/scripts/tests/oracle_prose_delta.py",
+      "to": "scripts/tests/oracle_prose_delta.py",
       "source_blob": "f988e2c832502870df54d24fa67d2e5cd7c5b6ec",
       "source_sha256": "b820bdaa7e93a303242bebce53323ed7806d3f16fec7d060d21dd1a322d320ea"
     },
@@ -14507,20 +14507,20 @@
       "source_blob": "eea2806b06bd5c1db59da87c9b77881c6d581ef6"
     },
     {
-      "from": "lingxi-code/scripts/perm_extract_literals.py",
-      "to": "scripts/perm_extract_literals.py",
+      "from": "lingxi-code/scripts/checks/perm_extract_literals.py",
+      "to": "scripts/checks/perm_extract_literals.py",
       "source_blob": "477e56a2e40e6de8d29750625e330fd10d2a5460",
       "source_sha256": "6bd19f466bad15c474017a7718f0969cb80c5df38580e0f8fd5de84c070b5450"
     },
     {
-      "from": "lingxi-code/scripts/perm_verify_literals.py",
-      "to": "scripts/perm_verify_literals.py",
+      "from": "lingxi-code/scripts/checks/perm_verify_literals.py",
+      "to": "scripts/checks/perm_verify_literals.py",
       "source_blob": "2f15d31ce02bfc39e360391871f16f9d0992721a",
       "source_sha256": "22bb26210bc3c4c9edb250e6fd2896129ed71772c1d69cdb0f434345d36e9cd1"
     },
     {
-      "from": "lingxi-code/scripts/prompt_drift_scan.py",
-      "to": "scripts/prompt_drift_scan.py",
+      "from": "lingxi-code/scripts/checks/prompt_drift_scan.py",
+      "to": "scripts/checks/prompt_drift_scan.py",
       "source_blob": "193cf21bd1b60ae28d29beb50e8678b58d45e9bb",
       "source_sha256": "a299d776567cf798f23d006910648e3ac91dd9522f5e56f278e6b25169b0b00a"
     },
@@ -14537,14 +14537,14 @@
       "source_blob": "37ca49ab0f2b0257f949f9fd5130a35c8ff199e8"
     },
     {
-      "from": "lingxi-code/scripts/test-local-app-r4-libs.mjs",
-      "to": "scripts/test-local-app-r4-libs.mjs",
+      "from": "lingxi-code/scripts/tests/test-local-app-r4-libs.mjs",
+      "to": "scripts/tests/test-local-app-r4-libs.mjs",
       "source_sha256": "d43d39388aae6a1f334050d9621c15985402b2e17493562d5cd3270d6f3f14ec",
       "source_blob": "5bedc9ed3363646c821c1425763357eca1311d92"
     },
     {
-      "from": "lingxi-code/scripts/test_gate_triggers.py",
-      "to": "scripts/test_gate_triggers.py",
+      "from": "lingxi-code/scripts/tests/test_gate_triggers.py",
+      "to": "scripts/tests/test_gate_triggers.py",
       "source_sha256": "8393133bc9af41d1eab9a9eec6daf3de2822e3111e9d083def26277df172fb61",
       "source_blob": "44e558d8ed0626148cdcd37dd11ec2a6c5318545"
     },

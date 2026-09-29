@@ -345,10 +345,10 @@ mod command_arm_tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::{HookEvent, HookEventType};
     use crate::response::HookDecision;
-    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use platform_api::{
-        ProcessHandle, ProcessOutput, RuntimeError, SandboxPolicy, SandboxedCommand,
-    };
+    use mobile_linux_api::ProcessOutput;
+    use mobile_linux_api::SandboxBackend;
+    use platform_api::sandbox::{SandboxCapability, SandboxedTag};
+    use platform_api::{ProcessHandle, RuntimeError, SandboxPolicy, SandboxedCommand};
     use protocol::{HookId, ToolUseId};
     use serde_json::json;
     use std::path::PathBuf;
@@ -2562,10 +2562,12 @@ mod async_path_tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::{HookEvent, HookEventType};
     use crate::response::HookDecision;
-    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use mobile_linux_api::SandboxBackend;
+    use mobile_linux_api::{ProcessError, ProcessOutput};
+    use platform_api::sandbox::{SandboxCapability, SandboxedTag};
     use platform_api::{
-        BackgroundTaskHandle, ProcessError, ProcessHandle, ProcessOutput, RuntimeError,
-        RuntimeSpawner, SandboxPolicy, SandboxedCommand,
+        BackgroundTaskHandle, ProcessHandle, RuntimeError, RuntimeSpawner, SandboxPolicy,
+        SandboxedCommand,
     };
     use protocol::{HookId, ToolUseId};
     use std::collections::HashMap;

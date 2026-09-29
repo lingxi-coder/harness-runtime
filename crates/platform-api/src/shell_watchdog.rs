@@ -91,7 +91,7 @@ pub fn interactive_prompt(tail: &str) -> bool {
                         && lower
                             .as_bytes()
                             .get(offset + phrase.len())
-                            .map_or(true, |b| !word(*b))
+                            .is_none_or(|b| !word(*b))
                 })
             })
 }

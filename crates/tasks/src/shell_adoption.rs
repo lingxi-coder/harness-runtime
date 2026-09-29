@@ -226,7 +226,7 @@ impl TaskRegistry {
                 .await
             {
                 Ok(native) => native,
-                Err(platform_api::ProcessError::Unsupported) => {
+                Err(mobile_linux_api::ProcessError::Unsupported) => {
                     self.release_shell_transfer_fences(&[shell.base.id]);
                     continue;
                 }

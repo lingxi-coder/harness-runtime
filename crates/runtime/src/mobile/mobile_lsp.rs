@@ -14,11 +14,13 @@ use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
+use mobile_linux_api::{
+    map_host_path_to_guest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy,
+    RawStdioOpenRequest, RawStdioSessionHandle, ResourceLimits, SandboxBackend,
+};
 use platform_api::{
-    mobile_linux::map_host_path_to_guest, LspError, LspRawConnection, LspServerCapabilities,
-    LspServerConfig, LspTransport, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy,
-    NewDiagnosticsSource, RawStdioOpenRequest, RawStdioSessionHandle, ResourceLimits,
-    SandboxBackend,
+    LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
+    NewDiagnosticsSource,
 };
 
 pub(crate) const GLOBAL_TYPESCRIPT_LSP_SERVER_NAME: &str =

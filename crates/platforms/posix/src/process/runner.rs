@@ -18,11 +18,9 @@ use crate::process::wrap::{
     ENV_GIT_EDITOR, ENV_LINGXI_CHILD_SESSION, ENV_LINGXI_MARKER, ENV_LINGXI_SESSION_ID, ENV_SHELL,
 };
 use async_trait::async_trait;
-use platform_api::process::ProcessStreamSink;
-use platform_api::{
-    HookRunOutcome, ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand,
-    SandboxedTag,
-};
+use mobile_linux_api::ProcessStreamSink;
+use mobile_linux_api::{ProcessError, ProcessOutput};
+use platform_api::{HookRunOutcome, ProcessHandle, ProcessRunner, SandboxedCommand, SandboxedTag};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

@@ -49,7 +49,7 @@ pub const PLUGIN_MANIFEST_DIR: &str = ".lingxi-plugin";
 /// Oracle counterpart: `CLAUDE_PLUGIN_ROOT`. The Claude spelling is
 /// **replaced, not aliased** — LingXi neither reads `.claude-plugin` nor
 /// exports any `CLAUDE_PLUGIN_*` alias, and the brand gate
-/// (`scripts/check_brand_leaks.py`, rule G2) treats a `CLAUDE_PLUGIN_*` read
+/// (`scripts/checks/check_brand_leaks.py`, rule G2) treats a `CLAUDE_PLUGIN_*` read
 /// outside the brand-normalization fixtures as a leak. Oracle fixtures are
 /// compared only after brand-token normalization.
 pub const PLUGIN_ROOT_ENV: &str = "LINGXI_PLUGIN_ROOT";
@@ -162,7 +162,7 @@ mod tests {
     // Cargo-graph path from here to "what does crate X do with this string".
     // The only single-source assertion reachable from inside `branding` is to
     // read the other crates' source text off disk, rooted at
-    // `CARGO_MANIFEST_DIR` — the same thing `scripts/check_brand_leaks.py`
+    // `CARGO_MANIFEST_DIR` — the same thing `scripts/checks/check_brand_leaks.py`
     // does for the brand-namespace literals. That is what these tests do.
     //
     // Two tests, deliberately:
@@ -187,7 +187,7 @@ mod tests {
     /// `branding` crate itself, where the literals are declared.
     ///
     /// Skips `target`, `node_modules` and any dot-directory, matching the
-    /// enumeration `scripts/check_brand_leaks.py` performs.
+    /// enumeration `scripts/checks/check_brand_leaks.py` performs.
     fn scan_rs_sources(root: &Path, exclude: Option<&Path>, needles: &[&str]) -> Scan {
         const SKIP_DIRS: [&str; 2] = ["target", "node_modules"];
 

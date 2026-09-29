@@ -11,9 +11,10 @@
 //! string, and the `bwrap` / `sandbox-exec` argv shape.
 
 use async_trait::async_trait;
+use mobile_linux_api::{NetworkPolicy, SandboxBackend};
 use platform_api::{
-    NetworkPolicy, ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
-    SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
+    ProcessCommand, Sandbox, SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy,
+    SandboxedCommand, SandboxedTag,
 };
 use sandbox::dependency_check::{
     check_dependencies, sandbox_unavailable_reason, SandboxDependencyCheck,
@@ -350,7 +351,8 @@ fn runtime_config_from_policy(policy: &SandboxPolicy) -> SandboxRuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::{runtime_config_from_policy, split_bare_repo_paths};
-    use platform_api::{NetworkPolicy, ResourceLimits, SandboxPolicy};
+    use mobile_linux_api::{NetworkPolicy, ResourceLimits};
+    use platform_api::SandboxPolicy;
 
     /// Build a minimal `SandboxPolicy` literal for net-mapping tests.
     /// `SandboxPolicy` does not derive `Default`, so construct each field.

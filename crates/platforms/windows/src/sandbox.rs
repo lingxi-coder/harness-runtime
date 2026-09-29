@@ -11,9 +11,10 @@
 //! on — `AppContainer` / Job Objects work is not part of claude-code parity.
 
 use async_trait::async_trait;
+use mobile_linux_api::SandboxBackend;
 use platform_api::{
-    ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures,
-    SandboxPolicy, SandboxedCommand, SandboxedTag,
+    ProcessCommand, Sandbox, SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy,
+    SandboxedCommand, SandboxedTag,
 };
 
 /// Windows-side [`Sandbox`] — always reports unsupported.
@@ -67,9 +68,8 @@ impl Sandbox for WindowsSandbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::{
-        NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend, SandboxPolicy,
-    };
+    use mobile_linux_api::{NetworkPolicy, ResourceLimits, SandboxBackend};
+    use platform_api::{ProcessCommand, Sandbox, SandboxPolicy};
     use std::collections::HashMap;
 
     fn empty_cmd() -> ProcessCommand {

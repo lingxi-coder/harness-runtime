@@ -1,10 +1,10 @@
 //! Unix transport and process boundary for the shared supervision protocol.
 use super::runner::PosixProcess;
+use mobile_linux_api::ProcessError;
 use platform_api::process::ShellProcessHandoff;
 use platform_api::shell_supervisor::{self as shared, BoxStream, Listener, Platform};
 use platform_api::{
-    BackgroundExitSink, ForegroundRunResult, ProcessError, ProcessHandle, ProcessRunner,
-    SandboxedCommand,
+    BackgroundExitSink, ForegroundRunResult, ProcessHandle, ProcessRunner, SandboxedCommand,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

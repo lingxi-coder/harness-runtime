@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use mobile_linux_api::ProcessStreamSink;
+use mobile_linux_api::ProcessStreamSink;
 
 /// SH-07 — live-output observer for a HOOK child, so the hook layer can emit
 /// claude-code's `system/hook_progress` stream-json frames while the hook is
@@ -281,7 +281,7 @@ pub enum HookRunOutcome {
     },
 }
 
-pub use mobile_linux_api::ProcessOutput;
+use mobile_linux_api::ProcessOutput;
 
 /// A task identity a caller binds to a command it intends to background, so the
 /// engine's task registry and the process runner agree on ONE id and ONE output
@@ -442,7 +442,7 @@ pub struct ProcessHandle {
     pub pid: u32,
 }
 
-pub use mobile_linux_api::ProcessError;
+use mobile_linux_api::ProcessError;
 
 #[cfg(test)]
 mod tests {

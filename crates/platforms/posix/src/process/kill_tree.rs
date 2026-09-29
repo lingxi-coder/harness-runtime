@@ -12,9 +12,9 @@
 //! - [`kill_tree_unix`]: SIGTERM → 5 s grace → SIGKILL. Kept for callers
 //!   (e.g. shutdown paths) that want a polite drain before force-killing.
 
+use mobile_linux_api::ProcessError;
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
-use platform_api::ProcessError;
 use std::time::Duration;
 
 /// Default grace period between SIGTERM and the SIGKILL escalation.
@@ -93,7 +93,7 @@ fn pgid_from(pid: u32) -> Result<Pid, ProcessError> {
 #[cfg(test)]
 mod tests {
     use super::{kill_tree_force, kill_tree_unix};
-    use platform_api::ProcessError;
+    use mobile_linux_api::ProcessError;
 
     /// Killing a non-existent PGID returns `Ok(())` — `ESRCH` on the first
     /// signal is treated as success because the caller's only goal is "the

@@ -374,11 +374,11 @@ impl ShellRunner for PromptShellRunner {
         };
         let sandboxed = if self.force_platform_sandbox {
             let policy = platform_api::sandbox::SandboxPolicy {
-                network: platform_api::sandbox::NetworkPolicy::Disabled,
+                network: mobile_linux_api::NetworkPolicy::Disabled,
                 writable_paths: vec![],
                 denied_paths: vec![],
                 allow_subprocess: true,
-                limits: platform_api::sandbox::ResourceLimits::default(),
+                limits: mobile_linux_api::ResourceLimits::default(),
             };
             self.sandbox
                 .prepare(pcmd, &policy)
@@ -661,11 +661,13 @@ pub fn build_prompt_shell_provider(ctx: &BuiltinToolContext) -> Arc<dyn ShellExp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mobile_linux_api::SandboxBackend;
+    use mobile_linux_api::{ProcessError, ProcessOutput};
     use permission::filesystem::FsRoots;
-    use platform_api::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
+    use platform_api::process::{ProcessHandle, ProcessRunner};
     use platform_api::sandbox::{
-        Sandbox, SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy,
-        SandboxedCommand, SandboxedTag,
+        Sandbox, SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand,
+        SandboxedTag,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -685,7 +687,7 @@ mod tests {
     struct RecordingSandbox {
         prepare_calls: AtomicUsize,
         bypass_calls: AtomicUsize,
-        last_network: Mutex<Option<platform_api::sandbox::NetworkPolicy>>,
+        last_network: Mutex<Option<mobile_linux_api::NetworkPolicy>>,
     }
 
     #[async_trait]
@@ -915,7 +917,7 @@ mod tests {
         assert_eq!(sandbox.bypass_calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             *sandbox.last_network.lock().unwrap(),
-            Some(platform_api::sandbox::NetworkPolicy::Disabled)
+            Some(mobile_linux_api::NetworkPolicy::Disabled)
         );
     }
 

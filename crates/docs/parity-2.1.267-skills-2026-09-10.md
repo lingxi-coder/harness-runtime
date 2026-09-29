@@ -371,7 +371,7 @@ deliberately, not incidentally.
 
 ## 6. Gates
 
-- `scripts/check_skill_frontmatter.py` is a real fail-closed gate (name == dir,
+- `scripts/checks/check_skill_frontmatter.py` is a real fail-closed gate (name == dir,
   description ≤ 180 display columns, frontmatter parsable) but `SKILL_ROOTS`
   covers only `plugins/lingxi-local-app/skills` — not the bundled skills and not
   `<DOT_DIR>/skills`. Widening it is cheap and unclaimed.

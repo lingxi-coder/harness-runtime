@@ -1,10 +1,10 @@
 //! Windows named-pipe adapter for the shared acknowledged shell supervisor.
 use super::{runner::WindowsProcess, supervisor_native as native};
+use mobile_linux_api::ProcessError;
 use platform_api::process::ShellProcessHandoff;
 use platform_api::shell_supervisor::{self as shared, BoxStream, Listener, Platform};
 use platform_api::{
-    BackgroundExitSink, ForegroundRunResult, ProcessError, ProcessHandle, ProcessRunner,
-    SandboxedCommand,
+    BackgroundExitSink, ForegroundRunResult, ProcessHandle, ProcessRunner, SandboxedCommand,
 };
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};

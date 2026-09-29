@@ -13,6 +13,7 @@ license.workspace = true
 # -> BuiltinToolContext.android_git).
 
 [dependencies]
+mobile-linux-api.workspace = true
 tool-api = { path = "../../tool-api" }
 platform-api = { path = "../../platform-api" }
 permission = { path = "../../permission" }

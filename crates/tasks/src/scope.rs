@@ -125,7 +125,7 @@
 //!
 //! `local_apps::ids::is_valid_app_id` is the original. `tasks` does not take
 //! a PRODUCTION dependency on `local-apps`: both crates classify as `engine`
-//! so `scripts/check_deps.py` would permit the edge, but `local-apps` pulls
+//! so `scripts/checks/check_deps.py` would permit the edge, but `local-apps` pulls
 //! bundled SQLite, vendored libgit2 and two tree-sitter grammars into
 //! `tasks`, and `tasks` has five dependents (including `cron` and
 //! `coordinator`, which build none of that today) for what is a six-line

@@ -543,7 +543,7 @@ mod tests {
         assert!(loader.list_names().await.contains(&canonical.to_owned()));
         assert!(loader.load("canvas-2d-local-app").await.unwrap().is_none());
         let tool = tool_skill::skill::SkillTool::with_loader(
-            shell_test_ctx(platform_api::process::ProcessOutput {
+            shell_test_ctx(mobile_linux_api::ProcessOutput {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,

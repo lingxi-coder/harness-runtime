@@ -15,12 +15,12 @@ jobs:
         run: ./scripts/check-all.sh
       - name: Test gate rejection cases
         run: |
-          python3 scripts/check_brand_leaks.py --selftest
-          python3 scripts/test_dependency_rules.py
+          python3 scripts/checks/check_brand_leaks.py --selftest
+          python3 scripts/tests/test_dependency_rules.py
       - name: Runtime template behavior
-        run: node --test scripts/test-local-app-r4-libs.mjs
+        run: node --test scripts/tests/test-local-app-r4-libs.mjs
       - name: Verify every gate and the trigger chain
-        run: python3 scripts/test_gate_triggers.py
+        run: python3 scripts/tests/test_gate_triggers.py
 
   compile-check:
     runs-on: ubuntu-latest
@@ -349,4 +349,4 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/harness-seccomp-target
           CARGO_PROFILE_DEV_DEBUG: "0"
-        run: python3 scripts/smoke-linux-seccomp.py
+        run: python3 scripts/tests/smoke-linux-seccomp.py

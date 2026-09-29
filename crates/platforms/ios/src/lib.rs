@@ -25,12 +25,15 @@
 // line.
 #![allow(missing_docs)]
 
+use mobile_linux_api::{
+    MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec, SandboxBackend,
+    UnavailableMobileLinuxRuntime,
+};
 use platform_api::{
     AudioService, CalendarProvider, CameraControl, Clipboard, Clock, ContactsProvider,
     DeepLinkOpener, DeviceStatusProvider, FileSystem, HapticService, HttpTransport,
-    LocationProvider, MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec,
-    NotificationService, Platform, ProcessRunner, Sandbox, SandboxBackend, SecureStorage,
-    SharingService, UnavailableMobileLinuxRuntime, WorktreeManager,
+    LocationProvider, NotificationService, Platform, ProcessRunner, Sandbox, SecureStorage,
+    SharingService, WorktreeManager,
 };
 use platform_common::{GuestPathFileSystem, MobileLinuxProcessRunner, MobileLinuxSandbox};
 use std::path::PathBuf;
@@ -194,7 +197,7 @@ fn build_mobile_linux_mounts(
         .map(|host_path| {
             vec![MountSpec {
                 host_path,
-                guest_path: platform_api::mobile_linux::guest_paths::workspace(&guest_workspace_id),
+                guest_path: mobile_linux_api::guest_paths::workspace(&guest_workspace_id),
                 read_only: false,
                 purpose: MountPurpose::Workspace,
             }]
@@ -268,9 +271,10 @@ impl Platform for IosPlatform {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use mobile_linux_api::UnavailableMobileLinuxRuntime;
     use platform_api::{
         CameraError, CapturePhotoOpts, CapturedImage, FsError, ShareError, SharePayload,
-        ShareResult, UnavailableMobileLinuxRuntime,
+        ShareResult,
     };
 
     struct StubCamera;

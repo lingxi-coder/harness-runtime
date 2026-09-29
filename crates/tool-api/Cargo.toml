@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+mobile-linux-api.workspace = true
 lingxi-llm-client.workspace = true
 unicode-width = "=0.1.14"
 unicode-segmentation = "=1.12.0"

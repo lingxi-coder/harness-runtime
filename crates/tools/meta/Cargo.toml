@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+mobile-linux-api.workspace = true
 branding = { path = "../../branding" }
 tool-api = { path = "../../tool-api" }
 platform-api = { path = "../../platform-api" }

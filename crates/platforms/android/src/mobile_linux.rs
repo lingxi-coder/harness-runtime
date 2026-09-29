@@ -2,7 +2,13 @@
 //! Execution and rootfs lifecycle are owned by the standalone SDK.
 
 use async_trait::async_trait;
-use platform_api::*;
+use mobile_linux_api::{
+    LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
+    MobileLinuxError, MobileLinuxEvent, MobileLinuxRuntime, MobileLinuxRuntimeMode,
+    MobileLinuxTaskSnapshot, MountSpec, ProcessStreamSink, PtyOpenRequest, PtySessionHandle,
+    PtySize, RawStdioOpenRequest, RawStdioReadResult, RawStdioSessionHandle, RootfsStatus,
+    SandboxBackend,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -57,11 +63,10 @@ impl AndroidProotRuntime {
 }
 
 fn product_build_profile() -> mobile_linux_android::IsolatedBuildProfile {
-    use platform_api::mobile_linux::guest_paths;
     mobile_linux_android::IsolatedBuildProfile {
-        guest_root: guest_paths::LOCAL_APP_BUILD_ROOT.into(),
-        project_directory: guest_paths::LOCAL_APP_BUILD_PROJECT_DIR.into(),
-        dependency_store: guest_paths::LOCAL_APP_DEPENDENCY_STORE.into(),
+        guest_root: platform_api::local_app_paths::LOCAL_APP_BUILD_ROOT.into(),
+        project_directory: platform_api::local_app_paths::LOCAL_APP_BUILD_PROJECT_DIR.into(),
+        dependency_store: platform_api::local_app_paths::LOCAL_APP_DEPENDENCY_STORE.into(),
         state_directory: ".lingxi-build-state".into(),
         host_apps_directory: "apps".into(),
         host_build_directory: "build".into(),
@@ -250,6 +255,7 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mobile_linux_api::RootfsState;
 
     #[test]
     fn product_profile_keeps_existing_paths() {

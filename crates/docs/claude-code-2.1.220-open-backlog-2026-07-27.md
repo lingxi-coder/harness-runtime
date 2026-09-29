@@ -32,7 +32,7 @@
   本分支范围外、未提交的 mobile-linux 工作
   `platform-common::mobile_linux::manifest_rejects_executables_in_writable_paths`
   处失败。该失败没有通过修改无关工作来掩盖。
-- `cargo build --release -p cli --bin lingxi-cli`、`./scripts/check-deps.sh`：
+- `cargo build --release -p cli --bin lingxi-cli`、`./scripts/checks/check-deps.sh`：
   通过。
 - `cargo fmt --all -- --check` 与
   `cargo clippy --workspace --all-targets -- -D warnings` 仍受仓库既有、可在

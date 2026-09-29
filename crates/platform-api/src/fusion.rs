@@ -1911,12 +1911,13 @@ pub struct FusionResult {
 /// have a perfectly usable answer while its parent-session append is still in
 /// flight or has failed. In particular, `Queued` means that a durable outbox
 /// accepted the item; an in-memory hand-off must not use that state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FusionPublicationStatus {
     /// No parent-session publication is required for this run.
     NotRequired,
     /// Publication has been requested but has not reached a terminal state.
+    #[default]
     Pending,
     /// A durable outbox accepted the result; delivery may happen later.
     Queued,
@@ -1926,12 +1927,6 @@ pub enum FusionPublicationStatus {
     OutboxFailed,
     /// The result could not be durably stored.
     StorageFailure,
-}
-
-impl Default for FusionPublicationStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 impl FusionPublicationStatus {
