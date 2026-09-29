@@ -76,11 +76,10 @@ use local_apps::{AppError, AppService};
 use mcp::registry::OAuthDeps;
 use mcp::{ConfigScope as McpConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 
-use llm_runtime::oauth::anthropic::client::ClaudeAiOAuthClient;
-use llm_runtime::oauth::anthropic::handle::OAuthHandle;
-use llm_runtime::oauth::anthropic::ClaudeAiOAuthConfig;
-use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
-use llm_runtime::oauth::openai as openai_oauth;
+use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
+use llm_runtime::auth::anthropic::handle::OAuthHandle;
+use llm_runtime::auth::anthropic::{OAuthCredentialProvider, RefreshDriver};
+use llm_runtime::auth::openai as openai_oauth;
 use llm_runtime::{
     Credential, CredentialConfig, CredentialProvider, CredentialScope, ModelRuntime, ProviderId,
     Transport,
@@ -3143,21 +3142,21 @@ async fn build_mobile_inner_with_ask(
             .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
     );
     let anthropic_oauth_config = ClaudeAiOAuthConfig::default_with_port(0);
-    let anthropic_oauth_client = Arc::new(ClaudeAiOAuthClient::new(
+    let anthropic_oauth_handle = Arc::new(OAuthHandle::new(
         anthropic_oauth_config.clone(),
         llm_transport.clone(),
         credentials.clone(),
+        clock.clone(),
     ));
-    let anthropic_oauth_handle = Arc::new(OAuthHandle::new(anthropic_oauth_client));
-    let openai_oauth_config = openai_oauth::OpenAiOAuthConfig::default();
-    let openai_oauth_client = Arc::new(openai_oauth::OpenAiOAuthClient::new(
-        openai_oauth_config.clone(),
-        llm_transport.clone(),
-    ));
-    let openai_oauth_handle = Arc::new(openai_oauth::OpenAiOAuthHandle::new(
-        openai_oauth_client,
-        credentials.clone(),
-    ));
+    let openai_oauth_config = lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig::default();
+    let openai_oauth_handle = Arc::new(
+        openai_oauth::OpenAiOAuthHandle::new(
+            openai_oauth_config.clone(),
+            llm_transport.clone(),
+            credentials.clone(),
+        )
+        .with_clock(clock.clone()),
+    );
     let anthropic_refresh_spawner: Arc<dyn platform_api::RuntimeSpawner> =
         Arc::new(platform_posix_minimal::PosixRuntime::new());
     let openai_refresh_spawner: Arc<dyn platform_api::RuntimeSpawner> =
@@ -3165,7 +3164,7 @@ async fn build_mobile_inner_with_ask(
 
     let anthropic_oauth_state = match credentials.get_oauth_tokens().await {
         Ok(Some(tokens)) => {
-            match llm_runtime::oauth::anthropic::client::init_refresh_driver(
+            match llm_runtime::auth::anthropic::login::init_refresh_driver(
                 anthropic_oauth_config,
                 tokens.access_token,
                 tokens.refresh_token,
@@ -3192,7 +3191,7 @@ async fn build_mobile_inner_with_ask(
         }
     };
     let openai_oauth_state = match credentials.get_openai_oauth_tokens().await {
-        Ok(Some(tokens)) => match openai_oauth::client::init_refresh_driver(
+        Ok(Some(tokens)) => match openai_oauth::login::init_refresh_driver(
             openai_oauth_config,
             tokens.access_token,
             tokens.refresh_token,

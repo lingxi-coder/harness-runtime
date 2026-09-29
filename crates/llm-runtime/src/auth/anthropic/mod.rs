@@ -11,10 +11,10 @@
 pub mod api_key_helper;
 #[cfg(not(loom))]
 pub mod callback;
-pub mod client;
 pub mod credential_provider;
 pub mod handle;
 pub mod limits;
+pub mod login;
 pub mod refresh;
 pub mod resolver;
 pub mod scope_upgrade;
@@ -30,18 +30,13 @@ pub use api_key_helper::{
 };
 #[cfg(not(loom))]
 pub use callback::{await_callback, CallbackError, CallbackListener, CallbackParams};
-pub use client::{ClaudeAiOAuthClient, OAuthError};
 pub use credential_provider::OAuthCredentialProvider;
 pub use handle::OAuthHandle;
 pub use limits::{ClaudeAiLimitsState, ClaudeAiLimitsTracker, SubscriptionType};
-pub use lingxi_llm_client::auth::oauth::anthropic::{
-    ClaudeAiOAuthConfig, CLAUDE_CODE_OAUTH_SCOPES, REFRESH_GRANT_TYPE,
-};
+pub use login::OAuthError;
 pub use refresh::{AuthState, RefreshDriver};
 pub use resolver::{resolve, AuthSource, ResolverContext};
-pub use scope_upgrade::{
-    parse_scope_upgrade, run_scope_upgrade, PkceRunResult, PkceRunner, ScopeUpgradeRequired,
-};
+pub use scope_upgrade::{run_scope_upgrade, PkceRunResult, PkceRunner};
 pub use subscription::{
     apply_profile, is_enterprise, is_subscriber_tier, publish_subscription,
     resolve_subscription_snapshot,

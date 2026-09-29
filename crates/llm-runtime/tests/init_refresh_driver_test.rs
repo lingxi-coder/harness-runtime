@@ -1,9 +1,9 @@
 //! End-to-end smoke: `init_refresh_driver` registers the hook + spawns proactive.
 
 use async_trait::async_trait;
+use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
-use llm_runtime::oauth::anthropic::client::init_refresh_driver;
-use llm_runtime::oauth::anthropic::ClaudeAiOAuthConfig;
+use llm_runtime::auth::anthropic::login::init_refresh_driver;
 use platform_api::{BackgroundTaskHandle, Clock, RuntimeError, RuntimeSpawner};
 use protocol::Secret;
 use std::future::Future;

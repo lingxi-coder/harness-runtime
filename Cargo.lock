@@ -6444,6 +6444,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonrpc",
+ "lingxi-llm-client",
  "llm-runtime",
  "lsp",
  "mcp",

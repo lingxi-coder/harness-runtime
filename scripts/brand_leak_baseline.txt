@@ -201,7 +201,7 @@ G1	crates/hooks/src/executor_test.rs	\.lingxi
 G1	crates/hooks/src/hook_payload_test.rs	LINGXI
 G1	crates/hooks/src/user_config.rs	LINGXI
 G1	crates/http-client/src/tls_config.rs	LINGXI
-G1	crates/llm-runtime/src/aws_auth.rs	\.claude\.json
+G1	crates/llm-runtime/src/auth/external_aws.rs	\.claude\.json
 G1	crates/llm-runtime/src/copilot/auth.rs	LingXi
 G1	crates/llm-runtime/src/copilot/login.rs	LINGXI
 G1	crates/llm-runtime/src/model/context_window.rs	LINGXI
@@ -732,8 +732,8 @@ G2	crates/llm-runtime/src/model/retry.rs	CLAUDE_CODE_RETRY_WATCHDOG
 G2	crates/llm-runtime/src/model/stream_watchdog.rs	CLAUDE_ENABLE_BYTE_WATCHDOG
 G2	crates/llm-runtime/src/model/stream_watchdog.rs	CLAUDE_ENABLE_STREAM_WATCHDOG
 G2	crates/llm-runtime/src/model/stream_watchdog.rs	CLAUDE_STREAM_IDLE_TIMEOUT_MS
-G2	crates/llm-runtime/src/oauth/anthropic/resolver.rs	CLAUDE_CODE_HOST_AUTH_ENV_VAR
-G2	crates/llm-runtime/src/oauth/anthropic/resolver.rs	CLAUDE_CODE_REMOTE
+G2	crates/llm-runtime/src/auth/anthropic/resolver.rs	CLAUDE_CODE_HOST_AUTH_ENV_VAR
+G2	crates/llm-runtime/src/auth/anthropic/resolver.rs	CLAUDE_CODE_REMOTE
 G2	crates/llm-runtime/src/service.rs	CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
 G2	crates/llm-runtime/src/service_test.rs	CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
 G2	crates/mcp/src/client.rs	CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT

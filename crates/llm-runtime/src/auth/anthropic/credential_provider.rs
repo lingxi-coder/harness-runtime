@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 
-use crate::oauth::anthropic::refresh::RefreshDriver;
+use crate::auth::anthropic::refresh::RefreshDriver;
 
 /// Serves the current OAuth access token, refreshing in place when expired
 /// (single-flight via the underlying refresh lock).
@@ -80,7 +80,7 @@ impl CredentialProvider for OAuthCredentialProvider {
                 .driver
                 .refresh(token_hash)
                 .await
-                .map_err(|e| crate::oauth::lifecycle::llm_error_for(&e))?;
+                .map_err(|e| crate::auth::lifecycle::llm_error_for(&e))?;
 
             Ok(Credential::BearerToken(bearer.0.expose_secret().clone()))
         })
@@ -90,28 +90,28 @@ impl CredentialProvider for OAuthCredentialProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth::lifecycle::OAuthHookError;
+    use crate::auth::lifecycle::OAuthHookError;
 
     /// The whole point of the split: three refresh failures, but only one of
     /// them means the user has to log in again.
     #[test]
     fn only_a_rejected_refresh_token_is_the_dead_oauth_session() {
         assert_eq!(
-            crate::oauth::lifecycle::llm_error_for(&OAuthHookError::RefreshFailed(
+            crate::auth::lifecycle::llm_error_for(&OAuthHookError::RefreshFailed(
                 "idp said no".into()
             )),
             LlmError::OAuthRefreshDead
         );
         // Another caller rotated first — the retry succeeds, nothing expired.
         assert_eq!(
-            crate::oauth::lifecycle::llm_error_for(&OAuthHookError::TokenStale),
+            crate::auth::lifecycle::llm_error_for(&OAuthHookError::TokenStale),
             LlmError::Authentication {
                 message: String::new()
             }
         );
         // The IdP was unreachable; the refresh token may be perfectly valid.
         assert_eq!(
-            crate::oauth::lifecycle::llm_error_for(&OAuthHookError::ProviderUnreachable(
+            crate::auth::lifecycle::llm_error_for(&OAuthHookError::ProviderUnreachable(
                 "dns".into()
             )),
             LlmError::Authentication {

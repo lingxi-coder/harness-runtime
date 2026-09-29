@@ -1301,9 +1301,9 @@ impl ModelRuntime {
             &sdk_profile,
             material,
             ClientIdentity {
-                user_agent: crate::copilot::COPILOT_USER_AGENT,
-                editor_version: crate::copilot::COPILOT_EDITOR_VERSION,
-                plugin_version: crate::copilot::COPILOT_EDITOR_PLUGIN_VERSION,
+                user_agent: crate::auth::copilot::COPILOT_USER_AGENT,
+                editor_version: crate::auth::copilot::COPILOT_EDITOR_VERSION,
+                plugin_version: crate::auth::copilot::COPILOT_EDITOR_PLUGIN_VERSION,
             },
             now,
         )

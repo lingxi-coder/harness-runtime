@@ -21,7 +21,7 @@
 //! tier we *have* and conservatively treat an absent / ambiguous tier as
 //! non-enterprise and non-subscriber.
 
-use crate::oauth::anthropic::limits::{ClaudeAiLimitsState, SubscriptionType};
+use crate::auth::anthropic::limits::{ClaudeAiLimitsState, SubscriptionType};
 use lingxi_llm_client::auth::oauth::anthropic::{
     fetch_profile_from_oauth_token, fetch_user_roles, OAuthProfileResponse,
 };
@@ -257,7 +257,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_and_publish_pro_plan_to_global() {
-        use crate::oauth::anthropic::testsupport::{Canned, MockHttp, SUBSCRIPTION_CACHE_LOCK};
+        use crate::auth::anthropic::testsupport::{Canned, MockHttp, SUBSCRIPTION_CACHE_LOCK};
         // Serialize: `publish_subscription` mutates the process-global cache.
         let _g = SUBSCRIPTION_CACHE_LOCK
             .lock()
@@ -296,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_skips_without_profile_scope() {
-        use crate::oauth::anthropic::testsupport::{Canned, MockHttp};
+        use crate::auth::anthropic::testsupport::{Canned, MockHttp};
         let body = r#"{"organization":{"organization_type":"claude_pro"}}"#;
         let transport: Arc<dyn Transport> = MockHttp::new(vec![(
             "anthropic.com",

@@ -295,8 +295,8 @@ mod tests {
     /// Serialize tests that compete for the fixed ports 1455/1457.
     /// Delegates to the shared guard in `testsupport` so handle tests and
     /// callback tests can't collide with each other.
-    async fn port_guard() -> crate::oauth::openai::testsupport::PortGuard {
-        crate::oauth::openai::testsupport::port_guard().await
+    async fn port_guard() -> crate::auth::openai::testsupport::PortGuard {
+        crate::auth::openai::testsupport::port_guard().await
     }
 
     async fn send_get(port: u16, path_and_query: &str) -> String {
@@ -314,7 +314,7 @@ mod tests {
     #[tokio::test]
     async fn returns_params_on_valid_callback() {
         let _g = port_guard().await;
-        let listener = crate::oauth::openai::testsupport::bind_fixed_ports_for_test().await;
+        let listener = crate::auth::openai::testsupport::bind_fixed_ports_for_test().await;
         let port = listener.port();
         assert!(port == 1455 || port == 1457, "unexpected port {port}");
 
@@ -429,7 +429,7 @@ mod tests {
     #[tokio::test]
     async fn state_mismatch_is_rejected() {
         let _g = port_guard().await;
-        let listener = crate::oauth::openai::testsupport::bind_fixed_ports_for_test().await;
+        let listener = crate::auth::openai::testsupport::bind_fixed_ports_for_test().await;
         let port = listener.port();
         let server = tokio::spawn(async move { listener.accept("EXPECTED").await });
         let _ = send_get(port, "/auth/callback?code=abc&state=WRONG").await;
@@ -440,7 +440,7 @@ mod tests {
     #[tokio::test]
     async fn url_encoded_values_are_decoded() {
         let _g = port_guard().await;
-        let listener = crate::oauth::openai::testsupport::bind_fixed_ports_for_test().await;
+        let listener = crate::auth::openai::testsupport::bind_fixed_ports_for_test().await;
         let port = listener.port();
         // code contains a percent-escaped slash; state is plain.
         let server = tokio::spawn(async move { listener.accept("ST").await });
@@ -452,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn non_auth_callback_path_is_404_then_callback_succeeds() {
         let _g = port_guard().await;
-        let listener = crate::oauth::openai::testsupport::bind_fixed_ports_for_test().await;
+        let listener = crate::auth::openai::testsupport::bind_fixed_ports_for_test().await;
         let port = listener.port();
         let server = tokio::spawn(async move { listener.accept("S").await });
 
@@ -469,7 +469,7 @@ mod tests {
     #[tokio::test]
     async fn binds_fixed_port_or_fallback() {
         let _g = port_guard().await;
-        let l = crate::oauth::openai::testsupport::bind_fixed_ports_for_test().await;
+        let l = crate::auth::openai::testsupport::bind_fixed_ports_for_test().await;
         assert!(l.port() == 1455 || l.port() == 1457);
     }
 }

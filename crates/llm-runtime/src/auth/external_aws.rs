@@ -206,7 +206,7 @@ impl AwsAuthProcess for ShellAwsAuthProcess {
 
 // ── STS output validation (`Rdi` / `wdi`) ───────────────────────────────────
 
-pub use lingxi_llm_client::auth::aws::{parse_sts_output, AwsExportedCredentials};
+use lingxi_llm_client::auth::aws::{parse_sts_output, AwsExportedCredentials};
 
 // ── Drive-loop trigger classification (`V_c` / `G_c`) ───────────────────────
 

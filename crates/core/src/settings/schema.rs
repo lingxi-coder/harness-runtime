@@ -804,7 +804,7 @@ pub struct SettingsJson {
     /// line of) a script whose stdout is the Anthropic auth value. CC 2.1.207
     /// zod (verbatim): `apiKeyHelper:E.string().optional().describe("Path to a
     /// script that outputs authentication values")`. Consumed by the auth
-    /// executor (`llm_runtime::oauth::anthropic::run_api_key_helper`, port of
+    /// executor (`llm_runtime::auth::anthropic::run_api_key_helper`, port of
     /// binary `LTh`) with the TTL cache (`api_key_helper_ttl_ms`, port of `obc`).
     /// Scalar-override merge (not in `MERGE_STRATEGIES`).
     #[serde(default, skip_serializing_if = "Option::is_none")]

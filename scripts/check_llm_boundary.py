@@ -97,6 +97,8 @@ RULES = {
 }
 
 RUNTIME_RULES = {
+    "host OAuth client forwarding objects must not return": re.compile(r'\bstruct\s+(?:ClaudeAiOAuthClient|OpenAiOAuthClient)\b'),
+    "single provider auth operations must call the SDK directly": re.compile(r'\bfn\s+(?:request_device_code|poll_for_token|whoami|obtain_api_key|build_authorize_url(?:_with_redirect|_with_options|_pair_with_options)?)\b'),
     "canonical usage and pricing types belong in llm-client": re.compile(r'\bstruct\s+(?:Usage|TokenUsage|ServerToolUsage|TokenPricing)\b'),
     "provider usage normalization belongs in llm-client": re.compile(r'\bfn\s+normalize_anthropic_usage\b'),
     "provider credential parsing belongs in llm-client": re.compile(r'\bfn\s+parse_sts_output\b'),
@@ -132,6 +134,10 @@ def main():
         assert runtime_findings('pub struct Usage { input: u64 }')
         assert runtime_findings('pub fn normalize_anthropic_usage() {}')
         assert runtime_findings('pub fn parse_sts_output() {}')
+        assert runtime_findings('pub struct OpenAiOAuthClient {}')
+        assert runtime_findings('pub async fn whoami() {}')
+        assert not runtime_findings('sdk::whoami(transport, config, token).await')
+        assert not runtime_findings('pub async fn run_device_code_login() {}')
         assert not runtime_findings('pub struct ExecutionUsage { report: sdk::UsageReport }')
         assert not runtime_findings('pub use sdk::protocol::Usage;')
         assert findings('fn parse() { headers.get("x-claudeai-window-limit"); }')
@@ -139,6 +145,8 @@ def main():
         return 0
     errors = []
     removed_modules = [
+        "oauth", "credential_lifecycle", "aws_auth.rs", "credentials.rs", "copilot.rs",
+        "auth/anthropic/client.rs", "auth/openai/client.rs",
         "anthropic.rs", "sigv4.rs", "copilot/auth.rs", "copilot/login.rs",
         "oauth/anthropic/config.rs", "oauth/anthropic/pkce.rs", "oauth/anthropic/profile.rs",
         "oauth/openai/config.rs", "oauth/openai/pkce.rs", "oauth/openai/token_data.rs",

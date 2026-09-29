@@ -589,11 +589,11 @@ pub struct ApiService {
     ///
     /// When set, an AWS-auth failure (401/403) on the Bedrock provider runs
     /// the client-side refresh flow and retries the request, bounded at
-    /// [`crate::aws_auth::AWS_AUTH_MAX_ATTEMPTS`] (`Ygf = 2`). `None` (the
+    /// [`crate::auth::external_aws::AWS_AUTH_MAX_ATTEMPTS`] (`Ygf = 2`). `None` (the
     /// default) keeps every error path unchanged. Provider-gated inside
-    /// [`crate::aws_auth::is_aws_auth_error`] — non-AWS providers never
+    /// [`crate::auth::external_aws::is_aws_auth_error`] — non-AWS providers never
     /// reach the refresh.
-    aws_auth: Option<Arc<dyn crate::aws_auth::AwsAuthRefresh>>,
+    aws_auth: Option<Arc<dyn crate::auth::external_aws::AwsAuthRefresh>>,
     /// Monotonic guard timestamp (ms) for the rate-limit record path — the
     /// binary's `Nha` (@210953364). A record whose timestamp is OLDER than
     /// this is dropped so an out-of-order (parallel) response cannot overwrite
@@ -1096,7 +1096,10 @@ impl ApiService {
     /// Attach the AWS auth-refresh driver (2.1.198 `awsAuthRefresh` flow).
     /// Builder-style; the default is `None` (no refresh, errors stay terminal).
     #[must_use]
-    pub fn with_aws_auth(mut self, aws_auth: Arc<dyn crate::aws_auth::AwsAuthRefresh>) -> Self {
+    pub fn with_aws_auth(
+        mut self,
+        aws_auth: Arc<dyn crate::auth::external_aws::AwsAuthRefresh>,
+    ) -> Self {
         self.aws_auth = Some(aws_auth);
         self
     }
@@ -3196,8 +3199,9 @@ impl ApiService {
                             // (Authentication ⇒ Terminal — the binary's
                             // `api_request_aws_auth_exhausted` throw).
                             if let Some(aws) = &self.aws_auth {
-                                if aws_auth_attempts < crate::aws_auth::AWS_AUTH_MAX_ATTEMPTS
-                                    && crate::aws_auth::is_aws_auth_error(
+                                if aws_auth_attempts
+                                    < crate::auth::external_aws::AWS_AUTH_MAX_ATTEMPTS
+                                    && crate::auth::external_aws::is_aws_auth_error(
                                         &decode_err,
                                         &prepared.route.resolved_route.provider_id,
                                     )
@@ -4295,8 +4299,8 @@ impl ApiService {
                         // twin of the non-stream AWS auth-refresh hook (see
                         // `drive_non_stream_seeded_with_chain`).
                         if let Some(aws) = &self.aws_auth {
-                            if aws_auth_attempts < crate::aws_auth::AWS_AUTH_MAX_ATTEMPTS
-                                && crate::aws_auth::is_aws_auth_error(
+                            if aws_auth_attempts < crate::auth::external_aws::AWS_AUTH_MAX_ATTEMPTS
+                                && crate::auth::external_aws::is_aws_auth_error(
                                     &decode_err,
                                     &prepared.route.resolved_route.provider_id,
                                 )

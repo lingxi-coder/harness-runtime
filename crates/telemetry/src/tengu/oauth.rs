@@ -3,7 +3,7 @@
 //! Spec §7 line 712-721. The five M3-04-emitted events
 //! (`tengu_oauth_refresh_started`, `_succeeded`, `_failed`,
 //! `tengu_oauth_scope_upgraded`, `tengu_oauth_proactive_canceled`) byte-match
-//! the wire shape emitted by `llm_runtime::oauth::anthropic::refresh` and
+//! the wire shape emitted by `llm_runtime::auth::anthropic::refresh` and
 //! `scope_upgrade`. The three PKCE schemas are M4-staged but locked here so
 //! the PKCE runner can emit without bumping the schema tree.
 
@@ -49,12 +49,12 @@ pub(crate) const NAMES: &[&str] = &[
 /// `tengu_awsAuthRefresh_missing_trust` — the `awsAuthRefresh` command resolved
 /// from project/local settings before workspace trust was confirmed; execution
 /// refused (2.1.198 `ZBd` security gate). Emitted by
-/// `llm_runtime::aws_auth::AwsAuthRefresher::refresh`.
+/// `llm_runtime::auth::external_aws::AwsAuthRefresher::refresh`.
 pub const AWS_AUTH_REFRESH_MISSING_TRUST: &str = "tengu_awsAuthRefresh_missing_trust";
 
 /// `tengu_awsCredentialExport_missing_trust` — same trust gate for the
 /// `awsCredentialExport` command (2.1.198 `t2d`). Emitted by
-/// `llm_runtime::aws_auth::AwsAuthRefresher::export_credentials`.
+/// `llm_runtime::auth::external_aws::AwsAuthRefresher::export_credentials`.
 pub const AWS_CREDENTIAL_EXPORT_MISSING_TRUST: &str = "tengu_awsCredentialExport_missing_trust";
 
 /// Global-tail block for the two AWS auth trust-gate events. Public so the

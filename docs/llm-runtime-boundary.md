@@ -186,7 +186,7 @@ subscription gates. Provider OAuth config/PKCE/token/profile forwarding modules
 and the SigV4 forwarding module have been removed. Copilot's host module now
 contains only application selection and editor identity.
 
-`oauth::lifecycle` shares token hashing, refresh preflight, failure classification
+`auth::lifecycle` shares token hashing, refresh preflight, failure classification
 and telemetry helpers. Provider drivers retain their different storage slots,
 identity metadata and refresh policies. SDK operations do not start background
 refresh tasks or retry model execution.
@@ -210,3 +210,33 @@ Validation for the canonical usage/auth-data follow-up (2026-09-29):
 These are local submodule, mocked-provider and compile checks. Real provider
 accounts, physical mobile devices and a fresh published dependency checkout
 have not been validated for this follow-up.
+
+
+## Host authentication module
+
+`llm_runtime::auth` groups host login, credential selection/storage, callback
+handling, refresh coordination and external credential command policy. The
+previous `oauth`, `aws_auth`, `credentials` and `copilot` module paths are removed;
+there are no compatibility forwarding modules. Host `ClaudeAiOAuthClient` and
+`OpenAiOAuthClient` objects and one-operation device/PAT wrappers are removed.
+Desktop and mobile assemble login handles with SDK configuration and the shared
+SDK transport; handles call SDK operations directly. `auth::login` helpers inside
+each provider convert results to host secret storage and wall-clock timestamps.
+
+`llm_client::auth` owns provider URLs, PKCE, exchange/refresh requests and token
+response interpretation. The automatic/manual Anthropic authorization URLs share
+one SDK-generated PKCE verifier and state. Host UI, callback and credential
+storage contracts remain unchanged; the Rust module paths intentionally change.
+
+Validation for the host `auth` consolidation (2026-09-29): SDK OAuth tests
+passed 23 cases; host auth unit tests passed 115 cases and focused refresh/scope
+integration tests passed 18 cases. Desktop all-feature test compilation,
+minimal llm-runtime compilation, and iOS/Android arm64 mobile/UniFFI compilation
+passed. Callback tests require local loopback access and passed outside the
+filesystem/network sandbox. Formatting and the architecture gate passed.
+These checks use the editable SDK submodule, not a newly published SDK revision;
+real provider login and physical-device authentication remain unverified.
+
+The host `auth` consolidation pins SDK commit
+`0c6a907d897a54e656700c00cf335d91b10dca0b`. Publish this SDK commit before
+publishing the parent commit; neither repository is pushed by the local commit step.

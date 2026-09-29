@@ -256,7 +256,7 @@ impl CredentialProvider for CopilotExchangeCredentialProvider {
             let exchanged = lingxi_llm_client::auth::oauth::copilot::exchange_copilot_token(
                 &*self.http,
                 &raw,
-                crate::copilot::EXCHANGE_IDENTITY,
+                crate::auth::copilot::EXCHANGE_IDENTITY,
             )
             .await
             .map_err(|error| match error {

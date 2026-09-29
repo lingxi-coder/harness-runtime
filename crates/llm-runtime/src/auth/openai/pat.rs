@@ -6,24 +6,10 @@
 //! codex `login/src/auth/personal_access_token.rs`.
 
 use std::fmt;
-use std::sync::Arc;
 
 use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 
-use crate::oauth::openai::client::OAuthError;
-use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
-
-pub use lingxi_llm_client::auth::oauth::openai::PatMetadata;
-
-pub async fn whoami(
-    cfg: &OpenAiOAuthConfig,
-    http: &Arc<dyn lingxi_llm_client::Transport>,
-    pat: &str,
-) -> Result<PatMetadata, OAuthError> {
-    lingxi_llm_client::auth::oauth::openai::whoami(http.as_ref(), cfg, pat)
-        .await
-        .map_err(|e| OAuthError::TokenExchange(e.to_string()))
-}
+use lingxi_llm_client::auth::oauth::openai::PatMetadata;
 
 /// Static credential provider for a PAT. Serves `Credential::ChatGptOAuth` with
 /// the PAT as the bearer + the resolved `account_id/fedramp`. No refresh.
@@ -34,7 +20,7 @@ pub struct PatCredentialProvider {
 }
 
 impl PatCredentialProvider {
-    /// Build from a PAT + its resolved metadata (the engine calls [`whoami`] once).
+    /// Build from a PAT + its resolved metadata (the engine calls the SDK once).
     #[must_use]
     pub fn new(pat: impl Into<String>, metadata: PatMetadata) -> Self {
         Self {
@@ -72,7 +58,9 @@ impl CredentialProvider for PatCredentialProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth::openai::testsupport::{Canned, MockHttp};
+    use crate::auth::openai::testsupport::{Canned, MockHttp};
+    use lingxi_llm_client::auth::oauth::openai::{self as sdk, OpenAiOAuthConfig};
+    use std::sync::Arc;
 
     fn cfg() -> OpenAiOAuthConfig {
         OpenAiOAuthConfig::default()
@@ -87,7 +75,9 @@ mod tests {
                 body: r#"{"chatgpt_account_id":"acc_7","chatgpt_account_is_fedramp":true,"email":"u@x.com","chatgpt_plan_type":"pro"}"#.into(),
             },
         )]);
-        let md = whoami(&cfg(), &http, "at-token").await.expect("ok");
+        let md = sdk::whoami(http.as_ref(), &cfg(), "at-token")
+            .await
+            .expect("ok");
         assert_eq!(md.account_id.as_deref(), Some("acc_7"));
         assert!(md.fedramp);
         assert_eq!(md.email.as_deref(), Some("u@x.com"));
@@ -102,7 +92,7 @@ mod tests {
                 body: "{}".into(),
             },
         )]);
-        assert!(whoami(&cfg(), &http, "at-bad").await.is_err());
+        assert!(sdk::whoami(http.as_ref(), &cfg(), "at-bad").await.is_err());
     }
 
     #[tokio::test]

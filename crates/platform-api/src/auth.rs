@@ -36,7 +36,7 @@ pub enum AuthError {
 
 /// Public auth surface — interactive sign-in / sign-out + current-user
 /// snapshot. The concrete impl wraps `lingxi-anthropic-oauth`'s
-/// `ClaudeAiOAuthClient` plus the secret-storage layer.
+/// SDK OAuth operations plus the host secret-storage layer.
 #[async_trait]
 pub trait AuthHandle: Send + Sync {
     /// Run an interactive OAuth code-flow (PKCE) login. Blocks until the
