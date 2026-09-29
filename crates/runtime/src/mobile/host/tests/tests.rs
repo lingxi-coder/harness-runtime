@@ -24,7 +24,7 @@ use super::{
     lower_session_agent_snapshot, mobile_cron_schedule_error, mobile_mcp_config_unchanged,
     mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight, mobile_mcp_record_reload_intent,
     mobile_mcp_reload_requires_replacement, mobile_mcp_run_reload_job,
-    mobile_mcp_state_is_transitional, mobile_skill_listing_provider, provider_models_endpoint,
+    mobile_mcp_state_is_transitional, mobile_skill_listing_provider,
     session_agent_conversation_is_visible, session_agent_transcript_event,
     session_agent_transcript_revision, McpConfigScope, McpRegistry, McpServerConfig, MobileConfig,
     MobileCronStoreHandle, MobileMcpReloadJob, MobileRuntime, MobileSessionAgentObserver,
@@ -589,31 +589,11 @@ fn android_recurring_schedule_enforces_fifteen_minute_floor() {
 }
 
 #[test]
-fn provider_connection_uses_provider_specific_model_endpoint() {
-    assert_eq!(
-        Ok("https://api.deepseek.com/models".to_string()),
-        provider_models_endpoint("https://api.deepseek.com/", "deepseek"),
-    );
-    assert_eq!(
-        Ok("https://api.openai.com/v1/models".to_string()),
-        provider_models_endpoint("https://api.openai.com/v1", "openai"),
-    );
-    assert_eq!(
-        Ok("https://api.anthropic.com/v1/models".to_string()),
-        provider_models_endpoint("https://api.anthropic.com", "anthropic"),
-    );
-    assert!(provider_models_endpoint("file:///tmp/provider", "custom").is_err());
-    assert!(provider_models_endpoint("https://key@example.com/v1", "custom").is_err());
-}
-
-#[test]
 fn provider_connection_requires_selected_model_in_recognized_catalog() {
     let connected = classify_provider_connection_response(
-        Ok(protocol::HttpResponse {
+        Ok(llm_runtime::services::sdk::directory::probe::ProbeResult {
             status: 200,
-            headers: Vec::new(),
-            body: r#"{"object":"list","data":[{"id":"deepseek-flash"}]}"#.to_string(),
-            body_bytes: Vec::new(),
+            model_ids: Some(vec!["deepseek-flash".into()]),
         }),
         "deepseek-flash",
         42,
@@ -626,11 +606,9 @@ fn provider_connection_requires_selected_model_in_recognized_catalog() {
     assert!(connected.used_stored_credential);
 
     let missing = classify_provider_connection_response(
-        Ok(protocol::HttpResponse {
+        Ok(llm_runtime::services::sdk::directory::probe::ProbeResult {
             status: 200,
-            headers: Vec::new(),
-            body: r#"{"models":[{"name":"models/gemini-2.5-flash"}]}"#.to_string(),
-            body_bytes: Vec::new(),
+            model_ids: Some(vec!["gemini-2.5-flash".into()]),
         }),
         "gemini-2.5-pro",
         9,

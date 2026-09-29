@@ -164,7 +164,7 @@ mod tests {
         }
     }
 
-    impl Transport for FakeTransport {
+    impl llm_runtime::test_support::FixtureTransport for FakeTransport {
         fn execute<'a>(
             &'a self,
             request: &'a ProviderRequest,
@@ -198,6 +198,7 @@ mod tests {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(FakeTransport);
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -206,6 +207,7 @@ mod tests {
         events: Mutex<Vec<&'static str>>,
         observations: Mutex<Vec<(crate::Usage, crate::ModelAttemptUsageCompleteness)>>,
         fail_settlement: bool,
+        admission_delay: Duration,
     }
 
     struct ProbeLease {
@@ -232,6 +234,9 @@ mod tests {
             prepared: &crate::PreparedLlmCall,
         ) -> Result<Box<dyn crate::ModelAttemptLease>, LlmError> {
             assert!(request.model_attempt.is_some());
+            if !self.admission_delay.is_zero() {
+                tokio::time::sleep(self.admission_delay).await;
+            }
             let _ = prepared;
             self.events.lock().unwrap().push("begin");
             Ok(Box::new(ProbeLease {
@@ -285,7 +290,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_transport_failure_settles_as_no_provider_response() {
+    async fn a_transport_failure_keeps_unknown_execution_outcome() {
         let transport = FakeTransport::sequence(vec![FakeResponse::Err(LlmError::Transport {
             message: "connection refused".into(),
         })]);
@@ -300,12 +305,152 @@ mod tests {
             .is_err());
         let events = probe.events.lock().unwrap().clone();
         assert!(
-            events.contains(&"no-provider-response"),
-            "a dispatched attempt that saw no response must say so: {events:?}"
+            !events.contains(&"no-provider-response"),
+            "missing usage must leave the dispatched attempt unknown: {events:?}"
         );
         assert!(
             probe.observations.lock().unwrap().is_empty(),
             "nothing was observed, so nothing may be priced"
+        );
+    }
+
+    struct IncompleteResponseTransport {
+        status: u16,
+    }
+    #[async_trait::async_trait]
+    impl Transport for IncompleteResponseTransport {
+        async fn send(
+            &self,
+            _: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            use futures::StreamExt;
+            let body = if self.status >= 400 {
+                futures::stream::pending().boxed()
+            } else {
+                futures::stream::iter(vec![
+                    Ok(
+                        r#"{"id":"msg","content":[{"type":"text","text":"generated"}],"usage":"#
+                            .into(),
+                    ),
+                    Err(lingxi_llm_client::protocol::LlmError::StreamInterrupted {
+                        message: "lost body after generation".into(),
+                    }),
+                ])
+                .boxed()
+            };
+            Ok(lingxi_llm_client::StreamResponse {
+                status: self.status,
+                headers: vec![],
+                body,
+            })
+        }
+    }
+    #[tokio::test]
+    async fn incomplete_nonstream_response_keeps_unknown_attempt() {
+        let service = make_adapter_with_retries(
+            Arc::new(IncompleteResponseTransport { status: 200 }),
+            Some(0),
+        );
+        let probe = Arc::new(AttemptProbe::default());
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        assert!(service
+            .execute_side_query_request(registered_request())
+            .await
+            .is_err());
+        assert_eq!(
+            *probe.events.lock().unwrap(),
+            vec!["begin", "dispatch", "finish-owned", "settled"]
+        );
+        assert!(probe.observations.lock().unwrap().is_empty());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn stalled_stream_error_body_times_out_and_settles_once() {
+        for status in [429, 500] {
+            let service = make_adapter_with_retries(
+                Arc::new(IncompleteResponseTransport { status }),
+                Some(3),
+            )
+            .with_stream_idle_timeout_override(Some(Duration::from_secs(5)));
+            let probe = Arc::new(AttemptProbe::default());
+            service.set_model_attempt_hooks(Arc::new(probe.clone()));
+            let result = tokio::time::timeout(
+                Duration::from_secs(6),
+                service.stream_request(registered_request()),
+            )
+            .await;
+            assert!(matches!(result, Ok(Err(LlmError::TransportTimeout { .. }))));
+            assert_eq!(
+                *probe.events.lock().unwrap(),
+                vec!["begin", "dispatch", "finish-owned", "settled"]
+            );
+        }
+    }
+
+    struct StalledNonStreamTransport {
+        body: bool,
+    }
+    #[async_trait::async_trait]
+    impl Transport for StalledNonStreamTransport {
+        async fn send(
+            &self,
+            _: lingxi_llm_client::HttpRequest,
+        ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError>
+        {
+            use futures::StreamExt;
+            if !self.body {
+                return std::future::pending().await;
+            }
+            Ok(lingxi_llm_client::StreamResponse {
+                status: 200,
+                headers: vec![],
+                body: futures::stream::pending().boxed(),
+            })
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn nonstream_deadline_bounds_headers_and_body_and_settles_once() {
+        for body in [false, true] {
+            let service =
+                make_adapter_with_retries(Arc::new(StalledNonStreamTransport { body }), Some(0));
+            let probe = Arc::new(AttemptProbe::default());
+            service.set_model_attempt_hooks(Arc::new(probe.clone()));
+            let result = tokio::time::timeout(
+                crate::execution::non_stream_timeout() + Duration::from_secs(1),
+                service.execute_side_query_request(registered_request()),
+            )
+            .await;
+            assert!(
+                matches!(result, Ok(Err(LlmError::TransportTimeout { .. }))),
+                "{result:?}"
+            );
+            assert_eq!(
+                *probe.events.lock().unwrap(),
+                vec!["begin", "dispatch", "finish-owned", "settled"]
+            );
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn nonstream_deadline_excludes_host_admission() {
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 200,
+            headers: BTreeMap::new(),
+            body_json: ok_response_json(),
+            request_id: None,
+        });
+        let service = make_adapter_with_retries(transport, Some(0));
+        let probe = Arc::new(AttemptProbe {
+            admission_delay: crate::execution::non_stream_timeout() + Duration::from_secs(1),
+            ..Default::default()
+        });
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        service
+            .execute_side_query_request(registered_request())
+            .await
+            .unwrap();
+        assert_eq!(
+            *probe.events.lock().unwrap(),
+            vec!["begin", "dispatch", "finish-owned", "settled"]
         );
     }
 
@@ -327,7 +472,7 @@ mod tests {
         ws_calls: std::sync::atomic::AtomicUsize,
     }
 
-    impl Transport for HttpOnlyProbeTransport {
+    impl llm_runtime::test_support::FixtureTransport for HttpOnlyProbeTransport {
         fn execute<'a>(
             &'a self,
             _: &'a ProviderRequest,
@@ -367,6 +512,7 @@ mod tests {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(HttpOnlyProbeTransport);
 
     struct ProbeWsSession {
         frames: Vec<Vec<u8>>,
@@ -428,9 +574,12 @@ mod tests {
         );
         let probe = Arc::new(AttemptProbe::default());
         service.set_model_attempt_hooks(Arc::new(probe.clone()));
-        let mut stream = service.stream_request(request).await.unwrap();
-        while let Some(event) = stream.next().await {
-            event.unwrap();
+        // Each drive has a fresh x-request-id, but still shares one connection.
+        for _ in 0..2 {
+            let mut stream = service.stream_request(request.clone()).await.unwrap();
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
         }
         assert_eq!(
             transport
@@ -445,7 +594,7 @@ mod tests {
         );
         assert_eq!(
             *probe.events.lock().unwrap(),
-            vec!["begin", "dispatch", "finish-owned", "settled"],
+            ["begin", "dispatch", "finish-owned", "settled"].repeat(2),
             "the WebSocket send is metered exactly like an HTTP one"
         );
         assert_eq!(
@@ -550,8 +699,7 @@ mod tests {
             vec![
                 "begin",
                 "dispatch",
-                // The first physical send never saw a provider response.
-                "no-provider-response",
+                // Missing usage keeps the first physical attempt unknown.
                 "finish-owned",
                 "settled",
                 "begin",
@@ -685,8 +833,7 @@ mod tests {
             vec![
                 "begin",
                 "dispatch",
-                // The first physical send never saw a provider response.
-                "no-provider-response",
+                // Missing usage keeps the first physical attempt unknown.
                 "finish-owned",
                 "settled",
                 "begin",
@@ -3412,7 +3559,7 @@ mod tests {
         attempts: Mutex<Vec<Option<String>>>,
     }
 
-    impl Transport for BodyPhaseDropThenOk {
+    impl llm_runtime::test_support::FixtureTransport for BodyPhaseDropThenOk {
         fn execute<'a>(
             &'a self,
             _request: &'a ProviderRequest,
@@ -3454,6 +3601,7 @@ mod tests {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(BodyPhaseDropThenOk);
 
     /// End-to-end arm 2: the drive loop's one-frame lookahead must strip the
     /// header, emit `tengu_dispatch_header_fallback{reason:"body_phase",
@@ -5552,7 +5700,7 @@ mod tests {
         }
     }
 
-    impl Transport for FakeStreamTransport {
+    impl llm_runtime::test_support::FixtureTransport for FakeStreamTransport {
         fn execute<'a>(
             &'a self,
             _request: &'a ProviderRequest,
@@ -5596,6 +5744,7 @@ mod tests {
             Box::pin(async move { resp })
         }
     }
+    llm_runtime::impl_fixture_transport!(FakeStreamTransport);
 
     /// A transport whose connect/header phase never resolves.
     struct HangingOpenTransport {
@@ -5614,7 +5763,7 @@ mod tests {
         }
     }
 
-    impl Transport for HangingOpenTransport {
+    impl llm_runtime::test_support::FixtureTransport for HangingOpenTransport {
         fn execute<'a>(
             &'a self,
             _request: &'a ProviderRequest,
@@ -5634,6 +5783,7 @@ mod tests {
             Box::pin(std::future::pending())
         }
     }
+    llm_runtime::impl_fixture_transport!(HangingOpenTransport);
 
     /// 2.1.245/246 first-byte parity: a request that never receives response
     /// headers retries once, then terminates with the exact user-facing copy.
@@ -5926,7 +6076,7 @@ mod tests {
 
     /// Transport that opens a 200 stream whose frames hang forever.
     struct HangingStreamTransport;
-    impl Transport for HangingStreamTransport {
+    impl llm_runtime::test_support::FixtureTransport for HangingStreamTransport {
         fn execute<'a>(
             &'a self,
             _request: &'a ProviderRequest,
@@ -5950,6 +6100,7 @@ mod tests {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(HangingStreamTransport);
 
     /// The watchdog is ON by default and aborts a stream that produces no
     /// event within the idle timeout, surfacing a detectable idle-timeout
@@ -6913,7 +7064,7 @@ mod tests {
         }
     }
 
-    impl Transport for ScriptedStreamTransport {
+    impl llm_runtime::test_support::FixtureTransport for ScriptedStreamTransport {
         fn execute<'a>(
             &'a self,
             _request: &'a ProviderRequest,
@@ -6941,6 +7092,7 @@ mod tests {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(ScriptedStreamTransport);
 
     /// Build a streaming adapter with an attached analytics bus.
     async fn make_stream_adapter_with_bus(

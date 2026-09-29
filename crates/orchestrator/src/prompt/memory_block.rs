@@ -406,7 +406,7 @@ pub fn build_session_memory_handle(
 pub fn build_memdir_prefetch_from_anthropic(
     api_key: impl Into<String>,
     api_base: Option<String>,
-    http: Arc<dyn platform_api::HttpTransport>,
+    http: Arc<dyn llm_runtime::Transport>,
     runtime: Arc<dyn platform_api::RuntimeSpawner>,
     home: &std::path::Path,
     cwd: &std::path::Path,

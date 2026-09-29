@@ -15,23 +15,22 @@ only at the consuming workspace root.
 
 The 0.3 client integration provides typed hosted tools, prompt caching, output
 contracts and scoped continuation to `LlmRequest`. `services::ProviderServices`
-shares the host transport and configuration; `services::sdk` exposes the exact
+shares the SDK transport and configuration; `services::sdk` exposes the exact
 upstream types. Bind a provider through
 `services.client().provider::<services::providers::OpenAiClient>(profile_name)`
 and use its `audio()`, `files()` or other provider resources directly. Anthropic
 Skills are available through `providers::AnthropicClient::skills`; operation
 credentials and deadlines arrive through `RequestOptions`. Realtime audio uses
-a separate duplex transport, with an optional `realtime-websocket` feature.
+a separate duplex interface on the same configured SDK `HttpTransport`, with the optional `realtime-websocket` feature.
 See [the migration guide](../../docs/llm-client-upgrade.md) for the scope,
 `Arc<dyn Transport>` call-site migration and submodule contribution workflow.
 
-`upstream.rs` projects host request/events into the independent client's typed
-contracts. It uses the client's low-level codec interface so host authentication,
-exact UTF-16 request serialization, platform transports and synchronous dispatch
-hooks remain on the existing physical send boundary. One catalog row is frozen
-before encoding. A retry must settle the previous attempt before another send.
-The independent client also exposes `PreparedCall` for hosts that delegate
-request preparation and transport to its executor.
+`upstream.rs` projects host conversation data to SDK types. Model HTTP, Responses
+WebSocket and realtime networking live in the SDK. Production hosts inject
+`Arc<dyn services::sdk::Transport>` directly; the platform HTTP bridge has been removed.
+Prepared calls preserve host admission and synchronous dispatch hooks. Each retry
+settles the previous attempt before a fresh call can send again. Shared SDK clients
+retain immutable configuration while credentials and scopes are request-local.
 
 The `providers` module only projects Gemini file envelopes and exports codec
 adapters. It contains no local provider codec implementation or copied catalog.

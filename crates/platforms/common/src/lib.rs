@@ -28,7 +28,7 @@ pub use http::ReqwestHttp;
 pub use llm_config::{
     apply_settings_providers, builtin_anthropic_config, parse_routing_overrides, RoutingOverrides,
 };
-pub use llm_runtime::LlmTransportBridge;
+
 pub use mcp_http::{connect_http, HttpConnectError};
 pub use mcp_remote::RemoteMcpTransport;
 pub use mcp_sse::{connect_sse, SseConnectError, SseEndpointMode, IDE_AUTH_HEADER};
@@ -40,3 +40,5 @@ pub use mobile_linux::{
 };
 pub use worktree_create_guard::reject_worktree_create_symlinks;
 pub use worktree_include::copy_worktree_include_files;
+
+pub use http_client::provider_transport;

@@ -243,10 +243,7 @@ pub use fusion::{
     FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT,
 };
 pub use haptics::{HapticError, HapticService, HapticStyle};
-pub use http::{
-    HttpError, HttpTransport, RawByteStreamWithMeta, ResolvedAddressOverride, WebSocketConnection,
-    WebSocketConnectionWithMeta, WebSocketMessageStream, WebSocketMessageStreamWithMeta,
-};
+pub use http::{HttpError, HttpTransport, RawByteStreamWithMeta, ResolvedAddressOverride};
 pub use ide::{IdeEndpointInfo, IdeHandle, IdeStatus, IdeTransport};
 pub use live_sessions::{SessionIdClaim, SessionWriterLease, SharedSessionWriterLease};
 pub use location::{LocationError, LocationFix, LocationProvider};

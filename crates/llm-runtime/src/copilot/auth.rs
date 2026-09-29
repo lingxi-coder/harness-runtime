@@ -79,36 +79,12 @@ impl CopilotAuthenticator {
 
 impl Authenticator for CopilotAuthenticator {
     fn apply(&self, mut request: ProviderRequest) -> Result<ProviderRequest, LlmError> {
-        let headers = &mut request.headers;
-        // Defensive parity with opencode: never let an x-api-key ride along.
-        headers.remove("x-api-key");
-        headers.insert(
-            "Authorization".to_string(),
-            format!("Bearer {}", self.secret.0),
-        );
-        headers.insert("User-Agent".to_string(), COPILOT_USER_AGENT.to_string());
-        headers.insert(
-            "Openai-Intent".to_string(),
-            "conversation-edits".to_string(),
-        );
-        headers.insert(
-            "X-GitHub-Api-Version".to_string(),
-            COPILOT_API_VERSION.to_string(),
-        );
-        // LingXi is an agentic client; per-request user/agent refinement is deferred.
-        headers.insert("x-initiator".to_string(), "agent".to_string());
-        // Copilot rejects requests without a known integration id + editor version.
-        headers.insert(
-            "Copilot-Integration-Id".to_string(),
-            COPILOT_INTEGRATION_ID.to_string(),
-        );
-        headers.insert(
-            "Editor-Version".to_string(),
-            COPILOT_EDITOR_VERSION.to_string(),
-        );
-        headers.insert(
-            "Editor-Plugin-Version".to_string(),
-            COPILOT_EDITOR_PLUGIN_VERSION.to_string(),
+        lingxi_llm_client::auth::header_policy::copilot(
+            &mut request.headers,
+            &self.secret.0,
+            COPILOT_USER_AGENT,
+            COPILOT_EDITOR_VERSION,
+            COPILOT_EDITOR_PLUGIN_VERSION,
         );
         Ok(request)
     }

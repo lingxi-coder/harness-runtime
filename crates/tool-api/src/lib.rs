@@ -16,7 +16,6 @@
     clippy::doc_markdown
 )]
 
-pub mod anthropic_request;
 pub mod artifact_gate;
 pub mod ask_user_question;
 pub mod bash_runner;
@@ -24,6 +23,7 @@ pub mod builtin_context;
 pub mod content_replacement;
 pub mod context;
 pub mod defer;
+pub mod hosted_search;
 pub mod model_prompt_gate;
 pub mod native_schema;
 pub mod progress;
@@ -43,7 +43,6 @@ pub mod worktree_session;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use anthropic_request::{AnthropicRequestBuilder, McpTokenCounter};
 pub use builtin_context::{
     AndroidGitSecret, AndroidGitToolCtx, AndroidShellToolCtx, BashEditDiffSetup,
     BuiltinToolContext, GitCredentialProvider, LiveCwdCell, MainLoopModelProfileProvider,
@@ -53,6 +52,10 @@ pub use content_replacement::ContentReplacementState;
 pub use context::{ToolUseContext, ToolUseOptions};
 pub use defer::{
     mode_from_env, mode_from_values, DeferralState, ToolSearchMode, ENTER_WORKTREE_TOOL_NAME,
+};
+pub use hosted_search::{
+    HostedSearchError, HostedSearchOutput, HostedSearchRequest, HostedWebSearchClient,
+    McpTokenCounter,
 };
 pub use model_prompt_gate::dh_simple_system_prompt;
 pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};

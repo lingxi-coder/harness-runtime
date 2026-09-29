@@ -55,7 +55,7 @@ impl HostTransport {
     }
 }
 
-impl Transport for HostTransport {
+impl llm_runtime::test_support::FixtureTransport for HostTransport {
     fn execute<'a>(
         &'a self,
         _: &'a ProviderRequest,
@@ -107,6 +107,7 @@ impl Transport for HostTransport {
         })
     }
 }
+llm_runtime::impl_fixture_transport!(HostTransport);
 
 fn profiles() -> Vec<sdk::protocol::ProviderProfile> {
     serde_json::from_value(json!([
@@ -141,7 +142,7 @@ fn options(key: &str, account: &str) -> sdk::RequestOptions {
 #[tokio::test]
 async fn shared_services_preserve_audio_streams_and_request_scoped_credentials() {
     let transport = Arc::new(HostTransport::default());
-    let services = ProviderServices::with_host_transport(
+    let services = ProviderServices::with_transport(
         &profiles(),
         sdk::protocol::Region::International,
         transport.clone(),
@@ -212,7 +213,7 @@ async fn shared_services_preserve_audio_streams_and_request_scoped_credentials()
 #[tokio::test]
 async fn file_references_keep_account_scope_and_reject_cross_account_reuse() {
     let transport = Arc::new(HostTransport::default());
-    let services = ProviderServices::with_host_transport(
+    let services = ProviderServices::with_transport(
         &profiles(),
         sdk::protocol::Region::International,
         transport.clone(),
@@ -240,7 +241,7 @@ async fn file_references_keep_account_scope_and_reject_cross_account_reuse() {
 #[test]
 fn file_services_enforce_selected_region_before_io() {
     let transport = Arc::new(HostTransport::default());
-    let services = ProviderServices::with_host_transport(
+    let services = ProviderServices::with_transport(
         &profiles(),
         sdk::protocol::Region::ChinaMainland,
         transport.clone(),
@@ -256,7 +257,7 @@ fn file_services_enforce_selected_region_before_io() {
 #[tokio::test]
 async fn remote_skills_reuse_host_transport_with_explicit_workspace_scope() {
     let transport = Arc::new(HostTransport::default());
-    let services = ProviderServices::with_host_transport(
+    let services = ProviderServices::with_transport(
         &profiles(),
         sdk::protocol::Region::International,
         transport.clone(),

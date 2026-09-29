@@ -466,7 +466,7 @@ mod tests {
     async fn task_stop_cancels_a_scan_while_provider_stream_is_establishing() {
         use llm_runtime::{
             AuthStrategy, Capabilities, ClientConfig, CredentialConfig, DefaultLlmClient,
-            ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, Transport,
+            ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
         };
         use permission::auto_mode_propose::ProposeQuery;
         use std::sync::{
@@ -483,7 +483,7 @@ mod tests {
                 self.0.store(true, Ordering::SeqCst);
             }
         }
-        impl Transport for Establishing {
+        impl llm_runtime::test_support::FixtureTransport for Establishing {
             fn execute<'a>(
                 &'a self,
                 _: &'a llm_runtime::ProviderRequest,
@@ -503,6 +503,7 @@ mod tests {
                 })
             }
         }
+        llm_runtime::impl_fixture_transport!(Establishing);
         let transport = Arc::new(Establishing {
             entered: tokio::sync::Notify::new(),
             dropped: Arc::new(AtomicBool::new(false)),

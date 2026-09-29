@@ -625,10 +625,10 @@ impl MobileOAuthManager {
                 }
             }
         };
-        let endpoint = match provider {
+        use llm_runtime::services::sdk::directory::probe::{ProbeCredential, ProbeProtocol};
+        let (base, kind) = match provider {
             MobileOAuthProvider::Anthropic => {
-                let configured_base = api_base.trim().trim_end_matches('/');
-                if configured_base != ANTHROPIC_OAUTH_API_BASE {
+                if api_base.trim().trim_end_matches('/') != ANTHROPIC_OAUTH_API_BASE {
                     return provider_connection_failure(
                         "Anthropic OAuth 仅支持官方 HTTPS API 地址",
                         false,
@@ -638,46 +638,24 @@ impl MobileOAuthManager {
                         true,
                     );
                 }
-                provider_models_endpoint(ANTHROPIC_OAUTH_API_BASE, "anthropic")
-            }
-            MobileOAuthProvider::OpenAi => Ok("https://chatgpt.com/backend-api/models".to_string()),
-        };
-        let endpoint = match endpoint {
-            Ok(endpoint) => endpoint,
-            Err(message) => {
-                return provider_connection_failure(message, false, false, None, 0, true);
-            }
-        };
-        let mut headers = vec![
-            ("accept".to_string(), "application/json".to_string()),
-            ("authorization".to_string(), format!("Bearer {token}")),
-        ];
-        match provider {
-            MobileOAuthProvider::Anthropic => {
-                headers.push(("anthropic-version".to_string(), "2023-06-01".to_string()));
-                headers.push(("anthropic-beta".to_string(), "oauth-2025-04-20".to_string()));
+                (ANTHROPIC_OAUTH_API_BASE, ProbeProtocol::Anthropic)
             }
             MobileOAuthProvider::OpenAi => {
-                if let Some(account_id) = account_id {
-                    headers.push(("ChatGPT-Account-ID".to_string(), account_id));
-                }
-                if fedramp {
-                    headers.push(("X-OpenAI-Fedramp".to_string(), "true".to_string()));
-                }
+                ("https://chatgpt.com/backend-api", ProbeProtocol::ChatGpt)
             }
-        }
+        };
         let started = std::time::Instant::now();
-        let response = self
-            .http
-            .request(protocol::HttpRequest {
-                method: protocol::HttpMethod::Get,
-                url: endpoint,
-                headers,
-                body: None,
-                body_bytes: None,
-                timeout: Some(PROVIDER_CONNECTION_TIMEOUT),
-            })
-            .await;
+        let response = probe_provider(
+            base,
+            kind,
+            ProbeCredential {
+                token: token.into(),
+                bearer: true,
+                account_id,
+                fedramp,
+            },
+        )
+        .await;
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         classify_provider_connection_response(response, model.trim(), latency_ms, true)
     }
@@ -996,62 +974,6 @@ pub(super) const PROVIDER_CONNECTION_TIMEOUT: std::time::Duration =
 
 pub(crate) const LOCAL_APPS_MCP_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
 
-pub(super) fn provider_models_endpoint(
-    api_base: &str,
-    provider_preset: &str,
-) -> Result<String, &'static str> {
-    let base = api_base.trim().trim_end_matches('/');
-    if base.is_empty() {
-        return Err("请填写 API 地址");
-    }
-    if !(base.starts_with("https://") || base.starts_with("http://")) {
-        return Err("API 地址必须以 https:// 或 http:// 开头");
-    }
-    if base
-        .chars()
-        .any(|ch| ch.is_whitespace() || matches!(ch, '#' | '?'))
-        || base.split_once("://").is_some_and(|(_, authority)| {
-            authority
-                .split('/')
-                .next()
-                .is_some_and(|host| host.contains('@'))
-        })
-    {
-        return Err("API 地址格式无效");
-    }
-
-    if base.ends_with("/models") {
-        return Ok(base.to_string());
-    }
-    if let Some(prefix) = base.strip_suffix("/chat/completions") {
-        return Ok(format!("{prefix}/models"));
-    }
-    if provider_preset == "anthropic" && !base.ends_with("/v1") {
-        return Ok(format!("{base}/v1/models"));
-    }
-    Ok(format!("{base}/models"))
-}
-
-pub(super) fn provider_connection_headers(
-    provider_preset: &str,
-    credential: &str,
-) -> Vec<(String, String)> {
-    let mut headers = vec![("accept".to_string(), "application/json".to_string())];
-    match provider_preset {
-        "anthropic" => {
-            headers.push(("x-api-key".to_string(), credential.to_string()));
-            headers.push(("anthropic-version".to_string(), "2023-06-01".to_string()));
-        }
-        "google" => {
-            headers.push(("x-goog-api-key".to_string(), credential.to_string()));
-        }
-        _ => {
-            headers.push(("authorization".to_string(), format!("Bearer {credential}")));
-        }
-    }
-    headers
-}
-
 pub(super) fn provider_connection_failure(
     message: impl Into<String>,
     reachable: bool,
@@ -1072,35 +994,44 @@ pub(super) fn provider_connection_failure(
     }
 }
 
-pub(super) fn provider_model_ids(body: &str) -> Option<Vec<String>> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    let entries = value
-        .get("data")
-        .or_else(|| value.get("models"))?
-        .as_array()?;
-    Some(
-        entries
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .get("id")
-                    .or_else(|| entry.get("name"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(|id| id.strip_prefix("models/").unwrap_or(id).to_string())
-            })
-            .collect(),
+pub(super) async fn probe_provider(
+    base: &str,
+    kind: llm_runtime::services::sdk::directory::probe::ProbeProtocol,
+    credential: llm_runtime::services::sdk::directory::probe::ProbeCredential,
+) -> Result<llm_runtime::services::sdk::directory::probe::ProbeResult, HttpError> {
+    use llm_runtime::services::sdk;
+    fn map(error: sdk::protocol::LlmError) -> HttpError {
+        match error {
+            sdk::protocol::LlmError::InvalidRequest { message } => {
+                HttpError::InvalidRequest(message)
+            }
+            sdk::protocol::LlmError::TransportTimeout { .. } => {
+                HttpError::Timeout(PROVIDER_CONNECTION_TIMEOUT)
+            }
+            other => HttpError::Connection(other.to_string()),
+        }
+    }
+    let transport = platform_common::provider_transport().map_err(map)?;
+    sdk::directory::probe::probe(
+        &transport,
+        base,
+        kind,
+        &credential,
+        PROVIDER_CONNECTION_TIMEOUT,
     )
+    .await
+    .map_err(map)
 }
 
 pub(super) fn classify_provider_connection_response(
-    response: Result<protocol::HttpResponse, HttpError>,
+    response: Result<llm_runtime::services::sdk::directory::probe::ProbeResult, HttpError>,
     model: &str,
     latency_ms: u64,
     used_stored_credential: bool,
 ) -> ProviderConnectionTestDto {
     match response {
         Ok(response) if (200..300).contains(&response.status) => {
-            let model_ids = provider_model_ids(&response.body);
+            let model_ids = response.model_ids;
             let model_available = model.is_empty()
                 || model_ids
                     .as_ref()

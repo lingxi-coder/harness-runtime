@@ -775,7 +775,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            for _ in 0..2 {
+            for _ in 0..5 {
                 let Ok((tcp, _)) = listener.accept().await else {
                     return;
                 };
@@ -807,17 +807,50 @@ mod tests {
             cert_store: Some("bundled".to_string()),
             extra_ca_certs: Some(ca_path.clone()),
         };
-        let connector =
-            tokio_tungstenite::Connector::Rustls(settings.websocket_client_config().unwrap());
+        use lingxi_llm_client::Transport;
         let url = format!("wss://127.0.0.1:{}/", addr.port());
-        let connected =
-            tokio_tungstenite::connect_async_tls_with_config(&url, None, false, Some(connector))
-                .await;
-        assert!(
-            connected.is_ok(),
-            "custom CA + client identity must complete WSS: {connected:?}"
-        );
+        let transport = lingxi_llm_client::HttpTransport::with_client_configurator(|builder| {
+            settings.apply_to_builder(builder)
+        })
+        .unwrap();
+        let request = || lingxi_llm_client::HttpRequest {
+            method: "GET".into(),
+            url: url.clone(),
+            headers: vec![],
+            body: Default::default(),
+            timeout: Some(std::time::Duration::from_secs(2)),
+        };
+        assert!(transport.connect_websocket(request()).await.is_ok());
+        {
+            use lingxi_llm_client::realtime::RealtimeTransport;
+            assert!(transport
+                .connect(lingxi_llm_client::realtime::RealtimeConnectRequest {
+                    endpoint: url.clone(),
+                    headers: vec![],
+                    max_frame_bytes: 4096
+                })
+                .await
+                .is_ok());
+        }
+        let untrusted = lingxi_llm_client::HttpTransport::new().unwrap();
+        assert!(matches!(
+            untrusted.connect_websocket(request()).await,
+            Err(lingxi_llm_client::protocol::LlmError::TlsCert { .. })
+        ));
 
+        {
+            use lingxi_llm_client::realtime::{RealtimeError, RealtimeTransport};
+            assert!(matches!(
+                untrusted
+                    .connect(lingxi_llm_client::realtime::RealtimeConnectRequest {
+                        endpoint: url.clone(),
+                        headers: vec![],
+                        max_frame_bytes: 4096
+                    })
+                    .await,
+                Err(RealtimeError::TlsCert { .. })
+            ));
+        }
         let without_identity = TlsSettings {
             client_cert: None,
             client_key: None,
@@ -825,15 +858,13 @@ mod tests {
             cert_store: Some("bundled".to_string()),
             extra_ca_certs: Some(ca_path),
         };
-        let connector = tokio_tungstenite::Connector::Rustls(
-            without_identity.websocket_client_config().unwrap(),
-        );
-        let connected =
-            tokio_tungstenite::connect_async_tls_with_config(&url, None, false, Some(connector))
-                .await;
+        let transport = lingxi_llm_client::HttpTransport::with_client_configurator(|builder| {
+            without_identity.apply_to_builder(builder)
+        })
+        .unwrap();
         assert!(
-            connected.is_err(),
-            "client-auth-required WSS must reject a connector without identity"
+            transport.connect_websocket(request()).await.is_err(),
+            "mTLS must reject a missing identity"
         );
     }
 

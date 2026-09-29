@@ -1059,7 +1059,7 @@ static READ_MCP_RESOURCE_SCHEMA: Lazy<Value> = Lazy::new(|| {
 async fn process_mcp_call_result(
     bus: Arc<AnalyticsBus>,
     output_dir: std::path::PathBuf,
-    token_counter: Arc<tool_api::AnthropicRequestBuilder>,
+    token_counter: Option<Arc<dyn tool_api::McpTokenCounter>>,
     default_model: String,
     output_schema: Option<Value>,
     server: String,
@@ -1238,10 +1238,14 @@ async fn process_mcp_call_result(
             // handler applies (see `ExactCountOutcome`).
             let exact_token_count =
                 if crate::large_output::mcp_content_needs_exact_count(&model_content) {
-                    match token_counter
-                        .count_mcp_content_tokens(&default_model, &model_content)
-                        .await
-                    {
+                    match match token_counter.as_ref() {
+                        Some(counter) => {
+                            counter
+                                .count_mcp_content_tokens(&default_model, &model_content)
+                                .await
+                        }
+                        None => Ok(None),
+                    } {
                         // The active route returned an exact count.
                         Ok(Some(count)) => crate::large_output::ExactCountOutcome::Counted(count),
                         // The route has NO exact-count endpoint (a non-Anthropic
@@ -1742,7 +1746,7 @@ impl Tool for MCPTool {
         // can be detached on the background path.
         let bus = self.ctx.bus.clone();
         let output_dir = self.ctx.tool_results_dir();
-        let token_counter = self.ctx.provider.clone();
+        let token_counter = self.ctx.mcp_token_counter.clone();
         let default_model = self.ctx.default_model.clone();
 
         // Direct-await path: auto-background disabled (`auto_bg_ms == 0`) OR no

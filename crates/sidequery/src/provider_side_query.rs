@@ -34,15 +34,19 @@ use crate::side_query::{
     SideQueryRequest, SideQueryResponse,
 };
 use async_trait::async_trait;
-use llm_runtime::LlmTransportBridge;
+use llm_runtime::Transport;
 use llm_runtime::{
     AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, DefaultLlmClient,
     LlmError, LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
     StaticCredentialProvider, SystemBlock,
 };
+#[cfg(test)]
 use platform_api::http::{RawByteStream, SseStream};
+#[cfg(test)]
 use platform_api::{HttpError, HttpTransport};
-use protocol::{HttpRequest, HttpResponse, MediaAnalysis};
+use protocol::MediaAnalysis;
+#[cfg(test)]
+use protocol::{HttpRequest, HttpResponse};
 use std::sync::Arc;
 
 /// Default Anthropic API base URL used when the caller passes `None`.
@@ -51,47 +55,11 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// Static credential id used inside the internal config for a static API key.
 const SIDEQUERY_CRED_ID: &str = "sidequery_key";
 
-/// Sized newtype adapter around an `Arc<dyn HttpTransport>` for the isolated
-/// constructor's [`LlmTransportBridge`].
-struct ArcTransport(Arc<dyn HttpTransport>);
-
-#[async_trait]
-impl HttpTransport for ArcTransport {
-    async fn send_stream(
-        &self,
-        req: platform_api::http::HttpStreamRequest,
-    ) -> Result<platform_api::http::RawByteStreamWithMeta, HttpError> {
-        self.0.send_stream(req).await
-    }
-
-    async fn stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(
-        &self,
-        req: HttpRequest,
-        resolved: Option<platform_api::ResolvedAddressOverride>,
-    ) -> Result<platform_api::http::RawByteStreamWithMeta, HttpError> {
-        self.0
-            .stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(req, resolved)
-            .await
-    }
-
-    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
-        self.0.request(req).await
-    }
-
-    async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError> {
-        self.0.stream_sse(req).await
-    }
-
-    async fn stream_raw_bytes(&self, req: HttpRequest) -> Result<RawByteStream, HttpError> {
-        self.0.stream_raw_bytes(req).await
-    }
-}
-
 enum ProviderSideQueryBackend {
     /// Standalone utility-query client built from a raw Anthropic API key.
     Direct {
         client: DefaultLlmClient,
-        transport: Arc<dyn HttpTransport>,
+        transport: Arc<dyn Transport>,
     },
     /// The live session service used by compaction/recap.
     Session(Arc<llm_runtime::ApiService>),
@@ -116,7 +84,7 @@ impl ProviderSideQueryClient {
     pub fn new(
         api_key: impl Into<String>,
         base_url: Option<String>,
-        transport: Arc<dyn HttpTransport>,
+        transport: Arc<dyn Transport>,
     ) -> Self {
         let api_key = api_key.into();
         let base_url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
@@ -518,12 +486,9 @@ impl SideQueryClient for ProviderSideQueryClient {
             ..LlmRequest::default()
         };
 
-        // Route through the transport bridge so the existing Arc<dyn
-        // HttpTransport> is usable as an llm_runtime::Transport.
-        let arc_transport = ArcTransport(Arc::clone(transport));
-        let bridge = LlmTransportBridge::new(arc_transport);
+        // Dispatch directly through the shared SDK transport.
 
-        let resp = client.execute(&llm_req, Arc::new(bridge)).await?;
+        let resp = client.execute(&llm_req, transport.clone()).await?;
 
         Ok(decode_response(
             resp,
@@ -618,10 +583,9 @@ impl SideQueryClient for ProviderSideQueryClient {
                     }),
                     ..LlmRequest::default()
                 };
-                let arc_transport = ArcTransport(Arc::clone(transport));
-                let bridge = LlmTransportBridge::new(arc_transport);
+
                 client
-                    .execute(&llm_req, Arc::new(bridge))
+                    .execute(&llm_req, transport.clone())
                     .await
                     .map_err(map_structured_llm_error)?
             }
@@ -1014,6 +978,7 @@ mod tests {
             ))
         }
     }
+    llm_runtime::impl_http_fixture_transport!(StubTransport);
 
     fn req(output_format: Option<serde_json::Value>) -> SideQueryRequest {
         SideQueryRequest {
@@ -1261,9 +1226,7 @@ mod tests {
             .with_credential_provider(Arc::new(StaticCredentialProvider::new(
                 Credential::BearerToken("parent-oauth-token".to_string()),
             )));
-        let parent_transport: Arc<dyn llm_runtime::Transport> = Arc::new(LlmTransportBridge::new(
-            ArcTransport(transport.clone() as Arc<dyn HttpTransport>),
-        ));
+        let parent_transport: Arc<dyn llm_runtime::Transport> = transport.clone();
         let parent_service = Arc::new(
             llm_runtime::ApiService::new(
                 Arc::new(parent_client),
@@ -1328,7 +1291,8 @@ mod tests {
         assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
         assert_eq!(body["output_config"]["effort"], "high");
         assert!(
-            body.get("tool_choice").is_none(),
+            body.get("tool_choice")
+                .is_none_or(|choice| choice == &serde_json::json!({"type":"auto"})),
             "main-turn forced tool choice leaked into compact: {body}"
         );
         assert!(
@@ -1483,6 +1447,9 @@ mod tests {
         let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
         let mut r = req(None);
         r.tool_choice = Some(serde_json::json!({ "type": "any" }));
+        r.tools = vec![
+            serde_json::json!({"name":"search","description":"Search","input_schema":{"type":"object","properties":{}}}),
+        ];
         r.stop_sequences = vec!["STOP".into()];
         client.query(r).await.expect("query ok");
         let received = transport.received.lock().unwrap();
@@ -1706,7 +1673,7 @@ mod tests {
         }
     }
 
-    impl llm_runtime::Transport for StreamStubTransport {
+    impl llm_runtime::test_support::FixtureTransport for StreamStubTransport {
         fn execute<'a>(
             &'a self,
             _request: &'a llm_runtime::ProviderRequest,
@@ -1746,6 +1713,7 @@ mod tests {
             })
         }
     }
+    llm_runtime::impl_fixture_transport!(StreamStubTransport);
 
     /// Build a Session-backend client whose one registered model declares
     /// `structured_output: true` — the capability

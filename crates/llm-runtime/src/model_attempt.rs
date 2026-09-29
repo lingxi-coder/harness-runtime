@@ -53,9 +53,8 @@ pub trait ModelAttemptLease: Send {
     fn observe_usage(&mut self, usage: &Usage, completeness: ModelAttemptUsageCompleteness);
 
     /// Record that no provider response was ever accepted for this attempt.
-    /// The transport driver calls this when it finishes an attempt it marked
-    /// dispatched without ever observing usage. Defaulted so a host that does
-    /// not distinguish the case keeps its existing behavior.
+    /// This does not prove the provider did not execute the request. Hosts
+    /// must retain unknown budget occupancy even when no response was received.
     fn mark_no_provider_response(&mut self) {}
 
     /// Synchronously transfer the observation and permit into a host-owned
@@ -77,9 +76,6 @@ pub trait ModelAttemptSettlement: Send {
 pub(crate) struct WireAttempt {
     lease: Option<Box<dyn ModelAttemptLease>>,
     usage: Usage,
-    /// Whether any provider usage was ever observed on this physical attempt.
-    /// A dispatched attempt that finishes without one saw no response at all.
-    observed: bool,
 }
 
 impl WireAttempt {
@@ -87,7 +83,6 @@ impl WireAttempt {
         Self {
             lease,
             usage: Usage::default(),
-            observed: false,
         }
     }
 
@@ -100,7 +95,6 @@ impl WireAttempt {
 
     pub(crate) fn observe(&mut self, usage: &Usage, completeness: ModelAttemptUsageCompleteness) {
         self.usage = usage.clone();
-        self.observed = true;
         if let Some(lease) = self.lease.as_mut() {
             lease.observe_usage(&self.usage, completeness);
         }
@@ -142,13 +136,9 @@ impl WireAttempt {
     }
 
     pub(crate) async fn finish(&mut self) -> Result<(), LlmError> {
-        if let Some(mut lease) = self.lease.take() {
-            // Every `finish` site in the driver is reached with the attempt
-            // already marked dispatched, so "never observed" here means the
-            // transport produced no provider response at all.
-            if !self.observed {
-                lease.mark_no_provider_response();
-            }
+        if let Some(lease) = self.lease.take() {
+            // Missing usage cannot establish whether a dispatched request ran.
+            // Leave the lease unknown unless actual provider usage was observed.
             lease.finish().wait().await.map_err(accounting_error)?;
         }
         Ok(())

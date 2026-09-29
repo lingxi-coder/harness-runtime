@@ -365,6 +365,12 @@ pub fn reasoning_for_request(
         if let ThinkingConfig::Enabled { budget_tokens } = thinking {
             budget = budget_tokens;
         }
+        // An automatically selected manual budget must fit the caller's output
+        // ceiling. Do not invent an invalid sub-minimum budget or increase the
+        // ceiling. Explicit manual settings still reach SDK validation.
+        if matches!(thinking, ThinkingConfig::Adaptive)
+            && max_tokens.is_some_and(|limit| limit <= lingxi_llm_client::providers::anthropic::request_policy::MIN_MANUAL_THINKING_TOKENS)
+        { return None; }
         // budget_tokens must stay strictly below max_tokens.
         budget = budget.min(max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
         Some(crate::ReasoningConfig::Enabled {

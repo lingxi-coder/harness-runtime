@@ -550,6 +550,11 @@ pub struct LlmResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LlmEvent {
+    /// SDK-normalized hosted search attribution and progress metadata.
+    WebSearch {
+        /// Search observation; never executable model content.
+        result: lingxi_llm_client::protocol::WebSearchResult,
+    },
     /// Response start snapshot.
     MessageStart {
         /// Response metadata snapshot.

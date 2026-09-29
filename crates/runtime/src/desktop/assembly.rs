@@ -22,7 +22,6 @@ use skill_api::SkillRegistry;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
-use tool_api::AnthropicRequestBuilder;
 use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 
@@ -204,7 +203,7 @@ pub async fn build_with_credential_stack(
         credentials,
         auth,
         subscription,
-        resolved_anthropic_api_key,
+        resolved_anthropic_api_key: _,
         is_subscriber,
         openai_oauth_client,
         pricing,
@@ -360,15 +359,6 @@ pub async fn build_with_credential_stack(
             .with_initial_effort(cfg.initial_effort.clone().map(serde_json::Value::String))
             .with_fast_mode(fast_flag.clone()),
     );
-    // WebSearch uses the resolved Anthropic key, while MCP large-result
-    // confirmation reuses the fully routed/OAuth-aware main session provider.
-    let tool_provider = Arc::new(
-        AnthropicRequestBuilder::new(
-            resolved_anthropic_api_key.clone().unwrap_or_default(),
-            Some(cfg.api_base.clone()),
-        )
-        .with_mcp_token_counter(provider_adapter.clone()),
-    );
     let provider_adapter_handle = provider_adapter.clone();
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     // The SAME `ProviderApiAdapter` drives the streaming turn path: it impls both
@@ -377,7 +367,7 @@ pub async fn build_with_credential_stack(
     // Without this the orchestrator falls back to `NoStreamingApiClient` and every
     // streaming turn fails with "no streaming client configured".
     let streaming_api: Arc<dyn orchestrator::StreamingApiClient> = provider_adapter.clone();
-    let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
+    let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter.clone();
 
     // (4) Orchestrator config from `cfg` (was `argv.model`).
     // The bridge persists the structured effort choice in the same user
@@ -2111,7 +2101,7 @@ pub async fn build_with_credential_stack(
         Arc::new(sidequery::ProviderSideQueryClient::new(
             cfg.api_key.clone(),
             Some(cfg.api_base.clone()),
-            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            api_service.transport(),
         ));
     let compaction_side_query: Arc<dyn sidequery::SideQueryClient> = Arc::new(
         sidequery::ProviderSideQueryClient::from_service(api_service.clone()),
@@ -3238,7 +3228,8 @@ pub async fn build_with_credential_stack(
         worktree_session: worktree_session_cell,
         platform: sandbox_platform,
         http: http.clone(),
-        provider: tool_provider,
+        hosted_search: Some(provider_adapter.clone()),
+        mcp_token_counter: Some(provider_adapter.clone()),
         default_model: orch_cfg.model.clone(),
         web_search_config: Some(Arc::new(DesktopWebSearchConfigProvider {
             lingxi_home: cfg.lingxi_home.clone(),
