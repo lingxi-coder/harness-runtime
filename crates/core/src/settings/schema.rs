@@ -913,7 +913,7 @@ pub enum FusionCompletionPolicy {
 /// owns it plus that profile's wire model id — the same `(profile, model)` pair
 /// `/model` switches to and `fusion::CatalogModel` is keyed by.
 ///
-/// Fusion has three model ROLES (panel, analyst, synthesizer) and every one of
+/// Fusion has two model ROLES (panel, analyst) and both of
 /// them must be named here before a run may start. There is deliberately no
 /// automatic ranking any more: a checked-in hint table used to pick panels and
 /// the analyst on the operator's behalf, which meant the set of models a run
@@ -992,9 +992,6 @@ pub struct FusionSettingsJson {
     /// Analyst output cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analyst_max_output_tokens: Option<u32>,
-    /// Synthesizer output cap.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub synthesizer_max_output_tokens: Option<u32>,
     /// Panel idle timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel_idle_timeout_ms: Option<u64>,
@@ -1004,9 +1001,6 @@ pub struct FusionSettingsJson {
     /// Analyst timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analyst_timeout_ms: Option<u64>,
-    /// Synthesizer timeout.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub synthesizer_timeout_ms: Option<u64>,
     /// End-to-end timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_timeout_ms: Option<u64>,
@@ -1034,10 +1028,6 @@ pub struct FusionSettingsJson {
     /// capability check made against the live catalog at preflight, not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analyst_model: Option<FusionModelSelectionJson>,
-    /// The synthesizer that merges the analysis into the final answer.
-    /// Required.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub synthesizer_model: Option<FusionModelSelectionJson>,
 }
 
 impl FusionSettingsJson {
@@ -1109,10 +1099,6 @@ impl FusionSettingsJson {
                 "fusion.analystMaxOutputTokens",
                 self.analyst_max_output_tokens,
             ),
-            (
-                "fusion.synthesizerMaxOutputTokens",
-                self.synthesizer_max_output_tokens,
-            ),
         ] {
             if let Some(n) = value {
                 if n == 0 {
@@ -1140,7 +1126,6 @@ impl FusionSettingsJson {
             ("fusion.panelIdleTimeoutMs", self.panel_idle_timeout_ms),
             ("fusion.panelTotalTimeoutMs", self.panel_total_timeout_ms),
             ("fusion.analystTimeoutMs", self.analyst_timeout_ms),
-            ("fusion.synthesizerTimeoutMs", self.synthesizer_timeout_ms),
         ] {
             // Finding [15]: same per-file hazard the stage-SUM check below
             // is deliberately gated against — a tier that sets a stage
@@ -1154,8 +1139,8 @@ impl FusionSettingsJson {
             // `permissions`/`hooks`/`model` along with it.
             // `FusionRuntimeConfig::from_settings` re-checks the identical
             // per-stage-vs-total invariant on the MERGED view for
-            // `panelTotalTimeoutMs`, `analystTimeoutMs` and
-            // `synthesizerTimeoutMs` — each is a term of its stage-sum
+            // `panelTotalTimeoutMs` and `analystTimeoutMs` — each is a
+            // term of its stage-sum
             // check (fusion/src/config.rs). `panelIdleTimeoutMs` is NOT a
             // term of that sum, so nothing re-checks it once this gate
             // closes; see the same-file `panelIdleTimeoutMs` vs
@@ -1211,13 +1196,13 @@ impl FusionSettingsJson {
         }
         // F004: a run whose panels all completed must not be able to report
         // "timed out before any panel completed" just because the analyst
-        // retry loop and the synthesizer, summed with the panel stage, can
+        // retry loop, summed with the panel stage, can
         // exceed the end-to-end deadline. Defaults here mirror
         // `fusion::FusionRuntimeConfig::defaults`.
         //
         // Same per-file hazard as the `minSuccessfulPanels` check above, in
         // BOTH directions: only run this comparison when `totalTimeoutMs` is
-        // present IN THIS FILE *and* at least one of the three stage fields
+        // present IN THIS FILE *and* at least one of the stage fields
         // is too. A tier that sets stage fields but not `totalTimeoutMs` has
         // no opinion on the total — it may be raised in a different tier —
         // so defaulting `total` to the runtime's 1_200_000 here would reject
@@ -1229,20 +1214,15 @@ impl FusionSettingsJson {
         // identical invariant on the MERGED view and fails only the fusion
         // run, which is the right blast radius for a genuine violation.
         if self.total_timeout_ms.is_some()
-            && (self.panel_total_timeout_ms.is_some()
-                || self.analyst_timeout_ms.is_some()
-                || self.synthesizer_timeout_ms.is_some())
+            && (self.panel_total_timeout_ms.is_some() || self.analyst_timeout_ms.is_some())
         {
             let panel_total = self.panel_total_timeout_ms.unwrap_or(600_000);
             let analyst = self.analyst_timeout_ms.unwrap_or(120_000);
-            let synthesizer = self.synthesizer_timeout_ms.unwrap_or(180_000);
             let retries = u64::from(self.analysis_protocol_retries.unwrap_or(1));
-            let stage_sum = panel_total
-                .saturating_add(analyst.saturating_mul(1 + retries))
-                .saturating_add(synthesizer);
+            let stage_sum = panel_total.saturating_add(analyst.saturating_mul(1 + retries));
             if stage_sum > total {
                 return Err(SchemaViolation(format!(
-                    "fusion.panelTotalTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) + fusion.synthesizerTimeoutMs ({stage_sum}) must not exceed fusion.totalTimeoutMs ({total})"
+                    "fusion.panelTotalTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) ({stage_sum}) must not exceed fusion.totalTimeoutMs ({total})"
                 )));
             }
         }
@@ -1293,9 +1273,6 @@ impl FusionSettingsJson {
         use crate::settings::SettingsError::SchemaViolation;
         if let Some(analyst) = self.analyst_model.as_ref() {
             analyst.validate("fusion.analystModel")?;
-        }
-        if let Some(synthesizer) = self.synthesizer_model.as_ref() {
-            synthesizer.validate("fusion.synthesizerModel")?;
         }
         let Some(panels) = self.panel_models.as_ref() else {
             return Ok(());
@@ -1570,9 +1547,9 @@ mod tests {
     fn fusion_total_timeout_alone_in_a_file_does_not_trip_the_stage_sum_check() {
         // Same per-file hazard as above, for the stage-sum check: a tier
         // that only lowers `totalTimeoutMs` has no opinion on
-        // `panelTotalTimeoutMs` / `analystTimeoutMs` / `synthesizerTimeoutMs`
-        // — defaulting all three against this file's total alone would
-        // reject a file that sets nothing else (1_020_000 > 500_000).
+        // `panelTotalTimeoutMs` / `analystTimeoutMs` — defaulting both
+        // against this file's total alone would reject a file that sets
+        // nothing else (840_000 > 500_000).
         let settings: SettingsJson =
             serde_json::from_str(r#"{"fusion":{"totalTimeoutMs":500000}}"#).unwrap();
         settings
@@ -1688,8 +1665,7 @@ mod tests {
                     {"profile":"openai","model":"gpt-5.6-sol"},
                     {"profile":"google","model":"gemini-3-pro"}
                 ],
-                "analystModel":{"profile":"openai","model":"gpt-5.6-terra"},
-                "synthesizerModel":{"profile":"anthropic","model":"claude-sonnet-5"}
+                "analystModel":{"profile":"openai","model":"gpt-5.6-terra"}
             }}"#,
         )
         .unwrap();
@@ -1714,10 +1690,6 @@ mod tests {
             fusion.analyst_model.as_ref().unwrap().model,
             "gpt-5.6-terra"
         );
-        assert_eq!(
-            fusion.synthesizer_model.as_ref().unwrap().profile,
-            "anthropic"
-        );
         // Absent roles serialize away rather than writing `null`, so a merge
         // of this layer over another cannot shadow the lower layer's roles.
         let written = serde_json::to_value(fusion).unwrap();
@@ -1725,7 +1697,6 @@ mod tests {
         let empty = serde_json::to_value(FusionSettingsJson::default()).unwrap();
         assert!(empty.get("panelModels").is_none());
         assert!(empty.get("analystModel").is_none());
-        assert!(empty.get("synthesizerModel").is_none());
     }
 
     #[test]
@@ -2732,8 +2703,8 @@ mod tests {
         // The SAME idea, with `totalTimeoutMs` present in this same file (so
         // this file DOES have an opinion on the total), is still rejected —
         // by the per-stage branch specifically. `panelIdleTimeoutMs` is used
-        // here (not `panelTotalTimeoutMs`/`analystTimeoutMs`/
-        // `synthesizerTimeoutMs`) because those three also feed the
+        // here (not `panelTotalTimeoutMs`/`analystTimeoutMs`) because
+        // those two also feed the
         // stage-SUM check just below (F004): a fixture built from any of
         // them would be rejected by either branch, so `is_err()` would stop
         // isolating the per-stage branch this test exists to pin.
@@ -2759,7 +2730,7 @@ mod tests {
     #[test]
     fn fusion_rejects_stage_timeout_sum_exceeding_total_even_when_each_stage_fits_alone() {
         // Each individual stage is well under `totalTimeoutMs` on its own, but
-        // panelTotal + analyst*(1+retries) + synthesizer sums past it — every
+        // panelTotal + analyst*(1+retries) sums past it — every
         // per-field "must not exceed total" check above passes, so only the
         // dedicated stage-sum check (F004) can catch this.
         let sum_exceeds_total: SettingsJson = serde_json::from_str(
@@ -2767,20 +2738,19 @@ mod tests {
                 "totalTimeoutMs": 100000,
                 "panelTotalTimeoutMs": 60000,
                 "analystTimeoutMs": 30000,
-                "synthesizerTimeoutMs": 30000,
                 "analysisProtocolRetries": 1
             }}"#,
         )
         .unwrap();
         let err = sum_exceeds_total
             .validate()
-            .expect_err("60000 + 30000*2 + 30000 = 150000 > totalTimeoutMs 100000");
+            .expect_err("60000 + 30000*2 = 120000 > totalTimeoutMs 100000");
         assert!(
             matches!(&err, crate::settings::SettingsError::SchemaViolation(msg) if msg.contains("totalTimeoutMs"))
         );
 
-        // The documented defaults (panelTotal 600_000 + analyst 120_000*2 +
-        // synth 180_000 = 1_020_000) must fit under the default total
+        // The documented defaults (panelTotal 600_000 + analyst 120_000*2 =
+        // 840_000) must fit under the default total
         // (1_200_000) with an absent `totalTimeoutMs`.
         let defaults_fit: SettingsJson =
             serde_json::from_str(r#"{"fusion":{"enabled":true}}"#).unwrap();

@@ -23,28 +23,24 @@ use serde_json::{Map, Value};
 
 /// Top-level settings key holding every Fusion setting.
 pub const FUSION_SETTINGS_KEY: &str = "fusion";
-/// `fusion.enabled` — the agent-listing / workflow master switch.
+/// `fusion.enabled` — the agent-listing master switch.
 pub const ENABLED_KEY: &str = "enabled";
 /// `fusion.panelModels`.
 pub const PANEL_MODELS_KEY: &str = "panelModels";
 /// `fusion.analystModel`.
 pub const ANALYST_MODEL_KEY: &str = "analystModel";
-/// `fusion.synthesizerModel`.
-pub const SYNTHESIZER_MODEL_KEY: &str = "synthesizerModel";
 
-/// The three model roles as configured (or not) in a settings file.
+/// The model roles as configured (or not) in a settings file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FusionModelRoles {
     /// Panel roster in the operator's priority order. Empty = unconfigured.
     pub panels: Vec<FusionModelChoice>,
     /// Judge model. `None` = unconfigured.
     pub analyst: Option<FusionModelChoice>,
-    /// Merge model. `None` = unconfigured.
-    pub synthesizer: Option<FusionModelChoice>,
 }
 
 impl FusionModelRoles {
-    /// Read the three roles out of a parsed `settings.json` value.
+    /// Read the roles out of a parsed `settings.json` value.
     ///
     /// A malformed entry reads as ABSENT rather than as an error: this is the
     /// read used to decide whether to offer the setup wizard, and a file that
@@ -63,7 +59,6 @@ impl FusionModelRoles {
                 .map(|rows| rows.iter().filter_map(choice_from_json).collect())
                 .unwrap_or_default(),
             analyst: fusion.get(ANALYST_MODEL_KEY).and_then(choice_from_json),
-            synthesizer: fusion.get(SYNTHESIZER_MODEL_KEY).and_then(choice_from_json),
         }
     }
 
@@ -87,7 +82,6 @@ impl FusionModelRoles {
             );
         }
         write_optional(fusion, ANALYST_MODEL_KEY, self.analyst.as_ref());
-        write_optional(fusion, SYNTHESIZER_MODEL_KEY, self.synthesizer.as_ref());
     }
 
     /// Roles with nothing usable configured, in [`FusionModelRole::ALL`] order.
@@ -103,9 +97,6 @@ impl FusionModelRoles {
         if self.analyst.is_none() {
             missing.push(FusionModelRole::Analyst);
         }
-        if self.synthesizer.is_none() {
-            missing.push(FusionModelRole::Synthesizer);
-        }
         missing
     }
 
@@ -119,7 +110,7 @@ impl FusionModelRoles {
     /// first run sees, as distinct from a half-finished configuration.
     #[must_use]
     pub fn is_untouched(&self) -> bool {
-        self.panels.is_empty() && self.analyst.is_none() && self.synthesizer.is_none()
+        self.panels.is_empty() && self.analyst.is_none()
     }
 }
 
@@ -158,7 +149,7 @@ pub fn startup_notice(roles: &FusionModelRoles) -> Option<String> {
     if roles.is_untouched() {
         return Some(
             "Fusion (multi-model deliberation) has no models configured. \
-             Run /fusion setup to choose its panel, analyst and synthesizer models."
+             Run /fusion setup to choose its panel and analyst models."
                 .to_string(),
         );
     }
@@ -221,7 +212,6 @@ mod tests {
                 FusionModelChoice::new("openai", "gpt-5.6-sol"),
             ],
             analyst: Some(FusionModelChoice::new("openai", "gpt-5.6-terra")),
-            synthesizer: Some(FusionModelChoice::new("anthropic", "claude-sonnet-5")),
         }
     }
 
@@ -260,7 +250,6 @@ mod tests {
         // engine never resolves.
         assert!(!fusion.contains_key(PANEL_MODELS_KEY));
         assert!(!fusion.contains_key(ANALYST_MODEL_KEY));
-        assert!(!fusion.contains_key(SYNTHESIZER_MODEL_KEY));
     }
 
     #[test]

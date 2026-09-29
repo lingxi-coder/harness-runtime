@@ -7,7 +7,7 @@ use tokio::sync::mpsc::Sender;
 /// progress is a lossy side-channel, never a pipeline the orchestrator's own
 /// stage transitions should back-pressure on. `try_send` (not `.send().await`)
 /// is what makes that true — a slow/stalled consumer must not delay the
-/// panel/analyst/synth stage it is merely observing.
+/// panel/analyst stage it is merely observing.
 pub fn emit(
     progress: &Option<Sender<FusionProgress>>,
     stage: FusionStage,

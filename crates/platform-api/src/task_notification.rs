@@ -165,6 +165,10 @@ fn redact_host_capabilities(args_json: &str) -> String {
 }
 
 const WORKFLOW_RESULT_PREVIEW_UTF16: usize = 8_000;
+/// A Fusion `<result>` is the material the parent model synthesizes the
+/// final answer from, so it keeps far more than a workflow preview while
+/// still fitting under [`TASK_NOTIFICATION_MAX_UTF16`].
+const FUSION_RESULT_PREVIEW_UTF16: usize = 80_000;
 const TASK_NOTIFICATION_MAX_UTF16: usize = 100_000;
 const TASK_NOTIFICATION_TRUNCATION_SLACK_UTF16: usize = 1_024;
 const TASK_NOTIFICATION_TRUNCATION_MARKER_PREFIX: &str = "\n\n... [";
@@ -748,11 +752,11 @@ fn render_one_with_options(n: &TaskNotification, push_enabled: bool) -> String {
                 .map(|result| {
                     let escaped = escape_xml(result);
                     let length = utf16_len(&escaped);
-                    if length > WORKFLOW_RESULT_PREVIEW_UTF16 {
-                        let preview = truncate_utf16(&escaped, WORKFLOW_RESULT_PREVIEW_UTF16);
+                    if length > FUSION_RESULT_PREVIEW_UTF16 {
+                        let preview = truncate_utf16(&escaped, FUSION_RESULT_PREVIEW_UTF16);
                         format!(
                             "\n<result>{preview}\n... (truncated {} chars, full result in {output_file})</result>",
-                            length - WORKFLOW_RESULT_PREVIEW_UTF16
+                            length - FUSION_RESULT_PREVIEW_UTF16
                         )
                     } else {
                         format!("\n<result>{escaped}</result>")

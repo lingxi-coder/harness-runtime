@@ -384,9 +384,6 @@ async fn desktop_attempt_panel_fence_waits_for_durable_receipt_and_keeps_analyst
     assert_eq!(harness.permits(), 4);
     assert!(!authority.state.lock().unwrap().closed);
     authority.live((ModelAttemptStage::Analyst, None)).unwrap();
-    authority
-        .live((ModelAttemptStage::Synthesis, None))
-        .unwrap();
     assert!(authority.live((ModelAttemptStage::Panel, Some(0))).is_err());
     assert!(authority
         .tracker
@@ -590,8 +587,7 @@ async fn desktop_attempt_registration_allows_pick_when_optional_synthesis_is_una
         request,
         resolved: fusion::ResolvedSet {
             panels: vec![panel.clone()],
-            analyst: panel.clone(),
-            synthesizer: panel,
+            analyst: panel,
         },
         snapshot: Arc::new(snapshot),
         live_policy: Arc::new(Live),
@@ -620,9 +616,6 @@ async fn desktop_attempt_registration_allows_pick_when_optional_synthesis_is_una
     assert!(authority
         .routes
         .contains_key(&(ModelAttemptStage::Analyst, None)));
-    assert!(!authority
-        .routes
-        .contains_key(&(ModelAttemptStage::Synthesis, None)));
     assert_eq!(harness.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -1044,10 +1037,6 @@ async fn authority() -> Arc<RunAuthority> {
         resolved: fusion::ResolvedSet {
             panels: vec![],
             analyst: fusion::ResolvedPanel {
-                profile: "profile".into(),
-                model: "test".into(),
-            },
-            synthesizer: fusion::ResolvedPanel {
                 profile: "profile".into(),
                 model: "test".into(),
             },

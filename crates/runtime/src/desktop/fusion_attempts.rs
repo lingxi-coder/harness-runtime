@@ -197,14 +197,6 @@ impl DesktopFusionAttempts {
                 captured.resolved.analyst.clone(),
                 config.analyst_max_output_tokens,
             ));
-            selected.push((
-                (ModelAttemptStage::Synthesis, None),
-                fusion::ResolvedPanel {
-                    profile: captured.request.parent_profile.clone(),
-                    model: captured.request.parent_model.clone(),
-                },
-                config.synthesizer_max_output_tokens,
-            ));
         }
         let mut routes = HashMap::new();
         for (key, panel, configured_output) in selected {
@@ -264,9 +256,6 @@ impl DesktopFusionAttempts {
                 Ok(route) => {
                     routes.insert(key, route);
                 }
-                // Synthesis is optional. Missing authority for it must not
-                // prevent a panel pick; an actual synth begin still rejects.
-                Err(_) if key.0 == ModelAttemptStage::Synthesis => {}
                 Err(error) => return Err(error),
             }
         }

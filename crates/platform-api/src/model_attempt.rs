@@ -30,8 +30,6 @@ pub enum ModelAttemptStage {
     Panel,
     /// The anonymous structured judge.
     Analyst,
-    /// The optional single merged response.
-    Synthesis,
 }
 
 /// Process-local registration key. Never persist or emit it in telemetry.
@@ -262,14 +260,10 @@ mod tests {
             run.context(ModelAttemptStage::Analyst, Some(0)),
             Err(ModelAttemptContextError::InvalidPanelSlot)
         ));
-        assert!(matches!(
-            run.context(ModelAttemptStage::Synthesis, Some(0)),
-            Err(ModelAttemptContextError::InvalidPanelSlot)
-        ));
         run.registration
             .next_call
             .store(u64::MAX - 1, Ordering::Relaxed);
-        let last = run.context(ModelAttemptStage::Synthesis, None).unwrap();
+        let last = run.context(ModelAttemptStage::Analyst, None).unwrap();
         assert_eq!(last.logical_call_id(), u64::MAX - 1);
         assert!(matches!(
             last.fresh_call(),

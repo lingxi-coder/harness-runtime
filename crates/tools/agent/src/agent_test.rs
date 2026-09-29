@@ -739,20 +739,24 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     }
 
     fn sample_fusion_result(status: platform_api::FusionStatus) -> platform_api::FusionResult {
-        use platform_api::{FusionDecision, FusionNeedsParentReason};
-        let decision = match status {
-            platform_api::FusionStatus::Completed => FusionDecision::Merged,
-            platform_api::FusionStatus::NeedsParent => FusionDecision::NeedsParent {
-                reason: FusionNeedsParentReason::LowConfidence,
-            },
+        let report = platform_api::PanelReport {
+            schema_version: 2,
+            summary: "summary".into(),
+            candidate_answer: "FUSION_FINAL".into(),
+            claims: vec![],
+            evidence: vec![],
+            assumptions: vec![],
+            risks: vec![],
+            unresolved_questions: vec![],
         };
         platform_api::FusionResult {
-            schema_version: 1,
+            schema_version: 2,
             run_id: "fu_test".into(),
             status,
-            decision,
-            final_text: "FUSION_FINAL".into(),
+            analysis_failure: (status == platform_api::FusionStatus::Unanalyzed)
+                .then(|| "timeout".to_string()),
             analysis: None,
+            responses: vec![platform_api::PanelMaterial::from_report("P1", &report)],
             // 3 panels (the quality preset count every fixture in this file
             // wires) — F008's spawn-quota release compares `panel_n` against
             // `result.panels.len()`, so a fixture with an EMPTY panel vec
@@ -790,7 +794,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// to one real child agent.
     #[test]
     fn fusion_tool_result_marks_subagent_hooks_fired_with_no_agent_id() {
-        let result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        let result = sample_fusion_result(platform_api::FusionStatus::Analyzed);
         let call_result = fusion_tool_result(result);
         assert_eq!(
             call_result.data["subagentHooksFired"],
@@ -1033,7 +1037,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(request);
-                    Ok(sample_fusion_result(platform_api::FusionStatus::Completed))
+                    Ok(sample_fusion_result(platform_api::FusionStatus::Analyzed))
                 },
             )
         }
@@ -1086,7 +1090,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                                 .await;
                         }
                     }
-                    Ok(sample_fusion_result(platform_api::FusionStatus::Completed))
+                    Ok(sample_fusion_result(platform_api::FusionStatus::Analyzed))
                 },
             )
         }
@@ -1217,7 +1221,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // the executor) could never be caught here.
         let fusion = Arc::new(ScriptedFusion {
             enabled: false,
-            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            result: sample_fusion_result(platform_api::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
         let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
@@ -1324,7 +1328,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         let fusion = Arc::new(ScriptedFusion {
             enabled: true,
-            result: sample_fusion_result(platform_api::FusionStatus::NeedsParent),
+            result: sample_fusion_result(platform_api::FusionStatus::Unanalyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
         let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
@@ -1349,9 +1353,15 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 fresh_tx(),
             )
             .await
-            .expect("NeedsParent is Ok");
-        assert_eq!(result.model_content.as_deref(), Some("FUSION_FINAL"));
-        assert_eq!(result.data["status"], "needs_parent");
+            .expect("an unanalyzed run is Ok");
+        let material = result.model_content.as_deref().unwrap();
+        assert!(material.starts_with("<fusion-material"), "{material}");
+        assert!(
+            material.contains("<answer>FUSION_FINAL</answer>"),
+            "{material}"
+        );
+        assert!(material.contains("<analysis-unavailable reason=\"timeout\">"));
+        assert_eq!(result.data["status"], "unanalyzed");
         let returned_run_id = result.data["runId"]
             .as_str()
             .expect("Fusion tool result must carry its trusted run id");
@@ -1386,7 +1396,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let bctx = wired_ctx_with_bus(spawner, bus).await;
         let fusion = Arc::new(ScriptedFusion {
             enabled: true,
-            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            result: sample_fusion_result(platform_api::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
         let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
@@ -1444,8 +1454,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let bus = Arc::new(AnalyticsBus::new());
         bus.attach_sink(sink.clone()).await;
         let bctx = wired_ctx_with_bus(arc_mock_spawner(), bus).await;
-        let result = sample_fusion_result(platform_api::FusionStatus::Completed);
-        let answer = result.final_text.clone();
+        let result = sample_fusion_result(platform_api::FusionStatus::Analyzed);
+        let answer = "FUSION_FINAL".to_string();
         let tool = AgentTool::new(bctx).with_fusion(Arc::new(PreparedAllocationFusion {
             result,
             allocated_panels: 3,
@@ -1455,7 +1465,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             fresh_ctx_with_registry(Arc::new(ToolRegistry::new())), fresh_tx()).await.expect("computed answer remains available");
         assert!(output.is_error);
         assert_eq!(output.data["status"], "failed");
-        assert_eq!(output.data["computationStatus"], "completed");
+        assert_eq!(output.data["computationStatus"], "analyzed");
         assert_eq!(output.data["attemptSettlement"]["status"], "failed");
         assert_eq!(
             output.data["attemptSettlement"]["reason"],
@@ -1506,7 +1516,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let mut result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        let mut result = sample_fusion_result(platform_api::FusionStatus::Analyzed);
         // Panel 3 never reached the subagent spawner (e.g. `PoolFull`) —
         // the orchestrator still returns `Ok` because `partial_ok` is
         // satisfied by the other two panels.
@@ -1566,7 +1576,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let mut result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        let mut result = sample_fusion_result(platform_api::FusionStatus::Analyzed);
         // Panel 3's task was killed before it ever called the spawner, so
         // no subagent was allocated and no provider call was made.
         result.panels[2] = platform_api::PanelOutcome {
@@ -1612,7 +1622,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let mut result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        let mut result = sample_fusion_result(platform_api::FusionStatus::Analyzed);
         // The third panel timed out/panicked before its allocation receipt was
         // observed. Its category is not proof of non-dispatch, so the legacy
         // category-only path would charge all three slots.
@@ -1747,7 +1757,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         bctx.permission_gate = Some(Arc::new(DenyFusionGate));
         let fusion = Arc::new(ScriptedFusion {
             enabled: true,
-            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            result: sample_fusion_result(platform_api::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
         let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
@@ -2619,7 +2629,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let bctx = wired_ctx_with_bus(spawner, bus).await;
         let fusion = Arc::new(ScriptedFusion {
             enabled: true,
-            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            result: sample_fusion_result(platform_api::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
         let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
@@ -2845,7 +2855,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let mut result = sample_fusion_result(platform_api::FusionStatus::Completed);
+        let mut result = sample_fusion_result(platform_api::FusionStatus::Analyzed);
         // The third of the three resolved panels was REJECTED by the spawner
         // before any child existed — the exact shape `panel.rs` finishes as
         // `error_category: "spawn"`.
@@ -3080,7 +3090,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let bctx = wired_ctx_with_bus(arc_mock_spawner(), bus).await;
         let fusion = Arc::new(ScriptedFusion {
             enabled: true,
-            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            result: sample_fusion_result(platform_api::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
         let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
@@ -3144,7 +3154,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         bctx.budget_enforcer = None;
         let fusion = Arc::new(ScriptedFusion {
             enabled: true,
-            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            result: sample_fusion_result(platform_api::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
         let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
@@ -3213,7 +3223,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             let bctx = wired_ctx_with_bus(arc_mock_spawner(), bus).await;
             let tool = AgentTool::new(bctx).with_fusion(Arc::new(ScriptedFusion {
                 enabled: true,
-                result: sample_fusion_result(platform_api::FusionStatus::Completed),
+                result: sample_fusion_result(platform_api::FusionStatus::Analyzed),
                 runs: std::sync::atomic::AtomicUsize::new(0),
             }));
             let mut input = serde_json::json!({
@@ -3412,7 +3422,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     async fn fusion_agent_rejects_disallowed_cross_provider_before_executor_runs() {
         let fusion = Arc::new(ScriptedFusion {
             enabled: true,
-            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            result: sample_fusion_result(platform_api::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
         let tool = AgentTool::new(wired_ctx(
@@ -3454,7 +3464,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
         let fusion = ScriptedFusion {
             enabled: true,
-            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            result: sample_fusion_result(platform_api::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         };
 
@@ -5487,7 +5497,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         bctx.permission_gate = Some(Arc::new(DenyFusionGate));
         let tool = AgentTool::new(bctx).with_fusion(Arc::new(ScriptedFusion {
             enabled: true,
-            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            result: sample_fusion_result(platform_api::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         }));
         let prompt = tool

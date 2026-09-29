@@ -102,7 +102,7 @@ const GENERAL_PURPOSE_AGENT_TYPE: &str = "general-purpose";
 /// Public Fusion agent type (not `fusion-panel`).
 const FUSION_AGENT_TYPE: &str = "fusion";
 
-const FUSION_WHEN_TO_USE: &str = "Parallel multi-model deliberation for complex code, task, plan, or review work. About 4–5× the cost of a single agent.";
+const FUSION_WHEN_TO_USE: &str = "Parallel multi-model deliberation for complex code, task, plan, or review work. Returns the panels' anonymized answers plus an analysis of their consensus, contradictions, partial coverage, unique insights and blind spots — you then write the final answer yourself. About 4–5× the cost of a single agent.";
 
 /// 2.1.238 `Gri` (@285270080), NEW in 2.1.238 (0 hits in 2.1.220):
 /// the message head used both by the Agent-tool prompt (as the tail of the
@@ -1061,10 +1061,7 @@ fn fusion_stage_name(stage: &FusionStage) -> &'static str {
         FusionStage::RunningPanels { .. } => "running_panels",
         FusionStage::PanelsDispatched { .. } => "panels_dispatched",
         FusionStage::Analyzing => "analyzing",
-        FusionStage::Selecting => "selecting",
-        FusionStage::Synthesizing => "synthesizing",
         FusionStage::Completed => "completed",
-        FusionStage::NeedsParent => "needs_parent",
         FusionStage::Failed => "failed",
         FusionStage::Cancelled => "cancelled",
     }
@@ -1113,10 +1110,10 @@ fn panels_proven_spawned(stage: &FusionStage) -> Option<u64> {
 
 fn fusion_tool_result(result: platform_api::FusionResult) -> ToolCallResult {
     let status = match result.status {
-        FusionStatus::Completed => "completed",
-        FusionStatus::NeedsParent => "needs_parent",
+        FusionStatus::Analyzed => "analyzed",
+        FusionStatus::Unanalyzed => "unanalyzed",
     };
-    let decision = serde_json::to_value(&result.decision).unwrap_or(Value::Null);
+    let material = platform_api::render_fusion_material(&result);
     let panels: Vec<Value> = result
         .panels
         .iter()
@@ -1133,7 +1130,7 @@ fn fusion_tool_result(result: platform_api::FusionResult) -> ToolCallResult {
         data: json!({
             "runId": result.run_id,
             "status": status,
-            "decision": decision,
+            "analysisFailure": result.analysis_failure,
             "panels": panels,
             "usage": result.usage,
             "timing": result.timing,
@@ -1150,7 +1147,7 @@ fn fusion_tool_result(result: platform_api::FusionResult) -> ToolCallResult {
             // this data's absent `agentId`.
             "subagentHooksFired": true,
         }),
-        model_content: Some(result.final_text),
+        model_content: Some(material),
         new_messages: vec![],
         context_modifier: None,
         mcp_meta: None,
@@ -5260,7 +5257,7 @@ mod f_description_l_gate_tests {
         let mut fixture = agents();
         fixture.push(platform_api::subagent_spawn::SubagentListingEntry {
             agent_type: "fusion".into(),
-            when_to_use: "Parallel multi-model deliberation for complex code, task, plan, or review work. About 4\u{2013}5\u{d7} the cost of a single agent.".into(),
+            when_to_use: crate::agent::FUSION_WHEN_TO_USE.into(),
             when_to_use_lean: None,
             tools_description: "Fusion deliberation (read-only panel)".into(),
         });
@@ -5416,10 +5413,7 @@ mod round3_finding_11_19_spawn_signal_tests {
             FusionStage::ResolvingModels,
             FusionStage::ReservingBudget,
             FusionStage::Analyzing,
-            FusionStage::Selecting,
-            FusionStage::Synthesizing,
             FusionStage::Completed,
-            FusionStage::NeedsParent,
             FusionStage::Failed,
             FusionStage::Cancelled,
         ] {

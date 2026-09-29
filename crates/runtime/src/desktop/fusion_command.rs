@@ -123,15 +123,15 @@ impl FusionCompletionSink for DesktopFusionCompletionSink {
 }
 
 /// Short, content-free notice text for [`DesktopFusionCompletionSink::publish`]
-/// — no prompt, no final text, no model/provider names, just the status and a
-/// pointer at the durable record.
+/// — no prompt, no panel text, no model/provider names, just the status. The
+/// material itself reaches the main model through the task notification.
 pub(crate) fn fusion_completion_notice_for_status(status: FusionStatus) -> String {
     match status {
-        FusionStatus::Completed => {
-            "Fusion run finished — see the result appended to this conversation.".to_string()
+        FusionStatus::Analyzed => {
+            "Fusion run finished — the panels' answers and analysis were handed to the main model, which writes the final answer.".to_string()
         }
-        FusionStatus::NeedsParent => {
-            "Fusion run finished — it needs your judgment; see the summary appended to this conversation.".to_string()
+        FusionStatus::Unanalyzed => {
+            "Fusion run finished without an analysis — the panels' answers were handed to the main model, which writes the final answer.".to_string()
         }
     }
 }
@@ -168,8 +168,8 @@ pub(crate) fn fusion_completion_notice_other_session_for_status(
     );
     let short: String = body.chars().take(8).collect();
     let what = match status {
-        FusionStatus::Completed => "its result",
-        FusionStatus::NeedsParent => "its summary (it needs your judgment)",
+        FusionStatus::Analyzed => "its record",
+        FusionStatus::Unanalyzed => "its record (without an analysis)",
     };
     format!(
         "Fusion run finished — {what} was saved to the conversation it was started in \
@@ -183,14 +183,14 @@ pub(crate) fn fusion_persisted_notice(
     current_session: bool,
 ) -> String {
     match (status, current_session) {
-        ("completed", true) => fusion_completion_notice_for_status(FusionStatus::Completed),
-        ("needs_parent", true) => fusion_completion_notice_for_status(FusionStatus::NeedsParent),
-        ("completed", false) => fusion_completion_notice_other_session_for_status(
-            FusionStatus::Completed,
+        ("analyzed", true) => fusion_completion_notice_for_status(FusionStatus::Analyzed),
+        ("unanalyzed", true) => fusion_completion_notice_for_status(FusionStatus::Unanalyzed),
+        ("analyzed", false) => fusion_completion_notice_other_session_for_status(
+            FusionStatus::Analyzed,
             conversation_id,
         ),
-        ("needs_parent", false) => fusion_completion_notice_other_session_for_status(
-            FusionStatus::NeedsParent,
+        ("unanalyzed", false) => fusion_completion_notice_other_session_for_status(
+            FusionStatus::Unanalyzed,
             conversation_id,
         ),
         ("error", true) => {
@@ -531,21 +531,23 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
 mod tests {
     use super::*;
     use command_api::parse_slash_command;
-    use platform_api::{
-        FusionDecision, FusionNeedsParentReason, FusionStatus, FusionTiming, FusionUsage,
-    };
+    use platform_api::{FusionStatus, FusionTiming, FusionUsage};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn dummy_result(run_id: &str) -> FusionResult {
         FusionResult {
-            schema_version: 1,
+            schema_version: 2,
             run_id: run_id.into(),
-            status: FusionStatus::NeedsParent,
-            decision: FusionDecision::NeedsParent {
-                reason: FusionNeedsParentReason::LowConfidence,
-            },
-            final_text: "needs parent".into(),
+            status: FusionStatus::Unanalyzed,
+            analysis_failure: Some("timeout".into()),
             analysis: None,
+            responses: vec![platform_api::PanelMaterial {
+                panel_id: "P1".into(),
+                summary: "summary".into(),
+                candidate_answer: "the secret panel answer".into(),
+                risks: vec![],
+                unresolved_questions: vec![],
+            }],
             panels: vec![],
             usage: FusionUsage::default(),
             timing: FusionTiming::default(),
@@ -793,8 +795,7 @@ mod tests {
         let session_id = mock.current_session_id().await.to_string();
         let sink = DesktopFusionCompletionSink::new(mock.clone());
         let mut result = dummy_result("fu_1");
-        result.status = FusionStatus::Completed;
-        result.final_text = "the secret final answer".into();
+        result.status = FusionStatus::Analyzed;
 
         sink.publish(&session_id, &result).await;
 
@@ -804,11 +805,11 @@ mod tests {
             notices[0].contains("Fusion run finished"),
             "got: {notices:?}"
         );
-        // Content-free: no prompt/final-text leak into the live notice — the
-        // durable `<fusion-result>` meta row carries that, not this notice.
+        // Content-free: no panel text leaks into the live notice — the
+        // material reaches the main model through the task notification.
         assert!(
-            !notices[0].contains(&result.final_text),
-            "notice must not leak final_text: {notices:?}"
+            !notices[0].contains("the secret panel answer"),
+            "notice must not leak panel text: {notices:?}"
         );
 
         // Idempotent publish (same run id) must not double-notify.
@@ -817,19 +818,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_notice_differs_for_needs_parent_vs_completed() {
+    async fn publish_notice_differs_for_unanalyzed_vs_analyzed() {
         let mock = Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
         let session_id = mock.current_session_id().await.to_string();
         let sink = DesktopFusionCompletionSink::new(mock.clone());
-        let mut result = dummy_result("fu_needs_parent");
-        result.status = FusionStatus::NeedsParent;
+        let mut result = dummy_result("fu_unanalyzed");
+        result.status = FusionStatus::Unanalyzed;
 
         sink.publish(&session_id, &result).await;
 
         let notices = mock.background_notices();
         assert_eq!(notices.len(), 1);
         assert!(
-            notices[0].contains("needs your judgment"),
+            notices[0].contains("without an analysis"),
             "got: {notices:?}"
         );
     }
@@ -964,7 +965,7 @@ mod tests {
         });
         let sink = DesktopFusionCompletionSink::new(handle.clone());
         let mut result = dummy_result("fu_cleared");
-        result.status = FusionStatus::Completed;
+        result.status = FusionStatus::Analyzed;
 
         sink.publish(started_in, &result).await;
 
@@ -976,7 +977,7 @@ mod tests {
         let notices = mock.background_notices();
         assert_eq!(notices.len(), 1, "exactly one notice: {notices:?}");
         assert!(
-            !notices[0].contains("appended to this conversation"),
+            !notices[0].contains("handed to the main model"),
             "the result is NOT in this conversation — that copy is false here: {notices:?}"
         );
         assert!(
@@ -1014,7 +1015,7 @@ mod tests {
         });
         let sink = DesktopFusionCompletionSink::new(handle.clone());
         let mut result = dummy_result("fu_same_session");
-        result.status = FusionStatus::Completed;
+        result.status = FusionStatus::Analyzed;
 
         let receipt = sink.publish(&current, &result).await;
         assert_eq!(
@@ -1025,7 +1026,7 @@ mod tests {
         let notices = mock.background_notices();
         assert_eq!(notices.len(), 1, "exactly one notice: {notices:?}");
         assert!(
-            notices[0].contains("see the result appended to this conversation"),
+            notices[0].contains("handed to the main model"),
             "got: {notices:?}"
         );
     }
@@ -1067,7 +1068,7 @@ mod tests {
         let mock = Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
         let sink = DesktopFusionCompletionSink::new(mock.clone());
         let mut result = dummy_result("fu_append_fails");
-        result.status = FusionStatus::Completed;
+        result.status = FusionStatus::Analyzed;
 
         // A conversation id that does NOT match the mock's current session id
         // drives the trait's default `append_meta_user_message_to_session`

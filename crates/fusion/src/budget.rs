@@ -10,7 +10,7 @@
 //! `estimated = true` and contributes $0 — no rate exists to guess a dollar
 //! figure from. A component with no USAGE at all — an attempted call whose
 //! real, already-billed token counts were lost (an in-flight panel cut off
-//! by a timeout/cancel, or an analyst/synthesizer call that failed before
+//! by a timeout/cancel, or an analyst call that failed before
 //! returning any usage) — is estimated from what IS known (the prompt sent,
 //! or the task + successful panel reports a judge call read) using main's
 //! real character-based approximation
@@ -168,7 +168,7 @@ pub struct FusionQuote {
     pub reserved_input_tokens: u64,
     /// Output tokens in the corrected formula.
     pub reserved_output_tokens: u64,
-    /// Provider calls in the peak (panel turns + analyst + synth).
+    /// Provider calls in the peak (panel turns + analyst).
     pub max_calls: u64,
 }
 
@@ -218,15 +218,10 @@ pub fn quote(
     let analyst_output_cap = analyst_limits.output_cap(config.analyst_max_output_tokens);
     let analyst_output = u64::from(analyst_output_cap)
         .saturating_mul(1 + u64::from(config.analysis_protocol_retries));
-    let synth_output_cap = route_limits(catalog, &resolved.synthesizer)
-        .output_cap(config.synthesizer_max_output_tokens);
-    let synth_output = u64::from(synth_output_cap);
-    let reserved_output_tokens = panel_output
-        .saturating_add(analyst_output)
-        .saturating_add(synth_output);
+    let reserved_output_tokens = panel_output.saturating_add(analyst_output);
     let panel_calls = panel_count.saturating_mul(turns);
     let analyst_calls = 1 + u64::from(config.analysis_protocol_retries);
-    let max_calls = panel_calls.saturating_add(analyst_calls).saturating_add(1);
+    let max_calls = panel_calls.saturating_add(analyst_calls);
 
     let mut reserved_usd = 0_u64;
     for panel in &resolved.panels {
@@ -261,15 +256,6 @@ pub fn quote(
         analyst_output,
         analyst_calls,
     )?);
-    reserved_usd = reserved_usd.saturating_add(model_peak(
-        &resolved.synthesizer,
-        catalog,
-        prices,
-        session_has_max,
-        0,
-        synth_output,
-        1,
-    )?);
 
     if let Some(cap) = config.max_reserved_nano_usd {
         reserved_usd = reserved_usd.min(cap);
@@ -291,7 +277,7 @@ fn route_limits(catalog: &dyn ModelSource, route: &ResolvedPanel) -> ModelLimits
         .map_or_else(ModelLimits::unknown, |row| row.limits)
 }
 
-/// Price one component (a panel, the analyst, or the synthesizer/parent) from
+/// Price one component (a panel or the analyst) from
 /// its own token usage. `None` means the model has no price in `prices` and
 /// is not a `Subscription`-class hint — the caller decides whether that is a
 /// hard failure (reservation quote, when the session has a max budget) or an
@@ -640,10 +626,6 @@ comparator, not dead API surface and not a production fallback"
                 profile: "anthropic".into(),
                 model: "sonnet".into(),
             },
-            synthesizer: ResolvedPanel {
-                profile: "anthropic".into(),
-                model: "sonnet".into(),
-            },
         }
     }
 
@@ -721,7 +703,7 @@ comparator, not dead API surface and not a production fallback"
 
     /// G003-cache follow-up: `price_component` must charge cache-read and
     /// cache-write tokens the same way it charges input/output — a panel or
-    /// analyst/synth call that used prompt caching is still real spend, and
+    /// analyst call that used prompt caching is still real spend, and
     /// the main turn loop's `CostCalculator` (over the SAME catalog) already
     /// bills all four classes in full.
     #[test]

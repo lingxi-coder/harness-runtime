@@ -376,10 +376,6 @@ impl Fixture {
                     "anthropic",
                     "claude-sonnet-5",
                 )),
-                synthesizer_model: Some(platform_api::FusionModelChoice::new(
-                    "anthropic",
-                    "claude-sonnet-5",
-                )),
                 ..fusion_engine::FusionRuntimeConfig::defaults()
             }),
             Arc::new(catalog),

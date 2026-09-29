@@ -2600,9 +2600,12 @@ mod tests {
     fn completed_result(run_id: &platform_api::FusionRunId) -> FusionResult {
         serde_json::from_value(serde_json::json!({
             "run_id": run_id.to_string(),
-            "status": "completed",
-            "decision": {"type": "merged"},
-            "final_text": "done"
+            "status": "analyzed",
+            "responses": [{
+                "panel_id": "P1",
+                "summary": "summary",
+                "candidate_answer": "done"
+            }]
         }))
         .unwrap()
     }

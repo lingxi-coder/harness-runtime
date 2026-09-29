@@ -41,16 +41,12 @@ pub struct FusionRuntimeConfig {
     pub max_reserved_nano_usd: Option<u64>,
     /// Analyst output cap.
     pub analyst_max_output_tokens: u32,
-    /// Synthesizer output cap.
-    pub synthesizer_max_output_tokens: u32,
     /// Panel idle timeout.
     pub panel_idle_timeout_ms: u64,
     /// Panel total timeout.
     pub panel_total_timeout_ms: u64,
     /// Analyst timeout.
     pub analyst_timeout_ms: u64,
-    /// Synthesizer timeout.
-    pub synthesizer_timeout_ms: u64,
     /// End-to-end timeout.
     pub total_timeout_ms: u64,
     /// Analyst protocol retries (0 or 1).
@@ -68,8 +64,6 @@ pub struct FusionRuntimeConfig {
     pub panel_models: Vec<FusionModelChoice>,
     /// Configured analyst. `None` means unconfigured.
     pub analyst_model: Option<FusionModelChoice>,
-    /// Configured synthesizer. `None` means unconfigured.
-    pub synthesizer_model: Option<FusionModelChoice>,
 }
 
 impl FusionRuntimeConfig {
@@ -90,20 +84,17 @@ impl FusionRuntimeConfig {
             panel_reserved_input_tokens_per_turn: 32768,
             max_reserved_nano_usd: None,
             analyst_max_output_tokens: 8192,
-            synthesizer_max_output_tokens: 16384,
             panel_idle_timeout_ms: 180_000,
             panel_total_timeout_ms: 600_000,
             analyst_timeout_ms: 120_000,
-            synthesizer_timeout_ms: 180_000,
             // F004: must stay >= panelTotal + analystTimeoutMs*(1 +
-            // analysisProtocolRetries) + synthesizerTimeoutMs, or the
-            // documented per-stage defaults can never all complete before the
-            // end-to-end deadline fires (600_000 + 120_000*2 + 180_000 =
-            // 1_020_000 > the previous 900_000 default). Raised rather than
+            // analysisProtocolRetries), or the documented per-stage defaults
+            // can never all complete before the end-to-end deadline fires
+            // (600_000 + 120_000*2 = 840_000). Raised rather than
             // shrinking the stage defaults, which are independently
             // documented budgets. `FusionSettingsJson::validate` enforces the
             // same inequality per-file when a file itself sets any of the
-            // three stage fields; `from_settings` below re-enforces it on the
+            // stage fields; `from_settings` below re-enforces it on the
             // fully merged, concrete view, since a merge of files that each
             // individually pass validation is not guaranteed to.
             total_timeout_ms: 1_200_000,
@@ -118,7 +109,6 @@ impl FusionRuntimeConfig {
             // moved. `FusionError::NotConfigured` names the settings keys.
             panel_models: Vec::new(),
             analyst_model: None,
-            synthesizer_model: None,
         }
     }
 
@@ -131,9 +121,6 @@ impl FusionRuntimeConfig {
         }
         if self.analyst_model.is_none() {
             missing.push(FusionModelRole::Analyst);
-        }
-        if self.synthesizer_model.is_none() {
-            missing.push(FusionModelRole::Synthesizer);
         }
         missing
     }
@@ -190,9 +177,6 @@ impl FusionRuntimeConfig {
         if let Some(n) = settings.analyst_max_output_tokens {
             cfg.analyst_max_output_tokens = n;
         }
-        if let Some(n) = settings.synthesizer_max_output_tokens {
-            cfg.synthesizer_max_output_tokens = n;
-        }
         if let Some(n) = settings.panel_idle_timeout_ms {
             cfg.panel_idle_timeout_ms = n;
         }
@@ -201,9 +185,6 @@ impl FusionRuntimeConfig {
         }
         if let Some(n) = settings.analyst_timeout_ms {
             cfg.analyst_timeout_ms = n;
-        }
-        if let Some(n) = settings.synthesizer_timeout_ms {
-            cfg.synthesizer_timeout_ms = n;
         }
         if let Some(n) = settings.total_timeout_ms {
             cfg.total_timeout_ms = n;
@@ -224,10 +205,6 @@ impl FusionRuntimeConfig {
             cfg.panel_models = panels.iter().map(choice_from_settings).collect();
         }
         cfg.analyst_model = settings.analyst_model.as_ref().map(choice_from_settings);
-        cfg.synthesizer_model = settings
-            .synthesizer_model
-            .as_ref()
-            .map(choice_from_settings);
 
         // F004 / F011 item 6 (round-3 review fix): `FusionSettingsJson::validate`
         // above only checked THIS settings snapshot's own fields — and, per its
@@ -244,16 +221,13 @@ impl FusionRuntimeConfig {
                 "fusion.completionPolicy quorum_after_grace requires fusion.partialOk=true".into(),
             ));
         }
-        let stage_sum = cfg
-            .panel_total_timeout_ms
-            .saturating_add(
-                cfg.analyst_timeout_ms
-                    .saturating_mul(1 + u64::from(cfg.analysis_protocol_retries)),
-            )
-            .saturating_add(cfg.synthesizer_timeout_ms);
+        let stage_sum = cfg.panel_total_timeout_ms.saturating_add(
+            cfg.analyst_timeout_ms
+                .saturating_mul(1 + u64::from(cfg.analysis_protocol_retries)),
+        );
         if stage_sum > cfg.total_timeout_ms {
             return Err(FusionError::InvalidConfiguration(format!(
-                "fusion.panelTotalTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) + fusion.synthesizerTimeoutMs ({stage_sum}) must not exceed fusion.totalTimeoutMs ({total})",
+                "fusion.panelTotalTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) ({stage_sum}) must not exceed fusion.totalTimeoutMs ({total})",
                 total = cfg.total_timeout_ms
             )));
         }
@@ -429,7 +403,7 @@ mod tests {
     /// F004 regression (round-3 review): a merged settings snapshot that sets
     /// only `totalTimeoutMs` passes `FusionSettingsJson::validate` (the
     /// stage-sum check there is a per-FILE relaxation, deliberately silent
-    /// when none of the three stage fields are present in the same file) but
+    /// when none of the stage fields are present in the same file) but
     /// must still be rejected by `from_settings`, which sees the fully
     /// merged, concrete stage values and must enforce the stage-sum
     /// invariant there instead.
@@ -443,13 +417,12 @@ mod tests {
         // proving the file itself is not being dropped.
         settings.validate().expect("single-field file stays valid");
         let err = FusionRuntimeConfig::from_settings(&settings)
-            .expect_err("merged stage sum (1_020_000) exceeds totalTimeoutMs (500_000)");
+            .expect_err("merged stage sum (840_000) exceeds totalTimeoutMs (500_000)");
         match err {
             FusionError::InvalidConfiguration(msg) => {
                 assert!(
                     msg.contains("panelTotalTimeoutMs")
                         && msg.contains("analystTimeoutMs")
-                        && msg.contains("synthesizerTimeoutMs")
                         && msg.contains("totalTimeoutMs"),
                     "error must name the offending fields, got: {msg}"
                 );
@@ -529,7 +502,6 @@ mod tests {
             total_timeout_ms: Some(100_000),
             panel_total_timeout_ms: Some(60_000),
             analyst_timeout_ms: Some(10_000),
-            synthesizer_timeout_ms: Some(10_000),
             analysis_protocol_retries: Some(0),
             ..FusionSettingsJson::default()
         };
@@ -550,8 +522,7 @@ mod tests {
                     {"profile":"anthropic","model":" claude-opus-5 "},
                     {"profile":"openai","model":"gpt-5.6-sol"}
                 ],
-                "analystModel":{"profile":"openai","model":"gpt-5.6-terra"},
-                "synthesizerModel":{"profile":"anthropic","model":"claude-sonnet-5"}
+                "analystModel":{"profile":"openai","model":"gpt-5.6-terra"}
             }"#,
         )
         .unwrap()
@@ -562,7 +533,6 @@ mod tests {
         let cfg = FusionRuntimeConfig::defaults();
         assert!(cfg.panel_models.is_empty());
         assert_eq!(cfg.analyst_model, None);
-        assert_eq!(cfg.synthesizer_model, None);
         assert_eq!(cfg.missing_model_roles(), FusionModelRole::ALL.to_vec());
     }
 
@@ -580,10 +550,6 @@ mod tests {
         assert_eq!(
             cfg.analyst_model,
             Some(FusionModelChoice::new("openai", "gpt-5.6-terra"))
-        );
-        assert_eq!(
-            cfg.synthesizer_model,
-            Some(FusionModelChoice::new("anthropic", "claude-sonnet-5"))
         );
         assert!(cfg.missing_model_roles().is_empty());
     }
@@ -639,7 +605,6 @@ mod tests {
                 FusionModelChoice::new("openai", "gpt-5.6-sol"),
             ],
             analyst: Some(FusionModelChoice::new("openai", "gpt-5.6-terra")),
-            synthesizer: Some(FusionModelChoice::new("anthropic", "claude-sonnet-5")),
         };
         let mut written = serde_json::json!({});
         roles.write_settings_json(&mut written);
@@ -661,7 +626,6 @@ mod tests {
 
         assert_eq!(cfg.panel_models, roles.panels);
         assert_eq!(cfg.analyst_model, roles.analyst);
-        assert_eq!(cfg.synthesizer_model, roles.synthesizer);
         assert!(
             cfg.missing_model_roles().is_empty(),
             "a file the wizard just completed must not still read as unconfigured"
@@ -683,7 +647,6 @@ mod tests {
                 FusionModelChoice::new("openai", "gpt-5.6-sol"),
             ],
             analyst: Some(FusionModelChoice::new("openai", "gpt-5.6-terra")),
-            synthesizer: Some(FusionModelChoice::new("anthropic", "claude-sonnet-5")),
         }
         .write_settings_json(&mut written);
         let settings: lingxi_core::settings::schema::SettingsJson =

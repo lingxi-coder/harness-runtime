@@ -1009,7 +1009,7 @@ mod tests {
         let mut request = req(None);
         let ordinary = serde_json::to_value(&request).unwrap();
         request.model_attempt = Some(
-            run.context(platform_api::ModelAttemptStage::Synthesis, None)
+            run.context(platform_api::ModelAttemptStage::Analyst, None)
                 .unwrap(),
         );
         assert_eq!(serde_json::to_value(&request).unwrap(), ordinary);

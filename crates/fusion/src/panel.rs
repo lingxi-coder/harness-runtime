@@ -36,11 +36,10 @@ use tokio::time::{Duration, Instant};
 /// real, billed usage but before the stage as a whole resolves — still
 /// leaves the cells holding that real data instead of `None`/the coarse
 /// pre-panel estimate latched before any panel was even dispatched. Every
-/// field mirrors a `price_realized_usage` parameter naming an analyst/synth
-/// call that has provably not happened yet at this point in the run (the
-/// panel stage always precedes `analyze_and_decide`), so `update` always
-/// passes `analyst_usage: None`, `analyst_attempted: false`,
-/// `synth_usage: None`, `synth_attempted: false` — exactly the same
+/// field mirrors a `price_realized_usage` parameter naming an analyst call
+/// that has provably not happened yet at this point in the run (the panel
+/// stage always precedes `run_analysis`), so `update` always passes
+/// `analyst_usage: None`, `analyst_attempted: false` — exactly the same
 /// arguments `run_inner`'s own `check_panel_bar`-failure arm uses.
 pub struct RealizedSpendSink<'a> {
     pub realized_tokens: &'a Arc<Mutex<Option<u64>>>,
@@ -49,11 +48,6 @@ pub struct RealizedSpendSink<'a> {
     pub catalog: &'a dyn ModelSource,
     pub prices: &'a dyn FusionPriceBook,
     pub analyst: &'a ResolvedPanel,
-    /// The configured synthesizer route — the merge call this sink prices.
-    /// Named for the ROLE, not for the session: `fusion.synthesizerModel` need
-    /// not be the model the session itself is talking to.
-    pub synth_profile: &'a str,
-    pub synth_model: &'a str,
     pub request_prompt: &'a str,
     pub catalog_snapshot: Option<&'a CatalogSnapshot>,
     pub reserved_max_nano_usd: u64,
@@ -158,10 +152,6 @@ impl RealizedSpendSink<'_> {
             self.prices,
             &priced_so_far,
             self.analyst,
-            None,
-            false,
-            self.synth_profile,
-            self.synth_model,
             None,
             false,
             self.request_prompt,
@@ -494,6 +484,15 @@ pub struct PanelInternal {
     pub usage: Option<FusionUsage>,
     /// Prompt actually sent (tests assert mutual invisibility).
     pub spawn_prompt: String,
+}
+
+/// Successful panels that produced a report.
+#[must_use]
+pub(crate) fn successful(panels: &[PanelInternal]) -> Vec<&PanelInternal> {
+    panels
+        .iter()
+        .filter(|panel| panel.status == PanelRunStatus::Completed && panel.report.is_some())
+        .collect()
 }
 
 /// JSON Schema the hidden `fusion-panel` `StructuredOutput` tool must satisfy.
@@ -988,7 +987,7 @@ fn spawn_panel_tasks(
 /// whatever panels already finished kept in the returned `Vec` — instead of
 /// being cut off by the outer `run()` wrapper, which drops `run_inner` (and every
 /// panel result gathered so far) wholesale and degrades to `TimedOutEmpty` even
-/// when panels had already produced enough successful material for `NeedsParent`.
+/// when panels had already produced enough successful material to hand the parent.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_panels(
     spawner: Arc<dyn SubagentSpawner>,
@@ -3790,8 +3789,6 @@ mod cancel_drain_settlement_tests {
                 catalog: &self.catalog,
                 prices: &self.prices,
                 analyst: &self.analyst,
-                synth_profile: "anthropic",
-                synth_model: "claude-sonnet-5",
                 request_prompt: "task",
                 catalog_snapshot: None,
                 reserved_max_nano_usd: 0,
@@ -3851,8 +3848,6 @@ mod cancel_drain_settlement_tests {
             catalog: &catalog,
             prices: &prices,
             analyst: &analyst,
-            synth_profile: "anthropic",
-            synth_model: "claude-sonnet-5",
             request_prompt: "task",
             catalog_snapshot: None,
             reserved_max_nano_usd: 99,

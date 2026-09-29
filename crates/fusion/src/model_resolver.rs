@@ -166,8 +166,6 @@ pub struct ResolvedSet {
     pub panels: Vec<ResolvedPanel>,
     /// Analyst / judge target.
     pub analyst: ResolvedPanel,
-    /// Synthesizer / merge target.
-    pub synthesizer: ResolvedPanel,
 }
 
 /// Resolve the panel set and analyst. Performs no provider calls.
@@ -213,12 +211,7 @@ pub fn resolve(
     }
     reject_duplicate_underlying_models(&panels)?;
     let analyst = resolve_analyst(request, config, &available)?;
-    let synthesizer = resolve_synthesizer(request, config, &available)?;
-    Ok(ResolvedSet {
-        panels,
-        analyst,
-        synthesizer,
-    })
+    Ok(ResolvedSet { panels, analyst })
 }
 
 /// The configured roster, trimmed to the preset's panel count.
@@ -322,28 +315,6 @@ fn reject_duplicate_underlying_models(panels: &[ResolvedPanel]) -> Result<(), Fu
         }
     }
     Ok(())
-}
-
-/// The configured synthesizer, validated against the live catalog.
-fn resolve_synthesizer(
-    request: &FusionRequest,
-    config: &FusionRuntimeConfig,
-    available: &[CatalogModel],
-) -> Result<ResolvedPanel, FusionError> {
-    let choice = config
-        .synthesizer_model
-        .as_ref()
-        .ok_or_else(|| FusionError::NotConfigured {
-            missing: vec![FusionModelRole::Synthesizer],
-        })?;
-    resolve_configured_route(
-        choice,
-        request,
-        config,
-        available,
-        FusionModelRole::Synthesizer,
-        config.synthesizer_max_output_tokens,
-    )
 }
 
 /// Build a data-carrying [`FusionError::TooFewModels`] (F011) so the caller
@@ -638,7 +609,6 @@ mod tests {
                 FusionModelChoice::new("google", "gemini-3-pro"),
             ],
             analyst_model: Some(FusionModelChoice::new("openai", "gpt-5.6-terra")),
-            synthesizer_model: Some(FusionModelChoice::new("anthropic", "claude-opus-5")),
             ..FusionRuntimeConfig::defaults()
         }
     }
@@ -666,7 +636,6 @@ mod tests {
             "roster order is the operator's priority order, not a re-ranking"
         );
         assert_eq!(resolved.analyst.model, "gpt-5.6-terra");
-        assert_eq!(resolved.synthesizer.model, "claude-opus-5");
     }
 
     /// The hint table used to decide which models ran. It must not any more:
@@ -739,11 +708,7 @@ mod tests {
         // An operator who has to re-run to discover the next gap will conclude
         // the wizard is broken, so the message must list them together.
         let rendered = error.to_string();
-        for key in [
-            "fusion.panelModels",
-            "fusion.analystModel",
-            "fusion.synthesizerModel",
-        ] {
+        for key in ["fusion.panelModels", "fusion.analystModel"] {
             assert!(rendered.contains(key), "{rendered}");
         }
         assert!(rendered.contains("/fusion setup"), "{rendered}");
@@ -783,19 +748,18 @@ mod tests {
             matches!(
                 &error,
                 FusionError::NotConfigured { missing }
-                    if missing == &vec![FusionModelRole::Analyst, FusionModelRole::Synthesizer]
+                    if missing == &vec![FusionModelRole::Analyst]
             ),
             "a per-run --models list covers the panels only; got {error:?}"
         );
 
         let mut config = FusionRuntimeConfig {
             analyst_model: Some(FusionModelChoice::new("openai", "gpt-5.6-terra")),
-            synthesizer_model: Some(FusionModelChoice::new("anthropic", "claude-opus-5")),
             ..FusionRuntimeConfig::defaults()
         };
         config.min_successful_panels = 2;
         let resolved = resolve(&request, &config, &three_provider_catalog())
-            .expect("an explicit list plus configured analyst/synthesizer resolves");
+            .expect("an explicit list plus a configured analyst resolves");
         assert_eq!(resolved.panels.len(), 2);
     }
 
@@ -964,60 +928,6 @@ mod tests {
         config.analyst_model = Some(FusionModelChoice::new("anthropic", "claude-opus-5"));
         let resolved = resolve(&req(), &config, &three_provider_catalog()).unwrap();
         assert_eq!(resolved.analyst.model, "claude-opus-5");
-    }
-
-    // ---- the synthesizer -----------------------------------------------
-
-    #[test]
-    fn the_synthesizer_is_the_configured_route_not_the_session_model() {
-        let mut config = configured();
-        config.synthesizer_model = Some(FusionModelChoice::new("google", "gemini-3-pro"));
-        let resolved = resolve(&req(), &config, &three_provider_catalog()).unwrap();
-        assert_eq!(resolved.synthesizer.profile, "google");
-        assert_eq!(resolved.synthesizer.model, "gemini-3-pro");
-        assert_ne!(
-            resolved.synthesizer.model,
-            req().parent_model,
-            "the merge no longer implicitly runs on the session's own model"
-        );
-    }
-
-    #[test]
-    fn a_synthesizer_the_catalog_does_not_have_fails_by_name() {
-        let mut config = configured();
-        config.synthesizer_model = Some(FusionModelChoice::new("anthropic", "claude-ghost"));
-        let error = resolve(&req(), &config, &three_provider_catalog()).unwrap_err();
-        let rendered = error.to_string();
-        assert!(rendered.contains("fusion.synthesizerModel"), "{rendered}");
-        assert!(rendered.contains("anthropic/claude-ghost"), "{rendered}");
-    }
-
-    /// The synthesizer's capacity is checked against ITS OWN output cap, not
-    /// the panel cap — the merge writes the answer the user reads and is
-    /// configured with a much larger ceiling.
-    #[test]
-    fn the_synthesizer_capacity_check_uses_the_synthesizer_output_cap() {
-        let mut catalog = three_provider_catalog();
-        catalog[0].limits = ModelLimits {
-            context_window_tokens: Some(200_000),
-            max_input_tokens: Some(180_000),
-            max_output_tokens: Some(0),
-        };
-        let mut config = configured();
-        // Take the zero-output model off the panel roster so only the
-        // synthesizer role can trip.
-        config.panel_models = vec![
-            FusionModelChoice::new("openai", "gpt-5.6-sol"),
-            FusionModelChoice::new("google", "gemini-3-pro"),
-        ];
-        config.min_successful_panels = 2;
-        let error = resolve(&req(), &config, &catalog).unwrap_err();
-        let rendered = error.to_string();
-        assert!(rendered.contains("fusion.synthesizerModel"), "{rendered}");
-        assert!(
-            rendered.contains(&config.synthesizer_max_output_tokens.to_string()),
-            "{rendered}"
-        );
     }
 
     // ---- the explicit per-run `--models` path (unchanged contract) ------

@@ -435,10 +435,9 @@ impl DesktopFusionRecorder {
                 "content": [{"type": "text", "text": body}],
             },
             "fusionRunId": result.run_id,
-            "fusionStatus": if result.status == FusionStatus::Completed {
-                "completed"
-            } else {
-                "needs_parent"
+            "fusionStatus": match result.status {
+                FusionStatus::Analyzed => "analyzed",
+                FusionStatus::Unanalyzed => "unanalyzed",
             },
         })
     }
@@ -956,8 +955,8 @@ mod tests {
     use super::*;
     use cost::CostHydrator as _;
     use platform_api::{
-        DurableFusionTerminalRecord, FusionDecision, FusionError, FusionOrigin, FusionResult,
-        FusionRunFacts, FusionRunId, FusionRunIdentity, FusionStatus, FusionTiming, FusionUsage,
+        DurableFusionTerminalRecord, FusionError, FusionOrigin, FusionResult, FusionRunFacts,
+        FusionRunId, FusionRunIdentity, FusionStatus, FusionTiming, FusionUsage,
         SessionWriterLease,
     };
 
@@ -1017,10 +1016,16 @@ mod tests {
                 result: Ok(FusionResult {
                     schema_version: 1,
                     run_id: identity.run_id.to_string(),
-                    status: FusionStatus::Completed,
-                    decision: FusionDecision::Merged,
-                    final_text: "answer".into(),
+                    status: FusionStatus::Analyzed,
+                    analysis_failure: None,
                     analysis: None,
+                    responses: vec![platform_api::PanelMaterial {
+                        panel_id: "P1".into(),
+                        summary: "summary".into(),
+                        candidate_answer: "answer".into(),
+                        risks: vec![],
+                        unresolved_questions: vec![],
+                    }],
                     panels: vec![],
                     usage: Default::default(),
                     timing: Default::default(),
@@ -1106,10 +1111,16 @@ mod tests {
             Ok(FusionResult {
                 schema_version: 1,
                 run_id: identity.run_id.to_string(),
-                status: FusionStatus::Completed,
-                decision: FusionDecision::Merged,
-                final_text: "answer".into(),
+                status: FusionStatus::Analyzed,
+                analysis_failure: None,
                 analysis: None,
+                responses: vec![platform_api::PanelMaterial {
+                    panel_id: "P1".into(),
+                    summary: "summary".into(),
+                    candidate_answer: "answer".into(),
+                    risks: vec![],
+                    unresolved_questions: vec![],
+                }],
                 panels: vec![],
                 usage: FusionUsage::default(),
                 timing: FusionTiming::default(),
@@ -1138,7 +1149,12 @@ mod tests {
             std::path::Path::new("/test"),
         );
         let body = payload["message"]["content"][0]["text"].as_str().unwrap();
-        assert!(body.contains("answer"));
+        // The user-facing row is the compact summary: the material itself
+        // reaches the parent model through the task notification, so the
+        // accounting disclosure must sit next to that summary, not erase it.
+        assert!(body.contains("<fusion-result>"), "{body}");
+        assert!(body.contains("<status>analyzed</status>"), "{body}");
+        assert!(!body.contains("<answer>"), "{body}");
         assert!(body.contains(
             "<fusion-accounting-error>ledger &lt;unavailable&gt;</fusion-accounting-error>"
         ));
@@ -1164,10 +1180,16 @@ mod tests {
             Ok(FusionResult {
                 schema_version: 1,
                 run_id: identity.run_id.to_string(),
-                status: FusionStatus::Completed,
-                decision: FusionDecision::Merged,
-                final_text: "answer".into(),
+                status: FusionStatus::Analyzed,
+                analysis_failure: None,
                 analysis: None,
+                responses: vec![platform_api::PanelMaterial {
+                    panel_id: "P1".into(),
+                    summary: "summary".into(),
+                    candidate_answer: "answer".into(),
+                    risks: vec![],
+                    unresolved_questions: vec![],
+                }],
                 panels: vec![],
                 usage: FusionUsage::default(),
                 timing: FusionTiming::default(),
@@ -1325,11 +1347,8 @@ mod tests {
                 platform_api::FusionPublicationStatus::StorageFailure,
             );
             let mut conflict = outcome;
-            conflict
-                .result
-                .as_mut()
-                .unwrap()
-                .final_text
+            conflict.result.as_mut().unwrap().responses[0]
+                .candidate_answer
                 .push_str(" changed");
             assert_eq!(
                 recorder
@@ -1848,7 +1867,7 @@ mod tests {
             message_uuid: message_uuid.clone(),
             payload: serde_json::json!({
                 "uuid": message_uuid,
-                "fusionStatus": "completed",
+                "fusionStatus": "analyzed",
                 "message": {"content": [{"type": "text", "text": "project me"}]}
             }),
             attempt: 0,

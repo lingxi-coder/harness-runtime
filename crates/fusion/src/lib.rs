@@ -28,16 +28,13 @@
 mod analyst;
 mod attempts;
 mod budget;
-mod citations;
 mod config;
-mod decision;
 mod model_resolver;
 mod orchestrator;
 mod packing;
 mod panel;
 mod progress;
 mod snapshot;
-mod synthesizer;
 
 pub use attempts::{
     FusionAttemptFinalizer, FusionAttemptLivePolicy, FusionAttemptRegistrar,

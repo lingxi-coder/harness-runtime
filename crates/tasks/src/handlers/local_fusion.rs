@@ -148,8 +148,11 @@ async fn finalize_fusion_outcome(
         };
     match &outcome.result {
         Ok(result) => {
-            let body =
-                serde_json::to_string_pretty(result).unwrap_or_else(|_| result.final_text.clone());
+            // The parent model synthesizes the final answer from this
+            // material; it reaches the parent through the task
+            // notification's `<result>`, and the spool keeps the full JSON.
+            let material = platform_api::render_fusion_material(result);
+            let body = serde_json::to_string_pretty(result).unwrap_or_else(|_| material.clone());
             let _ = output_manager.append(worker_spool_path, &body).await;
             // Write the egress/usage summary BEFORE the terminal status
             // transition (same ordering rule as `set_agent_outcome`): the
@@ -209,7 +212,7 @@ async fn finalize_fusion_outcome(
                 .finish_fusion_terminal(
                     worker_task_id,
                     result.run_id.clone(),
-                    result.final_text.clone(),
+                    material,
                     if accounting_failed {
                         TaskStatus::Failed
                     } else {
@@ -846,39 +849,41 @@ pub fn escape_xml(s: &str) -> String {
     out
 }
 
-/// Short label for a [`platform_api::FusionNeedsParentReason`]. Mirrors
-/// `fusion::orchestrator::reason_line` (not reused — this crate does not
-/// depend on the `fusion` crate, see §0) but goes through [`escape_xml`]
-/// before embedding, since `AnalystRequested`'s `reason` is untrusted text
-/// from a panel/analyst model (F010 is the deeper sanitize-at-the-source
-/// fix; this is the minimum needed so it cannot break out of its element).
-fn needs_parent_reason_label(reason: &platform_api::FusionNeedsParentReason) -> String {
-    use platform_api::FusionNeedsParentReason as Reason;
-    match reason {
-        Reason::AnalystRequested { reason } => reason.clone(),
-        Reason::AnalysisParseFailed => "analyst output could not be parsed".to_string(),
-        Reason::AnalysisFailed { category } => format!("analyst call failed: {category}"),
-        Reason::CriticalContradiction => "unresolved critical contradiction".to_string(),
-        Reason::LowConfidence => "confidence below merge threshold".to_string(),
-        Reason::SynthesisFailed => "synthesizer failed".to_string(),
-        Reason::SynthesisTimedOut => "synthesizer timed out".to_string(),
-    }
-}
-
-/// Sanitized fusion-result envelope. No `PanelReport`, no raw provider errors,
-/// no analyst payload, no model names (profile ids only, via
-/// `<egress-profiles>`).
+/// Compact, user-facing fusion-result envelope. It is appended to the
+/// session excluded from model context: the parent model receives the full
+/// material through the task notification and writes the answer itself, so
+/// this only tells the user what ran. No panel text, no analyst payload, no
+/// model names (profile ids only, via `<egress-profiles>`).
 #[must_use]
 pub fn fusion_result_xml(result: &FusionResult) -> String {
     let status = match result.status {
-        FusionStatus::Completed => "completed",
-        FusionStatus::NeedsParent => "needs_parent",
+        FusionStatus::Analyzed => "analyzed",
+        FusionStatus::Unanalyzed => "unanalyzed",
     };
-    let decision = match &result.decision {
-        platform_api::FusionDecision::Picked { panel_id } => format!("picked:{panel_id}"),
-        platform_api::FusionDecision::Merged => "merged".to_string(),
-        platform_api::FusionDecision::NeedsParent { .. } => "needs_parent".to_string(),
-    };
+    let analysis_failure_section = result
+        .analysis_failure
+        .as_deref()
+        .map(|reason| {
+            format!(
+                "\n  <analysis-failure>{}</analysis-failure>",
+                escape_xml(reason)
+            )
+        })
+        .unwrap_or_default();
+    let panels = result
+        .panels
+        .iter()
+        .map(|panel| {
+            let status = match panel.status {
+                platform_api::PanelRunStatus::Completed => "completed",
+                platform_api::PanelRunStatus::Failed => "failed",
+                platform_api::PanelRunStatus::TimedOut => "timed_out",
+                platform_api::PanelRunStatus::Cancelled => "cancelled",
+            };
+            format!("{}:{status}", panel.panel_id)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let egress_section = if result.egress_profiles.is_empty() {
         String::new()
     } else {
@@ -886,15 +891,6 @@ pub fn fusion_result_xml(result: &FusionResult) -> String {
             "\n  <egress-profiles>{}</egress-profiles>",
             escape_xml(&result.egress_profiles.join(", "))
         )
-    };
-    let needs_parent_reason_section = match &result.decision {
-        platform_api::FusionDecision::NeedsParent { reason } => format!(
-            "\n  <needs-parent-reason>{}</needs-parent-reason>",
-            escape_xml(&needs_parent_reason_label(reason))
-        ),
-        platform_api::FusionDecision::Picked { .. } | platform_api::FusionDecision::Merged => {
-            String::new()
-        }
     };
     let usage_section = format!(
         "\n  <usage><input-tokens>{}</input-tokens><output-tokens>{}</output-tokens><provider-requests>{}</provider-requests><estimated>{}</estimated></usage>",
@@ -904,141 +900,47 @@ pub fn fusion_result_xml(result: &FusionResult) -> String {
         result.usage.estimated,
     );
     format!(
-        "<fusion-result>\n  <run-id>{}</run-id>\n  <status>{}</status>\n  <decision>{}</decision>\n  <final-text>{}</final-text>{egress_section}{needs_parent_reason_section}{usage_section}\n</fusion-result>",
+        "<fusion-result>\n  <run-id>{}</run-id>\n  <status>{status}</status>{analysis_failure_section}\n  <panels>{}</panels>{egress_section}{usage_section}\n</fusion-result>",
         escape_xml(&result.run_id),
-        status,
-        escape_xml(&decision),
-        escape_xml(&result.final_text),
+        escape_xml(&panels),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::{
-        FusionAnalysis, FusionDecision, FusionNeedsParentReason, FusionRecommendation,
-        FusionTiming, FusionUsage,
-    };
+    use platform_api::{FusionAnalysis, FusionTiming, FusionUsage, PanelMaterial, PanelReport};
 
-    // A sentinel `FusionAnalysis` (not `None`) so `!xml.contains("analysis")`
-    // and friends actually prove the analyst payload is omitted, rather than
-    // trivially passing because there was never anything to omit.
-    fn sentinel_analysis() -> FusionAnalysis {
-        FusionAnalysis {
-            schema_version: 1,
-            consensus: vec!["ANALYSIS_SENTINEL_consensus".into()],
-            contradictions: vec![],
-            unique_insights: vec![],
-            coverage_gaps: vec!["ANALYSIS_SENTINEL_gap".into()],
-            scores: std::collections::BTreeMap::new(),
-            confidence: 42,
-            recommendation: FusionRecommendation::NeedsParent {
-                reason: "ANALYSIS_SENTINEL_reason".into(),
-            },
-        }
-    }
-
-    #[test]
-    fn xml_escapes_and_omits_raw_analysis() {
-        let xml = fusion_result_xml(&FusionResult {
-            schema_version: 1,
+    fn result(analysis: Option<FusionAnalysis>) -> FusionResult {
+        let report = PanelReport {
+            schema_version: 2,
+            summary: "PANEL_SENTINEL_summary".into(),
+            candidate_answer: "PANEL_SENTINEL_answer".into(),
+            claims: vec![],
+            evidence: vec![],
+            assumptions: vec![],
+            risks: vec![],
+            unresolved_questions: vec![],
+        };
+        FusionResult {
+            schema_version: 2,
             run_id: "fu_<x>".into(),
-            status: FusionStatus::NeedsParent,
-            decision: FusionDecision::NeedsParent {
-                reason: FusionNeedsParentReason::LowConfidence,
+            status: if analysis.is_some() {
+                FusionStatus::Analyzed
+            } else {
+                FusionStatus::Unanalyzed
             },
-            final_text: "a & b < c".into(),
-            analysis: Some(sentinel_analysis()),
-            panels: vec![],
-            usage: FusionUsage::default(),
-            timing: FusionTiming::default(),
-            egress_profiles: vec!["openai".into()],
-        });
-        assert!(xml.contains("<run-id>fu_&lt;x&gt;</run-id>"));
-        assert!(xml.contains("<status>needs_parent</status>"));
-        assert!(xml.contains("<final-text>a &amp; b &lt; c</final-text>"));
-        // The sentinel's own text never appears anywhere in the envelope —
-        // proves the analyst payload really is omitted, not merely absent
-        // because the fixture had nothing in it.
-        assert!(
-            !xml.contains("ANALYSIS_SENTINEL"),
-            "raw analysis leaked: {xml}"
-        );
-        assert!(!xml.contains("<analysis"), "got: {xml}");
-        // F006 item 3: the egress profile is now surfaced — inside its own
-        // element, never inside <final-text>.
-        assert!(
-            xml.contains("<egress-profiles>openai</egress-profiles>"),
-            "got: {xml}"
-        );
-        let final_text_section = xml
-            .split("<final-text>")
-            .nth(1)
-            .and_then(|s| s.split("</final-text>").next())
-            .unwrap_or_default();
-        assert!(
-            !final_text_section.contains("openai"),
-            "profile leaked into <final-text>: {xml}"
-        );
-    }
-
-    #[test]
-    fn xml_carries_needs_parent_reason_only_for_needs_parent_decisions() {
-        let needs_parent = fusion_result_xml(&FusionResult {
-            schema_version: 1,
-            run_id: "fu_np".into(),
-            status: FusionStatus::NeedsParent,
-            decision: FusionDecision::NeedsParent {
-                reason: FusionNeedsParentReason::CriticalContradiction,
-            },
-            final_text: "needs parent".into(),
-            analysis: None,
-            panels: vec![],
-            usage: FusionUsage::default(),
-            timing: FusionTiming::default(),
-            egress_profiles: vec![],
-        });
-        assert!(
-            needs_parent.contains(
-                "<needs-parent-reason>unresolved critical contradiction</needs-parent-reason>"
-            ),
-            "got: {needs_parent}"
-        );
-        assert!(
-            !needs_parent.contains("<egress-profiles>"),
-            "no egress clause when empty: {needs_parent}"
-        );
-
-        let picked = fusion_result_xml(&FusionResult {
-            schema_version: 1,
-            run_id: "fu_pick".into(),
-            status: FusionStatus::Completed,
-            decision: FusionDecision::Picked {
+            analysis_failure: analysis.is_none().then(|| "timeout".to_string()),
+            analysis,
+            responses: vec![PanelMaterial::from_report("P1", &report)],
+            panels: vec![platform_api::PanelOutcome {
                 panel_id: "P1".into(),
-            },
-            final_text: "picked answer".into(),
-            analysis: None,
-            panels: vec![],
-            usage: FusionUsage::default(),
-            timing: FusionTiming::default(),
-            egress_profiles: vec![],
-        });
-        assert!(
-            !picked.contains("<needs-parent-reason>"),
-            "a Picked decision must not render a needs-parent-reason: {picked}"
-        );
-    }
-
-    #[test]
-    fn xml_usage_section_carries_tokens_and_estimated_flag_but_no_model_names() {
-        let xml = fusion_result_xml(&FusionResult {
-            schema_version: 1,
-            run_id: "fu_usage".into(),
-            status: FusionStatus::Completed,
-            decision: FusionDecision::Merged,
-            final_text: "merged".into(),
-            analysis: None,
-            panels: vec![],
+                status: platform_api::PanelRunStatus::Completed,
+                duration_ms: 1,
+                error_category: None,
+                error_detail: None,
+                usage: None,
+            }],
             usage: FusionUsage {
                 input_tokens: 111,
                 output_tokens: 222,
@@ -1047,8 +949,50 @@ mod tests {
                 ..FusionUsage::default()
             },
             timing: FusionTiming::default(),
-            egress_profiles: vec![],
-        });
+            egress_profiles: vec!["openai".into()],
+        }
+    }
+
+    fn sentinel_analysis() -> FusionAnalysis {
+        FusionAnalysis {
+            schema_version: 2,
+            consensus: vec![platform_api::SupportedPoint {
+                point: "ANALYSIS_SENTINEL_consensus".into(),
+                panel_ids: vec!["P1".into()],
+            }],
+            contradictions: vec![],
+            partial_coverage: vec![],
+            unique_insights: vec![],
+            blind_spots: vec!["ANALYSIS_SENTINEL_gap".into()],
+            scores: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// The user-facing envelope only says what ran: the material itself goes
+    /// to the parent model through the task notification, so neither panel
+    /// text nor the analyst payload may appear here.
+    #[test]
+    fn xml_is_a_compact_summary_without_panel_or_analyst_text() {
+        let xml = fusion_result_xml(&result(Some(sentinel_analysis())));
+        assert!(xml.contains("<run-id>fu_&lt;x&gt;</run-id>"));
+        assert!(xml.contains("<status>analyzed</status>"));
+        assert!(xml.contains("<panels>P1:completed</panels>"));
+        assert!(xml.contains("<egress-profiles>openai</egress-profiles>"));
+        assert!(!xml.contains("SENTINEL"), "material leaked: {xml}");
+        assert!(!xml.contains("<analysis"), "got: {xml}");
+        assert!(!xml.contains("<analysis-failure>"), "got: {xml}");
+    }
+
+    #[test]
+    fn xml_names_the_analysis_failure_when_the_analyst_did_not_run() {
+        let xml = fusion_result_xml(&result(None));
+        assert!(xml.contains("<status>unanalyzed</status>"));
+        assert!(xml.contains("<analysis-failure>timeout</analysis-failure>"));
+    }
+
+    #[test]
+    fn xml_usage_section_carries_tokens_and_estimated_flag_but_no_model_names() {
+        let xml = fusion_result_xml(&result(None));
         assert!(
             xml.contains(
                 "<usage><input-tokens>111</input-tokens><output-tokens>222</output-tokens><provider-requests>3</provider-requests><estimated>true</estimated></usage>"

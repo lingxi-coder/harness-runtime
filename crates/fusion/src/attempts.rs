@@ -16,7 +16,7 @@ use platform_api::{
 use crate::{FusionRuntimeSnapshot, ResolvedSet};
 
 /// Seal Panel admission and wait for its owned durable receipts while leaving
-/// Analyst/Synthesis admission available. Waiting never owns or cancels work.
+/// Analyst admission available. Waiting never owns or cancels work.
 #[async_trait]
 pub trait FusionPanelAttemptFence: Send + Sync {
     fn close(&self);
@@ -58,12 +58,6 @@ impl FusionAttemptLivePolicy for CapturedLivePolicy {
                 "analyst",
                 self.snapshot.config.analyst_max_output_tokens,
                 true,
-            ),
-            (ModelAttemptStage::Synthesis, None) => (
-                &self.resolved.synthesizer,
-                "synthesizer",
-                self.snapshot.config.synthesizer_max_output_tokens,
-                false,
             ),
             _ => return Err(FusionError::Internal),
         };

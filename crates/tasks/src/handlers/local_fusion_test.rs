@@ -4,9 +4,8 @@ use super::*;
 use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use platform_api::{
-    BudgetError, FusionDecision, FusionNeedsParentReason, FusionOrigin, FusionPreset,
-    FusionRequest, FusionRunOutcome, FusionRunRecorder, FusionSlashPublicationTarget, FusionTiming,
-    FusionUsage,
+    BudgetError, FusionOrigin, FusionPreset, FusionRequest, FusionRunOutcome, FusionRunRecorder,
+    FusionSlashPublicationTarget, FusionTiming, FusionUsage,
 };
 use serde_json::json;
 use std::any::Any;
@@ -1038,14 +1037,12 @@ fn dummy_request() -> FusionRequest {
 
 fn dummy_result() -> FusionResult {
     FusionResult {
-        schema_version: 1,
+        schema_version: 2,
         run_id: "fu_test".into(),
-        status: FusionStatus::NeedsParent,
-        decision: FusionDecision::NeedsParent {
-            reason: FusionNeedsParentReason::LowConfidence,
-        },
-        final_text: "needs parent".into(),
+        status: FusionStatus::Unanalyzed,
+        analysis_failure: Some("timeout".into()),
         analysis: None,
+        responses: vec![],
         panels: vec![],
         usage: FusionUsage::default(),
         timing: FusionTiming::default(),
@@ -1107,7 +1104,7 @@ async fn accounting_failure_retains_answer_but_does_not_report_success() {
         .lock()
         .await
         .values()
-        .any(|body| body.contains("needs parent")));
+        .any(|body| body.contains("\"unanalyzed\"")));
 }
 
 fn make_handler(
