@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use llm_runtime::{LlmError, LlmEvent};
+use llm_runtime::{HistoryEvent, LlmError};
 use protocol::{ContentBlock, ConversationMessage, MessageId};
 use tokio_util::sync::CancellationToken;
 
@@ -47,7 +47,7 @@ enum PrepareStreamingOutcome {
 }
 
 enum OpenedModelStream {
-    Stream(futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>>),
+    Stream(futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>),
     Recovered(crate::streaming_loop::PumpedTurn),
 }
 
@@ -670,7 +670,7 @@ impl StreamingTurnDriver<'_> {
             let _ = observation.finish();
         }
 
-        // Convert LlmResponse → PumpedTurn so the rest of the streaming
+        // Convert HistoryResponse → PumpedTurn so the rest of the streaming
         // turn loop can proceed identically.
         let pumped_from_fallback = llm_response_to_pumped_turn(&resp);
         let cost_receipt = Self::begin_stream_cost_response(

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 ///
 /// Constructed from a `StreamEvent::ContentBlockStart` payload at the call
 /// site (formerly `api_client::types::StreamEvent`; now
-/// `llm_runtime::LlmEvent`). `ToolUse` carries the API-provided id + name
+/// `llm_runtime::HistoryEvent`). `ToolUse` carries the API-provided id + name
 /// verbatim; the input JSON is reassembled from `input_json_delta` chunks.
 #[derive(Debug, Clone)]
 pub enum BlockKind {

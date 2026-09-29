@@ -1,303 +1,227 @@
-//! Drive a streaming [`LlmEvent`] sequence to a single [`LlmResponse`] — the
+//! Drive a streaming [`HistoryEvent`] sequence to a single [`HistoryResponse`] — the
 //! exact value the non-streaming round-trip returns — so a caller's downstream
 //! logic is byte-identical regardless of which transport produced the turn.
 //!
 //! Byte-locked against `orchestrator::sse`'s `BlockAccumulator` +
 //! `event_router` (source semantics: `claude.ts:1995-2300`). It lived in the
 //! `agent` crate because that crate cannot depend on the orchestrator without
-//! closing a dependency cycle; it now lives HERE, next to the `LlmEvent` and
-//! `LlmResponse` it is defined in terms of, so every consumer of a stream gets
+//! closing a dependency cycle; it now lives HERE, next to the `HistoryEvent` and
+//! `HistoryResponse` it is defined in terms of, so every consumer of a stream gets
 //! the same assembly instead of growing a second, weaker one. `agent`
 //! re-exports it and is otherwise unchanged.
 //!
 //! [`response_to_stream_events`] is the inverse: it synthesizes a lossless
-//! [`LlmEvent`] sequence from an `LlmResponse`, so a client that only
+//! [`HistoryEvent`] sequence from an `HistoryResponse`, so a client that only
 //! implements the non-streaming round-trip can still present a streaming seam.
 //! The two round-trip exactly (see the `round_trip_*` tests).
 #![forbid(unsafe_code)]
 
 use crate::{
-    ContentBlock, ContentDelta, LlmError, LlmEvent, LlmResponse, MessageDeltaPayload, Usage,
+    ContentBlock, HistoryContentDelta, HistoryEvent, HistoryMessageDelta, HistoryResponse,
+    LlmError, Usage,
 };
 use futures::stream::{BoxStream, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// Tag identifying what kind of content block is being accumulated.
-///
-/// Mirrors `orchestrator::sse::accumulator::BlockKind`. `ToolUse` carries the
-/// API-provided id + name verbatim; the input JSON is reassembled from
-/// `input_json_delta` chunks.
+// The SDK owns text/signature/JSON assembly. This map only remembers the host
+// presentation kind and lifecycle so invalid UI event sequences fail locally.
 #[derive(Debug, Clone)]
 enum BlockKind {
-    /// A `text` block — accumulates `text_delta` chunks.
     Text,
-    /// A `tool_use` / `tool_call` block — accumulates `input_json_delta` chunks.
     ToolCall {
-        /// Stable identifier echoed back in the matching `ToolResult`.
         id: String,
-        /// Tool name (e.g. `"Read"`).
         name: String,
+        server: Option<Value>,
     },
-    /// A `thinking` / `reasoning` block — accumulates `thinking_delta` chunks.
     Reasoning,
-    /// A low-frequency server-side block (`redacted_thinking`,
-    /// `server_tool_use`, `connector_text`, `advisor_tool_result`) captured in
-    /// full from the `ContentBlockStart` event and preserved verbatim for
-    /// resume/replay byte parity. (`server_tool_use` may also stream its input
-    /// via `input_json_delta`; that is merged on `stop_block`.)
     Preserved(ContentBlock),
-    /// Any other variant the accumulator cannot represent. Stores nothing;
-    /// `stop_block` returns [`CompletedBlock::Skipped`].
     Other,
 }
 
-impl BlockKind {
-    fn name(&self) -> &'static str {
-        match self {
-            BlockKind::Text => "text",
-            BlockKind::ToolCall { .. } => "tool_call",
-            BlockKind::Reasoning => "reasoning",
-            BlockKind::Preserved(_) => "preserved",
-            BlockKind::Other => "other",
-        }
-    }
-}
-
-/// One finished content block, ready to be appended to the assistant message.
-#[derive(Debug, Clone)]
-enum CompletedBlock {
-    /// Plain text.
-    Text {
-        /// Concatenated body of all `text_delta` chunks.
-        text: String,
-    },
-    /// Tool invocation, with reassembled JSON input.
-    ToolCall {
-        /// Tool call identifier (string id as returned by the provider).
-        id: String,
-        /// Tool name.
-        name: String,
-        /// Reassembled tool input.
-        input: Value,
-    },
-    /// Extended thinking / reasoning.
-    Reasoning {
-        /// Concatenated reasoning body.
-        text: String,
-        /// Optional cryptographic signature.
-        signature: Option<String>,
-    },
-    /// A low-frequency server-side block captured verbatim from
-    /// `ContentBlockStart` (see [`BlockKind::Preserved`]). Replayed unchanged.
-    Preserved(ContentBlock),
-    /// A [`BlockKind::Other`] variant — caller drops it.
-    Skipped,
-}
-
-impl CompletedBlock {
-    /// Project a finished block back onto the wire [`ContentBlock`] shape the
-    /// [`LlmResponse`] carries. [`CompletedBlock::Skipped`] yields `None`
-    /// (the block is dropped, exactly as the non-streaming
-    /// `translate_response_blocks` drops server-side variants).
-    fn into_content_block(self) -> Option<ContentBlock> {
-        match self {
-            CompletedBlock::Text { text } => Some(ContentBlock::Text {
-                text,
-                cache_control: None,
-            }),
-            CompletedBlock::ToolCall { id, name, input } => {
-                Some(ContentBlock::ToolCall { id, name, input })
-            }
-            CompletedBlock::Reasoning { text, signature } => {
-                Some(ContentBlock::Reasoning { text, signature })
-            }
-            CompletedBlock::Preserved(block) => Some(block),
-            CompletedBlock::Skipped => None,
-        }
-    }
-}
-
-/// Per-block state held during accumulation.
-#[derive(Debug)]
-struct BlockState {
-    kind: BlockKind,
-    /// Used for `Text` and `Reasoning`.
-    text_buf: String,
-    /// Used for `ToolCall` (raw `partial_json` concat).
-    json_buf: String,
-    /// Set by `signature_delta` on a `Reasoning` block.
-    signature: Option<String>,
-}
-
-/// In-progress accumulator. One per active stream consumer.
 #[derive(Debug, Default)]
 struct BlockAccumulator {
-    blocks: HashMap<u32, BlockState>,
-    /// Counts started client and server tools, including completed blocks.
+    sdk: lingxi_llm_client::stream_assembly::StreamAccumulator,
+    kinds: HashMap<u32, BlockKind>,
     tool_calls_started: usize,
+    tool_deltas: std::collections::HashSet<u32>,
 }
-
 impl BlockAccumulator {
     fn new() -> Self {
-        Self {
-            blocks: HashMap::new(),
-            tool_calls_started: 0,
-        }
+        Self::default()
     }
-
-    /// Register a new block at `index`. An existing entry is overwritten,
-    /// mirroring `claude.ts:1996-2070` (`contentBlocks[part.index] = { ... }`).
+    fn observe(&mut self, event: lingxi_llm_client::protocol::StreamEvent) {
+        self.sdk.observe(&event);
+    }
     fn start_block(&mut self, index: u32, kind: BlockKind) {
-        if matches!(
-            kind,
-            BlockKind::ToolCall { .. } | BlockKind::Preserved(ContentBlock::ServerToolUse { .. })
-        ) {
-            self.tool_calls_started += 1;
+        use lingxi_llm_client::protocol::{StreamEvent, ToolUseId};
+        match &kind {
+            BlockKind::Text => self.observe(StreamEvent::TextDelta {
+                block: index as usize,
+                text: String::new(),
+            }),
+            BlockKind::Reasoning => self.observe(StreamEvent::ReasoningDelta {
+                block: index as usize,
+                text: String::new(),
+            }),
+            BlockKind::ToolCall { id, name, .. } => {
+                self.tool_calls_started += 1;
+                self.observe(StreamEvent::ToolCallDelta {
+                    block: index as usize,
+                    id: ToolUseId::new(id),
+                    provider_id: None,
+                    caller: None,
+                    toolset_name: None,
+                    name: name.clone(),
+                    arguments_fragment: String::new(),
+                });
+            }
+            _ => {}
         }
-        self.blocks.insert(
-            index,
-            BlockState {
-                kind,
-                text_buf: String::new(),
-                json_buf: String::new(),
-                signature: None,
-            },
-        );
+        self.kinds.insert(index, kind);
     }
-
-    /// Append `text` to the `Text` or `Reasoning` buffer of the block at
-    /// `index`.
     fn append_text(&mut self, index: u32, text: &str) -> Result<(), LlmError> {
-        let state = self
-            .blocks
-            .get_mut(&index)
-            .ok_or_else(|| block_not_found(index))?;
-        match &state.kind {
-            BlockKind::Text | BlockKind::Reasoning => {
-                state.text_buf.push_str(text);
-                Ok(())
-            }
-            other => Err(type_mismatch(index, other.name(), "text_delta")),
+        use lingxi_llm_client::protocol::StreamEvent;
+        match self.kinds.get(&index) {
+            Some(BlockKind::Text) => self.observe(StreamEvent::TextDelta {
+                block: index as usize,
+                text: text.into(),
+            }),
+            Some(BlockKind::Reasoning) => self.observe(StreamEvent::ReasoningDelta {
+                block: index as usize,
+                text: text.into(),
+            }),
+            Some(_) => return Err(type_mismatch(index, "text", "text_delta")),
+            None => return Err(block_not_found(index)),
         }
+        Ok(())
     }
-
-    /// Append a `partial_json` chunk to the `ToolCall` buffer of the block at
-    /// `index`.
     fn append_json(&mut self, index: u32, partial: &str) -> Result<(), LlmError> {
-        let state = self
-            .blocks
-            .get_mut(&index)
-            .ok_or_else(|| block_not_found(index))?;
-        match &state.kind {
-            // `server_tool_use` (Preserved) may stream its input via
-            // `input_json_delta`; buffer it and merge on stop.
-            BlockKind::ToolCall { .. } | BlockKind::Preserved(_) => {
-                state.json_buf.push_str(partial);
-                Ok(())
+        use lingxi_llm_client::protocol::{StreamEvent, ToolUseId};
+        match self.kinds.get(&index).cloned() {
+            Some(BlockKind::ToolCall { id, name, .. }) => {
+                if !partial.is_empty() {
+                    self.tool_deltas.insert(index);
+                }
+                self.observe(StreamEvent::ToolCallDelta {
+                    block: index as usize,
+                    id: ToolUseId::new(id),
+                    provider_id: None,
+                    caller: None,
+                    toolset_name: None,
+                    name,
+                    arguments_fragment: partial.into(),
+                })
             }
-            other => Err(type_mismatch(index, other.name(), "input_json_delta")),
+            Some(BlockKind::Preserved(_)) => {}
+            Some(_) => return Err(type_mismatch(index, "tool_call", "input_json_delta")),
+            None => return Err(block_not_found(index)),
         }
+        Ok(())
     }
-
-    /// Append `thinking` from a `thinking_delta` to the block at `index` —
-    /// applying ONLY to a `Reasoning` (thinking) block, and a SILENT NO-OP
-    /// otherwise (claude-code `case"thinking_delta":{if(n?.type==="thinking")…;
-    /// break}`). This must NOT error: the API streams `thinking_delta`
-    /// (`estimated_tokens` pings) DURING the redacted-thinking phase, so a
-    /// `thinking_delta` legitimately arrives on a `redacted_thinking`
-    /// ([`BlockKind::Preserved`]) block — the previous shared `append_text` path
-    /// raised a `type mismatch` and terminated the stream (a spurious failure
-    /// where CC succeeds). A `thinking_delta` for a non-existent block is also a
-    /// no-op, mirroring CC's `n?.type` optional-chaining.
     fn append_thinking(&mut self, index: u32, text: &str) {
-        if let Some(state) = self.blocks.get_mut(&index) {
-            if matches!(state.kind, BlockKind::Reasoning) {
-                state.text_buf.push_str(text);
-            }
+        if matches!(self.kinds.get(&index), Some(BlockKind::Reasoning)) {
+            self.observe(lingxi_llm_client::protocol::StreamEvent::ReasoningDelta {
+                block: index as usize,
+                text: text.into(),
+            });
         }
     }
-
-    /// Set the signature on a `Reasoning` block (from a `signature_delta`).
-    fn set_signature(&mut self, index: u32, sig: &str) -> Result<(), LlmError> {
-        let state = self
-            .blocks
-            .get_mut(&index)
-            .ok_or_else(|| block_not_found(index))?;
-        match &state.kind {
-            BlockKind::Reasoning => {
-                state.signature = Some(sig.to_string());
-                Ok(())
+    fn set_signature(&mut self, index: u32, signature: &str) -> Result<(), LlmError> {
+        match self.kinds.get(&index) {
+            Some(BlockKind::Reasoning) => {
+                self.observe(lingxi_llm_client::protocol::StreamEvent::ThoughtSignature {
+                    block: index as usize,
+                    signature: signature.into(),
+                })
             }
-            other => Err(type_mismatch(index, other.name(), "signature_delta")),
+            Some(_) => return Err(type_mismatch(index, "reasoning", "signature_delta")),
+            None => return Err(block_not_found(index)),
         }
+        Ok(())
     }
-
-    /// Finalize the block at `index`, removing it and returning a
-    /// [`CompletedBlock`].
-    fn stop_block(&mut self, index: u32) -> Result<CompletedBlock, LlmError> {
-        let state = self
-            .blocks
+    fn stop_block(&mut self, index: u32) -> Result<Option<ContentBlock>, LlmError> {
+        use lingxi_llm_client::protocol::{ContentBlock as SdkBlock, StreamEvent};
+        let kind = self
+            .kinds
             .remove(&index)
             .ok_or_else(|| double_stop(index))?;
-        let completed = match state.kind {
-            BlockKind::Text => CompletedBlock::Text {
-                text: state.text_buf,
+        self.observe(StreamEvent::BlockEnd {
+            block: index as usize,
+        });
+        let content = self.sdk.content_at(index as usize);
+        let content = content.as_ref();
+        Ok(match kind {
+            BlockKind::Preserved(block) => Some(block),
+            BlockKind::Other => None,
+            BlockKind::Text => match content {
+                Some(SdkBlock::Text { text, .. }) => Some(ContentBlock::Text {
+                    text: text.clone(),
+                    cache_control: None,
+                }),
+                _ => None,
             },
-            BlockKind::Reasoning => CompletedBlock::Reasoning {
-                text: state.text_buf,
-                signature: state.signature,
+            BlockKind::Reasoning => match content {
+                Some(SdkBlock::Thinking { text, signature }) => Some(ContentBlock::Reasoning {
+                    text: text.clone(),
+                    signature: signature.clone(),
+                }),
+                _ => None,
             },
-            BlockKind::ToolCall { id, name } => {
-                let input = if state.json_buf.is_empty() {
-                    Value::Object(serde_json::Map::new())
-                } else {
-                    serde_json::from_str::<Value>(&state.json_buf).map_err(|e| {
-                        LlmError::MalformedToolInput {
-                            tool_name: name.clone(),
-                            block_index: index,
-                            reason: e.to_string(),
-                            input_bytes: state.json_buf.len(),
-                            has_other_tool_calls: self.tool_calls_started > 1,
-                        }
-                    })?
-                };
-                CompletedBlock::ToolCall { id, name, input }
-            }
-            BlockKind::Preserved(mut block) => {
-                // Merge any `input_json_delta`-streamed input into a
-                // `server_tool_use` block (the start event seeds an empty input).
-                if !state.json_buf.is_empty() {
-                    if let ContentBlock::ServerToolUse { input, .. } = &mut block {
-                        if let Ok(parsed) = serde_json::from_str::<Value>(&state.json_buf) {
-                            *input = parsed;
-                        }
+            BlockKind::ToolCall { id, name, server } => match content {
+                Some(SdkBlock::ToolUse { input, .. }) => Some(if let Some(initial) = server {
+                    ContentBlock::ServerToolUse {
+                        id,
+                        name,
+                        input: if self.tool_deltas.contains(&index) {
+                            input.clone()
+                        } else {
+                            initial
+                        },
                     }
+                } else {
+                    ContentBlock::ToolCall {
+                        id,
+                        name,
+                        input: input.clone(),
+                    }
+                }),
+                _ if server.is_some() => Some(ContentBlock::ServerToolUse {
+                    id,
+                    name,
+                    input: server.expect("server initial input"),
+                }),
+                _ => {
+                    let input_bytes = self
+                        .sdk
+                        .snapshot()
+                        .incomplete_tools
+                        .iter()
+                        .find(|tool| tool.block == index as usize)
+                        .map_or(0, |tool| tool.input_bytes);
+                    return Err(LlmError::MalformedToolInput {
+                        tool_name: name,
+                        block_index: index,
+                        reason: "invalid JSON tool input".into(),
+                        input_bytes,
+                        has_other_tool_calls: self.tool_calls_started > 1,
+                    });
                 }
-                CompletedBlock::Preserved(block)
-            }
-            BlockKind::Other => CompletedBlock::Skipped,
-        };
-        Ok(completed)
+            },
+        })
     }
 }
-
-// ----- Error constructors (mirror `orchestrator::sse::StreamingError` Display,
-// wrapped in `LlmError::StreamInterrupted` so the subagent loop's single
-// `Result<LlmResponse, LlmError>` seam carries them) --------------------
 
 fn block_not_found(index: u32) -> LlmError {
     LlmError::StreamInterrupted {
         message: format!("streaming: delta for block index {index} without prior start"),
     }
 }
-
 fn double_stop(index: u32) -> LlmError {
     LlmError::StreamInterrupted {
         message: format!("streaming: double stop for block index {index}"),
     }
 }
-
 fn type_mismatch(index: u32, expected: &str, got: &str) -> LlmError {
     LlmError::StreamInterrupted {
         message: format!(
@@ -305,31 +229,25 @@ fn type_mismatch(index: u32, expected: &str, got: &str) -> LlmError {
         ),
     }
 }
-
-/// Map a wire `content_block` payload to its accumulator [`BlockKind`].
-/// Mirrors `orchestrator::sse::event_router`'s `ContentBlockStart` arm.
-fn block_kind_of(content_block: &ContentBlock) -> BlockKind {
-    match content_block {
+fn block_kind_of(block: &ContentBlock) -> BlockKind {
+    match block {
         ContentBlock::Text { .. } | ContentBlock::TextJsUtf16 { .. } => BlockKind::Text,
         ContentBlock::ToolCall { id, name, .. } => BlockKind::ToolCall {
             id: id.clone(),
             name: name.clone(),
+            server: None,
+        },
+        ContentBlock::ServerToolUse { id, name, input } => BlockKind::ToolCall {
+            id: id.clone(),
+            name: name.clone(),
+            server: Some(input.clone()),
         },
         ContentBlock::Reasoning { .. } => BlockKind::Reasoning,
-        // Low-frequency server-side blocks: captured verbatim from the start
-        // event and preserved for resume/replay byte parity.
         ContentBlock::RedactedThinking { .. }
-        | ContentBlock::ServerToolUse { .. }
         | ContentBlock::ConnectorText { .. }
         | ContentBlock::ProviderContent { .. }
-        | ContentBlock::AdvisorToolResult { .. } => BlockKind::Preserved(content_block.clone()),
-        ContentBlock::Image { .. }
-        | ContentBlock::ImageUrl { .. }
-        | ContentBlock::Document { .. }
-        | ContentBlock::ToolResult { .. }
-        // cache_edits is a request-only directive — never streamed back as a
-        // content_block_start, so it never reaches the accumulator.
-        | ContentBlock::CacheEdits { .. } => BlockKind::Other,
+        | ContentBlock::AdvisorToolResult { .. } => BlockKind::Preserved(block.clone()),
+        _ => BlockKind::Other,
     }
 }
 
@@ -398,11 +316,11 @@ pub(crate) fn merge_usage(seed: &Usage, delta: &Usage) -> Usage {
 }
 
 /// Drive `stream` to completion, accumulating SSE events into a single
-/// [`LlmResponse`] — the streaming analog of one non-streaming
+/// [`HistoryResponse`] — the streaming analog of one non-streaming
 /// `messages_create` round-trip. `id` / `model` / the usage seed come from
 /// `message_start`; the final `stop_reason` + usage come from `message_delta`.
 ///
-/// If the stream yields a [`LlmEvent::Completed`] event, the contained
+/// If the stream yields a [`HistoryEvent::Completed`] event, the contained
 /// response is returned immediately without waiting for `MessageStop` (it
 /// already is the final complete response).
 ///
@@ -419,8 +337,8 @@ pub(crate) fn merge_usage(seed: &Usage, delta: &Usage) -> Usage {
 // directly (the runner needs the salvaged partial), so this is `cfg(test)`.
 #[cfg(test)]
 pub async fn accumulate_stream(
-    stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
-) -> Result<LlmResponse, LlmError> {
+    stream: BoxStream<'static, Result<HistoryEvent, LlmError>>,
+) -> Result<HistoryResponse, LlmError> {
     accumulate_stream_salvaging(stream)
         .await
         .map_err(|(_partial, e)| e)
@@ -435,8 +353,8 @@ pub async fn accumulate_stream(
 /// seen are salvaged — an in-flight (unstopped) block is dropped exactly as CC's
 /// `blocks_yielded` counts only completed blocks.
 pub async fn accumulate_stream_salvaging(
-    mut stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
-) -> Result<LlmResponse, (Vec<ContentBlock>, LlmError)> {
+    mut stream: BoxStream<'static, Result<HistoryEvent, LlmError>>,
+) -> Result<HistoryResponse, (Vec<ContentBlock>, LlmError)> {
     let mut acc = BlockAccumulator::new();
     let mut malformed_input: Option<LlmError> = None;
     let mut content: Vec<ContentBlock> = Vec::new();
@@ -445,6 +363,7 @@ pub async fn accumulate_stream_salvaging(
     let mut model = String::new();
     let mut usage = Usage::default();
     let mut stop_reason: Option<String> = None;
+    let mut stop_details = None;
     let mut cost = None;
     let mut provider_metadata = Value::Null;
 
@@ -467,7 +386,7 @@ pub async fn accumulate_stream_salvaging(
         };
         if let Some(error) = malformed_input.as_mut() {
             match event {
-                LlmEvent::ContentBlockStart { content_block, .. }
+                HistoryEvent::ContentBlockStart { content_block, .. }
                     if matches!(
                         content_block,
                         ContentBlock::ToolCall { .. } | ContentBlock::ServerToolUse { .. }
@@ -475,12 +394,12 @@ pub async fn accumulate_stream_salvaging(
                 {
                     acc.tool_calls_started += 1;
                 }
-                LlmEvent::Completed { .. } => {
+                HistoryEvent::Completed { .. } => {
                     // A terminal snapshot may include calls without corresponding
                     // start events. Do not recover without complete event evidence.
                     return Err((content, malformed_input.expect("pending malformed input")));
                 }
-                LlmEvent::MessageStop => {
+                HistoryEvent::MessageStop => {
                     if let LlmError::MalformedToolInput {
                         has_other_tool_calls,
                         ..
@@ -495,41 +414,43 @@ pub async fn accumulate_stream_salvaging(
             continue;
         }
         match event {
-            LlmEvent::WebSearch { .. } => {} // Metadata is retained by the terminal snapshot.
-            LlmEvent::MessageStart { response } => {
+            HistoryEvent::WebSearch { .. } => {} // Metadata is retained by the terminal snapshot.
+            HistoryEvent::MessageStart { response } => {
                 // Capture id/model + the usage seed from the start snapshot.
                 id = response.id;
                 model = response.model;
                 usage = response.usage;
                 cost = response.cost;
                 provider_metadata = response.provider_metadata;
+                stop_details = response.stop_details;
             }
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index,
                 content_block,
             } => {
                 acc.start_block(index, block_kind_of(&content_block));
             }
-            LlmEvent::ContentBlockDelta { index, delta } => match delta {
-                ContentDelta::TextDelta { text } => salvage!(acc.append_text(index, &text)),
-                ContentDelta::InputJsonDelta { partial_json } => {
+            HistoryEvent::ContentBlockDelta { index, delta } => match delta {
+                HistoryContentDelta::TextDelta { text } => salvage!(acc.append_text(index, &text)),
+                HistoryContentDelta::InputJsonDelta { partial_json } => {
                     salvage!(acc.append_json(index, &partial_json));
                 }
-                ContentDelta::ThinkingDelta { thinking } => {
+                HistoryContentDelta::ThinkingDelta { thinking } => {
                     // No-op on a non-thinking block (e.g. `redacted_thinking`),
                     // never a stream error — see [`append_thinking`].
                     acc.append_thinking(index, &thinking);
                 }
-                ContentDelta::SignatureDelta { signature } => {
+                HistoryContentDelta::SignatureDelta { signature } => {
                     salvage!(acc.set_signature(index, &signature));
                 }
                 // Dropped at the `translate_response_blocks` boundary.
-                ContentDelta::CitationsDelta { .. } | ContentDelta::ConnectorTextDelta { .. } => {}
+                HistoryContentDelta::CitationsDelta { .. }
+                | HistoryContentDelta::ConnectorTextDelta { .. } => {}
             },
-            LlmEvent::ContentBlockStop { index } => {
+            HistoryEvent::ContentBlockStop { index } => {
                 match acc.stop_block(index) {
                     Ok(block) => {
-                        if let Some(block) = block.into_content_block() {
+                        if let Some(block) = block {
                             if let ContentBlock::ProviderContent { value, .. } = &block {
                                 if value["type"] == "lingxi_observation" {
                                     if let Some(metadata) = value.get("metadata") {
@@ -560,12 +481,15 @@ pub async fn accumulate_stream_salvaging(
                     Err(error) => return Err((content, error)),
                 }
             }
-            LlmEvent::MessageDelta {
+            HistoryEvent::MessageDelta {
                 delta,
                 usage: delta_usage,
             } => {
                 if let Some(sr) = delta.stop_reason {
                     stop_reason = Some(sr);
+                }
+                if delta.stop_details.is_some() {
+                    stop_details = delta.stop_details;
                 }
                 if let Some(mut u) = delta_usage {
                     if let Some(metadata) = u.provider_metadata.get("stream") {
@@ -577,13 +501,13 @@ pub async fn accumulate_stream_salvaging(
                     usage = merge_usage(&usage, &u);
                 }
             }
-            LlmEvent::MessageStop => {
-                return Ok(LlmResponse {
+            HistoryEvent::MessageStop => {
+                return Ok(HistoryResponse {
                     id,
                     model,
                     content,
                     stop_reason,
-                    stop_details: None,
+                    stop_details,
                     usage,
                     cost,
                     provider_metadata,
@@ -593,7 +517,7 @@ pub async fn accumulate_stream_salvaging(
             // response in the `Completed` event — return it directly.
             // This is the canonical terminal for llm-runtime streams
             // (llm-runtime protocol.rs:302; drops Ping/Error from api-client).
-            LlmEvent::Completed { response } => {
+            HistoryEvent::Completed { response } => {
                 return Ok(*response);
             }
         }
@@ -610,7 +534,7 @@ pub async fn accumulate_stream_salvaging(
     ))
 }
 
-/// Synthesize a [`LlmEvent`] sequence that reconstructs `resp` exactly when
+/// Synthesize a [`HistoryEvent`] sequence that reconstructs `resp` exactly when
 /// fed back through [`accumulate_stream`].
 ///
 /// Used by the default [`crate::api::SubagentApiClient::messages_create_stream`]
@@ -620,13 +544,13 @@ pub async fn accumulate_stream_salvaging(
 /// empty, exactly as on the wire), `tool_call` input rides one `input_json_delta`
 /// (re-parsed on stop), and the full usage is seeded on `message_start` so the
 /// [`merge_usage`] reconstruction reproduces `resp.usage`.
-pub fn response_to_stream_events(resp: LlmResponse) -> Vec<LlmEvent> {
+pub fn response_to_stream_events(resp: HistoryResponse) -> Vec<HistoryEvent> {
     let mut events = Vec::with_capacity(resp.content.len() * 3 + 3);
     // `message_start` carries id/model + a usage seed. On the wire the seed
     // holds input/cache with `output_tokens == 0`; here we seed the FULL usage
     // so the round-trip is exact regardless of the field split.
-    events.push(LlmEvent::MessageStart {
-        response: Box::new(LlmResponse {
+    events.push(HistoryEvent::MessageStart {
+        response: Box::new(HistoryResponse {
             id: resp.id.clone(),
             model: resp.model.clone(),
             content: Vec::new(),
@@ -645,39 +569,39 @@ pub fn response_to_stream_events(resp: LlmResponse) -> Vec<LlmEvent> {
         let index = u32::try_from(i).unwrap_or(u32::MAX);
         match block {
             ContentBlock::Text { text, .. } => {
-                events.push(LlmEvent::ContentBlockStart {
+                events.push(HistoryEvent::ContentBlockStart {
                     index,
                     content_block: ContentBlock::Text {
                         text: String::new(),
                         cache_control: None,
                     },
                 });
-                events.push(LlmEvent::ContentBlockDelta {
+                events.push(HistoryEvent::ContentBlockDelta {
                     index,
-                    delta: ContentDelta::TextDelta { text },
+                    delta: HistoryContentDelta::TextDelta { text },
                 });
             }
             ContentBlock::Reasoning { text, signature } => {
-                events.push(LlmEvent::ContentBlockStart {
+                events.push(HistoryEvent::ContentBlockStart {
                     index,
                     content_block: ContentBlock::Reasoning {
                         text: String::new(),
                         signature: None,
                     },
                 });
-                events.push(LlmEvent::ContentBlockDelta {
+                events.push(HistoryEvent::ContentBlockDelta {
                     index,
-                    delta: ContentDelta::ThinkingDelta { thinking: text },
+                    delta: HistoryContentDelta::ThinkingDelta { thinking: text },
                 });
                 if let Some(sig) = signature {
-                    events.push(LlmEvent::ContentBlockDelta {
+                    events.push(HistoryEvent::ContentBlockDelta {
                         index,
-                        delta: ContentDelta::SignatureDelta { signature: sig },
+                        delta: HistoryContentDelta::SignatureDelta { signature: sig },
                     });
                 }
             }
             ContentBlock::ToolCall { id, name, input } => {
-                events.push(LlmEvent::ContentBlockStart {
+                events.push(HistoryEvent::ContentBlockStart {
                     index,
                     content_block: ContentBlock::ToolCall {
                         id: id.clone(),
@@ -686,9 +610,9 @@ pub fn response_to_stream_events(resp: LlmResponse) -> Vec<LlmEvent> {
                     },
                 });
                 // The accumulator reassembles + parses this back to `input`.
-                events.push(LlmEvent::ContentBlockDelta {
+                events.push(HistoryEvent::ContentBlockDelta {
                     index,
-                    delta: ContentDelta::InputJsonDelta {
+                    delta: HistoryContentDelta::InputJsonDelta {
                         partial_json: input.to_string(),
                     },
                 });
@@ -698,22 +622,22 @@ pub fn response_to_stream_events(resp: LlmResponse) -> Vec<LlmEvent> {
             // start event and yields `Preserved` on stop, so it round-trips
             // verbatim (matching `translate_response_blocks` preservation).
             other => {
-                events.push(LlmEvent::ContentBlockStart {
+                events.push(HistoryEvent::ContentBlockStart {
                     index,
                     content_block: other,
                 });
             }
         }
-        events.push(LlmEvent::ContentBlockStop { index });
+        events.push(HistoryEvent::ContentBlockStop { index });
     }
-    events.push(LlmEvent::MessageDelta {
-        delta: MessageDeltaPayload {
+    events.push(HistoryEvent::MessageDelta {
+        delta: HistoryMessageDelta {
             stop_reason: resp.stop_reason,
-            stop_details: None,
+            stop_details: resp.stop_details,
         },
         usage: Some(resp.usage),
     });
-    events.push(LlmEvent::MessageStop);
+    events.push(HistoryEvent::MessageStop);
     events
 }
 
@@ -723,13 +647,13 @@ mod tests {
     use crate::TokenUsage;
     use futures::stream;
 
-    fn boxed(events: Vec<LlmEvent>) -> BoxStream<'static, Result<LlmEvent, LlmError>> {
+    fn boxed(events: Vec<HistoryEvent>) -> BoxStream<'static, Result<HistoryEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
     }
 
-    fn message_start(id: &str, model: &str) -> LlmEvent {
-        LlmEvent::MessageStart {
-            response: Box::new(LlmResponse {
+    fn message_start(id: &str, model: &str) -> HistoryEvent {
+        HistoryEvent::MessageStart {
+            response: Box::new(HistoryResponse {
                 id: id.to_string(),
                 model: model.to_string(),
                 content: Vec::new(),
@@ -747,22 +671,22 @@ mod tests {
         let metadata = serde_json::json!({"llm_client":{"web_search":[{"citations":[{"url":"https://example.com"}]}]}});
         let response = accumulate_stream(boxed(vec![
             message_start("m", "model"),
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index: u32::MAX,
                 content_block: ContentBlock::ProviderContent {
                     protocol: "open_ai_responses".into(),
                     value: serde_json::json!({"type":"lingxi_observation","metadata":metadata}),
                 },
             },
-            LlmEvent::ContentBlockStop { index: u32::MAX },
-            LlmEvent::MessageDelta {
-                delta: MessageDeltaPayload {
+            HistoryEvent::ContentBlockStop { index: u32::MAX },
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
                 usage: None,
             },
-            LlmEvent::MessageStop,
+            HistoryEvent::MessageStop,
         ]))
         .await
         .unwrap();
@@ -787,14 +711,14 @@ mod tests {
         usage.cost_estimate = Some(quote);
         let response = accumulate_stream(boxed(vec![
             message_start("m", "deepseek-flash"),
-            LlmEvent::MessageDelta {
-                delta: MessageDeltaPayload {
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
                 usage: Some(usage),
             },
-            LlmEvent::MessageStop,
+            HistoryEvent::MessageStop,
         ]))
         .await
         .unwrap();
@@ -806,30 +730,30 @@ mod tests {
     async fn text_stream_accumulates_one_text_block() {
         let evs = vec![
             message_start("m1", "claude-mock"),
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index: 0,
                 content_block: ContentBlock::Text {
                     text: String::new(),
                     cache_control: None,
                 },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::TextDelta { text: "he".into() },
+                delta: HistoryContentDelta::TextDelta { text: "he".into() },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::TextDelta { text: "llo".into() },
+                delta: HistoryContentDelta::TextDelta { text: "llo".into() },
             },
-            LlmEvent::ContentBlockStop { index: 0 },
-            LlmEvent::MessageDelta {
-                delta: MessageDeltaPayload {
+            HistoryEvent::ContentBlockStop { index: 0 },
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
                 usage: None,
             },
-            LlmEvent::MessageStop,
+            HistoryEvent::MessageStop,
         ];
         let resp = accumulate_stream(boxed(evs)).await.expect("accumulate");
         assert_eq!(resp.id, "m1");
@@ -846,7 +770,7 @@ mod tests {
     async fn tool_call_stream_reassembles_input_json() {
         let evs = vec![
             message_start("m1", "claude-mock"),
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index: 1,
                 content_block: ContentBlock::ToolCall {
                     id: "tc-1".to_string(),
@@ -854,27 +778,27 @@ mod tests {
                     input: Value::Null,
                 },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 1,
-                delta: ContentDelta::InputJsonDelta {
+                delta: HistoryContentDelta::InputJsonDelta {
                     partial_json: "{\"file".into(),
                 },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 1,
-                delta: ContentDelta::InputJsonDelta {
+                delta: HistoryContentDelta::InputJsonDelta {
                     partial_json: "_path\":\"foo.rs\"}".into(),
                 },
             },
-            LlmEvent::ContentBlockStop { index: 1 },
-            LlmEvent::MessageDelta {
-                delta: MessageDeltaPayload {
+            HistoryEvent::ContentBlockStop { index: 1 },
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
                     stop_reason: Some("tool_use".into()),
                     stop_details: None,
                 },
                 usage: None,
             },
-            LlmEvent::MessageStop,
+            HistoryEvent::MessageStop,
         ];
         let resp = accumulate_stream(boxed(evs)).await.expect("accumulate");
         assert_eq!(resp.stop_reason.as_deref(), Some("tool_use"));
@@ -893,34 +817,34 @@ mod tests {
     async fn reasoning_stream_accumulates_body_and_signature() {
         let evs = vec![
             message_start("m1", "claude-mock"),
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index: 0,
                 content_block: ContentBlock::Reasoning {
                     text: String::new(),
                     signature: None,
                 },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::ThinkingDelta {
+                delta: HistoryContentDelta::ThinkingDelta {
                     thinking: "ponder".into(),
                 },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::SignatureDelta {
+                delta: HistoryContentDelta::SignatureDelta {
                     signature: "sig-1".into(),
                 },
             },
-            LlmEvent::ContentBlockStop { index: 0 },
-            LlmEvent::MessageDelta {
-                delta: MessageDeltaPayload {
+            HistoryEvent::ContentBlockStop { index: 0 },
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
                 usage: None,
             },
-            LlmEvent::MessageStop,
+            HistoryEvent::MessageStop,
         ];
         let resp = accumulate_stream(boxed(evs)).await.expect("accumulate");
         match &resp.content[0] {
@@ -935,8 +859,8 @@ mod tests {
     #[tokio::test]
     async fn final_usage_merges_start_seed_and_delta() {
         let evs = vec![
-            LlmEvent::MessageStart {
-                response: Box::new(LlmResponse {
+            HistoryEvent::MessageStart {
+                response: Box::new(HistoryResponse {
                     id: "m1".into(),
                     model: "claude-mock".into(),
                     content: Vec::new(),
@@ -956,8 +880,8 @@ mod tests {
                     provider_metadata: Value::Null,
                 }),
             },
-            LlmEvent::MessageDelta {
-                delta: MessageDeltaPayload {
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
@@ -972,7 +896,7 @@ mod tests {
                     ..Usage::default()
                 }),
             },
-            LlmEvent::MessageStop,
+            HistoryEvent::MessageStop,
         ];
         let resp = accumulate_stream(boxed(evs)).await.expect("accumulate");
         // output from the delta; input/cache kept from the start seed.
@@ -986,14 +910,14 @@ mod tests {
     async fn stream_without_message_stop_errors() {
         let evs = vec![
             message_start("m1", "claude-mock"),
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index: 0,
                 content_block: ContentBlock::Text {
                     text: String::new(),
                     cache_control: None,
                 },
             },
-            LlmEvent::ContentBlockStop { index: 0 },
+            HistoryEvent::ContentBlockStop { index: 0 },
             // no message_stop
         ];
         let err = accumulate_stream(boxed(evs)).await.expect_err("no stop");
@@ -1004,13 +928,13 @@ mod tests {
     async fn delta_before_start_is_malformed() {
         let evs = vec![
             message_start("m1", "claude-mock"),
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::TextDelta {
+                delta: HistoryContentDelta::TextDelta {
                     text: "oops".into(),
                 },
             },
-            LlmEvent::MessageStop,
+            HistoryEvent::MessageStop,
         ];
         let err = accumulate_stream(boxed(evs)).await.expect_err("malformed");
         match err {
@@ -1026,20 +950,20 @@ mod tests {
         // `input_json_delta` on a text block.
         let evs = vec![
             message_start("m1", "claude-mock"),
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index: 0,
                 content_block: ContentBlock::Text {
                     text: String::new(),
                     cache_control: None,
                 },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::InputJsonDelta {
+                delta: HistoryContentDelta::InputJsonDelta {
                     partial_json: "{}".into(),
                 },
             },
-            LlmEvent::MessageStop,
+            HistoryEvent::MessageStop,
         ];
         let err = accumulate_stream(boxed(evs)).await.expect_err("mismatch");
         match err {
@@ -1058,20 +982,20 @@ mod tests {
         // the port must NOT terminate the stream with a type mismatch.
         let evs = vec![
             message_start("m1", "claude-mock"),
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index: 0,
                 content_block: ContentBlock::RedactedThinking {
                     data: "opaque".into(),
                 },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::ThinkingDelta {
+                delta: HistoryContentDelta::ThinkingDelta {
                     thinking: "leak".into(),
                 },
             },
-            LlmEvent::ContentBlockStop { index: 0 },
-            LlmEvent::MessageStop,
+            HistoryEvent::ContentBlockStop { index: 0 },
+            HistoryEvent::MessageStop,
         ];
         let resp = accumulate_stream(boxed(evs))
             .await
@@ -1097,7 +1021,7 @@ mod tests {
     async fn bad_tool_call_json_is_malformed() {
         let evs = vec![
             message_start("m1", "claude-mock"),
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index: 0,
                 content_block: ContentBlock::ToolCall {
                     id: "tc-1".to_string(),
@@ -1105,14 +1029,14 @@ mod tests {
                     input: Value::Null,
                 },
             },
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::InputJsonDelta {
+                delta: HistoryContentDelta::InputJsonDelta {
                     partial_json: "{not json".into(),
                 },
             },
-            LlmEvent::ContentBlockStop { index: 0 },
-            LlmEvent::MessageStop,
+            HistoryEvent::ContentBlockStop { index: 0 },
+            HistoryEvent::MessageStop,
         ];
         let err = accumulate_stream(boxed(evs)).await.expect_err("bad json");
         match err {
@@ -1151,17 +1075,17 @@ mod tests {
                             input: Value::Null,
                         }
                     };
-                    evs.push(LlmEvent::ContentBlockStart {
+                    evs.push(HistoryEvent::ContentBlockStart {
                         index: 0,
                         content_block,
                     });
                     if completed {
-                        evs.push(LlmEvent::ContentBlockStop { index: 0 });
+                        evs.push(HistoryEvent::ContentBlockStop { index: 0 });
                     }
                 }
                 let input = r#"{"secret":"never-print-this""#;
                 evs.extend([
-                    LlmEvent::ContentBlockStart {
+                    HistoryEvent::ContentBlockStart {
                         index: 1,
                         content_block: ContentBlock::ToolCall {
                             id: "output".into(),
@@ -1169,14 +1093,14 @@ mod tests {
                             input: Value::Null,
                         },
                     },
-                    LlmEvent::ContentBlockDelta {
+                    HistoryEvent::ContentBlockDelta {
                         index: 1,
-                        delta: ContentDelta::InputJsonDelta {
+                        delta: HistoryContentDelta::InputJsonDelta {
                             partial_json: input.into(),
                         },
                     },
-                    LlmEvent::ContentBlockStop { index: 1 },
-                    LlmEvent::MessageStop,
+                    HistoryEvent::ContentBlockStop { index: 1 },
+                    HistoryEvent::MessageStop,
                 ]);
                 let (_, err) = accumulate_stream_salvaging(boxed(evs))
                     .await
@@ -1213,7 +1137,7 @@ mod tests {
             for terminal in [false, true] {
                 let mut evs = vec![
                     message_start("m1", "mock"),
-                    LlmEvent::ContentBlockStart {
+                    HistoryEvent::ContentBlockStart {
                         index: 0,
                         content_block: ContentBlock::ToolCall {
                             id: "output".into(),
@@ -1221,16 +1145,16 @@ mod tests {
                             input: Value::Null,
                         },
                     },
-                    LlmEvent::ContentBlockDelta {
+                    HistoryEvent::ContentBlockDelta {
                         index: 0,
-                        delta: ContentDelta::InputJsonDelta {
+                        delta: HistoryContentDelta::InputJsonDelta {
                             partial_json: "{".into(),
                         },
                     },
-                    LlmEvent::ContentBlockStop { index: 0 },
+                    HistoryEvent::ContentBlockStop { index: 0 },
                 ];
                 if later_tool {
-                    evs.push(LlmEvent::ContentBlockStart {
+                    evs.push(HistoryEvent::ContentBlockStart {
                         index: 1,
                         content_block: ContentBlock::ToolCall {
                             id: "later".into(),
@@ -1240,7 +1164,7 @@ mod tests {
                     });
                 }
                 if terminal {
-                    evs.push(LlmEvent::MessageStop);
+                    evs.push(HistoryEvent::MessageStop);
                 }
                 let err = accumulate_stream(boxed(evs))
                     .await
@@ -1254,7 +1178,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_error_passes_through_verbatim() {
-        let s: BoxStream<'static, Result<LlmEvent, LlmError>> = stream::iter(vec![
+        let s: BoxStream<'static, Result<HistoryEvent, LlmError>> = stream::iter(vec![
             Ok(message_start("m1", "claude-mock")),
             Err(LlmError::Transport {
                 message: "dropped".into(),
@@ -1269,7 +1193,7 @@ mod tests {
     async fn completed_event_short_circuits_response() {
         // A `Completed{response}` event immediately returns the contained
         // response without waiting for `MessageStop`.
-        let resp = LlmResponse {
+        let resp = HistoryResponse {
             id: "cmp-1".into(),
             model: "claude-mock".into(),
             content: vec![ContentBlock::Text {
@@ -1282,7 +1206,7 @@ mod tests {
             cost: None,
             provider_metadata: Value::Null,
         };
-        let events = vec![LlmEvent::Completed {
+        let events = vec![HistoryEvent::Completed {
             response: Box::new(resp.clone()),
         }];
         let got = accumulate_stream(boxed(events)).await.expect("completed");
@@ -1301,7 +1225,7 @@ mod tests {
         // streaming accumulator (captured from the `ContentBlockStart` event) so
         // resume/replay JSONL bytes stay intact — matching the non-streaming
         // `translate_response_blocks` preservation.
-        let resp = LlmResponse {
+        let resp = HistoryResponse {
             id: "m1".into(),
             model: "claude-mock".into(),
             content: vec![
@@ -1333,7 +1257,7 @@ mod tests {
         assert!(matches!(round.content[1], ContentBlock::Text { .. }));
     }
 
-    async fn assert_round_trips(resp: LlmResponse) {
+    async fn assert_round_trips(resp: HistoryResponse) {
         // Drive the synthetic stream back through the accumulator.
         let events = response_to_stream_events(resp.clone());
         let round = accumulate_stream(boxed(events))
@@ -1366,7 +1290,7 @@ mod tests {
 
     #[tokio::test]
     async fn round_trip_text_and_tool_call_and_reasoning() {
-        assert_round_trips(LlmResponse {
+        assert_round_trips(HistoryResponse {
             id: "m1".into(),
             model: "claude-mock".into(),
             content: vec![
@@ -1403,8 +1327,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refusal_details_survive_the_history_stream_edge() {
+        let mut response = HistoryResponse {
+            id: "refusal".into(),
+            model: "model".into(),
+            content: Vec::new(),
+            stop_reason: Some("refusal".into()),
+            stop_details: Some(crate::HistoryStopDetails {
+                category: Some("category".into()),
+                explanation: Some("explanation".into()),
+            }),
+            usage: Usage::default(),
+            cost: None,
+            provider_metadata: Value::Null,
+        };
+        let expected = response.stop_details.clone();
+        response.content.push(ContentBlock::Text {
+            text: "refused".into(),
+            cache_control: None,
+        });
+        let result = accumulate_stream(boxed(response_to_stream_events(response)))
+            .await
+            .unwrap();
+        assert_eq!(result.stop_details, expected);
+    }
+
+    #[tokio::test]
     async fn round_trip_empty_tool_input() {
-        assert_round_trips(LlmResponse {
+        assert_round_trips(HistoryResponse {
             id: "m2".into(),
             model: "claude-mock".into(),
             content: vec![ContentBlock::ToolCall {

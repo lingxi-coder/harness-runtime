@@ -166,7 +166,7 @@ impl Tool for StubTool {
 const GATED_MODEL: &str = "claude-fable-5-1";
 
 fn wakeup_orch(
-    responses: Vec<llm_runtime::LlmResponse>,
+    responses: Vec<llm_runtime::HistoryResponse>,
     tools: Vec<(&'static str, bool)>,
 ) -> (
     ConversationOrchestrator,
@@ -181,7 +181,7 @@ fn wakeup_orch(
 /// sync by hand).
 fn wakeup_orch_with_model(
     model: &str,
-    responses: Vec<llm_runtime::LlmResponse>,
+    responses: Vec<llm_runtime::HistoryResponse>,
     tools: Vec<(&'static str, bool)>,
 ) -> (
     ConversationOrchestrator,
@@ -211,7 +211,7 @@ fn wakeup_orch_with_model(
     (orch, slot, api)
 }
 
-fn tool_round(calls: &[(&str, ToolUseId)]) -> llm_runtime::LlmResponse {
+fn tool_round(calls: &[(&str, ToolUseId)]) -> llm_runtime::HistoryResponse {
     mock_message_response(
         calls
             .iter()
@@ -225,7 +225,7 @@ fn tool_round(calls: &[(&str, ToolUseId)]) -> llm_runtime::LlmResponse {
     )
 }
 
-fn text_end(text: &str) -> llm_runtime::LlmResponse {
+fn text_end(text: &str) -> llm_runtime::HistoryResponse {
     mock_message_response(
         vec![LlmContentBlock::Text {
             text: text.into(),

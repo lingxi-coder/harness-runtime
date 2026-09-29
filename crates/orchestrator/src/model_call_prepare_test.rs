@@ -236,7 +236,7 @@ async fn thinking_strip_persistence_ignores_worker_only_rejections() {
             _system: Option<&str>,
             _msgs: Vec<ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+        ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
             unreachable!("persistence must not call the provider")
         }
         fn thinking_stripped_messages(&self) -> std::collections::HashMap<MessageId, usize> {

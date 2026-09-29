@@ -1887,7 +1887,7 @@ impl ConversationOrchestrator {
 }
 
 // Streaming recovery conversion and visibility helpers.
-/// Convert an `LlmResponse` (from the non-streaming fallback call) into the
+/// Convert an `HistoryResponse` (from the non-streaming fallback call) into the
 /// same [`crate::streaming_loop::PumpedTurn`] shape the streaming loop uses,
 /// so the remainder of the streaming turn handler works unchanged.
 ///
@@ -1912,7 +1912,9 @@ pub(super) fn pumped_has_visible_text(blocks: &[protocol::ContentBlock]) -> bool
         .any(|b| matches!(b, ContentBlock::Text { text } if !text.trim().is_empty()))
 }
 
-pub(super) fn llm_response_to_pumped_turn(resp: &LlmResponse) -> crate::streaming_loop::PumpedTurn {
+pub(super) fn llm_response_to_pumped_turn(
+    resp: &HistoryResponse,
+) -> crate::streaming_loop::PumpedTurn {
     use crate::streaming_loop::{ObservedToolUse, PumpedTurn};
     use crate::turn_loop::translate_response_blocks;
     use protocol::ContentBlock;
@@ -1924,7 +1926,7 @@ pub(super) fn llm_response_to_pumped_turn(resp: &LlmResponse) -> crate::streamin
     // call (seeded) whose response includes the authoritative usage.
     let usage = Some(resp.usage.clone());
 
-    // Translate LlmResponse content → protocol::ContentBlock (same as batched path).
+    // Translate HistoryResponse content → protocol::ContentBlock (same as batched path).
     // Then split into (assistant_blocks, tool_uses): text/thinking go into
     // assistant_blocks; ToolUse blocks go into tool_uses for the concurrent dispatch.
     // The streaming loop step 4 re-assembles them into the assistant message by
@@ -2008,4 +2010,4 @@ pub(super) fn parse_generated_session_name(raw: &str) -> Option<String> {
 // NOTE: `AnthropicProviderAdapter` and `AnthropicProviderStreamingAdapter`
 // were removed in Task 5 — they drove `api_client::AnthropicProvider` directly.
 // The live path is now `ProviderApiAdapter` (provider_adapter.rs), retargeted
-// in Task 6 to drive `llm_runtime::DefaultLlmClient`. (3b deletes api-client.)
+// in Task 6 to drive `llm_runtime::ModelRuntime`. (3b deletes api-client.)

@@ -8,7 +8,7 @@
 //! - any other id → keychain[id] → env[recorded var] → `Err(Authentication)`
 //!   (matching `EnvCredentialProvider`; spec §6.1/§6.6).
 //!
-//! Secrets are returned as `Credential::ApiKey`; `DefaultLlmClient::load_secret`
+//! Secrets are returned as `Credential::ApiKey`; `ModelRuntime::load_secret`
 //! extracts `ApiKey | BearerToken` uniformly and the profile's `AuthStrategy`
 //! picks the header (so Copilot's `CopilotBearer` rides this path).
 
@@ -179,8 +179,8 @@ impl CredentialProvider for MultiCredentialProvider {
 mod tests {
     use super::*;
     use llm_runtime::{
-        Capabilities, Credential, CredentialProvider, CredentialScope, DefaultLlmClient, LlmError,
-        LlmRequest, ModelProfile, ProviderId,
+        Capabilities, Credential, CredentialProvider, CredentialScope, LlmError, LlmRequest,
+        ModelProfile, ModelRuntime, ProviderId,
     };
     use std::sync::Arc;
 
@@ -444,7 +444,7 @@ mod tests {
             user_providers: Default::default(),
             routing: None,
         });
-        let mut client = DefaultLlmClient::from_config(assembled.client_config)
+        let mut client = ModelRuntime::from_config(assembled.client_config)
             .expect("cold-start route config must be valid");
         client = client.with_credential_provider(Arc::new(MultiCredentialProvider::new(
             credentials.clone(),

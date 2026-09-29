@@ -13,7 +13,7 @@ use crate::sse::accumulator::BlockAccumulator;
 use crate::sse::event_router::{dispatch_event, RouterAction};
 use crate::streaming_executor::StreamingToolExecutor;
 use futures::stream::{BoxStream, StreamExt};
-use llm_runtime::{LlmError, LlmEvent, TokenUsage, Usage as LlmUsage};
+use llm_runtime::{HistoryEvent, LlmError, TokenUsage, Usage as LlmUsage};
 use platform_api::OutputStream;
 use protocol::{ContentBlock, MessageId, ToolUseId};
 use serde_json::Value;
@@ -69,7 +69,7 @@ pub struct PumpedTurn {
     /// Refusal `stop_details` (`{category, explanation}`) from the final
     /// `message_delta` — drives the terminal refusal message's cyber/bio
     /// variant. `None` for non-refusal turns.
-    pub stop_details: Option<llm_runtime::StopDetails>,
+    pub stop_details: Option<llm_runtime::HistoryStopDetails>,
 }
 
 /// Merge a `MessageDelta` usage snapshot into the `MessageStart` seed.
@@ -349,7 +349,7 @@ pub(crate) fn mid_stream_retry_cap(error: &OrchestratorError) -> u32 {
 }
 
 pub async fn pump_stream(
-    stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
+    stream: BoxStream<'static, Result<HistoryEvent, LlmError>>,
     output: &Arc<dyn OutputStream>,
 ) -> Result<PumpedTurn, OrchestratorError> {
     pump_stream_inner(stream, output, None)
@@ -412,7 +412,7 @@ pub(crate) struct ExecutorPump<'a, 'e> {
 /// retry). On success the outcome is byte-identical to
 /// [`pump_stream_with_executor_tracked`].
 pub(crate) async fn pump_stream_with_executor_tracked(
-    stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
+    stream: BoxStream<'static, Result<HistoryEvent, LlmError>>,
     output: &Arc<dyn OutputStream>,
     pump: ExecutorPump<'_, '_>,
 ) -> Result<PumpedTurn, PumpFailure> {
@@ -420,7 +420,7 @@ pub(crate) async fn pump_stream_with_executor_tracked(
 }
 
 async fn pump_stream_inner(
-    mut stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
+    mut stream: BoxStream<'static, Result<HistoryEvent, LlmError>>,
     output: &Arc<dyn OutputStream>,
     mut pump: Option<ExecutorPump<'_, '_>>,
 ) -> Result<PumpedTurn, PumpFailure> {
@@ -474,7 +474,7 @@ async fn pump_stream_inner(
                 ));
             }
         };
-        if let LlmEvent::MessageDelta {
+        if let HistoryEvent::MessageDelta {
             usage: Some(usage), ..
         } = &mut event
         {
@@ -483,12 +483,12 @@ async fn pump_stream_inner(
             }
         }
         // Capture MessageStart usage before dispatching (dispatch consumes the event).
-        if let LlmEvent::MessageStart { ref response } = event {
+        if let HistoryEvent::MessageStart { ref response } = event {
             message_start_usage = Some(response.usage.clone());
         }
         // `Hr` (binary @219640711): a non-thinking `content_block_start` flips
         // `real_content_started`, disqualifying the mid-stream transient retry.
-        if let LlmEvent::ContentBlockStart {
+        if let HistoryEvent::ContentBlockStart {
             ref content_block, ..
         } = event
         {
@@ -501,7 +501,7 @@ async fn pump_stream_inner(
             }
         }
         let completed_block_index = match &event {
-            LlmEvent::ContentBlockStop { index } => Some(*index),
+            HistoryEvent::ContentBlockStop { index } => Some(*index),
             _ => None,
         };
         let action = match dispatch_event(event, &mut acc, output, suppress_live_text).await {
@@ -625,7 +625,7 @@ mod tests {
     use llm_runtime::TokenUsage;
     use protocol::ToolUseId;
 
-    fn boxed(events: Vec<LlmEvent>) -> BoxStream<'static, Result<LlmEvent, LlmError>> {
+    fn boxed(events: Vec<HistoryEvent>) -> BoxStream<'static, Result<HistoryEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
     }
 
@@ -721,7 +721,7 @@ mod tests {
             content_block_start_text(1),
             text_delta(1, "answer"),
             content_block_stop(1),
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index: 0x8000_0000,
                 content_block: llm_runtime::ContentBlock::ProviderContent {
                     protocol: "open_ai_responses".into(),
@@ -911,7 +911,7 @@ mod tests {
     #[tokio::test]
     async fn underlying_stream_error_surfaces_as_streaming_variant() {
         let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
-        let s: BoxStream<'static, Result<LlmEvent, LlmError>> = stream::iter(vec![
+        let s: BoxStream<'static, Result<HistoryEvent, LlmError>> = stream::iter(vec![
             Ok(message_start("m1", "claude-opus-4-7")),
             Err(LlmError::Transport {
                 message: "dropped".into(),

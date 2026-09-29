@@ -17,7 +17,7 @@
 
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
-use llm_runtime::{LlmError, LlmEvent, LlmResponse};
+use llm_runtime::{HistoryEvent, HistoryResponse, LlmError};
 use platform_api::{SubagentObservation, SubagentSpawnObserver, WorkflowQueryWatchdog};
 use protocol::{AgentId, SessionId};
 use std::path::PathBuf;
@@ -193,13 +193,13 @@ pub trait SubagentApiClient: Send + Sync {
         system: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError>;
+    ) -> Result<HistoryResponse, LlmError>;
 
     /// Issue one model round-trip over the streaming SSE transport, returning
-    /// the wire-decoded [`LlmEvent`] stream (yielding until `message_stop` or
+    /// the wire-decoded [`HistoryEvent`] stream (yielding until `message_stop` or
     /// `completed`). The [`crate::runner::run_subagent`] loop drains this
     /// through `crate::accumulator::accumulate_stream` into the same
-    /// `LlmResponse` the non-streaming path returns, so the turn loop is
+    /// `HistoryResponse` the non-streaming path returns, so the turn loop is
     /// transport-agnostic.
     ///
     /// The default wraps [`SubagentApiClient::messages_create`] in a synthetic,
@@ -219,7 +219,7 @@ pub trait SubagentApiClient: Send + Sync {
         messages: Vec<protocol::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = effort;
         let resp = self.messages_create(model, system, messages, tools).await?;
         let events = crate::accumulator::response_to_stream_events(resp);
@@ -240,7 +240,7 @@ pub trait SubagentApiClient: Send + Sync {
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = forced_tool;
         self.messages_create_stream(model, system, messages, tools, effort)
             .await
@@ -253,7 +253,7 @@ pub trait SubagentApiClient: Send + Sync {
     /// test mocks that only implement the profile-less method keep their legacy
     /// (default-provider) behavior unchanged (frozen-trait rule). The production
     /// orchestrator adapter OVERRIDES this to forward `profile` to
-    /// `DefaultLlmClient::messages_create(model, profile, …)`.
+    /// `ModelRuntime::messages_create(model, profile, …)`.
     async fn messages_create_in(
         &self,
         model: &str,
@@ -261,7 +261,7 @@ pub trait SubagentApiClient: Send + Sync {
         system: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         let _ = profile;
         self.messages_create(model, system, messages, tools).await
     }
@@ -280,7 +280,7 @@ pub trait SubagentApiClient: Send + Sync {
         messages: Vec<protocol::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = profile;
         self.messages_create_stream(model, system, messages, tools, effort)
             .await
@@ -300,7 +300,7 @@ pub trait SubagentApiClient: Send + Sync {
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = profile;
         self.messages_create_stream_forced(model, system, messages, tools, forced_tool, effort)
             .await
@@ -317,7 +317,7 @@ pub trait SubagentApiClient: Send + Sync {
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
         opts: SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         if opts.model_attempt.is_some() {
             return Err(LlmError::InvalidRequest {
                 message: "registered model attempt requires an opts-aware host adapter".into(),
@@ -339,7 +339,7 @@ pub trait SubagentApiClient: Send + Sync {
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
         opts: SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         if opts.model_attempt.is_some() {
             return Err(LlmError::InvalidRequest {
                 message: "registered model attempt requires an opts-aware host adapter".into(),
@@ -433,7 +433,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         system: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.inner
             .messages_create(model, system, messages, tools)
             .await
@@ -446,7 +446,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         messages: Vec<protocol::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.inner
             .messages_create_stream(model, system, messages, tools, effort)
             .await
@@ -460,7 +460,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.inner
             .messages_create_stream_forced(model, system, messages, tools, forced_tool, effort)
             .await
@@ -473,7 +473,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         system: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.inner
             .messages_create_in(model, profile, system, messages, tools)
             .await
@@ -487,7 +487,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         messages: Vec<protocol::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.inner
             .messages_create_stream_in(model, profile, system, messages, tools, effort)
             .await
@@ -502,7 +502,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.inner
             .messages_create_stream_forced_in(
                 model,
@@ -533,7 +533,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
         opts: SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.inner
             .messages_create_stream_in_opts(model, profile, system, messages, tools, effort, opts)
             .await
@@ -549,7 +549,7 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
         opts: SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.inner
             .messages_create_stream_forced_in_opts(
                 model,
@@ -749,9 +749,9 @@ mod tests {
             _system: Option<&str>,
             _messages: Vec<protocol::ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<LlmResponse, LlmError> {
+        ) -> Result<HistoryResponse, LlmError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(LlmResponse {
+            Ok(HistoryResponse {
                 id: "mock".into(),
                 model: "mock".into(),
                 content: Vec::new(),

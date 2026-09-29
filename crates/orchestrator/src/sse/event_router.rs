@@ -13,7 +13,7 @@
 
 use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use super::StreamingError;
-use llm_runtime::{ContentBlock as LlmContentBlock, ContentDelta, LlmEvent, Usage};
+use llm_runtime::{ContentBlock as LlmContentBlock, HistoryContentDelta, HistoryEvent, Usage};
 use platform_api::OutputStream;
 use protocol::{ContentBlock, ToolUseId};
 use serde_json::{json, Value};
@@ -55,7 +55,7 @@ pub enum RouterAction {
         /// Refusal `stop_details` (`{category, explanation}`) from the delta —
         /// drives the terminal refusal message's cyber/bio variant. `None` for
         /// non-refusal deltas.
-        stop_details: Option<llm_runtime::StopDetails>,
+        stop_details: Option<llm_runtime::HistoryStopDetails>,
     },
     /// `message_delta` arrived with usage but NO `stop_reason` (A3). The
     /// streaming loop records `output_tokens` and continues.
@@ -75,7 +75,7 @@ pub enum RouterAction {
 /// # Errors
 /// Propagates [`StreamingError`] from accumulator mutations.
 pub async fn dispatch_event(
-    event: LlmEvent,
+    event: HistoryEvent,
     acc: &mut BlockAccumulator,
     output: &Arc<dyn OutputStream>,
     // P2-04 (MessageDisplay `displayContent`): when a `MessageDisplay` hook is
@@ -90,8 +90,8 @@ pub async fn dispatch_event(
     match event {
         // Hosted search consumers inspect this semantic event separately. Main
         // conversation attribution remains in the terminal metadata snapshot.
-        LlmEvent::WebSearch { .. } => Ok(RouterAction::Continue),
-        LlmEvent::MessageStart { response } => {
+        HistoryEvent::WebSearch { .. } => Ok(RouterAction::Continue),
+        HistoryEvent::MessageStart { response } => {
             // No-op for state; the loop already knows the model + id from
             // the turn invocation. claude-code captures `partialMessage`
             // and `ttftMs` here; we don't need those at the M5-04 wire.
@@ -136,7 +136,7 @@ pub async fn dispatch_event(
             emit_usage_if_present(output, &response.usage).await;
             Ok(RouterAction::Continue)
         }
-        LlmEvent::ContentBlockStart {
+        HistoryEvent::ContentBlockStart {
             index,
             content_block,
         } => {
@@ -203,7 +203,7 @@ pub async fn dispatch_event(
             acc.start_block(index, kind)?;
             Ok(RouterAction::Continue)
         }
-        LlmEvent::ContentBlockDelta { index, delta } => {
+        HistoryEvent::ContentBlockDelta { index, delta } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             if output.wants_partial_stream_events() {
                 let delta_val = reconstruct_delta_json(&delta);
@@ -216,7 +216,7 @@ pub async fn dispatch_event(
                 output.emit_stream_event(&event_json, false).await;
             }
             match delta {
-                ContentDelta::TextDelta { text } => {
+                HistoryContentDelta::TextDelta { text } => {
                     acc.append_text(index, &text)?;
                     // Stream the token to the output sink RIGHT NOW.
                     // This is the key M5-04 behavior: tokens are
@@ -228,10 +228,10 @@ pub async fn dispatch_event(
                         output.emit_text(&text).await;
                     }
                 }
-                ContentDelta::InputJsonDelta { partial_json } => {
+                HistoryContentDelta::InputJsonDelta { partial_json } => {
                     acc.append_json(index, &partial_json)?;
                 }
-                ContentDelta::ThinkingDelta { thinking } => {
+                HistoryContentDelta::ThinkingDelta { thinking } => {
                     acc.append_text(index, &thinking)?;
                     // §0.7 "light up thinking/usage": stream the reasoning
                     // delta to the output sink RIGHT NOW, mirroring the
@@ -240,17 +240,18 @@ pub async fn dispatch_event(
                     // on the completed thinking block (`SignatureDelta`).
                     output.emit_thinking(&thinking, None).await;
                 }
-                ContentDelta::SignatureDelta { signature } => {
+                HistoryContentDelta::SignatureDelta { signature } => {
                     acc.set_signature(index, &signature)?;
                 }
-                ContentDelta::CitationsDelta { .. } | ContentDelta::ConnectorTextDelta { .. } => {
+                HistoryContentDelta::CitationsDelta { .. }
+                | HistoryContentDelta::ConnectorTextDelta { .. } => {
                     // Dropped at M5-04 boundary (parity with M5-02's
                     // `translate_response_blocks` which drops them).
                 }
             }
             Ok(RouterAction::Continue)
         }
-        LlmEvent::ContentBlockStop { index } => {
+        HistoryEvent::ContentBlockStop { index } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             if output.wants_partial_stream_events() {
                 let event_json = serde_json::to_string(&json!({
@@ -303,7 +304,7 @@ pub async fn dispatch_event(
                 CompletedBlock::Skipped => Ok(RouterAction::Continue),
             }
         }
-        LlmEvent::MessageDelta { delta, usage } => {
+        HistoryEvent::MessageDelta { delta, usage } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             if output.wants_partial_stream_events() {
                 let usage_val = usage.as_ref().map(|u| {
@@ -357,12 +358,12 @@ pub async fn dispatch_event(
                 Ok(RouterAction::Continue)
             }
         }
-        // NOTE: LlmEvent has no Ping or Error variants — errors surface as
+        // NOTE: HistoryEvent has no Ping or Error variants — errors surface as
         // Err(LlmError) from the stream, and keepalives are never forwarded
         // from the transport layer. The Completed short-circuit terminal is
         // treated as an end-of-stream signal (the full response is available
         // in the response field but we forward the already-accumulated blocks).
-        LlmEvent::MessageStop | LlmEvent::Completed { .. } => {
+        HistoryEvent::MessageStop | HistoryEvent::Completed { .. } => {
             // stream-json P4: emit message_stop for --include-partial-messages.
             if output.wants_partial_stream_events() {
                 let event_json = serde_json::to_string(&json!({
@@ -413,24 +414,24 @@ fn reconstruct_content_block_json(block: &LlmContentBlock) -> Value {
     }
 }
 
-/// Reconstruct the JSON value for a `ContentDelta`
+/// Reconstruct the JSON value for a `HistoryContentDelta`
 /// (used in the `content_block_delta` SSE event for P4 partial-messages).
-fn reconstruct_delta_json(delta: &ContentDelta) -> Value {
+fn reconstruct_delta_json(delta: &HistoryContentDelta) -> Value {
     match delta {
-        ContentDelta::TextDelta { text } => json!({"type": "text_delta", "text": text}),
-        ContentDelta::InputJsonDelta { partial_json } => {
+        HistoryContentDelta::TextDelta { text } => json!({"type": "text_delta", "text": text}),
+        HistoryContentDelta::InputJsonDelta { partial_json } => {
             json!({"type": "input_json_delta", "partial_json": partial_json})
         }
-        ContentDelta::ThinkingDelta { thinking } => {
+        HistoryContentDelta::ThinkingDelta { thinking } => {
             json!({"type": "thinking_delta", "thinking": thinking})
         }
-        ContentDelta::SignatureDelta { signature } => {
+        HistoryContentDelta::SignatureDelta { signature } => {
             json!({"type": "signature_delta", "signature": signature})
         }
-        ContentDelta::CitationsDelta { citation } => {
+        HistoryContentDelta::CitationsDelta { citation } => {
             json!({"type": "citations_delta", "citation": citation})
         }
-        ContentDelta::ConnectorTextDelta { connector_text } => {
+        HistoryContentDelta::ConnectorTextDelta { connector_text } => {
             json!({"type": "connector_text_delta", "connector_text": connector_text})
         }
     }
@@ -459,7 +460,7 @@ async fn emit_usage_if_present(output: &Arc<dyn OutputStream>, usage: &Usage) {
 mod tests {
     use super::*;
     use crate::test_support::MockOutputStream;
-    use llm_runtime::MessageDeltaPayload;
+    use llm_runtime::HistoryMessageDelta;
 
     #[tokio::test]
     async fn text_delta_emits_to_output_and_accumulates() {
@@ -468,7 +469,7 @@ mod tests {
         let out: Arc<dyn OutputStream> = mock.clone();
         // start a text block
         dispatch_event(
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index: 0,
                 content_block: LlmContentBlock::Text {
                     text: String::new(),
@@ -483,9 +484,9 @@ mod tests {
         .expect("start");
         // delta
         dispatch_event(
-            LlmEvent::ContentBlockDelta {
+            HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::TextDelta { text: "hi".into() },
+                delta: HistoryContentDelta::TextDelta { text: "hi".into() },
             },
             &mut acc,
             &out,
@@ -504,8 +505,8 @@ mod tests {
         let mock = Arc::new(MockOutputStream::new());
         let out: Arc<dyn OutputStream> = mock.clone();
         let action = dispatch_event(
-            LlmEvent::MessageDelta {
-                delta: MessageDeltaPayload {
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
@@ -530,7 +531,7 @@ mod tests {
         let mut acc = BlockAccumulator::new();
         let mock = Arc::new(MockOutputStream::new());
         let out: Arc<dyn OutputStream> = mock.clone();
-        let action = dispatch_event(LlmEvent::MessageStop, &mut acc, &out, false)
+        let action = dispatch_event(HistoryEvent::MessageStop, &mut acc, &out, false)
             .await
             .expect("ok");
         assert!(matches!(action, RouterAction::EndOfStream));
@@ -538,11 +539,11 @@ mod tests {
 
     #[tokio::test]
     async fn completed_event_ends_stream() {
-        use llm_runtime::{LlmResponse, Usage};
+        use llm_runtime::{HistoryResponse, Usage};
         let mut acc = BlockAccumulator::new();
         let mock = Arc::new(MockOutputStream::new());
         let out: Arc<dyn OutputStream> = mock.clone();
-        let resp = LlmResponse {
+        let resp = HistoryResponse {
             id: "msg_1".into(),
             model: "claude-opus-4-7".into(),
             content: vec![],
@@ -553,7 +554,7 @@ mod tests {
             provider_metadata: serde_json::Value::Null,
         };
         let action = dispatch_event(
-            LlmEvent::Completed {
+            HistoryEvent::Completed {
                 response: Box::new(resp),
             },
             &mut acc,

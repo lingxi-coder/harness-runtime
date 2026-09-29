@@ -82,8 +82,8 @@ use llm_runtime::oauth::anthropic::handle::OAuthHandle;
 use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
 use llm_runtime::oauth::openai as openai_oauth;
 use llm_runtime::{
-    Credential, CredentialConfig, CredentialProvider, CredentialScope, DefaultLlmClient,
-    ProviderId, Transport,
+    Credential, CredentialConfig, CredentialProvider, CredentialScope, ModelRuntime, ProviderId,
+    Transport,
 };
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
@@ -3138,17 +3138,21 @@ async fn build_mobile_inner_with_ask(
     // before assembling the client. This lets a native Keychain session restore
     // into the live provider graph on every engine boot.
     let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
+    let llm_transport: Arc<dyn Transport> = Arc::new(
+        platform_common::provider_transport()
+            .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
+    );
     let anthropic_oauth_config = ClaudeAiOAuthConfig::default_with_port(0);
     let anthropic_oauth_client = Arc::new(ClaudeAiOAuthClient::new(
         anthropic_oauth_config.clone(),
-        http.clone(),
+        llm_transport.clone(),
         credentials.clone(),
     ));
     let anthropic_oauth_handle = Arc::new(OAuthHandle::new(anthropic_oauth_client));
     let openai_oauth_config = openai_oauth::OpenAiOAuthConfig::default();
     let openai_oauth_client = Arc::new(openai_oauth::OpenAiOAuthClient::new(
         openai_oauth_config.clone(),
-        http.clone(),
+        llm_transport.clone(),
     ));
     let openai_oauth_handle = Arc::new(openai_oauth::OpenAiOAuthHandle::new(
         openai_oauth_client,
@@ -3166,7 +3170,7 @@ async fn build_mobile_inner_with_ask(
                 tokens.access_token,
                 tokens.refresh_token,
                 tokens.expires_at,
-                http.clone(),
+                llm_transport.clone(),
                 clock.clone(),
                 None,
                 Some(credentials.clone()),
@@ -3196,7 +3200,7 @@ async fn build_mobile_inner_with_ask(
             tokens.account_id,
             tokens.fedramp,
             tokens.email,
-            http.clone(),
+            llm_transport.clone(),
             clock.clone(),
             None,
             Some(credentials.clone()),
@@ -3223,9 +3227,7 @@ async fn build_mobile_inner_with_ask(
     // the ApiService got `None`. Mirrors the desktop root's single logEvent sink.
     let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
 
-    // Model networking is owned by the shared SDK.
-    //      Mobile uses the platform's `Arc<dyn HttpTransport>` wrapped in `DynHttp`
-    //      so the device backend is preserved; no desktop-only deps are pulled.
+    // Model and provider authentication networking share the SDK transport.
     //
     //      Phase 2a-mobile: assemble the FULL multi-provider client config
     //      (Anthropic + builtin catalog presets + settings `providers`) + chains
@@ -3234,10 +3236,6 @@ async fn build_mobile_inner_with_ask(
     //      through the provider credential ids below. Anthropic's API-key flag
     //      intentionally remains true when both credentials exist because the
     //      shared assembler gives API Key precedence over OAuth.
-    let llm_transport: Arc<dyn Transport> = Arc::new(
-        platform_common::provider_transport()
-            .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
-    );
     let stored_anthropic_key = credentials.get_anthropic_api_key().await.ok().flatten();
     let has_api_key = !cfg.api_key.trim().is_empty() || stored_anthropic_key.is_some();
     let has_anthropic_oauth = anthropic_oauth_state.is_some();
@@ -3320,7 +3318,7 @@ async fn build_mobile_inner_with_ask(
         .cloned()
         .unwrap_or_else(|| "firstParty".to_string());
 
-    let mut client = DefaultLlmClient::from_config(assembled.client_config)
+    let mut client = ModelRuntime::from_config(assembled.client_config)
         .map_err(|e| MobileBuildError::ApiBase(format!("llm-runtime config: {e}")))?;
     // §6.1: ONE composite credential slot for ALL providers. OAuth delegates
     // serve `anthropic-oauth` and `openai-chatgpt` without exposing tokens to
@@ -3382,7 +3380,7 @@ async fn build_mobile_inner_with_ask(
     };
 
     // 3c-T3: build the cost estimator from the assembled pricing catalog so
-    // LlmResponse.cost is populated on every successful decode. The catalog
+    // HistoryResponse.cost is populated on every successful decode. The catalog
     // already carries the built-in reference tiers + non-Anthropic preset rows +
     // any settings per-profile pricing overrides folded in by `assemble`. Unpriced
     // / unknown models leave cost = None (never an error).
@@ -3394,7 +3392,7 @@ async fn build_mobile_inner_with_ask(
     };
 
     // Audit #15: session CostTracker (desktop parity). The `cost_estimator` above
-    // populates per-response `LlmResponse.cost`; the CostTracker accumulates the
+    // populates per-response `HistoryResponse.cost`; the CostTracker accumulates the
     // running SESSION total the orchestrator records each turn. The persist
     // channel is DRAINED by a spawned recv-loop that discards each `CostState` —
     // byte-for-byte mirroring harness-runtime::desktop (which also just drains it): mobile

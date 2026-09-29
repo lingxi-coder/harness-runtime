@@ -1,60 +1,16 @@
-//! Claude.ai OAuth client skeleton.
-//!
-//! See spec §30. M1.19 ships the contract + PKCE/state generation + the
-//! authorize URL builder; browser-open + token exchange land with the
-//! cli-demo in Plan 16.
-
-use ::url::form_urlencoded;
+//! Host Anthropic login adapter: SDK authentication plus stored credentials and clock.
 
 use crate::oauth::anthropic::config::ClaudeAiOAuthConfig;
-use crate::oauth::anthropic::pkce::{generate_pkce, generate_state_token};
 use crate::oauth::anthropic::refresh::{AuthState, RefreshDriver};
-use platform_api::{Clock, HttpTransport};
-use protocol::{HttpMethod, HttpRequest, Secret};
+use lingxi_llm_client::auth::oauth::anthropic as sdk;
+use lingxi_llm_client::auth::oauth::pkce::{generate_pkce, generate_state_token};
+use lingxi_llm_client::transport::Transport;
+use platform_api::Clock;
+use protocol::Secret;
 use secret::CredentialManager;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
-
-/// Timeout for the token-exchange POST.
-///
-/// The oracle posts `TOKEN_URL` with `{timeout:30000}` (2.1.241, the `kba`
-/// token-exchange helper), so the deadline is 30 s — the old comment asserted
-/// 15 s and the constant matched the comment rather than the oracle.
-const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Render a non-2xx token-endpoint response as a diagnosable one-liner.
-///
-/// The raw body used to be inlined verbatim, which both leaked whatever the
-/// endpoint echoed back and buried the one field that identifies the failure.
-/// Anthropic's shape is `{"error":{"type":..,"message":..}}`; anything else
-/// falls back to a length-capped body so an unexpected shape is still legible.
-/// The full body is emitted at `debug` only.
-fn describe_token_error(status: u16, body: &str) -> String {
-    tracing::debug!(target: "lingxi::oauth", status, body, "token endpoint rejected the exchange");
-    let parsed: Option<serde_json::Value> = serde_json::from_str(body).ok();
-    let error = parsed.as_ref().and_then(|v| v.get("error"));
-    let kind = error
-        .and_then(|e| e.get("type").or_else(|| e.get("code")))
-        .and_then(serde_json::Value::as_str);
-    let message = error
-        .and_then(|e| e.get("message"))
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| parsed.as_ref()?.get("error_description")?.as_str());
-    match (kind, message) {
-        (Some(kind), Some(message)) => format!("status {status} [{kind}]: {message}"),
-        (Some(kind), None) => format!("status {status} [{kind}]"),
-        (None, Some(message)) => format!("status {status}: {message}"),
-        (None, None) => {
-            let mut snippet: String = body.chars().take(200).collect();
-            if body.chars().count() > 200 {
-                snippet.push('\u{2026}');
-            }
-            format!("status {status}: {snippet}")
-        }
-    }
-}
 
 /// OAuth-flow failures.
 #[derive(Debug, Error)]
@@ -93,81 +49,14 @@ pub enum OAuthError {
     },
 }
 
-/// Account record optionally embedded in the token-exchange response.
-///
-/// Field name is `email_address` here (the profile endpoint uses `email`).
-#[derive(Debug, Clone, Deserialize)]
-pub struct ExchangeAccount {
-    /// Stable account UUID.
-    #[serde(default)]
-    pub uuid: String,
-    /// User's email address.
-    #[serde(default)]
-    pub email_address: String,
-}
+pub use sdk::{AuthorizeOptions, ExchangeAccount, ExchangeOrganization};
 
-/// Organization record optionally embedded in the token-exchange response.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ExchangeOrganization {
-    /// Stable organization UUID.
-    #[serde(default)]
-    pub uuid: String,
-}
-
-/// Raw token-endpoint response shape for the `authorization_code` grant.
-///
-/// `account` / `organization` are optional: when present they let us resolve
-/// the user's email + org without a second `/profile` round-trip.
-#[derive(Debug, Clone, Deserialize)]
-struct ExchangeResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    #[serde(default)]
-    expires_in: u64,
-    scope: Option<String>,
-    account: Option<ExchangeAccount>,
-    organization: Option<ExchangeOrganization>,
-}
-
-/// JSON request body for the `authorization_code` grant. Field order matches
-/// claude-code's `exchangeCodeForTokens`.
-#[derive(Debug, Serialize)]
-struct ExchangeRequest<'a> {
-    grant_type: &'a str,
-    code: &'a str,
-    redirect_uri: &'a str,
-    client_id: &'a str,
-    code_verifier: &'a str,
-    state: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expires_in: Option<u64>,
-}
-
-/// Optional authorize-URL fields used by the public `auth login` and
-/// `setup-token` flows.
-#[derive(Debug, Clone, Default)]
-pub struct AuthorizeOptions {
-    /// Override the configured scopes (used by inference-only setup tokens).
-    pub scopes: Option<Vec<String>>,
-    /// Managed organization pin forwarded to the authorization service.
-    pub org_uuid: Option<String>,
-    /// Pre-populated account email.
-    pub login_hint: Option<String>,
-    /// Login method hint such as `sso`.
-    pub login_method: Option<String>,
-}
-
-/// The two authorize-URL variants of one grant, plus the PKCE verifier + state
-/// they share. See [`ClaudeAiOAuthClient::build_authorize_url_pair_with_options`].
+/// Both browser landing URLs for one PKCE grant.
 #[derive(Debug, Clone)]
 pub struct AuthorizeUrlPair {
-    /// Redirects to the loopback listener (`http://localhost:{port}/callback`).
     pub automatic_url: String,
-    /// Redirects to the hosted code page that displays `code#state` for paste.
     pub manual_url: String,
-    /// PKCE verifier for the eventual token exchange.
     pub verifier: String,
-    /// CSRF state token embedded in both URLs.
     pub state: String,
 }
 
@@ -199,22 +88,10 @@ impl Clock for SystemClock {
 /// Stateful client for the Claude.ai Authorization Code flow.
 pub struct ClaudeAiOAuthClient {
     config: ClaudeAiOAuthConfig,
-    http: Arc<dyn HttpTransport>,
+    http: Arc<dyn Transport>,
     #[allow(dead_code)]
     credentials: Arc<CredentialManager>,
     clock: Arc<dyn Clock>,
-}
-
-/// Percent-encode one query value the way `URLSearchParams` does.
-///
-/// The oracle assembles its authorize URL through `URLSearchParams` /
-/// `URL.searchParams.set`, which serialises as
-/// `application/x-www-form-urlencoded` — SPACE becomes `+`, not `%20`. The
-/// scope parameter is a space-joined list, so this is the one place the two
-/// encodings visibly disagree, and an authorization server that compares the
-/// scope string byte-for-byte would see a different value.
-fn form_encode(value: &str) -> String {
-    form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 impl ClaudeAiOAuthClient {
@@ -225,7 +102,7 @@ impl ClaudeAiOAuthClient {
     #[must_use]
     pub fn new(
         config: ClaudeAiOAuthConfig,
-        http: Arc<dyn HttpTransport>,
+        http: Arc<dyn Transport>,
         credentials: Arc<CredentialManager>,
     ) -> Self {
         Self {
@@ -252,7 +129,7 @@ impl ClaudeAiOAuthClient {
     /// Shared HTTP transport — used by the login flow for the optional profile
     /// fetch.
     #[must_use]
-    pub fn http(&self) -> Arc<dyn HttpTransport> {
+    pub fn http(&self) -> Arc<dyn Transport> {
         self.http.clone()
     }
 
@@ -338,37 +215,7 @@ impl ClaudeAiOAuthClient {
         state: &str,
         options: &AuthorizeOptions,
     ) -> String {
-        let scopes = options
-            .scopes
-            .as_ref()
-            .unwrap_or(&self.config.scopes)
-            .join(" ");
-        let mut url = format!(
-            "{}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
-            self.config.authorization_endpoint,
-            form_encode(&self.config.client_id),
-            form_encode(redirect_uri),
-            form_encode(&scopes),
-            form_encode(challenge),
-            form_encode(state),
-        );
-        if let Some(org_uuid) = options.org_uuid.as_deref() {
-            url.push_str("&orgUUID=");
-            url.push_str(&form_encode(org_uuid));
-        }
-        if let Some(login_hint) = options.login_hint.as_deref() {
-            url.push_str("&login_hint=");
-            url.push_str(&form_encode(login_hint));
-        }
-        if let Some(login_method) = options.login_method.as_deref() {
-            url.push_str("&login_method=");
-            // `form_encode`, like every other param: the oracle builds the whole
-            // URL through `URLSearchParams`, which is form-urlencoded. Latent
-            // today (the only value is "sso"), but the two encodings disagree on
-            // SPACE.
-            url.push_str(&form_encode(login_method));
-        }
-        url
+        sdk::format_authorize_url(&self.config, redirect_uri, challenge, state, options)
     }
 
     /// Exchange an authorization `code` for an access + refresh token pair.
@@ -418,58 +265,25 @@ impl ClaudeAiOAuthClient {
         redirect_uri: &str,
         expires_in: Option<u64>,
     ) -> Result<ExchangedTokens, OAuthError> {
-        let body = ExchangeRequest {
-            grant_type: "authorization_code",
+        let parsed = sdk::exchange_code(
+            self.http.as_ref(),
+            &self.config,
             code,
-            redirect_uri,
-            client_id: &self.config.client_id,
-            code_verifier: verifier,
+            verifier,
             state,
+            redirect_uri,
             expires_in,
-        };
-        let body = serde_json::to_string(&body)
-            .map_err(|e| OAuthError::TokenExchange(format!("encode: {e}")))?;
-        let req = HttpRequest {
-            method: HttpMethod::Post,
-            url: self.config.token_endpoint.clone(),
-            headers: vec![
-                ("content-type".into(), "application/json".into()),
-                ("accept".into(), "application/json".into()),
-            ],
-            body: Some(body),
-            body_bytes: None,
-            timeout: Some(EXCHANGE_TIMEOUT),
-        };
-        let resp = self
-            .http
-            .request(req)
-            .await
-            .map_err(|e| OAuthError::TokenExchange(format!("transport: {e}")))?;
-        let parsed: ExchangeResponse = match resp.status {
-            200 => serde_json::from_str(&resp.body)
-                .map_err(|e| OAuthError::TokenExchange(format!("decode: {e}")))?,
-            401 => {
-                return Err(OAuthError::TokenExchange(
-                    "Authentication failed: Invalid authorization code".into(),
-                ))
-            }
-            other => {
-                return Err(OAuthError::TokenExchange(describe_token_error(
-                    other, &resp.body,
-                )))
-            }
-        };
-
+        )
+        .await
+        .map_err(|e| OAuthError::TokenExchange(e.to_string()))?;
         let scopes = parsed.scope.as_deref().map_or_else(
             || self.config.scopes.clone(),
             |s| s.split_whitespace().map(str::to_string).collect::<Vec<_>>(),
         );
-        let expires_at = self.clock.now() + Duration::from_secs(parsed.expires_in);
-
         Ok(ExchangedTokens {
             access_token: Secret::new(parsed.access_token),
             refresh_token: parsed.refresh_token.map(Secret::new),
-            expires_at,
+            expires_at: self.clock.now() + Duration::from_secs(parsed.expires_in),
             scopes,
             account: parsed.account,
             organization: parsed.organization,
@@ -495,7 +309,7 @@ pub async fn init_refresh_driver(
     access_token: Secret<String>,
     refresh_token: Option<Secret<String>>,
     expires_at: SystemTime,
-    http: Arc<dyn platform_api::HttpTransport>,
+    http: Arc<dyn Transport>,
     clock: Arc<dyn platform_api::Clock>,
     bus: Option<Arc<telemetry::AnalyticsBus>>,
     credentials: Option<Arc<secret::CredentialManager>>,
@@ -527,12 +341,13 @@ mod exchange_tests {
     use crate::oauth::anthropic::testsupport::{
         mem_credential_manager, Canned, MemStorage, MockHttp, TestClock,
     };
+    use protocol::HttpMethod;
 
     fn client_with(http: Arc<MockHttp>, clock_secs: u64) -> ClaudeAiOAuthClient {
         let clock = TestClock::new(clock_secs);
         let cm = mem_credential_manager(MemStorage::new(), clock.clone());
         let cfg = ClaudeAiOAuthConfig::default_with_port(45_321);
-        ClaudeAiOAuthClient::new(cfg, http as Arc<dyn HttpTransport>, cm).with_clock(clock)
+        ClaudeAiOAuthClient::new(cfg, http as Arc<dyn Transport>, cm).with_clock(clock)
     }
 
     /// The two URLs MUST share one PKCE pair: a code obtained from the manual

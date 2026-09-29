@@ -67,123 +67,16 @@ use command_api::builtins::{
 use lingxi_core::settings::enterprise::{
     check_org_membership, ForceLoginOrgPin, OrgMembershipCheck,
 };
-use llm_runtime::copilot::{CopilotHttp, CopilotLogin, DeviceCodeResponse, PollOutcome};
+use llm_runtime::copilot::{CopilotLogin, DeviceCodeResponse, PollOutcome};
 use llm_runtime::oauth::openai as openai_oauth;
-use llm_runtime::transport::BoxFuture;
-use llm_runtime::LlmError;
-use platform_api::{AuthHandle, HttpTransport};
-use platform_posix::PosixHttp;
-use protocol::{HttpMethod, HttpRequest};
-use serde_json::Value;
+use llm_runtime::services::sdk;
+use platform_api::AuthHandle;
+use sdk::transport::Transport;
 use std::sync::Mutex as StdMutex;
 
 /// Credential id under which the GitHub Copilot OAuth token is stored. Matches
 /// the catalog preset's `profile_name`.
 const COPILOT_CREDENTIAL_ID: &str = "github-copilot";
-
-/// Host `CopilotHttp` over the production `PosixHttp` transport.
-pub struct PosixCopilotHttp {
-    http: PosixHttp,
-}
-
-impl PosixCopilotHttp {
-    /// Construct over a fresh `PosixHttp`.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            http: PosixHttp::new(),
-        }
-    }
-}
-
-impl Default for PosixCopilotHttp {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CopilotHttp for PosixCopilotHttp {
-    fn post_json<'a>(
-        &'a self,
-        url: &'a str,
-        body: &'a Value,
-    ) -> BoxFuture<'a, Result<Value, LlmError>> {
-        Box::pin(async move {
-            let payload = serde_json::to_string(body).map_err(|e| LlmError::Transport {
-                message: e.to_string(),
-            })?;
-            // protocol::HttpRequest: method is HttpMethod, headers are Vec pairs,
-            // body is Option<String>, plus `body_bytes` (raw body, unused here)
-            // and a timeout field (both adapted to main's wider transport shape).
-            let req = HttpRequest {
-                method: HttpMethod::Post,
-                url: url.to_string(),
-                headers: vec![
-                    ("Accept".to_string(), "application/json".to_string()),
-                    ("Content-Type".to_string(), "application/json".to_string()),
-                    ("User-Agent".to_string(), "LingXi-Code".to_string()),
-                ],
-                body: Some(payload),
-                body_bytes: None,
-                timeout: None,
-            };
-            let resp = self
-                .http
-                .request(req)
-                .await
-                .map_err(|e| LlmError::Transport {
-                    message: e.to_string(),
-                })?;
-            serde_json::from_str(&resp.body).map_err(|e| LlmError::Transport {
-                message: format!("copilot json: {e}"),
-            })
-        })
-    }
-
-    fn get_json<'a>(
-        &'a self,
-        url: &'a str,
-        headers: &'a [(&'a str, String)],
-    ) -> BoxFuture<'a, Result<Value, LlmError>> {
-        Box::pin(async move {
-            // Caller headers win; only fill Accept/User-Agent defaults the seam
-            // requires when the caller didn't supply them — the Copilot token
-            // exchange sends its own editor `User-Agent`, which must not be
-            // shadowed by a duplicate (GitHub rejects the unrecognized one).
-            let mut hdrs: Vec<(String, String)> = headers
-                .iter()
-                .map(|(k, v)| ((*k).to_string(), v.clone()))
-                .collect();
-            fn has(hdrs: &[(String, String)], name: &str) -> bool {
-                hdrs.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
-            }
-            if !has(&hdrs, "Accept") {
-                hdrs.push(("Accept".to_string(), "application/json".to_string()));
-            }
-            if !has(&hdrs, "User-Agent") {
-                hdrs.push(("User-Agent".to_string(), "LingXi-Code".to_string()));
-            }
-            let req = HttpRequest {
-                method: HttpMethod::Get,
-                url: url.to_string(),
-                headers: hdrs,
-                body: None,
-                body_bytes: None,
-                timeout: None,
-            };
-            let resp = self
-                .http
-                .request(req)
-                .await
-                .map_err(|e| LlmError::Transport {
-                    message: e.to_string(),
-                })?;
-            serde_json::from_str(&resp.body).map_err(|e| LlmError::Transport {
-                message: format!("copilot json: {e}"),
-            })
-        })
-    }
-}
 
 /// Sleep port so the poll loop is testable without real time.
 #[async_trait]
@@ -237,9 +130,9 @@ pub fn native_browser_opener() -> Arc<dyn Fn(&str) + Send + Sync> {
 /// the sleep port, and the keychain. `begin` returns the displayable step (and
 /// caches the `DeviceCodeResponse`); `poll_to_completion` runs the SlowDown/Pending
 /// loop and stores the token on success.
-pub struct EngineCopilotConnect<H: CopilotHttp> {
+pub struct EngineCopilotConnect {
     credentials: Arc<CredentialManager>,
-    login: CopilotLogin<H>,
+    login: CopilotLogin,
     sleeper: Arc<dyn PollSleeper>,
     cached: StdMutex<Option<DeviceCodeResponse>>,
     /// Best-effort browser opener invoked by [`Self::begin`] with the GitHub
@@ -249,28 +142,29 @@ pub struct EngineCopilotConnect<H: CopilotHttp> {
     browser: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
-impl EngineCopilotConnect<PosixCopilotHttp> {
-    /// Production constructor: device-flow over `PosixHttp`, real `tokio` sleeps,
-    /// and a native browser opener so `begin()` launches the GitHub sign-in page.
+impl EngineCopilotConnect {
+    /// Production constructor over the shared SDK HTTP transport.
     #[must_use]
-    pub fn new(credentials: Arc<CredentialManager>) -> Self {
+    pub fn new(credentials: Arc<CredentialManager>, transport: Arc<dyn Transport>) -> Self {
         Self::with_parts(
             credentials,
-            CopilotLogin::new(PosixCopilotHttp::new()),
+            CopilotLogin::new(
+                transport,
+                llm_runtime::copilot::login::copilot_client_id(),
+                llm_runtime::copilot::COPILOT_USER_AGENT,
+            ),
             Arc::new(TokioSleeper),
         )
         .with_browser(native_browser_opener())
     }
-}
 
-impl<H: CopilotHttp> EngineCopilotConnect<H> {
     /// Construct over an injected `CopilotLogin` + sleeper (test seam). The
     /// browser opener defaults to a no-op; production wires one via
     /// [`Self::with_browser`].
     #[must_use]
     pub fn with_parts(
         credentials: Arc<CredentialManager>,
-        login: CopilotLogin<H>,
+        login: CopilotLogin,
         sleeper: Arc<dyn PollSleeper>,
     ) -> Self {
         Self {
@@ -292,7 +186,7 @@ impl<H: CopilotHttp> EngineCopilotConnect<H> {
 }
 
 #[async_trait]
-impl<H: CopilotHttp> CopilotConnectDriver for EngineCopilotConnect<H> {
+impl CopilotConnectDriver for EngineCopilotConnect {
     async fn begin(&self, domain: Option<&str>) -> Result<CopilotConnectStep, ConnectError> {
         let dc = self
             .login
@@ -817,22 +711,23 @@ mod tests {
     }
 
     use command_api::builtins::CopilotConnectDriver;
-    use llm_runtime::copilot::{CopilotHttp, CopilotLogin, COPILOT_CLIENT_ID};
-    use llm_runtime::transport::BoxFuture;
-    use llm_runtime::LlmError;
+    use llm_runtime::copilot::{CopilotLogin, COPILOT_CLIENT_ID};
+    use sdk::transport::{
+        HttpRequest as SdkHttpRequest, HttpResponse as SdkHttpResponse, StreamResponse, Transport,
+    };
     use serde_json::{json, Value};
 
-    struct ScriptedCopilotHttp {
+    struct ScriptedCopilotTransport {
         device: Value,
         tokens: StdMutex<std::collections::VecDeque<Value>>,
     }
-    impl CopilotHttp for ScriptedCopilotHttp {
-        fn post_json<'a>(
-            &'a self,
-            url: &'a str,
-            _body: &'a Value,
-        ) -> BoxFuture<'a, Result<Value, LlmError>> {
-            let v = if url.contains("device/code") {
+    #[async_trait]
+    impl Transport for ScriptedCopilotTransport {
+        async fn send(
+            &self,
+            request: SdkHttpRequest,
+        ) -> Result<StreamResponse, sdk::protocol::LlmError> {
+            let v = if request.url.contains("device/code") {
                 self.device.clone()
             } else {
                 self.tokens
@@ -841,7 +736,12 @@ mod tests {
                     .pop_front()
                     .unwrap_or_else(|| json!({ "error": "expired_token" }))
             };
-            Box::pin(async move { Ok(v) })
+            Ok(SdkHttpResponse {
+                status: 200,
+                headers: vec![],
+                body: serde_json::to_vec(&v).unwrap().into(),
+            }
+            .into())
         }
     }
 
@@ -855,12 +755,16 @@ mod tests {
         cm: Arc<CredentialManager>,
         device: Value,
         tokens: Vec<Value>,
-    ) -> EngineCopilotConnect<ScriptedCopilotHttp> {
-        let http = ScriptedCopilotHttp {
+    ) -> EngineCopilotConnect {
+        let http = ScriptedCopilotTransport {
             device,
             tokens: StdMutex::new(tokens.into_iter().collect()),
         };
-        EngineCopilotConnect::with_parts(cm, CopilotLogin::new(http), Arc::new(InstantSleeper))
+        EngineCopilotConnect::with_parts(
+            cm,
+            CopilotLogin::new(Arc::new(http), COPILOT_CLIENT_ID, "LingXi-Code"),
+            Arc::new(InstantSleeper),
+        )
     }
 
     #[tokio::test]

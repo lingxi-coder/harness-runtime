@@ -26,7 +26,7 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use hooks::{HookPromptRunner, PromptHookError, PromptHookRequest};
-use llm_runtime::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
+use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
 use protocol::{ConversationMessage, MessageId};
 
 use crate::conversation::{ConversationOrchestrator, OrchestratorApiClient};
@@ -135,7 +135,7 @@ impl ApiClientHookPromptRunner {
     /// `extractTextContent(response.message.content)`; `execPromptHook.ts:105`).
     /// `Text` and `ConnectorText` blocks contribute; tool-use / reasoning blocks
     /// are ignored, matching `extractTextContent`'s text-only projection.
-    fn extract_text(response: &LlmResponse) -> String {
+    fn extract_text(response: &HistoryResponse) -> String {
         let mut out = String::new();
         for block in &response.content {
             match block {
@@ -477,7 +477,7 @@ fn bound_hook_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_runtime::{LlmResponse, Usage};
+    use llm_runtime::{HistoryResponse, Usage};
     use std::sync::Mutex;
 
     /// One recorded `messages_create` call: `(model, profile, system, messages)`.
@@ -497,8 +497,8 @@ mod tests {
         }
     }
 
-    fn make_text_response(body: &str) -> LlmResponse {
-        LlmResponse {
+    fn make_text_response(body: &str) -> HistoryResponse {
+        HistoryResponse {
             id: "msg_1".into(),
             model: "claude-haiku-4-5".into(),
             content: vec![LlmContentBlock::Text {
@@ -516,7 +516,7 @@ mod tests {
     /// Records each `messages_create` call and returns a scripted response.
     struct MockApi {
         recorded: Mutex<Vec<RecordedCall>>,
-        response: Mutex<Option<Result<LlmResponse, LlmError>>>,
+        response: Mutex<Option<Result<HistoryResponse, LlmError>>>,
     }
     impl MockApi {
         fn text(model_echo: &str, body: &str) -> Arc<Self> {
@@ -536,7 +536,7 @@ mod tests {
             system: Option<&str>,
             msgs: Vec<ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<LlmResponse, LlmError> {
+        ) -> Result<HistoryResponse, LlmError> {
             self.recorded.lock().unwrap().push((
                 model.to_string(),
                 profile.map(str::to_owned),

@@ -6,7 +6,7 @@
 
 use crate::conversation::OrchestratorApiClient;
 use async_trait::async_trait;
-use llm_runtime::{ContentBlock as LlmContentBlock, LlmError, LlmResponse, Usage};
+use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError, Usage};
 use platform_api::{CostSnapshot, OutputEvent, OutputStream};
 use protocol::ConversationMessage;
 use std::collections::VecDeque;
@@ -65,7 +65,7 @@ pub fn with_scripted_compactor(
 /// `LlmError::Transport { message: "mock script exhausted" }` — synthetic
 /// upstream failure so the orchestrator's max-turns guard is exercised.
 pub struct MockApiClient {
-    queue: Arc<Mutex<VecDeque<LlmResponse>>>,
+    queue: Arc<Mutex<VecDeque<HistoryResponse>>>,
     captured_msgs: Arc<Mutex<Vec<Vec<ConversationMessage>>>>,
     captured_systems: Arc<Mutex<Vec<Option<String>>>>,
     captured_tools: Arc<Mutex<Vec<Vec<serde_json::Value>>>>,
@@ -114,7 +114,7 @@ pub struct MockPrewarmCall {
 impl MockApiClient {
     /// Construct a mock with a script of `responses` returned in order.
     #[must_use]
-    pub fn new(responses: Vec<LlmResponse>) -> Self {
+    pub fn new(responses: Vec<HistoryResponse>) -> Self {
         Self {
             queue: Arc::new(Mutex::new(VecDeque::from(responses))),
             captured_msgs: Arc::new(Mutex::new(Vec::new())),
@@ -219,7 +219,7 @@ impl OrchestratorApiClient for MockApiClient {
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.captured_msgs.lock().await.push(msgs);
         self.captured_systems
             .lock()
@@ -245,7 +245,7 @@ impl OrchestratorApiClient for MockApiClient {
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         initial_consecutive_overloaded: u8,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.captured_seeds
             .lock()
             .await
@@ -302,15 +302,15 @@ impl OrchestratorApiClient for MockApiClient {
     }
 }
 
-/// Tiny helper for tests to construct a fully populated `LlmResponse`
+/// Tiny helper for tests to construct a fully populated `HistoryResponse`
 /// without typing out every field. Defaults: zero usage, no thinking,
 /// caller picks the content blocks + `stop_reason`.
 #[must_use]
 pub fn mock_message_response(
     content: Vec<LlmContentBlock>,
     stop_reason: Option<&str>,
-) -> LlmResponse {
-    LlmResponse {
+) -> HistoryResponse {
+    HistoryResponse {
         id: "msg_mock".to_string(),
         model: "claude-opus-4-7".to_string(),
         content,

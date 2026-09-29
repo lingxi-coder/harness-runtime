@@ -123,7 +123,7 @@ impl crate::conversation::StreamingApiClient for PatchBarrierStream {
         _: Vec<ConversationMessage>,
         _: Vec<serde_json::Value>,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, LlmError>>,
+        futures::stream::BoxStream<'static, Result<llm_runtime::HistoryEvent, LlmError>>,
         LlmError,
     > {
         use crate::test_support_stream::{content_block_start_tool_use, input_json_delta};
@@ -537,7 +537,7 @@ async fn abort_at_owned_cost_wait<T>(
     );
 }
 
-fn batched_orchestrator(response: llm_runtime::LlmResponse) -> ConversationOrchestrator {
+fn batched_orchestrator(response: llm_runtime::HistoryResponse) -> ConversationOrchestrator {
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![response])),
@@ -697,7 +697,7 @@ impl OrchestratorApiClient for VisionApi {
         _system: Option<&str>,
         _msgs: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, LlmError> {
         Err(LlmError::Transport {
             message: "main request must not run before vision cancellation".into(),
         })
@@ -979,7 +979,7 @@ fn refusing_durability(session_id: SessionId) -> Arc<CostTracker> {
     )
 }
 
-fn answer_response(text: &str) -> llm_runtime::LlmResponse {
+fn answer_response(text: &str) -> llm_runtime::HistoryResponse {
     let mut response = mock_message_response(
         vec![LlmContentBlock::Text {
             text: text.into(),
@@ -1098,7 +1098,7 @@ impl OrchestratorApiClient for BlockingVisionApi {
         _system: Option<&str>,
         _msgs: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, LlmError> {
         Err(LlmError::Transport {
             message: "the main request must not run: vision is cancelled first".into(),
         })

@@ -6,7 +6,7 @@
 //! `tool_use` block STARTING flips that flag, this also guarantees a
 //! non-idempotent tool that already started is never re-run.
 
-use llm_runtime::{LlmError, LlmEvent};
+use llm_runtime::{HistoryEvent, LlmError};
 use orchestrator::test_support::{
     content_block_start_text, content_block_start_thinking, content_block_start_tool_use,
     input_json_delta, message_start, message_stop, text_delta, thinking_delta, MockApiClient,
@@ -35,7 +35,7 @@ fn orch(
     )
 }
 
-fn end_turn(index_after: u32) -> Vec<Result<LlmEvent, LlmError>> {
+fn end_turn(index_after: u32) -> Vec<Result<HistoryEvent, LlmError>> {
     vec![
         Ok(message_start("m2", "claude-opus-4-7")),
         Ok(content_block_start_text(index_after)),
@@ -50,7 +50,7 @@ fn end_turn(index_after: u32) -> Vec<Result<LlmEvent, LlmError>> {
 /// succeed on the second open. `stream()` is called TWICE.
 #[tokio::test]
 async fn thinking_only_transient_reset_retries_and_succeeds() {
-    let failing: Vec<Result<LlmEvent, LlmError>> = vec![
+    let failing: Vec<Result<HistoryEvent, LlmError>> = vec![
         Ok(message_start("m1", "claude-opus-4-7")),
         Ok(content_block_start_thinking(0)),
         Ok(thinking_delta(0, "pondering")),
@@ -104,7 +104,7 @@ async fn thinking_only_transient_reset_retries_and_succeeds() {
 /// gracefully as `model_error` and `stream()` is called exactly ONCE.
 #[tokio::test]
 async fn tool_started_then_transient_reset_does_not_retry() {
-    let failing: Vec<Result<LlmEvent, LlmError>> = vec![
+    let failing: Vec<Result<HistoryEvent, LlmError>> = vec![
         Ok(message_start("m1", "claude-opus-4-7")),
         Ok(content_block_start_tool_use(
             0,
@@ -162,7 +162,7 @@ async fn thinking_only_non_transient_error_does_not_stream_retry() {
     // Malformed input JSON on a tool block → StreamingProtocol error, which is
     // NOT transient. Even though only thinking-ish content preceded, no
     // streaming re-open happens.
-    let failing: Vec<Result<LlmEvent, LlmError>> = vec![
+    let failing: Vec<Result<HistoryEvent, LlmError>> = vec![
         Ok(message_start("m1", "claude-opus-4-7")),
         Ok(content_block_start_thinking(0)),
         Ok(thinking_delta(0, "pondering")),

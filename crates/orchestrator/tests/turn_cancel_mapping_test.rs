@@ -22,7 +22,7 @@
 //! assumptions.
 
 use async_trait::async_trait;
-use llm_runtime::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
+use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
 use orchestrator::test_support::{
     mock_message_response, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -55,7 +55,7 @@ impl OrchestratorApiClient for CancelsThenSucceeds {
         _system: Option<&str>,
         _msgs: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Fire the cancel BEFORE answering, so the step resolves into an
         // already-cancelled turn.
@@ -191,7 +191,7 @@ fn a_pre_cancelled_streaming_turn_emits_no_end_event() {
                 .build()
                 .expect("runtime")
                 .block_on(async {
-                    fn round() -> Vec<llm_runtime::LlmEvent> {
+                    fn round() -> Vec<llm_runtime::HistoryEvent> {
                         scripted![
                             message_start("m1", "claude-opus-4-7"),
                             content_block_start_text(0),

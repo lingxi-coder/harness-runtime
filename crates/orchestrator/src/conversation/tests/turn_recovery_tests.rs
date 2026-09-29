@@ -114,7 +114,7 @@ impl OrchestratorApiClient for BlockingPrewarmApiClient {
         _system: Option<&str>,
         _msgs: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         Err(LlmError::Transport {
             message: "blocking prewarm api does not serve messages_create".into(),
         })

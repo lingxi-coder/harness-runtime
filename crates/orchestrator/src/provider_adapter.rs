@@ -12,7 +12,7 @@ use crate::conversation::{OrchestratorApiClient, StreamingApiClient};
 use crate::model::rate_limit::{RateLimitInfo, RawUtilization};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use llm_runtime::{LlmError, LlmEvent, LlmResponse, MediaDelegationAccounting};
+use llm_runtime::{HistoryEvent, HistoryResponse, LlmError, MediaDelegationAccounting};
 use protocol::ConversationMessage;
 use std::sync::Arc;
 
@@ -194,7 +194,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             return self
                 .service
@@ -225,7 +225,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         profile: Option<&str>,
         system: &str,
         msgs: Vec<ConversationMessage>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         let stream = self.service.stream_json_schema_with_thinking(
             model, profile, Some(system), msgs,
             serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"},"reason":{"type":"string"},"impossible":{"type":"boolean"}},"required":["ok","reason"],"additionalProperties":false}),
@@ -270,10 +270,10 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         context_hint: Option<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let mut request = self.build_scheduled_request(settings, system, msgs, tools, None)?;
-            request.context_hint = context_hint;
+            request.input.controls.anthropic.context_hint = context_hint;
             return self.service.execute_side_query_request(request).await;
         }
         self.service
@@ -289,7 +289,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         max_tokens: u32,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let request =
                 self.build_scheduled_request(settings, system, msgs, tools, Some(max_tokens))?;
@@ -311,7 +311,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         fallback_model: Option<&str>,
         is_subscriber: bool,
         is_enterprise: bool,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let request = self.build_scheduled_request(settings, system, msgs, tools, None)?;
 
@@ -339,7 +339,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         initial_consecutive_overloaded: u8,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let request = self.build_scheduled_request(settings, system, msgs, tools, None)?;
 
@@ -865,7 +865,7 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.service
             .messages_create(model, None, system, messages, tools)
             .await
@@ -878,7 +878,7 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         // Subagent stream: fast mode is a main-loop-only tier, so `speed=None`.
         self.service
             .stream(model, None, system, messages, tools, effort, None)
@@ -893,7 +893,7 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.service
             .stream_forced(model, None, system, messages, tools, forced_tool, effort)
             .await
@@ -913,7 +913,7 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.service
             .messages_create(model, profile, system, messages, tools)
             .await
@@ -927,7 +927,7 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         // Subagent stream: fast mode is a main-loop-only tier, so `speed=None`.
         self.service
             .stream(model, profile, system, messages, tools, effort, None)
@@ -943,7 +943,7 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.service
             .stream_forced(model, profile, system, messages, tools, forced_tool, effort)
             .await
@@ -969,7 +969,7 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
         opts: agent::api::SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.service
             .stream_with_attempt_opts(
                 model,
@@ -996,7 +996,7 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
         opts: agent::api::SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.service
             .stream_with_attempt_opts(
                 model,
@@ -1023,7 +1023,7 @@ impl StreamingApiClient for ProviderApiAdapter {
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let request = self.build_scheduled_request(settings, system, messages, tools, None)?;
             return self.service.stream_request(request).await;
@@ -1103,7 +1103,7 @@ mod tests {
     }
     use super::*;
     use llm_runtime::model::user_agent::UserAgentEnv;
-    use llm_runtime::DefaultLlmClient;
+    use llm_runtime::ModelRuntime;
     use llm_runtime::{
         ApiService, AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig,
         LlmError, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
@@ -1252,7 +1252,7 @@ mod tests {
     fn make_adapter(transport: Arc<dyn Transport>) -> ProviderApiAdapter {
         std::env::set_var("ADAPTER_TEST_KEY", "test-key");
         let client = Arc::new(
-            DefaultLlmClient::from_config(ClientConfig {
+            ModelRuntime::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
                     wire_profile: None,
                     regions: llm_runtime::Region::all(),
@@ -1878,7 +1878,7 @@ mod tests {
         );
     }
 
-    // ── 3c-T3: LlmResponse.cost populated from cost estimator ─────────────────
+    // ── 3c-T3: HistoryResponse.cost populated from cost estimator ─────────────────
 
     fn make_adapter_with_estimator(transport: Arc<dyn Transport>) -> ProviderApiAdapter {
         use crate::cost_wiring::llm_catalog_from_cost;
@@ -1891,7 +1891,7 @@ mod tests {
         let estimator = Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated));
 
         let client = Arc::new(
-            DefaultLlmClient::from_config(ClientConfig {
+            ModelRuntime::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
                     wire_profile: None,
                     regions: llm_runtime::Region::all(),
@@ -1997,7 +1997,7 @@ mod tests {
         let estimator = Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated));
 
         let client = Arc::new(
-            DefaultLlmClient::from_config(ClientConfig {
+            ModelRuntime::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
                     wire_profile: None,
                     regions: llm_runtime::Region::all(),
@@ -2360,7 +2360,7 @@ mod tests {
             wire.regions = sdk::protocol::Region::all();
             profile.wire_profile = Some(wire);
             let client = Arc::new(
-                DefaultLlmClient::from_config(ClientConfig {
+                ModelRuntime::from_config(ClientConfig {
                     providers: vec![profile],
                 })
                 .unwrap(),
@@ -2479,7 +2479,7 @@ mod tests {
             wire.regions = sdk::protocol::Region::all();
             profile.wire_profile = Some(wire);
             let client = Arc::new(
-                DefaultLlmClient::from_config(ClientConfig {
+                ModelRuntime::from_config(ClientConfig {
                     providers: vec![profile],
                 })
                 .unwrap(),
@@ -2549,29 +2549,24 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
     ) -> Result<tool_api::HostedSearchOutput, tool_api::HostedSearchError> {
         use futures::StreamExt;
         use llm_runtime::services::sdk;
-        use llm_runtime::{ContentBlock, LlmEvent};
-        let mut request = llm_runtime::LlmRequest::new(input.model);
+        use llm_runtime::HistoryEvent;
+        let mut request = llm_runtime::LlmRequest::new(input.model).with_user_text(format!(
+            "Perform a web search for the query: {}",
+            input.query
+        ));
         request.profile = input.profile;
-        request.max_tokens = Some(4096);
-        request.query_source = Some("web_search_tool".into());
-        request.system = vec![llm_runtime::SystemBlock {
+        request.input.max_tokens = Some(4096);
+        request.execution.query_source = Some("web_search_tool".into());
+        request.input.system = vec![sdk::protocol::SystemBlock {
             text: "You are an assistant for performing a web search tool use".into(),
-            cache_control: None,
         }];
-        request.messages = vec![llm_runtime::Message {
-            role: "user".into(),
-            content: vec![ContentBlock::Text {
-                text: format!("Perform a web search for the query: {}", input.query),
-                cache_control: None,
-            }],
-        }];
-        request.hosted_tools = vec![sdk::protocol::HostedTool::WebSearch(
+        request.input.hosted_tools = vec![sdk::protocol::HostedTool::WebSearch(
             sdk::protocol::WebSearchConfig {
                 allowed_domains: input.allowed_domains,
                 blocked_domains: input.blocked_domains,
                 max_uses: self
                     .service
-                    .hosted_search_max_uses(&request.model, request.profile.as_deref()),
+                    .hosted_search_max_uses(&request.input.model, request.profile.as_deref()),
             },
         )];
         let usage = Arc::new(std::sync::Mutex::new(llm_runtime::Usage::default()));
@@ -2591,7 +2586,7 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
             .await
             .map_err(hosted_search_error)?
             .inspect(move |event| match event {
-                Ok(LlmEvent::WebSearch { result }) => {
+                Ok(HistoryEvent::WebSearch { result }) => {
                     observed_citations
                         .lock()
                         .expect("search citations")
@@ -2603,7 +2598,7 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
                         let _ = progress.send(());
                     }
                 }
-                Ok(LlmEvent::ContentBlockStart { content_block, .. }) => {
+                Ok(HistoryEvent::ContentBlockStart { content_block, .. }) => {
                     if sdk::hosted_search::search_started(
                         &serde_json::to_value(content_block).unwrap_or_default(),
                     ) {
@@ -2611,10 +2606,11 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
                         let _ = progress.send(());
                     }
                 }
-                Ok(LlmEvent::MessageStart { response }) | Ok(LlmEvent::Completed { response }) => {
+                Ok(HistoryEvent::MessageStart { response })
+                | Ok(HistoryEvent::Completed { response }) => {
                     *u.lock().expect("search usage") = response.usage.clone();
                 }
-                Ok(LlmEvent::MessageDelta {
+                Ok(HistoryEvent::MessageDelta {
                     usage: Some(usage), ..
                 }) => {
                     *u.lock().expect("search usage") = usage.clone();

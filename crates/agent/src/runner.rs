@@ -22,7 +22,7 @@
 
 use crate::context::SubagentContext;
 use futures::StreamExt;
-use llm_runtime::{LlmError, LlmEvent};
+use llm_runtime::{HistoryEvent, LlmError};
 use platform_api::WorkflowQueryWatchdog;
 use protocol::{AgentId, ConversationMessage, MessageId};
 use serde::{Deserialize, Serialize};
@@ -241,9 +241,9 @@ where
 /// `next()` starts a fresh timeout, so total stream lifetime is unbounded while
 /// progress continues. The wrapper yields one typed timeout error then closes.
 fn with_workflow_stream_watchdog(
-    stream: futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>>,
+    stream: futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>,
     watchdog: Option<WorkflowQueryWatchdog>,
-) -> futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>> {
+) -> futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>> {
     let Some(policy) = watchdog else {
         return stream;
     };
@@ -1773,12 +1773,12 @@ async fn run_subagent_loop(
                                     )
                                 };
                                 let has_server_content = match event {
-                                    Ok(LlmEvent::ContentBlockStart { content_block, .. }) => {
-                                        !local_content(content_block)
-                                    }
+                                    Ok(HistoryEvent::ContentBlockStart {
+                                        content_block, ..
+                                    }) => !local_content(content_block),
                                     Ok(
-                                        LlmEvent::MessageStart { response }
-                                        | LlmEvent::Completed { response },
+                                        HistoryEvent::MessageStart { response }
+                                        | HistoryEvent::Completed { response },
                                     ) => response.content.iter().any(|block| !local_content(block)),
                                     _ => false,
                                 };

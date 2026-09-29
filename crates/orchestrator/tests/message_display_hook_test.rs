@@ -176,7 +176,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
     }
 }
 
-fn single_text_turn() -> Vec<llm_runtime::LlmEvent> {
+fn single_text_turn() -> Vec<llm_runtime::HistoryEvent> {
     scripted![
         message_start("msg_01", "claude-opus-4-7"),
         content_block_start_text(0),

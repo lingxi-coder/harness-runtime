@@ -1,8 +1,8 @@
-use llm_runtime::client::DefaultLlmClient;
+use llm_runtime::client::ModelRuntime;
 use llm_runtime::{
     AuthStrategy, Capabilities, ClientConfig, CredentialConfig, LlmError, LlmRequest, ModelProfile,
     PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, ProviderStreamTransport,
-    ReasoningConfig, ResponseFormat,
+    ReasoningConfig,
 };
 
 #[tokio::test]
@@ -41,7 +41,7 @@ async fn client_builds_routes_from_config_and_lists_models() {
         }],
     };
 
-    let client = DefaultLlmClient::from_config(config).unwrap();
+    let client = ModelRuntime::from_config(config).unwrap();
     assert_eq!(client.available_models().len(), 1);
     assert!(client.prepare(&LlmRequest::new("fast")).await.is_ok());
 }
@@ -82,7 +82,7 @@ async fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
         }],
     };
 
-    let client = DefaultLlmClient::from_config(config).unwrap();
+    let client = ModelRuntime::from_config(config).unwrap();
     let prepared = client.prepare(&LlmRequest::new("fast")).await.unwrap();
 
     assert_eq!(prepared.route.resolved_route.profile_name, "openai");
@@ -95,7 +95,7 @@ async fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
 
 #[tokio::test]
 async fn provider_qualified_ui_ref_is_normalized_before_openai_compatible_encoding() {
-    let client = DefaultLlmClient::from_config(ClientConfig {
+    let client = ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: lingxi_llm_client::protocol::Region::all(),
@@ -152,7 +152,7 @@ async fn provider_qualified_ui_ref_is_normalized_before_openai_compatible_encodi
 
 #[tokio::test]
 async fn slash_bearing_openrouter_wire_model_is_not_mistaken_for_a_ui_ref() {
-    let client = DefaultLlmClient::from_config(ClientConfig {
+    let client = ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: lingxi_llm_client::protocol::Region::all(),
@@ -236,7 +236,7 @@ fn anthropic_fast_profile(profile_name: &str, base_url: &str) -> ProviderProfile
 
 #[tokio::test]
 async fn fast_speed_survives_only_on_the_builtin_anthropic_route() {
-    let direct = DefaultLlmClient::from_config(ClientConfig {
+    let direct = ModelRuntime::from_config(ClientConfig {
         providers: vec![anthropic_fast_profile(
             "anthropic",
             "https://api.anthropic.com",
@@ -244,11 +244,11 @@ async fn fast_speed_survives_only_on_the_builtin_anthropic_route() {
     })
     .unwrap();
     let mut request = LlmRequest::new("claude-opus-5");
-    request.speed = Some("fast".to_string());
+    request.set_speed(Some("fast".to_string())).unwrap();
     let prepared = direct.prepare(&request).await.unwrap();
     assert_eq!(prepared.provider_request.body_json["speed"], "fast");
 
-    let custom = DefaultLlmClient::from_config(ClientConfig {
+    let custom = ModelRuntime::from_config(ClientConfig {
         providers: vec![anthropic_fast_profile(
             "anthropic-compatible",
             "https://gateway.example",
@@ -268,12 +268,12 @@ async fn fast_speed_is_removed_for_models_without_the_registry_capability() {
     profile.models[0].display_model = "claude-sonnet-5".to_string();
     profile.models[0].request_model = "claude-sonnet-5".to_string();
     profile.models[0].billing_model = "claude-sonnet-5".to_string();
-    let client = DefaultLlmClient::from_config(ClientConfig {
+    let client = ModelRuntime::from_config(ClientConfig {
         providers: vec![profile],
     })
     .unwrap();
     let mut request = LlmRequest::new("claude-sonnet-5");
-    request.speed = Some("fast".to_string());
+    request.set_speed(Some("fast".to_string())).unwrap();
     let prepared = client.prepare(&request).await.unwrap();
     assert!(prepared.provider_request.body_json.get("speed").is_none());
 }
@@ -325,7 +325,7 @@ async fn github_copilot_gpt5_and_codex_route_to_responses_endpoint() {
             connection: Default::default(),
         }],
     };
-    let client = DefaultLlmClient::from_config(config).unwrap();
+    let client = ModelRuntime::from_config(config).unwrap();
 
     for responses_model in ["gpt-5.5", "gpt-5-codex"] {
         let prepared = client
@@ -391,7 +391,7 @@ async fn non_copilot_openai_chat_provider_is_never_overridden() {
             connection: Default::default(),
         }],
     };
-    let client = DefaultLlmClient::from_config(config).unwrap();
+    let client = ModelRuntime::from_config(config).unwrap();
     let prepared = client.prepare(&LlmRequest::new("gpt-5.5")).await.unwrap();
     assert_eq!(prepared.route.protocol, ProtocolFamily::OpenAiChat);
     assert_eq!(
@@ -443,11 +443,11 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
             connection: Default::default(),
         }],
     };
-    let client = DefaultLlmClient::from_config(config).unwrap();
+    let client = ModelRuntime::from_config(config).unwrap();
     let mut req = LlmRequest::new("qwen/qwen3-coder:free");
-    req.reasoning = Some(ReasoningConfig::Enabled {
+    req.set_reasoning(Some(ReasoningConfig::Enabled {
         budget_tokens: 2048,
-    });
+    }));
 
     // Must PREPARE OK (previously errored with UnsupportedCapability { reasoning }).
     let prepared = client
@@ -466,28 +466,31 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
     // `validate_capabilities` rejects them independently of the top-level field,
     // so a switch after any thinking must not hard-fail.
     let mut resumed = LlmRequest::new("qwen/qwen3-coder:free");
-    resumed.messages = vec![
-        llm_runtime::Message {
-            role: "assistant".to_string(),
-            content: vec![
-                llm_runtime::ContentBlock::Reasoning {
-                    text: "let me think".to_string(),
-                    signature: None,
-                },
-                llm_runtime::ContentBlock::Text {
-                    text: "the answer is 42".to_string(),
+    assign_history(
+        &mut resumed,
+        &vec![
+            llm_runtime::Message {
+                role: "assistant".to_string(),
+                content: vec![
+                    llm_runtime::ContentBlock::Reasoning {
+                        text: "let me think".to_string(),
+                        signature: None,
+                    },
+                    llm_runtime::ContentBlock::Text {
+                        text: "the answer is 42".to_string(),
+                        cache_control: None,
+                    },
+                ],
+            },
+            llm_runtime::Message {
+                role: "user".to_string(),
+                content: vec![llm_runtime::ContentBlock::Text {
+                    text: "thanks".to_string(),
                     cache_control: None,
-                },
-            ],
-        },
-        llm_runtime::Message {
-            role: "user".to_string(),
-            content: vec![llm_runtime::ContentBlock::Text {
-                text: "thanks".to_string(),
-                cache_control: None,
-            }],
-        },
-    ];
+                }],
+            },
+        ],
+    );
     // No top-level reasoning field this turn — only history blocks.
     let prepared = client
         .prepare(&resumed)
@@ -544,23 +547,26 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
             connection: Default::default(),
         }],
     };
-    let client = DefaultLlmClient::from_config(config).unwrap();
+    let client = ModelRuntime::from_config(config).unwrap();
 
     // The common "paste image into input view" scenario.
     let mut image_request = LlmRequest::new("qwen/qwen3-coder:free");
-    image_request.messages = vec![llm_runtime::Message {
-        role: "user".to_string(),
-        content: vec![
-            llm_runtime::ContentBlock::Text {
-                text: "describe this image".to_string(),
-                cache_control: None,
-            },
-            llm_runtime::ContentBlock::Image {
-                media_type: "image/png".to_string(),
-                bytes: vec![1, 2, 3],
-            },
-        ],
-    }];
+    assign_history(
+        &mut image_request,
+        &vec![llm_runtime::Message {
+            role: "user".to_string(),
+            content: vec![
+                llm_runtime::ContentBlock::Text {
+                    text: "describe this image".to_string(),
+                    cache_control: None,
+                },
+                llm_runtime::ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    bytes: vec![1, 2, 3],
+                },
+            ],
+        }],
+    );
     let error = client
         .prepare(&image_request)
         .await
@@ -575,35 +581,38 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
     // surface the vision capability error rather than silently mutating the
     // request.
     let mut history_request = LlmRequest::new("qwen/qwen3-coder:free");
-    history_request.messages = vec![
-        llm_runtime::Message {
-            role: "user".to_string(),
-            content: vec![
-                llm_runtime::ContentBlock::Text {
-                    text: "look at this".to_string(),
+    assign_history(
+        &mut history_request,
+        &vec![
+            llm_runtime::Message {
+                role: "user".to_string(),
+                content: vec![
+                    llm_runtime::ContentBlock::Text {
+                        text: "look at this".to_string(),
+                        cache_control: None,
+                    },
+                    llm_runtime::ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        bytes: vec![1, 2, 3],
+                    },
+                ],
+            },
+            llm_runtime::Message {
+                role: "assistant".to_string(),
+                content: vec![llm_runtime::ContentBlock::Text {
+                    text: "i see a photo".to_string(),
                     cache_control: None,
-                },
-                llm_runtime::ContentBlock::Image {
-                    media_type: "image/png".to_string(),
-                    bytes: vec![1, 2, 3],
-                },
-            ],
-        },
-        llm_runtime::Message {
-            role: "assistant".to_string(),
-            content: vec![llm_runtime::ContentBlock::Text {
-                text: "i see a photo".to_string(),
-                cache_control: None,
-            }],
-        },
-        llm_runtime::Message {
-            role: "user".to_string(),
-            content: vec![llm_runtime::ContentBlock::Text {
-                text: "ok what else".to_string(),
-                cache_control: None,
-            }],
-        },
-    ];
+                }],
+            },
+            llm_runtime::Message {
+                role: "user".to_string(),
+                content: vec![llm_runtime::ContentBlock::Text {
+                    text: "ok what else".to_string(),
+                    cache_control: None,
+                }],
+            },
+        ],
+    );
     let error = client
         .prepare(&history_request)
         .await
@@ -683,7 +692,7 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
         ],
     };
 
-    let err = DefaultLlmClient::from_config(config).unwrap_err();
+    let err = ModelRuntime::from_config(config).unwrap_err();
     assert!(matches!(err, LlmError::InvalidRequest { .. }));
 }
 
@@ -727,7 +736,7 @@ async fn openai_responses_profile_prepares_post_to_responses_endpoint() {
 
     // The old build_codec arm returned LlmError::InvalidRequest ("no codec
     // yet"); construction must now succeed.
-    let client = DefaultLlmClient::from_config(config)
+    let client = ModelRuntime::from_config(config)
         .expect("OpenAiResponses must have a codec; the 'no codec yet' error is gone");
 
     let prepared = client.prepare(&LlmRequest::new("gpt-4o")).await.unwrap();
@@ -783,7 +792,7 @@ async fn openai_responses_websocket_capability_selects_stream_transport_only_for
             connection: Default::default(),
         }],
     };
-    let client = DefaultLlmClient::from_config(config).unwrap();
+    let client = ModelRuntime::from_config(config).unwrap();
 
     let unary = client.prepare(&LlmRequest::new("gpt-5")).await.unwrap();
     assert_eq!(
@@ -841,7 +850,7 @@ fn websocket_capability_is_rejected_for_non_responses_protocols() {
         }],
     };
 
-    let err = DefaultLlmClient::from_config(config).unwrap_err();
+    let err = ModelRuntime::from_config(config).unwrap_err();
     assert!(
         matches!(err, LlmError::InvalidRequest { ref message } if message.contains("OpenAiResponses")),
         "got: {err:?}"
@@ -885,9 +894,9 @@ async fn response_format_is_rejected_when_selected_model_lacks_structured_output
         }],
     };
 
-    let client = DefaultLlmClient::from_config(config).unwrap();
+    let client = ModelRuntime::from_config(config).unwrap();
     let mut request = LlmRequest::new("fast");
-    request.response_format = Some(ResponseFormat::JsonObject);
+    request.input.output_format = lingxi_llm_client::protocol::OutputFormat::JsonObject;
 
     let err = client.prepare(&request).await.unwrap_err();
     assert!(
@@ -937,20 +946,34 @@ async fn aliases_sharing_a_wire_id_keep_the_selected_rows_inference_contract() {
         profile.models.push(model);
         profile.wire_profile.as_mut().unwrap().models.push(source);
     }
-    let client = DefaultLlmClient::from_config(ClientConfig {
+    let client = ModelRuntime::from_config(ClientConfig {
         providers: vec![profile],
     })
     .unwrap();
     let mut request = LlmRequest::new("low-row").with_user_text("hello");
-    request.effort = Some(serde_json::json!("low"));
+    request.set_effort(Some(serde_json::json!("low"))).unwrap();
     let prepared = client.prepare(&request).await.unwrap();
     assert_eq!(prepared.provider_request.body_json["model"], "gpt-5.6-sol");
     assert_eq!(prepared.route.resolved_route.display_model, "low-row");
-    request.model = "high-row".into();
+    request.input.model = "high-row".into();
     assert!(
         client.prepare(&request).await.is_err(),
         "a wire ID must not widen the selected effort levels"
     );
-    request.effort = Some(serde_json::json!("high"));
+    request.set_effort(Some(serde_json::json!("high"))).unwrap();
     assert!(client.prepare(&request).await.is_ok());
+}
+
+fn assign_history(request: &mut llm_runtime::LlmRequest, messages: &[llm_runtime::Message]) {
+    let (input, exact_strings) = llm_runtime::convert::history_input(
+        &request.input.model,
+        messages,
+        &[],
+        &[],
+        lingxi_llm_client::protocol::ProtocolFamily::OpenAiChat,
+    )
+    .unwrap();
+    request.input.messages = input.messages;
+    request.input.prompt_cache = input.prompt_cache;
+    request.execution.message_json_string_overrides = exact_strings;
 }

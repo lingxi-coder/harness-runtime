@@ -95,7 +95,7 @@ impl FileSystem for InMemoryFs {
 /// terminates and the persistent runner parks for the next message. An
 /// `Err` entry surfaces as an API error (driving the runner to `Failed`).
 struct ScriptedApiClient {
-    responses: StdMutex<VecDeque<Result<llm_runtime::LlmResponse, String>>>,
+    responses: StdMutex<VecDeque<Result<llm_runtime::HistoryResponse, String>>>,
     calls: AtomicUsize,
 }
 
@@ -127,7 +127,7 @@ impl SubagentApiClient for GatedApiClient {
         _system: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         self.histories.lock().unwrap().push(messages);
         if call == 0 {
@@ -169,7 +169,7 @@ impl SubagentApiClient for ScriptedApiClient {
         _system: Option<&str>,
         _messages: Vec<protocol::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let next = self.responses.lock().unwrap().pop_front();
         match next {
@@ -180,8 +180,8 @@ impl SubagentApiClient for ScriptedApiClient {
     }
 }
 
-fn text_response(text: &str) -> llm_runtime::LlmResponse {
-    llm_runtime::LlmResponse {
+fn text_response(text: &str) -> llm_runtime::HistoryResponse {
+    llm_runtime::HistoryResponse {
         id: "mock".into(),
         model: "mock".into(),
         content: vec![llm_runtime::ContentBlock::Text {

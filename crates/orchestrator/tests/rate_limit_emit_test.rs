@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
 /// A single-text `end_turn` response so each `run_turn` is exactly one API call.
-fn end_turn_response(text: &str) -> llm_runtime::LlmResponse {
+fn end_turn_response(text: &str) -> llm_runtime::HistoryResponse {
     mock_message_response(
         vec![LlmContentBlock::Text {
             text: text.into(),

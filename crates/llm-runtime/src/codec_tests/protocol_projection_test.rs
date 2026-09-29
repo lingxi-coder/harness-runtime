@@ -1,8 +1,9 @@
-//! Cross-provider replay and exact tool-result projection regressions.
-use llm_runtime::{
-    AnthropicMessagesCodec, BedrockClaudeCodec, CacheControl, ContentBlock, LlmRequest, Message,
-    OpenAiChatCodec, OpenAiResponsesCodec, ProviderResponse, WireCodec,
+use crate::upstream::codec_fixtures::HistoryFixture;
+use crate::upstream::codec_fixtures::{
+    AnthropicMessagesCodec, BedrockClaudeCodec, FixtureCodec, OpenAiChatCodec, OpenAiResponsesCodec,
 };
+// Cross-provider replay and exact tool-result projection regressions.
+use llm_runtime::{CacheControl, ContentBlock, Message, ProviderResponse};
 use serde_json::{json, Value};
 
 #[test]
@@ -23,7 +24,7 @@ fn switching_from_responses_to_chat_keeps_answer_and_original_replay_state() {
             }),
         ))
         .unwrap();
-    let mut request = LlmRequest::new("chat-model");
+    let mut request = HistoryFixture::new("chat-model");
     request.messages.push(Message {
         role: "assistant".into(),
         content: response.content,
@@ -63,7 +64,7 @@ fn switching_from_responses_to_chat_keeps_answer_and_original_replay_state() {
 
 #[test]
 fn switching_away_from_anthropic_keeps_native_text_without_hosted_tool_state() {
-    let mut request = LlmRequest::new("chat-model");
+    let mut request = HistoryFixture::new("chat-model");
     request.messages.push(Message {
         role: "assistant".into(),
         content: vec![
@@ -103,7 +104,7 @@ fn exact_tool_result(cache_control: Option<CacheControl>) -> ContentBlock {
 
 #[test]
 fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
-    let codecs: Vec<Box<dyn WireCodec>> = vec![
+    let codecs: Vec<Box<dyn FixtureCodec>> = vec![
         Box::new(AnthropicMessagesCodec::new(
             "https://api.anthropic.com",
             "2023-06-01",
@@ -114,7 +115,7 @@ fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
     ];
     for codec in codecs {
         for control in [None, Some(CacheControl::Ephemeral)] {
-            let mut request = LlmRequest::new("claude-sonnet-4-6");
+            let mut request = HistoryFixture::new("claude-sonnet-4-6");
             request.messages.push(Message {
                 role: "assistant".into(),
                 content: vec![
@@ -164,7 +165,7 @@ fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
 
 #[test]
 fn tool_result_sidecars_become_display_text_on_chat_wire() {
-    let mut request = LlmRequest::new("chat-model");
+    let mut request = HistoryFixture::new("chat-model");
     request.messages.push(Message {
         role: "user".into(),
         content: vec![exact_tool_result(None)],

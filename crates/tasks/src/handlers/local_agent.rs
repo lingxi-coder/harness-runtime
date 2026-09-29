@@ -2009,7 +2009,7 @@ mod tests {
                 _: Option<&str>,
                 messages: Vec<protocol::ConversationMessage>,
                 _: Vec<serde_json::Value>,
-            ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+            ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
                 let registry = self.registry.get().unwrap().upgrade().unwrap();
                 let history = serde_json::to_string(&messages).unwrap();
                 let child = history.contains("nested child prompt");
@@ -2072,7 +2072,7 @@ mod tests {
                     );
                     "parent folded child"
                 };
-                Ok(llm_runtime::LlmResponse {
+                Ok(llm_runtime::HistoryResponse {
                     id: "response".into(),
                     model: "mock".into(),
                     content: vec![llm_runtime::ContentBlock::Text {

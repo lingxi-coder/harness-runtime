@@ -1,13 +1,20 @@
-use llm_runtime::{validate_capabilities, Capabilities, ContentBlock, LlmRequest, Message};
+use lingxi_llm_client::protocol::{
+    ContentBlock, ConversationMessage, ImageSource, MessageRole, ToolSpec,
+};
+use llm_runtime::{validate_capabilities, Capabilities, LlmRequest};
 
 #[test]
 fn tool_declarations_require_tools_capability() {
     let mut request = LlmRequest::new("text-only").with_user_text("hi");
-    request.tools = vec![llm_runtime::ToolDeclaration {
+    request.input.tools = vec![ToolSpec {
         name: "Read".to_string(),
         description: "d".to_string(),
         input_schema: serde_json::json!({"type":"object"}),
-        ..Default::default()
+        strict: false,
+        defer_loading: false,
+        native_options: vec![],
+        tool_type: None,
+        extra: serde_json::Value::Null,
     }];
     let capabilities = Capabilities {
         streaming: true,
@@ -26,18 +33,19 @@ fn tool_declarations_require_tools_capability() {
 #[test]
 fn with_image_attaches_to_last_user_message_or_starts_one() {
     let mut request = LlmRequest::new("vision-model").with_user_text("look at this");
-    request.messages.push(llm_runtime::Message {
-        role: "assistant".to_string(),
+    request.input.messages.push(ConversationMessage {
+        role: MessageRole::Assistant,
+        native_options: vec![],
         content: vec![ContentBlock::Text {
             text: "ok".to_string(),
-            cache_control: None,
+            thought_signature: None,
         }],
     });
 
     let request = request.with_image("image/png", vec![1, 2, 3]);
 
-    let last = request.messages.last().expect("messages");
-    assert_eq!(last.role, "user");
+    let last = request.input.messages.last().expect("messages");
+    assert_eq!(last.role, MessageRole::User);
     assert!(matches!(
         last.content.as_slice(),
         [ContentBlock::Image { .. }]
@@ -69,10 +77,13 @@ fn unsupported_capabilities_fail_before_transport() {
 #[test]
 fn image_url_block_requires_vision_capability() {
     let mut request = LlmRequest::new("m");
-    request.messages.push(Message {
-        role: "user".to_string(),
-        content: vec![ContentBlock::ImageUrl {
-            url: "https://x/y.png".to_string(),
+    request.input.messages.push(ConversationMessage {
+        role: MessageRole::User,
+        native_options: vec![],
+        content: vec![ContentBlock::Image {
+            source: ImageSource::Url {
+                url: "https://x/y.png".to_string(),
+            },
         }],
     });
     let capabilities = Capabilities {
@@ -93,9 +104,9 @@ fn image_url_block_requires_vision_capability() {
 #[test]
 fn reasoning_config_requires_reasoning_capability() {
     let mut request = LlmRequest::new("m").with_user_text("hi");
-    request.reasoning = Some(llm_runtime::ReasoningConfig::Enabled {
+    request.set_reasoning(Some(llm_runtime::ReasoningConfig::Enabled {
         budget_tokens: 1024,
-    });
+    }));
     let capabilities = Capabilities {
         streaming: true,
         tools: true,

@@ -1,6 +1,6 @@
 use llm_runtime::{
-    ApiKeyAuthenticator, Authenticator, BearerAuthenticator, Credential, CredentialProvider,
-    CredentialScope, EnvCredentialProvider, ProviderId, ProviderRequest, StaticCredentialProvider,
+    Credential, CredentialProvider, CredentialScope, EnvCredentialProvider, ProviderId,
+    StaticCredentialProvider,
 };
 
 #[tokio::test]
@@ -44,58 +44,88 @@ fn credential_scope_carries_optional_credential_id() {
     assert_eq!(scope.credential_id.as_deref(), Some("team-key"));
 }
 
-#[test]
-fn api_key_authenticator_applies_header_to_provider_request() {
-    let request = ProviderRequest::post_json(
-        "https://api.anthropic.com/v1/messages",
-        serde_json::json!({"model":"claude"}),
-    );
-    let auth = ApiKeyAuthenticator::new("test-key");
-
-    let signed = auth.apply(request).expect("signed request");
-
-    assert_eq!(
-        signed.headers.get("x-api-key"),
-        Some(&"test-key".to_string())
-    );
-    assert_eq!(signed.body_json["model"], "claude");
-}
-
-#[test]
-fn api_key_authenticator_supports_provider_specific_header_names() {
-    let request = ProviderRequest::post_json(
-        "https://generativelanguage.googleapis.com/v1beta/models/m:generateContent",
-        serde_json::json!({}),
-    );
-    let auth = ApiKeyAuthenticator::with_header_name("x-goog-api-key", "g-key");
-
-    let signed = auth.apply(request).expect("signed request");
-
-    assert_eq!(
-        signed.headers.get("x-goog-api-key"),
-        Some(&"g-key".to_string())
-    );
-}
-
-#[test]
-fn bearer_authenticator_applies_authorization_header_without_removing_existing_headers() {
-    let mut request = ProviderRequest::post_json(
-        "https://api.openai.com/v1/chat/completions",
-        serde_json::json!({}),
-    );
+fn authenticate(
+    auth: &str,
+    protocol: &str,
+    extra: serde_json::Value,
+    token: &str,
+    headers: Vec<(String, String)>,
+) -> lingxi_llm_client::HttpRequest {
+    use lingxi_llm_client::auth::{apply_credential, ClientIdentity, CredentialRef};
+    let profile = serde_json::from_value(serde_json::json!({
+        "provider_id":"test", "profile_name":"test", "protocol":protocol,
+        "auth":auth, "base_url":"https://example.test", "models":[], "extra":extra
+    }))
+    .unwrap();
+    let mut request = lingxi_llm_client::HttpRequest {
+        method: "POST".into(),
+        url: "https://example.test/messages".into(),
+        headers,
+        body: br#"{"model":"claude"}"#.to_vec().into(),
+        timeout: None,
+    };
+    apply_credential(
+        &mut request,
+        &profile,
+        CredentialRef::Token(token),
+        ClientIdentity {
+            user_agent: "test",
+            editor_version: "test/1",
+            plugin_version: "test/1",
+        },
+        std::time::SystemTime::UNIX_EPOCH,
+    )
+    .unwrap();
     request
+}
+
+#[test]
+fn api_key_authentication_preserves_provider_body() {
+    let signed = authenticate(
+        "api_key",
+        "anthropic_messages",
+        serde_json::json!({}),
+        "test-key",
+        vec![],
+    );
+    assert!(signed
         .headers
-        .insert("content-type".to_string(), "application/json".to_string());
-    let auth = BearerAuthenticator::new("test-token");
+        .iter()
+        .any(|(name, value)| name == "x-api-key" && value == "test-key"));
+    assert_eq!(&signed.body[..], br#"{"model":"claude"}"#);
+}
 
-    let signed = auth.apply(request).expect("signed request");
+#[test]
+fn api_key_authentication_supports_provider_specific_header_names() {
+    let signed = authenticate(
+        "api_key",
+        "gemini_generate_content",
+        serde_json::json!({"credential_header":"x-goog-api-key"}),
+        "g-key",
+        vec![],
+    );
+    assert!(signed
+        .headers
+        .iter()
+        .any(|(name, value)| name == "x-goog-api-key" && value == "g-key"));
+}
 
-    assert_eq!(
-        signed.headers.get("Authorization"),
-        Some(&"Bearer test-token".to_string())
+#[test]
+fn bearer_authentication_preserves_unrelated_headers() {
+    let signed = authenticate(
+        "bearer",
+        "open_ai_chat",
+        serde_json::json!({}),
+        "test-token",
+        vec![("content-type".into(), "application/json".into())],
     );
-    assert_eq!(
-        signed.headers.get("content-type"),
-        Some(&"application/json".to_string())
-    );
+    assert!(signed
+        .headers
+        .iter()
+        .any(|(name, value)| name.eq_ignore_ascii_case("authorization")
+            && value == "Bearer test-token"));
+    assert!(signed
+        .headers
+        .iter()
+        .any(|(name, value)| name == "content-type" && value == "application/json"));
 }

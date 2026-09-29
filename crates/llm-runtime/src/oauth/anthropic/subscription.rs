@@ -22,10 +22,11 @@
 //! non-enterprise and non-subscriber.
 
 use crate::oauth::anthropic::limits::{ClaudeAiLimitsState, SubscriptionType};
+use crate::oauth::anthropic::profile::subscription_type;
 use crate::oauth::anthropic::profile::{
     fetch_profile_from_oauth_token, fetch_user_roles, OAuthProfileResponse,
 };
-use platform_api::HttpTransport;
+use lingxi_llm_client::transport::Transport;
 use std::sync::Arc;
 
 /// `CLAUDE_AI_INFERENCE_SCOPE` — `constants/oauth.ts:33`. Locked byte-for-byte.
@@ -92,7 +93,7 @@ pub fn is_subscriber_tier(state: &ClaudeAiLimitsState) -> bool {
 /// untouched (we do NOT clobber a previously-known tier with `None`), matching
 /// the TS coalescing `profileInfo?.subscriptionType ?? existing?.subscriptionType`.
 pub fn apply_profile(state: &mut ClaudeAiLimitsState, profile: &OAuthProfileResponse) {
-    if let Some(tier) = profile.subscription_type() {
+    if let Some(tier) = subscription_type(&profile) {
         state.subscription_type = Some(tier);
     }
 }
@@ -123,20 +124,20 @@ fn subscription_type_str(tier: SubscriptionType) -> Option<String> {
 pub async fn resolve_subscription_snapshot(
     access_token: &str,
     scopes: &[String],
-    transport: &Arc<dyn HttpTransport>,
+    transport: &Arc<dyn Transport>,
 ) -> Option<platform_api::subscription::SubscriptionSnapshot> {
     if !has_profile_scope(scopes) {
         return None;
     }
-    let profile = fetch_profile_from_oauth_token(access_token, transport).await?;
+    let profile = fetch_profile_from_oauth_token(access_token, transport.as_ref()).await?;
     // Roles are a second, best-effort call (claude-code fetches them alongside
     // the profile for `organizationRole`); failure leaves the role unknown.
-    let roles = fetch_user_roles(access_token, transport).await;
+    let roles = fetch_user_roles(access_token, transport.as_ref()).await;
     let org = profile.organization.as_ref();
     Some(platform_api::subscription::SubscriptionSnapshot {
         // `isClaudeAISubscriber` ← the `user:inference` scope.
         is_subscriber: subscription_from_scopes(scopes),
-        subscription_type: profile.subscription_type().and_then(subscription_type_str),
+        subscription_type: subscription_type(&profile).and_then(subscription_type_str),
         rate_limit_tier: org.and_then(|o| o.rate_limit_tier.clone()),
         has_extra_usage_enabled: org.and_then(|o| o.has_extra_usage_enabled).unwrap_or(false),
         billing_type: org.and_then(|o| o.billing_type.clone()),
@@ -152,7 +153,7 @@ pub async fn resolve_subscription_snapshot(
 pub async fn publish_subscription(
     access_token: &str,
     scopes: &[String],
-    transport: &Arc<dyn HttpTransport>,
+    transport: &Arc<dyn Transport>,
 ) {
     if let Some(snapshot) = resolve_subscription_snapshot(access_token, scopes, transport).await {
         platform_api::subscription::set_current_subscription(Some(snapshot));
@@ -301,7 +302,7 @@ mod tests {
         let body = r#"{"organization":{"organization_type":"claude_pro","uuid":"o1",
             "rate_limit_tier":"default_claude_pro","billing_type":"stripe_subscription",
             "has_extra_usage_enabled":true}}"#;
-        let transport: Arc<dyn HttpTransport> = MockHttp::new(vec![(
+        let transport: Arc<dyn Transport> = MockHttp::new(vec![(
             "anthropic.com",
             Canned {
                 status: 200,
@@ -333,7 +334,7 @@ mod tests {
     async fn resolve_skips_without_profile_scope() {
         use crate::oauth::anthropic::testsupport::{Canned, MockHttp};
         let body = r#"{"organization":{"organization_type":"claude_pro"}}"#;
-        let transport: Arc<dyn HttpTransport> = MockHttp::new(vec![(
+        let transport: Arc<dyn Transport> = MockHttp::new(vec![(
             "anthropic.com",
             Canned {
                 status: 200,

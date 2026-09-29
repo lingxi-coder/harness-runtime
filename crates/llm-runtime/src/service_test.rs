@@ -6,17 +6,44 @@ pub use super::*;
 mod tests {
     use super::*;
 
+    fn cache_control_at(
+        request: &LlmRequest,
+        position: lingxi_llm_client::protocol::CachePosition,
+    ) -> Option<crate::CacheControl> {
+        use lingxi_llm_client::protocol::{CacheScope as SdkScope, CacheTtl};
+        request
+            .input
+            .prompt_cache
+            .breakpoints
+            .iter()
+            .find(|point| point.position == position)
+            .map(|point| {
+                let ttl_1h = match point.ttl {
+                    CacheTtl::FiveMinutes => false,
+                    CacheTtl::OneHour => true,
+                    CacheTtl::ThirtyMinutes => panic!("unexpected Anthropic cache TTL"),
+                };
+                match (point.scope, ttl_1h) {
+                    (None, false) => crate::CacheControl::Ephemeral,
+                    (scope, ttl_1h) => crate::CacheControl::EphemeralScoped {
+                        scope: scope.map(|SdkScope::Global| crate::CacheScope::Global),
+                        ttl_1h,
+                    },
+                }
+            })
+    }
+
     #[test]
     fn frozen_stream_quote_stays_out_of_serialized_provider_metadata() {
-        let mut events = vec![LlmEvent::MessageDelta {
-            delta: crate::MessageDeltaPayload {
+        let mut events = vec![HistoryEvent::MessageDelta {
+            delta: crate::HistoryMessageDelta {
                 stop_reason: Some("end_turn".into()),
                 stop_details: None,
             },
             usage: Some(crate::Usage::default()),
         }];
         attach_frozen_stream_quote(&mut events, None);
-        let LlmEvent::MessageDelta {
+        let HistoryEvent::MessageDelta {
             usage: Some(usage), ..
         } = &events[0]
         else {
@@ -34,7 +61,7 @@ mod tests {
         quote.estimated = true;
         quote.total_cost_usd = Some(0.00075);
         attach_frozen_stream_quote(&mut events, Some(&quote));
-        let LlmEvent::MessageDelta {
+        let HistoryEvent::MessageDelta {
             usage: Some(usage), ..
         } = &events[0]
         else {
@@ -100,7 +127,7 @@ mod tests {
     use crate::{
         AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig, LlmError,
         ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, ProviderRequest,
-        ProviderResponse, StreamingResponse, ToolDeclaration,
+        ProviderResponse, StreamingResponse,
     };
     use std::collections::BTreeMap;
     use std::sync::Mutex;
@@ -233,7 +260,7 @@ mod tests {
             request: &LlmRequest,
             prepared: &crate::PreparedLlmCall,
         ) -> Result<Box<dyn crate::ModelAttemptLease>, LlmError> {
-            assert!(request.model_attempt.is_some());
+            assert!(request.execution.model_attempt.is_some());
             if !self.admission_delay.is_zero() {
                 tokio::time::sleep(self.admission_delay).await;
             }
@@ -457,8 +484,8 @@ mod tests {
     fn registered_request() -> LlmRequest {
         let mut request =
             LlmRequest::new("claude-sonnet-4-20250514").with_user_text("fake request");
-        request.max_tokens = Some(100);
-        request.model_attempt = Some(
+        request.input.max_tokens = Some(100);
+        request.execution.model_attempt = Some(
             platform_api::ModelAttemptRun::new(Arc::new(()))
                 .context(platform_api::ModelAttemptStage::Panel, Some(0))
                 .unwrap(),
@@ -560,7 +587,7 @@ mod tests {
             true,
         );
         let mut request = registered_request();
-        request.model = "model".into();
+        request.input.model = "model".into();
         request.stream = true;
         assert_eq!(
             service
@@ -622,7 +649,7 @@ mod tests {
             let probe = Arc::new(AttemptProbe::default());
             service.set_model_attempt_hooks(Arc::new(probe.clone()));
             let mut request = registered_request();
-            request.model = "model".into();
+            request.input.model = "model".into();
             let mut stream = service.stream_request(request).await.unwrap();
             stream.next().await.unwrap().unwrap();
             {
@@ -677,7 +704,7 @@ mod tests {
         service.set_model_attempt_hooks(Arc::new(probe.clone()));
         let request = registered_request();
         let control = resolve_retry_control_with_settings(
-            &request.model,
+            &request.input.model,
             None,
             false,
             &ResolveRetryEnv::from_process_env(),
@@ -798,7 +825,7 @@ mod tests {
         assert!(service.stream_request(registered_request()).await.is_err());
         assert_eq!(transport.seen_count(), 0);
         let mut ordinary = registered_request();
-        ordinary.model_attempt = None;
+        ordinary.execution.model_attempt = None;
         service.execute_side_query_request(ordinary).await.unwrap();
         assert_eq!(
             transport.seen_count(),
@@ -883,7 +910,7 @@ mod tests {
         let mut stream = adapter.stream_request(registered_request()).await.unwrap();
         assert!(matches!(
             stream.next().await.unwrap().unwrap(),
-            LlmEvent::MessageStart { .. }
+            HistoryEvent::MessageStart { .. }
         ));
         {
             let seen = probe.observations.lock().unwrap();
@@ -986,7 +1013,7 @@ mod tests {
         let probe = Arc::new(AttemptProbe::default());
         service.set_model_attempt_hooks(Arc::new(probe.clone()));
         let mut request = registered_request();
-        request.model = "model".into();
+        request.input.model = "model".into();
         let mut stream = service.stream_request(request).await.unwrap();
         assert!(stream.next().await.unwrap().is_err());
         let seen = probe.observations.lock().unwrap();
@@ -1100,7 +1127,7 @@ mod tests {
                 let probe = Arc::new(AttemptProbe::default());
                 service.set_model_attempt_hooks(Arc::new(probe.clone()));
                 let mut request = registered_request();
-                request.model = "model".into();
+                request.input.model = "model".into();
                 service.execute_side_query_request(request).await.unwrap();
                 assert_eq!(transport.seen_count(), 1);
                 assert_eq!(
@@ -1220,7 +1247,7 @@ mod tests {
             let probe = Arc::new(AttemptProbe::default());
             service.set_model_attempt_hooks(Arc::new(probe.clone()));
             let mut request = registered_request();
-            request.model = "model".into();
+            request.input.model = "model".into();
             service.execute_side_query_request(request).await.unwrap();
             let seen = probe.observations.lock().unwrap();
             assert_eq!(
@@ -1243,7 +1270,7 @@ mod tests {
     ) -> ApiService {
         std::env::set_var("ADAPTER_TEST_KEY", "test-key");
         let client = Arc::new(
-            DefaultLlmClient::from_config(ClientConfig {
+            ModelRuntime::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
                     wire_profile: None,
                     regions: lingxi_llm_client::protocol::Region::all(),
@@ -1304,7 +1331,7 @@ mod tests {
     ) -> ApiService {
         std::env::set_var("ADAPTER_TEST_KEY", "test-key");
         let client = Arc::new(
-            DefaultLlmClient::from_config(ClientConfig {
+            ModelRuntime::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
                     wire_profile: None,
                     regions: lingxi_llm_client::protocol::Region::all(),
@@ -1435,7 +1462,7 @@ mod tests {
             None
         };
         let client = Arc::new(
-            DefaultLlmClient::from_config(ClientConfig {
+            ModelRuntime::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
                     wire_profile: None,
                     regions: crate::Region::all(),
@@ -1567,7 +1594,6 @@ mod tests {
 
     #[test]
     fn build_request_splits_system_into_org_blocks_by_default() {
-        use crate::ContentBlock as LlmContentBlock;
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DISABLE_PROMPT_CACHING");
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
@@ -1589,16 +1615,37 @@ mod tests {
         // (a) two system blocks: prefix (HEADER) + rest, each org-scoped → each
         // carries an ephemeral breakpoint (the attribution block is never
         // emitted, so 2 not 3).
-        assert_eq!(req.system.len(), 2);
-        assert_eq!(req.system[0].text, HEADER);
-        assert_eq!(req.system[0].cache_control, Some(CacheControl::Ephemeral));
-        assert_eq!(req.system[1].text, "rest body here");
-        assert_eq!(req.system[1].cache_control, Some(CacheControl::Ephemeral));
+        assert_eq!(req.input.system.len(), 2);
+        assert_eq!(req.input.system[0].text, HEADER);
+        assert_eq!(
+            cache_control_at(
+                &req,
+                lingxi_llm_client::protocol::CachePosition::System { index: 0 }
+            ),
+            Some(CacheControl::Ephemeral)
+        );
+        assert_eq!(req.input.system[1].text, "rest body here");
+        assert_eq!(
+            cache_control_at(
+                &req,
+                lingxi_llm_client::protocol::CachePosition::System { index: 1 }
+            ),
+            Some(CacheControl::Ephemeral)
+        );
         // (c) the last message's last block carries the one message breakpoint.
-        let last = req.messages.last().expect("a message");
+        let last = req.input.messages.last().expect("a message");
         match last.content.last().expect("a content block") {
-            LlmContentBlock::Text { cache_control, .. } => {
-                assert_eq!(*cache_control, Some(CacheControl::Ephemeral));
+            lingxi_llm_client::protocol::ContentBlock::Text { .. } => {
+                assert_eq!(
+                    cache_control_at(
+                        &req,
+                        lingxi_llm_client::protocol::CachePosition::Message {
+                            index: req.input.messages.len() - 1,
+                            block: last.content.len() - 1
+                        }
+                    ),
+                    Some(CacheControl::Ephemeral)
+                );
             }
             other => panic!("expected trailing text block, got {other:?}"),
         }
@@ -1613,8 +1660,6 @@ mod tests {
     /// flag, matching the oracle's `if(!$U())W=j6s(W);else W=xPy(W,a)`.
     #[test]
     fn build_request_tool_reference_branch_follows_session_gate_not_toolset() {
-        use crate::ContentBlock as LlmBlock;
-
         // A user tool_result carrying a tool_reference to a tool absent from the
         // (empty) availability set, paired with its assistant tool_use so
         // `ensure_tool_result_pairing` is a strict no-op.
@@ -1650,11 +1695,14 @@ mod tests {
         };
         // Read the placeholder text the converted tool_result carries.
         let placeholder = |req: &LlmRequest| -> String {
-            for m in &req.messages {
+            for m in &req.input.messages {
                 for b in &m.content {
-                    if let LlmBlock::ToolResult { output, .. } = b {
-                        if let Some(text) = output
-                            .as_array()
+                    if let lingxi_llm_client::protocol::ContentBlock::ToolResult {
+                        blocks, ..
+                    } = b
+                    {
+                        if let Some(text) = blocks
+                            .as_ref()
                             .and_then(|arr| arr.first())
                             .and_then(|v| v.get("text"))
                             .and_then(serde_json::Value::as_str)
@@ -1718,7 +1766,6 @@ mod tests {
     #[test]
     fn thinking_is_provider_aware() {
         use crate::model::thinking::ThinkingConfig;
-        use crate::ReasoningConfig;
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let build = |model: &str| {
@@ -1733,13 +1780,17 @@ mod tests {
                     None,
                 )
                 .expect("build_request")
-                .reasoning
+                .input
+                .thinking
         };
 
         // Claude with the default (Adaptive) thinking → Adaptive, byte-faithful.
         assert_eq!(
             build("claude-opus-4-8-20260115"),
-            Some(ReasoningConfig::Adaptive)
+            Some(lingxi_llm_client::protocol::ThinkingConfig {
+                mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+                ..Default::default()
+            })
         );
         // Non-Claude with the default (Adaptive) → NO reasoning field (provider
         // applies its own default instead of a forced high-effort / budget-0).
@@ -1766,11 +1817,14 @@ mod tests {
                 None,
             )
             .expect("build_request")
-            .reasoning;
+            .input
+            .thinking;
         assert_eq!(
             r,
-            Some(ReasoningConfig::Enabled {
-                budget_tokens: 4096
+            Some(lingxi_llm_client::protocol::ThinkingConfig {
+                mode: Some(lingxi_llm_client::protocol::ThinkingMode::Enabled),
+                budget: Some(lingxi_llm_client::protocol::ThinkingBudget::Tokens(4096)),
+                effort: None
             })
         );
     }
@@ -1801,6 +1855,7 @@ mod tests {
                     max_tokens,
                 )
                 .expect("build_request")
+                .input
                 .max_tokens
         };
 
@@ -1826,7 +1881,6 @@ mod tests {
 
     #[test]
     fn build_request_omits_cache_breakpoints_when_disabled() {
-        use crate::ContentBlock as LlmContentBlock;
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("DISABLE_PROMPT_CACHING", "1");
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
@@ -1845,12 +1899,33 @@ mod tests {
             .expect("build_request");
         std::env::remove_var("DISABLE_PROMPT_CACHING");
         // Still split into 2 blocks, but none carry a breakpoint.
-        assert_eq!(req.system.len(), 2);
-        assert_eq!(req.system[0].cache_control, None);
-        assert_eq!(req.system[1].cache_control, None);
-        let last = req.messages.last().expect("a message");
+        assert_eq!(req.input.system.len(), 2);
+        assert_eq!(
+            cache_control_at(
+                &req,
+                lingxi_llm_client::protocol::CachePosition::System { index: 0 }
+            ),
+            None
+        );
+        assert_eq!(
+            cache_control_at(
+                &req,
+                lingxi_llm_client::protocol::CachePosition::System { index: 1 }
+            ),
+            None
+        );
+        let last = req.input.messages.last().expect("a message");
         match last.content.last().expect("a content block") {
-            LlmContentBlock::Text { cache_control, .. } => assert_eq!(*cache_control, None),
+            lingxi_llm_client::protocol::ContentBlock::Text { .. } => assert_eq!(
+                cache_control_at(
+                    &req,
+                    lingxi_llm_client::protocol::CachePosition::Message {
+                        index: req.input.messages.len() - 1,
+                        block: last.content.len() - 1
+                    }
+                ),
+                None
+            ),
             other => panic!("expected trailing text block, got {other:?}"),
         }
     }
@@ -1886,8 +1961,14 @@ mod tests {
             )
             .expect("build_request");
         // Gate off → org default (no scope:global block, marker left inline).
-        assert_eq!(req.system.len(), 2);
-        assert_eq!(req.system[0].cache_control, Some(CacheControl::Ephemeral));
+        assert_eq!(req.input.system.len(), 2);
+        assert_eq!(
+            cache_control_at(
+                &req,
+                lingxi_llm_client::protocol::CachePosition::System { index: 0 }
+            ),
+            Some(CacheControl::Ephemeral)
+        );
     }
 
     #[test]
@@ -1923,20 +2004,35 @@ mod tests {
             )
             .expect("build_request");
         std::env::remove_var("LINGXI_GLOBAL_CACHE_SCOPE");
-        assert_eq!(req.system.len(), 3);
-        assert_eq!(req.system[0].text, HEADER);
-        assert_eq!(req.system[0].cache_control, None); // prefix uncached
-        assert_eq!(req.system[1].text, "static");
+        assert_eq!(req.input.system.len(), 3);
+        assert_eq!(req.input.system[0].text, HEADER);
         assert_eq!(
-            req.system[1].cache_control,
+            cache_control_at(
+                &req,
+                lingxi_llm_client::protocol::CachePosition::System { index: 0 }
+            ),
+            None
+        ); // prefix uncached
+        assert_eq!(req.input.system[1].text, "static");
+        assert_eq!(
+            cache_control_at(
+                &req,
+                lingxi_llm_client::protocol::CachePosition::System { index: 1 }
+            ),
             Some(CacheControl::EphemeralScoped {
                 scope: Some(CacheScope::Global),
                 ttl_1h: false
             })
         );
-        assert_eq!(req.system[2].text, "dynamic");
+        assert_eq!(req.input.system[2].text, "dynamic");
         // dynamic is `org`-scoped, not uncached — `y8s` @237509234.
-        assert_eq!(req.system[2].cache_control, Some(CacheControl::Ephemeral));
+        assert_eq!(
+            cache_control_at(
+                &req,
+                lingxi_llm_client::protocol::CachePosition::System { index: 2 }
+            ),
+            Some(CacheControl::Ephemeral)
+        );
     }
 
     // ── 1P cache-EDITING (cache_edits / cache_reference, RESIDUAL 4) ───────────
@@ -1987,7 +2083,6 @@ mod tests {
     fn build_request_cache_editing_dormant_by_default() {
         // Gate OFF (default): no cache_reference on tool_results, no cache_edits
         // block — byte-identical to the pre-feature request.
-        use crate::ContentBlock as LlmContentBlock;
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DISABLE_PROMPT_CACHING");
         std::env::remove_var("LINGXI_CACHE_EDITING");
@@ -2018,20 +2113,15 @@ mod tests {
             )
             .expect("build_request");
         // No cache_edits block anywhere.
-        for m in &req.messages {
-            for b in &m.content {
-                assert!(
-                    !matches!(b, LlmContentBlock::CacheEdits { .. }),
-                    "no cache_edits block on the default path"
-                );
-                if let LlmContentBlock::ToolResult {
-                    cache_reference, ..
-                } = b
-                {
-                    assert_eq!(*cache_reference, None, "no cache_reference by default");
-                }
-            }
-        }
+        let encoded = serde_json::to_value(&req.input).unwrap().to_string();
+        assert!(
+            !encoded.contains("cache_edits"),
+            "cache editing remains disabled"
+        );
+        assert!(
+            !encoded.contains("cache_reference"),
+            "cache references remain absent"
+        );
     }
 
     #[test]
@@ -2039,7 +2129,7 @@ mod tests {
         // Even with the old opt-in env set, the path stays fail-closed until
         // the cache-editing beta/session latch and cross-call pinned state are
         // implemented together.
-        use crate::{CacheEdit, ContentBlock as LlmContentBlock};
+        use crate::CacheEdit;
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DISABLE_PROMPT_CACHING");
         std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
@@ -2089,23 +2179,15 @@ mod tests {
         std::env::remove_var("LINGXI_CACHE_EDITING");
 
         // No cache_reference stamping and no cache_edits insertion anywhere.
-        for m in &req.messages {
-            for b in &m.content {
-                assert!(
-                    !matches!(b, LlmContentBlock::CacheEdits { .. }),
-                    "cache_edits remain unreachable until the full protocol is wired"
-                );
-                if let LlmContentBlock::ToolResult {
-                    cache_reference, ..
-                } = b
-                {
-                    assert_eq!(
-                        *cache_reference, None,
-                        "cache_reference must remain absent on the fail-closed path"
-                    );
-                }
-            }
-        }
+        let encoded = serde_json::to_value(&req.input).unwrap().to_string();
+        assert!(
+            !encoded.contains("cache_edits"),
+            "cache editing remains disabled"
+        );
+        assert!(
+            !encoded.contains("cache_reference"),
+            "cache references remain absent"
+        );
     }
 
     // ── build_request profile threading (Unit B Task 5) ──────────────────────
@@ -2125,7 +2207,10 @@ mod tests {
                 None,
             )
             .expect("build_request with profile");
-        assert_eq!(req.model, "gpt-5.2", "model must be preserved verbatim");
+        assert_eq!(
+            req.input.model, "gpt-5.2",
+            "model must be preserved verbatim"
+        );
         assert_eq!(
             req.profile.as_deref(),
             Some("github-copilot"),
@@ -2141,7 +2226,7 @@ mod tests {
             .build_request("claude-opus-4-7", None, None, vec![], vec![], false, None)
             .expect("build_request without profile");
         assert_eq!(
-            req.model, "claude-opus-4-7",
+            req.input.model, "claude-opus-4-7",
             "model must be preserved verbatim"
         );
         assert!(
@@ -2170,20 +2255,30 @@ mod tests {
                 Some("fusion_analyst"),
             )
             .expect("side-query request builder");
-        assert_eq!(req.model, "claude-sonnet-4-20250514");
+        assert_eq!(req.input.model, "claude-sonnet-4-20250514");
         assert_eq!(req.profile.as_deref(), Some("anthropic"));
-        assert_eq!(req.system[0].text, "system");
-        assert_eq!(req.messages.len(), 1);
-        assert_eq!(req.max_tokens, Some(321));
-        assert_eq!(req.stop_sequences, vec!["STOP"]);
+        assert_eq!(req.input.system[0].text, "system");
+        assert_eq!(req.input.messages.len(), 1);
+        assert_eq!(req.input.max_tokens, Some(321));
+        assert_eq!(req.input.stop_sequences, vec!["STOP"]);
         assert!(
-            req.temperature
-                .is_some_and(|temperature| (temperature - f64::from(0.2_f32)).abs() < f64::EPSILON),
-            "the f32 caller value must survive its exact widening to f64"
+            req.input
+                .temperature
+                .is_some_and(|temperature| temperature == 0.2_f32),
+            "the f32 caller value must remain exact in canonical input"
         );
-        assert_eq!(req.effort, Some(serde_json::json!("high")));
-        assert_eq!(req.query_source.as_deref(), Some("fusion_analyst"));
-        assert!(req.capture_retry_count);
+        assert_eq!(
+            req.input
+                .thinking
+                .as_ref()
+                .and_then(|thinking| thinking.effort),
+            Some(lingxi_llm_client::protocol::ReasoningEffort::High)
+        );
+        assert_eq!(
+            req.execution.query_source.as_deref(),
+            Some("fusion_analyst")
+        );
+        assert!(req.execution.capture_retry_count);
     }
 
     #[test]
@@ -2210,14 +2305,21 @@ mod tests {
             )
             .expect("strict request builder");
         assert!(req.stream);
-        assert!(req.tools.is_empty());
-        assert!(req.tool_choice.is_none());
-        assert_eq!(req.max_tokens, Some(256));
+        assert!(req.input.tools.is_empty());
+        assert!(req.input.tool_choice == lingxi_llm_client::protocol::ToolChoice::Auto);
+        assert_eq!(req.input.max_tokens, Some(256));
         assert_eq!(
-            req.response_format,
-            Some(crate::ResponseFormat::JsonSchema { schema })
+            req.input.output_format,
+            lingxi_llm_client::protocol::OutputFormat::JsonSchema {
+                name: "response".into(),
+                schema,
+                strict: true
+            }
         );
-        assert_eq!(req.query_source.as_deref(), Some("fusion_analyst"));
+        assert_eq!(
+            req.execution.query_source.as_deref(),
+            Some("fusion_analyst")
+        );
     }
 
     // ── build_request thinking / temperature / max_tokens (DIV-1/3/4) ────────
@@ -2254,16 +2356,19 @@ mod tests {
                 .build_request(model, None, None, vec![], vec![], false, None)
                 .expect("build_request");
             assert_eq!(
-                req.reasoning,
-                Some(crate::ReasoningConfig::Adaptive),
+                req.input
+                    .thinking
+                    .as_ref()
+                    .and_then(|thinking| thinking.mode),
+                Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
                 "{model} → adaptive"
             );
             assert!(
-                req.temperature.is_none(),
+                req.input.temperature.is_none(),
                 "{model} → no temperature when thinking on"
             );
             assert_eq!(
-                req.max_tokens,
+                req.input.max_tokens,
                 Some(expected_max),
                 "{model} → model max_tokens"
             );
@@ -2284,15 +2389,19 @@ mod tests {
         let req = adapter
             .build_request("claude-haiku-4-5", None, None, vec![], vec![], false, None)
             .expect("build_request");
-        assert_eq!(req.max_tokens, Some(32_000));
+        assert_eq!(req.input.max_tokens, Some(32_000));
         assert_eq!(
-            req.reasoning,
-            Some(crate::ReasoningConfig::Enabled {
-                budget_tokens: 31_999
-            }),
+            req.input
+                .thinking
+                .as_ref()
+                .and_then(|thinking| thinking.budget.clone()),
+            Some(lingxi_llm_client::protocol::ThinkingBudget::Tokens(31_999)),
             "haiku-4-5 → fixed budget clamped to max_tokens-1"
         );
-        assert!(req.temperature.is_none(), "thinking on → no temperature");
+        assert!(
+            req.input.temperature.is_none(),
+            "thinking on → no temperature"
+        );
         clear_thinking_env();
     }
 
@@ -2317,13 +2426,22 @@ mod tests {
         let expected = match adapter
             .build_request(model, None, None, vec![], vec![], false, None)
             .expect("build_request")
-            .reasoning
+            .input
+            .thinking
         {
-            Some(crate::ReasoningConfig::Adaptive) => serde_json::json!({"type": "adaptive"}),
-            Some(crate::ReasoningConfig::Enabled { budget_tokens }) => {
+            Some(lingxi_llm_client::protocol::ThinkingConfig {
+                mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+                ..
+            }) => serde_json::json!({"type": "adaptive"}),
+            Some(lingxi_llm_client::protocol::ThinkingConfig {
+                mode: Some(lingxi_llm_client::protocol::ThinkingMode::Enabled),
+                budget: Some(lingxi_llm_client::protocol::ThinkingBudget::Tokens(budget_tokens)),
+                ..
+            }) => {
                 serde_json::json!({"type": "enabled", "budget_tokens": budget_tokens})
             }
             None => serde_json::Value::Null,
+            other => panic!("unexpected thinking config: {other:?}"),
         };
         assert_ne!(
             expected,
@@ -2385,10 +2503,12 @@ mod tests {
             )
             .expect("enabled request");
         assert_eq!(
-            enabled.reasoning,
-            Some(crate::ReasoningConfig::Enabled {
-                budget_tokens: 4_096
-            })
+            enabled
+                .input
+                .thinking
+                .as_ref()
+                .and_then(|thinking| thinking.budget),
+            Some(lingxi_llm_client::protocol::ThinkingBudget::Tokens(4_096))
         );
 
         service.set_thinking(crate::model::thinking::ThinkingConfig::Disabled);
@@ -2403,7 +2523,7 @@ mod tests {
                 None,
             )
             .expect("disabled request");
-        assert!(disabled.reasoning.is_none());
+        assert!(disabled.input.thinking.is_none());
         clear_thinking_env();
     }
 
@@ -2418,15 +2538,18 @@ mod tests {
         let req = adapter
             .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
             .expect("build_request");
-        assert!(req.reasoning.is_none(), "thinking disabled → no reasoning");
+        assert!(
+            req.input.thinking.is_none(),
+            "thinking disabled → no reasoning"
+        );
         // opus-4-8 is not in the `rhn` temperature-gate set → no temperature even
         // when thinking is env-disabled.
         assert!(
-            req.temperature.is_none(),
+            req.input.temperature.is_none(),
             "opus-4-8 thinking-disabled → no temperature (not in rhn set)"
         );
         // max_tokens still uses the model limit even when thinking is disabled.
-        assert_eq!(req.max_tokens, Some(64_000));
+        assert_eq!(req.input.max_tokens, Some(64_000));
         clear_thinking_env();
     }
 
@@ -2448,7 +2571,7 @@ mod tests {
                 Some(7_777),
             )
             .expect("build_request");
-        assert_eq!(req.max_tokens, Some(7_777));
+        assert_eq!(req.input.max_tokens, Some(7_777));
         clear_thinking_env();
     }
 
@@ -2478,7 +2601,7 @@ mod tests {
                 None,
             )
             .expect("ordinary GLM request");
-        assert_eq!(ordinary.max_tokens, Some(32_000));
+        assert_eq!(ordinary.input.max_tokens, Some(32_000));
 
         let oversized_override = adapter
             .build_request(
@@ -2491,7 +2614,7 @@ mod tests {
                 Some(u32::MAX),
             )
             .expect("explicit GLM request");
-        assert_eq!(oversized_override.max_tokens, Some(230_400));
+        assert_eq!(oversized_override.input.max_tokens, Some(230_400));
     }
 
     #[test]
@@ -2510,7 +2633,7 @@ mod tests {
             )
             .expect("custom model request");
 
-        assert_eq!(request.max_tokens, Some(150_000));
+        assert_eq!(request.input.max_tokens, Some(150_000));
     }
 
     #[test]
@@ -2524,13 +2647,13 @@ mod tests {
             .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
             .expect("build_request");
         assert!(
-            req.reasoning.is_none(),
+            req.input.thinking.is_none(),
             "ThinkingConfig::Disabled → no reasoning"
         );
         // opus-4-8 is NOT in the `rhn` temperature-gate set → field omitted even
         // with thinking disabled (binary @205866168: `!xs && rhn(u) ? … : void 0`).
         assert!(
-            req.temperature.is_none(),
+            req.input.temperature.is_none(),
             "opus-4-8 thinking-disabled → no temperature (not in rhn set)"
         );
         clear_thinking_env();
@@ -2547,9 +2670,12 @@ mod tests {
         let req = adapter
             .build_request("claude-sonnet-4-5", None, None, vec![], vec![], false, None)
             .expect("build_request");
-        assert!(req.reasoning.is_none(), "thinking disabled → no reasoning");
+        assert!(
+            req.input.thinking.is_none(),
+            "thinking disabled → no reasoning"
+        );
         assert_eq!(
-            req.temperature,
+            req.input.temperature,
             Some(1.0),
             "sonnet-4-5 thinking-disabled → temperature:1 (in rhn set)"
         );
@@ -2568,10 +2694,8 @@ mod tests {
             .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
             .expect("build_request");
         assert_eq!(
-            req.metadata,
-            Some(crate::RequestMetadata {
-                user_id: "{\"session_id\":\"s1\"}".to_string()
-            })
+            req.input.metadata,
+            serde_json::json!({ "user_id": "{\"session_id\":\"s1\"}" })
         );
 
         // Default adapter → no metadata.
@@ -2581,7 +2705,7 @@ mod tests {
         )))
         .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
         .expect("build_request");
-        assert!(bare.metadata.is_none());
+        assert!(bare.input.metadata.is_null());
         clear_thinking_env();
     }
 
@@ -2648,7 +2772,7 @@ mod tests {
             text: "keep".to_string(),
             cache_control: None,
         };
-        let mut messages = vec![
+        let messages = vec![
             crate::Message {
                 role: "assistant".to_string(),
                 content: vec![
@@ -2675,12 +2799,27 @@ mod tests {
             },
         ];
 
+        let (canonical, _) = crate::convert::history_input(
+            "model",
+            &messages,
+            &[],
+            &[],
+            lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+        )
+        .unwrap();
+        let mut messages = canonical.messages;
         strip_signature_blocks(&mut messages);
 
-        assert_eq!(messages[0].content, vec![text()]);
+        assert_eq!(
+            messages[0].content,
+            vec![lingxi_llm_client::protocol::ContentBlock::Text {
+                text: "keep".into(),
+                thought_signature: None
+            }]
+        );
         assert!(matches!(
             messages[1].content.as_slice(),
-            [crate::ContentBlock::Reasoning { .. }]
+            [lingxi_llm_client::protocol::ContentBlock::Thinking { .. }]
         ));
     }
 
@@ -2806,7 +2945,7 @@ mod tests {
         )));
         // The encoder emits a computed `output_config.effort` from request.effort.
         let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
-        request.effort = Some(serde_json::json!("high"));
+        request.set_effort(Some(serde_json::json!("high"))).unwrap();
 
         // (5) extra body's output_config is peeled and the computed one layered on
         // top: colliding `effort` → computed wins; extra's `format` is merged in.
@@ -2947,12 +3086,7 @@ mod tests {
             "https://bedrock-runtime.us-east-1.amazonaws.com",
         );
         let mut request = LlmRequest::new("model").with_user_text("hi");
-        request.tools.push(ToolDeclaration {
-            name: "ToolSearch".to_string(),
-            description: "discover tools".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
-            ..Default::default()
-        });
+        request.input.tools.push(serde_json::from_value(serde_json::json!({"name":"ToolSearch", "description":"discover tools", "input_schema":{"type":"object"}})).unwrap());
         let body = body_after_inject(&adapter, &request).await;
         assert!(body["anthropic_beta"].as_array().is_some_and(|betas| {
             betas
@@ -3134,7 +3268,7 @@ mod tests {
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
         }];
-        // The capability check is in DefaultLlmClient.validate_capabilities; since
+        // The capability check is in ModelRuntime.validate_capabilities; since
         // FakeTransport doesn't inspect the body, this exercises the whole path.
         let _ = adapter
             .messages_create("claude-sonnet-4-20250514", None, None, msgs, Vec::new())
@@ -3936,8 +4070,6 @@ mod tests {
     /// Plan test: tool_use id round-trips through the adapter without mangling.
     #[tokio::test]
     async fn tool_use_id_round_trip_within_turn() {
-        use crate::ContentBlock as LlmBlock;
-
         let response_json = serde_json::json!({
             "id": "msg_tool",
             "model": "claude-sonnet-4-20250514",
@@ -3960,7 +4092,7 @@ mod tests {
             .await
             .expect("ok");
         match resp.content.as_slice() {
-            [LlmBlock::ToolCall { id, name, .. }] => {
+            [crate::ContentBlock::ToolCall { id, name, .. }] => {
                 assert_eq!(id, "toolu_abc", "tool_use id must round-trip verbatim");
                 assert_eq!(name, "Read");
             }
@@ -5452,19 +5584,20 @@ mod tests {
             )
             .unwrap();
         let assistants: Vec<_> = request
+            .input
             .messages
             .iter()
-            .filter(|message| message.role == "assistant")
+            .filter(|message| message.role == lingxi_llm_client::protocol::MessageRole::Assistant)
             .collect();
         assert_eq!(assistants.len(), 2);
-        assert!(!assistants[0]
-            .content
-            .iter()
-            .any(|block| matches!(block, crate::ContentBlock::Reasoning { .. })));
-        assert!(assistants[1]
-            .content
-            .iter()
-            .any(|block| matches!(block, crate::ContentBlock::Reasoning { .. })));
+        assert!(!assistants[0].content.iter().any(|block| matches!(
+            block,
+            lingxi_llm_client::protocol::ContentBlock::Thinking { .. }
+        )));
+        assert!(assistants[1].content.iter().any(|block| matches!(
+            block,
+            lingxi_llm_client::protocol::ContentBlock::Thinking { .. }
+        )));
         assert!(!adapter
             .thinking_stripped_messages()
             .contains_key(&fresh.id()));
@@ -6145,7 +6278,7 @@ mod tests {
         #[allow(deprecated)]
         std::env::set_var("ROUTING_TEST_KEY", "test-key");
         let client = Arc::new(
-            DefaultLlmClient::from_config(ClientConfig {
+            ModelRuntime::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
                     wire_profile: None,
                     regions: lingxi_llm_client::protocol::Region::all(),
@@ -7103,7 +7236,7 @@ mod tests {
         #[allow(deprecated)]
         std::env::set_var("STREAM_TELEM_TEST_KEY", "test-key");
         let client = Arc::new(
-            DefaultLlmClient::from_config(ClientConfig {
+            ModelRuntime::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
                     wire_profile: None,
                     regions: lingxi_llm_client::protocol::Region::all(),
@@ -7290,7 +7423,7 @@ mod tests {
         aws: Arc<CountingAwsRefresh>,
     ) -> ApiService {
         let client = Arc::new(
-            DefaultLlmClient::from_config(ClientConfig {
+            ModelRuntime::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
                     wire_profile: None,
                     regions: lingxi_llm_client::protocol::Region::all(),
@@ -7495,7 +7628,7 @@ mod tests {
                 None,
             )
             .expect("default request");
-        assert!(default_req.max_tokens.expect("max tokens") < 32_000);
+        assert!(default_req.input.max_tokens.expect("max tokens") < 32_000);
 
         let with_beta = make_adapter(FakeTransport::always(ProviderResponse::json(
             200,
@@ -7519,7 +7652,7 @@ mod tests {
                 None,
             )
             .expect("1m request");
-        assert_eq!(beta_req.max_tokens, Some(32_000));
+        assert_eq!(beta_req.input.max_tokens, Some(32_000));
     }
 }
 

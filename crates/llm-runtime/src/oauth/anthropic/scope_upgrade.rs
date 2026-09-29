@@ -9,43 +9,10 @@ use crate::oauth::anthropic::client::OAuthError;
 use crate::oauth::anthropic::refresh::{AuthState, TokenInfo};
 use async_trait::async_trait;
 use protocol::Secret;
-use serde::Deserialize;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-/// Decoded shape of a 403 response body announcing a required scope upgrade.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ScopeUpgradeRequired {
-    /// Scopes the provider now requires.
-    pub required: Vec<String>,
-    /// Scopes currently granted on the token.
-    #[serde(default)]
-    pub granted: Vec<String>,
-}
-
-/// Parse a 403 body for `required_scopes`. Returns `None` if the body is not
-/// a scope-upgrade signal (other 403 reasons exist).
-#[must_use]
-pub fn parse_scope_upgrade(body: &str) -> Option<ScopeUpgradeRequired> {
-    let v: serde_json::Value = serde_json::from_str(body).ok()?;
-    let required = v.get("required_scopes")?.as_array()?;
-    let required: Vec<String> = required
-        .iter()
-        .filter_map(|s| s.as_str().map(str::to_string))
-        .collect();
-    if required.is_empty() {
-        return None;
-    }
-    let granted: Vec<String> = v
-        .get("granted_scopes")
-        .and_then(|g| g.as_array())
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|s| s.as_str().map(str::to_string))
-        .collect();
-    Some(ScopeUpgradeRequired { required, granted })
-}
+pub use lingxi_llm_client::auth::oauth::anthropic::{parse_scope_upgrade, ScopeUpgradeRequired};
 
 /// Result of running a PKCE flow: a complete `TokenInfo` ready to swap into
 /// `AuthState`.

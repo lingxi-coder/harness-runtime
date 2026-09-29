@@ -314,7 +314,7 @@ async fn parity_cost_after_one_turn() {
     use protocol::SessionId;
     use tokio::sync::mpsc;
 
-    let response = llm_runtime::LlmResponse {
+    let response = llm_runtime::HistoryResponse {
         id: "msg_mock".into(),
         model: "claude-opus-4-6".into(),
         // A realistic end_turn response carries visible text. (An empty-content

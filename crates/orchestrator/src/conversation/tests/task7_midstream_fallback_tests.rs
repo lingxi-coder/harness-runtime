@@ -23,7 +23,7 @@ static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Build a one-ContentBlockStart-then-Err(Overloaded) stream: the first
 /// event is yielded successfully (proving partial events arrived), then the
 /// stream errors with `LlmError::Overloaded`.
-fn one_event_then_overloaded() -> Vec<Result<llm_runtime::LlmEvent, llm_runtime::LlmError>> {
+fn one_event_then_overloaded() -> Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>> {
     vec![
         Ok(message_start("m1", "claude-opus-4-7")),
         Ok(content_block_start_text(0)),
@@ -33,7 +33,7 @@ fn one_event_then_overloaded() -> Vec<Result<llm_runtime::LlmEvent, llm_runtime:
 }
 
 /// Build an `end_turn` non-streaming response for the fallback.
-fn fallback_response() -> llm_runtime::LlmResponse {
+fn fallback_response() -> llm_runtime::HistoryResponse {
     mock_message_response(
         vec![LlmContentBlock::Text {
             text: "fallback body".into(),

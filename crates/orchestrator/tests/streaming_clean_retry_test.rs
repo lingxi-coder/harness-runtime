@@ -1,6 +1,6 @@
 //! cc 2.1.263 Oer: retry from pre-attempt history plus the clean meta nudge.
 
-use llm_runtime::LlmEvent;
+use llm_runtime::HistoryEvent;
 use orchestrator::test_support::{
     content_block_start_text, content_block_start_thinking, content_block_stop, message_delta_stop,
     message_start, message_stop, noop_hook_executor, text_delta, thinking_delta, MockApiClient,
@@ -11,7 +11,7 @@ use protocol::{ContentBlock, ConversationMessage};
 use std::{path::PathBuf, sync::Arc};
 use tool_api::registry::ToolRegistry;
 
-fn attempt(stop: &str, thinking: bool) -> Vec<LlmEvent> {
+fn attempt(stop: &str, thinking: bool) -> Vec<HistoryEvent> {
     vec![
         message_start("attempt", "claude-opus-4-7"),
         if thinking {

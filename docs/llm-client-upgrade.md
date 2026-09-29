@@ -1,9 +1,10 @@
 # llm-client 能力接入
 
 开发子模块与运行时固定 Git 依赖当前使用 `lingxi-llm-client` 0.3.0，提交
-`58740df6606d5eafa1b575fde2af940278f11d0b`，已从 canonical 远端
-`https://github.com/lingxi-coder/llm-client` 获取。该版本统一模型 HTTP/WebSocket 传输、鉴权策略、模型目录与托管搜索接口。
-该提交包含会话隔离、文件操作期限及流式上传修复，并已推送。后续子模块修改仍须先独立提交并推送，再更新父仓库记录。
+`a4a9880fa02737d95665b3215f6743dfc128f4a4`。该版本统一模型 HTTP/WebSocket 传输、鉴权策略、模型目录、
+托管搜索及 Anthropic/OpenAI/Copilot OAuth 协议。本次提交尚未推送；发布时须先推送
+SDK，再推送父仓库，以便 canonical 远端 `https://github.com/lingxi-coder/llm-client`
+能够解析固定依赖。
 
 ## 子模块联合开发
 
@@ -43,16 +44,16 @@ CI 的 checkout 使用 `submodules: recursive`，因此使用父仓库锁定的 
 
 ## 会话请求
 
-`harness_runtime::models::llm` 仍是模型宿主入口。`LlmRequest` 新增
-`hosted_tools`、`prompt_cache`、`output_format` 和 `continuation`，直接使用
-`llm::services::sdk::protocol` 中的类型。原有 `response_format`、system 缓存标记
-及 Responses 控制保留；新旧输出契约或缓存 TTL 冲突时返回错误。
+`harness_runtime::models::llm` 仍是模型宿主入口。`LlmRequest.input` 直接使用
+SDK `ChatRequest`，包括 `hosted_tools`、`prompt_cache`、`output_format` 和
+`continuation`。宿主执行信息放在不参与序列化的 `execution` 中；旧 Rust 字段
+接口已移除，历史与移动端展示格式由边界适配器保留。
 
 ```rust
 use harness_runtime::models::llm::{LlmRequest, services::sdk::protocol::{HostedTool, WebSearchConfig}};
 
 let mut request = LlmRequest::new("your-configured-model");
-request.hosted_tools.push(HostedTool::WebSearch(WebSearchConfig::default()));
+request.input.hosted_tools.push(HostedTool::WebSearch(WebSearchConfig::default()));
 // 添加消息，再交给已有 ApiService 请求入口；支持范围由实际 profile/model 校验。
 ```
 
@@ -60,7 +61,7 @@ Web Fetch、远程 Skills 的模型执行使用相同的 `hosted_tools` 入口�
 上游 `providers::anthropic::types::AnthropicWebFetchConfig` 和
 `providers::anthropic::types::AnthropicCodeExecutionConfig`。远程 Skills
 由提供方容器执行；它们不会安装进本地技能目录，也不会作为本地工具调用执行。
-搜索结果、引用、文件检索结果及容器信息保留在响应的 `provider_metadata.llm_client` 中；
+SDK 响应保留结构化结果与原生内容；持久化历史适配器将搜索结果、引用、文件检索结果及容器信息投影到 `provider_metadata.llm_client` 中；
 原生提供方内容保留协议标签用于同协议续传。
 
 托管工具及远程状态请求采用单次尝试，避免在结果不确定时自动重试或切换连接。
@@ -160,20 +161,22 @@ HTTP/TLS/OAuth 测试需要允许绑定本机端口。为避免生成大量增�
 
 生产模型请求直接注入 `Arc<dyn sdk::Transport>`。已删除 `LlmTransportBridge`、
 宿主 Responses WebSocket 连接及 `AnthropicRequestBuilder`，调用方不得恢复这些实现。
-`DefaultLlmClient` 按有效路由和网络配置复用 SDK client；请求鉴权通过
+`ModelRuntime` 按有效路由和网络配置复用 SDK client；请求鉴权通过
 `RequestOptions.authenticator` 注入，在途 draft 保留自己的账号与凭据提供者。
 缓存 scope 和显式 continuation 由 SDK 类型校验并编码，不在宿主补写协议 JSON。
 
 | 调用 | 生产路径 |
 | --- | --- |
-| 主对话、侧查询、压缩、精确 token counting | ApiService / DefaultLlmClient → SDK prepared call → SDK Transport |
+| 主对话、侧查询、压缩、精确 token counting | ApiService / ModelRuntime → SDK prepared call → SDK Transport |
 | Hosted WebSearch | HostedWebSearchClient → 会话 ApiService → SDK hosted tool；工具只展示结果和管理预算 |
 | Files、Audio、Images、Skills、Embeddings、Batches | ProviderServices → SDK provider resource → 同一 SDK Transport |
 | 移动连接测试与模型目录 | SDK directory::probe，包含鉴权、分页与总期限；宿主仅投影 UI DTO |
 | Responses / Realtime | SDK 共用 HTTP upgrade connector；取消或异常不自动重放 |
 
-普通网页下载、Brave/Tavily/SearXNG/DDG、OAuth 登录刷新、MCP、遥测及 Monitor
-继续使用宿主通用网络栈。这些不是模型请求。
+模型 provider 的 OAuth 协议、token exchange/refresh、设备授权与账户查询也使用 SDK
+认证接口和共享 Transport；宿主保留登录交互、凭据存储与刷新调度。
+普通网页下载、Brave/Tavily/SearXNG/DDG、MCP（包括 MCP OAuth）、遥测及 Monitor
+继续使用宿主通用网络栈。
 
 `scripts/check-llm-boundary.sh` 自动进入 `check-all.sh` 和 CI：检查生产模型端点拼装及
 旧适配器回流，同时禁止 provider 原始流事件解析和未声明的 WebSocket 实现。
@@ -221,3 +224,7 @@ Responses 会话还保留所选 Transport 的所有权：更换 Transport 时关
 续传及降级状态，共用同一个 Transport 的不同 client 可继续复用。
 `ResponsesSession::prepare_using` 的显式传输参数改为 `Option<Arc<dyn Transport>>`；
 准备之后再以其他 Transport 派发会在宿主准入之前被拒绝。
+
+## Runtime contract consolidation
+
+See [Model execution and host policy](llm-runtime-boundary.md) for the canonical SDK request/event boundary, the breaking Rust API migration, durable-history adapters, and execution invariants.

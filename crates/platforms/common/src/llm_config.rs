@@ -1,4 +1,4 @@
-//! Shared built-in Anthropic `ClientConfig` for `DefaultLlmClient`.
+//! Shared built-in Anthropic `ClientConfig` for `ModelRuntime`.
 //!
 //! Both `engine-desktop` and `engine-mobile` need an identical 10-entry
 //! Claude-4-generation model table. Keeping it here (a crate both hosts already
@@ -70,7 +70,7 @@ use llm_runtime::{
     CredentialConfig, LlmError, ProviderCredentialMode, ProviderParseOptions,
 };
 
-/// Build the built-in Anthropic [`ClientConfig`] for [`llm_runtime::DefaultLlmClient`].
+/// Build the built-in Anthropic [`ClientConfig`] for [`llm_runtime::ModelRuntime`].
 ///
 /// One [`ProviderProfile`] with the full Claude-4-generation model table (10
 /// entries). See module-level docs for the complete table and auth strategy

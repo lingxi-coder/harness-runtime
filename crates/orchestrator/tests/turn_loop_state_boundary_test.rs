@@ -17,7 +17,7 @@
 //! step, say) silently reports every turn as having produced nothing, and no
 //! test that only counts messages would notice.
 
-use llm_runtime::{ContentBlock as LlmContentBlock, LlmResponse, Usage};
+use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, Usage};
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     noop_hook_executor, text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient,
@@ -56,8 +56,8 @@ where
 /// baseline was captured rather than defaulted.
 const SEEDED_POOL: u64 = 4242;
 
-fn response(text: &str) -> LlmResponse {
-    LlmResponse {
+fn response(text: &str) -> HistoryResponse {
+    HistoryResponse {
         id: "msg_state".into(),
         model: "claude-opus-4-7".into(),
         content: vec![LlmContentBlock::Text {
@@ -72,7 +72,7 @@ fn response(text: &str) -> LlmResponse {
     }
 }
 
-fn batched_orch(responses: Vec<LlmResponse>) -> ConversationOrchestrator {
+fn batched_orch(responses: Vec<HistoryResponse>) -> ConversationOrchestrator {
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(responses)),

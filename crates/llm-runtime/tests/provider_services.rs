@@ -368,7 +368,7 @@ fn host_configured_services(
     }))
     .unwrap();
     profile.wire_profile = Some(profiles().remove(1));
-    llm_runtime::DefaultLlmClient::from_config(llm_runtime::ClientConfig {
+    llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
         providers: vec![profile],
     })
     .unwrap()

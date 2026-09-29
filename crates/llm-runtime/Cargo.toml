@@ -8,7 +8,7 @@ license.workspace = true
 [features]
 default = []
 test-support = []
-# Independent duplex realtime sessions; Responses WebSockets still use the host transport.
+# Independent duplex realtime sessions; Responses WebSockets use the SDK transport.
 realtime-websocket = ["lingxi-llm-client/realtime-websocket"]
 
 [dependencies]

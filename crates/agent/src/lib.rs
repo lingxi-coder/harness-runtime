@@ -31,7 +31,7 @@
 /// Streaming assembly, re-exported from `llm-runtime`.
 ///
 /// This module used to OWN the accumulator. It now lives in `llm-runtime`,
-/// beside the `LlmEvent`/`LlmResponse` it is defined in terms of, so other
+/// beside the `HistoryEvent`/`HistoryResponse` it is defined in terms of, so other
 /// stream consumers (the mobile local-app generator) reuse the same assembly
 /// instead of growing a second one. The alias keeps every call site here
 /// unchanged.

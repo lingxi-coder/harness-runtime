@@ -83,7 +83,7 @@ use llm_runtime::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use llm_runtime::oauth::anthropic::handle::OAuthHandle;
 use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
 use llm_runtime::oauth::openai as openai_oauth;
-use llm_runtime::{DefaultLlmClient, Transport};
+use llm_runtime::{ModelRuntime, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
 use orchestrator::test_support::{NoOpPermissionGate, StaticMemoryProvider};
@@ -3609,7 +3609,7 @@ impl FusionCatalogRefresher {
         match credential_id {
             // API-key routes resolve CredentialManager on every request, so a
             // cold API-key profile can adopt its first key without rebuilding
-            // DefaultLlmClient. The assembled source is the proof that this
+            // ModelRuntime. The assembled source is the proof that this
             // runtime actually chose that auth strategy.
             "anthropic" | "anthropic-api-key" => self
                 .credential_sources
@@ -4978,17 +4978,9 @@ not fall back to FusionModelHints::default()'s cost_class: Medium"
         assert_eq!(row.hints.cost_class, platform_api::FusionCostClass::Medium);
     }
 
-    /// Round-5 review finding [3]: a `gemini` row's model capability bit says
-    /// `structured_output: true` (it is copied verbatim from the vendored
-    /// models.dev slice), but `GeminiCodec::encode_request` rejects ANY
-    /// `response_format` outright. Before this fix the row was built with
-    /// `structured_output: true`, so `resolve_analyst`'s `with_schema` gate
-    /// happily elected a Gemini analyst, §4 preflight passed with zero
-    /// errors, both panels burned real tokens, and only THEN did
-    /// `analyst.rs`'s `query_json_schema` die with
-    /// `InvalidRequest("GeminiCodec does not encode response_format yet")`.
+    /// The SDK Gemini codec supports structured output when the model does.
     #[test]
-    fn a_gemini_row_is_not_marked_structured_output_capable() {
+    fn a_gemini_row_retains_sdk_structured_output_capability() {
         let providers = llm_runtime::builtin_presets().providers;
         let gemini = providers
             .iter()
@@ -5006,8 +4998,7 @@ not fall back to FusionModelHints::default()'s cost_class: Medium"
             .expect("gemini-3.1-pro-preview present in the vendored gemini slice");
         assert!(
             pro.capabilities.structured_output,
-            "sanity: this test is only meaningful while the MODEL bit is true — \
-that mismatch with the codec is the whole defect"
+            "the preset model must advertise structured output"
         );
         let row = desktop_fusion_catalog_row(
             &gemini.profile_name,
@@ -5016,9 +5007,8 @@ that mismatch with the codec is the whole defect"
             &gemini.protocol,
         );
         assert!(
-            !row.structured_output,
-            "a GeminiGenerateContent row must NOT claim structured_output: its codec \
-rejects every response_format, so electing it analyst fails only AFTER the panels have spent"
+            row.structured_output,
+            "the SDK Gemini codec encodes structured output"
         );
     }
 
@@ -5063,10 +5053,7 @@ rejects every response_format, so electing it analyst fails only AFTER the panel
         );
     }
 
-    /// Both halves of the AND must be load-bearing: an encoding codec must
-    /// keep a `structured_output: false` model false (the codec bit cannot
-    /// manufacture a capability), and a non-encoding codec must not be
-    /// rescued by a true model bit.
+    /// Wire support must preserve the independent model capability bit.
     #[test]
     fn protocol_gate_and_model_bit_are_both_required() {
         let mut caps = llm_runtime::Capabilities::default();
@@ -5083,34 +5070,7 @@ rejects every response_format, so electing it analyst fails only AFTER the panel
         let mut incapable = capable.clone();
         incapable.capabilities.structured_output = false;
 
-        for family in [
-            llm_runtime::ProtocolFamily::GeminiGenerateContent,
-            llm_runtime::ProtocolFamily::VertexGemini,
-        ] {
-            assert!(
-                !family.encodes_response_format(),
-                "{family:?} delegates to GeminiCodec, which rejects response_format"
-            );
-            assert!(
-                !desktop_fusion_catalog_row(
-                    "p",
-                    &capable,
-                    platform_api::ModelBillingMode::PerToken,
-                    &family,
-                )
-                .structured_output,
-                "{family:?} must gate the row false even with capabilities.structured_output = true"
-            );
-        }
-        for family in [
-            llm_runtime::ProtocolFamily::AnthropicMessages,
-            llm_runtime::ProtocolFamily::OpenAiResponses,
-            llm_runtime::ProtocolFamily::OpenAiChat,
-            llm_runtime::ProtocolFamily::VertexClaude,
-            llm_runtime::ProtocolFamily::BedrockClaude,
-            llm_runtime::ProtocolFamily::FoundryClaude,
-            llm_runtime::ProtocolFamily::AzureOpenAi,
-        ] {
+        for family in llm_runtime::ProtocolFamily::ALL {
             assert!(
                 family.encodes_response_format(),
                 "{family:?} encodes response_format (directly or via the codec it delegates to)"
@@ -5403,7 +5363,7 @@ mod desktop_fusion_executor_boot_test {
         let outputs = budget.workflow_output_scopes();
         desktop_fusion_attempts(
             Arc::new(llm_runtime::ApiService::new(
-                Arc::new(llm_runtime::DefaultLlmClient::from_config(Default::default()).unwrap()),
+                Arc::new(llm_runtime::ModelRuntime::from_config(Default::default()).unwrap()),
                 Arc::new(UnreachableTransport),
                 Default::default(),
                 Default::default(),
@@ -8182,7 +8142,7 @@ fn subscription_snapshot_from(
     use llm_runtime::oauth::anthropic::SubscriptionType;
     let org = profile.and_then(|p| p.organization.as_ref());
     let subscription_type = profile
-        .and_then(llm_runtime::oauth::anthropic::OAuthProfileResponse::subscription_type)
+        .and_then(llm_runtime::oauth::anthropic::profile::subscription_type)
         .and_then(|t| match t {
             SubscriptionType::Pro => Some("pro"),
             SubscriptionType::Max => Some("max"),
@@ -10238,7 +10198,7 @@ async fn apply_worktree_launch(
 }
 
 /// The resolved LLM stack: credentials, the assembled multi-provider config,
-/// and the routed [`DefaultLlmClient`] every model-facing surface needs.
+/// and the routed [`ModelRuntime`] every model-facing surface needs.
 ///
 /// Extracted verbatim out of [`build`] so that headless one-shot commands
 /// (which must NOT boot a session, fire `SessionStart` hooks, or start MCP
@@ -10321,7 +10281,7 @@ pub struct LlmStack {
     /// Resolved provider tag for the session's boot auto-mode gate.
     pub session_auto_mode_provider: String,
     /// See [`build`] for the resolution rules behind `llm_runtime`.
-    pub llm_runtime: Arc<DefaultLlmClient>,
+    pub llm_runtime: Arc<ModelRuntime>,
     /// See [`build`] for the resolution rules behind `llm_transport`.
     pub llm_transport: Arc<dyn Transport>,
     /// See [`build`] for the resolution rules behind `cost_estimator`.
@@ -10546,10 +10506,8 @@ async fn resolve_llm_stack_with_credentials(
         }
     }
 
-    // The shared SDK transport owns provider networking for
-    //      `DefaultLlmClient`. A second `PosixHttp` instance is used so the
-    //      bridge owns its own (stateless) handle; the original `http` Arc
-    //      continues to serve MCP / hooks / side-query.
+    // Model execution and provider authentication share SDK networking.
+    // General web, MCP and hooks retain the host HTTP transport.
     let llm_transport: Arc<dyn Transport> = Arc::new(
         platform_common::provider_transport().map_err(|e| BuildError::ApiBase(e.to_string()))?,
     );
@@ -10595,7 +10553,7 @@ async fn resolve_llm_stack_with_credentials(
     let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
     let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
         oauth_cfg.clone(),
-        http.clone(),
+        llm_transport.clone(),
         credentials.clone(),
     ));
     let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(oauth_client));
@@ -10605,7 +10563,7 @@ async fn resolve_llm_stack_with_credentials(
     //        the proactive-refresh task and returns the shared `AuthState`.  The
     //        returned state is used BOTH for the old api-client hook path (removed
     //        in Plan 3a Task 9) and to wire `OAuthCredentialProvider` into the
-    //        new `DefaultLlmClient` path.
+    //        new `ModelRuntime` path.
     //
     //        (3.2) API.6: while we have the token in hand, resolve the Claude.ai
     //        subscriber flag from its scopes (see [`oauth_subscriber_flag`]).
@@ -10708,7 +10666,7 @@ async fn resolve_llm_stack_with_credentials(
                 tokens.access_token,
                 tokens.refresh_token,
                 tokens.expires_at,
-                http.clone(),
+                llm_transport.clone(),
                 clock.clone(),
                 Some(Arc::new(telemetry::AnalyticsBus::new())),
                 Some(credentials.clone()),
@@ -10747,8 +10705,7 @@ async fn resolve_llm_stack_with_credentials(
                         // calls and never logged or formatted.
                         {
                             let slot = subscription.clone();
-                            let transport: std::sync::Arc<dyn platform_api::HttpTransport> =
-                                http.clone();
+                            let transport: Arc<dyn Transport> = llm_transport.clone();
                             let creds = credentials.clone();
                             // Move (not copy) the token into the task — its
                             // only consumer.
@@ -10757,14 +10714,16 @@ async fn resolve_llm_stack_with_credentials(
                                 let token = token.expose_secret();
                                 let Some(profile) =
                                     llm_runtime::oauth::anthropic::fetch_profile_from_oauth_token(
-                                        token, &transport,
+                                        token,
+                                        transport.as_ref(),
                                     )
                                     .await
                                 else {
                                     return;
                                 };
                                 let roles = llm_runtime::oauth::anthropic::fetch_user_roles(
-                                    token, &transport,
+                                    token,
+                                    transport.as_ref(),
                                 )
                                 .await;
                                 let snap = subscription_snapshot_from(
@@ -10813,7 +10772,7 @@ async fn resolve_llm_stack_with_credentials(
     let openai_oauth_cfg = openai_oauth::OpenAiOAuthConfig::default();
     let openai_oauth_client = Arc::new(openai_oauth::OpenAiOAuthClient::new(
         openai_oauth_cfg.clone(),
-        http.clone(),
+        llm_transport.clone(),
     ));
 
     // (3.2a-pre) P3 enterprise precedence for the openai-chatgpt credential:
@@ -10821,8 +10780,7 @@ async fn resolve_llm_stack_with_credentials(
     let mut openai_chatgpt_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> = None;
     if let Ok(pat) = std::env::var("OPENAI_PERSONAL_ACCESS_TOKEN") {
         if !pat.trim().is_empty() {
-            let http_dyn: Arc<dyn platform_api::HttpTransport> =
-                http.clone() as Arc<dyn platform_api::HttpTransport>;
+            let http_dyn: Arc<dyn Transport> = llm_transport.clone() as Arc<dyn Transport>;
             match openai_oauth::whoami(&openai_oauth_cfg, &http_dyn, &pat).await {
                 Ok(md) => {
                     openai_chatgpt_delegate =
@@ -10868,7 +10826,7 @@ async fn resolve_llm_stack_with_credentials(
                     tokens.account_id,
                     tokens.fedramp,
                     tokens.email,
-                    http.clone(),
+                    llm_transport.clone(),
                     clock.clone(),
                     Some(Arc::new(telemetry::AnalyticsBus::new())),
                     Some(credentials.clone()),
@@ -11026,7 +10984,7 @@ async fn resolve_llm_stack_with_credentials(
         .map(|(profile, provider)| (profile.clone(), provider == "firstParty"))
         .collect();
 
-    let mut client = DefaultLlmClient::from_config(assembled.client_config)
+    let mut client = ModelRuntime::from_config(assembled.client_config)
         .map_err(|e| BuildError::ApiBase(format!("llm-runtime config: {e}")))?;
     // §6.1: ONE composite credential slot for ALL providers (anthropic api-key /
     // oauth-delegate + every per-profile credential source).
@@ -11349,14 +11307,14 @@ async fn resolve_llm_stack_with_credentials(
     // id passes straight through unchanged.
     let copilot_creds = llm_runtime::CopilotExchangeCredentialProvider::new(
         Arc::new(composite),
-        Arc::new(connect::PosixCopilotHttp::new()),
+        llm_transport.clone(),
         "github-copilot",
     );
     client = client.with_credential_provider(Arc::new(copilot_creds));
     let llm_runtime = Arc::new(client);
 
     // 3c-T3: build the cost estimator from the assembled pricing catalog so
-    // LlmResponse.cost is populated on every successful decode. The catalog
+    // HistoryResponse.cost is populated on every successful decode. The catalog
     // already carries the built-in reference tiers + non-Anthropic preset rows +
     // any settings per-profile pricing overrides folded in by `assemble`. Unpriced
     // / unknown models leave cost = None (never an error).
@@ -12052,7 +12010,7 @@ pub async fn build_with_credential_stack(
     let interactive_session = session_composition.is_interactive_session();
     let service_built = llm_runtime::ApiService::new_with_routing(
         llm_runtime,
-        llm_transport,
+        llm_transport.clone(),
         subscriber_state,
         UserAgentEnv::from_process_env(),
         env!("CARGO_PKG_VERSION"),
@@ -16216,7 +16174,7 @@ pub async fn build_with_credential_stack(
             .await;
     }
     orch.spawn_startup_responses_websocket_prewarm();
-    // Plan 3c: `/connect` seams — Copilot device-flow over `PosixHttp`, and the
+    // `/connect` seams — Copilot device-flow over SDK HTTP, and the
     // API-key writer over the host secure prompt (tui-supplied; headless no-op).
     // M8: also wire the ChatGPT OAuth seam (`/connect chatgpt`).
     // Round-4 review finding [8] / round-5 finding [15]: EVERY `/connect`
@@ -16233,6 +16191,7 @@ pub async fn build_with_credential_stack(
         Arc::new(FusionCatalogRefreshingCopilotConnect {
             inner: Arc::new(crate::desktop::connect::EngineCopilotConnect::new(
                 credentials.clone(),
+                llm_transport.clone(),
             )),
             refresher: fusion_catalog_refresher.clone(),
         });
@@ -19056,7 +19015,7 @@ flag-only login never recovers from a preceding logout"
             mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             credentials: fusion_delete_test_credentials(),
             // Both credentials existed at boot, but assemble selected exactly
-            // one OAuth source and DefaultLlmClient copied that fixed route.
+            // one OAuth source and ModelRuntime copied that fixed route.
             credential_sources: vec![provider_config::CredentialSource {
                 provider_id: llm_runtime::ProviderId::AnthropicFirstParty,
                 profile_name: "anthropic".to_string(),
@@ -25991,7 +25950,7 @@ must be filtered out: got {after:?}"
     /// `available_models()` + the alias resolves via the registry.
     ///
     /// This exercises the full settings → `apply_settings_providers` →
-    /// `DefaultLlmClient::from_config` → registry path without any network call.
+    /// `ModelRuntime::from_config` → registry path without any network call.
     /// The `build()` call is the composition-root assertion; the model/alias
     /// assertions use `apply_settings_providers` directly (same code path, but
     /// callable without digging into the orchestrator internals).
@@ -26052,8 +26011,7 @@ must be filtered out: got {after:?}"
         platform_common::apply_settings_providers(&mut llm_cfg, &providers, Some(&routing))
             .expect("apply_settings_providers must succeed");
 
-        let client =
-            llm_runtime::DefaultLlmClient::from_config(llm_cfg).expect("config must be valid");
+        let client = llm_runtime::ModelRuntime::from_config(llm_cfg).expect("config must be valid");
 
         // (1) available_models() includes the custom groq model.
         let available: Vec<String> = client
@@ -26111,8 +26069,7 @@ must be filtered out: got {after:?}"
         });
         platform_common::apply_settings_providers(&mut llm_cfg, &empty, Some(&routing))
             .expect("routing-only apply must succeed");
-        let client =
-            llm_runtime::DefaultLlmClient::from_config(llm_cfg).expect("config must be valid");
+        let client = llm_runtime::ModelRuntime::from_config(llm_cfg).expect("config must be valid");
         let aliased = client
             .available_models()
             .into_iter()

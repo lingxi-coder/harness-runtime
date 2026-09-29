@@ -4203,7 +4203,7 @@ mod tests {
     }
 
     struct QueueApi {
-        responses: Mutex<VecDeque<llm_runtime::LlmResponse>>,
+        responses: Mutex<VecDeque<llm_runtime::HistoryResponse>>,
         calls: AtomicUsize,
     }
 
@@ -4253,14 +4253,14 @@ mod tests {
             _system: Option<&str>,
             _messages: Vec<protocol::ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+        ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.responses.lock().unwrap().pop_front().unwrap())
         }
     }
 
-    fn text_response(text: &str) -> llm_runtime::LlmResponse {
-        llm_runtime::LlmResponse {
+    fn text_response(text: &str) -> llm_runtime::HistoryResponse {
+        llm_runtime::HistoryResponse {
             id: "mock".into(),
             model: "mock".into(),
             content: vec![llm_runtime::ContentBlock::Text {
@@ -4670,7 +4670,7 @@ mod tests {
                 _system: Option<&str>,
                 _messages: Vec<protocol::ConversationMessage>,
                 tools: Vec<serde_json::Value>,
-            ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+            ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
                 *self.seen_tools.lock().unwrap() = tools;
                 Ok(text_response("done"))
             }
@@ -4961,7 +4961,7 @@ mod tests {
             _system: Option<&str>,
             _messages: Vec<protocol::ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+        ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
             std::future::pending().await
         }
     }

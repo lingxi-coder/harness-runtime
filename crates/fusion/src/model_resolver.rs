@@ -113,19 +113,10 @@ pub struct CatalogModel {
     /// owning profile's wire codec being able to encode an
     /// `LlmRequest.response_format`.
     ///
-    /// Round-5 review finding [3]: these are two different claims and the
-    /// weaker one is not enough. `capabilities.structured_output` comes
-    /// verbatim from the vendored models.dev slice and describes the MODEL;
-    /// `GeminiCodec::encode_request` rejects every `response_format`
-    /// regardless (`"GeminiCodec does not encode response_format yet"`), and
-    /// `llm_runtime::protocol::validate_capabilities` — the only pre-transport
-    /// gate — passes on the capability bit alone. A row that carried only the
-    /// model bit therefore cleared [`resolve_analyst`]'s `with_schema` gate,
-    /// cleared §4 preflight with zero errors, let both panels spend real
-    /// money, and only then died inside `analyst.rs`'s `query_json_schema`.
-    /// Producers must AND the codec in: see
-    /// `llm_runtime::ProtocolFamily::encodes_response_format`, applied at the one
-    /// production construction site (`desktop_fusion_catalog_row`).
+    /// Producers combine the model bit with the SDK codec's wire support via
+    /// `llm_runtime::ProtocolFamily::encodes_response_format`. All current
+    /// SDK codecs, including Gemini, support structured response formats;
+    /// the model capability bit remains independently required.
     pub structured_output: bool,
     /// Provider/profile-specific context and input/output limits.
     pub limits: ModelLimits,

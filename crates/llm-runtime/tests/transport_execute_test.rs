@@ -1,11 +1,12 @@
+use lingxi_llm_client::protocol::{ContentBlock, StopReason};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use llm_runtime::client::DefaultLlmClient;
+use llm_runtime::client::ModelRuntime;
 use llm_runtime::{
-    AuthStrategy, BoxFuture, Capabilities, ClientConfig, ContentBlock, CredentialConfig, LlmError,
-    LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
-    ProviderRequest, ProviderResponse, StreamingResponse, Transport,
+    AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig, LlmError, LlmRequest,
+    ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, ProviderRequest,
+    ProviderResponse, StreamingResponse, Transport,
 };
 
 #[derive(Debug)]
@@ -46,9 +47,9 @@ impl llm_runtime::test_support::FixtureTransport for FakeTransport {
 }
 llm_runtime::impl_fixture_transport!(FakeTransport);
 
-fn anthropic_client() -> DefaultLlmClient {
+fn anthropic_client() -> ModelRuntime {
     std::env::set_var("LLM_CLIENT_TRANSPORT_TEST_KEY", "transport-key");
-    DefaultLlmClient::from_config(ClientConfig {
+    ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: lingxi_llm_client::protocol::Region::all(),
@@ -109,10 +110,10 @@ async fn execute_sends_authenticated_request_and_decodes_response() {
         .expect("response");
 
     assert!(
-        matches!(response.content.as_slice(), [ContentBlock::Text { text, .. }] if text == "hi")
+        matches!(response.message.content.as_slice(), [ContentBlock::Text { text, .. }] if text == "hi")
     );
-    assert_eq!(response.stop_reason.as_deref(), Some("end_turn"));
-    assert_eq!(response.usage.billable_tokens.input, 9);
+    assert_eq!(response.stop_reason, StopReason::EndTurn);
+    assert_eq!(response.usage.complete().unwrap().input_tokens, 9);
 
     let seen = transport
         .seen

@@ -8,7 +8,7 @@ use crate::test_support::{PermissionDecision, PermissionDecisionSource, Permissi
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use hooks::response::HookDecision;
-use llm_runtime::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
+use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
 use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -736,7 +736,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         }
     }
 
-    // 2. Translate `LlmResponse.content` -> `ContentBlock` history entry.
+    // 2. Translate `HistoryResponse.content` -> `ContentBlock` history entry.
     let assistant_blocks = translate_response_blocks(&response.content);
 
     // 3. Append the assistant message to the session. We need the
@@ -1160,12 +1160,12 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
 }
 
 /// Outcome of [`call_api_with_ptl_recovery`]: either a successful
-/// `LlmResponse`, or a signal that the prompt-too-long reactive recovery
+/// `HistoryResponse`, or a signal that the prompt-too-long reactive recovery
 /// (Batch 5) was exhausted and the turn should end with the byte-exact
 /// [`PROMPT_TOO_LONG_ERROR_MESSAGE`].
 pub(crate) enum PtlCallOutcome {
     /// The API call (or a retry after truncation/compaction) succeeded.
-    Response(Box<LlmResponse>),
+    Response(Box<HistoryResponse>),
     /// The PTL retry budget + reactive-compact fallback were all exhausted.
     /// End the turn with terminal reason `"prompt_too_long"` (the REACTIVE
     /// exhaustion path, `query.ts:1175`).
@@ -1749,7 +1749,7 @@ async fn reissue_after_model_fallback(
     original_model: &str,
     fallback_model: String,
     tools: Vec<serde_json::Value>,
-) -> Result<LlmResponse, LlmError> {
+) -> Result<HistoryResponse, LlmError> {
     // (i) Switch the working/session model to the fallback.
     {
         let mut s = orch.session.lock().await;
@@ -2190,7 +2190,7 @@ pub(crate) fn terminal_api_error_text(
     interactive: bool,
     stop_reason: &str,
     request_id: Option<&str>,
-    stop_details: Option<&llm_runtime::StopDetails>,
+    stop_details: Option<&llm_runtime::HistoryStopDetails>,
 ) -> Option<String> {
     match stop_reason {
         "max_tokens" => Some(format!(
@@ -2342,7 +2342,7 @@ fn refusal_explanation_clause(explanation: Option<&str>) -> String {
 pub(crate) async fn surface_terminal_api_error(
     orch: &ConversationOrchestrator,
     stop_reason: &str,
-    stop_details: Option<&llm_runtime::StopDetails>,
+    stop_details: Option<&llm_runtime::HistoryStopDetails>,
 ) -> Option<MessageId> {
     let (model, interactive) = {
         let s = orch.session.lock().await;
@@ -8589,7 +8589,7 @@ mod tool_result_persistence_wiring_tests {
 
     #[tokio::test]
     async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
-        use llm_runtime::WireCodec;
+        use llm_runtime::services::sdk::{self, WireCodec};
         use protocol::{ConversationMessage, MessageId};
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("history.jsonl");
@@ -8624,18 +8624,30 @@ mod tool_result_persistence_wiring_tests {
         let history =
             crate::resume::state_from_messages(uuid::Uuid::nil(), &loaded.messages_in_order)
                 .history;
-        let request = llm_runtime::LlmRequest {
-            model: "claude-opus-4-7".into(),
-            messages: llm_runtime::convert::to_llm_messages(history).unwrap(),
-            ..Default::default()
-        };
-        let codec =
-            llm_runtime::AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-        for encoded in [
-            codec.encode_request(&request).unwrap(),
-            codec.encode_count_tokens_request(&request).unwrap(),
-        ] {
-            let wire = String::from_utf8(encoded.wire_body_bytes().unwrap()).unwrap();
+        let messages = llm_runtime::convert::to_llm_messages(history).unwrap();
+        let (input, overrides) = llm_runtime::convert::history_input(
+            "claude-opus-4-7",
+            &messages,
+            &[],
+            &[],
+            sdk::protocol::ProtocolFamily::AnthropicMessages,
+        )
+        .unwrap();
+        let profile: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
+            "provider_id":"anthropic", "profile_name":"test", "base_url":"https://api.anthropic.com",
+            "protocol":"anthropic_messages", "auth":"none", "models":[]
+        })).unwrap();
+        let codec = sdk::AnthropicMessagesCodec;
+        for mode in [sdk::RequestMode::Complete, sdk::RequestMode::CountTokens] {
+            let encoded = codec
+                .encode_request(
+                    sdk::EncodeRequest::new(&input),
+                    &sdk::CodecContext::new(&profile, &input.model, mode),
+                )
+                .unwrap();
+            let body = serde_json::from_slice(&encoded.body).unwrap();
+            let wire =
+                String::from_utf8(sdk::exact_json::serialize(&body, &overrides).unwrap()).unwrap();
             assert!(
                 wire.contains("\\ud83d\\n..."),
                 "exact JS surrogate must reach wire: {wire}"

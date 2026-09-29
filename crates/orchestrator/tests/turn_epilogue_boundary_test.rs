@@ -262,7 +262,7 @@ fn snapshot_lines(path: &std::path::Path) -> usize {
 /// `end_turn` never reaches it — the turn ends through the natural `Complete`
 /// arm instead, which does run the epilogue. The first draft of the Return test
 /// scripted text and failed on exactly that.
-fn streamed_tool_round(id: &str, tool: &str) -> Vec<llm_runtime::LlmEvent> {
+fn streamed_tool_round(id: &str, tool: &str) -> Vec<llm_runtime::HistoryEvent> {
     vec![
         message_start(id, "claude-opus-4-7"),
         orchestrator::test_support_stream::content_block_start_tool_use(
@@ -277,7 +277,7 @@ fn streamed_tool_round(id: &str, tool: &str) -> Vec<llm_runtime::LlmEvent> {
     ]
 }
 
-fn streamed_end_turn(id: &str) -> Vec<llm_runtime::LlmEvent> {
+fn streamed_end_turn(id: &str) -> Vec<llm_runtime::HistoryEvent> {
     scripted![
         message_start(id, "claude-opus-4-7"),
         content_block_start_text(0),

@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use lingxi_core::SessionState;
-use llm_runtime::{LlmError, LlmEvent, LlmResponse};
+use llm_runtime::{HistoryEvent, HistoryResponse, LlmError};
 use protocol::{ConversationMessage, HookId, MessageId, SessionId};
 use session::JsonlWriter;
 use sha2::{Digest, Sha256};
@@ -41,7 +41,7 @@ use tool_api::ToolRegistryView as _;
 /// Minimal contract the orchestrator needs from the API client.
 ///
 /// Production: [`crate::provider_adapter::ProviderApiAdapter`] (Task 6)
-/// drives `llm_runtime::DefaultLlmClient` into this shape.
+/// drives `llm_runtime::ModelRuntime` into this shape.
 /// Tests: `MockApiClient`.
 #[async_trait]
 pub trait OrchestratorApiClient: Send + Sync {
@@ -63,7 +63,7 @@ pub trait OrchestratorApiClient: Send + Sync {
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError>;
+    ) -> Result<HistoryResponse, LlmError>;
 
     /// Non-streaming `messages.create` carrying a `context_hint` offer.
     ///
@@ -84,7 +84,7 @@ pub trait OrchestratorApiClient: Send + Sync {
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         _context_hint: Option<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.messages_create(model, profile, system, msgs, tools)
             .await
     }
@@ -99,7 +99,7 @@ pub trait OrchestratorApiClient: Send + Sync {
         profile: Option<&str>,
         system: &str,
         msgs: Vec<ConversationMessage>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.messages_create(model, profile, Some(system), msgs, Vec::new())
             .await
     }
@@ -122,7 +122,7 @@ pub trait OrchestratorApiClient: Send + Sync {
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         _max_tokens: u32,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.messages_create(model, profile, system, msgs, tools)
             .await
     }
@@ -153,7 +153,7 @@ pub trait OrchestratorApiClient: Send + Sync {
         _fallback_model: Option<&str>,
         _is_subscriber: bool,
         _is_enterprise: bool,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         // Default: ignore the fallback args and use the plain seam. Keeps all
         // non-Anthropic impls (and mocks) byte-identical.
         self.messages_create(model, profile, system, msgs, tools)
@@ -182,7 +182,7 @@ pub trait OrchestratorApiClient: Send + Sync {
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         _initial_consecutive_overloaded: u8,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         // Default: ignore the seed and use the plain seam. Keeps all
         // non-Anthropic impls (and mocks) byte-identical.
         self.messages_create(model, profile, system, msgs, tools)
@@ -431,24 +431,24 @@ fn enrich_rate_limited_error(
 /// Streaming-API surface used by the orchestrator's streaming turn loop.
 ///
 /// Mirrors [`OrchestratorApiClient`] but returns a typed
-/// `BoxStream<'static, Result<LlmEvent, LlmError>>` instead of a
-/// single `LlmResponse`. The orchestrator owns the stream and drives
+/// `BoxStream<'static, Result<HistoryEvent, LlmError>>` instead of a
+/// single `HistoryResponse`. The orchestrator owns the stream and drives
 /// it to completion (or `message_stop` / `Completed`).
 ///
-/// Production: [`ProviderApiAdapter`] (Task 6) drives `DefaultLlmClient`
+/// Production: [`ProviderApiAdapter`] (Task 6) drives `ModelRuntime`
 /// directly. Tests: `MockStreamingApiClient` in `test_support_stream.rs`.
 #[async_trait]
 pub trait StreamingApiClient: Send + Sync {
     /// Open a streaming `messages.create` request. The returned stream
-    /// yields wire-decoded `LlmEvent` values until the server emits
+    /// yields wire-decoded `HistoryEvent` values until the server emits
     /// `message_stop` or a `Completed` event. The implementation is
     /// responsible for HTTP, SSE chunk buffering, and JSON-decoding the
-    /// `data:` lines into typed `LlmEvent` values.
+    /// `data:` lines into typed `HistoryEvent` values.
     ///
     /// `profile` — optional provider profile name (e.g. `"github-copilot"`).
     /// Mirrors the `profile` parameter on the batched `messages_create*`
     /// methods so the streaming path can thread `SessionState::model_profile`
-    /// through to `build_request` / `DefaultLlmClient::prepare`.
+    /// through to `build_request` / `ModelRuntime::prepare`.
     async fn stream(
         &self,
         model: &str,
@@ -456,7 +456,7 @@ pub trait StreamingApiClient: Send + Sync {
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError>;
+    ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>;
 
     /// Connect-phase retry count of the most recent `stream` call (the value
     /// the adapter knows when it returns the stream). Used by the streaming
@@ -1476,7 +1476,7 @@ impl StreamingApiClient for NoStreamingApiClient {
         _system: Option<&str>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         Err(LlmError::Transport {
             message: "no streaming client configured".into(),
         })

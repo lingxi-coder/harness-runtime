@@ -3,7 +3,7 @@
 //! AND a budget is configured, keeps nudging the model past `end_turn` until
 //! ~90% of the budget is spent — and that with the gate OFF (the parity
 //! default) the loop stops at the first `end_turn` (NO-OP).
-use llm_runtime::{ContentBlock as LlmContentBlock, LlmResponse, TokenUsage, Usage};
+use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, TokenUsage, Usage};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -14,8 +14,8 @@ use tool_api::registry::ToolRegistry;
 
 /// Build an `end_turn` response with a single text block and a given
 /// `output_tokens` usage count.
-fn end_turn_with_output_tokens(output_tokens: u64) -> LlmResponse {
-    LlmResponse {
+fn end_turn_with_output_tokens(output_tokens: u64) -> HistoryResponse {
+    HistoryResponse {
         id: "msg_mock".to_string(),
         model: "claude-opus-4-7".to_string(),
         content: vec![LlmContentBlock::Text {
@@ -247,7 +247,7 @@ async fn budget_on_resets_recovery_count_on_continuation() {
 fn streamed_end_turn_with_output_tokens(
     id: &str,
     output_tokens: u64,
-) -> Vec<llm_runtime::LlmEvent> {
+) -> Vec<llm_runtime::HistoryEvent> {
     use orchestrator::test_support::{
         content_block_start_text, content_block_stop, message_start, message_stop, text_delta,
     };

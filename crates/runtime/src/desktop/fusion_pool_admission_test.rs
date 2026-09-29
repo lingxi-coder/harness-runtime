@@ -76,7 +76,10 @@ impl agent::SubagentApiClient for Api {
         effort: Option<Value>,
         opts: agent::api::SubagentApiCallOpts,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         self.messages_create_stream_forced_in_opts(
@@ -96,7 +99,10 @@ impl agent::SubagentApiClient for Api {
         effort: Option<Value>,
         opts: agent::api::SubagentApiCallOpts,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
         llm_runtime::LlmError,
     > {
         // Explicit mock host: retain and inspect the actual Rust capability,
@@ -127,10 +133,10 @@ impl agent::SubagentApiClient for Api {
         _: Option<&str>,
         _: Vec<protocol::ConversationMessage>,
         _: Vec<Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.both.wait().await;
-        Ok(llm_runtime::LlmResponse {
+        Ok(llm_runtime::HistoryResponse {
             id: "fake-panel".into(),
             model: "mock".into(),
             content: vec![llm_runtime::ContentBlock::ToolCall {

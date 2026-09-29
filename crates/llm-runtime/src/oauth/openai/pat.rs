@@ -7,79 +7,22 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
-use platform_api::HttpTransport;
-use protocol::{HttpMethod, HttpRequest};
-use serde::Deserialize;
 
 use crate::oauth::openai::client::OAuthError;
 use crate::oauth::openai::config::OpenAiOAuthConfig;
 
-/// Account metadata resolved from the PAT `whoami` call.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PatMetadata {
-    /// `ChatGPT` workspace/account id → `ChatGPT-Account-ID` header.
-    pub account_id: Option<String>,
-    /// `FedRAMP` account flag → `X-OpenAI-Fedramp` header.
-    pub fedramp: bool,
-    /// User email (best-effort).
-    pub email: Option<String>,
-    /// Subscription plan type (best-effort).
-    pub plan: Option<String>,
-}
+pub use lingxi_llm_client::auth::oauth::openai::PatMetadata;
 
-#[derive(Deserialize)]
-struct WhoamiResp {
-    #[serde(default)]
-    chatgpt_account_id: Option<String>,
-    #[serde(default)]
-    chatgpt_account_is_fedramp: bool,
-    #[serde(default)]
-    email: Option<String>,
-    #[serde(default)]
-    chatgpt_plan_type: Option<String>,
-}
-
-/// Resolve account metadata for a PAT via `GET {authapi}/v1/user-auth-credential/whoami`.
-///
-/// # Errors
-/// Errors on transport failure or non-200 status.
 pub async fn whoami(
     cfg: &OpenAiOAuthConfig,
-    http: &Arc<dyn HttpTransport>,
+    http: &Arc<dyn lingxi_llm_client::Transport>,
     pat: &str,
 ) -> Result<PatMetadata, OAuthError> {
-    let req = HttpRequest {
-        method: HttpMethod::Get,
-        url: cfg.whoami_url(),
-        headers: vec![
-            ("authorization".into(), format!("Bearer {pat}")),
-            ("accept".into(), "application/json".into()),
-        ],
-        body: None,
-        body_bytes: None,
-        timeout: Some(Duration::from_secs(15)),
-    };
-    let resp = http
-        .request(req)
+    lingxi_llm_client::auth::oauth::openai::whoami(http.as_ref(), cfg, pat)
         .await
-        .map_err(|e| OAuthError::TokenExchange(format!("whoami transport: {e}")))?;
-    if resp.status != 200 {
-        return Err(OAuthError::TokenExchange(format!(
-            "whoami failed with status {}",
-            resp.status
-        )));
-    }
-    let raw: WhoamiResp = serde_json::from_str(&resp.body)
-        .map_err(|e| OAuthError::TokenExchange(format!("whoami decode: {e}")))?;
-    Ok(PatMetadata {
-        account_id: raw.chatgpt_account_id,
-        fedramp: raw.chatgpt_account_is_fedramp,
-        email: raw.email,
-        plan: raw.chatgpt_plan_type,
-    })
+        .map_err(|e| OAuthError::TokenExchange(e.to_string()))
 }
 
 /// Static credential provider for a PAT. Serves `Credential::ChatGptOAuth` with
@@ -137,7 +80,7 @@ mod tests {
 
     #[tokio::test]
     async fn whoami_parses_account_and_fedramp() {
-        let http: Arc<dyn HttpTransport> = MockHttp::new(vec![(
+        let http: Arc<dyn lingxi_llm_client::Transport> = MockHttp::new(vec![(
             "whoami",
             Canned {
                 status: 200,
@@ -152,7 +95,7 @@ mod tests {
 
     #[tokio::test]
     async fn whoami_non_200_errors() {
-        let http: Arc<dyn HttpTransport> = MockHttp::new(vec![(
+        let http: Arc<dyn lingxi_llm_client::Transport> = MockHttp::new(vec![(
             "whoami",
             Canned {
                 status: 401,

@@ -3718,7 +3718,7 @@ pub trait OutputStream: Send + Sync {
     /// Emit a raw SSE stream event frame (`stream_event`) for
     /// `--include-partial-messages`.
     ///
-    /// `event_json` is a JSON string reconstructed from the parsed `LlmEvent`
+    /// `event_json` is a JSON string reconstructed from the parsed `HistoryEvent`
     /// (semantically equivalent to the original Anthropic SSE event, but NOT
     /// byte-for-byte identical since LingXi already parsed the raw bytes).
     /// `is_message_start` is `true` only for the `message_start` event, which

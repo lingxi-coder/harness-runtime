@@ -783,7 +783,7 @@ fn analyst_user_message(
 /// `additionalProperties: false` — the shape every strict-mode JSON-schema
 /// codec demands (see `llm-runtime/src/providers/openai.rs`'s
 /// `"strict": true`); `minimum`/`maximum` are dropped because the strict
-/// converter (`llm_runtime::strict_schema::to_strict_schema`) does not allow
+/// converter (`llm_runtime::services::sdk::providers::anthropic::strict_schema::to_strict_schema`) does not allow
 /// those keywords — the host re-validates the numeric range itself in
 /// [`scores_match_request`].
 /// `analyst_json_schema` helper: the `scores` sub-schema — one required
@@ -1019,7 +1019,7 @@ mod tests {
         let ids = vec!["P1".to_string(), "P2".to_string()];
         let dims = vec!["coverage".to_string(), "safety".to_string()];
         let schema = analyst_json_schema(&ids, &dims);
-        llm_runtime::strict_schema::to_strict_schema(&schema)
+        llm_runtime::services::sdk::providers::anthropic::strict_schema::to_strict_schema(&schema)
             .expect("analyst schema must be strict-mode compatible");
     }
 
@@ -1048,8 +1048,10 @@ mod tests {
         // The generated schema must itself accept the sample under the strict
         // conversion (closed objects, all-required) before we even ask serde
         // to decode it.
-        llm_runtime::strict_schema::to_strict_schema(&analyst_json_schema(&ids, &dims))
-            .expect("schema must be strict-mode compatible");
+        llm_runtime::services::sdk::providers::anthropic::strict_schema::to_strict_schema(
+            &analyst_json_schema(&ids, &dims),
+        )
+        .expect("schema must be strict-mode compatible");
         let analysis: FusionAnalysis =
             serde_json::from_value(sample).expect("sample matches FusionAnalysis");
         assert_eq!(analysis.contradictions[0].severity, RiskSeverity::High);
