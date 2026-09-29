@@ -12,7 +12,14 @@
 use crate::oauth::openai::client::OAuthError;
 use crate::oauth::openai::config::OpenAiOAuthConfig;
 use async_trait::async_trait;
-use protocol::{HttpMethod, HttpRequest, Secret};
+use lingxi_llm_client::auth::oauth::openai::{
+    refresh_token, ExchangedTokens as TokenEndpointResponse, OAuthProtocolError,
+};
+use lingxi_llm_client::{
+    transport::{HttpRequest as SdkHttpRequest, StreamResponse},
+    Transport,
+};
+use protocol::Secret;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -45,9 +52,6 @@ pub enum OAuthHookError {
     #[error("provider unreachable: {0}")]
     ProviderUnreachable(String),
 }
-
-/// Timeout for the refresh-token POST (15 seconds).
-const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Threshold: refresh proactively when expiry is within 5 minutes.
 pub const PROACTIVE_LEAD_CAP: Duration = Duration::from_secs(5 * 60);
@@ -95,7 +99,7 @@ pub struct AuthState {
     pub(crate) refresh_lock: Arc<Mutex<()>>,
     /// Proactive task handle.
     pub(crate) proactive_handle: RwLock<Option<platform_api::BackgroundTaskHandle>>,
-    pub(crate) http: Arc<dyn platform_api::HttpTransport>,
+    pub(crate) http: Arc<dyn Transport>,
     pub(crate) clock: Arc<dyn platform_api::Clock>,
     pub(crate) bus: Option<Arc<telemetry::AnalyticsBus>>,
     pub(crate) credentials: Option<Arc<secret::CredentialManager>>,
@@ -113,7 +117,7 @@ impl AuthState {
         account_id: Option<String>,
         fedramp: bool,
         email: Option<String>,
-        http: Arc<dyn platform_api::HttpTransport>,
+        http: Arc<dyn Transport>,
         clock: Arc<dyn platform_api::Clock>,
         bus: Option<Arc<telemetry::AnalyticsBus>>,
         credentials: Option<Arc<secret::CredentialManager>>,
@@ -201,43 +205,14 @@ impl AuthState {
         token.last_refresh = None;
     }
 
-    /// Perform the actual HTTP refresh POST. `OpenAI` token endpoint:
-    /// POST `config.token_url`, JSON body: { `client_id`, `grant_type`: "`refresh_token`", `refresh_token` }.
     async fn do_refresh_http(
         &self,
-        refresh_token: &Secret<String>,
+        refresh: &Secret<String>,
     ) -> Result<TokenEndpointResponse, OAuthError> {
-        let payload = RefreshRequest {
-            grant_type: "refresh_token",
-            refresh_token: refresh_token.expose_secret(),
-            client_id: &self.config.client_id,
-        };
-        let body = serde_json::to_string(&payload)
-            .map_err(|e| OAuthError::TokenExchange(format!("encode: {e}")))?;
-        let req = HttpRequest {
-            method: HttpMethod::Post,
-            url: self.config.token_url.clone(),
-            headers: vec![
-                ("content-type".into(), "application/json".into()),
-                ("accept".into(), "application/json".into()),
-            ],
-            body: Some(body),
-            body_bytes: None,
-            timeout: Some(REFRESH_TIMEOUT),
-        };
-        let resp = self
-            .http
-            .request(req)
-            .await
-            .map_err(|e| OAuthError::TokenExchange(format!("transport: {e}")))?;
-        match resp.status {
-            200 => serde_json::from_str::<TokenEndpointResponse>(&resp.body)
-                .map_err(|e| OAuthError::TokenExchange(format!("decode: {e}"))),
-            401 | 403 => Err(OAuthError::RefreshExpired),
-            other => Err(OAuthError::TokenExchange(format!(
-                "status {other}: {}",
-                resp.body
-            ))),
+        match refresh_token(self.http.as_ref(), &self.config, refresh.expose_secret()).await {
+            Ok(tokens) => Ok(tokens),
+            Err(OAuthProtocolError::InvalidRefreshCredential) => Err(OAuthError::RefreshExpired),
+            Err(e) => Err(OAuthError::TokenExchange(e.to_string())),
         }
     }
 
@@ -279,20 +254,14 @@ impl AuthState {
     }
 }
 
-/// Null HTTP transport used by [`AuthState::new_for_test`].
+/// Null transport used by test-only state.
 struct NullTransport;
 #[async_trait]
-impl platform_api::HttpTransport for NullTransport {
-    async fn request(
+impl Transport for NullTransport {
+    async fn send(
         &self,
-        _req: protocol::HttpRequest,
-    ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-        panic!("NullTransport: test forgot to inject a real transport");
-    }
-    async fn stream_sse(
-        &self,
-        _req: protocol::HttpRequest,
-    ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+        _req: SdkHttpRequest,
+    ) -> Result<StreamResponse, lingxi_llm_client::protocol::LlmError> {
         panic!("NullTransport: test forgot to inject a real transport");
     }
 }
@@ -322,26 +291,6 @@ impl RefreshDriver {
         self.state.shutdown(spawner).await;
         self.state.invalidate().await;
     }
-}
-
-/// JSON request body for the `refresh_token` grant.
-/// `OpenAI` doesn't accept a `scope` param (unlike anthropic-oauth).
-#[derive(Debug, serde::Serialize)]
-struct RefreshRequest<'a> {
-    grant_type: &'a str,
-    refresh_token: &'a str,
-    client_id: &'a str,
-}
-
-/// Body shape returned by the token endpoint on a successful refresh.
-#[derive(Debug, serde::Deserialize)]
-struct TokenEndpointResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    #[serde(default)]
-    expires_in: u64,
-    /// Optional `id_token` — when present, carries updated `account_id/fedramp` claims.
-    id_token: Option<String>,
 }
 
 impl RefreshDriver {
@@ -694,7 +643,7 @@ mod refresh_tests {
             Some("acc_XYZ".into()),
             false,
             Some("acc_xyz@example.com".into()),
-            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            http.clone() as Arc<dyn Transport>,
             clock.clone() as Arc<dyn platform_api::Clock>,
             None,
             Some(credentials.clone()),
@@ -744,7 +693,7 @@ mod refresh_tests {
             None,
             false,
             None,
-            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            http.clone() as Arc<dyn Transport>,
             clock.clone() as Arc<dyn platform_api::Clock>,
             None,
             None,
@@ -758,13 +707,13 @@ mod refresh_tests {
 
         // Wire shape: POST JSON with grant_type=refresh_token.
         let req = http.last_request().expect("request made");
-        assert_eq!(req.method, HttpMethod::Post);
+        assert_eq!(req.method, "POST");
         assert!(req
             .headers
             .iter()
             .any(|(k, v)| k == "content-type" && v == "application/json"));
         let sent: serde_json::Value =
-            serde_json::from_str(req.body.as_deref().unwrap()).expect("json body");
+            serde_json::from_str(std::str::from_utf8(&req.body).unwrap()).expect("json body");
         assert_eq!(sent["grant_type"], "refresh_token");
         assert_eq!(sent["refresh_token"], "OLD_REFRESH");
         assert_eq!(sent["client_id"], "app_EMoamEEZ73f0CkXaXp7hrann");
@@ -809,7 +758,7 @@ mod refresh_tests {
             None,
             false,
             None,
-            http as Arc<dyn platform_api::HttpTransport>,
+            http as Arc<dyn Transport>,
             clock as Arc<dyn platform_api::Clock>,
             None,
             None,
@@ -853,7 +802,7 @@ mod refresh_tests {
             Some("acc_XYZ".into()),
             false,
             Some("user@example.com".into()),
-            http as Arc<dyn platform_api::HttpTransport>,
+            http as Arc<dyn Transport>,
             clock as Arc<dyn platform_api::Clock>,
             None,
             None,
@@ -897,7 +846,7 @@ mod refresh_tests {
             Some("acc_XYZ".into()),
             false,
             Some("old@example.com".into()),
-            http as Arc<dyn platform_api::HttpTransport>,
+            http as Arc<dyn Transport>,
             clock as Arc<dyn platform_api::Clock>,
             None,
             None,
@@ -911,7 +860,7 @@ mod refresh_tests {
     }
 
     #[tokio::test]
-    async fn reactive_refresh_401_maps_to_session_expired() {
+    async fn reactive_refresh_invalid_grant_maps_to_session_expired() {
         let http = MockHttp::new(vec![(
             "oauth/token",
             Canned {
@@ -929,7 +878,7 @@ mod refresh_tests {
             None,
             false,
             None,
-            http as Arc<dyn platform_api::HttpTransport>,
+            http as Arc<dyn Transport>,
             clock as Arc<dyn platform_api::Clock>,
             None,
             None,
@@ -964,7 +913,7 @@ mod refresh_tests {
             None,
             false,
             None,
-            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            http.clone() as Arc<dyn Transport>,
             clock as Arc<dyn platform_api::Clock>,
             None,
             None,
@@ -974,7 +923,9 @@ mod refresh_tests {
         driver.refresh(prev).await.expect("refresh ok");
 
         let req = http.last_request().expect("request made");
-        assert_eq!(req.timeout, Some(Duration::from_secs(15)));
+        assert!(req
+            .timeout
+            .is_some_and(|t| t > Duration::ZERO && t <= Duration::from_secs(15)));
     }
 
     #[tokio::test]
@@ -998,7 +949,7 @@ mod refresh_tests {
             None,
             false,
             None,
-            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            http.clone() as Arc<dyn Transport>,
             clock.clone() as Arc<dyn platform_api::Clock>,
             None,
             None,

@@ -21,8 +21,6 @@ use crate::oauth::anthropic::config::{
 };
 use async_trait::async_trait;
 use platform_api::{AuthError, AuthHandle, LoginInfo};
-use protocol::{HttpMethod, HttpRequest};
-use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,24 +47,6 @@ pub struct CodeFlowIo {
     /// against the loopback listener; a closed channel (stdin EOF) simply
     /// leaves the listener waiting.
     pub manual_rx: Option<tokio::sync::mpsc::Receiver<(String, String)>>,
-}
-
-/// Profile-endpoint shapes. `account.email` (note: the token-exchange response
-/// uses `email_address` instead) and `organization.uuid`.
-#[derive(Debug, Deserialize)]
-struct ProfileResponse {
-    account: Option<ProfileAccount>,
-    organization: Option<ProfileOrganization>,
-}
-#[derive(Debug, Deserialize)]
-struct ProfileAccount {
-    #[serde(default)]
-    email: String,
-}
-#[derive(Debug, Deserialize)]
-struct ProfileOrganization {
-    #[serde(default)]
-    uuid: String,
 }
 
 /// `AuthHandle` impl wrapping the [`ClaudeAiOAuthClient`].
@@ -394,40 +374,13 @@ impl OAuthHandle {
 
     /// GET the profile endpoint with `Authorization: Bearer <access>`.
     async fn fetch_profile(&self, access_token: &str) -> Result<(String, String), AuthError> {
-        let req = HttpRequest {
-            method: HttpMethod::Get,
-            url: self.client.config().profile_endpoint.clone(),
-            headers: vec![
-                ("authorization".into(), format!("Bearer {access_token}")),
-                ("accept".into(), "application/json".into()),
-            ],
-            body: None,
-            body_bytes: None,
-            timeout: Some(Duration::from_secs(15)),
-        };
-        let resp = self
-            .client
-            .http()
-            .request(req)
-            .await
-            .map_err(|e| AuthError::Network(e.to_string()))?;
-        if resp.status == 401 || resp.status == 403 {
-            return Err(AuthError::ServerError(format!(
-                "profile fetch rejected: status {}",
-                resp.status
-            )));
-        }
-        if resp.status != 200 {
-            return Err(AuthError::ServerError(format!(
-                "profile fetch failed: status {}",
-                resp.status
-            )));
-        }
-        let profile: ProfileResponse = serde_json::from_str(&resp.body)
-            .map_err(|e| AuthError::ServerError(format!("profile decode: {e}")))?;
-        let email = profile.account.map(|a| a.email).unwrap_or_default();
-        let org_id = profile.organization.map(|o| o.uuid).unwrap_or_default();
-        Ok((email, org_id))
+        lingxi_llm_client::auth::oauth::anthropic::fetch_login_identity(
+            self.client.http().as_ref(),
+            &self.client.config().profile_endpoint,
+            access_token,
+        )
+        .await
+        .map_err(AuthError::ServerError)
     }
 }
 
@@ -516,7 +469,7 @@ mod tests {
     use crate::oauth::anthropic::testsupport::{
         mem_credential_manager, Canned, MemStorage, MockHttp, TestClock,
     };
-    use platform_api::HttpTransport;
+    use lingxi_llm_client::transport::Transport;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -575,8 +528,7 @@ mod tests {
         let cm = mem_credential_manager(storage.clone(), clock.clone());
         let cfg = ClaudeAiOAuthConfig::default_with_port(0);
         let client = Arc::new(
-            ClaudeAiOAuthClient::new(cfg, http.clone() as Arc<dyn HttpTransport>, cm)
-                .with_clock(clock),
+            ClaudeAiOAuthClient::new(cfg, http.clone() as Arc<dyn Transport>, cm).with_clock(clock),
         );
 
         let was_opened = Arc::new(AtomicBool::new(false));
@@ -619,14 +571,13 @@ mod tests {
     /// body (the URL is the fixed `token_endpoint`), so the transport's URL
     /// routing cannot observe it — assertions on the exchange must come here.
     fn exchange_redirect_uri(http: &MockHttp) -> String {
-        let reqs = http.requests.lock().unwrap();
+        let reqs = http.sdk_requests.lock().unwrap();
         let exchange = reqs
             .iter()
             .find(|r| r.url.contains("oauth/token"))
             .expect("token exchange was issued");
         let body: serde_json::Value =
-            serde_json::from_str(exchange.body.as_deref().expect("exchange has a body"))
-                .expect("exchange body is JSON");
+            serde_json::from_slice(&exchange.body).expect("exchange body is JSON");
         body["redirect_uri"]
             .as_str()
             .expect("exchange body carries redirect_uri")

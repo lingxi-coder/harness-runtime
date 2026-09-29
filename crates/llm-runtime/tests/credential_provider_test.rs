@@ -6,13 +6,14 @@
 //!   3. Refresh failure maps to `LlmError::Authentication` (no secret material leaked).
 
 use async_trait::async_trait;
+use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
 use llm_runtime::oauth::anthropic::OAuthCredentialProvider;
 use llm_runtime::oauth::anthropic::{
     refresh::AuthState, refresh::RefreshDriver, ClaudeAiOAuthConfig,
 };
 use llm_runtime::{Credential, CredentialProvider, CredentialScope, LlmError, ProviderId};
-use platform_api::{Clock, HttpError, HttpTransport};
-use protocol::{HttpRequest, HttpResponse, Secret};
+use platform_api::Clock;
+use protocol::Secret;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -33,20 +34,18 @@ impl Clock for FixedClock {
 struct FreshTokenTransport;
 
 #[async_trait]
-impl HttpTransport for FreshTokenTransport {
-    async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
-        Ok(HttpResponse {
-            status: 200,
-            headers: vec![],
-            body: r#"{"access_token":"tok-refreshed","refresh_token":"ref-new","expires_in":3600,"scope":"read:user"}"#.to_string(),
-            body_bytes: Vec::new(),
-        })
-    }
-    async fn stream_sse(
+impl Transport for FreshTokenTransport {
+    async fn send(
         &self,
         _req: HttpRequest,
-    ) -> Result<platform_api::http::SseStream, HttpError> {
-        unimplemented!("sse not used");
+    ) -> Result<StreamResponse, lingxi_llm_client::protocol::LlmError> {
+        Ok(StreamResponse {
+            status: 200,
+            headers: vec![],
+            body: Box::pin(futures::stream::once(async {
+                Ok(bytes::Bytes::from_static(br#"{"access_token":"tok-refreshed","refresh_token":"ref-new","expires_in":3600,"scope":"read:user"}"#))
+            })),
+        })
     }
 }
 
@@ -54,20 +53,18 @@ impl HttpTransport for FreshTokenTransport {
 struct FailingTransport;
 
 #[async_trait]
-impl HttpTransport for FailingTransport {
-    async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
-        Ok(HttpResponse {
-            status: 401,
-            headers: vec![],
-            body: r#"{"error":"invalid_grant"}"#.to_string(),
-            body_bytes: Vec::new(),
-        })
-    }
-    async fn stream_sse(
+impl Transport for FailingTransport {
+    async fn send(
         &self,
         _req: HttpRequest,
-    ) -> Result<platform_api::http::SseStream, HttpError> {
-        unimplemented!("sse not used");
+    ) -> Result<StreamResponse, lingxi_llm_client::protocol::LlmError> {
+        Ok(StreamResponse {
+            status: 401,
+            headers: vec![],
+            body: Box::pin(futures::stream::once(async {
+                Ok(bytes::Bytes::from_static(br#"{"error":"invalid_grant"}"#))
+            })),
+        })
     }
 }
 
@@ -84,7 +81,7 @@ fn fresh_driver() -> Arc<RefreshDriver> {
         // Expires well in the future relative to CLOCK_NOW_SECS.
         SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS + 3_600),
         // Transport must never be invoked here: a returned credential other than "tok-fresh" would fail the assertion below.
-        Arc::new(FreshTokenTransport) as Arc<dyn HttpTransport>,
+        Arc::new(FreshTokenTransport) as Arc<dyn Transport>,
         Arc::new(FixedClock(
             SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS),
         )) as Arc<dyn Clock>,
@@ -103,7 +100,7 @@ fn expired_driver_ok() -> Arc<RefreshDriver> {
         Some(Secret::new("ref-expired".to_string())),
         // Expired: `expires_at` is before the clock's `now`.
         SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS - 1),
-        Arc::new(FreshTokenTransport) as Arc<dyn HttpTransport>,
+        Arc::new(FreshTokenTransport) as Arc<dyn Transport>,
         Arc::new(FixedClock(
             SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS),
         )) as Arc<dyn Clock>,
@@ -121,7 +118,7 @@ fn expired_driver_fail() -> Arc<RefreshDriver> {
         Secret::new("tok-expired".to_string()),
         Some(Secret::new("ref-expired".to_string())),
         SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS - 1),
-        Arc::new(FailingTransport) as Arc<dyn HttpTransport>,
+        Arc::new(FailingTransport) as Arc<dyn Transport>,
         Arc::new(FixedClock(
             SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS),
         )) as Arc<dyn Clock>,

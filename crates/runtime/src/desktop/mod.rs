@@ -8070,7 +8070,7 @@ fn subscription_snapshot_from(
     use llm_runtime::oauth::anthropic::SubscriptionType;
     let org = profile.and_then(|p| p.organization.as_ref());
     let subscription_type = profile
-        .and_then(llm_runtime::oauth::anthropic::OAuthProfileResponse::subscription_type)
+        .and_then(llm_runtime::oauth::anthropic::profile::subscription_type)
         .and_then(|t| match t {
             SubscriptionType::Pro => Some("pro"),
             SubscriptionType::Max => Some("max"),
@@ -10434,10 +10434,8 @@ async fn resolve_llm_stack_with_credentials(
         }
     }
 
-    // The shared SDK transport owns provider networking for
-    //      `ModelRuntime`. A second `PosixHttp` instance is used so the
-    //      bridge owns its own (stateless) handle; the original `http` Arc
-    //      continues to serve MCP / hooks / side-query.
+    // Model execution and provider authentication share SDK networking.
+    // General web, MCP and hooks retain the host HTTP transport.
     let llm_transport: Arc<dyn Transport> = Arc::new(
         platform_common::provider_transport().map_err(|e| BuildError::ApiBase(e.to_string()))?,
     );
@@ -10483,7 +10481,7 @@ async fn resolve_llm_stack_with_credentials(
     let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
     let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
         oauth_cfg.clone(),
-        http.clone(),
+        llm_transport.clone(),
         credentials.clone(),
     ));
     let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(oauth_client));
@@ -10596,7 +10594,7 @@ async fn resolve_llm_stack_with_credentials(
                 tokens.access_token,
                 tokens.refresh_token,
                 tokens.expires_at,
-                http.clone(),
+                llm_transport.clone(),
                 clock.clone(),
                 Some(Arc::new(telemetry::AnalyticsBus::new())),
                 Some(credentials.clone()),
@@ -10635,8 +10633,7 @@ async fn resolve_llm_stack_with_credentials(
                         // calls and never logged or formatted.
                         {
                             let slot = subscription.clone();
-                            let transport: std::sync::Arc<dyn platform_api::HttpTransport> =
-                                http.clone();
+                            let transport: Arc<dyn Transport> = llm_transport.clone();
                             let creds = credentials.clone();
                             // Move (not copy) the token into the task — its
                             // only consumer.
@@ -10645,14 +10642,16 @@ async fn resolve_llm_stack_with_credentials(
                                 let token = token.expose_secret();
                                 let Some(profile) =
                                     llm_runtime::oauth::anthropic::fetch_profile_from_oauth_token(
-                                        token, &transport,
+                                        token,
+                                        transport.as_ref(),
                                     )
                                     .await
                                 else {
                                     return;
                                 };
                                 let roles = llm_runtime::oauth::anthropic::fetch_user_roles(
-                                    token, &transport,
+                                    token,
+                                    transport.as_ref(),
                                 )
                                 .await;
                                 let snap = subscription_snapshot_from(
@@ -10701,7 +10700,7 @@ async fn resolve_llm_stack_with_credentials(
     let openai_oauth_cfg = openai_oauth::OpenAiOAuthConfig::default();
     let openai_oauth_client = Arc::new(openai_oauth::OpenAiOAuthClient::new(
         openai_oauth_cfg.clone(),
-        http.clone(),
+        llm_transport.clone(),
     ));
 
     // (3.2a-pre) P3 enterprise precedence for the openai-chatgpt credential:
@@ -10709,8 +10708,7 @@ async fn resolve_llm_stack_with_credentials(
     let mut openai_chatgpt_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> = None;
     if let Ok(pat) = std::env::var("OPENAI_PERSONAL_ACCESS_TOKEN") {
         if !pat.trim().is_empty() {
-            let http_dyn: Arc<dyn platform_api::HttpTransport> =
-                http.clone() as Arc<dyn platform_api::HttpTransport>;
+            let http_dyn: Arc<dyn Transport> = llm_transport.clone() as Arc<dyn Transport>;
             match openai_oauth::whoami(&openai_oauth_cfg, &http_dyn, &pat).await {
                 Ok(md) => {
                     openai_chatgpt_delegate =
@@ -10756,7 +10754,7 @@ async fn resolve_llm_stack_with_credentials(
                     tokens.account_id,
                     tokens.fedramp,
                     tokens.email,
-                    http.clone(),
+                    llm_transport.clone(),
                     clock.clone(),
                     Some(Arc::new(telemetry::AnalyticsBus::new())),
                     Some(credentials.clone()),
@@ -11237,7 +11235,7 @@ async fn resolve_llm_stack_with_credentials(
     // id passes straight through unchanged.
     let copilot_creds = llm_runtime::CopilotExchangeCredentialProvider::new(
         Arc::new(composite),
-        Arc::new(connect::PosixCopilotHttp::new()),
+        llm_transport.clone(),
         "github-copilot",
     );
     client = client.with_credential_provider(Arc::new(copilot_creds));
@@ -11940,7 +11938,7 @@ pub async fn build_with_credential_stack(
     let interactive_session = session_composition.is_interactive_session();
     let service_built = llm_runtime::ApiService::new_with_routing(
         llm_runtime,
-        llm_transport,
+        llm_transport.clone(),
         subscriber_state,
         UserAgentEnv::from_process_env(),
         env!("CARGO_PKG_VERSION"),
@@ -16095,7 +16093,7 @@ pub async fn build_with_credential_stack(
             .await;
     }
     orch.spawn_startup_responses_websocket_prewarm();
-    // Plan 3c: `/connect` seams — Copilot device-flow over `PosixHttp`, and the
+    // `/connect` seams — Copilot device-flow over SDK HTTP, and the
     // API-key writer over the host secure prompt (tui-supplied; headless no-op).
     // M8: also wire the ChatGPT OAuth seam (`/connect chatgpt`).
     // Round-4 review finding [8] / round-5 finding [15]: EVERY `/connect`
@@ -16112,6 +16110,7 @@ pub async fn build_with_credential_stack(
         Arc::new(FusionCatalogRefreshingCopilotConnect {
             inner: Arc::new(crate::desktop::connect::EngineCopilotConnect::new(
                 credentials.clone(),
+                llm_transport.clone(),
             )),
             refresher: fusion_catalog_refresher.clone(),
         });

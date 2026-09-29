@@ -7,15 +7,16 @@
 //! `refresh_single_flight_test.rs` — this file is a tokio-level smoke test.
 
 use async_trait::async_trait;
+use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
 use llm_runtime::oauth::anthropic::refresh::{AuthState, RefreshDriver};
 use llm_runtime::oauth::anthropic::ClaudeAiOAuthConfig;
-use platform_api::{Clock, HttpError, HttpTransport};
-use protocol::{HttpRequest, HttpResponse, Secret};
+use platform_api::Clock;
+use protocol::Secret;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-/// Counting HTTP transport: every `request()` increments `calls`. Always returns
+/// Counting HTTP transport: every `send()` increments `calls`. Always returns
 /// a fresh token in the JSON body.
 struct CountingTransport {
     calls: Arc<AtomicU32>,
@@ -25,26 +26,24 @@ struct CountingTransport {
 }
 
 #[async_trait]
-impl HttpTransport for CountingTransport {
-    async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
+impl Transport for CountingTransport {
+    async fn send(
+        &self,
+        _req: HttpRequest,
+    ) -> Result<StreamResponse, lingxi_llm_client::protocol::LlmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         // Simulate the IdP's token-endpoint JSON response.
         let body = format!(
             r#"{{"access_token":"{}","refresh_token":"{}","expires_in":{},"scope":"read:user write:messages read:projects"}}"#,
             self.new_access_token, self.new_refresh_token, self.expires_in_secs,
         );
-        Ok(HttpResponse {
+        Ok(StreamResponse {
             status: 200,
             headers: vec![],
-            body,
-            body_bytes: Vec::new(),
+            body: Box::pin(futures::stream::once(async move {
+                Ok(bytes::Bytes::from(body))
+            })),
         })
-    }
-    async fn stream_sse(
-        &self,
-        _req: HttpRequest,
-    ) -> Result<platform_api::http::SseStream, HttpError> {
-        unimplemented!("not used in refresh tests");
     }
 }
 
@@ -58,7 +57,7 @@ impl Clock for FixedClock {
 fn make_state(initial_access: &str) -> (Arc<AuthState>, Arc<AtomicU32>) {
     let cfg = ClaudeAiOAuthConfig::default_with_port(0);
     let calls = Arc::new(AtomicU32::new(0));
-    let transport: Arc<dyn HttpTransport> = Arc::new(CountingTransport {
+    let transport: Arc<dyn Transport> = Arc::new(CountingTransport {
         calls: calls.clone(),
         new_access_token: "FRESH_ACCESS".into(),
         new_refresh_token: "FRESH_REFRESH".into(),

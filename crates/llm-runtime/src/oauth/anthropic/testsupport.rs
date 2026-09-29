@@ -6,6 +6,9 @@
 //! browser, no real keychain).
 
 use async_trait::async_trait;
+use futures::stream;
+use lingxi_llm_client::protocol::LlmError;
+use lingxi_llm_client::transport::{HttpRequest as SdkHttpRequest, StreamResponse, Transport};
 use platform_api::http::SseStream;
 use platform_api::{
     BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner,
@@ -35,6 +38,7 @@ pub struct Canned {
 pub struct MockHttp {
     routes: Vec<(String, Canned)>,
     pub requests: Mutex<Vec<HttpRequest>>,
+    pub sdk_requests: Mutex<Vec<SdkHttpRequest>>,
     pub calls: AtomicU64,
 }
 
@@ -47,6 +51,7 @@ impl MockHttp {
                 .map(|(u, c)| (u.to_string(), c))
                 .collect(),
             requests: Mutex::new(Vec::new()),
+            sdk_requests: Mutex::new(Vec::new()),
             calls: AtomicU64::new(0),
         })
     }
@@ -58,7 +63,48 @@ impl MockHttp {
 
     /// Clone of the last request body observed (for body assertions).
     pub fn last_request(&self) -> Option<HttpRequest> {
-        self.requests.lock().unwrap().last().cloned()
+        self.requests.lock().unwrap().last().cloned().or_else(|| {
+            self.sdk_requests
+                .lock()
+                .unwrap()
+                .last()
+                .map(|r| HttpRequest {
+                    method: if r.method == "POST" {
+                        protocol::HttpMethod::Post
+                    } else {
+                        protocol::HttpMethod::Get
+                    },
+                    url: r.url.clone(),
+                    headers: r.headers.clone(),
+                    body: Some(String::from_utf8_lossy(&r.body).into_owned()),
+                    body_bytes: None,
+                    timeout: r.timeout,
+                })
+        })
+    }
+}
+
+#[async_trait]
+impl Transport for MockHttp {
+    async fn send(&self, req: SdkHttpRequest) -> Result<StreamResponse, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.sdk_requests.lock().unwrap().push(req.clone());
+        let canned = self
+            .routes
+            .iter()
+            .find(|(url, _)| req.url.contains(url))
+            .map(|(_, canned)| canned.clone())
+            .or_else(|| self.routes.first().map(|(_, canned)| canned.clone()))
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: "no canned route".into(),
+            })?;
+        Ok(StreamResponse {
+            status: canned.status,
+            headers: vec![],
+            body: Box::pin(stream::once(
+                async move { Ok(canned.body.into_bytes().into()) },
+            )),
+        })
     }
 }
 

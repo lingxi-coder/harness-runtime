@@ -68,7 +68,8 @@ format. Provider argument, signature and native-block assembly use the SDK's
 | Reasoning capabilities and provider replay compatibility | SDK |
 | Canonical stream aggregation, complete blocks and partial results | SDK |
 | Files, audio, images, embeddings, model/provider resources | SDK |
-| Credentials, OAuth login/refresh and account selection | Host |
+| Provider OAuth authorization, token exchange/refresh, device flow and account API protocols | SDK |
+| Credential storage, browser/callback UI, refresh coordination and account selection | Host |
 | History normalization, tool pairing and UI/FFI projection | Host |
 | Permission, admission, cancellation/deadline and retry decisions | Host |
 | Frozen-price accounting, conservative unknown settlement and telemetry | Host |
@@ -116,8 +117,8 @@ Follow-up route-adaptation regression checks passed: 1,052 runtime library tests
 6 connection-failover tests and 8 SDK replay tests. Sidequery and orchestrator
 all-feature compilation also passed after the fix.
 
-The SDK is published as `1a60e73ad12e663be768232a91cbd3ea693aca6e`; the root
-Git dependency and submodule use that revision. The development lockfile retains
+The preceding model-contract migration published SDK revision
+`1a60e73ad12e663be768232a91cbd3ea693aca6e`. The development lockfile retains
 the local path package through the root patch, so refreshing it does not change
 its contents. No real-provider or physical-device acceptance was run.
 
@@ -126,3 +127,39 @@ local SDK patch fetched the published revision from the canonical Git URL.
 `cargo check -p harness-runtime --all-features` passed, and locked Cargo metadata
 confirmed the exact SDK Git source. The local minimal-feature check, formatting,
 architecture gate and gate self-test also passed.
+
+## Authentication boundary
+
+`lingxi_llm_client::auth::oauth` owns Anthropic, OpenAI and Copilot authentication
+protocols. This includes authorization URL encoding, shared PKCE generation,
+token exchange and refresh request/response handling, device authorization
+responses, and provider account/profile queries. Operations use SDK `Transport`
+and bounded `HttpExecutor`; they do not schedule refreshes or replay model calls.
+Desktop and mobile inject the same configured transport used for model calls.
+
+Host OAuth adapters retain secure storage, external credential helpers, browser
+opening, loopback callbacks and mobile redirect handling. They also retain
+single-flight refresh coordination, background task cancellation, token rotation
+persistence, account selection and telemetry. A provider rejection of a refresh
+credential is distinct from temporary transport/server failure. Neither a token
+refresh nor a successful login authorizes retrying a model request with an
+unknown execution outcome.
+
+SDK authentication must not depend on platform-api, the host credential manager,
+UI callbacks, process environment conventions or runtime background tasks.
+General MCP OAuth remains a separate host concern. The architecture gate rejects
+provider authentication endpoint implementation outside the SDK alongside model
+protocol bypasses.
+
+Authentication migration regression checks (2026-09-29): runtime library and
+integration suites passed 1,236 tests; SDK all-feature auth tests passed 47 tests.
+Desktop connect tests passed 7 tests.
+Coverage includes token wire compatibility, explicit rejection versus temporary
+failure, token rotation, single-flight refresh, callback redirects, deadlines,
+response-body cancellation and error redaction. Runtime all-feature test
+compilation, minimal-feature compilation and iOS/Android arm64 mobile/UniFFI
+checks passed. These checks use the editable SDK submodule; the authentication follow-up
+has not yet been published or validated with live provider credentials.
+
+The authentication follow-up pins SDK commit `a4a9880fa02737d95665b3215f6743dfc128f4a4`.
+Both repositories are committed locally; publish the SDK before the parent.

@@ -17,37 +17,7 @@ pub const COPILOT_EDITOR_VERSION: &str = "LingXi-Code/1.0";
 /// `Editor-Plugin-Version` header value (the Copilot plugin/extension version).
 pub const COPILOT_EDITOR_PLUGIN_VERSION: &str = "LingXi-Code/1.0";
 
-/// GitHub OAuth token used directly as the Copilot bearer credential.
-///
-/// The `Debug` impl is redacting so the token never reaches logs or errors.
-#[derive(Clone)]
-pub struct CopilotSecret(String);
-
-impl CopilotSecret {
-    /// Wrap a GitHub OAuth token.
-    #[must_use]
-    pub fn new(token: impl Into<String>) -> Self {
-        Self(token.into())
-    }
-
-    /// **Plan 3c frozen-crate (§10) EXCEPTION — documented deviation.** Expose the
-    /// raw GitHub OAuth token so the host `/connect` device-flow driver can persist
-    /// it to the keychain under `github-copilot`. This is the ONLY reader; the
-    /// `Debug` impl stays redacting. `#[doc(hidden)]` so it is not part of the
-    /// public surface and is only reachable by the engine that already drives the
-    /// Copilot login. Do not use for logging or display.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn token_for_storage(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for CopilotSecret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("CopilotSecret(<redacted>)")
-    }
-}
+pub use lingxi_llm_client::auth::oauth::copilot::CopilotSecret;
 
 #[cfg(test)]
 mod tests {

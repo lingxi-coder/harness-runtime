@@ -87,10 +87,11 @@ def production(source):
     return tokens.sub(lambda m: re.sub(r'[^\n]', ' ', m.group()) if m.group().startswith(('//', '/*')) else m.group(), source)
 
 RULES = {
+    "provider authentication endpoint belongs in llm-client": re.compile(r'"[^"\n]*(?:/oauth/token|/oauth/authorize|/api/oauth/(?:profile|roles)|/login/device/code|/login/oauth/access_token|/api/accounts/deviceauth/|/copilot_internal/v2/token|/user-auth-credential/whoami)[^"\n]*"'),
     "model endpoint belongs in llm-client": re.compile(r'"[^"\n]*(?:/v1/messages|/chat/completions|/backend-api/models|/responses|/embeddings|/audio/(?:speech|transcriptions|translations)|/images/(?:generations|edits)|/v1/models|:generateContent|:streamGenerateContent)[^"\n]*"'),
     "provider stream parsing belongs in llm-client": re.compile(r'"(?:content_block_(?:start|delta|stop)|response\.(?:output_text|output_item|function_call_arguments)\.[^"\n]+)"'),
     "WebSocket implementation requires an explicit non-model exception": re.compile(r'\btokio_tungstenite\s*::'),
-    "removed model adapter must not return": re.compile(r'\b(?:struct\s+AnthropicRequestBuilder|struct\s+LlmTransportBridge|trait\s+ResponsesWebSocketTransportSession|struct\s+StreamReassembler|struct\s+DefaultLlmClient|struct\s+ResponsesWebSocketSession|trait\s+WireCodec|trait\s+StreamDecoder|struct\s+LlmResponse|enum\s+LlmEvent)\b'),
+    "removed model adapter must not return": re.compile(r'\b(?:struct\s+AnthropicRequestBuilder|struct\s+LlmTransportBridge|trait\s+ResponsesWebSocketTransportSession|struct\s+StreamReassembler|struct\s+DefaultLlmClient|struct\s+ResponsesWebSocketSession|trait\s+CopilotHttp|struct\s+PosixCopilotHttp|trait\s+WireCodec|trait\s+StreamDecoder|struct\s+LlmResponse|enum\s+LlmEvent)\b'),
 }
 
 def findings(source):
@@ -100,7 +101,11 @@ def findings(source):
 def main():
     if "--selftest" in sys.argv:
         assert findings('fn run() { let url = format!("{base}/v1/messages"); }')
+        assert findings('fn refresh() { let url = "https://auth.openai.com/oauth/token"; }')
+        assert findings('fn device() { let url = format!("https://{host}/login/device/code"); }')
+        assert not findings('fn callback() { let url = "http://localhost:1455/auth/callback"; }')
         assert findings('struct AnthropicRequestBuilder {}')
+        assert findings('pub trait CopilotHttp {}')
         assert findings('pub trait WireCodec {}')
         assert findings('pub trait StreamDecoder {}')
         assert findings('pub struct DefaultLlmClient {}')

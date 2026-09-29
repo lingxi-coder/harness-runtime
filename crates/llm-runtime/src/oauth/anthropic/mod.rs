@@ -1,16 +1,6 @@
-//! Claude.ai OAuth client and Anthropic auth-source resolver.
-//!
-//! See spec §30 (Anthropic Auth). This crate owns:
-//! - PKCE (RFC 7636) verifier/challenge + CSRF state generation
-//! - Loopback HTTP listener for the redirect URI
-//! - Auth-source resolver covering the 9 documented sources (A6)
-//! - Static config + a placeholder rate-limit tracker
-//! - Reactive + proactive token refresh (M3-04)
-//! - Scope upgrade flow (M3-04)
-//!
-//! Plan 3a/3b: `BearerToken`/`OAuthHookError`/`TokenHash` are owned locally
-//! in `refresh.rs`; `RefreshDriver::refresh` is an inherent method. The
-//! api-client crate has been removed from the workspace entirely.
+//! Host Anthropic login, credential-source policy and refresh lifecycle.
+//! Authorization, token and profile protocols are supplied by llm-client;
+//! this module owns callbacks, secure storage, coordination and presentation.
 
 #![forbid(unsafe_code)]
 

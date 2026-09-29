@@ -1,6 +1,6 @@
-//! OAuth flows folded in from the former `anthropic-oauth` / `openai-oauth`
-//! crates. These implement `crate::CredentialProvider` over PKCE/device-code
-//! refresh machinery; the auth abstractions already live in this crate.
+//! Host OAuth orchestration: secure credential storage, login UI and callbacks,
+//! refresh coordination, background task lifecycle and model retry policy.
+//! Provider authentication protocols and networking are implemented in llm-client.
 
 pub mod anthropic;
 pub mod openai;

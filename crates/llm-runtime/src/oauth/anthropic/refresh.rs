@@ -21,7 +21,9 @@
 use crate::oauth::anthropic::client::OAuthError;
 use crate::oauth::anthropic::config::ClaudeAiOAuthConfig;
 use async_trait::async_trait;
-use protocol::{HttpMethod, HttpRequest, Secret};
+use lingxi_llm_client::auth::oauth::anthropic::{self as sdk, RefreshResponse, TokenError};
+use lingxi_llm_client::transport::Transport;
+use protocol::Secret;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -115,7 +117,7 @@ pub struct AuthState {
     pub(crate) proactive_handle: RwLock<Option<platform_api::BackgroundTaskHandle>>,
     /// HTTP transport for token-endpoint POSTs. Engine code never imports a
     /// concrete HTTP client; we go through the trait per D17.
-    pub(crate) http: Arc<dyn platform_api::HttpTransport>,
+    pub(crate) http: Arc<dyn Transport>,
     /// Wall-clock source. Tests inject a virtual clock.
     pub(crate) clock: Arc<dyn platform_api::Clock>,
     /// Optional analytics bus for `tengu_oauth_*` events. `None` in tests that
@@ -139,7 +141,7 @@ impl AuthState {
         access_token: Secret<String>,
         refresh_token: Option<Secret<String>>,
         expires_at: SystemTime,
-        http: Arc<dyn platform_api::HttpTransport>,
+        http: Arc<dyn Transport>,
         clock: Arc<dyn platform_api::Clock>,
         bus: Option<Arc<telemetry::AnalyticsBus>>,
         credentials: Option<Arc<secret::CredentialManager>>,
@@ -235,55 +237,17 @@ impl AuthState {
     async fn do_refresh_http(
         &self,
         refresh_token: &Secret<String>,
-    ) -> Result<TokenEndpointResponse, OAuthError> {
-        // Scope param matching claude-code's `refreshOAuthToken`: when no
-        // explicit scopes are requested, send the canonical default set.
-        // TS does `scope: (requestedScopes?.length ? requestedScopes :
-        // CLAUDE_AI_OAUTH_SCOPES).join(' ')` (services/oauth/client.ts:159-162),
-        // and `checkAndRefreshOAuthTokenIfNeeded` passes `scopes: undefined`
-        // for subscribers precisely so the canonical default applies and the
-        // backend's refresh-grant scope expansion (e.g. adding user:file_upload)
-        // takes effect without a re-login (utils/auth.ts:1531-1538). The
-        // reactive/proactive driver never carries explicit requested scopes
-        // (the frozen `OAuthRefreshHook::refresh` signature has no scope arg),
-        // so this is always the default-set case. The canonical default is
-        // `config.scopes` (sourced from `CLAUDE_CODE_OAUTH_SCOPES`); we do NOT
-        // echo the current token's (possibly narrower) scopes — that would pin
-        // the grant and defeat scope expansion.
-        let scope = self.config.scopes.join(" ");
-        let payload = RefreshRequest {
-            grant_type: crate::oauth::anthropic::config::REFRESH_GRANT_TYPE,
-            refresh_token: refresh_token.expose_secret(),
-            client_id: &self.config.client_id,
-            scope: &scope,
-        };
-        let body = serde_json::to_string(&payload)
-            .map_err(|e| OAuthError::TokenExchange(format!("encode: {e}")))?;
-        let req = HttpRequest {
-            method: HttpMethod::Post,
-            url: self.config.token_endpoint.clone(),
-            headers: vec![
-                ("content-type".into(), "application/json".into()),
-                ("accept".into(), "application/json".into()),
-            ],
-            body: Some(body),
-            body_bytes: None,
-            timeout: Some(REFRESH_TIMEOUT),
-        };
-        let resp = self
-            .http
-            .request(req)
-            .await
-            .map_err(|e| OAuthError::TokenExchange(format!("transport: {e}")))?;
-        match resp.status {
-            200 => serde_json::from_str::<TokenEndpointResponse>(&resp.body)
-                .map_err(|e| OAuthError::TokenExchange(format!("decode: {e}"))),
-            401 | 403 => Err(OAuthError::RefreshExpired),
-            other => Err(OAuthError::TokenExchange(format!(
-                "status {other}: {}",
-                resp.body
-            ))),
-        }
+    ) -> Result<RefreshResponse, OAuthError> {
+        sdk::refresh_token(
+            self.http.as_ref(),
+            &self.config,
+            refresh_token.expose_secret(),
+        )
+        .await
+        .map_err(|error| match error {
+            TokenError::InvalidRefreshToken => OAuthError::RefreshExpired,
+            other => OAuthError::TokenExchange(other.to_string()),
+        })
     }
 
     /// Persist the rotated [`TokenInfo`] to the keychain via
@@ -326,22 +290,15 @@ impl AuthState {
     }
 }
 
-/// Null HTTP transport used by [`AuthState::new_for_test`] — every call panics.
-/// Tests that need to exercise the refresh path use the production constructor
-/// with a counting transport.
+/// Test-only transport that must never be called.
 struct NullTransport;
 #[async_trait]
-impl platform_api::HttpTransport for NullTransport {
-    async fn request(
+impl Transport for NullTransport {
+    async fn send(
         &self,
-        _req: protocol::HttpRequest,
-    ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-        panic!("NullTransport: test forgot to inject a real transport");
-    }
-    async fn stream_sse(
-        &self,
-        _req: protocol::HttpRequest,
-    ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+        _req: lingxi_llm_client::transport::HttpRequest,
+    ) -> Result<lingxi_llm_client::transport::StreamResponse, lingxi_llm_client::protocol::LlmError>
+    {
         panic!("NullTransport: test forgot to inject a real transport");
     }
 }
@@ -375,28 +332,6 @@ impl RefreshDriver {
         self.state.shutdown(spawner).await;
         self.state.invalidate().await;
     }
-}
-
-/// JSON request body for the `refresh_token` grant. Field order matches
-/// claude-code's `refreshOAuthToken`.
-#[derive(Debug, serde::Serialize)]
-struct RefreshRequest<'a> {
-    grant_type: &'a str,
-    refresh_token: &'a str,
-    client_id: &'a str,
-    scope: &'a str,
-}
-
-/// Body shape returned by the token endpoint on a successful refresh.
-#[derive(Debug, serde::Deserialize)]
-struct TokenEndpointResponse {
-    access_token: String,
-    /// Optional — some providers don't rotate the `refresh_token` on every refresh.
-    refresh_token: Option<String>,
-    expires_in: u64,
-    /// Space-separated scope list (RFC 6749 §3.3). Optional — if absent, we
-    /// inherit the current `TokenInfo.scopes`.
-    scope: Option<String>,
 }
 
 impl RefreshDriver {
@@ -706,6 +641,7 @@ mod wire_and_persist_tests {
     use crate::oauth::anthropic::testsupport::{
         mem_credential_manager, Canned, MemStorage, MockHttp, TestClock,
     };
+    use protocol::HttpMethod;
 
     /// Reactive refresh must send a JSON body carrying the `scope` param and
     /// persist the rotated tokens to the attached `CredentialManager`.
@@ -740,7 +676,7 @@ mod wire_and_persist_tests {
             Secret::new("OLD_ACCESS".into()),
             Some(Secret::new("OLD_REFRESH".into())),
             SystemTime::UNIX_EPOCH + Duration::from_secs(2_010),
-            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            http.clone() as Arc<dyn Transport>,
             clock.clone() as Arc<dyn platform_api::Clock>,
             None,
             Some(cm.clone()),
@@ -810,7 +746,7 @@ mod wire_and_persist_tests {
             Some(Secret::new("REFRESH".into())),
             // Expires soon so the proactive lead computation yields a short sleep.
             SystemTime::UNIX_EPOCH + Duration::from_secs(2),
-            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            http.clone() as Arc<dyn Transport>,
             clock.clone() as Arc<dyn platform_api::Clock>,
             None,
             None,
@@ -864,7 +800,7 @@ mod wire_and_persist_tests {
             Secret::new("ACCESS".into()),
             Some(Secret::new("REFRESH".into())),
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
-            http as Arc<dyn platform_api::HttpTransport>,
+            http as Arc<dyn Transport>,
             clock as Arc<dyn platform_api::Clock>,
             None,
             None,
@@ -904,7 +840,7 @@ mod wire_and_persist_tests {
             Secret::new("ACCESS".into()),
             Some(Secret::new("REFRESH".into())),
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
-            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            http.clone() as Arc<dyn Transport>,
             clock as Arc<dyn platform_api::Clock>,
             None,
             None,
@@ -946,7 +882,7 @@ mod wire_and_persist_tests {
             Secret::new("ACCESS".into()),
             Some(Secret::new("REFRESH".into())),
             SystemTime::UNIX_EPOCH + Duration::from_secs(10),
-            http.clone() as Arc<dyn platform_api::HttpTransport>,
+            http.clone() as Arc<dyn Transport>,
             clock as Arc<dyn platform_api::Clock>,
             None,
             None,
@@ -956,6 +892,8 @@ mod wire_and_persist_tests {
         driver.refresh(prev).await.expect("refresh ok");
 
         let req = http.last_request().expect("request made");
-        assert_eq!(req.timeout, Some(Duration::from_secs(15)));
+        assert!(req.timeout.is_some_and(
+            |timeout| timeout > Duration::from_secs(14) && timeout <= Duration::from_secs(15)
+        ));
     }
 }

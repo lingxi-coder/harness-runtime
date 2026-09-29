@@ -101,7 +101,7 @@ pub use config::{
     AuthStrategy, AzureConfig, Capabilities, ClientConfig, ConnectionSpec, CredentialConfig,
     FailoverTriggers, ModelProfile, PricingConfig, ProtocolFamily, ProviderProfile, SigningConfig,
 };
-pub use copilot::{CopilotHttp, CopilotLogin, CopilotSecret, DeviceCodeResponse, PollOutcome};
+pub use copilot::{CopilotLogin, CopilotSecret, DeviceCodeResponse, PollOutcome};
 pub use cost::{CostEstimator, PricingCatalog, PricingPolicy, TokenPricing};
 pub use credentials::{
     CopilotExchangeCredentialProvider, Credential, CredentialProvider, CredentialScope,

@@ -1,9 +1,10 @@
 # llm-client 能力接入
 
 开发子模块与运行时固定 Git 依赖当前使用 `lingxi-llm-client` 0.3.0，提交
-`1a60e73ad12e663be768232a91cbd3ea693aca6e`，已从 canonical 远端
-`https://github.com/lingxi-coder/llm-client` 获取。该版本统一模型 HTTP/WebSocket 传输、鉴权策略、模型目录与托管搜索接口。
-该提交还统一了鉴权编码、重放适配、推理能力与流聚合，并已推送。后续子模块修改仍须先独立提交并推送，再更新父仓库记录。
+`a4a9880fa02737d95665b3215f6743dfc128f4a4`。该版本统一模型 HTTP/WebSocket 传输、鉴权策略、模型目录、
+托管搜索及 Anthropic/OpenAI/Copilot OAuth 协议。本次提交尚未推送；发布时须先推送
+SDK，再推送父仓库，以便 canonical 远端 `https://github.com/lingxi-coder/llm-client`
+能够解析固定依赖。
 
 ## 子模块联合开发
 
@@ -172,8 +173,10 @@ HTTP/TLS/OAuth 测试需要允许绑定本机端口。为避免生成大量增�
 | 移动连接测试与模型目录 | SDK directory::probe，包含鉴权、分页与总期限；宿主仅投影 UI DTO |
 | Responses / Realtime | SDK 共用 HTTP upgrade connector；取消或异常不自动重放 |
 
-普通网页下载、Brave/Tavily/SearXNG/DDG、OAuth 登录刷新、MCP、遥测及 Monitor
-继续使用宿主通用网络栈。这些不是模型请求。
+模型 provider 的 OAuth 协议、token exchange/refresh、设备授权与账户查询也使用 SDK
+认证接口和共享 Transport；宿主保留登录交互、凭据存储与刷新调度。
+普通网页下载、Brave/Tavily/SearXNG/DDG、MCP（包括 MCP OAuth）、遥测及 Monitor
+继续使用宿主通用网络栈。
 
 `scripts/check-llm-boundary.sh` 自动进入 `check-all.sh` 和 CI：检查生产模型端点拼装及
 旧适配器回流，同时禁止 provider 原始流事件解析和未声明的 WebSocket 实现。

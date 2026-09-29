@@ -435,7 +435,6 @@ mod tests {
     use crate::oauth::openai::testsupport::{
         mem_credential_manager, port_guard, Canned, MemStorage, MockHttp, TestClock,
     };
-    use platform_api::HttpTransport;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -469,8 +468,10 @@ mod tests {
         let storage = MemStorage::new();
         let cm = mem_credential_manager(storage.clone(), clock.clone());
         let cfg = crate::oauth::openai::config::OpenAiOAuthConfig::default();
-        let client =
-            Arc::new(OpenAiOAuthClient::new(cfg, http as Arc<dyn HttpTransport>).with_clock(clock));
+        let client = Arc::new(
+            OpenAiOAuthClient::new(cfg, http as Arc<dyn lingxi_llm_client::Transport>)
+                .with_clock(clock),
+        );
 
         let was_opened = Arc::new(AtomicBool::new(false));
         let browser_flag = was_opened.clone();

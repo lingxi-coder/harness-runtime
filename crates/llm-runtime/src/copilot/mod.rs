@@ -8,7 +8,7 @@ pub use auth::{
     COPILOT_INTEGRATION_ID, COPILOT_USER_AGENT,
 };
 pub use login::{
-    exchange_copilot_token, CopilotHttp, CopilotLogin, DeviceCodeResponse, ExchangedToken,
+    exchange_copilot_token, CopilotLogin, DeviceCodeResponse, ExchangeIdentity, ExchangedToken,
     PollOutcome, COPILOT_CLIENT_ID, COPILOT_TOKEN_EXCHANGE_URL, COPILOT_TOKEN_REFRESH_SKEW_SECS,
     DEFAULT_GITHUB_DOMAIN,
 };

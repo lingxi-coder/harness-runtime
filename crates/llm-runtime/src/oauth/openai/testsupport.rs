@@ -6,12 +6,14 @@
 //! browser, no real keychain).
 
 use async_trait::async_trait;
-use platform_api::http::SseStream;
+use bytes::Bytes;
+use futures::stream;
+use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
 use platform_api::{
-    BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner,
-    SecureStorage, SecureStorageBackend, SecureStorageError,
+    BackgroundTaskHandle, Clock, RuntimeError, RuntimeSpawner, SecureStorage, SecureStorageBackend,
+    SecureStorageError,
 };
-use protocol::{HttpRequest, HttpResponse, SecureStorageData};
+use protocol::SecureStorageData;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -76,35 +78,32 @@ impl MockHttp {
 }
 
 #[async_trait]
-impl HttpTransport for MockHttp {
-    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+impl Transport for MockHttp {
+    async fn send(
+        &self,
+        req: HttpRequest,
+    ) -> Result<StreamResponse, lingxi_llm_client::protocol::LlmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.requests.lock().unwrap().push(req.clone());
-        let body_match = req.body.as_deref().and_then(|body| {
-            self.body_routes
-                .iter()
-                .find(|(needle, _)| body.contains(needle.as_str()))
-                .map(|(_, c)| c.clone())
-        });
+        let body_match = self
+            .body_routes
+            .iter()
+            .find(|(needle, _)| String::from_utf8_lossy(&req.body).contains(needle.as_str()))
+            .map(|(_, c)| c.clone());
         let canned = body_match
             .or_else(|| {
                 self.routes
                     .iter()
-                    .find(|(u, _)| req.url.contains(u.as_str()))
+                    .find(|(url, _)| req.url.contains(url.as_str()))
                     .map(|(_, c)| c.clone())
             })
             .or_else(|| self.routes.first().map(|(_, c)| c.clone()))
-            .ok_or_else(|| HttpError::InvalidRequest("no canned route".into()))?;
-        Ok(HttpResponse {
+            .expect("no canned route");
+        Ok(StreamResponse {
             status: canned.status,
             headers: vec![],
-            body: canned.body,
-            body_bytes: Vec::new(),
+            body: Box::pin(stream::once(async move { Ok(Bytes::from(canned.body)) })),
         })
-    }
-
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
-        Err(HttpError::InvalidRequest("sse unsupported in mock".into()))
     }
 }
 
@@ -375,17 +374,25 @@ pub fn mem_credential_manager(
     storage: Arc<MemStorage>,
     clock: Arc<dyn Clock>,
 ) -> Arc<secret::CredentialManager> {
-    // Re-use a never-called HTTP mock for the credential manager's http field.
-    let http = MockHttp::new(vec![(
-        "__never__",
-        Canned {
-            status: 500,
-            body: String::new(),
-        },
-    )]);
+    struct CredentialHttp;
+    #[async_trait]
+    impl platform_api::HttpTransport for CredentialHttp {
+        async fn request(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            panic!("CredentialManager network request was not expected in OAuth test")
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            panic!("CredentialManager stream request was not expected in OAuth test")
+        }
+    }
     Arc::new(secret::CredentialManager::new(
         storage as Arc<dyn SecureStorage>,
         clock,
-        http as Arc<dyn HttpTransport>,
+        Arc::new(CredentialHttp) as Arc<dyn platform_api::HttpTransport>,
     ))
 }

@@ -178,7 +178,7 @@ impl CredentialProvider for EnvCredentialProvider {
 /// this can safely wrap the host's composite credential provider.
 pub struct CopilotExchangeCredentialProvider {
     inner: std::sync::Arc<dyn CredentialProvider>,
-    http: std::sync::Arc<dyn crate::copilot::CopilotHttp>,
+    http: std::sync::Arc<dyn lingxi_llm_client::transport::Transport>,
     credential_id: String,
     cached: std::sync::Mutex<Option<crate::copilot::ExchangedToken>>,
 }
@@ -190,7 +190,7 @@ impl CopilotExchangeCredentialProvider {
     #[must_use]
     pub fn new(
         inner: std::sync::Arc<dyn CredentialProvider>,
-        http: std::sync::Arc<dyn crate::copilot::CopilotHttp>,
+        http: std::sync::Arc<dyn lingxi_llm_client::transport::Transport>,
         credential_id: impl Into<String>,
     ) -> Self {
         Self {
@@ -253,7 +253,23 @@ impl CredentialProvider for CopilotExchangeCredentialProvider {
                     })
                 }
             };
-            let exchanged = crate::copilot::exchange_copilot_token(&*self.http, &raw).await?;
+            let exchanged = crate::copilot::exchange_copilot_token(
+                &*self.http,
+                &raw,
+                crate::copilot::login::EXCHANGE_IDENTITY,
+            )
+            .await
+            .map_err(|error| match error {
+                lingxi_llm_client::protocol::LlmError::InvalidRequest { message } => {
+                    LlmError::InvalidRequest { message }
+                }
+                lingxi_llm_client::protocol::LlmError::TransportTimeout { message } => {
+                    LlmError::TransportTimeout { message }
+                }
+                _ => LlmError::Transport {
+                    message: "Copilot token exchange failed".into(),
+                },
+            })?;
             let bearer = exchanged.bearer().to_string();
             *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = Some(exchanged);
             Ok(Credential::BearerToken(bearer))
@@ -295,24 +311,24 @@ mod tests {
         calls: std::sync::Mutex<u32>,
         expires_at: u64,
     }
-    impl crate::copilot::CopilotHttp for MockExchangeHttp {
-        fn post_json<'a>(
-            &'a self,
-            _url: &'a str,
-            _body: &'a serde_json::Value,
-        ) -> BoxFuture<'a, Result<serde_json::Value, LlmError>> {
-            Box::pin(async { unreachable!("exchange uses get_json") })
-        }
-        fn get_json<'a>(
-            &'a self,
-            _url: &'a str,
-            _headers: &'a [(&'a str, String)],
-        ) -> BoxFuture<'a, Result<serde_json::Value, LlmError>> {
+    #[async_trait::async_trait]
+    impl lingxi_llm_client::transport::Transport for MockExchangeHttp {
+        async fn send(
+            &self,
+            _request: lingxi_llm_client::transport::HttpRequest,
+        ) -> Result<
+            lingxi_llm_client::transport::StreamResponse,
+            lingxi_llm_client::protocol::LlmError,
+        > {
             *self.calls.lock().unwrap() += 1;
-            let e = self.expires_at;
-            Box::pin(
-                async move { Ok(serde_json::json!({"token": "copilot-bearer", "expires_at": e})) },
-            )
+            let body =
+                serde_json::json!({"token": "copilot-bearer", "expires_at": self.expires_at});
+            Ok(lingxi_llm_client::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: serde_json::to_vec(&body).unwrap().into(),
+            }
+            .into())
         }
     }
 
