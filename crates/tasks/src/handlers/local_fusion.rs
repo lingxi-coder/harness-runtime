@@ -950,6 +950,7 @@ mod tests {
             },
             timing: FusionTiming::default(),
             egress_profiles: vec!["openai".into()],
+            mode: Default::default(),
         }
     }
 

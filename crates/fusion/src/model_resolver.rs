@@ -552,6 +552,8 @@ mod tests {
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
+            mode: Default::default(),
+            verify_commands: Vec::new(),
         }
     }
 

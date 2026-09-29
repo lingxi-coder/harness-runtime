@@ -1028,6 +1028,101 @@ pub struct FusionSettingsJson {
     /// capability check made against the live catalog at preflight, not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analyst_model: Option<FusionModelSelectionJson>,
+    /// Implement mode (`/fusion --implement`, Agent `fusion_mode: "implement"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implement: Option<FusionImplementSettingsJson>,
+}
+
+/// Typed `settings.fusion.implement` object: each panel changes the code in
+/// its own git worktree and the host verifies it. Every field is `Option`;
+/// the orchestrator applies the defaults.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FusionImplementSettingsJson {
+    /// Per-panel turn cap (1..=200). Default 40.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    /// Per-panel total timeout. Default 1_800_000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_timeout_ms: Option<u64>,
+    /// End-to-end timeout of an implement run. Default 3_600_000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_timeout_ms: Option<u64>,
+    /// Commands the host runs, in order, in every panel's worktree once the
+    /// panel is done (e.g. `cargo check --locked`). `/fusion --implement
+    /// --verify <cmd>` replaces them for one run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_commands: Option<Vec<String>>,
+    /// Per-command verification timeout. Default 600_000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_timeout_ms: Option<u64>,
+    /// Worktrees verified at once (1..=8). Default 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_concurrency: Option<u8>,
+    /// Hours a panel worktree with changes is kept. Default 24.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_hours: Option<u32>,
+    /// Implement mode refuses to start with less free disk than this where
+    /// the worktrees go. Default 5 GiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_free_disk_bytes: Option<u64>,
+    /// Implement runs the model starts whose quote is at most this many USD
+    /// run without asking. Read from user and local settings only: a
+    /// checked-in project file cannot turn on unattended spending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_approve_max_usd: Option<f64>,
+}
+
+/// Most verification commands one run executes per worktree.
+pub const FUSION_MAX_VERIFY_COMMANDS: usize = 16;
+
+impl FusionImplementSettingsJson {
+    fn validate(&self) -> Result<(), crate::settings::SettingsError> {
+        use crate::settings::SettingsError::SchemaViolation;
+        if let Some(turns) = self.max_turns {
+            if !(1..=200).contains(&turns) {
+                return Err(SchemaViolation(
+                    "fusion.implement.maxTurns must be in 1..=200".into(),
+                ));
+            }
+        }
+        for (name, value) in [
+            ("fusion.implement.panelTimeoutMs", self.panel_timeout_ms),
+            ("fusion.implement.totalTimeoutMs", self.total_timeout_ms),
+            ("fusion.implement.verifyTimeoutMs", self.verify_timeout_ms),
+        ] {
+            if value == Some(0) {
+                return Err(SchemaViolation(format!("{name} must be positive")));
+            }
+        }
+        if let Some(n) = self.verify_concurrency {
+            if !(1..=8).contains(&n) {
+                return Err(SchemaViolation(
+                    "fusion.implement.verifyConcurrency must be in 1..=8".into(),
+                ));
+            }
+        }
+        if let Some(commands) = &self.verify_commands {
+            if commands.len() > FUSION_MAX_VERIFY_COMMANDS {
+                return Err(SchemaViolation(format!(
+                    "fusion.implement.verifyCommands may list at most {FUSION_MAX_VERIFY_COMMANDS} commands"
+                )));
+            }
+            if commands.iter().any(|command| command.trim().is_empty()) {
+                return Err(SchemaViolation(
+                    "fusion.implement.verifyCommands entries must not be empty".into(),
+                ));
+            }
+        }
+        if let Some(usd) = self.auto_approve_max_usd {
+            if !usd.is_finite() || usd < 0.0 {
+                return Err(SchemaViolation(
+                    "fusion.implement.autoApproveMaxUsd must be a non-negative number".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl FusionSettingsJson {
@@ -1257,6 +1352,9 @@ impl FusionSettingsJson {
             }
         }
         self.validate_model_roles(max_panel)?;
+        if let Some(implement) = &self.implement {
+            implement.validate()?;
+        }
         Ok(())
     }
 

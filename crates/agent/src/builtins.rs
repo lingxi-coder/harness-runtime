@@ -866,9 +866,79 @@ For file evidence, set locator to the workspace-relative path (optionally with :
     }
 }
 
+/// Hidden Fusion implement-mode panel definition. Resolved and hidden like
+/// [`fusion_panel_definition`].
+///
+/// It runs in its own git worktree (the spawn's `cwd`). The fusion
+/// orchestrator confines every tool call to that worktree, runs it
+/// non-interactively, and keeps Bash inside the sandbox rooted there; the
+/// structured `PanelReport` schema is applied at spawn. `max_turns` is the
+/// ceiling `fusion.implement.maxTurns` may lower.
+#[must_use]
+pub fn fusion_implementer_definition() -> AgentDefinition {
+    AgentDefinition {
+        agent_type: platform_api::FUSION_IMPLEMENTER_TYPE.to_string(),
+        when_to_use:
+            "Hidden Fusion implementer — implements a task in its own worktree. Not selectable via subagent_type."
+                .to_string(),
+        tools: AgentToolPolicy::Explicit(vec![
+            "Read".into(),
+            "Grep".into(),
+            "Glob".into(),
+            "Edit".into(),
+            "Write".into(),
+            "Bash".into(),
+            "WebFetch".into(),
+        ]),
+        max_turns: 200,
+        // Never prompts: the orchestrator's invoker marks every call
+        // non-interactive, so an ask is a denial.
+        permission_mode: AgentPermissionMode::Isolated,
+        system_prompt: Some(
+            r"You are a Fusion panel in implement mode. Independently implement one task in the current directory, which is your own copy of the repository. Other panels exist but you cannot see them and must not address them.
+
+Rules:
+- Work only inside the current directory. Paths outside it are refused.
+- Build and run tests as you see fit; Bash runs in a sandbox that can write only here.
+- Do not run `git add`, `git commit`, or any command that rewrites history: the host collects your changes from the working tree itself.
+- Do not mention provider names, model names, or that you are part of a multi-model ensemble.
+- When done, return a PanelReport through the StructuredOutput tool.
+
+In the report, candidate_answer describes the change: what you changed and why, and how you checked it. Do not paste the full diff; the host collects it. Report commands you ran as command evidence; the host runs its own verification and does not rely on your account.
+
+For file evidence about existing code, set locator to the path relative to the current directory (optionally with :line or :start-end) and excerpt to 1-10 lines copied verbatim from that file, without line numbers."
+                .to_string(),
+        ),
+        ..fusion_panel_definition()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_implementer_writes_but_cannot_delegate_or_leave_its_worktree() {
+        let def = fusion_implementer_definition();
+        assert_eq!(def.agent_type, "fusion-implementer");
+        assert!(platform_api::is_fusion_panel_type(&def.agent_type));
+        let AgentToolPolicy::Explicit(tools) = &def.tools else {
+            panic!("explicit allow-list expected");
+        };
+        for tool in ["Edit", "Write", "Bash"] {
+            assert!(tools.iter().any(|t| t == tool), "{tool}");
+        }
+        for tool in ["Agent", "SendMessage", "EnterWorktree", "ExitWorktree"] {
+            assert!(!tools.iter().any(|t| t == tool), "{tool}");
+        }
+        assert!(matches!(def.permission_mode, AgentPermissionMode::Isolated));
+        let prompt = def.system_prompt.unwrap();
+        assert!(prompt.contains("git commit"));
+        assert!(prompt.contains("current directory"));
+        assert!(!builtin_agent_definitions_gated(true)
+            .iter()
+            .any(|d| d.agent_type == def.agent_type));
+    }
 
     #[test]
     fn has_five_builtins_with_unique_types() {

@@ -26,9 +26,9 @@ use permission::{PermissionDecisionReason, PermissionResult};
 use platform_api::budget::BudgetError;
 use platform_api::fusion::{
     FusionActivation, FusionAgentSurface, FusionExecutor, FusionInheritance, FusionModelRef,
-    FusionOrigin, FusionPreparedSummary, FusionPreset, FusionProgress, FusionRequest,
-    FusionRunControl, FusionRunFactsRecorder, FusionRunId, FusionRunIdentity, FusionRunRecorder,
-    FusionRunRecorderFactory, FusionStage, FusionStatus, FusionSubmission,
+    FusionOrigin, FusionPanelMode, FusionPreparedSummary, FusionPreset, FusionProgress,
+    FusionRequest, FusionRunControl, FusionRunFactsRecorder, FusionRunId, FusionRunIdentity,
+    FusionRunRecorder, FusionRunRecorderFactory, FusionStage, FusionStatus, FusionSubmission,
     FusionTerminalCapability, PreparedFusionRun, FUSION_MAX_PANEL, FUSION_MIN_PANEL,
 };
 use platform_api::subagent_spawn::{
@@ -103,6 +103,10 @@ const GENERAL_PURPOSE_AGENT_TYPE: &str = "general-purpose";
 const FUSION_AGENT_TYPE: &str = "fusion";
 
 const FUSION_WHEN_TO_USE: &str = "Parallel multi-model deliberation for complex code, task, plan, or review work. Returns the panels' anonymized answers plus an analysis of their consensus, contradictions, partial coverage, unique insights and blind spots — you then write the final answer yourself. About 4–5× the cost of a single agent.";
+
+/// Appended to [`FUSION_WHEN_TO_USE`] only on hosts that can run implement
+/// mode (`FusionAgentSurface::implement_available`).
+const FUSION_IMPLEMENT_WHEN_TO_USE: &str = "Pass fusion_mode \"implement\" when the panels should each make the change themselves, in their own git worktree, with the host running the user's verification commands on every result; you then write the final change in the user's workspace, using the panels' patches as references. Several times the cost of analysis, so use it for changes worth comparing, and expect the user to be asked to confirm it unless they allow it automatically.";
 
 /// 2.1.238 `Gri` (@285270080), NEW in 2.1.238 (0 hits in 2.1.220):
 /// the message head used both by the Agent-tool prompt (as the tail of the
@@ -228,6 +232,10 @@ pub struct AgentToolInput {
     /// Request cross-provider Fusion (Agent default is same-provider).
     #[serde(default)]
     pub cross_provider: Option<bool>,
+    /// Fusion panel mode: `"analysis"` (default) or `"implement"`. Ignored
+    /// unless `subagent_type` is `"fusion"`.
+    #[serde(default)]
+    pub fusion_mode: Option<String>,
 }
 
 /// claude `Agt()` (`AgentTool.tsx`): normalize a subagent-type candidate for the
@@ -544,6 +552,11 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "cross_provider": {
                 "type": "boolean",
                 "description": "Allow Fusion panels to leave the parent provider. Agent default is same-provider."
+            },
+            "fusion_mode": {
+                "type": "string",
+                "enum": ["analysis", "implement"],
+                "description": "Fusion panel mode when subagent_type is \"fusion\". \"analysis\" (default): read-only panels answer the task. \"implement\": each panel changes the code in its own git worktree and the host runs the configured verification commands on every result. Ignored for other agent types."
             }
         },
         "required": ["description", "prompt"]
@@ -1025,6 +1038,12 @@ fn fusion_request_from_agent(
         .map(|m| parse_fusion_models(m))
         .transpose()?;
     let dimensions = parsed.dimensions.clone().unwrap_or_default();
+    let mode = parse_fusion_mode(parsed.fusion_mode.as_deref())?;
+    if mode == FusionPanelMode::Implement && !surface.implement_available {
+        return Err(ToolError::InvalidInput(
+            "fusion_mode \"implement\" is not available on this host; use \"analysis\"".into(),
+        ));
+    }
     let parent_model =
         main_loop_model_parent(ctx).unwrap_or_else(|| ctx.options.main_loop_model.clone());
     let routed_profile = ctx
@@ -1051,7 +1070,52 @@ fn fusion_request_from_agent(
         cross_provider: parsed.cross_provider.unwrap_or(false),
         parent_profile,
         parent_model,
+        mode,
+        // Verification commands come from the user's settings or their own
+        // `/fusion --verify`; a model can never choose what the host runs.
+        verify_commands: Vec::new(),
     })
+}
+
+/// The confirmation the user sees before a model-initiated implement run.
+fn fusion_implement_prompt(
+    task: &str,
+    confirmation: &platform_api::fusion::ImplementConfirmation,
+) -> String {
+    let panels = confirmation
+        .panels
+        .map_or_else(|| "Several panels".to_string(), |n| format!("{n} panels"));
+    let cost = match confirmation.quote_nano_usd {
+        Some(nano) => format!(
+            "Reserved cost: up to ${:.2} (an upper bound, several times an analysis run).",
+            nano as f64 / 1e9
+        ),
+        None => "The cost could not be estimated.".to_string(),
+    };
+    let task: String = task
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect();
+    format!(
+        "{panels} will each change the code in their own git worktree, made from a snapshot of \
+your workspace, and the host will run your verification commands on every result. Your \
+workspace itself is not modified; the model then writes the final change.\n{cost}\n\
+Set fusion.implement.autoApproveMaxUsd in your user settings to skip this question for runs \
+up to a limit.\n\nTask: {task}"
+    )
+}
+
+fn parse_fusion_mode(raw: Option<&str>) -> Result<FusionPanelMode, ToolError> {
+    match raw {
+        None | Some("analysis") => Ok(FusionPanelMode::Analysis),
+        Some("implement") => Ok(FusionPanelMode::Implement),
+        Some(other) => Err(ToolError::InvalidInput(format!(
+            "unknown fusion_mode `{other}`; expected \"analysis\" or \"implement\""
+        ))),
+    }
 }
 
 fn fusion_stage_name(stage: &FusionStage) -> &'static str {
@@ -1060,6 +1124,9 @@ fn fusion_stage_name(stage: &FusionStage) -> &'static str {
         FusionStage::ReservingBudget => "reserving_budget",
         FusionStage::RunningPanels { .. } => "running_panels",
         FusionStage::PanelsDispatched { .. } => "panels_dispatched",
+        FusionStage::PreparingWorktrees => "preparing_worktrees",
+        FusionStage::CollectingPatches => "collecting_patches",
+        FusionStage::Verifying => "verifying",
         FusionStage::CheckingEvidence => "checking_evidence",
         FusionStage::Analyzing => "analyzing",
         FusionStage::Completed => "completed",
@@ -1130,6 +1197,7 @@ fn fusion_tool_result(result: platform_api::FusionResult) -> ToolCallResult {
     ToolCallResult {
         data: json!({
             "runId": result.run_id,
+            "mode": result.mode,
             "status": status,
             "analysisFailure": result.analysis_failure,
             "panels": panels,
@@ -1300,6 +1368,8 @@ fn fusion_error_is_preflight(err: &platform_api::FusionError) -> bool {
             // stays charged.
             | FusionError::AllPanelsFailedPreflight
             | FusionError::PanelAdmissionRejected(_)
+            // Implement mode refuses before any panel is dispatched.
+            | FusionError::ImplementUnavailable(_)
     )
 }
 
@@ -1683,6 +1753,58 @@ impl AgentTool {
             .unwrap_or(budget)
     }
 
+    /// A model-initiated implement-mode Fusion run changes files in several
+    /// worktrees, runs the user's verification commands and costs several
+    /// times an analysis run. Ask the user first, unless the host says the run
+    /// is within their automatic-approval limit. A call `call_fusion` will
+    /// reject anyway is not asked about.
+    fn fusion_implement_ask(
+        &self,
+        input: &Value,
+        ctx: &ToolUseContext,
+    ) -> Option<PermissionResult> {
+        let parsed: AgentToolInput = serde_json::from_value(input.clone()).ok()?;
+        let is_fusion = parsed
+            .subagent_type
+            .as_deref()
+            .is_some_and(|agent_type| normalize_agent_type(agent_type) == FUSION_AGENT_TYPE);
+        if !is_fusion
+            || parse_fusion_mode(parsed.fusion_mode.as_deref()).ok()? != FusionPanelMode::Implement
+        {
+            return None;
+        }
+        let executor = self.fusion.as_ref()?;
+        let surface = executor.agent_surface();
+        if !surface.enabled || !surface.implement_available {
+            return None;
+        }
+        let request = fusion_request_from_agent(
+            self.ctx.main_loop_model_profile_provider.as_ref(),
+            &parsed,
+            ctx,
+            surface,
+            executor.as_ref(),
+        )
+        .ok()?;
+        let confirmation = executor.implement_confirmation(&request);
+        if !confirmation.required {
+            return None;
+        }
+        let message = fusion_implement_prompt(&parsed.prompt, &confirmation);
+        Some(PermissionResult::Ask {
+            reason: PermissionDecisionReason::Other {
+                reason: "Fusion implement mode changes files and runs commands".into(),
+            },
+            prompt: permission::result::PermissionPrompt {
+                title: "Fusion implement mode".into(),
+                message,
+                options: vec!["Allow".into(), "Deny".into()],
+            },
+            pending_classifier_check: None,
+            metadata: PermissionMetadata::default(),
+        })
+    }
+
     fn fusion_surface(&self) -> FusionAgentSurface {
         self.fusion
             .as_ref()
@@ -1696,11 +1818,23 @@ impl AgentTool {
         if agents.iter().any(|a| a.agent_type == FUSION_AGENT_TYPE) {
             return;
         }
+        let surface = self.fusion_surface();
+        let (when_to_use, tools_description) = if surface.implement_available {
+            (
+                format!("{FUSION_WHEN_TO_USE} {FUSION_IMPLEMENT_WHEN_TO_USE}"),
+                "Fusion deliberation (read-only panels; implement mode edits isolated worktrees)",
+            )
+        } else {
+            (
+                FUSION_WHEN_TO_USE.to_string(),
+                "Fusion deliberation (read-only panel)",
+            )
+        };
         agents.push(SubagentListingEntry {
             agent_type: FUSION_AGENT_TYPE.to_string(),
-            when_to_use: FUSION_WHEN_TO_USE.to_string(),
+            when_to_use,
             when_to_use_lean: None,
-            tools_description: "Fusion deliberation (read-only panel)".to_string(),
+            tools_description: tools_description.to_string(),
         });
     }
 
@@ -3504,7 +3638,10 @@ impl Tool for AgentTool {
         }
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+        if let Some(ask) = self.fusion_implement_ask(input, ctx) {
+            return ask;
+        }
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "Agent spawn delegates to host runtime; no direct side-effect".into(),

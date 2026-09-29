@@ -163,6 +163,7 @@ fn executor(
         Arc::new(catalog),
         Arc::new(telemetry::AnalyticsBus::new()),
         pricing,
+        None,
     )
 }
 
@@ -190,6 +191,8 @@ fn submission(
         cross_provider: false,
         parent_profile: "anthropic".into(),
         parent_model: MODELS[0].into(),
+        mode: Default::default(),
+        verify_commands: Vec::new(),
     };
     platform_api::FusionSubmission::new(
         request,

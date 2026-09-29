@@ -876,6 +876,8 @@ fn request(prompt: &str) -> FusionRequest {
         cross_provider: true,
         parent_profile: "anthropic".into(),
         parent_model: "claude-sonnet-5".into(),
+        mode: Default::default(),
+        verify_commands: Vec::new(),
     }
 }
 
@@ -2230,6 +2232,8 @@ async fn anthropic_only_catalog_clears_structured_output_preflight() {
         cross_provider: false,
         parent_profile: "anthropic".into(),
         parent_model: "claude-sonnet-5".into(),
+        mode: Default::default(),
+        verify_commands: Vec::new(),
     };
     let result = orch.run(req, inherit(), None).await;
     let result = match result {
@@ -3454,6 +3458,7 @@ fn three_ok_completed_panels() -> Vec<crate::panel::PanelInternal> {
             usage: None,
             spawn_prompt: String::new(),
             evidence_checks: Vec::new(),
+            implement: Default::default(),
         })
         .collect()
 }
@@ -5986,6 +5991,8 @@ async fn analyst_overlaps_panel_telemetry_uses_canonical_model_key() {
         // tie-break key never discriminates among the analyst candidates.
         parent_profile: "somewhere-else".into(),
         parent_model: "unused".into(),
+        mode: Default::default(),
+        verify_commands: Vec::new(),
     };
     let spawner = FakeSpawner::new(HashMap::new());
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
@@ -6690,6 +6697,7 @@ fn make_panel_internal(
         usage: None,
         spawn_prompt: String::new(),
         evidence_checks: Vec::new(),
+        implement: Default::default(),
     }
 }
 
@@ -7052,6 +7060,7 @@ fn panel_with_cache_write(cache_write_tokens: u64) -> Vec<crate::panel::PanelInt
         }),
         spawn_prompt: String::new(),
         evidence_checks: Vec::new(),
+        implement: Default::default(),
     }]
 }
 
@@ -7260,4 +7269,460 @@ async fn evidence_checks_reach_the_analyst_the_material_and_telemetry() {
         completed.metadata.get("evidence_missing_file_count"),
         Some(AnalyticsValue::Int(1))
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Implement mode: worktrees, patches, verification and the analyst input.
+// ---------------------------------------------------------------------------
+
+/// Worktrees are real temp directories; every one "changed" `src/a.rs`
+/// except those whose name ends in a suffix listed in `unchanged`.
+struct FakeWorktrees {
+    root: std::path::PathBuf,
+    unchanged: Vec<&'static str>,
+    discarded: Mutex<Vec<String>>,
+    created: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl platform_api::WorktreeManager for FakeWorktrees {
+    async fn create_worktree(
+        &self,
+        slug: &str,
+        base_branch: Option<&str>,
+        _copy_includes: &[std::path::PathBuf],
+    ) -> Result<platform_api::WorktreeHandle, platform_api::WorktreeError> {
+        assert_eq!(
+            base_branch,
+            Some("basecommit"),
+            "worktrees start at the snapshot"
+        );
+        let path = self.root.join(slug);
+        std::fs::create_dir_all(&path).unwrap();
+        self.created.lock().unwrap().push(slug.to_string());
+        Ok(platform_api::WorktreeHandle {
+            path,
+            branch_name: format!("worktree-{slug}"),
+            base_commit: None,
+        })
+    }
+    async fn remove_worktree(
+        &self,
+        _: &platform_api::WorktreeHandle,
+    ) -> Result<(), platform_api::WorktreeError> {
+        Ok(())
+    }
+    async fn list_worktrees(
+        &self,
+    ) -> Result<Vec<platform_api::WorktreeInfo>, platform_api::WorktreeError> {
+        Ok(Vec::new())
+    }
+    async fn cleanup_stale(
+        &self,
+        _: std::time::Duration,
+    ) -> Result<Vec<std::path::PathBuf>, platform_api::WorktreeError> {
+        Ok(Vec::new())
+    }
+    fn is_supported(&self) -> bool {
+        true
+    }
+    async fn snapshot_base(
+        &self,
+        _: platform_api::SnapshotLimits,
+    ) -> Result<platform_api::WorkspaceBase, platform_api::WorktreeError> {
+        Ok(platform_api::WorkspaceBase {
+            commit: "basecommit".into(),
+            head: Some("basecommit".into()),
+            includes_uncommitted: false,
+        })
+    }
+    async fn worktree_patch(
+        &self,
+        handle: &platform_api::WorktreeHandle,
+        base: &str,
+    ) -> Result<platform_api::WorktreePatch, platform_api::WorktreeError> {
+        assert_eq!(base, "basecommit");
+        let name = handle
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        if self.unchanged.iter().any(|suffix| name.ends_with(suffix)) {
+            return Ok(platform_api::WorktreePatch {
+                diff: String::new(),
+                files: Vec::new(),
+            });
+        }
+        Ok(platform_api::WorktreePatch {
+            diff: format!("--- a/src/a.rs\n+++ b/src/a.rs\n+// change from {name}\n"),
+            files: vec![platform_api::PatchFile {
+                path: "src/a.rs".into(),
+                status: platform_api::PatchFileStatus::Modified,
+                insertions: 1,
+                deletions: 0,
+                binary: false,
+            }],
+        })
+    }
+    async fn discard_worktree(
+        &self,
+        handle: &platform_api::WorktreeHandle,
+    ) -> Result<(), platform_api::WorktreeError> {
+        self.discarded.lock().unwrap().push(
+            handle
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        Ok(())
+    }
+}
+
+/// `cargo test` fails in the worktree whose name ends in `-p2`; every other
+/// command passes.
+struct FakeImplementHost {
+    worktrees: Arc<FakeWorktrees>,
+    refuse: Option<&'static str>,
+    verified: Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait]
+impl platform_api::FusionImplementHost for FakeImplementHost {
+    fn worktrees(&self) -> Arc<dyn platform_api::WorktreeManager> {
+        self.worktrees.clone()
+    }
+    async fn preflight(&self, _: u64) -> Result<(), String> {
+        self.refuse.map_or(Ok(()), |reason| Err(reason.to_string()))
+    }
+    async fn verify(
+        &self,
+        worktree: &std::path::Path,
+        command: &str,
+        _: std::time::Duration,
+        _: CancellationToken,
+    ) -> platform_api::VerificationRun {
+        let name = worktree.file_name().unwrap().to_string_lossy().into_owned();
+        self.verified
+            .lock()
+            .unwrap()
+            .push((name.clone(), command.to_string()));
+        let failed = command == "cargo test" && name.ends_with("-p2");
+        platform_api::VerificationRun {
+            command: command.into(),
+            outcome: if failed {
+                platform_api::VerificationOutcome::Failed {
+                    exit_code: Some(101),
+                }
+            } else {
+                platform_api::VerificationOutcome::Passed
+            },
+            duration_ms: 3,
+            output_tail: if failed {
+                "test failed: boom".into()
+            } else {
+                String::new()
+            },
+        }
+    }
+}
+
+fn implement_fixture(
+    unchanged: Vec<&'static str>,
+    refuse: Option<&'static str>,
+) -> (tempfile::TempDir, Arc<FakeImplementHost>) {
+    let dir = tempfile::tempdir().unwrap();
+    let worktrees = Arc::new(FakeWorktrees {
+        root: dir.path().to_path_buf(),
+        unchanged,
+        discarded: Mutex::new(Vec::new()),
+        created: Mutex::new(Vec::new()),
+    });
+    let host = Arc::new(FakeImplementHost {
+        worktrees,
+        refuse,
+        verified: Mutex::new(Vec::new()),
+    });
+    (dir, host)
+}
+
+fn implement_request() -> FusionRequest {
+    FusionRequest {
+        mode: platform_api::FusionPanelMode::Implement,
+        dimensions: Vec::new(),
+        verify_commands: vec!["cargo check".into(), "cargo test".into()],
+        ..request("add a retry")
+    }
+}
+
+#[tokio::test]
+async fn implement_mode_collects_patches_verifies_them_and_feeds_the_analyst() {
+    let (_dir, host) = implement_fixture(vec!["-p3"], None);
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(spawner.clone(), side.clone()).with_implement_host(host.clone());
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<platform_api::FusionProgress>(64);
+    let result = orch
+        .run(implement_request(), inherit(), Some(tx))
+        .await
+        .expect("implement run");
+
+    assert_eq!(result.mode, platform_api::FusionPanelMode::Implement);
+    // The implement dimensions replaced the analysis defaults.
+    let user = side.last_analyst_user.lock().unwrap().clone().unwrap();
+    let sent: Value = serde_json::from_str(&user).unwrap();
+    assert_eq!(
+        sent["dimensions"],
+        json!(platform_api::DEFAULT_IMPLEMENT_FUSION_DIMENSIONS)
+    );
+
+    // Each panel ran as the implementer, inside its own worktree.
+    let requests = spawner.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3);
+    let mut cwds: Vec<String> = requests
+        .iter()
+        .map(|r| {
+            assert_eq!(r.subagent_type, platform_api::FUSION_IMPLEMENTER_TYPE);
+            r.cwd.clone().expect("cwd override")
+        })
+        .collect();
+    cwds.sort();
+    cwds.dedup();
+    assert_eq!(cwds.len(), 3, "one worktree per panel");
+    assert!(spawner.prompts().iter().all(|p| p.contains("add a retry")));
+
+    // Patches and verification come from the host, per panel.
+    let changed: Vec<_> = result
+        .responses
+        .iter()
+        .filter(|m| m.patch.as_ref().is_some_and(|p| !p.is_empty()))
+        .collect();
+    assert_eq!(changed.len(), 2, "the -p3 worktree changed nothing");
+    for material in &changed {
+        let patch = material.patch.as_ref().unwrap();
+        assert_eq!(patch.base_commit, "basecommit");
+        assert!(patch.diff.contains("+// change from"));
+        assert!(patch.patch_file.is_some());
+        let Some(platform_api::PanelVerification::Runs(runs)) = &material.verification else {
+            panic!("verification ran for a panel with changes")
+        };
+        assert_eq!(runs.len(), 2);
+    }
+    let unchanged: Vec<_> = result
+        .responses
+        .iter()
+        .filter(|m| m.patch.as_ref().is_some_and(|p| p.is_empty()))
+        .collect();
+    assert_eq!(unchanged.len(), 1);
+    assert!(
+        unchanged[0].verification.is_none(),
+        "nothing to verify without changes"
+    );
+    let verified = host.verified.lock().unwrap().clone();
+    assert_eq!(
+        verified.len(),
+        4,
+        "two commands in each of the two changed worktrees"
+    );
+    assert!(verified.iter().all(|(name, _)| !name.ends_with("-p3")));
+
+    // The analyst saw the host's facts, not the panels' claims.
+    assert!(user.contains("\"implement\""));
+    assert!(user.contains("1/2 passed"), "{user}");
+    assert!(user.contains("+// change from"));
+
+    // The parent gets the patches and the outcomes.
+    let material = platform_api::render_fusion_material(&result);
+    assert!(material.contains("<patch worktree="), "{material}");
+    assert!(material.contains("<verification>"));
+    assert!(material.contains("outcome=\"failed\""));
+
+    // Only worktrees holding changes survive the run.
+    assert_eq!(
+        host.worktrees.discarded.lock().unwrap().clone().len(),
+        1,
+        "the unchanged worktree is discarded"
+    );
+    assert!(host.worktrees.discarded.lock().unwrap()[0].ends_with("-p3"));
+
+    // Stages appear in order.
+    let mut stages = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        stages.push(std::mem::discriminant(&event.stage));
+    }
+    let position = |stage: platform_api::FusionStage| {
+        stages
+            .iter()
+            .position(|s| *s == std::mem::discriminant(&stage))
+            .unwrap_or_else(|| panic!("missing stage {stage:?}"))
+    };
+    assert!(
+        position(platform_api::FusionStage::PreparingWorktrees)
+            < position(platform_api::FusionStage::CollectingPatches)
+    );
+    assert!(
+        position(platform_api::FusionStage::CollectingPatches)
+            < position(platform_api::FusionStage::Verifying)
+    );
+    assert!(
+        position(platform_api::FusionStage::Verifying)
+            < position(platform_api::FusionStage::Analyzing)
+    );
+}
+
+#[tokio::test]
+async fn an_unmet_panel_bar_with_changes_hands_the_work_over_unanalyzed() {
+    let (_dir, host) = implement_fixture(vec![], None);
+    let map = HashMap::from([
+        (
+            "claude-sonnet-5".into(),
+            FakePanel::Report(report("ANSWER_A")),
+        ),
+        ("gpt-5.6-terra".into(), FakePanel::Fail),
+        ("deepseek-v4-pro".into(), FakePanel::Fail),
+    ]);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let orch = orch_scripted(FakeSpawner::new(map), side.clone()).with_implement_host(host.clone());
+    let result = orch
+        .run(implement_request(), inherit(), None)
+        .await
+        .expect("work was left, so the run still hands it over");
+
+    assert_eq!(result.status, FusionStatus::Unanalyzed);
+    assert_eq!(
+        result.analysis_failure.as_deref(),
+        Some("panel_bar_not_met")
+    );
+    assert_eq!(
+        side.analyst_calls.load(Ordering::SeqCst),
+        0,
+        "no analyst call"
+    );
+    assert_eq!(result.responses.len(), 3);
+    assert_eq!(result.responses.iter().filter(|m| m.incomplete).count(), 2);
+    assert!(result
+        .responses
+        .iter()
+        .all(|m| m.patch.is_some() && m.verification.is_some()));
+    assert!(
+        host.worktrees.discarded.lock().unwrap().is_empty(),
+        "all three hold changes"
+    );
+}
+
+#[tokio::test]
+async fn implement_mode_is_refused_before_anything_is_spent() {
+    // No host wired.
+    let spawner = FakeSpawner::new(three_ok());
+    let orch = orch_scripted(
+        spawner.clone(),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+    );
+    let err = orch
+        .run(implement_request(), inherit(), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FusionError::ImplementUnavailable(_)),
+        "{err:?}"
+    );
+    assert!(err.guarantees_zero_provider_calls());
+    assert!(spawner.requests.lock().unwrap().is_empty());
+
+    // The host's preflight says no.
+    let (_dir, host) = implement_fixture(vec![], Some("turn the sandbox on"));
+    let spawner = FakeSpawner::new(three_ok());
+    let orch = orch_scripted(
+        spawner.clone(),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+    )
+    .with_implement_host(host.clone());
+    let err = orch
+        .run(implement_request(), inherit(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        FusionError::ImplementUnavailable("turn the sandbox on".into())
+    );
+    assert!(spawner.requests.lock().unwrap().is_empty());
+    assert!(
+        host.worktrees.created.lock().unwrap().is_empty(),
+        "no worktree before the preflight passes"
+    );
+}
+
+#[test]
+fn verify_commands_are_refused_outside_implement_mode() {
+    let orch = orch_scripted(
+        FakeSpawner::new(three_ok()),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+    );
+    let mut analysis = request("task");
+    analysis.verify_commands = vec!["cargo check".into()];
+    let identity =
+        FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Slash, None);
+    let refused =
+        Arc::new(orch).prepare(FusionSubmission::new(analysis, inherit(), identity).unwrap());
+    assert!(matches!(refused, Err(FusionError::InvalidRequest(_))));
+}
+
+#[test]
+fn a_model_started_implement_run_asks_unless_it_is_within_the_auto_approve_limit() {
+    let make = |limit: Option<u64>, priced: bool| {
+        let mut config = test_config();
+        config.implement.auto_approve_max_nano_usd = limit;
+        let mut orch = FusionOrchestrator::new(
+            FakeSpawner::new(three_ok()),
+            ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+            Arc::new(config),
+            Arc::new(catalog()),
+        );
+        if priced {
+            orch = orch.with_price_book(Arc::new(priced_book()));
+        }
+        orch
+    };
+    let request = implement_request();
+
+    // Nothing configured: ask, but show the estimate.
+    let asked = make(None, true).implement_confirmation(&request);
+    assert!(asked.required);
+    assert!(asked.quote_nano_usd.is_some_and(|q| q > 0));
+    assert_eq!(asked.panels, Some(3));
+
+    // A limit above the quote: run without asking; below it: ask.
+    let quote = asked.quote_nano_usd.unwrap();
+    assert!(
+        !make(Some(quote), true)
+            .implement_confirmation(&request)
+            .required
+    );
+    assert!(
+        make(Some(quote - 1), true)
+            .implement_confirmation(&request)
+            .required
+    );
+
+    // A run that cannot be priced always asks, whatever the limit.
+    let unpriced = make(Some(u64::MAX), false).implement_confirmation(&request);
+    assert!(unpriced.required);
+    assert_eq!(unpriced.quote_nano_usd, None);
+}
+
+#[test]
+fn the_agent_surface_offers_implement_mode_only_with_a_host() {
+    let bare = orch_scripted(
+        FakeSpawner::new(three_ok()),
+        ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]),
+    );
+    assert!(!bare.agent_surface().implement_available);
+    let (_dir, host) = implement_fixture(vec![], None);
+    assert!(
+        bare.with_implement_host(host)
+            .agent_surface()
+            .implement_available
+    );
 }

@@ -1032,6 +1032,8 @@ fn dummy_request() -> FusionRequest {
         cross_provider: true,
         parent_profile: "openai".into(),
         parent_model: "gpt-5.4".into(),
+        mode: Default::default(),
+        verify_commands: Vec::new(),
     }
 }
 
@@ -1047,6 +1049,7 @@ fn dummy_result() -> FusionResult {
         usage: FusionUsage::default(),
         timing: FusionTiming::default(),
         egress_profiles: vec![],
+        mode: Default::default(),
     }
 }
 

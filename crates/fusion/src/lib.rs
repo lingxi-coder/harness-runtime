@@ -30,6 +30,7 @@ mod attempts;
 mod budget;
 mod config;
 mod evidence;
+mod implement;
 mod model_resolver;
 mod orchestrator;
 mod packing;
@@ -43,7 +44,11 @@ pub use attempts::{
     FusionAttemptSummary, FusionPanelAttemptFence, RegisteredFusionAttempts,
 };
 pub use budget::{CapturedPriceBook, FusionPriceBook, FusionQuote, ModelRates};
-pub use config::{FusionCompletionPolicy, FusionConfigSource, FusionRuntimeConfig};
+pub use config::{
+    usd_to_nano_usd, FusionCompletionPolicy, FusionConfigSource, FusionImplementConfig,
+    FusionRuntimeConfig,
+};
+pub use implement::clean_worktrees;
 pub use model_resolver::{CatalogModel, ModelLimits, ModelSource, ResolvedPanel, ResolvedSet};
 pub use orchestrator::FusionOrchestrator;
 pub use snapshot::{CatalogRevision, CatalogSnapshot, FusionRuntimeSnapshot};

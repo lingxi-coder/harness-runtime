@@ -1819,6 +1819,8 @@ async fn a_fusion_row_survives_the_sweep_until_its_publication_settles() {
         cross_provider: false,
         parent_profile: "openai".into(),
         parent_model: "gpt-5.4".into(),
+        mode: Default::default(),
+        verify_commands: Vec::new(),
     };
     let id = registry
         .spawn(
@@ -1895,6 +1897,8 @@ async fn spawn_publishes_the_handlers_captured_fusion_timeout_on_the_task_state(
         cross_provider: false,
         parent_profile: "openai".into(),
         parent_model: "gpt-5.4".into(),
+        mode: Default::default(),
+        verify_commands: Vec::new(),
     };
 
     let id = registry
@@ -3071,6 +3075,8 @@ async fn fusion_activation_timestamp_is_published_after_task_created_hook() {
                         cross_provider: false,
                         parent_profile: "openai".into(),
                         parent_model: "gpt-5.4".into(),
+                        mode: Default::default(),
+                        verify_commands: Vec::new(),
                     },
                     conversation_id: "11111111-2222-4333-8444-555555555555".into(),
                 },

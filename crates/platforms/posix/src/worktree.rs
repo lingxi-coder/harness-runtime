@@ -18,9 +18,11 @@
 
 use async_trait::async_trait;
 use platform_api::{
-    WorktreeChangeSummary, WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager,
+    PatchFile, PatchFileStatus, SnapshotLimits, WorkspaceBase, WorktreeChangeSummary,
+    WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager, WorktreePatch,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -130,6 +132,172 @@ fn count_porcelain_changed_files(stdout: &str) -> usize {
 #[must_use]
 pub fn flatten_slug(slug: &str) -> String {
     slug.replace('/', "+")
+}
+
+/// Identity for the snapshot commits the host writes on its own behalf, so
+/// `commit-tree` works in a repository with no `user.name` configured.
+const SNAPSHOT_IDENTITY: [(&str, &str); 4] = [
+    ("GIT_AUTHOR_NAME", "Workspace snapshot"),
+    ("GIT_AUTHOR_EMAIL", "snapshot@localhost"),
+    ("GIT_COMMITTER_NAME", "Workspace snapshot"),
+    ("GIT_COMMITTER_EMAIL", "snapshot@localhost"),
+];
+
+/// Pathspec keeping the managed worktrees (each a nested checkout) out of a
+/// snapshot or patch; `git add -A` would otherwise record them as gitlinks.
+fn managed_worktrees_exclude() -> String {
+    format!(":(top,exclude){}/worktrees", branding::DOT_DIR)
+}
+
+/// Run `git` in `dir`, optionally against a private index file.
+async fn git_in(
+    dir: &Path,
+    args: &[&str],
+    index: Option<&Path>,
+) -> Result<std::process::Output, WorktreeError> {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir).args(args);
+    if let Some(index) = index {
+        cmd.env("GIT_INDEX_FILE", index);
+    }
+    cmd.output()
+        .await
+        .map_err(|e| WorktreeError::Io(e.to_string()))
+}
+
+/// [`git_in`]'s stdout, or its stderr as a [`WorktreeError::Git`].
+async fn git_stdout(
+    dir: &Path,
+    args: &[&str],
+    index: Option<&Path>,
+) -> Result<Vec<u8>, WorktreeError> {
+    let output = git_in(dir, args, index).await?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(WorktreeError::Git(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
+}
+
+fn trimmed(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout).trim().to_string()
+}
+
+/// A private copy of a checkout's index, so `git add -A` can stage the whole
+/// working tree without touching the index the user (or panel) sees. Seeded
+/// from the real index only to reuse its stat cache; an empty start gives the
+/// same tree. Removed on drop.
+struct TempIndex {
+    path: PathBuf,
+}
+
+impl TempIndex {
+    async fn seeded_from(checkout: &Path) -> Result<Self, WorktreeError> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let source =
+            trimmed(&git_stdout(checkout, &["rev-parse", "--git-path", "index"], None).await?);
+        let path = std::env::temp_dir().join(format!(
+            "worktree-index-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = tokio::fs::copy(checkout.join(source), &path).await;
+        Ok(Self { path })
+    }
+
+    /// Stage everything in `checkout` except the managed worktrees.
+    async fn add_all(&self, checkout: &Path) -> Result<(), WorktreeError> {
+        let exclude = managed_worktrees_exclude();
+        git_stdout(
+            checkout,
+            &["add", "-A", "--", ".", exclude.as_str()],
+            Some(&self.path),
+        )
+        .await
+        .map(drop)
+    }
+}
+
+impl Drop for TempIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        let mut lock = self.path.clone().into_os_string();
+        lock.push(".lock");
+        let _ = std::fs::remove_file(lock);
+    }
+}
+
+/// Parse `git diff --numstat -z` into `(path, insertions, deletions, binary)`.
+/// A rename's record is `ins\tdel\t\0from\0to\0`; the new path is kept.
+fn parse_numstat_z(stdout: &str) -> Vec<(String, u32, u32, bool)> {
+    let mut tokens = stdout.split('\0');
+    let mut out = Vec::new();
+    while let Some(record) = tokens.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let mut parts = record.splitn(3, '\t');
+        let (Some(ins), Some(del), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let path = if path.is_empty() {
+            let _from = tokens.next();
+            match tokens.next() {
+                Some(to) => to.to_string(),
+                None => break,
+            }
+        } else {
+            path.to_string()
+        };
+        let binary = ins == "-" || del == "-";
+        out.push((
+            path,
+            ins.parse().unwrap_or(0),
+            del.parse().unwrap_or(0),
+            binary,
+        ));
+    }
+    out
+}
+
+/// Parse `git diff --name-status -z` into `(path, status)`. Copies are
+/// reported as additions: the copy source is unchanged.
+fn parse_name_status_z(stdout: &str) -> Vec<(String, PatchFileStatus)> {
+    let mut tokens = stdout.split('\0');
+    let mut out = Vec::new();
+    while let Some(code) = tokens.next() {
+        let Some(kind) = code.chars().next() else {
+            continue;
+        };
+        let entry = match kind {
+            'R' => match (tokens.next(), tokens.next()) {
+                (Some(from), Some(to)) => (
+                    to.to_string(),
+                    PatchFileStatus::Renamed {
+                        from: from.to_string(),
+                    },
+                ),
+                _ => break,
+            },
+            'C' => match (tokens.next(), tokens.next()) {
+                (Some(_from), Some(to)) => (to.to_string(), PatchFileStatus::Added),
+                _ => break,
+            },
+            _ => {
+                let Some(path) = tokens.next() else { break };
+                let status = match kind {
+                    'A' => PatchFileStatus::Added,
+                    'D' => PatchFileStatus::Deleted,
+                    _ => PatchFileStatus::Modified,
+                };
+                (path.to_string(), status)
+            }
+        };
+        out.push(entry);
+    }
+    out
 }
 
 /// Production [`WorktreeManager`] using the `git worktree` CLI.
@@ -499,6 +667,175 @@ impl WorktreeManager for PosixWorktreeManager {
             changed_files,
             commits,
         }))
+    }
+
+    async fn snapshot_base(&self, limits: SnapshotLimits) -> Result<WorkspaceBase, WorktreeError> {
+        let top = PathBuf::from(trimmed(
+            &git_stdout(&self.repo_root, &["rev-parse", "--show-toplevel"], None).await?,
+        ));
+        // Fails (quietly) only on an unborn branch.
+        let head = git_in(&top, &["rev-parse", "--verify", "--quiet", "HEAD"], None).await?;
+        let head = head
+            .status
+            .success()
+            .then(|| trimmed(&head.stdout))
+            .filter(|head| !head.is_empty());
+        let exclude = managed_worktrees_exclude();
+        let status = git_stdout(
+            &top,
+            &[
+                "status",
+                "--porcelain",
+                "-z",
+                "--untracked-files=all",
+                "--",
+                ".",
+                exclude.as_str(),
+            ],
+            None,
+        )
+        .await?;
+        if let (true, Some(head)) = (status.is_empty(), &head) {
+            return Ok(WorkspaceBase {
+                commit: head.clone(),
+                head: Some(head.clone()),
+                includes_uncommitted: false,
+            });
+        }
+
+        let untracked = git_stdout(
+            &top,
+            &[
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                ".",
+                exclude.as_str(),
+            ],
+            None,
+        )
+        .await?;
+        let untracked = String::from_utf8_lossy(&untracked);
+        let mut files = 0usize;
+        let mut bytes = 0u64;
+        for path in untracked.split('\0').filter(|path| !path.is_empty()) {
+            files += 1;
+            if let Ok(meta) = tokio::fs::symlink_metadata(top.join(path)).await {
+                bytes = bytes.saturating_add(meta.len());
+            }
+        }
+        if files > limits.max_untracked_files || bytes > limits.max_untracked_bytes {
+            return Err(WorktreeError::SnapshotRefused(format!(
+                "The workspace has {files} untracked files ({bytes} bytes); the limit is {} files \
+                 and {} bytes. Commit them or add them to .gitignore first.",
+                limits.max_untracked_files, limits.max_untracked_bytes
+            )));
+        }
+
+        let index = TempIndex::seeded_from(&top).await?;
+        index.add_all(&top).await?;
+        let tree = trimmed(&git_stdout(&top, &["write-tree"], Some(&index.path)).await?);
+        let mut args = vec!["commit-tree", "--no-gpg-sign", "-m", "Workspace snapshot"];
+        if let Some(head) = &head {
+            args.extend(["-p", head.as_str()]);
+        }
+        args.push(tree.as_str());
+        let mut cmd = Command::new("git");
+        cmd.current_dir(&top).args(&args).envs(SNAPSHOT_IDENTITY);
+        let output = cmd
+            .output()
+            .await
+            .map_err(|e| WorktreeError::Io(e.to_string()))?;
+        if !output.status.success() {
+            return Err(WorktreeError::Git(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+        Ok(WorkspaceBase {
+            commit: trimmed(&output.stdout),
+            head,
+            includes_uncommitted: true,
+        })
+    }
+
+    async fn worktree_patch(
+        &self,
+        handle: &WorktreeHandle,
+        base: &str,
+    ) -> Result<WorktreePatch, WorktreeError> {
+        let dir = handle.path.as_path();
+        let index = TempIndex::seeded_from(dir).await?;
+        index.add_all(dir).await?;
+        let diff_args = |extra: &[&'static str]| {
+            let mut args: Vec<&str> = vec!["diff", "--cached", "-M", "--no-color", "--no-ext-diff"];
+            args.extend_from_slice(extra);
+            args.push(base);
+            args
+        };
+        let diff = git_stdout(
+            dir,
+            &diff_args(&[
+                "--binary",
+                "--no-textconv",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+            ]),
+            Some(&index.path),
+        )
+        .await?;
+        let numstat = git_stdout(dir, &diff_args(&["--numstat", "-z"]), Some(&index.path)).await?;
+        let statuses =
+            git_stdout(dir, &diff_args(&["--name-status", "-z"]), Some(&index.path)).await?;
+        let counts = parse_numstat_z(&String::from_utf8_lossy(&numstat));
+        let files = parse_name_status_z(&String::from_utf8_lossy(&statuses))
+            .into_iter()
+            .map(|(path, status)| {
+                let (insertions, deletions, binary) = counts
+                    .iter()
+                    .find(|(counted, ..)| *counted == path)
+                    .map_or((0, 0, false), |(_, ins, del, binary)| (*ins, *del, *binary));
+                PatchFile {
+                    path,
+                    status,
+                    insertions,
+                    deletions,
+                    binary,
+                }
+            })
+            .collect();
+        Ok(WorktreePatch {
+            diff: String::from_utf8_lossy(&diff).into_owned(),
+            files,
+        })
+    }
+
+    async fn discard_worktree(&self, handle: &WorktreeHandle) -> Result<(), WorktreeError> {
+        let path = handle.path.to_string_lossy();
+        let removed = git_in(
+            &self.repo_root,
+            &["worktree", "remove", "--force", path.as_ref()],
+            None,
+        )
+        .await?;
+        if !removed.status.success() {
+            if tokio::fs::try_exists(&handle.path).await.unwrap_or(true) {
+                return Err(WorktreeError::Git(
+                    String::from_utf8_lossy(&removed.stderr).into_owned(),
+                ));
+            }
+            // Already gone from disk: drop git's stale record of it.
+            let _ = git_in(&self.repo_root, &["worktree", "prune"], None).await;
+        }
+        // Best effort: the branch may already be gone.
+        let _ = git_in(
+            &self.repo_root,
+            &["branch", "-D", handle.branch_name.as_str()],
+            None,
+        )
+        .await;
+        Ok(())
     }
 }
 
@@ -1076,4 +1413,256 @@ mod change_summary_tests {
             "clean-but-committed worktree must be kept (is_dirty via commits)"
         );
     }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    const LIMITS: SnapshotLimits = SnapshotLimits {
+        max_untracked_files: 100,
+        max_untracked_bytes: 1 << 20,
+    };
+
+    async fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    async fn repo() -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let dir = std::fs::canonicalize(tmp.path()).unwrap();
+        git(&dir, &["init", "-q", "-b", "main"]).await;
+        git(&dir, &["config", "user.email", "ci@test"]).await;
+        git(&dir, &["config", "user.name", "ci"]).await;
+        std::fs::write(dir.join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(dir.join("keep.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.join("gone.txt"), "bye\n").unwrap();
+        std::fs::write(dir.join("old.txt"), "a\nb\nc\nd\ne\nf\n").unwrap();
+        git(&dir, &["add", "."]).await;
+        git(&dir, &["commit", "-qm", "seed"]).await;
+        (tmp, dir)
+    }
+
+    #[tokio::test]
+    async fn a_clean_workspace_snapshots_to_head() {
+        let (_tmp, dir) = repo().await;
+        let base = PosixWorktreeManager::new(dir.clone())
+            .snapshot_base(LIMITS)
+            .await
+            .unwrap();
+        let head = git(&dir, &["rev-parse", "HEAD"]).await.trim().to_string();
+        assert_eq!(base.commit, head);
+        assert_eq!(base.head.as_deref(), Some(head.as_str()));
+        assert!(!base.includes_uncommitted);
+    }
+
+    #[tokio::test]
+    async fn a_dirty_workspace_snapshots_its_changes_without_touching_the_index() {
+        let (_tmp, dir) = repo().await;
+        std::fs::write(dir.join("keep.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::remove_file(dir.join("gone.txt")).unwrap();
+        std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
+        std::fs::write(dir.join("debug.log"), "ignored\n").unwrap();
+        std::fs::write(dir.join("staged.txt"), "staged\n").unwrap();
+        git(&dir, &["add", "staged.txt"]).await;
+        let status_before = git(&dir, &["status", "--porcelain"]).await;
+
+        let manager = PosixWorktreeManager::new(dir.clone());
+        let base = manager.snapshot_base(LIMITS).await.unwrap();
+
+        assert!(base.includes_uncommitted);
+        let head = git(&dir, &["rev-parse", "HEAD"]).await.trim().to_string();
+        assert_eq!(base.head.as_deref(), Some(head.as_str()));
+        let parent = git(&dir, &["rev-parse", &format!("{}^", base.commit)]).await;
+        assert_eq!(parent.trim(), head);
+        let files = git(&dir, &["ls-tree", "-r", "--name-only", &base.commit]).await;
+        let files: Vec<&str> = files.lines().collect();
+        assert!(files.contains(&"new.txt") && files.contains(&"staged.txt"));
+        assert!(!files.contains(&"gone.txt") && !files.contains(&"debug.log"));
+        let keep = git(&dir, &["show", &format!("{}:keep.txt", base.commit)]).await;
+        assert_eq!(keep, "one\ntwo\nthree\n");
+        assert_eq!(git(&dir, &["status", "--porcelain"]).await, status_before);
+        assert_eq!(git(&dir, &["stash", "list"]).await, "");
+
+        // A worktree created from the snapshot sees the uncommitted work.
+        let wt = manager
+            .create_worktree("fusion-snap-p1", Some(&base.commit), &[])
+            .await
+            .unwrap();
+        assert!(wt.path.join("new.txt").exists());
+        assert!(!wt.path.join("gone.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn the_managed_worktrees_stay_out_of_a_snapshot() {
+        let (_tmp, dir) = repo().await;
+        let manager = PosixWorktreeManager::new(dir.clone());
+        manager.create_worktree("other", None, &[]).await.unwrap();
+        std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
+        let base = manager.snapshot_base(LIMITS).await.unwrap();
+        let files = git(&dir, &["ls-tree", "-r", "--name-only", &base.commit]).await;
+        assert!(files
+            .lines()
+            .all(|file| !file.starts_with(branding::DOT_DIR)));
+    }
+
+    #[tokio::test]
+    async fn too_many_untracked_files_refuse_the_snapshot() {
+        let (_tmp, dir) = repo().await;
+        for n in 0..3 {
+            std::fs::write(dir.join(format!("u{n}.txt")), "x").unwrap();
+        }
+        let manager = PosixWorktreeManager::new(dir.clone());
+        let limits = SnapshotLimits {
+            max_untracked_files: 2,
+            max_untracked_bytes: 1 << 20,
+        };
+        let err = manager.snapshot_base(limits).await.unwrap_err();
+        assert!(
+            matches!(err, WorktreeError::SnapshotRefused(ref msg) if msg.contains("3 untracked files"))
+        );
+        let limits = SnapshotLimits {
+            max_untracked_files: 10,
+            max_untracked_bytes: 2,
+        };
+        assert!(matches!(
+            manager.snapshot_base(limits).await,
+            Err(WorktreeError::SnapshotRefused(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_patch_covers_commits_and_uncommitted_work_and_applies_to_the_base() {
+        let (_tmp, dir) = repo().await;
+        let manager = PosixWorktreeManager::new(dir.clone());
+        let base = manager.snapshot_base(LIMITS).await.unwrap();
+        let wt = manager
+            .create_worktree("fusion-patch-p1", Some(&base.commit), &[])
+            .await
+            .unwrap();
+        std::fs::write(wt.path.join("keep.txt"), "one\n2\n").unwrap();
+        git(&wt.path, &["commit", "-qam", "panel commit"]).await;
+        std::fs::remove_file(wt.path.join("gone.txt")).unwrap();
+        std::fs::write(wt.path.join("added.txt"), "new\n").unwrap();
+        std::fs::write(wt.path.join("bin.dat"), [0u8, 159, 146, 150]).unwrap();
+        git(&wt.path, &["mv", "old.txt", "moved.txt"]).await;
+        std::fs::write(wt.path.join("trace.log"), "ignored\n").unwrap();
+        let status_before = git(&wt.path, &["status", "--porcelain"]).await;
+
+        let patch = manager.worktree_patch(&wt, &base.commit).await.unwrap();
+
+        let find = |path: &str| patch.files.iter().find(|file| file.path == path).cloned();
+        let keep = find("keep.txt").unwrap();
+        assert_eq!(keep.status, PatchFileStatus::Modified);
+        assert_eq!((keep.insertions, keep.deletions), (1, 1));
+        assert_eq!(find("gone.txt").unwrap().status, PatchFileStatus::Deleted);
+        assert_eq!(find("added.txt").unwrap().status, PatchFileStatus::Added);
+        assert!(find("bin.dat").unwrap().binary);
+        assert_eq!(
+            find("moved.txt").unwrap().status,
+            PatchFileStatus::Renamed {
+                from: "old.txt".into()
+            }
+        );
+        assert!(find("trace.log").is_none());
+        assert_eq!(patch.files.len(), 5);
+        assert_eq!(
+            git(&wt.path, &["status", "--porcelain"]).await,
+            status_before
+        );
+
+        let fresh = manager
+            .create_worktree("fusion-patch-apply", Some(&base.commit), &[])
+            .await
+            .unwrap();
+        let patch_file = dir.join("panel.patch");
+        std::fs::write(&patch_file, &patch.diff).unwrap();
+        git(&fresh.path, &["apply", patch_file.to_str().unwrap()]).await;
+        assert_eq!(
+            std::fs::read_to_string(fresh.path.join("keep.txt")).unwrap(),
+            "one\n2\n"
+        );
+        assert_eq!(
+            std::fs::read(fresh.path.join("bin.dat")).unwrap(),
+            [0u8, 159, 146, 150]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_untouched_worktree_has_an_empty_patch() {
+        let (_tmp, dir) = repo().await;
+        let manager = PosixWorktreeManager::new(dir.clone());
+        let base = manager.snapshot_base(LIMITS).await.unwrap();
+        let wt = manager
+            .create_worktree("fusion-empty-p1", Some(&base.commit), &[])
+            .await
+            .unwrap();
+        let patch = manager.worktree_patch(&wt, &base.commit).await.unwrap();
+        assert!(patch.diff.is_empty());
+        assert!(patch.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn discarding_removes_a_dirty_worktree_and_its_branch_idempotently() {
+        let (_tmp, dir) = repo().await;
+        let manager = PosixWorktreeManager::new(dir.clone());
+        let wt = manager
+            .create_worktree("fusion-discard-p1", None, &[])
+            .await
+            .unwrap();
+        std::fs::write(wt.path.join("dirty.txt"), "x").unwrap();
+        manager.discard_worktree(&wt).await.unwrap();
+        assert!(!wt.path.exists());
+        let branches = git(&dir, &["branch", "--list", &wt.branch_name]).await;
+        assert_eq!(branches, "");
+        manager.discard_worktree(&wt).await.unwrap();
+    }
+
+    #[test]
+    fn numstat_and_name_status_parse_renames_and_binaries() {
+        let numstat = "1\t2\tsrc/a.rs\0-\t-\timg.png\x000\t0\t\0old.rs\0new.rs\0";
+        assert_eq!(
+            parse_numstat_z(numstat),
+            vec![
+                ("src/a.rs".to_string(), 1, 2, false),
+                ("img.png".to_string(), 0, 0, true),
+                ("new.rs".to_string(), 0, 0, false),
+            ]
+        );
+        let statuses = "M\0src/a.rs\0R087\0old.rs\0new.rs\0A\0img.png\0D\0x\0C100\0a\0b\0";
+        assert_eq!(
+            parse_name_status_z(statuses),
+            vec![
+                ("src/a.rs".to_string(), PatchFileStatus::Modified),
+                (
+                    "new.rs".to_string(),
+                    PatchFileStatus::Renamed {
+                        from: "old.rs".into()
+                    }
+                ),
+                ("img.png".to_string(), PatchFileStatus::Added),
+                ("x".to_string(), PatchFileStatus::Deleted),
+                ("b".to_string(), PatchFileStatus::Added),
+            ]
+        );
+    }
+}
+
+/// Bytes free on the filesystem holding `path`, or `None` when it cannot be
+/// read (a missing path, an unsupported filesystem).
+#[must_use]
+pub fn available_disk_bytes(path: &Path) -> Option<u64> {
+    fs2::available_space(path).ok()
 }

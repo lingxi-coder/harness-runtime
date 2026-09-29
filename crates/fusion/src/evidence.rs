@@ -6,12 +6,18 @@
 //! drop a panel on their own, and they say nothing about whether a panel's
 //! reasoning holds.
 //!
-//! Every check is a `Grep` call through the parent's [`ToolInvoker`], so the
-//! parent's permission rules (deny rules, workspace scope) apply exactly as
-//! they would to the model. The caller is marked non-interactive and unable
-//! to show prompts: anything that would need a prompt is refused, never asked.
+//! Every check is a `Grep` call through a [`ToolInvoker`], so the parent's
+//! permission rules (deny rules, workspace scope) apply exactly as they would
+//! to the model. The caller is marked non-interactive and unable to show
+//! prompts: anything that would need a prompt is refused, never asked.
 //! `Read` is deliberately not used — it records the file as read for the
 //! session, which would let the parent `Edit` a file it never read itself.
+//!
+//! In analysis mode every panel's citations are looked up in the parent's
+//! workspace. In implement mode a panel cites its own working copy (the code
+//! it wrote exists nowhere else), so each panel's citations are looked up
+//! inside that panel's worktree, through the invoker confined to it. A
+//! citation that points outside the worktree is not checked.
 //!
 //! No provider is contacted and nothing leaves the machine.
 
@@ -21,6 +27,7 @@ use platform_api::tool_invoker::{
 };
 use platform_api::{EvidenceCheckStatus, EvidenceKind, PanelReport};
 use serde_json::{json, Value};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -143,6 +150,58 @@ fn escape_regex(token: &str) -> String {
     out
 }
 
+/// Where one panel's citations are looked up.
+#[derive(Clone)]
+pub(crate) struct EvidenceSource {
+    invoker: Arc<dyn ToolInvoker>,
+    root: Option<PathBuf>,
+}
+
+impl EvidenceSource {
+    /// Look citations up in the workspace the invoker serves (analysis mode).
+    pub(crate) fn workspace(invoker: Arc<dyn ToolInvoker>) -> Self {
+        Self {
+            invoker,
+            root: None,
+        }
+    }
+
+    /// Look citations up inside `root`, a panel's worktree (implement mode).
+    pub(crate) fn worktree(invoker: Arc<dyn ToolInvoker>, root: PathBuf) -> Self {
+        Self {
+            invoker,
+            root: Some(root),
+        }
+    }
+
+    /// The path to search for a citation of `cited`, or `None` when the host
+    /// will not look: an absolute path outside the worktree, or a relative
+    /// one that climbs out of it.
+    fn path_to_search(&self, cited: &str) -> Option<String> {
+        let Some(root) = &self.root else {
+            return Some(cited.to_string());
+        };
+        let cited = Path::new(cited);
+        if cited.is_absolute() {
+            return cited
+                .starts_with(root)
+                .then(|| cited.to_string_lossy().into_owned());
+        }
+        let mut joined = root.clone();
+        for component in cited.components() {
+            match component {
+                Component::CurDir => {}
+                Component::Normal(part) => joined.push(part),
+                Component::ParentDir if joined != *root => {
+                    joined.pop();
+                }
+                _ => return None,
+            }
+        }
+        Some(joined.to_string_lossy().into_owned())
+    }
+}
+
 struct Job {
     panel: usize,
     evidence: usize,
@@ -152,19 +211,22 @@ struct Job {
 
 /// Choose what to check: evidence that a claim cites first, then the rest,
 /// taken round-robin across panels (in anonymous-id order) so one verbose
-/// panel cannot use up the whole budget.
-fn plan_jobs(panels: &[PanelInternal]) -> Vec<Job> {
-    let mut order: Vec<usize> = (0..panels.len()).collect();
+/// panel cannot use up the whole budget. A panel takes part only when it has
+/// a source; a citation its source will not look up is left out.
+fn plan_jobs(panels: &[PanelInternal], sources: &[Option<EvidenceSource>]) -> Vec<Job> {
+    let source = |slot: usize| sources.get(slot).and_then(Option::as_ref);
+    let mut order: Vec<usize> = (0..panels.len())
+        .filter(|slot| source(*slot).is_some())
+        .collect();
     order.sort_by(|a, b| panels[*a].anonymous_id.cmp(&panels[*b].anonymous_id));
     let mut queues: Vec<std::collections::VecDeque<Job>> = order
         .iter()
-        .map(|&panel| {
-            panels[panel]
-                .report
-                .as_ref()
-                .map(|report| checkable_in_priority_order(panel, report))
-                .unwrap_or_default()
-        })
+        .map(
+            |&panel| match (panels[panel].report.as_ref(), source(panel)) {
+                (Some(report), Some(source)) => checkable_in_priority_order(panel, report, source),
+                _ => Default::default(),
+            },
+        )
         .collect();
     let mut jobs = Vec::new();
     while jobs.len() < MAX_CHECKED_EVIDENCE && queues.iter().any(|q| !q.is_empty()) {
@@ -183,6 +245,7 @@ fn plan_jobs(panels: &[PanelInternal]) -> Vec<Job> {
 fn checkable_in_priority_order(
     panel: usize,
     report: &PanelReport,
+    source: &EvidenceSource,
 ) -> std::collections::VecDeque<Job> {
     let mut indices: Vec<usize> = Vec::new();
     for claim in &report.claims {
@@ -203,7 +266,7 @@ fn checkable_in_priority_order(
         .into_iter()
         .filter_map(|index| {
             let ev = &report.evidence[index];
-            let path = locator_path(ev.kind, &ev.locator)?;
+            let path = source.path_to_search(&locator_path(ev.kind, &ev.locator)?)?;
             Some(Job {
                 panel,
                 evidence: index,
@@ -219,11 +282,13 @@ fn checkable_in_priority_order(
 }
 
 /// Fill every reported panel's `evidence_checks` (index-aligned with its
-/// `report.evidence`). Items outside the limits, or not reached by
-/// `deadline`, stay [`EvidenceCheckStatus::Unverifiable`].
+/// `report.evidence`). `sources[slot]` says where `panels[slot]`'s citations
+/// are looked up; a panel without one is not checked. Items outside the
+/// limits, or not reached by `deadline`, stay
+/// [`EvidenceCheckStatus::Unverifiable`].
 pub(crate) async fn check_panels(
     panels: &mut [PanelInternal],
-    invoker: Arc<dyn ToolInvoker>,
+    sources: &[Option<EvidenceSource>],
     deadline: Instant,
 ) {
     for panel in panels.iter_mut() {
@@ -233,14 +298,20 @@ pub(crate) async fn check_panels(
             .map_or(0, |report| report.evidence.len());
         panel.evidence_checks = vec![EvidenceCheckStatus::Unverifiable; len];
     }
-    let jobs = plan_jobs(panels);
+    let jobs = plan_jobs(panels, sources);
     if jobs.is_empty() || deadline <= Instant::now() {
         return;
     }
     let permits = Arc::new(Semaphore::new(CHECK_CONCURRENCY));
     let mut tasks = JoinSet::new();
     for job in jobs {
-        let invoker = Arc::clone(&invoker);
+        let Some(invoker) = sources
+            .get(job.panel)
+            .and_then(Option::as_ref)
+            .map(|source| Arc::clone(&source.invoker))
+        else {
+            continue;
+        };
         let permits = Arc::clone(&permits);
         tasks.spawn(async move {
             let _permit = permits.acquire_owned().await;
@@ -466,6 +537,7 @@ mod tests {
             usage: None,
             spawn_prompt: String::new(),
             evidence_checks: Vec::new(),
+            implement: Default::default(),
         }
     }
 
@@ -475,6 +547,10 @@ mod tests {
             evidence_refs: refs.iter().map(|r| (*r).to_string()).collect(),
             confidence: 50,
         }
+    }
+
+    fn inert_source() -> Option<EvidenceSource> {
+        Some(EvidenceSource::workspace(Arc::new(FakeGrep::default())))
     }
 
     const SOURCE: &str = "pub fn run_inner(\n    &self,\n) -> Result<FusionResult, FusionError> {\n    let request = validate_request(request)?;\n}\n";
@@ -570,7 +646,7 @@ mod tests {
         )];
         check_panels(
             &mut panels,
-            invoker,
+            &[Some(EvidenceSource::workspace(invoker))],
             Instant::now() + Duration::from_secs(5),
         )
         .await;
@@ -605,7 +681,7 @@ mod tests {
         )];
         check_panels(
             &mut panels,
-            invoker,
+            &[Some(EvidenceSource::workspace(invoker))],
             Instant::now() + Duration::from_secs(5),
         )
         .await;
@@ -635,7 +711,7 @@ mod tests {
             panel("P2", vec![], many("b")),
             panel("P1", vec![claim(&["a39"])], many("a")),
         ];
-        let jobs = plan_jobs(&panels);
+        let jobs = plan_jobs(&panels, &[inert_source(), inert_source()]);
         assert_eq!(jobs.len(), MAX_CHECKED_EVIDENCE);
         assert_eq!(
             (jobs[0].panel, jobs[0].evidence),
@@ -661,7 +737,7 @@ mod tests {
         )];
         check_panels(
             &mut panels,
-            invoker,
+            &[Some(EvidenceSource::workspace(invoker))],
             Instant::now() + Duration::from_millis(20),
         )
         .await;
@@ -680,11 +756,134 @@ mod tests {
             vec![],
             vec![evidence("e", EvidenceKind::File, "src/a.rs", None)],
         )];
-        check_panels(&mut panels, invoker, Instant::now()).await;
+        check_panels(
+            &mut panels,
+            &[Some(EvidenceSource::workspace(invoker))],
+            Instant::now(),
+        )
+        .await;
         assert_eq!(
             panels[0].evidence_checks,
             vec![EvidenceCheckStatus::Unverifiable]
         );
         assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn each_panel_is_checked_in_its_own_worktree() {
+        // Implement mode: a panel cites the code in its own working copy, and
+        // a file that exists only in another panel's copy is missing here.
+        let root = |name: &str| PathBuf::from(format!("/wt/{name}"));
+        let first = Arc::new(FakeGrep::default().with_file("/wt/p1/src/a.rs", SOURCE));
+        let second = Arc::new(FakeGrep::default().with_file("/wt/p2/src/b.rs", SOURCE));
+        let sources = vec![
+            Some(EvidenceSource::worktree(first.clone(), root("p1"))),
+            Some(EvidenceSource::worktree(second.clone(), root("p2"))),
+            None,
+        ];
+        let cite = |locator: &str| {
+            vec![evidence(
+                "e",
+                EvidenceKind::File,
+                locator,
+                Some("pub fn run_inner("),
+            )]
+        };
+        let mut panels = vec![
+            panel("P1", vec![], cite("src/a.rs:1-4")),
+            panel("P2", vec![], cite("src/a.rs")),
+            panel("P3", vec![], cite("src/a.rs")),
+        ];
+        check_panels(
+            &mut panels,
+            &sources,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            panels[0].evidence_checks,
+            vec![EvidenceCheckStatus::Verified]
+        );
+        assert_eq!(
+            panels[1].evidence_checks,
+            vec![EvidenceCheckStatus::MissingFile],
+            "src/a.rs does not exist in the second panel's working copy"
+        );
+        assert_eq!(
+            panels[2].evidence_checks,
+            vec![EvidenceCheckStatus::Unverifiable],
+            "a panel with no source is never checked"
+        );
+        // The Grep target is the worktree file, not the workspace one.
+        assert_eq!(first.calls.lock().unwrap()[0].0, "/wt/p1/src/a.rs");
+        assert_eq!(second.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn worktree_citations_stay_inside_the_worktree() {
+        let source =
+            EvidenceSource::worktree(Arc::new(FakeGrep::default()), PathBuf::from("/wt/p1"));
+        let find = |cited: &str| source.path_to_search(cited);
+        assert_eq!(find("src/a.rs").as_deref(), Some("/wt/p1/src/a.rs"));
+        assert_eq!(
+            find("./src/../lib/b.rs").as_deref(),
+            Some("/wt/p1/lib/b.rs")
+        );
+        assert_eq!(
+            find("/wt/p1/src/a.rs").as_deref(),
+            Some("/wt/p1/src/a.rs"),
+            "an absolute path inside the worktree is looked up as it is"
+        );
+        assert_eq!(find("/wt/p1"), Some("/wt/p1".into()));
+        assert_eq!(find("/repo/src/a.rs"), None, "the user's workspace");
+        assert_eq!(find("/wt/p2/src/a.rs"), None, "another panel's worktree");
+        assert_eq!(find("/wt/p10/a.rs"), None, "a sibling with the same prefix");
+        assert_eq!(find("../p2/src/a.rs"), None);
+        assert_eq!(find("src/../../p2/a.rs"), None);
+        // The workspace source never rewrites a citation.
+        let workspace = EvidenceSource::workspace(Arc::new(FakeGrep::default()));
+        assert_eq!(
+            workspace.path_to_search("../x.rs").as_deref(),
+            Some("../x.rs")
+        );
+    }
+
+    #[test]
+    fn unresolvable_citations_and_sourceless_panels_do_not_use_up_the_budget() {
+        let many = |prefix: &str| {
+            (0..40)
+                .map(|i| {
+                    evidence(
+                        &format!("{prefix}{i}"),
+                        EvidenceKind::File,
+                        &format!("src/{prefix}{i}.rs"),
+                        None,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut outside = many("o");
+        for item in &mut outside {
+            item.locator = format!("/repo/{}", item.locator);
+        }
+        let panels = vec![
+            panel("P1", vec![], many("a")),
+            panel("P2", vec![], many("b")),
+            panel("P3", vec![], outside),
+        ];
+        let worktree = |root: &str| {
+            Some(EvidenceSource::worktree(
+                Arc::new(FakeGrep::default()),
+                PathBuf::from(root),
+            ))
+        };
+        let sources = vec![None, worktree("/wt/p2"), worktree("/wt/p3")];
+        let jobs = plan_jobs(&panels, &sources);
+        assert_eq!(jobs.len(), MAX_CHECKED_EVIDENCE);
+        assert!(
+            jobs.iter().all(|job| job.panel == 1),
+            "P1 has no source and every P3 citation is outside its worktree"
+        );
+        assert!(jobs[0].path.starts_with("/wt/p2/src/"));
     }
 }

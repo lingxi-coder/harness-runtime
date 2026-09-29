@@ -856,7 +856,7 @@ async fn build_preload_messages(
     // `agent_type` on EVERY entrypoint (Agent tool, `/fusion`, workflow), so a
     // Fusion run's hook activity is exactly the chokepoint's one pair.
     if let Some(hooks) = &ctx.hook_executor {
-        if agent_type != platform_api::FUSION_PANEL_TYPE {
+        if !platform_api::is_fusion_panel_type(&agent_type) {
             let hook_ctx = hooks::registry::HookContext {
                 session_id: ctx.hook_session_id,
                 agent_id: Some(ctx.agent_id),
@@ -2300,9 +2300,9 @@ async fn run_subagent_loop(
                         // never from the model's tool input or telemetry. The
                         // hidden Fusion panel definition opts into deterministic
                         // WebFetch; every other Agent keeps ordinary behavior.
-                        tool_execution_policy: if ctx.agent_definition.agent_type
-                            == platform_api::FUSION_PANEL_TYPE
-                        {
+                        tool_execution_policy: if platform_api::is_fusion_panel_type(
+                            &ctx.agent_definition.agent_type,
+                        ) {
                             platform_api::tool_invoker::ToolExecutionPolicy::FusionPanel
                         } else {
                             platform_api::tool_invoker::ToolExecutionPolicy::Ordinary

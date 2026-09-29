@@ -93,6 +93,119 @@ pub trait WorktreeManager: Send + Sync {
         let _ = path;
         Err(WorktreeError::Unsupported)
     }
+
+    /// A commit holding the workspace exactly as it stands: `HEAD` when the
+    /// workspace is clean, otherwise a snapshot of every tracked change and
+    /// every untracked, non-ignored file on top of `HEAD`. The user's index,
+    /// working tree and stash are left untouched. Worktrees created from
+    /// [`WorkspaceBase::commit`] (it is a valid `base_branch`) see the
+    /// uncommitted work, and patches taken against it apply back cleanly.
+    ///
+    /// Refuses with [`WorktreeError::SnapshotRefused`] when the untracked
+    /// files exceed `limits`.
+    async fn snapshot_base(&self, limits: SnapshotLimits) -> Result<WorkspaceBase, WorktreeError> {
+        let _ = limits;
+        Err(WorktreeError::Unsupported)
+    }
+
+    /// Everything the worktree at `handle` changed relative to `base` —
+    /// commits, staged and unstaged edits, new and deleted files, ignoring
+    /// what `.gitignore` excludes — without touching the worktree's own
+    /// index.
+    async fn worktree_patch(
+        &self,
+        handle: &WorktreeHandle,
+        base: &str,
+    ) -> Result<WorktreePatch, WorktreeError> {
+        let _ = (handle, base);
+        Err(WorktreeError::Unsupported)
+    }
+
+    /// Remove the worktree at `handle` whatever it contains, and its branch.
+    /// For worktrees the host owns outright (Fusion panels), never for one
+    /// holding user work. Idempotent.
+    async fn discard_worktree(&self, handle: &WorktreeHandle) -> Result<(), WorktreeError> {
+        self.remove_worktree(handle).await
+    }
+}
+
+/// Caps on the untracked files a [`WorktreeManager::snapshot_base`] may copy
+/// into its snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotLimits {
+    /// Most untracked, non-ignored files the snapshot may include.
+    pub max_untracked_files: usize,
+    /// Most bytes those files may add up to.
+    pub max_untracked_bytes: u64,
+}
+
+/// The commit worktrees are created from. See
+/// [`WorktreeManager::snapshot_base`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceBase {
+    /// Commit id to create worktrees from and to diff them against.
+    pub commit: String,
+    /// `HEAD` when the snapshot was taken; `None` on an unborn branch.
+    pub head: Option<String>,
+    /// `true` when `commit` is a snapshot of uncommitted work rather than
+    /// `HEAD` itself.
+    pub includes_uncommitted: bool,
+}
+
+/// What a worktree changed relative to a base. See
+/// [`WorktreeManager::worktree_patch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreePatch {
+    /// `git diff --binary` against the base, applicable with `git apply`.
+    pub diff: String,
+    /// One entry per changed path.
+    pub files: Vec<PatchFile>,
+}
+
+/// One changed path in a [`WorktreePatch`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchFile {
+    /// Path relative to the repository root (the new path of a rename).
+    pub path: String,
+    /// How the path changed.
+    pub status: PatchFileStatus,
+    /// Added lines; `0` for a binary file.
+    pub insertions: u32,
+    /// Removed lines; `0` for a binary file.
+    pub deletions: u32,
+    /// `true` when git treats the file as binary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
+}
+
+/// How a [`PatchFile`] changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum PatchFileStatus {
+    /// New file.
+    Added,
+    /// Content or mode changed.
+    Modified,
+    /// File removed.
+    Deleted,
+    /// Moved from `from`, possibly with edits.
+    Renamed {
+        /// The old path.
+        from: String,
+    },
+}
+
+impl PatchFileStatus {
+    /// Stable lowercase label for rendering.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Modified => "modified",
+            Self::Deleted => "deleted",
+            Self::Renamed { .. } => "renamed",
+        }
+    }
 }
 
 /// Dirty-state summary of a worktree returned by
@@ -288,6 +401,10 @@ pub enum WorktreeError {
     /// direct `ev(...)` surfacing with no extra prefix).
     #[error("{0}")]
     SymlinkRejected(String),
+    /// [`WorktreeManager::snapshot_base`] refused to snapshot the workspace
+    /// (too many or too large untracked files). The message says what to do.
+    #[error("{0}")]
+    SnapshotRefused(String),
 }
 
 #[cfg(test)]

@@ -46,6 +46,7 @@ pub mod fork_resume;
 mod fusion_attempt_composition_test;
 mod fusion_attempts;
 mod fusion_command;
+mod fusion_implement;
 #[cfg(test)]
 mod fusion_pool_admission_test;
 pub mod fusion_recorder;
@@ -5155,10 +5156,64 @@ fn desktop_fusion_runtime_config(
         load_effective_settings_for_config(cfg, &managed_raw_tiers).ok_or_else(|| {
             platform_api::FusionError::InvalidConfiguration("settings failed to load".into())
         })?;
-    match effective.settings.fusion {
-        Some(settings) => fusion::FusionRuntimeConfig::from_settings(&settings),
-        None => Ok(fusion::FusionRuntimeConfig::defaults()),
+    let requested_auto_approve = effective
+        .settings
+        .fusion
+        .as_ref()
+        .and_then(|fusion| fusion.implement.as_ref())
+        .and_then(|implement| implement.auto_approve_max_usd)
+        .is_some();
+    let mut config = match effective.settings.fusion {
+        Some(settings) => fusion::FusionRuntimeConfig::from_settings(&settings)?,
+        None => fusion::FusionRuntimeConfig::defaults(),
+    };
+    // `autoApproveMaxUsd` lets model-started implement runs skip the user's
+    // confirmation, so it is never taken from the merged result, where a
+    // checked-in project setting could have supplied it.
+    if requested_auto_approve {
+        config.implement.auto_approve_max_nano_usd =
+            load_trusted_tier_implement_auto_approve(cfg, &managed_raw_tiers)
+                .map(fusion::usd_to_nano_usd);
     }
+    Ok(config)
+}
+
+/// `fusion.implement.autoApproveMaxUsd` as the user, local, flag and policy
+/// tiers see it, ignoring the checked-in project tier. Like
+/// [`load_trusted_tier_bash_edit_diff`], the tier stack has to be loaded on its
+/// own: the merged value keeps only the winning layer, so a project value over
+/// a user one would hide it.
+fn load_trusted_tier_implement_auto_approve(
+    cfg: &DesktopConfig,
+    managed_raw_tiers: &[String],
+) -> Option<f64> {
+    let env: BTreeMap<String, String> = BTreeMap::new();
+    let managed_layers: Vec<lingxi_core::settings::SettingsJson> = managed_raw_tiers
+        .iter()
+        .filter_map(|raw| serde_json::from_str(raw).ok())
+        .collect();
+    let files = !cfg.restricted;
+    lingxi_core::settings::Settings::load_with_layers_from_user_path(
+        lingxi_core::settings::LoadInputs {
+            env: &env,
+            project_dir: &cfg.cwd,
+            defaults: lingxi_core::settings::schema::SettingsJson::default(),
+        },
+        lingxi_core::settings::FileLayerScope {
+            include_user: files && cfg.setting_source_scope.0,
+            include_project: false,
+            include_local: files && cfg.setting_source_scope.1,
+        },
+        lingxi_core::settings::SupplementalLayers {
+            cli_layer: cfg.flag_settings.as_ref(),
+            managed_layers: &managed_layers,
+        },
+        Some(&cfg.lingxi_home.join("settings.json")),
+    )
+    .ok()
+    .and_then(|effective| effective.settings.fusion)
+    .and_then(|fusion| fusion.implement)
+    .and_then(|implement| implement.auto_approve_max_usd)
 }
 
 /// F007: reload point handed to `FusionOrchestrator` — `load()` re-resolves
@@ -5211,6 +5266,13 @@ impl platform_api::FusionExecutor for DesktopFusionExecutor {
         desktop_fusion_runtime_config(&self.cfg).err()
     }
 
+    fn implement_confirmation(
+        &self,
+        request: &platform_api::FusionRequest,
+    ) -> platform_api::ImplementConfirmation {
+        self.inner.implement_confirmation(request)
+    }
+
     fn resolve_parent_profile(
         &self,
         parent_model: &str,
@@ -5255,6 +5317,9 @@ fn desktop_fusion_executor(
     catalog: Arc<dyn fusion::ModelSource>,
     bus: Arc<telemetry::AnalyticsBus>,
     pricing: Arc<cost::PricingCatalog>,
+    // `None` leaves implement mode unavailable (nothing can confine or verify
+    // the panels' worktrees).
+    implement_host: Option<Arc<dyn platform_api::FusionImplementHost>>,
 ) -> Arc<dyn platform_api::FusionExecutor> {
     // Boot-time validation: surface the FIRST invalid `fusion.*` value
     // through a log line, but always build the live orchestrator below —
@@ -5271,11 +5336,14 @@ fn desktop_fusion_executor(
     }
     let config_source: Arc<dyn fusion::FusionConfigSource> =
         Arc::new(DesktopFusionConfigSource { cfg: cfg.clone() });
-    let inner = fusion::FusionOrchestrator::new(spawner, side_query, config_source, catalog)
+    let mut inner = fusion::FusionOrchestrator::new(spawner, side_query, config_source, catalog)
         .with_bus(bus)
         .with_price_book(Arc::new(DesktopFusionPriceBook::new(pricing)))
         .with_panel_admission()
         .with_attempt_registrar(attempts);
+    if let Some(host) = implement_host {
+        inner = inner.with_implement_host(host);
+    }
     Arc::new(DesktopFusionExecutor {
         inner: Arc::new(inner),
         cfg: cfg.clone(),
@@ -5424,6 +5492,7 @@ mod desktop_fusion_executor_boot_test {
             Arc::new(Vec::<fusion::CatalogModel>::new()),
             Arc::new(telemetry::AnalyticsBus::new()),
             Arc::new(cost::PricingCatalog::builtin_reference()),
+            None,
         );
 
         let boot_error = executor
@@ -5475,6 +5544,7 @@ mod desktop_fusion_executor_boot_test {
             Arc::new(Vec::<fusion::CatalogModel>::new()),
             Arc::new(telemetry::AnalyticsBus::new()),
             Arc::new(cost::PricingCatalog::builtin_reference()),
+            None,
         );
         assert!(executor.preflight_error().is_some());
 
@@ -14255,6 +14325,13 @@ pub async fn build_with_credential_stack(
         registry: local_workflow_status_sink.clone(),
         tx: workflow_event_tx,
     });
+    // Implement-mode Fusion: worktrees, the sandbox preflight and verification
+    // commands. Its tool context is bound once `tool_ctx` exists below.
+    let fusion_implement_host = Arc::new(fusion_implement::DesktopFusionImplementHost::new(
+        worktree_manager.clone(),
+        cwd.clone(),
+    ));
+    let fusion_implement_ctx = fusion_implement_host.context_cell();
     let fusion_executor: Arc<dyn platform_api::FusionExecutor> = desktop_fusion_executor(
         subagent_spawner.clone(),
         Arc::new(sidequery::ProviderSideQueryClient::from_service(
@@ -14265,6 +14342,7 @@ pub async fn build_with_credential_stack(
         fusion_catalog_source.clone(),
         analytics_bus.clone(),
         pricing.clone(),
+        Some(fusion_implement_host.clone() as Arc<dyn platform_api::FusionImplementHost>),
     );
     let local_workflow_handler = tasks::handlers::LocalWorkflowHandler::new(
         subagent_spawner.clone(),
@@ -15176,6 +15254,7 @@ pub async fn build_with_credential_stack(
     // tool registry consumes `tool_ctx`. The handler itself is registered only
     // in the desktop command registry below, leaving the locked upstream
     // command-api builtin table untouched.
+    let _ = fusion_implement_ctx.set(tool_ctx.clone());
     let worktree_command_handler: Arc<dyn BuiltinCommandHandler> = Arc::new(
         DesktopWorktreeCommandHandler::new(tool_ctx.clone(), worktree_state_persister.clone()),
     );
@@ -16235,7 +16314,10 @@ pub async fn build_with_credential_stack(
                 .collect(),
         )
         .with_durable_publication_available(cfg.session_persistence)
-        .with_publication_retrier(Some(fusion_recorder_factory_impl.clone())),
+        .with_publication_retrier(Some(fusion_recorder_factory_impl.clone()))
+        .with_implement_host(Some(
+            fusion_implement_host.clone() as Arc<dyn platform_api::FusionImplementHost>
+        )),
     ));
 
     // WIZARD-06: re-register `/auto-mode-setup` WITH its runners attached.

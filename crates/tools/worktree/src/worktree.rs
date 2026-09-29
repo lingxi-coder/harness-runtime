@@ -798,6 +798,12 @@ impl EnterWorktreeTool {
                     .await;
                 Err(ToolError::Internal(msg))
             }
+            // Creation never snapshots; kept for exhaustiveness.
+            WorktreeError::SnapshotRefused(msg) => {
+                self.emit_failed(invocation_id, "snapshot_refused", duration_ms)
+                    .await;
+                Err(ToolError::Internal(msg))
+            }
         }
     }
 }

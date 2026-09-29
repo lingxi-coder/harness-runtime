@@ -416,6 +416,8 @@ impl Fixture {
             cross_provider: false,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
+            mode: Default::default(),
+            verify_commands: Vec::new(),
         };
         let inherit = FusionInheritance::new(
             SubagentInheritance {

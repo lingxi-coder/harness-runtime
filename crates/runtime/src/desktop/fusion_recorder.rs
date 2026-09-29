@@ -1027,11 +1027,13 @@ mod tests {
                         evidence_checks: Default::default(),
                         risks: vec![],
                         unresolved_questions: vec![],
+                        ..Default::default()
                     }],
                     panels: vec![],
                     usage: Default::default(),
                     timing: Default::default(),
                     egress_profiles: vec![],
+                    mode: Default::default(),
                 }),
                 facts: FusionRunFacts::default(),
                 publication: FusionPublicationReceipt::queued(),
@@ -1124,11 +1126,13 @@ mod tests {
                     evidence_checks: Default::default(),
                     risks: vec![],
                     unresolved_questions: vec![],
+                    ..Default::default()
                 }],
                 panels: vec![],
                 usage: FusionUsage::default(),
                 timing: FusionTiming::default(),
                 egress_profiles: vec![],
+                mode: Default::default(),
             }),
         );
         outcome.publication = FusionPublicationReceipt::pending();
@@ -1195,11 +1199,13 @@ mod tests {
                     evidence_checks: Default::default(),
                     risks: vec![],
                     unresolved_questions: vec![],
+                    ..Default::default()
                 }],
                 panels: vec![],
                 usage: FusionUsage::default(),
                 timing: FusionTiming::default(),
                 egress_profiles: vec![],
+                mode: Default::default(),
             }),
         );
         outcome.publication = FusionPublicationReceipt::queued();

@@ -1584,6 +1584,9 @@ impl PoolSubagentSpawner {
         if subagent_type == platform_api::FUSION_PANEL_TYPE {
             return crate::builtins::fusion_panel_definition();
         }
+        if subagent_type == platform_api::FUSION_IMPLEMENTER_TYPE {
+            return crate::builtins::fusion_implementer_definition();
+        }
         // 0c. [Finding 25] `fusion` is reserved for the Fusion Agent surface:
         // tools/agent's `call` intercepts any subagent_type normalizing to
         // `fusion` into a multi-model panel BEFORE the catalog lookup, so a
@@ -2731,7 +2734,7 @@ pub fn tools_description(def: &AgentDefinition) -> String {
 pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEntry> {
     let mut by_type: HashMap<String, &AgentDefinition> = HashMap::new();
     for def in defs {
-        if def.agent_type == platform_api::FUSION_PANEL_TYPE {
+        if platform_api::is_fusion_panel_type(&def.agent_type) {
             continue;
         }
         // `workflow-subagent` is NOT a catalog agent. The oracle declares it

@@ -603,6 +603,8 @@ comparator, not dead API surface and not a production fallback"
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "sonnet".into(),
+            mode: Default::default(),
+            verify_commands: Vec::new(),
         }
     }
 

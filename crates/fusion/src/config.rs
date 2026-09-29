@@ -3,9 +3,78 @@
 pub use lingxi_core::settings::schema::FusionCompletionPolicy;
 use lingxi_core::settings::schema::FusionSettingsJson;
 use platform_api::{
-    FusionError, FusionModelChoice, FusionModelRole, FusionPreset, FUSION_MAX_PANEL,
-    FUSION_MIN_PANEL,
+    FusionError, FusionModelChoice, FusionModelRole, FusionPanelMode, FusionPreset,
+    FUSION_MAX_PANEL, FUSION_MIN_PANEL,
 };
+
+/// Implement-mode knobs with defaults applied. See
+/// [`FusionRuntimeConfig::for_mode`] for how they reshape a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FusionImplementConfig {
+    /// Per-panel turn cap.
+    pub max_turns: u32,
+    /// Per-panel total timeout.
+    pub panel_timeout_ms: u64,
+    /// End-to-end timeout of an implement run.
+    pub total_timeout_ms: u64,
+    /// Commands the host runs in each worktree, in order.
+    pub verify_commands: Vec<String>,
+    /// Per-command verification timeout.
+    pub verify_timeout_ms: u64,
+    /// Worktrees verified at once.
+    pub verify_concurrency: u8,
+    /// Hours a worktree with changes is kept.
+    pub retain_hours: u32,
+    /// Refuse to start below this much free disk.
+    pub min_free_disk_bytes: u64,
+    /// Model-started implement runs quoted at most this much start without
+    /// asking. Never taken from the merged settings: the host fills it from
+    /// the user and local tiers only.
+    pub auto_approve_max_nano_usd: Option<u64>,
+    /// Most untracked files a workspace snapshot may carry.
+    pub max_untracked_files: usize,
+    /// Most bytes those untracked files may add up to.
+    pub max_untracked_bytes: u64,
+}
+
+impl FusionImplementConfig {
+    /// Documented defaults.
+    #[must_use]
+    pub fn defaults() -> Self {
+        Self {
+            max_turns: 40,
+            panel_timeout_ms: 1_800_000,
+            total_timeout_ms: 3_600_000,
+            verify_commands: Vec::new(),
+            verify_timeout_ms: 600_000,
+            verify_concurrency: 2,
+            retain_hours: 24,
+            min_free_disk_bytes: 5 * 1024 * 1024 * 1024,
+            auto_approve_max_nano_usd: None,
+            max_untracked_files: 2_000,
+            max_untracked_bytes: 100 * 1024 * 1024,
+        }
+    }
+}
+
+impl Default for FusionImplementConfig {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+
+/// USD from settings to nano-USD, saturating.
+#[must_use]
+pub fn usd_to_nano_usd(usd: f64) -> u64 {
+    if usd.is_finite() && usd > 0.0 {
+        // Saturating float-to-int cast: values past u64::MAX clamp.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let nano = (usd * 1e9).round() as u64;
+        nano
+    } else {
+        0
+    }
+}
 
 /// Resolved Fusion knobs. Invalid *present* settings fail construction;
 /// missing fields take the documented defaults.
@@ -64,6 +133,8 @@ pub struct FusionRuntimeConfig {
     pub panel_models: Vec<FusionModelChoice>,
     /// Configured analyst. `None` means unconfigured.
     pub analyst_model: Option<FusionModelChoice>,
+    /// Implement-mode knobs.
+    pub implement: FusionImplementConfig,
 }
 
 impl FusionRuntimeConfig {
@@ -109,7 +180,22 @@ impl FusionRuntimeConfig {
             // moved. `FusionError::NotConfigured` names the settings keys.
             panel_models: Vec::new(),
             analyst_model: None,
+            implement: FusionImplementConfig::defaults(),
         }
+    }
+
+    /// The config a run in `mode` actually runs under. Implement panels
+    /// build and test, so they get their own turn cap and timeouts; the
+    /// analyst and everything else is shared.
+    #[must_use]
+    pub fn for_mode(&self, mode: FusionPanelMode) -> Self {
+        let mut cfg = self.clone();
+        if mode == FusionPanelMode::Implement {
+            cfg.panel_max_turns = self.implement.max_turns;
+            cfg.panel_total_timeout_ms = self.implement.panel_timeout_ms;
+            cfg.total_timeout_ms = self.implement.total_timeout_ms;
+        }
+        cfg
     }
 
     /// Roles that are still unconfigured, in [`FusionModelRole::ALL`] order.
@@ -205,6 +291,39 @@ impl FusionRuntimeConfig {
             cfg.panel_models = panels.iter().map(choice_from_settings).collect();
         }
         cfg.analyst_model = settings.analyst_model.as_ref().map(choice_from_settings);
+        if let Some(implement) = &settings.implement {
+            let target = &mut cfg.implement;
+            if let Some(n) = implement.max_turns {
+                target.max_turns = n;
+            }
+            if let Some(n) = implement.panel_timeout_ms {
+                target.panel_timeout_ms = n;
+            }
+            if let Some(n) = implement.total_timeout_ms {
+                target.total_timeout_ms = n;
+            }
+            if let Some(commands) = &implement.verify_commands {
+                target.verify_commands = commands
+                    .iter()
+                    .map(|command| command.trim().to_string())
+                    .collect();
+            }
+            if let Some(n) = implement.verify_timeout_ms {
+                target.verify_timeout_ms = n;
+            }
+            if let Some(n) = implement.verify_concurrency {
+                target.verify_concurrency = n;
+            }
+            if let Some(n) = implement.retain_hours {
+                target.retain_hours = n;
+            }
+            if let Some(n) = implement.min_free_disk_bytes {
+                target.min_free_disk_bytes = n;
+            }
+            // `auto_approve_max_usd` is deliberately not read here: this is
+            // the merged view, where a checked-in project tier could have set
+            // it. See `FusionImplementConfig::auto_approve_max_nano_usd`.
+        }
 
         // F004 / F011 item 6 (round-3 review fix): `FusionSettingsJson::validate`
         // above only checked THIS settings snapshot's own fields — and, per its
@@ -229,6 +348,22 @@ impl FusionRuntimeConfig {
             return Err(FusionError::InvalidConfiguration(format!(
                 "fusion.panelTotalTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) ({stage_sum}) must not exceed fusion.totalTimeoutMs ({total})",
                 total = cfg.total_timeout_ms
+            )));
+        }
+        // The implement run's own stage sum: a panel, at least one
+        // verification command, and the analyst must fit its total.
+        let implement_sum = cfg
+            .implement
+            .panel_timeout_ms
+            .saturating_add(cfg.implement.verify_timeout_ms)
+            .saturating_add(
+                cfg.analyst_timeout_ms
+                    .saturating_mul(1 + u64::from(cfg.analysis_protocol_retries)),
+            );
+        if implement_sum > cfg.implement.total_timeout_ms {
+            return Err(FusionError::InvalidConfiguration(format!(
+                "fusion.implement.panelTimeoutMs + fusion.implement.verifyTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) ({implement_sum}) must not exceed fusion.implement.totalTimeoutMs ({total})",
+                total = cfg.implement.total_timeout_ms
             )));
         }
         // No merged-view re-check for the roster bounds, unlike the two

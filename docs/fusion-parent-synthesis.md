@@ -249,8 +249,15 @@ analyst 打包和 `PanelMaterial` 都从这里读取。panel 输出里即使带�
 - 主模型经 Agent 工具发起 implement 时，默认需要用户确认（成本高）。设置
   `fusion.implement.autoApproveMaxUsd` 后改为自动：预算报价不超过该值的运行直接执行，
   超过的仍然要确认；不设置则每次都确认。
-  - 这是放宽权限的设置，只从用户级和本地设置读取，**不接受项目级（检入仓库的）设置**，
-    避免仓库自行开启高成本的自动运行。
+  - 这是放宽权限的设置，**不接受项目级（检入仓库的）设置**，避免仓库自行开启高成本的自动运行。
+    实现：合并后的设置里出现该键时，桌面宿主另外只加载用户、本地、`--settings` 与托管策略这几层
+    重新取值（`load_trusted_tier_implement_auto_approve`）；`FusionRuntimeConfig::from_settings`
+    从不读取它。
+  - 确认走 Agent 工具自己的权限检查（`Tool::check_permissions` 返回 `Ask`），弹窗给出面板数与
+    预留上限。报价由 `FusionExecutor::implement_confirmation` 给出：与 `prepare` 相同的快照、解析与
+    报价，但不登记、不预留；有模型无价格时按"无法报价"处理，一律询问。
+  - 只有 `FusionAgentSurface.implement_available`（宿主接了 `FusionImplementHost`）时 Agent 工具才提供
+    `fusion_mode: "implement"`，否则直接拒绝。
 - 前置检查不满足时直接拒绝，**不静默降级为 analysis**（两者的成本和产出都不同），
   且检查在任何花费之前完成：
   - 不是 git 仓库，或 `WorktreeManager::is_supported()` 为 false；
@@ -337,8 +344,11 @@ pub struct PanelPatch {
 - 只有用户亲自输入的命令行才接受 `--verify`：panel 和模型都不能指定验证命令，Agent 工具没有
   这个参数；若 `/fusion` 不是由用户输入触发（例如模型经命令类工具调用），带 `--verify` 时拒绝。
 - 两种来源都没有时，材料明确写"未经宿主验证"。
-- 经 `Sandbox` + `ProcessRunner` 在每个 worktree 执行：cwd 为 worktree，写范围为 worktree，
-  默认禁网，逐条执行并全部记录，单条有超时。
+- 经会话的沙箱在每个 worktree 执行（`DesktopFusionImplementHost::verify`）：`sandbox_runtime_at(worktree,
+  Agent)` 定根，`SandboxRunner::wrap` 包装后由 `ProcessRunner::run_streaming` 运行（超时或取消时杀整个
+  进程组）；沙箱被关掉时不运行，而是记 `Error`。逐条执行并全部记录，单条有超时，输出只留末尾。
+  **网络沿用会话沙箱自己的策略，不逐命令改写**：桌面实时运行器的代理是会话级共享的，逐命令换
+  允许列表会影响主会话正在跑的命令；沙箱默认不放行域名，所以未配置时等于禁网。
 - 并发：`verifyConcurrency` 默认 2（构建占 CPU 和磁盘）。构建目录默认每个 worktree 独立，
   可以配置共享缓存（如 sccache）。共享 `CARGO_TARGET_DIR` 会产生锁竞争，不推荐。
 - 不花 provider 费用，但计入总时长。
@@ -358,8 +368,9 @@ pub enum PanelVerification { NotConfigured, Runs(Vec<VerificationRun>) }
 
 - analysis：对照用户工作区（第 2a 阶段设计）。
 - implement：panel 的 cwd 是 worktree，引用的是改动后的代码。相对路径的 locator 改写为
-  `<worktree>/<path>` 后再 Grep；指向 worktree 之外的绝对路径记 `unverifiable`。
-  仍然经父会话 `ToolInvoker` 调用，权限规则一致。
+  `<worktree>/<path>` 后再 Grep；指向 worktree 之外的绝对路径、或用 `..` 爬出去的相对路径不核对
+  （保持 `unverifiable`，也不占核对名额）。每个 panel 用自己那个限定在 worktree 的 `ToolInvoker`
+  （包住父会话的），所以权限规则一致，符号链接逃逸也会被拒。
 - implement 模式下主要的客观依据是补丁和验证结果，证据核对只用来检查对现有代码的说法。
 
 ### analyst
@@ -421,10 +432,14 @@ Fusion 本身从不写用户工作区，主模型对用户工作区的写入全�
 
 ### worktree 生命周期
 
-- 命名 `fusion-<run 短 id>-p<n>`，分支同名，位于现有 `.lingxi/worktrees/` 下。
+- 命名 `fusion-<run 短 id>-p<n>`（短 id 取 run id 末 10 位小写字母数字，n 为匿名序号），分支为
+  `worktree-fusion-…`（`create_worktree` 统一加 `worktree-` 前缀），位于现有 `.lingxi/worktrees/` 下。
+  只有符合这个命名的目录才会被清理或扫除，用户自己建的 worktree 即使以 `fusion-` 开头也不会被动。
+  宿主只设置 `SubagentSpawnRequest.cwd`，不设 `.worktree`（worktree 归 Fusion 自己管理与清理）。
 - 采集补丁后，无改动的 worktree 立即删除。
 - 有改动的 worktree 与补丁文件保留 `retainHours`（默认 24）小时，由 `cleanup_stale` 清理。
-  用户取消运行时全部删除；另提供 `/fusion clean` 手动清理。
+  用户取消运行时全部删除；另提供 `/fusion clean` 手动清理（有 Fusion 任务在运行时拒绝，避免删掉
+  正在使用的 worktree）。
 
 ### 设置与预算
 
@@ -455,6 +470,8 @@ Fusion 本身从不写用户工作区，主模型对用户工作区的写入全�
 `FusionStage` 增加三个阶段。`FUSION_SCHEMA_VERSION` 升为 3。
 
 ## 后续阶段仍待实现的差距
+
+（implement 模式的各项差距已由第 4 阶段补齐，下表只保留仍待做的和对照现状。）
 
 | 需要 | 现状 | 差距 |
 |---|---|---|
@@ -552,7 +569,7 @@ worktree。
    作为 quality 预设可选项，产出 `VerifiedClaim`，需要多轮预算、为 analyst 预留并发池槽位、
    analyst 阶段按轮计费，子 agent 请求需支持温度 0。
 3. **沙箱按命令根目录解析**：已完成，见上文"第 3 阶段"。
-4. **implement 模式**（见"两种 panel 模式"）：
+4. **implement 模式**（见"两种 panel 模式"，已实现）：
    1. 快照与 worktree：`snapshot_base()`，编排器注入 `WorktreeManager`，创建 worktree 并填
       `SubagentSpawnRequest.cwd` / `.worktree`，生命周期与清理。
    2. `fusion-implementer` 与非冒泡的 worktree 限定权限模式。
@@ -570,5 +587,5 @@ worktree。
 
 仍待决：
 
-1. worktree 保留时长：目前设计为 24 小时加 `/fusion clean`。
+1. worktree 保留时长：已实现为 24 小时加 `/fusion clean`（`fusion.implement.retainHours`）。
 2. analysis 模式是否需要 `max_tool_calls` 这类每 panel 工具轮次上限（OpenRouter 默认 4）。

@@ -407,6 +407,8 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
                 cross_provider: true,
                 parent_profile: String::new(),
                 parent_model: String::new(),
+                mode: platform_api::FusionPanelMode::default(),
+                verify_commands: Vec::new(),
             },
             conversation_id: String::new(),
         },

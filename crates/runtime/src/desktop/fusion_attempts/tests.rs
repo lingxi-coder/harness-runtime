@@ -1033,6 +1033,8 @@ async fn authority() -> Arc<RunAuthority> {
             cross_provider: false,
             parent_profile: "profile".into(),
             parent_model: "test".into(),
+            mode: Default::default(),
+            verify_commands: Vec::new(),
         },
         resolved: fusion::ResolvedSet {
             panels: vec![],

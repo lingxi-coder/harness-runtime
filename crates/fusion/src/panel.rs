@@ -15,7 +15,7 @@ use platform_api::subagent_spawn::{
 use platform_api::{
     validate_panel_report, EvidenceCheckStatus, FusionError, FusionInheritance, FusionProgress,
     FusionRunFactsRecorder, FusionStage, FusionUsage, PanelReport, PanelRunStatus,
-    WorkflowQueryWatchdog, FUSION_MIN_PANEL, FUSION_PANEL_TYPE,
+    WorkflowQueryWatchdog, FUSION_IMPLEMENTER_TYPE, FUSION_MIN_PANEL, FUSION_PANEL_TYPE,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -255,6 +255,7 @@ fn in_flight_panels(
             usage: Some(estimate_in_flight_usage(generic_prompt)),
             spawn_prompt: generic_prompt.to_string(),
             evidence_checks: Vec::new(),
+            implement: Default::default(),
         })
         .collect()
 }
@@ -488,6 +489,8 @@ pub struct PanelInternal {
     /// Host checks of `report.evidence`, index-aligned; empty until the
     /// evidence stage runs. See [`crate::evidence`].
     pub evidence_checks: Vec<EvidenceCheckStatus>,
+    /// Implement mode: the panel's worktree, patch and verification.
+    pub implement: crate::implement::PanelImplementState,
 }
 
 /// Successful panels that produced a report.
@@ -802,6 +805,8 @@ fn spawn_panel_tasks(
     facts: Option<&FusionRunFactsRecorder>,
     task_barrier: &PanelTaskBarrier,
     admission: Option<platform_api::PanelPoolLease>,
+    // Implement mode: each panel's worktree, by spawn index.
+    workspaces: Option<&crate::implement::Workspaces>,
 ) -> (JoinSet<PanelTaskOutput>, HashMap<tokio::task::Id, usize>) {
     let mut permits = admission
         .map(platform_api::PanelPoolLease::into_permits)
@@ -850,6 +855,9 @@ fn spawn_panel_tasks(
             retry_response_body: false,
         };
         let name_index = anon_rank[index];
+        // `None`: analysis mode. `Some(None)`: this panel's worktree could
+        // not be created, so it is never dispatched.
+        let workspace = workspaces.map(|workspaces| workspaces.panel(index).cloned());
         let dispatch = Arc::clone(dispatch);
         let progress = progress.clone();
         let total = panels.len();
@@ -882,16 +890,23 @@ fn spawn_panel_tasks(
                 index,
                 name_index,
             );
-            let inherit = platform_api::subagent_spawn::SubagentInheritance {
+            let mut inherit = platform_api::subagent_spawn::SubagentInheritance {
                 tool_invoker: subagent.tool_invoker,
                 budget: subagent.budget,
             };
+            if let Some(Some(workspace)) = &workspace {
+                request.subagent_type = FUSION_IMPLEMENTER_TYPE.to_string();
+                request.cwd = Some(workspace.handle.path.to_string_lossy().into_owned());
+                inherit.tool_invoker = Arc::clone(&workspace.invoker);
+            }
             let context_failed = match attempt_context {
                 Ok(context) => { request.model_attempt = context; false },
                 Err(()) => true,
             };
             let outcome = if context_failed {
                 PanelFinish::Failed { category: "not_dispatched".into(), detail: Some("attempt context unavailable".into()) }
+            } else if matches!(workspace, Some(None)) {
+                PanelFinish::Failed { category: "not_dispatched".into(), detail: Some("panel worktree could not be created".into()) }
             } else if panel_deadline <= Instant::now() {
                 PanelFinish::TotalTimedOut
             } else {
@@ -1025,6 +1040,7 @@ pub async fn run_panels(
         sink,
         &task_barrier,
         None,
+        None,
     )
     .await;
     task_barrier.abort_and_wait().await;
@@ -1052,6 +1068,8 @@ pub(crate) async fn run_panels_supervised(
     sink: Option<&RealizedSpendSink<'_>>,
     task_barrier: &PanelTaskBarrier,
     admission: Option<platform_api::PanelPoolLease>,
+    // Implement mode: each panel's worktree, by spawn index.
+    workspaces: Option<&crate::implement::Workspaces>,
 ) -> Result<Vec<PanelInternal>, FusionError> {
     if admission
         .as_ref()
@@ -1080,7 +1098,11 @@ pub(crate) async fn run_panels_supervised(
     // Every panel's prompt is identical (panels are anonymized to each
     // other, so the task text never varies by identity) — built once and
     // reused both for spawning and for synthesizing a panicked/aborted slot.
-    let generic_prompt = panel_prompt(task_prompt);
+    let generic_prompt = if workspaces.is_some() {
+        implement_prompt(task_prompt)
+    } else {
+        panel_prompt(task_prompt)
+    };
     // Convert the configured token ceiling through the same conservative
     // request-fit approximation used for judge packing. A permissive 4-byte
     // transcript heuristic could admit a CJK/JSON-heavy request that exceeds
@@ -1115,6 +1137,7 @@ pub(crate) async fn run_panels_supervised(
         sink.map(|sink| &sink.facts),
         task_barrier,
         admission,
+        workspaces,
     );
 
     let mut collected: Vec<(usize, PanelInternal)> = Vec::with_capacity(total);
@@ -1543,6 +1566,16 @@ Task:\n{task}"
     )
 }
 
+/// The implement-mode counterpart of [`panel_prompt`].
+pub(crate) fn implement_prompt(task: &str) -> String {
+    format!(
+        "You are one independent Fusion panel working in your own copy of the \
+repository, the current directory. You cannot see other panels and must not mention \
+providers, model names, or that you are part of an ensemble.\n\n\
+Implement this task:\n{task}"
+    )
+}
+
 fn finish_panel(
     index: usize,
     panel: ResolvedPanel,
@@ -1564,6 +1597,7 @@ fn finish_panel(
         usage: None,
         spawn_prompt,
         evidence_checks: Vec::new(),
+        implement: Default::default(),
     };
     match outcome {
         PanelFinish::TotalTimedOut => {
@@ -2054,7 +2088,7 @@ fn anon_order(run_id: &str, len: usize) -> Vec<usize> {
 /// zero-based rank (`0` == `P1`) it will be assigned as `anonymous_id` once
 /// `anonymize` runs after collection. Lets the spawn-time host name agree
 /// with the post-collection reported id without waiting for collection.
-fn anon_rank_by_spawn_index(run_id: &str, len: usize) -> Vec<usize> {
+pub(crate) fn anon_rank_by_spawn_index(run_id: &str, len: usize) -> Vec<usize> {
     let order = anon_order(run_id, len);
     let mut rank = vec![0usize; len];
     for (anon, original) in order.into_iter().enumerate() {

@@ -3,7 +3,8 @@
 use crate::analyst::{AnalystError, AnalystUsage};
 use crate::budget::{self, FusionPriceBook, FusionQuote, ReservationLease};
 use crate::config::{FusionConfigSource, FusionRuntimeConfig};
-use crate::evidence;
+use crate::evidence::{self, EvidenceSource};
+use crate::implement::Workspaces;
 use crate::model_resolver::{self, ModelSource, ResolvedPanel, ResolvedSet};
 use crate::panel::{self, successful, PanelInternal};
 use crate::progress;
@@ -11,12 +12,13 @@ use crate::snapshot::{CatalogSnapshot, FusionRuntimeSnapshot};
 use async_trait::async_trait;
 use platform_api::subagent_spawn::SubagentSpawner;
 use platform_api::{
-    normalize_dimensions, EvidenceCheckCounts, EvidenceCheckStatus, FusionActivation,
-    FusionAgentSurface, FusionAnalysis, FusionError, FusionExecutor, FusionInheritance,
-    FusionOrigin, FusionPreparedSummary, FusionPreset, FusionProgress, FusionRequest, FusionResult,
-    FusionRunControl, FusionRunFactsRecorder, FusionRunIdentity, FusionRunOutcome, FusionStage,
-    FusionStatus, FusionSubmission, FusionTiming, FusionUsage, PanelMaterial, PanelOutcome,
-    PanelRunStatus, PreparedFusionRun, FUSION_MIN_PANEL,
+    normalize_dimensions_for, validate_verify_commands, EvidenceCheckCounts, EvidenceCheckStatus,
+    FusionActivation, FusionAgentSurface, FusionAnalysis, FusionError, FusionExecutor,
+    FusionInheritance, FusionOrigin, FusionPanelMode, FusionPreparedSummary, FusionPreset,
+    FusionProgress, FusionRequest, FusionResult, FusionRunControl, FusionRunFactsRecorder,
+    FusionRunIdentity, FusionRunOutcome, FusionStage, FusionStatus, FusionSubmission, FusionTiming,
+    FusionUsage, ImplementConfirmation, PanelMaterial, PanelOutcome, PanelRunStatus,
+    PreparedFusionRun, FUSION_MIN_PANEL,
 };
 use sidequery::SideQueryClient;
 // Used only by the tests below. Kept at file scope behind `cfg(test)` so the
@@ -108,6 +110,7 @@ pub struct FusionOrchestrator {
     attempt_run: Option<Arc<platform_api::ModelAttemptRun>>,
     panel_admission: bool,
     panel_fence: Option<Arc<dyn crate::FusionPanelAttemptFence>>,
+    implement_host: Option<Arc<dyn platform_api::FusionImplementHost>>,
 }
 
 /// Return value of [`FusionOrchestrator::run_analysis`]: the analysis (or
@@ -162,7 +165,16 @@ impl FusionOrchestrator {
             attempt_run: None,
             panel_admission: false,
             panel_fence: None,
+            implement_host: None,
         }
+    }
+
+    /// Attach the host services implement mode needs (worktrees, sandbox
+    /// preflight, verification). Without them implement runs are refused.
+    #[must_use]
+    pub fn with_implement_host(mut self, host: Arc<dyn platform_api::FusionImplementHost>) -> Self {
+        self.implement_host = Some(host);
+        self
     }
 
     /// Require atomic whole-panel admission from the host. Legacy standalone
@@ -220,9 +232,10 @@ impl FusionOrchestrator {
 
     fn prepared_config(
         &self,
+        mode: platform_api::FusionPanelMode,
         effective_timeout_ms: Option<u64>,
     ) -> Result<FusionRuntimeConfig, FusionError> {
-        let mut config = self.config_source.load()?;
+        let mut config = self.config_source.load()?.for_mode(mode);
         if let Some(captured_total) =
             effective_timeout_ms.map(|timeout_ms| timeout_ms.saturating_sub(FINALIZE_GRACE_MS))
         {
@@ -243,12 +256,12 @@ impl FusionOrchestrator {
     ) -> Result<FusionRuntimeSnapshot, FusionError> {
         let extra_routes = [(request.parent_profile.clone(), request.parent_model.clone())];
         for _ in 0..SNAPSHOT_CAPTURE_ATTEMPTS {
-            let config_before = self.prepared_config(effective_timeout_ms)?;
+            let config_before = self.prepared_config(request.mode, effective_timeout_ms)?;
             let catalog_before = CatalogSnapshot::capture(self.catalog.as_ref())?;
             let prices_before = catalog_before.capture_prices(self.prices.as_ref(), &extra_routes);
 
             let catalog_after = CatalogSnapshot::capture(self.catalog.as_ref())?;
-            let config_after = self.prepared_config(effective_timeout_ms)?;
+            let config_after = self.prepared_config(request.mode, effective_timeout_ms)?;
             let prices_after = catalog_after.capture_prices(self.prices.as_ref(), &extra_routes);
 
             if config_before == config_after
@@ -323,11 +336,14 @@ impl FusionOrchestrator {
         routes: &[&ResolvedPanel],
         stage: &str,
     ) -> Result<(), FusionError> {
-        let current = source.load().map_err(|_| {
-            FusionError::InvalidConfiguration(format!(
-                "fusion {stage} settings could not be revalidated"
-            ))
-        })?;
+        let current = source
+            .load()
+            .map_err(|_| {
+                FusionError::InvalidConfiguration(format!(
+                    "fusion {stage} settings could not be revalidated"
+                ))
+            })?
+            .for_mode(request.mode);
         if captured.enabled && !current.enabled {
             return Err(FusionError::InvalidConfiguration(format!(
                 "fusion was disabled before the {stage} stage"
@@ -580,6 +596,7 @@ impl FusionOrchestrator {
         realized_tokens: &Arc<Mutex<Option<u64>>>,
         resolved_egress: &Arc<Mutex<Option<Vec<String>>>>,
         settlement: &Arc<Mutex<Option<(u64, bool)>>>,
+        workspaces: Option<&Workspaces>,
     ) -> Result<(Vec<PanelInternal>, u64), FusionError> {
         let panel_started = Instant::now();
         let panel_total = u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX);
@@ -665,6 +682,7 @@ impl FusionOrchestrator {
             Some(&sink),
             panel_tasks,
             admission,
+            workspaces,
         )
         .await;
         if let Some(fence) = &self.panel_fence {
@@ -809,6 +827,16 @@ impl FusionOrchestrator {
             return Err(FusionError::Cancelled);
         }
         Self::ensure_operational_time(operational_deadline)?;
+        // Implement mode: worktrees exist before anything is admitted or
+        // reserved, so every refusal here costs nothing. Dropping them on any
+        // later error or cancel discards them (see `Workspaces`).
+        let workspaces = match request.mode {
+            FusionPanelMode::Analysis => None,
+            FusionPanelMode::Implement => Some(
+                self.prepare_workspaces(config, &resolved, &inherit, &progress, &run_id)
+                    .await?,
+            ),
+        };
         // Queue before any profile permit or monetary/output hold. A lease
         // remains local until every original panel consumes exactly one slot.
         let admission = if self.panel_admission {
@@ -883,8 +911,22 @@ impl FusionOrchestrator {
                 &realized_tokens,
                 &resolved_egress,
                 &settlement,
+                workspaces.as_ref(),
             )
             .await?;
+        if let Some(workspaces) = &workspaces {
+            progress::emit(
+                &progress,
+                FusionStage::CollectingPatches,
+                None,
+                FusionStage::CollectingPatches.label(),
+            );
+            tokio::select! {
+                biased;
+                () = inherit.cancel.cancelled() => return Err(FusionError::Cancelled),
+                () = workspaces.collect_patches(&mut panels) => {}
+            }
+        }
         // Panels are the earliest point in `run_inner` where real,
         // already-billed provider spend exists. Record it now so a cancel
         // or outer-timeout that later drops this future's own stack still
@@ -917,7 +959,13 @@ impl FusionOrchestrator {
         if let Ok(mut guard) = resolved_egress.lock() {
             *guard = dispatched_egress_profiles(&panels);
         }
-        if let Err(error) = check_panel_bar(&panels, &request, config) {
+        let bar = check_panel_bar(&panels, &request, config);
+        // Implement mode keeps a failed bar's work when some panel left
+        // changes: the parent gets them unanalyzed rather than nothing.
+        let bar_not_met_with_changes = bar.is_err()
+            && workspaces.is_some()
+            && panels.iter().any(|panel| panel.implement.has_changes());
+        if let (Err(error), false) = (bar, bar_not_met_with_changes) {
             // Settling real panel spend is irreversible even when the
             // computation result is an error. Take the same finalization
             // claim as the success path before committing so a concurrent
@@ -986,6 +1034,78 @@ impl FusionOrchestrator {
             return Err(error);
         }
 
+        let verification_started = Instant::now();
+        if let Some(workspaces) = &workspaces {
+            let commands = if request.verify_commands.is_empty() {
+                &config.implement.verify_commands
+            } else {
+                &request.verify_commands
+            };
+            // Verification may not eat into the analyst's time unless the
+            // analyst will not run.
+            let deadline = if bar_not_met_with_changes {
+                operational_deadline
+            } else {
+                operational_deadline
+                    .checked_sub(Self::analyst_reserve(config))
+                    .unwrap_or_else(Instant::now)
+            };
+            if panels.iter().any(|panel| panel.implement.has_changes()) && !commands.is_empty() {
+                progress::emit(
+                    &progress,
+                    FusionStage::Verifying,
+                    None,
+                    FusionStage::Verifying.label(),
+                );
+            }
+            tokio::select! {
+                biased;
+                () = inherit.cancel.cancelled() => return Err(FusionError::Cancelled),
+                () = workspaces.verify(
+                    &mut panels,
+                    commands,
+                    Duration::from_millis(config.implement.verify_timeout_ms),
+                    config.implement.verify_concurrency,
+                    deadline,
+                    &inherit.cancel,
+                ) => {}
+            }
+        }
+        let verification_ms = if workspaces.is_some() {
+            millis_since(verification_started)
+        } else {
+            0
+        };
+        if bar_not_met_with_changes {
+            let outcome = AnalysisOutcome {
+                analysis: None,
+                analysis_failure: Some("panel_bar_not_met".into()),
+                analyst_ms: 0,
+                usage: aggregate_panel_usage(&panels),
+                priced_analyst: None,
+                analyst_usage_incomplete: false,
+                analyst_attempted: false,
+            };
+            let result = self
+                .finalize_result(
+                    outcome,
+                    &resolved,
+                    &request,
+                    &panels,
+                    (panels_ms, verification_ms),
+                    &lease_cell,
+                    &progress,
+                    run_id,
+                    started,
+                    &control,
+                )
+                .await?;
+            if let Some(workspaces) = workspaces {
+                workspaces.finish(&panels).await;
+            }
+            return Ok(result);
+        }
+
         tokio::select! {
             biased;
             () = inherit.cancel.cancelled() => return Err(FusionError::Cancelled),
@@ -993,6 +1113,7 @@ impl FusionOrchestrator {
                 config,
                 &mut panels,
                 &inherit,
+                workspaces.as_ref(),
                 &progress,
                 operational_deadline,
             ) => {}
@@ -1032,19 +1153,67 @@ impl FusionOrchestrator {
             ) => outcome,
         };
 
-        self.finalize_result(
-            outcome,
-            &resolved,
-            &request,
-            &panels,
-            panels_ms,
-            &lease_cell,
-            &progress,
+        let result = self
+            .finalize_result(
+                outcome,
+                &resolved,
+                &request,
+                &panels,
+                (panels_ms, verification_ms),
+                &lease_cell,
+                &progress,
+                run_id,
+                started,
+                &control,
+            )
+            .await?;
+        if let Some(workspaces) = workspaces {
+            workspaces.finish(&panels).await;
+        }
+        Ok(result)
+    }
+
+    /// Implement mode's preparation: the host, the workspace snapshot and
+    /// one worktree per panel. See [`Workspaces::prepare`].
+    async fn prepare_workspaces(
+        &self,
+        config: &FusionRuntimeConfig,
+        resolved: &ResolvedSet,
+        inherit: &FusionInheritance,
+        progress: &Option<Sender<FusionProgress>>,
+        run_id: &str,
+    ) -> Result<Workspaces, FusionError> {
+        let host = self.implement_host.clone().ok_or_else(|| {
+            FusionError::ImplementUnavailable("this host does not support implement mode".into())
+        })?;
+        progress::emit(
+            progress,
+            FusionStage::PreparingWorktrees,
+            None,
+            FusionStage::PreparingWorktrees.label(),
+        );
+        let anon_rank = panel::anon_rank_by_spawn_index(run_id, resolved.panels.len());
+        let prepare = Workspaces::prepare(
+            host,
+            config,
             run_id,
-            started,
-            &control,
+            &anon_rank,
+            &inherit.subagent.tool_invoker,
+        );
+        tokio::select! {
+            biased;
+            () = inherit.cancel.cancelled() => Err(FusionError::Cancelled),
+            prepared = prepare => prepared,
+        }
+    }
+
+    /// Time the analyst stage may need: every attempt at its full timeout.
+    fn analyst_reserve(config: &FusionRuntimeConfig) -> Duration {
+        Duration::from_millis(
+            config
+                .analyst_timeout_ms
+                .saturating_mul(1 + u64::from(config.analysis_protocol_retries)),
         )
-        .await
     }
 
     /// The settlement borrow every stage after the panels refreshes through.
@@ -1091,22 +1260,21 @@ impl FusionOrchestrator {
     }
 
     /// Check the workspace evidence panels cite (see [`crate::evidence`])
-    /// through the parent's `Grep`. Capped at [`evidence::CHECK_TIME_CAP`]
-    /// and never allowed into the time the analyst still needs: with no time
-    /// to spare, every item stays `unverifiable`.
+    /// through the parent's `Grep` — in implement mode through the invoker
+    /// confined to each panel's own worktree. Capped at
+    /// [`evidence::CHECK_TIME_CAP`] and never allowed into the time the
+    /// analyst still needs: with no time to spare, every item stays
+    /// `unverifiable`.
     async fn check_evidence(
         &self,
         config: &FusionRuntimeConfig,
         panels: &mut [PanelInternal],
         inherit: &FusionInheritance,
+        workspaces: Option<&Workspaces>,
         progress: &Option<Sender<FusionProgress>>,
         operational_deadline: Instant,
     ) {
-        let analyst_reserve = Duration::from_millis(
-            config
-                .analyst_timeout_ms
-                .saturating_mul(1 + u64::from(config.analysis_protocol_retries)),
-        );
+        let analyst_reserve = Self::analyst_reserve(config);
         let now = Instant::now();
         let deadline = operational_deadline
             .checked_sub(analyst_reserve)
@@ -1125,7 +1293,26 @@ impl FusionOrchestrator {
                 FusionStage::CheckingEvidence.label(),
             );
         }
-        evidence::check_panels(panels, Arc::clone(&inherit.subagent.tool_invoker), deadline).await;
+        let sources: Vec<Option<EvidenceSource>> = match workspaces {
+            None => vec![
+                Some(EvidenceSource::workspace(Arc::clone(
+                    &inherit.subagent.tool_invoker,
+                )));
+                panels.len()
+            ],
+            Some(workspaces) => panels
+                .iter()
+                .map(|panel| {
+                    workspaces.panel(panel.index).map(|workspace| {
+                        EvidenceSource::worktree(
+                            Arc::clone(&workspace.invoker),
+                            workspace.handle.path.clone(),
+                        )
+                    })
+                })
+                .collect(),
+        };
+        evidence::check_panels(panels, &sources, deadline).await;
     }
 
     /// `run_inner`'s tail: emit the terminal progress stage, compute the
@@ -1141,7 +1328,7 @@ impl FusionOrchestrator {
         resolved: &ResolvedSet,
         request: &FusionRequest,
         panels: &[PanelInternal],
-        panels_ms: u64,
+        (panels_ms, verification_ms): (u64, u64),
         // [Round-4 review findings 1/2/3/19] Taken back out of the cell
         // below rather than owned outright — see `resolve_and_reserve`'s
         // parameter doc for why the lease lives in a shared cell instead of
@@ -1251,26 +1438,17 @@ impl FusionOrchestrator {
             total_ms: millis_since(started),
             panels_ms,
             analyst_ms,
+            verification_ms,
         };
         facts.set_timing(timing.clone());
         let result = FusionResult {
             schema_version: platform_api::FUSION_SCHEMA_VERSION,
             run_id,
+            mode: request.mode,
             status,
             analysis_failure,
             analysis,
-            responses: successful(panels)
-                .into_iter()
-                .filter_map(|panel| {
-                    panel.report.as_ref().map(|report| {
-                        PanelMaterial::from_report(
-                            &panel.anonymous_id,
-                            report,
-                            &panel.evidence_checks,
-                        )
-                    })
-                })
-                .collect(),
+            responses: panels.iter().filter_map(panel_material).collect(),
             panels: panels.iter().map(panel_outcome).collect(),
             usage,
             timing,
@@ -2196,6 +2374,48 @@ impl FusionExecutor for FusionOrchestrator {
             fast_panel_count: config.fast_panel_count,
             max_panel: config.max_panel,
             slash_cross_provider_default: config.slash_cross_provider_default,
+            implement_available: self.implement_host.is_some(),
+        }
+    }
+
+    fn implement_confirmation(&self, request: &FusionRequest) -> ImplementConfirmation {
+        // The same snapshot, resolution and quote `prepare` makes, without
+        // registering, reserving or spending anything.
+        let Ok(request) = validate_request(request.clone()) else {
+            return ImplementConfirmation::ask();
+        };
+        let Ok(snapshot) = self.capture_runtime_snapshot(&request, None) else {
+            return ImplementConfirmation::ask();
+        };
+        let Ok(resolved) = model_resolver::resolve(&request, &snapshot.config, &snapshot.catalog)
+        else {
+            return ImplementConfirmation::ask();
+        };
+        let panels = Some(u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX));
+        // `session_has_max: true` makes a model with no known price an error
+        // instead of a $0 quote: a run that cannot be priced always asks.
+        let Ok(quote) = budget::quote(
+            &snapshot.config,
+            &resolved,
+            &snapshot.catalog,
+            &snapshot.prices,
+            true,
+        ) else {
+            return ImplementConfirmation {
+                required: true,
+                quote_nano_usd: None,
+                panels,
+            };
+        };
+        let within_limit = snapshot
+            .config
+            .implement
+            .auto_approve_max_nano_usd
+            .is_some_and(|limit| quote.reserved_nano_usd <= limit);
+        ImplementConfirmation {
+            required: !within_limit,
+            quote_nano_usd: Some(quote.reserved_nano_usd),
+            panels,
         }
     }
 
@@ -2289,7 +2509,8 @@ fn validate_request(mut request: FusionRequest) -> Result<FusionRequest, FusionE
             "prompt must be non-empty".into(),
         ));
     }
-    request.dimensions = normalize_dimensions(request.dimensions)?;
+    request.dimensions = normalize_dimensions_for(request.mode, request.dimensions)?;
+    request.verify_commands = validate_verify_commands(request.mode, request.verify_commands)?;
     Ok(request)
 }
 
@@ -2662,6 +2883,27 @@ impl StageSettlement<'_> {
     }
 }
 
+/// The material a panel hands the parent: its report when it completed, or
+/// in implement mode an `incomplete` entry when it failed but left changes;
+/// plus, in implement mode, its patch and verification.
+fn panel_material(panel: &PanelInternal) -> Option<PanelMaterial> {
+    let mut material = match (&panel.report, panel.status) {
+        (Some(report), PanelRunStatus::Completed) => {
+            PanelMaterial::from_report(&panel.anonymous_id, report, &panel.evidence_checks)
+        }
+        _ if panel.implement.has_changes() => PanelMaterial::incomplete(&panel.anonymous_id),
+        _ => return None,
+    };
+    material.patch.clone_from(&panel.implement.patch);
+    material
+        .patch_error
+        .clone_from(&panel.implement.patch_error);
+    material
+        .verification
+        .clone_from(&panel.implement.verification);
+    Some(material)
+}
+
 /// [Round-3 review B2, reworked] The provider profiles this panel set was
 /// ACTUALLY dispatched to — every panel except those whose `error_category`
 /// satisfies [`panel::is_never_dispatched_category`]. As of round-5 item 8
@@ -2982,6 +3224,7 @@ fn fusion_error_label(error: &FusionError) -> &'static str {
         FusionError::PanelSetIncomplete => "panel_set_incomplete",
         FusionError::TimedOutEmpty => "timed_out_empty",
         FusionError::Cancelled => "cancelled",
+        FusionError::ImplementUnavailable(_) => "implement_unavailable",
         FusionError::Internal => "internal",
     }
 }
@@ -3324,6 +3567,7 @@ mod check_panel_bar_preflight_tests {
             usage: None,
             spawn_prompt: String::new(),
             evidence_checks: Vec::new(),
+            implement: Default::default(),
         }
     }
 
@@ -3343,6 +3587,8 @@ mod check_panel_bar_preflight_tests {
             cross_provider: false,
             parent_profile: "p".into(),
             parent_model: "m".into(),
+            mode: Default::default(),
+            verify_commands: Vec::new(),
         }
     }
 
@@ -3706,6 +3952,8 @@ mod outer_err_arm_realized_tokens_tests {
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
+            mode: Default::default(),
+            verify_commands: Vec::new(),
         }
     }
 

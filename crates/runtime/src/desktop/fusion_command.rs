@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tasks::{TaskSpawnInput, TaskType};
 use tokio::sync::Mutex;
 
-const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-provider] PROMPT | setup | --retry-publication fu_RUN_ID";
+const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-provider] [--implement [--verify \"COMMAND\"]...] PROMPT | setup | clean | --retry-publication fu_RUN_ID";
 
 /// What `/fusion setup` reports when it reaches THIS handler.
 ///
@@ -26,7 +26,7 @@ const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-
 /// taken as the PROMPT — a real multi-model deliberation, billed, on the word
 /// "setup". Naming the surfaces that can actually configure it is the only
 /// honest answer a handler with no UI of its own can give.
-const FUSION_SETUP_ELSEWHERE: &str = "`/fusion setup` opens an interactive wizard, which this surface cannot show.\n     In the terminal UI run `/fusion setup`; on the desktop open Settings → Fusion 多模型合议.\n     Either way it writes fusion.panelModels / fusion.analystModel / fusion.synthesizerModel to settings.json, which you can also edit by hand.";
+const FUSION_SETUP_ELSEWHERE: &str = "`/fusion setup` opens an interactive wizard, which this surface cannot show.\n     In the terminal UI run `/fusion setup`; on the desktop open Settings → Fusion 多模型合议.\n     Either way it writes fusion.panelModels / fusion.analystModel to settings.json, which you can also edit by hand.";
 const FUSION_PERSISTENCE_REQUIRED: &str =
     "durable session storage is disabled; /fusion requires session persistence (remove --no-session-persistence)";
 
@@ -299,6 +299,7 @@ pub struct DesktopFusionCommandHandler {
     parent_profiles: BTreeMap<String, String>,
     durable_publication_available: bool,
     publication_retrier: Option<Arc<crate::desktop::fusion_recorder::DesktopFusionRecorderFactory>>,
+    implement_host: Option<Arc<dyn platform_api::FusionImplementHost>>,
 }
 
 impl DesktopFusionCommandHandler {
@@ -317,6 +318,36 @@ impl DesktopFusionCommandHandler {
             parent_profiles,
             durable_publication_available: true,
             publication_retrier: None,
+            implement_host: None,
+        }
+    }
+
+    /// The host `/fusion clean` discards implement-mode worktrees through.
+    #[must_use]
+    pub fn with_implement_host(
+        mut self,
+        host: Option<Arc<dyn platform_api::FusionImplementHost>>,
+    ) -> Self {
+        self.implement_host = host;
+        self
+    }
+
+    /// `/fusion clean`: discard every implement-mode worktree and patch file.
+    /// Refused while a Fusion run is going, whose worktrees are in use.
+    async fn clean_worktrees(&self) -> String {
+        let Some(host) = &self.implement_host else {
+            return "This host has no implement-mode worktrees to clean.".into();
+        };
+        let running = self.registry.list().await.iter().any(|task| {
+            task.base().task_type == TaskType::LocalFusion && !task.base().status.is_terminal()
+        });
+        if running {
+            return "A Fusion run is still going; clean up after it finishes.".into();
+        }
+        match fusion::clean_worktrees(host.as_ref()).await {
+            0 => "No Fusion worktrees to clean.".into(),
+            1 => "Removed 1 Fusion worktree.".into(),
+            n => format!("Removed {n} Fusion worktrees."),
         }
     }
 
@@ -408,6 +439,11 @@ impl DesktopFusionCommandHandler {
                 display: Some(FUSION_SETUP_ELSEWHERE.to_string()),
             };
         }
+        if args.raw_args.trim().eq_ignore_ascii_case("clean") {
+            return CommandResult::Done {
+                display: Some(self.clean_worktrees().await),
+            };
+        }
         let parsed = match parse_fusion_slash(args) {
             Ok(parsed) => parsed,
             Err(msg) => {
@@ -442,6 +478,11 @@ impl DesktopFusionCommandHandler {
             "cross-provider"
         } else {
             "same-provider"
+        };
+        let preset_word = if request.mode == platform_api::FusionPanelMode::Implement {
+            "implement"
+        } else {
+            preset_word
         };
         let description = fusion_task_description(preset_word, scope_word, &request.prompt);
         let display = match self
@@ -549,11 +590,13 @@ mod tests {
                 evidence_checks: Default::default(),
                 risks: vec![],
                 unresolved_questions: vec![],
+                ..Default::default()
             }],
             panels: vec![],
             usage: FusionUsage::default(),
             timing: FusionTiming::default(),
             egress_profiles: vec![],
+            mode: Default::default(),
         }
     }
 
