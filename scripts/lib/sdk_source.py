@@ -11,7 +11,7 @@ sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY = "https://github.com/lingxi-coder/mobile-linux-runtime.git"
-PACKAGES = {"mobile-linux-api", "mobile-linux-core", "mobile-linux-android", "mobile-linux-ios", "mobile-linux-ffi", "platform-pty", "platform-android-libcap", "platform-android-minijail", "platform-android-shellbin"}
+PACKAGES = {"mobile-linux-api", "mobile-linux-core", "mobile-linux-android", "mobile-linux-ios", "mobile-linux-ffi", "platform-pty"}
 
 
 def inspect_metadata(metadata, dependency):
