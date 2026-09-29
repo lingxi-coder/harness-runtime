@@ -48,6 +48,8 @@ mod fusion_attempts;
 mod fusion_command;
 mod fusion_implement;
 #[cfg(test)]
+mod fusion_implement_e2e_test;
+#[cfg(test)]
 mod fusion_pool_admission_test;
 pub mod fusion_recorder;
 pub mod ide;
