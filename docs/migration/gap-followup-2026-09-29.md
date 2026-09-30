@@ -70,3 +70,20 @@ its smoke guard refuses to launch while the user's existing app is running.
 Closing that app requires the pending approval. Physical Android is not connected;
 iPhone/Android install-and-launch authorization is also pending. No physical-device
 execution is claimed for this dependency and FFI upgrade.
+
+
+## Windows SDK public API follow-up
+
+The SDK's existing handle-based directory enumeration and file-ID reopen functions
+were private to their implementation module. Publish the missing exports through
+scoped SDK commit `13ffbec5665cd586e1d6a97928cb9987393645c2`, based on the previous
+`224f1fb1` integration revision and merged into SDK main. The patch adds public API
+documentation and an external consumer test that enumerates, reopens and deletes
+an actual Windows file by its identity. CLI's `forbid(unsafe_code)` remains intact.
+
+All five manifest SDK entries use this one canonical Git revision. Cargo.lock
+changes only SDK source identities; existing registry choices are retained.
+SDK Windows GNU consumer compilation and strict Clippy pass. Full-feature runtime
+compilation and all nine repository gates pass after the pin update. Final downstream
+native evidence above belongs to its explicitly recorded earlier pin; the new
+locked product graph is being validated separately.
