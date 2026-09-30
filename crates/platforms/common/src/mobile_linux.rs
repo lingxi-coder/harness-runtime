@@ -1058,7 +1058,9 @@ mod tests {
             Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
         let sandbox = MobileLinuxSandbox::new(runtime, sample_mounts(&temp)).expect("sandbox");
         let mut cmd = sample_command(&temp);
-        cmd.cwd = Some(temp.path().join("outside"));
+        // Linux tempdirs live under /tmp, which is also an explicitly allowed
+        // guest cwd. Use an unmapped path outside every allowed guest root.
+        cmd.cwd = Some(PathBuf::from("/unmounted-host").join(temp.path().file_name().unwrap()));
 
         let error = sandbox
             .prepare(cmd, &sample_policy(&temp))

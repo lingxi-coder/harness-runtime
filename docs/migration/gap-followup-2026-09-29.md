@@ -42,8 +42,10 @@ Historical validation files remain records of their original revisions.
 - cargo deny: zero advisory errors/warnings and zero license/source errors;
   configured duplicate/unused-license/source warnings remain visible.
 - Strict workspace/all-target Clippy (`-D warnings`): passed.
-- Full final-tree workspace tests are rerun after repairs; the final result is
-  recorded when that command finishes.
+- Full workspace/all-feature tests: 17301 passed, 0 failed, 7 existing ignored
+  tests across 536 summaries, including nested supervisor helper invocations.
+  Subsequent Linux CI corrections pass 7 MCP reload, 8 Mobile Linux sandbox
+  and 1 process-tree focused tests.
 - [CI candidate 63e702c](https://github.com/lingxi-coder/harness-runtime/actions/runs/36673930535)
   passes native Windows MSVC/Linux/macOS desktop, both iOS targets, four Android
   combinations, feature profiles, parity, repository gates and Linux seccomp.

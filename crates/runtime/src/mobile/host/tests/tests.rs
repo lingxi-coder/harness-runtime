@@ -4370,13 +4370,16 @@ fn mobile_mcp_reload_deleted_pending_generation_is_nonblocking() {
         "deleted reload must not await pending OAuth"
     );
     handle.runtime().block_on(async {
-        handle.inner.mcp_registry.connections.write().await.insert(
-            "remote".into(),
-            mcp::connection::McpConnectionState::Disconnected {
+        // A reload may already have removed the old entry. Completing the
+        // mock OAuth state must not resurrect a server that was deleted.
+        let mut connections = handle.inner.mcp_registry.connections.write().await;
+        if let Some(state) = connections.get_mut("remote") {
+            *state = mcp::connection::McpConnectionState::Disconnected {
                 config: old_config,
                 last_error: None,
-            },
-        );
+            };
+        }
+        drop(connections);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 if !handle

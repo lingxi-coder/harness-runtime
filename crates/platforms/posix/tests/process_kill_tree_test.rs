@@ -18,16 +18,11 @@ async fn kill_tree_terminates_grandchildren() {
     // `sleep` calls running on the host. Random-ish but constant so the
     // assertion below is deterministic.
     let marker = "lingxi-kt-marker-7d9c";
-    // `sleep` only takes a number, so we tag via a wrapper shell that has
-    // the marker in its argv list. Pattern: the outer shell forks two
-    // child shells, each of which `exec`s `sleep`. Using `-c "exec sleep 60"`
-    // would lose the marker, so instead we use a function-form arg that
-    // ends up in the argv of the shell itself.
+    // POSIX sh accepts a positional $0; dash does not support `exec -a`.
+    // Keep both marked shells alive while they wait for their sleep children.
     let script = format!(
-        // Background two shells named via $0 = marker. Then wait so the
-        // outer shell does not exit on its own — kill_tree must do it.
-        r#"/bin/sh -c 'exec -a {marker} /bin/sh -c "sleep 60"' &
-           /bin/sh -c 'exec -a {marker} /bin/sh -c "sleep 60"' &
+        r#"/bin/sh -c 'sleep 60 & wait' {marker} &
+           /bin/sh -c 'sleep 60 & wait' {marker} &
            wait"#,
     );
 
@@ -38,16 +33,17 @@ async fn kill_tree_terminates_grandchildren() {
     let mut child = cmd.spawn().expect("spawn parent shell");
     let pid = child.id().expect("pid");
 
-    // Give the shell a moment to fork its grandchildren.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // Sanity-check the marker shows up before the kill — otherwise the
-    // post-kill assertion below would be a tautology.
-    let before = run_ps_filter(marker);
-    assert!(
-        !before.is_empty(),
-        "expected marker process(es) before kill_tree, ps lines: none"
-    );
+    // Wait for both child shells, rather than assuming a fixed fork delay.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if run_ps_filter(marker).len() >= 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the parent and both marked child shells must be running");
 
     // Kill the whole tree with a short grace so the test stays under 5 s.
     kill_tree_with_grace(pid, Duration::from_millis(200))
