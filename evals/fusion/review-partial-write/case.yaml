@@ -1,0 +1,30 @@
+# One task, asked two ways. Everything else is shared so the two runs are
+# paired and their difference is attributable to the arm, not to the setup.
+name: review-partial-write
+tags:
+  - review
+runs: 2
+max_turns: 6
+arms:
+  - label: single
+  - label: fusion
+    prompt: |
+      /fusion --models anthropic:claude-opus-5,openai:gpt-5.4,google:gemini-3-pro
+      Review this code and report what is wrong with it.
+
+      ```python
+      def save_config(path, config):
+          with open(path, "w") as f:
+              json.dump(config, f)
+      ```
+    settings:
+      fusion:
+        enabled: true
+prompt: |
+  Review this code and report what is wrong with it.
+
+  ```python
+  def save_config(path, config):
+      with open(path, "w") as f:
+          json.dump(config, f)
+  ```
