@@ -249,7 +249,8 @@ impl ConversationOrchestrator {
         tool_use_id: &lingxi_core::types::ToolUseId,
         decision: lingxi_core::host::permission_gate::PermissionOutcome,
     ) -> Result<bool, OrchestratorError> {
-        self.run_orphaned_permission_owned(tool_use_id, decision, None).await
+        self.run_orphaned_permission_owned(tool_use_id, decision, None)
+            .await
     }
 
     /// Replay a recovered tool under the host's retained operation owner. The
@@ -261,7 +262,8 @@ impl ConversationOrchestrator {
         decision: lingxi_core::host::permission_gate::PermissionOutcome,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<bool, OrchestratorError> {
-        self.run_orphaned_permission_owned(tool_use_id, decision, Some(cancel)).await
+        self.run_orphaned_permission_owned(tool_use_id, decision, Some(cancel))
+            .await
     }
 
     async fn run_orphaned_permission_owned(

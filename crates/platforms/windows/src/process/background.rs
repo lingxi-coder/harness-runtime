@@ -321,7 +321,11 @@ pub(super) async fn run(
         // Its per-command sink notification replaces the old reliance on
         // dropping StreamingProcessTreeGuard (the Windows platform callback
         // intentionally has no global process list to signal).
-        let stop = capture.binding.on_exit.as_ref().and_then(|sink| sink.stop_notify());
+        let stop = capture
+            .binding
+            .on_exit
+            .as_ref()
+            .and_then(|sink| sink.stop_notify());
         let stopping = async {
             match stop {
                 Some(notify) => notify.notified().await,

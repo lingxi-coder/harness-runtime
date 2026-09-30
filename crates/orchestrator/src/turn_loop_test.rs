@@ -6633,7 +6633,10 @@ mod pre_cancel_tests {
             lingxi_core::types::ConversationMessage::User { content, .. } => content.as_slice(),
             _ => &[],
         }).filter(|block| matches!(block, ContentBlock::ToolResult { tool_use_id, is_error: true, content, .. } if tool_use_id == &result_id && content == &expected)).count();
-        assert_eq!(results, 1, "in-flight abort must be persisted for the exact recovered tool: {history:?}");
+        assert_eq!(
+            results, 1,
+            "in-flight abort must be persisted for the exact recovered tool: {history:?}"
+        );
     }
 
     #[tokio::test]
@@ -6675,7 +6678,6 @@ mod pre_cancel_tests {
                 .unwrap()
         );
     }
-
 }
 // RECOV.4: the `max_output_tokens` recovery-reset helper used by both the
 // token-budget continuation and the Stop-hook blocking continuation.

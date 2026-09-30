@@ -152,11 +152,11 @@ async fn desktop_typed_bash_api_interrupt_stops_real_shell() {
 
 #[tokio::test]
 async fn typed_bash_supervisor_helper() {
-    let Ok(role) = std::env::var("LINGXI_TYPED_SUPERVISOR_ROLE") else {
+    let Ok(role) = std::env::var("HARNESS_TYPED_SUPERVISOR_ROLE") else {
         return;
     };
     let directory =
-        std::path::PathBuf::from(std::env::var_os("LINGXI_TYPED_SUPERVISOR_DIR").unwrap());
+        std::path::PathBuf::from(std::env::var_os("HARNESS_TYPED_SUPERVISOR_DIR").unwrap());
     if role == "supervisor" {
         platform_posix::process::supervisor::serve_supervisor(
             directory,
@@ -171,7 +171,7 @@ async fn typed_bash_supervisor_helper() {
         return;
     }
     platform_posix::process::supervisor::enable_supervisor(std::path::PathBuf::from(
-        std::env::var_os("LINGXI_TYPED_SUPERVISOR_WRAPPER").unwrap(),
+        std::env::var_os("HARNESS_TYPED_SUPERVISOR_WRAPPER").unwrap(),
     ));
     let token = tokio_util::sync::CancellationToken::new();
     let owner = format!("typed-supervised-{}", lingxi_core::types::ToolUseId::new());
@@ -235,7 +235,7 @@ async fn run_supervisor_fixture(role: &str, marker: &str) {
     let quoted = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
     let helper = "desktop::typed_bash_cancellation_tests::typed_bash_supervisor_helper";
     std::fs::write(&wrapper, format!(
-        "#!/bin/sh\nexport LINGXI_TYPED_SUPERVISOR_ROLE=supervisor\nexport LINGXI_TYPED_SUPERVISOR_DIR=\"$2\"\nexec {} --exact {} --nocapture\n",
+        "#!/bin/sh\nexport HARNESS_TYPED_SUPERVISOR_ROLE=supervisor\nexport HARNESS_TYPED_SUPERVISOR_DIR=\"$2\"\nexec {} --exact {} --nocapture\n",
         quoted(executable.to_str().unwrap()), helper,
     )).unwrap();
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -245,10 +245,10 @@ async fn run_supervisor_fixture(role: &str, marker: &str) {
         .args(["--exact", helper, "--nocapture"])
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("LINGXI_CONFIG_DIR", &home)
-        .env("LINGXI_TYPED_SUPERVISOR_ROLE", role)
-        .env("LINGXI_TYPED_SUPERVISOR_DIR", directory.path())
-        .env("LINGXI_TYPED_SUPERVISOR_WRAPPER", &wrapper)
+        .env(branding::CONFIG_DIR_ENV, &home)
+        .env("HARNESS_TYPED_SUPERVISOR_ROLE", role)
+        .env("HARNESS_TYPED_SUPERVISOR_DIR", directory.path())
+        .env("HARNESS_TYPED_SUPERVISOR_WRAPPER", &wrapper)
         .env("RUST_MIN_STACK", "33554432")
         .status()
         .await
@@ -282,7 +282,7 @@ async fn preaccept_disconnect(directory: &std::path::Path) {
     let output_file_identity = lingxi_core::host::rooted_fs::opened_file_identity(&file).unwrap();
     drop(file);
     let mut supervisor =
-        tokio::process::Command::new(std::env::var_os("LINGXI_TYPED_SUPERVISOR_WRAPPER").unwrap())
+        tokio::process::Command::new(std::env::var_os("HARNESS_TYPED_SUPERVISOR_WRAPPER").unwrap())
             .args([
                 std::ffi::OsStr::new("--lingxi-shell-supervisor"),
                 supervisor_dir.as_os_str(),
