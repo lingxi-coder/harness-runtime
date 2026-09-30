@@ -24,7 +24,7 @@ fn meta(uuid_byte: u8, secs: u64, created_secs: u64, name: &str) -> SessionMetad
 
 #[test]
 fn ord_sorts_newest_first() {
-    let mut v = vec![
+    let mut v = [
         meta(1, 100, 100, "a.jsonl"),
         meta(2, 300, 300, "b.jsonl"),
         meta(3, 200, 200, "c.jsonl"),
@@ -39,7 +39,7 @@ fn ord_sorts_newest_first() {
 fn ord_prefers_newer_transcript_activity_over_filesystem_mtime() {
     let older_file_newer_conversation = meta(1, 5, 1, "a.jsonl");
     let newer_file_older_conversation = meta(2, 4, 1, "b.jsonl");
-    let mut v = vec![newer_file_older_conversation, older_file_newer_conversation];
+    let mut v = [newer_file_older_conversation, older_file_newer_conversation];
     v.sort();
     assert_eq!(v[0].uuid, Uuid::from_bytes([1; 16]));
     assert_eq!(v[1].uuid, Uuid::from_bytes([2; 16]));
@@ -51,7 +51,7 @@ fn ord_ties_break_by_created_descending() {
     // claude-code `sortLogs` (`types/logs.ts:327-328`). The filenames are
     // deliberately NOT in created order to prove the tie-break is `created`,
     // not the old filename-ascending behavior.
-    let mut v = vec![
+    let mut v = [
         meta(1, 500, 100, "z.jsonl"), // oldest created
         meta(2, 500, 300, "a.jsonl"), // newest created
         meta(3, 500, 200, "m.jsonl"),

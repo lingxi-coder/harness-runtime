@@ -3,7 +3,7 @@ use crate::protocol::message::{MessageBlockDto, MessageDto, MessageImageDto};
 use lingxi_core::types::ConversationMessage;
 
 #[cfg(test)]
-mod tests {
+mod regressions {
     use super::*;
 
     // ── Primitive rules ────────────────────────────────────────────────────

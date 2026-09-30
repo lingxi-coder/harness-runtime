@@ -427,7 +427,7 @@ fn save_document(
             "skill",
         )?;
         if current != directory {
-            rename_confined(&current, &directory, &[root.clone()])?;
+            rename_confined(&current, &directory, std::slice::from_ref(&root))?;
         }
     } else if directory.exists() {
         let current_text = read_text(&directory.join(SKILL_FILE))?;
@@ -654,7 +654,7 @@ fn validate_skill_name(name: &str) -> Result<(), String> {
 }
 
 fn validate_skill_markdown(markdown: &str, scope: &str) -> Result<(), String> {
-    if markdown.as_bytes().len() > MAX_SKILL_BYTES {
+    if markdown.len() > MAX_SKILL_BYTES {
         return Err("SKILL.md exceeds the 512 KiB limit".to_string());
     }
     let source = if scope == "user" {

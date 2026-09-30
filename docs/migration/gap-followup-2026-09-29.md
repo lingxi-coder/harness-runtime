@@ -41,8 +41,14 @@ Historical validation files remain records of their original revisions.
 - Strict cargo audit: zero vulnerabilities, zero warnings.
 - cargo deny: zero advisory errors/warnings and zero license/source errors;
   configured duplicate/unused-license/source warnings remain visible.
-- Full final-tree workspace tests and strict all-target Clippy are rerun after
-  repairs; their final results are recorded when those commands finish.
+- Strict workspace/all-target Clippy (`-D warnings`): passed.
+- Full final-tree workspace tests are rerun after repairs; the final result is
+  recorded when that command finishes.
+- [CI candidate 63e702c](https://github.com/lingxi-coder/harness-runtime/actions/runs/36673930535)
+  passes native Windows MSVC/Linux/macOS desktop, both iOS targets, four Android
+  combinations, feature profiles, parity, repository gates and Linux seccomp.
+  Its unit job is pending; lint receives the separately verified follow-up.
+  Vulnerability/license checks pass; the source-review gate remains red.
 
 ## Evidence still required
 

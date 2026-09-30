@@ -330,7 +330,7 @@ mod tests {
                 true
             }
         }
-        impl<'a, T: DeserializeOwned> ProbeSpecialized for &'a Probe<T> {}
+        impl<T: DeserializeOwned> ProbeSpecialized for &Probe<T> {}
     }
 
     macro_rules! implements_deserialize {

@@ -28,7 +28,7 @@ fn end_turn_with_output_tokens(output_tokens: u64) -> HistoryResponse {
             report: llm_runtime::UsageReport::measured(
                 llm_runtime::Usage {
                     input_tokens: 0,
-                    output_tokens: output_tokens,
+                    output_tokens,
                     cache_write_tokens: 0,
                     cache_read_tokens: 0,
                     reasoning_tokens: 0,
@@ -269,7 +269,7 @@ fn streamed_end_turn_with_output_tokens(
                 report: llm_runtime::UsageReport::measured(
                     llm_runtime::Usage {
                         input_tokens: 0,
-                        output_tokens: output_tokens,
+                        output_tokens,
                         cache_write_tokens: 0,
                         cache_read_tokens: 0,
                         reasoning_tokens: 0,

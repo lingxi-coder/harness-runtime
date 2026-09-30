@@ -154,12 +154,12 @@ mod tests {
         );
     }
 
-    /// End-to-end `tengu_cedar_sundial` stale recovery: the file is modified on
-    /// disk after the seeded Read (newer mtime + different content), but the
-    /// edit still applies cleanly to the CURRENT content — with the flag on the
-    /// call succeeds against the current content, appends the modified-on-disk
-    /// note, and marks `staleRecovered: true` (conditional spread). With the
-    /// flag off (default) the same setup yields the stale J2n error.
+    // End-to-end `tengu_cedar_sundial` stale recovery: the file is modified on
+    // disk after the seeded Read (newer mtime + different content), but the
+    // edit still applies cleanly to the CURRENT content — with the flag on the
+    // call succeeds against the current content, appends the modified-on-disk
+    // note, and marks `staleRecovered: true` (conditional spread). With the
+    // flag off (default) the same setup yields the stale J2n error.
 
     /// The `kq` probe for these tests. The real global is a `OnceLock`, so it can be
     /// published only once per test binary; this one reads a switch the test flips,

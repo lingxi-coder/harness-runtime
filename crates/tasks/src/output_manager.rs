@@ -2371,10 +2371,12 @@ mod tests {
         let (_fs, mgr) = manager();
         let path = mgr.allocate("btail0003").await.unwrap();
         let line = "B".repeat(1024);
-        let body: String = std::iter::repeat(line.as_str())
-            .take((MAX_TASK_OUTPUT_READ_BYTES as usize / 1025) + 64)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let body: String = std::iter::repeat_n(
+            line.as_str(),
+            (MAX_TASK_OUTPUT_READ_BYTES as usize / 1025) + 64,
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
         mgr.append(&path, &body).await.unwrap();
 
         let read = mgr

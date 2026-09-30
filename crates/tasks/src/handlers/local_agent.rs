@@ -3200,7 +3200,7 @@ mod tests {
             "the terminal status is last: {calls:?}"
         );
         assert!(
-            calls[..status_at].iter().any(|c| *c == "outcome"),
+            calls[..status_at].contains(&"outcome"),
             "a payload must precede the terminal status: {calls:?}"
         );
     }

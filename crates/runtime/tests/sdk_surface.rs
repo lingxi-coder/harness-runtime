@@ -19,7 +19,7 @@ impl SessionService for Session {
     }
 
     async fn session_id(&self) -> SessionId {
-        self.0.clone()
+        self.0
     }
 
     async fn transcript(&self) -> Vec<ConversationMessage> {
@@ -46,7 +46,7 @@ impl LifecycleService for Lifecycle {
 #[tokio::test]
 async fn runtime_root_exposes_the_host_session_contract() {
     let id = SessionId::new();
-    let harness = HarnessBuilder::new(Arc::new(Session(id.clone())), Arc::new(Lifecycle)).build();
+    let harness = HarnessBuilder::new(Arc::new(Session(id)), Arc::new(Lifecycle)).build();
     assert_eq!(harness.session().id().await, id);
     assert!(harness.shutdown().await.complete);
 }

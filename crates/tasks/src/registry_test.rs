@@ -8626,7 +8626,7 @@ async fn shell_handoff_exports_only_restorable_roots_and_never_loses_unbound_roo
         "unrestored owner tree stays source-owned"
     );
     let accepted = registry
-        .commit_shell_handoff(&[root.task_id.clone()])
+        .commit_shell_handoff(std::slice::from_ref(&root.task_id))
         .await
         .unwrap();
     assert_eq!(accepted, vec![root.task_id.clone()]);
@@ -8760,7 +8760,7 @@ async fn task_output_cannot_consume_completion_inside_shell_transfer_fence() {
     // Source completion won before commit: it is rejected from the accepted
     // set but remains fenced until the host has durably recorded that fact.
     assert!(registry
-        .commit_shell_handoff(&[record.task_id.clone()])
+        .commit_shell_handoff(std::slice::from_ref(&record.task_id))
         .await
         .unwrap()
         .is_empty());

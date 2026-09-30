@@ -316,7 +316,7 @@ async fn modern_catalog_rejects_non_complete_result_type() {
         request["method"] == "tools/list"
             && request["params"]["_meta"]
                 .as_object()
-                .map_or(false, |meta| meta.len() == 3)
+                .is_some_and(|meta| meta.len() == 3)
     }));
     transport
         .disconnect(result.connection.connection_id)

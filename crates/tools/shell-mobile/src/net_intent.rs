@@ -254,7 +254,7 @@ pub fn network_intent(command: &str) -> Option<String> {
 
         if base == "apk" {
             let args: Vec<&str> = words.collect();
-            if args.iter().any(|arg| *arg == "--no-network") {
+            if args.contains(&"--no-network") {
                 continue;
             }
             if let Some(sub) = next_positional(&args, APK_SUBCMD_VALUE_OPTS) {
@@ -271,7 +271,7 @@ pub fn network_intent(command: &str) -> Option<String> {
 
         if base == "npm" {
             let args: Vec<&str> = words.collect();
-            if args.iter().any(|arg| *arg == "--offline") {
+            if args.contains(&"--offline") {
                 continue;
             }
             if let Some(sub) = next_positional(&args, NPM_SUBCMD_VALUE_OPTS) {
@@ -288,7 +288,7 @@ pub fn network_intent(command: &str) -> Option<String> {
 
         if base == "npx" {
             let args: Vec<&str> = words.collect();
-            if args.iter().any(|arg| *arg == "--no-install") {
+            if args.contains(&"--no-install") {
                 continue;
             }
             return Some(
@@ -301,7 +301,7 @@ pub fn network_intent(command: &str) -> Option<String> {
 
         if matches!(base, "pip" | "pip3") {
             let args: Vec<&str> = words.collect();
-            if args.iter().any(|arg| *arg == "--no-index") {
+            if args.contains(&"--no-index") {
                 continue;
             }
             if let Some(sub) = next_positional(&args, &[]) {
@@ -319,7 +319,7 @@ pub fn network_intent(command: &str) -> Option<String> {
         if matches!(base, "python" | "python3") {
             let args: Vec<&str> = words.collect();
             if let Some((pip_args, pip_base)) = python_module_args(&args) {
-                if pip_args.iter().any(|arg| *arg == "--no-index") {
+                if pip_args.contains(&"--no-index") {
                     continue;
                 }
                 if let Some(sub) = next_positional(pip_args, &[]) {

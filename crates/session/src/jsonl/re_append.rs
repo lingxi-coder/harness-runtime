@@ -1571,7 +1571,7 @@ mod tests {
         // `size - 65536 == 4`.
         let mut body = vec![b'z'; 3];
         body.extend_from_slice("中".as_bytes());
-        body.extend(std::iter::repeat(b'z').take(LITE_READ_BUF_SIZE - 2));
+        body.extend(std::iter::repeat_n(b'z', LITE_READ_BUF_SIZE - 2));
         assert_eq!(body.len(), LITE_READ_BUF_SIZE + 4);
         std::fs::write(&path, &body).unwrap();
         let tail = read_tail(&path);
@@ -1590,7 +1590,7 @@ mod tests {
         // A window that opens exactly ON a char boundary keeps it intact.
         let mut aligned = vec![b'z'; 2];
         aligned.extend_from_slice("中".as_bytes());
-        aligned.extend(std::iter::repeat(b'z').take(LITE_READ_BUF_SIZE - 3));
+        aligned.extend(std::iter::repeat_n(b'z', LITE_READ_BUF_SIZE - 3));
         assert_eq!(aligned.len(), LITE_READ_BUF_SIZE + 2);
         std::fs::write(&path, &aligned).unwrap();
         let tail = read_tail(&path);

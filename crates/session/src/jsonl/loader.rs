@@ -3431,7 +3431,7 @@ mod tests {
         };
         // Insert oldest-created first to prove the sort (not insertion order)
         // drives the result.
-        let mut v = vec![older, newer];
+        let mut v = [older, newer];
         v.sort();
         assert_eq!(v[0].title, "newer-created", "newer birthtime sorts first");
         assert_eq!(v[1].title, "older-created");

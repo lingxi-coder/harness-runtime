@@ -2212,9 +2212,9 @@ mod tests {
                 })
             )
             .unwrap();
-            write!(
+            writeln!(
                 file,
-                "{}\n",
+                "{}",
                 "x".repeat(crate::jsonl::LITE_READ_BUF_SIZE + 1024)
             )
             .unwrap();

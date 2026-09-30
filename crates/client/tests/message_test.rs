@@ -77,7 +77,7 @@ fn message_dto_round_trips() {
 #[test]
 fn message_block_set_matches_tui_scrollback() {
     // Construct one of every block kind and collect the snake_case wire tags.
-    let blocks = vec![
+    let blocks = [
         MessageBlockDto::Text {
             text: String::new(),
         },

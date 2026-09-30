@@ -870,7 +870,9 @@ mod tests {
         // Highest timestamps first: /f5,/f4,/f3,/f2,/f1 ; /f0 dropped.
         assert_eq!(restored[0].path, PathBuf::from("/f5"));
         assert_eq!(restored[4].path, PathBuf::from("/f1"));
-        assert!(restored.iter().all(|r| r.path != PathBuf::from("/f0")));
+        assert!(restored
+            .iter()
+            .all(|r| r.path != std::path::Path::new("/f0")));
     }
 
     #[test]
