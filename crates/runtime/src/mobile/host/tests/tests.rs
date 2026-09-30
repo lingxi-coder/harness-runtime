@@ -4262,7 +4262,58 @@ fn mobile_mcp_reload_pending_generations_are_nonblocking_and_cas_guarded() {
             );
         });
     };
+    // A fake OAuth completion has the same ownership obligation as a real
+    // connection task: compare and update the old pending state under one
+    // writer. An unconditional insert can overwrite a completed reload after
+    // its job has exited, leaving no task to restore the latest configuration.
+    async fn complete_old_oauth(registry: &McpRegistry, old_config: &McpServerConfig) -> bool {
+        let mut connections = registry.connections.write().await;
+        let Some(state) = connections.get_mut("remote") else {
+            return false;
+        };
+        if !matches!(
+            state,
+            mcp::connection::McpConnectionState::AwaitingOAuth { config, callback_port }
+                if *callback_port == 43123 && mobile_mcp_config_unchanged(config, old_config)
+        ) {
+            return false;
+        }
+        *state = mcp::connection::McpConnectionState::Disconnected {
+            config: old_config.clone(),
+            last_error: None,
+        };
+        true
+    }
     seed_pending(&handle);
+    // Exercise completion while the fake still owns the slot, independently
+    // of how Tokio schedules the reload jobs below.
+    handle.runtime().block_on(async {
+        assert!(complete_old_oauth(&handle.inner.mcp_registry, &old_config).await);
+        assert!(matches!(
+            handle.inner.mcp_registry.connections.read().await.get("remote"),
+            Some(mcp::connection::McpConnectionState::Disconnected { config, last_error: None })
+                if mobile_mcp_config_unchanged(config, &old_config)
+        ));
+    });
+    seed_pending(&handle);
+    let (completion_started, completion_ready) = tokio::sync::oneshot::channel();
+    let (completion_release, completion_wait) = tokio::sync::oneshot::channel();
+    let completion = handle.runtime().spawn({
+        let registry = handle.inner.mcp_registry.clone();
+        let old_config = old_config.clone();
+        async move {
+            completion_started.send(()).expect("report mock task ready");
+            completion_wait.await.expect("release old OAuth completion");
+            complete_old_oauth(&registry, &old_config).await
+        }
+    });
+    handle.runtime().block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(2), completion_ready)
+            .await
+            .expect("old OAuth mock task starts")
+            .expect("old OAuth mock task reports ready");
+    });
+    assert!(!completion.is_finished());
 
     write_oauth_config("http://127.0.0.1:1/first");
     let first_started = std::time::Instant::now();
@@ -4271,6 +4322,15 @@ fn mobile_mcp_reload_pending_generations_are_nonblocking_and_cas_guarded() {
         first_started.elapsed() < std::time::Duration::from_secs(1),
         "reload must not await a pending OAuth connection"
     );
+
+    let first_generation = handle
+        .inner
+        .mcp_reload_generations
+        .lock()
+        .expect("reload generations")
+        .get("remote")
+        .expect("first reload intent recorded")
+        .generation;
 
     write_oauth_config("http://127.0.0.1:1/second");
     let second_desired = mobile_mcp_preflight(
@@ -4286,16 +4346,36 @@ fn mobile_mcp_reload_pending_generations_are_nonblocking_and_cas_guarded() {
     .expect("second OAuth MCP config");
     handle.runtime().block_on(handle.reload_configured_mcp());
 
-    // Complete the OAuth-like old generation. Generation 1 must stop here;
-    // only generation 2 may install the second config.
+    let second_generation = {
+        let generations = handle
+            .inner
+            .mcp_reload_generations
+            .lock()
+            .expect("reload generations");
+        let intent = generations
+            .get("remote")
+            .expect("second reload intent recorded");
+        assert!(mobile_mcp_config_unchanged(
+            intent.desired.as_ref().expect("second desired config"),
+            &second_desired
+        ));
+        assert!(intent.generation > first_generation);
+        intent.generation
+    };
+    assert!(!super::mobile_mcp_reload_generation_is_current(
+        &handle.inner.mcp_reload_generations,
+        "remote",
+        first_generation
+    ));
+    assert!(super::mobile_mcp_reload_generation_is_current(
+        &handle.inner.mcp_reload_generations,
+        "remote",
+        second_generation
+    ));
+
+    // Both reload intents are recorded while the old mock task is held at its
+    // release barrier. Only the latest generation may settle the second config.
     handle.runtime().block_on(async {
-        handle.inner.mcp_registry.connections.write().await.insert(
-            "remote".into(),
-            mcp::connection::McpConnectionState::Disconnected {
-                config: old_config.clone(),
-                last_error: None,
-            },
-        );
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let state = handle
@@ -4308,6 +4388,7 @@ fn mobile_mcp_reload_pending_generations_are_nonblocking_and_cas_guarded() {
                     .cloned();
                 if state.as_ref().is_some_and(|state| {
                     mobile_mcp_config_unchanged(state.config(), &second_desired)
+                        && !mobile_mcp_state_is_transitional(state)
                 }) {
                     break;
                 }
@@ -4326,6 +4407,32 @@ fn mobile_mcp_reload_pending_generations_are_nonblocking_and_cas_guarded() {
             .cloned()
             .expect("latest config remains visible");
         assert!(mobile_mcp_config_unchanged(state.config(), &second_desired));
+
+        // Force the formerly flaky ordering: the latest config is already
+        // settled before the old OAuth task reports completion. The stale
+        // fake must leave the entire installed state untouched.
+        let settled = format!("{state:?}");
+        assert!(!completion.is_finished());
+        completion_release
+            .send(())
+            .expect("release late completion");
+        assert!(
+            !tokio::time::timeout(std::time::Duration::from_secs(2), completion)
+                .await
+                .expect("old OAuth mock completion settles")
+                .expect("old OAuth mock task joins")
+        );
+        let after_completion = handle.inner.mcp_registry.connections.read().await;
+        assert_eq!(
+            format!(
+                "{:?}",
+                after_completion
+                    .get("remote")
+                    .expect("latest state retained")
+            ),
+            settled,
+            "late fake OAuth completion must not overwrite the latest reload"
+        );
     });
 }
 

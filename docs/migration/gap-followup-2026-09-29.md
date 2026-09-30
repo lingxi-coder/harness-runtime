@@ -87,3 +87,18 @@ SDK Windows GNU consumer compilation and strict Clippy pass. Full-feature runtim
 compilation and all nine repository gates pass after the pin update. Final downstream
 native evidence above belongs to its explicitly recorded earlier pin; the new
 locked product graph is being validated separately.
+
+
+## Deterministic MCP reload fixture follow-up
+
+Latest SDK-pin CI exposed a test fixture that unconditionally completed an old
+OAuth state after the latest reload had already settled. The fake overwrote the
+new configuration after its owner exited. Forcing that ordering reproduces the
+old timeout 3/3. The fixture now checks old-state ownership atomically, uses an
+explicit completion barrier, asserts both generation identities and verifies the
+entire latest installed state remains unchanged after stale completion.
+
+Seven reload tests, twenty concurrent repetitions and five production-generation
+guard cases pass. The exact strict CI lint/format gate passes. Only test code
+changes; production APIs and the validated 0e8e54d/13ffbec native closure remain
+unchanged. Final post-commit CI is required separately.
