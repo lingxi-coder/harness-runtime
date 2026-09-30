@@ -129,7 +129,7 @@ pub fn assemble_system_prompt_with_style(
     // `keepCodingInstructions` (default true ⇒ no-style and builtins stay
     // byte-identical to before).
     push_section_separator(&mut s);
-    let keep_coding = output_style.map_or(true, |s| s.keep_coding_instructions);
+    let keep_coding = output_style.is_none_or(|s| s.keep_coding_instructions);
     // Session guidance differs between the interactive TUI and print/SDK
     // paths. Keep that signal explicit in the context rather than assuming
     // every caller is interactive.

@@ -146,7 +146,7 @@ fn is_unescaped(chars: &[char], i: usize) -> bool {
         backslashes += 1;
         j -= 1;
     }
-    backslashes % 2 == 0
+    backslashes.is_multiple_of(2)
 }
 
 /// What a rule does on match.

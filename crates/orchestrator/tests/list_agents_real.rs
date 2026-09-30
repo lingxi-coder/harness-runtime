@@ -1,3 +1,5 @@
+//! Agent listings reflect the live agent catalog.
+
 use agent::definition::{
     AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
 };

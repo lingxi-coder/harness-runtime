@@ -565,14 +565,13 @@ enum StopHookDisposition {
     Prevent(String),
 }
 
-/// Driver control-flow directive produced by `handle_stop_at_end` (hooks B4) so
-/// the three turn drivers (batched / streaming / cancelable) translate the Stop
-/// disposition into their own loop mechanics uniformly.
-
 const GOAL_PROMPT_TIMEOUT_SECS: u64 = 30;
 const GOAL_STOP_HOOK_NAME: &str = "__session_goal_stop";
 const GOAL_STOP_HOOK_PRIORITY: i32 = 1_000_000;
 
+/// Driver control-flow directive produced by `handle_stop_at_end` (hooks B4) so
+/// the three turn drivers (batched / streaming / cancelable) translate the Stop
+/// disposition into their own loop mechanics uniformly.
 enum StopHookFlow {
     /// Terminate the turn loop, returning this outcome (`emit_end_turn` already
     /// fired inside the helper).

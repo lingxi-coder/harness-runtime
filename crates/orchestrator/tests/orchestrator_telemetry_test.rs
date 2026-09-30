@@ -1,3 +1,5 @@
+//! Conversation execution emits its telemetry events.
+
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,

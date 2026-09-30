@@ -1211,22 +1211,6 @@ fn route_allows_first_party_fast_mode(route: &crate::ResolvedRoute, entry: &Rout
 ///
 /// Used to build the `YYYYMMDDTHHMMSSZ` timestamp for `SigV4` signing without
 /// depending on `chrono` or `time` crates.
-///
-/// Algorithm: Howard Hinnant's `civil_from_days`
-/// (<http://howardhinnant.github.io/date_algorithms.html>).
-// The algorithm uses single-char variable names from the reference paper, large
-// integer constants, signed/unsigned conversions, and boolean-to-int patterns
-// that are idiomatic there but trigger multiple clippy lints.  Suppress them at
-// the function level to keep the code aligned with the reference.
-#[allow(
-    clippy::many_single_char_names,
-    clippy::similar_names,
-    clippy::unreadable_literal,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::bool_to_int_with_if
-)]
 pub(crate) use lingxi_llm_client::auth::sigv4::secs_to_ymdhms;
 
 /// GitHub Copilot serves its GPT-5.x and `codex` models ONLY through the OpenAI

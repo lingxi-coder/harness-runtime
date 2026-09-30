@@ -1,3 +1,5 @@
+//! Conversation execution enforces its configured turn limit.
+
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,

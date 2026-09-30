@@ -1,3 +1,5 @@
+//! Tool failures reach conversation results and output events.
+
 use async_trait::async_trait;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{

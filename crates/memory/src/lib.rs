@@ -116,7 +116,7 @@ fn contains_bare_major(haystack: &str, prefix: &str) -> bool {
     let mut from = 0;
     while let Some(idx) = haystack[from..].find(prefix) {
         let at = from + idx;
-        let rest = haystack[at + prefix.len()..].as_bytes();
+        let rest = &haystack.as_bytes()[at + prefix.len()..];
         // `-\d(?!\d)` matched ⇒ the negative lookahead fails at this position.
         let blocked = rest.len() >= 2
             && rest[0] == b'-'

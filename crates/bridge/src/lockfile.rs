@@ -281,8 +281,7 @@ impl IdeLockfile {
     /// Returns I/O errors if the directory is unsafe, serialization fails, or a
     /// path (including a stale file or symlink) already occupies this port.
     pub fn write(&self) -> std::io::Result<()> {
-        let serialized = serde_json::to_vec_pretty(&self.body)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let serialized = serde_json::to_vec_pretty(&self.body).map_err(std::io::Error::other)?;
         self.ensure_private_directory()?;
 
         let path = self.path();

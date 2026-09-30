@@ -7,7 +7,7 @@
 //! - `WEB_SEARCH_TOOL_BLOCK_NAME = "web_search"` (tool block `name`)
 //! - `WEB_SEARCH_MAX_USES = 8` (upstream `WebSearchTool.ts:80`)
 //! - `WEB_SEARCH_DEFAULT_MAX_TOKENS = 4096`
-//! - `anthropic-beta: web-search-2025-03-05` (via `WEB_SEARCH_BETA` local const)
+//! Provider beta headers are supplied by the hosted-search session service.
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -107,13 +107,6 @@ fn web_search_budget_notice(used: u32, max: u32) -> String {
         "Web search was not performed: this session has used its web search budget ({used} of {max} WebSearch calls). Continue with the information already gathered instead of issuing more searches. If more searches are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION."
     )
 }
-
-/// `anthropic-beta` value that gates the web-search tool on the Anthropic API.
-///
-/// Wire-locked byte-for-byte against `claude-code/src/constants/betas.ts`
-/// (`WEB_SEARCH = "web-search-2025-03-05"`). Local copy so tools/web does not
-/// depend on api-client.
-const WEB_SEARCH_BETA: &str = "web-search-2025-03-05";
 
 /// Input schema for `WebSearchTool`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

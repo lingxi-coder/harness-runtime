@@ -172,25 +172,20 @@ pub fn model_sends_temperature(model: &str) -> bool {
 ///
 /// `Default` is [`ThinkingConfig::Adaptive`] — claude-code's default for
 /// adaptive-capable models (`alwaysThinkingEnabled` true by default).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum ThinkingConfig {
     /// Provider-owned automatic mode. No thinking/reasoning override is sent.
     Automatic,
     /// Thinking is off — no `thinking` field, and `temperature:1` is sent.
     Disabled,
     /// Adaptive thinking — the model decides depth (default).
+    #[default]
     Adaptive,
     /// Fixed thinking budget cap.
     Enabled {
         /// Requested maximum thinking-budget tokens.
         budget_tokens: u32,
     },
-}
-
-impl Default for ThinkingConfig {
-    fn default() -> Self {
-        Self::Adaptive
-    }
 }
 
 /// `true` when the named env var is truthy under the strict claude-code

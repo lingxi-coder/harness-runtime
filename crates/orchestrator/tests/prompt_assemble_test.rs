@@ -1,3 +1,5 @@
+//! System prompt sections compose through the production assembler.
+
 use orchestrator::prompt::{assemble_system_prompt, FileTree, MemoryFile, SystemPromptContext};
 use std::path::PathBuf;
 

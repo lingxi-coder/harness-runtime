@@ -1,3 +1,5 @@
+//! Memory files render through the prompt memory block.
+
 use memory::lingxi_md::LingxiMdTier;
 use orchestrator::prompt::{memory_block, MemoryFile};
 use std::path::PathBuf;

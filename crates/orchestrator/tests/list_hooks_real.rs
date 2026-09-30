@@ -1,3 +1,5 @@
+//! Hook listings reflect the registered hook definitions.
+
 use hooks::definition::{HookCondition, HookExecutor, HookSource};
 use hooks::events::HookEventType;
 use hooks::{HookDefinition, HookRegistry};

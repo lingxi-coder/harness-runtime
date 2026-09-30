@@ -1,3 +1,5 @@
+//! Streaming ping frames preserve the conversation's output events.
+
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,

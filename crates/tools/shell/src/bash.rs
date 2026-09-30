@@ -1047,9 +1047,7 @@ fn path_relative(from: &std::path::Path, to: &std::path::Path) -> String {
     if common == 0 && !f.is_empty() && !t.is_empty() {
         return to.to_string_lossy().into_owned();
     }
-    let mut parts: Vec<String> = std::iter::repeat("..".to_string())
-        .take(f.len() - common)
-        .collect();
+    let mut parts: Vec<String> = std::iter::repeat_n("..".to_string(), f.len() - common).collect();
     parts.extend(
         t[common..]
             .iter()

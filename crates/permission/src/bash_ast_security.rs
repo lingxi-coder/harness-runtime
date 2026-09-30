@@ -3792,8 +3792,7 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                         } else if timeout_long_value_re().is_match(u) {
                             c += 1;
                         } else if (u == "--kill-after" || u == "--signal")
-                            && a.get(c + 1)
-                                .map_or(false, |v| timeout_value_re().is_match(v))
+                            && a.get(c + 1).is_some_and(|v| timeout_value_re().is_match(v))
                         {
                             c += 2;
                         } else if u.starts_with("--") {
@@ -3805,8 +3804,7 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                         } else if u == "-v" {
                             c += 1;
                         } else if (u == "-k" || u == "-s")
-                            && a.get(c + 1)
-                                .map_or(false, |v| timeout_value_re().is_match(v))
+                            && a.get(c + 1).is_some_and(|v| timeout_value_re().is_match(v))
                         {
                             c += 2;
                         } else if timeout_ks_fused_re().is_match(u) {
@@ -3837,12 +3835,12 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                 }
                 "nice" => {
                     if a.get(1).map(String::as_str) == Some("-n")
-                        && a.get(2).map_or(false, |v| nice_n_value_re().is_match(v))
+                        && a.get(2).is_some_and(|v| nice_n_value_re().is_match(v))
                     {
                         a = &a[3..];
-                    } else if a.get(1).map_or(false, |v| nice_legacy_re().is_match(v)) {
+                    } else if a.get(1).is_some_and(|v| nice_legacy_re().is_match(v)) {
                         a = &a[2..];
-                    } else if a.get(1).map_or(false, |v| {
+                    } else if a.get(1).is_some_and(|v| {
                         nice_expansion_re().is_match(v) || contains_any_placeholder(v)
                     }) {
                         return SemanticCheckResult::Deny {
@@ -3863,7 +3861,7 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                             c += 1;
                         } else if u == "-i" || u == "-0" || u == "-v" {
                             c += 1;
-                        } else if u == "-u" && a.get(c + 1).map_or(false, |v| !v.is_empty()) {
+                        } else if u == "-u" && a.get(c + 1).is_some_and(|v| !v.is_empty()) {
                             // JS tests `r[c+1]` truthiness — an empty next arg is
                             // falsy → fall through to the unknown-flag Deny.
                             c += 2;
@@ -3886,7 +3884,7 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                     while c < a.len() {
                         let u = a[c].as_str();
                         if stdbuf_short_sep_re().is_match(u)
-                            && a.get(c + 1).map_or(false, |v| !v.is_empty())
+                            && a.get(c + 1).is_some_and(|v| !v.is_empty())
                         {
                             // JS tests `r[c+1]` truthiness — empty next arg is falsy.
                             c += 2;
@@ -3998,7 +3996,7 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                 let l = a[ai].as_str();
                 let c = a.get(ai + 1).map(String::as_str);
                 if flags.contains(&l)
-                    && c.map_or(false, |c| c.contains('[') || contains_any_placeholder(c))
+                    && c.is_some_and(|c| c.contains('[') || contains_any_placeholder(c))
                 {
                     return SemanticCheckResult::Deny {
                         reason: format!(
@@ -4007,7 +4005,7 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                     };
                 }
                 if is_test {
-                    if l == "-t" && c.map_or(false, |c| !numeric_arith_re().is_match(c)) {
+                    if l == "-t" && c.is_some_and(|c| !numeric_arith_re().is_match(c)) {
                         return SemanticCheckResult::Deny {
                             reason: format!(
                                 "'{o} -t' operand is non-numeric \u{2014} zsh arith-evals identifiers (may run $(cmd))"
@@ -4023,7 +4021,7 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                         if u.len() == 2
                             && l.contains(&u[1..2])
                             && a.get(ai + 1)
-                                .map_or(false, |d| d.contains('[') || contains_any_placeholder(d))
+                                .is_some_and(|d| d.contains('[') || contains_any_placeholder(d))
                         {
                             return SemanticCheckResult::Deny {
                                 reason: format!(

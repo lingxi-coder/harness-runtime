@@ -1,3 +1,5 @@
+//! Cost snapshots reflect the live conversation accounting.
+
 #![allow(
     clippy::field_reassign_with_default,
     clippy::float_cmp,

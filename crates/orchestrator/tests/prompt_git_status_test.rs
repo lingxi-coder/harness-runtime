@@ -1,3 +1,5 @@
+//! Git status contributes to the prompt environment.
+
 use orchestrator::prompt::{env_block, git_status, FileTree, SystemPromptContext};
 use std::path::PathBuf;
 use std::process::Command;

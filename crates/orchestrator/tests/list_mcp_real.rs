@@ -1,3 +1,5 @@
+//! MCP listings reflect the configured server registry.
+
 use async_trait::async_trait;
 use mcp::{ConfigScope, McpRegistry, McpServerConfig};
 use orchestrator::test_support::{

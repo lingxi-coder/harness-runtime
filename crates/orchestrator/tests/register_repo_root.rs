@@ -1,3 +1,5 @@
+//! Repository root registration updates the conversation services.
+
 use async_trait::async_trait;
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
