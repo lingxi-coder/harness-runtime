@@ -2198,7 +2198,7 @@ fn fish_entry(raw: &str) -> &str {
             backslashes += 1;
             i -= 1;
         }
-        if backslashes % 2 == 0 {
+        if backslashes.is_multiple_of(2) {
             return &raw[..at];
         }
         from = at + 1;

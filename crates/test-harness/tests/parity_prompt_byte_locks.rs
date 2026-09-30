@@ -88,8 +88,8 @@ fn normalize_live_prompt(body: &str, cwd: &Path) -> String {
                 " - Platform: <PLATFORM>".to_string()
             } else if line.starts_with(" - Shell:") {
                 " - Shell: <SHELL>".to_string()
-            } else if line.starts_with(" - OS version:") {
-                " - OS version: <OS_VERSION>".to_string()
+            } else if line.starts_with(" - OS Version:") {
+                " - OS Version: <OS_VERSION>".to_string()
             } else if line.starts_with("Today's date is ")
                 || line.starts_with("The current date is ")
             {
@@ -100,6 +100,21 @@ fn normalize_live_prompt(body: &str, cwd: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn live_prompt_normalization_removes_host_os_version() {
+    for os_version in [
+        "Darwin 24.6.0",
+        "Linux 6.14.0-1017-azure",
+        "Windows_NT 10.0",
+    ] {
+        let prompt = format!("before\n - OS Version: {os_version}\nafter");
+        assert_eq!(
+            normalize_live_prompt(&prompt, Path::new("/workspace")),
+            "before\n - OS Version: <OS_VERSION>\nafter"
+        );
+    }
 }
 
 struct PromptAgentTool {
@@ -358,9 +373,13 @@ fn production_prompt_bodies_match_their_byte_locks() {
 /// normalized deterministically; this test prevents that stable fixture from
 /// masking a broken composition path.
 ///
-/// Its 14_602/`06da73ad…` byte lock shares the PROVENANCE block above
+/// Its 14_601/`80dba21f…` byte lock shares the PROVENANCE block above
 /// `production_prompt_bodies_match_their_byte_locks` — read it
 /// before changing either value, and record WHY the number moved.
+/// The previous lock included `Darwin 24.6.0` because the normalizer used
+/// `OS version` instead of the emitted `OS Version`. Replacing only that
+/// machine-dependent value with `<OS_VERSION>` removes one byte; the production
+/// prompt is unchanged.
 #[tokio::test]
 async fn live_orchestrator_prompt_uses_production_context() {
     use std::sync::Arc;
@@ -463,9 +482,9 @@ async fn live_orchestrator_prompt_uses_production_context() {
 
     let normalized = normalize_live_prompt(&prompt, &cwd);
     let digest = format!("{:x}", Sha256::digest(normalized.as_bytes()));
-    assert_eq!(normalized.len(), 14_602, "live prompt length drifted");
+    assert_eq!(normalized.len(), 14_601, "live prompt length drifted");
     assert_eq!(
-        digest, "06da73ad932d83116628c510ea628befd77b0f87b6f1fbe2df041c30e73bc54c",
+        digest, "80dba21fd57101276064ae42542b67805db7c7a8f3e42a81cd63a0dba8cdc28a",
         "live normalized production prompt drifted"
     );
 }

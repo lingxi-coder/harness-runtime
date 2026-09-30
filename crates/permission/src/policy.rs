@@ -1062,6 +1062,7 @@ impl PermissionPolicy {
     /// `Nz()` (`Wmt() && tVe()`) has no port-side equivalent, so the exemption is
     /// applied on `would_sandbox` alone. With no sandbox runtime wired (the
     /// default) nothing is exempt, which is the STRICTER direction.
+    #[cfg(feature = "bash-ast")]
     fn read_block_unanalyzable_ask(
         &self,
         tool_name: &str,

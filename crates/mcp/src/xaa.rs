@@ -274,7 +274,7 @@ pub async fn discover_protected_resource(
 ) -> Result<ProtectedResourceMetadata, XaaError> {
     let url = well_known(server_url, "oauth-protected-resource");
     let prm: ProtectedResourceMetadata = get_json(http, &url).await.map_err(XaaError::Prm)?;
-    if prm.resource.is_empty() || prm.authorization_servers.first().is_none() {
+    if prm.resource.is_empty() || prm.authorization_servers.is_empty() {
         return Err(XaaError::Prm(
             "PRM missing resource or authorization_servers".into(),
         ));

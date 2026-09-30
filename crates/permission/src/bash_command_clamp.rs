@@ -216,7 +216,7 @@ pub fn find_clamp_miss(command: &str, clamps: &[Vec<String>]) -> Option<ClampMis
     // `to(...)` — unique, first-seen order.
     let mut unique: Vec<String> = Vec::new();
     for span in ordered {
-        if !unique.iter().any(|seen| *seen == span) {
+        if !unique.contains(&span) {
             unique.push(span);
         }
     }

@@ -632,7 +632,6 @@ impl PoolSubagentSpawner {
     /// Set-once seam for the spawn-time bypass clamps (see
     /// [`Self::spawn_bypass_gates`]). Grab this BEFORE boxing the spawner and
     /// fill it once the boot permission tiers exist.
-
     pub fn spawn_bypass_gates_handle(
         &self,
     ) -> Arc<std::sync::OnceLock<crate::permission_mode::SpawnBypassGates>> {

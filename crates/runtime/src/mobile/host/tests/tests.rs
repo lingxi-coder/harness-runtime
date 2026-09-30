@@ -49,11 +49,26 @@ fn mobile_provider_catalog_matches_engine_presets_without_secrets() {
         Some("ANTHROPIC_API_KEY")
     );
 
-    assert_eq!(dto.len(), catalog.providers.len() + 1);
-    for (entry, provider) in dto
-        .iter()
-        .filter(|entry| entry.profile_id != "anthropic")
-        .zip(catalog.providers.iter())
+    assert_eq!(
+        dto.len(),
+        catalog
+            .providers
+            .iter()
+            .filter(|provider| !provider.connection.hidden)
+            .count()
+    );
+    assert_eq!(
+        dto.iter()
+            .filter(|entry| entry.profile_id == "anthropic")
+            .count(),
+        1
+    );
+    for (entry, provider) in
+        dto.iter()
+            .filter(|entry| entry.profile_id != "anthropic")
+            .zip(catalog.providers.iter().filter(|provider| {
+                provider.profile_name != "anthropic" && !provider.connection.hidden
+            }))
     {
         assert_eq!(entry.profile_id, provider.profile_name);
         assert_eq!(entry.display_name, provider.profile_name);

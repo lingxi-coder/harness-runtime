@@ -64,8 +64,8 @@ pub const TOOL_NAME: &str = "Glob";
 /// Maximum match count returned (`GlobTool.ts:157`: `globLimits?.maxResults ?? 100`).
 pub const MAX_GLOB_MATCHES: usize = 100;
 
-/// Advisory appended to the model-facing result when matches were capped at
-/// `MAX_GLOB_MATCHES` (`GlobTool.ts:190-194`, byte-exact).
+// Advisory appended to the model-facing result when matches were capped at
+// `MAX_GLOB_MATCHES` (`GlobTool.ts:190-194`, byte-exact).
 // (The static "(Results are truncated…)" advisory is the binary's
 // `totalMatches===undefined` fallback in `zem()`; the live Glob path always has
 // a defined `totalMatches`, so it emits the dynamic count message instead — see

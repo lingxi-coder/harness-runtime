@@ -1,3 +1,5 @@
+//! File-edit notifications synchronize active LSP documents.
+
 use jsonrpc::Connection;
 use lingxi_core::host::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,

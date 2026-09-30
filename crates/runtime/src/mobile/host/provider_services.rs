@@ -93,8 +93,8 @@ pub(super) fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
         let curated = listings
             .into_iter()
             .filter(|listing| {
-                lingxi_core::host::is_curated_model(&listing.provider_id, &listing.request_model)
-                    || !lingxi_core::host::provider_has_curated_list(&listing.provider_id)
+                lingxi_core::host::is_curated_model(&provider.profile_name, &listing.request_model)
+                    || !lingxi_core::host::provider_has_curated_list(&provider.profile_name)
             })
             .collect::<Vec<_>>();
         ProviderCatalogEntryDto {
@@ -124,6 +124,7 @@ pub(super) fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
         llm_runtime::builtin_presets()
             .providers
             .into_iter()
+            .filter(|provider| provider.profile_name != "anthropic" && !provider.connection.hidden)
             .map(to_entry),
     );
     entries
@@ -815,7 +816,23 @@ pub(super) fn resolve_default_model_ref(
         (Some(only), None) => return (model, Some(only.provider_id.clone())),
         (None, _) => {}
     }
-    (model, profile)
+    let fallback = listings
+        .iter()
+        .find(|listing| {
+            listing.provider_id == "anthropic"
+                && Some(listing.request_model.as_str())
+                    == lingxi_core::host::provider_default_model("anthropic")
+        })
+        .or_else(|| {
+            listings.iter().find(|listing| {
+                lingxi_core::host::is_curated_model(&listing.provider_id, &listing.request_model)
+            })
+        })
+        .unwrap_or(&listings[0]);
+    (
+        fallback.request_model.clone(),
+        Some(fallback.provider_id.clone()),
+    )
 }
 
 pub(super) const MOBILE_ENABLED_PROFILES_KEY: &str = "mobileEnabledProfiles";

@@ -2,7 +2,6 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Tries to use system libgit2 and emits necessary build script instructions.
 fn try_system_libgit2(
@@ -118,11 +117,10 @@ The build is now aborting. To disable, unset the variable or use `LIBGIT2_NO_VEN
 
     println!("cargo:rustc-cfg=libgit2_vendored");
 
-    if !Path::new("libgit2/src").exists() {
-        let _ = Command::new("git")
-            .args(&["submodule", "update", "--init", "libgit2"])
-            .status();
-    }
+    assert!(
+        Path::new("libgit2/src").is_dir() && Path::new("libgit2/include/git2.h").is_file(),
+        "vendored libgit2 sources are missing; restore the complete source checkout"
+    );
 
     let target = env::var("TARGET").unwrap();
     let windows = target.contains("windows");

@@ -449,7 +449,7 @@ fn pattern_ends_in_unescaped_star(pattern: &str) -> bool {
         backslashes += 1;
         n -= 1;
     }
-    backslashes % 2 == 0
+    backslashes.is_multiple_of(2)
 }
 
 /// Does a parsed rule match a single candidate subcommand? Faithful to the

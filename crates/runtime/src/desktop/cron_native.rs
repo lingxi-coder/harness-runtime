@@ -352,7 +352,7 @@ impl NativeCronFirer {
             if lingxi_core::types::SessionId::parse_prefixed(target)
                 == Some(owner.current_session_id().await)
             {
-                let fs = platform_posix::PosixFileSystem::new(self.config.cwd.clone());
+                let fs = super::platform::DesktopFileSystem::new(self.config.cwd.clone());
                 let expected = lingxi_core::types::SessionId::parse_prefixed(target)
                     .ok_or("paused:Invalid session ID")?;
                 let (outcome, captured_session, summary) = owner
@@ -405,7 +405,7 @@ impl NativeCronFirer {
             if cancel.is_cancelled() {
                 return Err("cancelled:Scheduled run cancelled".into());
             }
-            let fs = platform_posix::PosixFileSystem::new(self.config.cwd.clone());
+            let fs = super::platform::DesktopFileSystem::new(self.config.cwd.clone());
             cron::automation::bind_automation_run_session(
                 &fs,
                 &self.config.cwd,
@@ -482,7 +482,7 @@ async fn claim_and_replay_target(
     })?
     .into_shared();
     let replayed = if resume {
-        let fs = Arc::new(platform_posix::PosixFileSystem::new(config.cwd.clone()));
+        let fs = Arc::new(super::platform::DesktopFileSystem::new(config.cwd.clone()));
         Some(
             orchestrator::replay_session_state(
                 &config.lingxi_home,

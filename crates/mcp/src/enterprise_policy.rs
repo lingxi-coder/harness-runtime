@@ -1001,17 +1001,19 @@ fn value_injects_url_structure(
     classes: &[(String, UrlVarPosition)],
     env: &IndexMap<String, String>,
 ) -> bool {
-    static SCHEME_UNSAFE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    static AUTHORITY_UNSAFE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static SCHEME_UNSAFE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"[:/@#?\\\s]").unwrap());
+    static AUTHORITY_UNSAFE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"[/@#?\\\s]").unwrap());
     for (name, pos) in classes {
         if *pos == UrlVarPosition::Rest {
             continue;
         }
         let Some(v) = env.get(name) else { continue };
         let re = if *pos == UrlVarPosition::Scheme {
-            SCHEME_UNSAFE.get_or_init(|| regex::Regex::new(r"[:/@#?\\\s]").unwrap())
+            &*SCHEME_UNSAFE
         } else {
-            AUTHORITY_UNSAFE.get_or_init(|| regex::Regex::new(r"[/@#?\\\s]").unwrap())
+            &*AUTHORITY_UNSAFE
         };
         if re.is_match(v) {
             return true;
@@ -1025,8 +1027,10 @@ fn value_injects_url_structure(
 /// normalized first (strip `\t\n\r`, backslashes → `/`, `%2e` → `.`), then
 /// tested against `z__` `(^|/)(\.|%2e)(\.|%2e)?(/|$)` case-insensitively.
 fn value_injects_path_traversal(pattern: &str, env: &IndexMap<String, String>) -> bool {
-    static PERCENT_2E: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    static TRAVERSAL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static PERCENT_2E: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)%2e").unwrap());
+    static TRAVERSAL: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)(^|/)(\.|%2e)(\.|%2e)?(/|$)").unwrap());
     for caps in crate::env_expansion::env_ref_regex().captures_iter(pattern) {
         let Some(v) = env.get(&caps[1]) else { continue };
         if v.contains('?') || v.contains('#') {
@@ -1037,13 +1041,8 @@ fn value_injects_path_traversal(pattern: &str, env: &IndexMap<String, String>) -
             .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
             .collect();
         let slashed = stripped.replace('\\', "/");
-        let normalized = PERCENT_2E
-            .get_or_init(|| regex::Regex::new(r"(?i)%2e").unwrap())
-            .replace_all(&slashed, ".");
-        if TRAVERSAL
-            .get_or_init(|| regex::Regex::new(r"(?i)(^|/)(\.|%2e)(\.|%2e)?(/|$)").unwrap())
-            .is_match(&normalized)
-        {
+        let normalized = PERCENT_2E.replace_all(&slashed, ".");
+        if TRAVERSAL.is_match(&normalized) {
             return true;
         }
     }

@@ -108,16 +108,17 @@ fn new_desktop_mcp_transport() -> Arc<DesktopMcpTransport> {
 ///
 /// Hooks are constructed before the MCP registry because the registry itself
 /// needs the hook dispatcher for elicitation. The `OnceLock` breaks that
-/// composition cycle without permitting hooks to discover or connect servers:
+/// construction cycle. Its weak registry reference avoids a runtime ownership
+/// cycle without permitting hooks to discover or connect servers:
 /// invocation only uses `McpRegistry::get_client`, the already-live lookup.
 #[derive(Clone, Default)]
 struct DesktopHookMcpInvoker {
-    registry: Arc<OnceLock<Arc<mcp::McpRegistry>>>,
+    registry: Arc<OnceLock<std::sync::Weak<mcp::McpRegistry>>>,
 }
 
 impl DesktopHookMcpInvoker {
     fn bind(&self, registry: Arc<mcp::McpRegistry>) {
-        let _ = self.registry.set(registry);
+        let _ = self.registry.set(Arc::downgrade(&registry));
     }
 }
 
@@ -187,7 +188,7 @@ fn map_hook_mcp_tool_error(error: mcp::McpClientError) -> hooks::HookMcpInvocati
 #[async_trait::async_trait]
 impl hooks::HookMcpInvoker for DesktopHookMcpInvoker {
     async fn invoke(&self, request: hooks::HookMcpInvocation) -> hooks::HookMcpInvocationResult {
-        let Some(registry) = self.registry.get() else {
+        let Some(registry) = self.registry.get().and_then(std::sync::Weak::upgrade) else {
             return hooks::HookMcpInvocationResult::NotConnected {
                 message: "MCP registry is not ready".to_string(),
             };
@@ -4827,6 +4828,7 @@ mod configuration;
 mod credentials;
 mod fusion_services;
 mod permission_config;
+mod platform;
 mod shutdown;
 
 pub use assembly::build;

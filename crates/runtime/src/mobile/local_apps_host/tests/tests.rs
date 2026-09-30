@@ -11658,21 +11658,29 @@ async fn an_unpersisted_lease_moves_the_next_allocation_off_that_port() {
 /// free pass.
 #[tokio::test]
 async fn a_pin_that_lands_after_the_snapshot_is_caught_before_the_choice_sticks() {
-    const APP_ID: &str = "8c6d31fa";
-    const FIRST_CHOICE: u16 = 27_262;
-    let first_choice = APP_PORT_WINDOW_FIRST + derived_window_slot(APP_ID);
-    let next_choice =
-        APP_PORT_WINDOW_FIRST + (derived_window_slot(APP_ID) + 1) % APP_PORT_WINDOW_LEN;
-    assert_eq!(
-        first_choice, FIRST_CHOICE,
-        "app {APP_ID} no longer derives the documented port; \
-         re-pick the fixture id and update the doc comment"
-    );
+    // Keep the contested and following slots free while building the fixture.
+    // A unique app id prevents parallel tests from deriving the same OS port.
+    let (app_id, first_choice, next_choice, first_probe, next_probe) = loop {
+        let app_id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let slot = derived_window_slot(&app_id);
+        let first = APP_PORT_WINDOW_FIRST + slot;
+        let next = APP_PORT_WINDOW_FIRST + (slot + 1) % APP_PORT_WINDOW_LEN;
+        if let (Ok(first_probe), Ok(next_probe)) = (
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, first)),
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, next)),
+        ) {
+            break (app_id, first, next, first_probe, next_probe);
+        }
+    };
+    let app_id = app_id.as_str();
 
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
     let sibling = create_app_fixture(&root, &service, "Hand-off").await;
     let leases = test_leases();
+
+    drop(first_probe);
+    drop(next_probe);
 
     // CONTROL: with the records still empty of pins, the derivation lands
     // on the contested port and the port is genuinely available here.  A
@@ -11680,7 +11688,7 @@ async fn a_pin_that_lands_after_the_snapshot_is_caught_before_the_choice_sticks(
     // outside this test, and the assertion below would have passed without
     // proving anything.
     let (control, control_port, control_lease) =
-        bind_stable_loopback(APP_ID, None, &[], &leases, &service)
+        bind_stable_loopback(app_id, None, &[], &leases, &service)
             .await
             .expect("the app derives its port with nothing pinned");
     assert_eq!(
@@ -11716,12 +11724,12 @@ async fn a_pin_that_lands_after_the_snapshot_is_caught_before_the_choice_sticks(
     // The snapshot is the one the caller read BEFORE that hand-off, so the
     // pre-check cannot exclude the port and the lease is taken on it.  Only
     // a read of the records after that take can reject it.
-    let (listener, port, lease) = bind_stable_loopback(APP_ID, None, &[], &leases, &service)
+    let (listener, port, lease) = bind_stable_loopback(app_id, None, &[], &leases, &service)
         .await
         .expect("the app still gets a port");
     assert_ne!(
         port, first_choice,
-        "app {APP_ID} was pinned to {first_choice}, which app {sibling} persisted \
+        "app {app_id} was pinned to {first_choice}, which app {sibling} persisted \
          after the snapshot was read; both apps now own it forever"
     );
     assert_eq!(

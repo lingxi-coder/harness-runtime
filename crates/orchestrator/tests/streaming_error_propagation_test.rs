@@ -1,3 +1,5 @@
+//! Streaming transport failures propagate through conversation output.
+
 use llm_runtime::{HistoryEvent, LlmError};
 use orchestrator::test_support::{
     message_start, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,

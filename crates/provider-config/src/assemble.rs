@@ -70,11 +70,11 @@ fn anthropic_profile(inputs: &AssembleInputs) -> (ProviderProfile, Option<Creden
         profile.wire_profile = preset.wire_profile;
         profile.models = preset.models;
         for model in &inputs.anthropic_models {
-            if !profile
-                .models
-                .iter()
-                .any(|existing| existing.request_model == model.request_model)
-            {
+            if !profile.models.iter().any(|existing| {
+                existing.request_model == model.request_model
+                    || existing.display_model == model.request_model
+                    || existing.aliases.contains(&model.request_model)
+            }) {
                 profile.models.push(model.clone());
             }
         }

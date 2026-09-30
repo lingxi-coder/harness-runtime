@@ -488,7 +488,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         .flatten();
     let (default_model_id, default_model_profile) = saved_model
         .as_deref()
-        .map(|model| resolve_default_model_ref(model, &default_listings))
+        .and_then(|model| model_preference::resolve(model, &default_listings))
         .unwrap_or_else(|| resolve_default_model_ref(&cfg.default_model, &default_listings));
     let profile_auto_mode_provider: std::collections::BTreeMap<String, String> = assembled
         .client_config

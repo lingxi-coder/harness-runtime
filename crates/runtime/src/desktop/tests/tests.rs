@@ -4164,7 +4164,7 @@ async fn drained_desktop_composition_releases_registry_and_session_claim() {
     );
     let mcp_registry = Arc::downgrade(&rt.mcp_registry);
     let command_registry = Arc::downgrade(&rt.shared_command_registry);
-    let lease = rt.session_state.writer_lease();
+    let lease = rt.session_state.writer_lease_core();
     let weak_lease = Arc::downgrade(&lease);
     drop(lease);
 

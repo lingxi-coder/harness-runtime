@@ -256,7 +256,12 @@ async fn invoker_is_late_bound_and_shared_across_clones() {
     let transport = Arc::new(NoopTransport::default());
     let registry = Arc::new(mcp::McpRegistry::new(transport));
     let clone = invoker.clone();
-    clone.bind(registry);
+    clone.bind(registry.clone());
+    assert_eq!(
+        Arc::strong_count(&registry),
+        1,
+        "the invoker must not retain the session registry"
+    );
 
     let after_bind = invoker
         .invoke(hooks::HookMcpInvocation {
@@ -308,7 +313,7 @@ async fn invoker_uses_get_client_and_does_not_lazy_connect_cached_servers() {
     );
 
     let invoker = DesktopHookMcpInvoker::default();
-    invoker.bind(registry);
+    invoker.bind(registry.clone());
     let result = invoker
         .invoke(hooks::HookMcpInvocation {
             server: "srv".into(),

@@ -7,7 +7,6 @@ extern crate vcpkg;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn main() {
     let zlib_ng_compat = env::var("CARGO_FEATURE_ZLIB_NG_COMPAT").is_ok();
@@ -34,11 +33,10 @@ fn main() {
         }
     }
 
-    if !Path::new("libssh2/.git").exists() {
-        let _ = Command::new("git")
-            .args(&["submodule", "update", "--init"])
-            .status();
-    }
+    assert!(
+        Path::new("libssh2/include/libssh2.h").is_file(),
+        "vendored libssh2 sources are missing; restore the complete source checkout"
+    );
 
     let target = env::var("TARGET").unwrap();
     let profile = env::var("PROFILE").unwrap();

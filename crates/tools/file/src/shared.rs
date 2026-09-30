@@ -265,7 +265,7 @@ pub const NUL_SCAN_WINDOW: usize = 8 * 1024;
 #[must_use]
 pub fn looks_binary(prefix: &[u8]) -> bool {
     let window = &prefix[..prefix.len().min(NUL_SCAN_WINDOW)];
-    window.iter().any(|b| *b == 0)
+    window.contains(&0)
 }
 
 /// Return `bytes` with the UTF-8 BOM (`EF BB BF`) stripped if present.

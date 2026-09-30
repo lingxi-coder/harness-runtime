@@ -141,7 +141,7 @@ async fn midstream_529_triggers_nonstreaming_fallback() {
             ConversationMessage::Assistant { content, .. } => Some(content),
             _ => None,
         })
-        .last()
+        .next_back()
         .expect("session must contain at least one assistant message");
     let persisted_texts: Vec<&str> = final_assistant
         .iter()

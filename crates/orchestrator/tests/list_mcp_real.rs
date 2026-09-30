@@ -1,3 +1,5 @@
+//! MCP listings reflect the configured server registry.
+
 use async_trait::async_trait;
 use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,

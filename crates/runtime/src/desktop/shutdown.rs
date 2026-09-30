@@ -133,6 +133,7 @@ pub struct DesktopSessionLifecycle {
     pub(super) command_registry: Arc<RwLock<CommandRegistry>>,
     pub(super) subagent_spawner: Arc<agent::handle::PoolSubagentSpawner>,
     pub(super) fusion_api_service: Arc<llm_runtime::ApiService>,
+    pub(super) fusion_implement_host: Arc<super::fusion_implement::DesktopFusionImplementHost>,
     pub(super) cost_tracker: Arc<cost::CostTracker>,
     pub(super) session_state_manager: Arc<session_state::SessionStateManager>,
     pub(super) fusion_recorder_factory: Arc<fusion_recorder::DesktopFusionRecorderFactory>,
@@ -268,6 +269,7 @@ impl DesktopSessionLifecycle {
         // set-once latches remain closed and cannot be resurrected by a late
         // producer.
         self.subagent_spawner.release_runtime_links();
+        self.fusion_implement_host.clear_context();
         if let Err(error) = self.cost_tracker.drain_owned_settlements().await {
             report
                 .errors

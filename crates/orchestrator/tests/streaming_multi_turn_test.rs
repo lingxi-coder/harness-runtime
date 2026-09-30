@@ -1,3 +1,5 @@
+//! Streaming conversation state persists across successive turns.
+
 use async_trait::async_trait;
 use lingxi_core::host::OutputEvent;
 use lingxi_core::types::ToolUseId;

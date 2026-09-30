@@ -214,7 +214,7 @@ impl ConversationOrchestrator {
                 .config
                 .output_style
                 .as_deref()
-                .map_or(true, |style| style == "default"),
+                .is_none_or(|style| style == "default"),
         };
         // All three plan-mode renderers (`M5T` full / `L5T` sparse / `H5T`
         // subagent) return through the batch wrapper `Zy` (2.1.238 @296675470),

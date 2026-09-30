@@ -1,3 +1,6 @@
+use super::platform::{
+    DesktopFileSystem, DesktopLspTransport, DesktopProcess, DesktopWorktreeManager,
+};
 use crate::desktop::ide::DesktopIdeHandle;
 use client::adapter::{AdapterPermissionGate, PermissionRequestSink};
 use command_api::model::BuiltinCommandHandler;
@@ -10,9 +13,7 @@ use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
 };
 use permission::gate::PermissionGate;
-use platform_posix::{
-    PosixFileSystem, PosixProcess, PosixRuntime, PosixSandbox, PosixWorktreeManager,
-};
+use platform_posix::{PosixRuntime, PosixSandbox};
 #[cfg(windows)]
 use platform_windows::process::supervisor as shell_supervisor;
 #[cfg(windows)]
@@ -175,7 +176,7 @@ pub async fn build_with_credential_stack(
     // durable transaction; legacy/no-persistence hosts keep compatibility.
     let main_jsonl_writer = session::jsonl::writer::JsonlWriter::new(
         main_transcript_path.clone(),
-        Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn lingxi_core::host::FileSystem>,
+        Arc::new(DesktopFileSystem::new(cwd.clone())) as Arc<dyn lingxi_core::host::FileSystem>,
     );
     // Resume the live file-history index before the first restored turn. The
     // `/rewind` command can parse snapshots directly from disk, but the edit
@@ -879,7 +880,7 @@ pub async fn build_with_credential_stack(
         // Without it `agent_transcript_path` pointed at nothing, and a
         // background agent's conversation existed only in memory.
         .with_transcript_fs(
-            Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn lingxi_core::host::FileSystem>
+            Arc::new(DesktopFileSystem::new(cwd.clone())) as Arc<dyn lingxi_core::host::FileSystem>
         )
         // Every subagent gets its own passive-diagnostics cursor. Sharing the
         // main registry as a source would make diagnostics first-reader-wins
@@ -1266,7 +1267,7 @@ pub async fn build_with_credential_stack(
     ) = match cfg.cli_agent.clone() {
         Some(w) => (Some(w), None, false),
         None if cfg.session_id_override.is_some() => {
-            let snapshot_fs = Arc::new(PosixFileSystem::new(cwd.clone()))
+            let snapshot_fs = Arc::new(DesktopFileSystem::new(cwd.clone()))
                 as Arc<dyn lingxi_core::host::FileSystem>;
             let (persisted, snapshot) = session::jsonl::read_agent_resume_state(
                 &main_transcript_path,
@@ -1812,7 +1813,7 @@ pub async fn build_with_credential_stack(
     //        - `http.clone()` is the real `PosixHttp`, so the HTTP arm performs
     //          real (SSRF-guarded) requests.
     //        - `PosixRuntime` is the real `RuntimeSpawner`.
-    //        - `with_process_runner(PosixProcess, PosixSandbox)` makes the
+    //        - `with_process_runner(DesktopProcess, PosixSandbox)` makes the
     //          Command arm spawn real child processes (the runner only accepts a
     //          `SandboxedCommand`, which the sandbox mints).
     //        The hooks Agent arm IS now wired via `.with_agent_spawner(..)`
@@ -1939,7 +1940,7 @@ pub async fn build_with_credential_stack(
         })
         .with_http_hook_policy(http_hook_urls, http_hook_env_vars)
         .with_process_runner(
-            Arc::new(PosixProcess::new()) as Arc<dyn lingxi_core::host::ProcessRunner>,
+            Arc::new(DesktopProcess::new()) as Arc<dyn lingxi_core::host::ProcessRunner>,
             Arc::new(PosixSandbox::new()) as Arc<dyn lingxi_core::host::Sandbox>,
         )
         .with_prompt_runner(hook_prompt_runner.clone() as Arc<dyn hooks::HookPromptRunner>)
@@ -2160,10 +2161,10 @@ pub async fn build_with_credential_stack(
     }
     let mut task_registry_inner = tasks::registry::TaskRegistry::new(
         Arc::new(PosixRuntime::new()),
-        Arc::new(PosixFileSystem::new(cwd.clone())),
+        Arc::new(DesktopFileSystem::new(cwd.clone())),
         Arc::new(tasks::output_manager::TaskOutputManager::new(
             task_output_dir,
-            Arc::new(PosixFileSystem::new(cwd.clone())),
+            Arc::new(DesktopFileSystem::new(cwd.clone())),
         )),
     )
     // `tengu_agent_tool_terminated` (async twin): the registry is where
@@ -2201,7 +2202,7 @@ pub async fn build_with_credential_stack(
     let bash_status_sink = Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
     tasks::registry::register_self_contained_handlers(
         &mut task_registry_inner,
-        Arc::new(PosixProcess::new()),
+        Arc::new(DesktopProcess::new()),
         Arc::new(PosixSandbox::new()),
         mcp_registry.clone(),
         bash_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
@@ -2402,7 +2403,7 @@ pub async fn build_with_credential_stack(
     .with_plan_files(plan_files.clone())
     .with_hook_context(subagent_hook_session_id, cwd.clone())
     .with_transcript(
-        Arc::new(PosixFileSystem::new(cwd.clone())),
+        Arc::new(DesktopFileSystem::new(cwd.clone())),
         main_subagents_dir.clone(),
     );
     // Grab the teammate handler's set-once cells BEFORE boxing, to fill once the
@@ -2472,7 +2473,7 @@ pub async fn build_with_credential_stack(
     // judges it when a BACKGROUND agent reaches a terminal state — claude-code's
     // `getWorktreeResult` closure handed to the detached lifecycle).
     let worktree_manager: Arc<dyn lingxi_core::host::worktree::WorktreeManager> =
-        Arc::new(PosixWorktreeManager::new(cwd.clone()));
+        Arc::new(DesktopWorktreeManager::new(cwd.clone()));
     // The forked-skill resume gate. Its skill resolver is bound LATER (the
     // command registry does not exist yet — the same registration cycle the
     // status sink solves); until then it reports "not fork-capable", which
@@ -2694,7 +2695,7 @@ pub async fn build_with_credential_stack(
                 |id| serde_json::json!({"type":"level", "id":id}),
             );
             cron_management::migrate_legacy(
-                &PosixFileSystem::new(cwd.clone()),
+                &DesktopFileSystem::new(cwd.clone()),
                 &cwd,
                 migration_model,
                 migration_reasoning,
@@ -2705,7 +2706,7 @@ pub async fn build_with_credential_stack(
             })?;
             if cron::scheduled_tasks_path(&cwd).exists() {
                 cron::automation::recover_orphaned_automation_runs(
-                    &PosixFileSystem::new(cwd.clone()),
+                    &DesktopFileSystem::new(cwd.clone()),
                     &cwd,
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -2720,7 +2721,7 @@ pub async fn build_with_credential_stack(
         let scheduler = Arc::new(
             cron::CronScheduler::new(
                 task_registry.clone(),
-                Arc::new(PosixFileSystem::new(cwd.clone())),
+                Arc::new(DesktopFileSystem::new(cwd.clone())),
                 clock.clone(),
                 Arc::new(PosixRuntime::new()),
                 tasks_file,
@@ -2981,7 +2982,7 @@ pub async fn build_with_credential_stack(
         "LSP diagnostics registry must be initialized exactly once"
     );
     let plugin_lsp_registry = Arc::new(
-        lsp::LspRegistry::new(Arc::new(platform_posix::PosixLspTransport::new()))
+        lsp::LspRegistry::new(Arc::new(DesktopLspTransport::new()))
             .with_diagnostics(lsp_diagnostics.clone()),
     );
 
@@ -3092,7 +3093,7 @@ pub async fn build_with_credential_stack(
     let worktree_session_cell = tool_api::worktree_session::new_worktree_session_cell();
     if cfg.session_id_override.is_some() {
         let restore_fs: Arc<dyn lingxi_core::host::FileSystem> =
-            Arc::new(PosixFileSystem::new(cwd.clone()));
+            Arc::new(DesktopFileSystem::new(cwd.clone()));
         if let Some(payload) = session::jsonl::loader::read_worktree_state(
             &main_transcript_path,
             restore_fs,
@@ -3142,12 +3143,12 @@ pub async fn build_with_credential_stack(
         // Read(deny) → Grep/Glob search excludes (resolved from the boot policy
         // above; empty when enforcement is off or no Read-deny rule applies).
         read_deny_exclude_globs,
-        fs: Arc::new(PosixFileSystem::new(cwd.clone())),
+        fs: Arc::new(DesktopFileSystem::new(cwd.clone())),
         bus: Arc::new(telemetry::AnalyticsBus::new()),
         // P1-08 trusted dirs now live inside `session_cwd` (built above from the
         // `trusted_dirs` set); `BuiltinToolContext` no longer has a standalone
         // `trusted_dirs` field — tools read `ctx.trusted_dirs()` off `session_cwd`.
-        process: Arc::new(PosixProcess::new()),
+        process: Arc::new(DesktopProcess::new()),
         sandbox: Arc::new(PosixSandbox::new()),
         clock: clock.clone(),
         sandbox_runtime: sandbox_runtime_cfg,
@@ -3481,7 +3482,7 @@ pub async fn build_with_credential_stack(
             Some(Arc::new(JsonlWorktreeStatePersister {
                 writer: Arc::new(session::jsonl::writer::JsonlWriter::new(
                     main_transcript_path.clone(),
-                    Arc::new(PosixFileSystem::new(cwd.clone()))
+                    Arc::new(DesktopFileSystem::new(cwd.clone()))
                         as Arc<dyn lingxi_core::host::FileSystem>,
                 )),
                 session_uuid: main_session_uuid.clone(),
@@ -3493,7 +3494,7 @@ pub async fn build_with_credential_stack(
     // tool registry consumes `tool_ctx`. The handler itself is registered only
     // in the desktop command registry below, leaving the locked upstream
     // command-api builtin table untouched.
-    let _ = fusion_implement_ctx.set(tool_ctx.clone());
+    let _ = fusion_implement_ctx.set(Arc::new(tool_ctx.clone()));
     let worktree_command_handler: Arc<dyn BuiltinCommandHandler> = Arc::new(
         DesktopWorktreeCommandHandler::new(tool_ctx.clone(), worktree_state_persister.clone()),
     );
@@ -3969,7 +3970,7 @@ pub async fn build_with_credential_stack(
     let plugin_agent_catalog = agent_catalog.clone();
     let plugin_mcp_registry = mcp_registry.clone();
     // `cwd` is moved into the orchestrator below; the plugin bootstrap's
-    // sandboxed `PosixFileSystem` (a Plan-16 dead-code field on `PluginManager`)
+    // sandboxed `DesktopFileSystem` (a Plan-16 dead-code field on `PluginManager`)
     // needs a workspace root, so snapshot it here.
     let cwd_for_plugins = watch_cwd.clone();
     // #39 UserPromptExpansion: capture the SAME `Arc<HookExecutorImpl>` BEFORE
@@ -3994,7 +3995,7 @@ pub async fn build_with_credential_stack(
     // persist machinery (`persist_assistant_per_block`,
     // `persist_message_to_jsonl_with_parent`) then appends user/assistant lines
     // the loader counts as a resumable session (title falls back to the first
-    // user message). `PosixFileSystem` does not confine `append_file_with_mode`
+    // user message). `DesktopFileSystem` does not confine `append_file_with_mode`
     // to its workspace root, so rooting it at `watch_cwd` is fine for a path
     // under `claude_home`.
     // `main_jsonl_writer` was created before durable session setup so Fusion
@@ -4347,7 +4348,7 @@ pub async fn build_with_credential_stack(
                                 .map(|(profile, _)| profile)
                         })
                         .and_then(|profile| selection_profile_auto_mode_provider.get(profile))
-                        .map_or(true, |provider| provider == "firstParty"),
+                        .is_none_or(|provider| provider == "firstParty"),
                 }),
         ));
         let _ =
@@ -4365,7 +4366,7 @@ pub async fn build_with_credential_stack(
                                     .map(|(profile, _)| profile)
                             })
                             .and_then(|profile| selection_profile_auto_mode_provider.get(profile))
-                            .map_or(true, |provider| provider == "firstParty"),
+                            .is_none_or(|provider| provider == "firstParty"),
                     };
                     if let Ok(mut cached) = last_selection.lock() {
                         *cached = Some(selection.clone());
@@ -4732,7 +4733,7 @@ pub async fn build_with_credential_stack(
         let pm = Arc::new(
             plugin::PluginManager::new(
                 plugins_dir.clone(),
-                Arc::new(PosixFileSystem::new(cwd_for_plugins.clone())),
+                Arc::new(DesktopFileSystem::new(cwd_for_plugins.clone())),
                 http.clone(),
                 Arc::new(PosixRuntime::new()),
                 credentials.clone(),
@@ -5180,7 +5181,7 @@ pub async fn build_with_credential_stack(
     //       consumes.
     #[cfg(not(test))]
     let watch_fs: Arc<dyn lingxi_core::host::FileSystem> =
-        Arc::new(PosixFileSystem::new(watch_cwd.clone()));
+        Arc::new(DesktopFileSystem::new(watch_cwd.clone()));
     // Unit tests exercise the real watcher lifecycle with cancellable streams,
     // without depending on the host FSEvents daemon's blocking startup/stop RPCs.
     #[cfg(test)]
@@ -5218,7 +5219,7 @@ pub async fn build_with_credential_stack(
         file_changed_watch::FileChangedWatcher::new(&matcher_refs, &watch_cwd, file_changed_firer);
     #[cfg(not(test))]
     let watch_fs: Arc<dyn lingxi_core::host::FileSystem> =
-        Arc::new(PosixFileSystem::new(watch_cwd.clone()));
+        Arc::new(DesktopFileSystem::new(watch_cwd.clone()));
     #[cfg(test)]
     let watch_fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(watcher_test_support::WatchFs::new(watch_cwd.clone()));
@@ -5264,7 +5265,7 @@ pub async fn build_with_credential_stack(
     if let (Some(scheduler), Some((config, permissions))) = (&cron_scheduler, native_cron_seed) {
         if orch.workspace_trusted().await && cron::scheduled_tasks_path(&config.cwd).exists() {
             cron::automation::recover_orphaned_automation_runs(
-                &PosixFileSystem::new(config.cwd.clone()),
+                &DesktopFileSystem::new(config.cwd.clone()),
                 &config.cwd,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -5294,6 +5295,7 @@ pub async fn build_with_credential_stack(
         command_registry: shared_command_registry.clone(),
         subagent_spawner: lifecycle_subagent_spawner,
         fusion_api_service: api_service,
+        fusion_implement_host,
         cost_tracker,
         session_state_manager,
         fusion_recorder_factory: fusion_recorder_factory_impl.clone(),

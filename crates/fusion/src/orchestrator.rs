@@ -388,7 +388,7 @@ impl FusionOrchestrator {
         let reservation_cap_narrowed = match current.max_reserved_nano_usd {
             Some(current_limit) => captured
                 .max_reserved_nano_usd
-                .map_or(true, |captured_limit| current_limit < captured_limit),
+                .is_none_or(|captured_limit| current_limit < captured_limit),
             None => false,
         };
         // All stage and total deadlines are part of the prepared run's

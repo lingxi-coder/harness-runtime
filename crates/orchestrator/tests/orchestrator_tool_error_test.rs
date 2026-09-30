@@ -1,3 +1,5 @@
+//! Tool failures reach conversation results and output events.
+
 use async_trait::async_trait;
 use lingxi_core::host::OutputEvent;
 use lingxi_core::types::{ContentBlock, ConversationMessage, ToolUseId};

@@ -442,7 +442,7 @@ pub async fn load_command_markdown_files(
                     .any(|d| normalize_for_comparison(d) == worktree_subdir);
                 if !worktree_has_subdir {
                     let main_lingxi_subdir = canonical_root.join(branding::DOT_DIR).join(SUBDIR);
-                    if !project_dirs.iter().any(|d| *d == main_lingxi_subdir) {
+                    if !project_dirs.contains(&main_lingxi_subdir) {
                         project_dirs.push(main_lingxi_subdir);
                     }
                 }

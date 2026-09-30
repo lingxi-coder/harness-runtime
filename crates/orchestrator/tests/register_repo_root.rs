@@ -1,3 +1,5 @@
+//! Repository root registration updates the conversation services.
+
 use async_trait::async_trait;
 use lingxi_core::host::{
     RegisterRepoRootRequest, RepoRootReloadOutcome, RepoRootReloadRequest, RepoRootReloader,

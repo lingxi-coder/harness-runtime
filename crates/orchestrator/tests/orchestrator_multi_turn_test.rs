@@ -1,3 +1,5 @@
+//! Conversation state persists across successive turns.
+
 use llm_runtime::ContentBlock as LlmContentBlock;
 
 use async_trait::async_trait;

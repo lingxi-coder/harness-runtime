@@ -347,7 +347,7 @@ async fn run_connect_tunnel(
 ) -> std::io::Result<()> {
     let upgraded = hyper::upgrade::on(req)
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     let mut client = TokioIo::new(upgraded);
 
     // P6b: TLS-MITM termination. Sniff the first bytes for a ClientHello; on TLS,

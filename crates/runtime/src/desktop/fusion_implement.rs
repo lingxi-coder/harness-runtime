@@ -21,7 +21,7 @@ use mobile_linux_api::{ProcessError, ProcessStreamSink};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tool_api::BuiltinToolContext;
@@ -38,7 +38,7 @@ pub struct DesktopFusionImplementHost {
     worktrees: Arc<dyn WorktreeManager>,
     /// Session workspace, where the worktrees live; the free-disk check looks here.
     workspace: PathBuf,
-    tool_ctx: Arc<OnceLock<BuiltinToolContext>>,
+    tool_ctx: Arc<agent::RuntimeLink<Arc<BuiltinToolContext>>>,
 }
 
 impl DesktopFusionImplementHost {
@@ -48,15 +48,20 @@ impl DesktopFusionImplementHost {
         Self {
             worktrees,
             workspace,
-            tool_ctx: Arc::new(OnceLock::new()),
+            tool_ctx: Arc::new(agent::RuntimeLink::new()),
         }
     }
 
     /// The cell the composition root fills once the session's tool context
     /// exists.
     #[must_use]
-    pub fn context_cell(&self) -> Arc<OnceLock<BuiltinToolContext>> {
+    pub fn context_cell(&self) -> Arc<agent::RuntimeLink<Arc<BuiltinToolContext>>> {
         Arc::clone(&self.tool_ctx)
+    }
+
+    /// Release session services after producer shutdown and refuse late verification.
+    pub(crate) fn clear_context(&self) {
+        self.tool_ctx.clear();
     }
 }
 
@@ -171,7 +176,7 @@ impl FusionImplementHost for DesktopFusionImplementHost {
         let Some(ctx) = self.tool_ctx.get() else {
             return Err("the session is still starting; try again in a moment".into());
         };
-        if !sandbox_engaged(ctx) {
+        if !sandbox_engaged(&ctx) {
             return Err(SANDBOX_REQUIRED.into());
         }
         if let Some(free) = platform_posix::worktree::available_disk_bytes(&self.workspace) {
@@ -213,7 +218,7 @@ impl FusionImplementHost for DesktopFusionImplementHost {
         };
         // Never run a verification command unconfined, even if the sandbox
         // was switched off after the run began.
-        if !sandbox_engaged(ctx) {
+        if !sandbox_engaged(&ctx) {
             return error("not run: the sandbox is off");
         }
         // The session's own network policy applies unchanged: the live runner
