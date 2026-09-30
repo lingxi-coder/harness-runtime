@@ -889,7 +889,7 @@ mod tests {
     fn native_custom_issues_and_type_message_overrides_follow_zue() {
         let issue = json!({"code":"custom","path":[],"message":"Duplicate questions"});
         assert_eq!(
-            super::format_issues("Tool", &[issue.clone()]),
+            super::format_issues("Tool", std::slice::from_ref(&issue)),
             serde_json::to_string_pretty(&vec![issue]).unwrap()
         );
         let issue = json!({"code":"invalid_type","expected":"string","received":"number","path":["field"],"message":"custom message"});

@@ -1,3 +1,5 @@
+//! Prompt headers preserve their locked text.
+
 use orchestrator::prompt::locked_templates::{HEADER, SECTION_SEP, TRAILING_NL};
 
 #[test]

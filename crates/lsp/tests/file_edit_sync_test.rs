@@ -1,3 +1,5 @@
+//! File-edit notifications synchronize active LSP documents.
+
 use jsonrpc::Connection;
 use lsp::LspRegistry;
 use platform_api::{

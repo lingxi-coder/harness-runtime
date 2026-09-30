@@ -1,3 +1,5 @@
+//! Prompt file trees reflect workspace discovery.
+
 use orchestrator::prompt::file_tree;
 use std::fs;
 use tempfile::TempDir;

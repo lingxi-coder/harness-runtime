@@ -54,6 +54,14 @@ The complete Windows GNU desktop check reaches a vendored libssh2 C compilation
 failure: `arc4random_buf` is undeclared. Native Windows MSVC CI must establish
 desktop compilation separately; neither result proves device/runtime behavior.
 
+[PR #5's first CI run](https://github.com/lingxi-coder/harness-runtime/actions/runs/36651351158)
+passes the Linux parity-fixture job. Windows MSVC progresses beyond the original
+67 POSIX-package errors but still fails on nine Unix socket/permission errors in
+`desktop/pane_teammate.rs`. Windows' existing swarm backend reports unavailable;
+a new Windows pane transport is outside this behavior-preserving follow-up.
+The first lint run also identified test-target documentation and iterator lints;
+those receive a separate diagnostic-only follow-up in this PR.
+
 Supply-chain CI reports advisories against the existing dependency lock. The
 all-features unit job also contains a stack overflow, settings/provider fixture
 failures, workflow timing failures, and Rust diagnostic snapshot differences.

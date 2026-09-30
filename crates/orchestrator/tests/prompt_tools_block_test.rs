@@ -1,3 +1,5 @@
+//! Available tools render through the prompt tools block.
+
 use orchestrator::prompt::tools_block;
 
 #[test]
