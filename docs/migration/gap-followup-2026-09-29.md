@@ -101,4 +101,6 @@ entire latest installed state remains unchanged after stale completion.
 Seven reload tests, twenty concurrent repetitions and five production-generation
 guard cases pass. The exact strict CI lint/format gate passes. Only test code
 changes; production APIs and the validated 0e8e54d/13ffbec native closure remain
-unchanged. Final post-commit CI is required separately.
+unchanged. [Final 6412274 CI](https://github.com/lingxi-coder/harness-runtime/actions/runs/36701417689)
+passes 26 of 27 jobs, including complete Linux unit tests and all native platform
+builds. Only cargo-vet source review remains red.
