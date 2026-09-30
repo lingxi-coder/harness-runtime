@@ -88,7 +88,6 @@ pub(crate) fn validate_tool_input_schema(
 /// Zod v4's issue objects survive at the tool boundary for constraints that
 /// JSON Schema cannot express. `zue` groups structural errors, falling back to
 /// the two-space JSON representation of *all* issues only when none group.
-
 pub(crate) fn validate_tool_schema(
     tool: &dyn tool_api::Tool,
     input: &serde_json::Value,

@@ -146,18 +146,13 @@ pub struct BinaryPin {
 /// A `monitors` entry's arm trigger (oracle `$s.when`): `"always"` arms at
 /// session start and on plugin reload; `"on-skill-invoke:<skill>"` arms the
 /// first time that skill is dispatched. Defaults to `Always`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum MonitorTrigger {
     /// Arms at session start and on plugin reload.
+    #[default]
     Always,
     /// Arms the first time the named skill is dispatched.
     OnSkillInvoke(String),
-}
-
-impl Default for MonitorTrigger {
-    fn default() -> Self {
-        Self::Always
-    }
 }
 
 impl MonitorTrigger {

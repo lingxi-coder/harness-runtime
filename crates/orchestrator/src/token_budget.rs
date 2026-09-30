@@ -235,7 +235,7 @@ fn group_en_us(n: u64) -> String {
     let commas = (len.saturating_sub(1)) / 3;
     let mut out = String::with_capacity(len + commas);
     for (i, b) in bytes.iter().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             out.push(',');
         }
         // `b` is an ASCII digit byte from `u64::to_string`.

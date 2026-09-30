@@ -132,9 +132,9 @@ pub(crate) fn bounds(
         schedule_factor,
     )?;
     Ok(Some(AttemptPriceBounds {
+        default_fast,
         standard,
         fast,
-        default_fast,
     }))
 }
 
@@ -174,19 +174,20 @@ fn tier_bounds(
                 continue;
             };
             rates.reasoning_per_million = rates.reasoning_per_million.or(rates.output_per_million);
-            for rate in [
+            for value in [
                 &mut rates.input_per_million,
                 &mut rates.output_per_million,
                 &mut rates.cache_read_per_million,
                 &mut rates.cache_write_per_million,
                 &mut rates.cache_write_1h_per_million,
                 &mut rates.reasoning_per_million,
-            ] {
-                if let Some(value) = rate {
-                    *value *= schedule_factor;
-                    if !value.is_finite() || *value < 0.0 {
-                        return Err(unavailable("attempt rate bound exceeds the numeric range"));
-                    }
+            ]
+            .into_iter()
+            .flatten()
+            {
+                *value *= schedule_factor;
+                if !value.is_finite() || *value < 0.0 {
+                    return Err(unavailable("attempt rate bound exceeds the numeric range"));
                 }
             }
             upper = Some(match upper {

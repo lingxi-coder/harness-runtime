@@ -4823,6 +4823,7 @@ mod configuration;
 mod credentials;
 mod fusion_services;
 mod permission_config;
+mod platform;
 mod shutdown;
 
 pub use assembly::build;

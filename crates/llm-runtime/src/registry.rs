@@ -206,7 +206,7 @@ impl ModelRegistry {
             profiles,
             lingxi_llm_client::protocol::Region::International,
         ));
-        Ok(Self { config, resolver })
+        Ok(Self { resolver, config })
     }
 
     /// Return configured profile/model pairs.

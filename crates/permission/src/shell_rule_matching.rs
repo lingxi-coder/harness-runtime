@@ -67,7 +67,7 @@ pub fn has_wildcards(pattern: &str) -> bool {
         match c {
             '\\' => backslashes += 1,
             '*' => {
-                if backslashes % 2 == 0 {
+                if backslashes.is_multiple_of(2) {
                     return true;
                 }
                 backslashes = 0;

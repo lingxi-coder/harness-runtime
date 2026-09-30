@@ -451,7 +451,7 @@ impl Autocompactor {
                 &raw_summary_text,
                 selector
                     .as_ref()
-                    .map_or(true, |overrides| overrides.suppress_follow_up_questions),
+                    .is_none_or(|overrides| overrides.suppress_follow_up_questions),
                 cache_params
                     .transcript_path
                     .as_deref()

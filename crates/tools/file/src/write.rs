@@ -477,7 +477,7 @@ impl Tool for FileWriteTool {
             );
         }
 
-        let bytes_written = content.as_bytes().len() as u64;
+        let bytes_written = content.len() as u64;
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, bytes_written, duration_ms)
             .await;

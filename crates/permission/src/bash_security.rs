@@ -1554,7 +1554,7 @@ fn has_unbalanced_quotes_raw(command: &str) -> bool {
         }
         i += 1;
     }
-    double_count % 2 != 0 || single_count % 2 != 0
+    !double_count.is_multiple_of(2) || !single_count.is_multiple_of(2)
 }
 
 /// Control-character pre-check (TS `CONTROL_CHAR_RE`, `bashSecurity.ts:2251`).
@@ -1599,8 +1599,8 @@ fn has_shell_quote_single_quote_bug(command: &str) -> bool {
                     return true;
                 }
                 if backslash_count > 0
-                    && backslash_count % 2 == 0
-                    && chars[i + 1..].iter().any(|&c| c == '\'')
+                    && backslash_count.is_multiple_of(2)
+                    && chars[i + 1..].contains(&'\'')
                 {
                     return true;
                 }

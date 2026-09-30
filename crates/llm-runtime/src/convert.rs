@@ -247,9 +247,8 @@ fn normalize_tool_references(
             else {
                 return true;
             };
-            available_tool_names.map_or(true, |available| {
-                available.contains(normalize_legacy_tool_name(name))
-            })
+            available_tool_names
+                .is_none_or(|available| available.contains(normalize_legacy_tool_name(name)))
         });
         has_surviving_reference |= blocks.iter().any(is_tool_reference);
         if blocks.is_empty() {

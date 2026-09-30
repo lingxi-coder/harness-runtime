@@ -766,7 +766,6 @@ pub(crate) fn request(
 
 /// Restore host legacy controls that are intentionally outside the SDK's typed
 /// request contract. Scoped continuations still pass through SDK validation.
-
 fn upstream_metadata(metadata: &mut Value) -> &mut serde_json::Map<String, Value> {
     if !metadata.is_object() {
         *metadata = if metadata.is_null() {

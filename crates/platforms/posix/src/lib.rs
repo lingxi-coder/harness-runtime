@@ -35,13 +35,16 @@
 
 pub mod bridge;
 pub mod clock;
+#[cfg(unix)]
 pub mod fs;
 pub mod http;
 pub mod lsp;
 pub mod mcp;
+#[cfg(unix)]
 pub mod process;
 pub mod runtime;
 pub mod sandbox;
+#[cfg(unix)]
 pub mod secure_storage;
 pub mod swarm;
 pub(crate) mod watch_helper;
@@ -51,6 +54,7 @@ pub mod wsl_detect;
 
 pub use bridge::PosixBridgeTransport;
 pub use clock::PosixClock;
+#[cfg(unix)]
 pub use fs::PosixFileSystem;
 pub use http::PosixHttp;
 pub use lsp::PosixLspTransport;
@@ -58,9 +62,11 @@ pub use mcp::PosixMcpTransport;
 // Convenience re-exports at the crate root so callers can write
 // `platform_posix::{connect_ws, spawn_stdio}` directly.
 pub use mcp::{connect_ws, spawn_stdio, McpTransportError};
+#[cfg(unix)]
 pub use process::PosixProcess;
 pub use runtime::PosixRuntime;
 pub use sandbox::PosixSandbox;
+#[cfg(unix)]
 pub use secure_storage::{
     plaintext_secure_storage, secure_storage_for_platform, secure_storage_for_policy,
     LinuxSecretStorage, MacOsKeychainStorage, PlainTextSecureStorage,
