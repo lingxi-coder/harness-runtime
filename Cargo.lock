@@ -7086,6 +7086,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "core",
+ "image 0.24.9",
  "mobile-linux-api",
  "once_cell",
  "permission",
@@ -7094,6 +7095,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tool-api",
+ "url",
 ]
 
 [[package]]

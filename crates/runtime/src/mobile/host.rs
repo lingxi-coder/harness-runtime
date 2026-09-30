@@ -781,8 +781,8 @@ fn mobile_skill_listing_provider(
                         description: c.description.clone(),
                         when_to_use: c.when_to_use.clone(),
                         // TS `cmd.source === 'bundled'` (prompt.ts) — bundled
-                        // skills are never truncated; mirror via loadedFrom.
-                        is_bundled: c.loaded_from.as_deref() == Some("bundled"),
+                        // skills are never truncated.
+                        is_bundled: c.source == CommandSource::Bundled,
                     })
                     .collect()
             }
@@ -850,6 +850,7 @@ fn mobile_reload_skills_handler(
     cwd: std::path::PathBuf,
     lingxi_home: std::path::PathBuf,
     home: std::path::PathBuf,
+    device_skill_tools: Vec<String>,
 ) -> command_api::builtins::reload_skills::ReloadSkillsHandler {
     command_api::builtins::reload_skills::ReloadSkillsHandler::with_all_roots(
         registry,
@@ -862,12 +863,13 @@ fn mobile_reload_skills_handler(
     )
     .with_locked_post_reload_finalizer(
         true,
-        Arc::new(|reg| {
+        Arc::new(move |reg| {
             reg.unregister_non_plugin_prefix(&format!(
                 "{}:",
                 crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
             ));
             crate::mobile::register_mobile_bundled_prompt_commands(reg);
+            crate::mobile::device_skills::register_mobile_device_skills(reg, &device_skill_tools);
         }),
     )
 }

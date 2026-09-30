@@ -3,6 +3,8 @@ include!("../permission_preference_tests.rs");
 include!("../model_preference_tests.rs");
 include!("../provider_region_tests.rs");
 include!("../reasoning_preference_tests.rs");
+#[path = "device_tools_tests.rs"]
+mod device_tools_tests;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

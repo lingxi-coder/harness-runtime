@@ -58,7 +58,7 @@ impl Tool for ShareTool {
         &INPUT_SCHEMA
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        true
+        self.ctx.share.is_some()
     }
     fn max_result_size_chars(&self) -> usize {
         1024

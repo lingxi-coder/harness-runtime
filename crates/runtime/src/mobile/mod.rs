@@ -52,6 +52,9 @@ mod host;
 // app-private root. Its dependencies are selected by the mobile runtime profile.
 #[cfg(feature = "mobile")]
 mod skill_loader;
+
+#[cfg(feature = "mobile")]
+mod device_skills;
 // v3 Phase 1: workflow-on-mobile composition pieces (launcher + deferred
 // invoker), consumed by the `host` build path.
 #[cfg(feature = "mobile")]
@@ -722,6 +725,18 @@ pub fn mobile_tool_registry(ctx: BuiltinToolContext) -> ToolRegistry {
 
 #[cfg(feature = "mobile")]
 pub(crate) const MOBILE_CHAT_TOOL_ALLOWLIST: &[&str] = &[
+    "camera",
+    "voice",
+    "speech",
+    "notification",
+    "clipboard",
+    "share",
+    "location",
+    "device_status",
+    "haptics",
+    "open_url",
+    "calendar",
+    "contacts",
     "AskUserQuestion",
     "Glob",
     "Grep",
@@ -1113,7 +1128,7 @@ mod tests {
 
     #[cfg(feature = "mobile")]
     #[test]
-    fn chat_profile_exposes_only_the_read_only_mobile_allowlist() {
+    fn chat_profile_exposes_read_tools_and_available_native_device_tools() {
         let ctx = shell_test_ctx(dummy_out());
         let code_registry = mobile_tool_registry(ctx.clone());
         assert!(code_registry.find_by_name("Write").is_some());
@@ -1143,8 +1158,6 @@ mod tests {
             "TaskCreate",
             "CronCreate",
             "ToolSearch",
-            "camera",
-            "notification",
         ] {
             assert!(
                 chat_registry.find_by_name(denied).is_none(),

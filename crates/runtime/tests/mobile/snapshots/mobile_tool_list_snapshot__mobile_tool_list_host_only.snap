@@ -36,9 +36,5 @@ expression: names
 - WebFetch
 - WebSearch
 - Write
-- camera
-- clipboard
-- notification
-- share
 - speech
 - voice

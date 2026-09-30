@@ -43,7 +43,10 @@ from pathlib import Path
 MAX_DESCRIPTION_COLUMNS = 180
 
 # 门要扫的 skill 根目录，相对仓库根。
-SKILL_ROOTS = ["crates/plugins/lingxi-local-app/skills"]
+SKILL_ROOTS = [
+    "crates/plugins/lingxi-local-app/skills",
+    "crates/runtime/src/mobile/device_skills",
+]
 
 # Agent 用同一套 frontmatter 判据,但形状不同:agent 是 `agents/<name>.md`
 # 单文件,identity 来自**文件名**;skill 是 `skills/<name>/SKILL.md`,identity

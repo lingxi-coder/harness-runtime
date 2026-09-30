@@ -69,7 +69,7 @@ impl Tool for NotificationTool {
         &INPUT_SCHEMA
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        true
+        self.ctx.notifications.is_some()
     }
     fn max_result_size_chars(&self) -> usize {
         4096
@@ -78,8 +78,7 @@ impl Tool for NotificationTool {
         false
     }
     fn is_read_only(&self, _input: &Value) -> bool {
-        // Posting a notification has no effect on the workspace files.
-        true
+        false
     }
 
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
@@ -206,6 +205,21 @@ mod tests {
         let mut ctx = tool_api::test_support::shell_test_ctx(empty_output());
         ctx.notifications = notifier;
         ctx
+    }
+
+    #[test]
+    fn notification_is_a_side_effect_and_requires_a_backend() {
+        let static_ctx = ToolStaticContext::default();
+        let tool = NotificationTool::new(ctx_with(None));
+        assert!(!tool.is_enabled(&static_ctx));
+        assert!(!tool.is_read_only(&json!({ "action": "post" })));
+
+        let tool = NotificationTool::new(ctx_with(Some(Arc::new(FakeNotifier {
+            deny: true,
+            ..Default::default()
+        }))));
+        assert!(tool.is_enabled(&static_ctx));
+        assert!(!tool.is_read_only(&json!({ "action": "post" })));
     }
 
     #[tokio::test]

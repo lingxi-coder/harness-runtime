@@ -1817,6 +1817,12 @@ pub(super) async fn build_mobile_inner_with_ask(
         share: platform.share(),
         notifications: platform.notifications(),
         clipboard: platform.clipboard(),
+        location: platform.location(),
+        device_status: platform.device_status(),
+        haptics: platform.haptics(),
+        deep_link: platform.deep_link(),
+        calendar: platform.calendar(),
+        contacts: platform.contacts(),
         computer_control: platform.computer_control(),
         // Mobile shell/git registration is fail-closed when the host selected
         // mobile-linux but the runtime is blocked or unlinked. In that state the
@@ -2061,6 +2067,11 @@ pub(super) async fn build_mobile_inner_with_ask(
         tools.register_builtin(tool);
     }
     crate::mobile::apply_mobile_session_tool_policy(&mut tools, cfg.session_mode);
+    let device_skill_tools = tools
+        .available_tools(&tool_api::tool_trait::ToolStaticContext::default())
+        .into_iter()
+        .map(|tool| tool.name().to_owned())
+        .collect::<Vec<_>>();
     let live_mcp_tool_ctx = tool_ctx.clone();
     let initial_mcp_tool_ctx = live_mcp_tool_ctx.clone();
     let app_agent_mcp_tool_context = live_mcp_tool_ctx.clone();
@@ -2506,6 +2517,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     )
     .await;
     crate::mobile::register_mobile_bundled_prompt_commands(&mut reg);
+    crate::mobile::device_skills::register_mobile_device_skills(&mut reg, &device_skill_tools);
     // `/workflows`: mobile cannot open the TUI picker, so bind the shared
     // command handler to the same live registry that powers workflow tools and
     // return the picker's snapshot as a structured command-output result.
@@ -2536,6 +2548,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         cwd.clone(),
         cfg.lingxi_home.clone(),
         cwd.clone(),
+        device_skill_tools.clone(),
     )));
     *shared_command_registry.write().await = reg;
     // P1.10 (§19.2): read the activation bit BEFORE materializing the
@@ -2672,6 +2685,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             cwd.clone(),
             cfg.lingxi_home.clone(),
             cwd.clone(),
+            device_skill_tools.clone(),
         );
         if let Some(parsed) = parse_slash_command("/reload-skills") {
             let _ = handler.handle(&parsed).await;
