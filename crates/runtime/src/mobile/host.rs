@@ -4878,6 +4878,11 @@ impl MobileEngineHandle {
         // connection-scoped and only resolves the broker's oneshot, so waiting
         // behind that lock turns the native sheet's submit spinner into a
         // deadlock. Resolve these two commands before serializing session state.
+        //
+        // The Local App approval answers are the same kind of command: a page
+        // bridge request parks on a capability or UI sheet INSIDE `submit_impl`
+        // (see `execute_bridge`), still holding the lock, and the answer that
+        // would release it must not queue behind it.
         match command {
             ClientCommand::AnswerAskUserQuestion {
                 request_id,
@@ -4888,6 +4893,9 @@ impl MobileEngineHandle {
             }
             ClientCommand::CancelAskUserQuestion { request_id } => {
                 self.resolve_ask_user_question(request_id, None).await
+            }
+            command if Self::is_local_app_approval_answer(&command) => {
+                self.resolve_local_app_approval(command).await
             }
             command => Box::pin(self.submit_impl(command)).await,
         }
@@ -4974,6 +4982,11 @@ impl MobileEngineHandle {
                 .update_shell_session_activity(true, busy, true);
         }
         match command {
+            // `submit` answers these before taking the lock; the arm only keeps
+            // a caller that reaches this function directly from dropping one.
+            answer if Self::is_local_app_approval_answer(&answer) => {
+                self.resolve_local_app_approval(answer).await
+            }
             // ── Turn driving (SPAWN + return promptly) ─────────────────────
             ClientCommand::SendPrompt {
                 text,
@@ -5982,74 +5995,6 @@ impl MobileEngineHandle {
                 PluginCommandDto::GetInventory { plugin_id } => {
                     self.emit_builtin_plugin_inventory(&plugin_id).await
                 }
-                // r1-backlog-native-confirmation-15, ACCEPTED DIVERGENCE —
-                // ANDROID ONLY as of this round. Both rejection messages below
-                // are raw English on the wire, and there is no channel to fix
-                // that from here, but the two clients no longer degrade the
-                // same way:
-                //   * iOS localizes at the CALL SITE — `LocalAppsStore`'s
-                //     `sendApprovalResolution` catches `ClientError.Rejected`
-                //     from a resolve command and substitutes
-                //     `local_apps_error_operation_interaction_invalid`
-                //     (LocalAppsStore.swift:2252-2255).
-                //   * Android still shows the English, because
-                //     `LocalAppsViewModel.localizedPluginError` covers
-                //     `LocalAppOperationFailed`, not `ClientError`.
-                // Do not read this note as "the iOS fix does not exist"; the
-                // remaining work is the Android half and the typed channel.
-                // `ClientError` is flat by documented design —
-                // every variant is a bare `message: String`, ~250 call sites,
-                // and adding a code field is settled as out of bounds — and
-                // the one typed local-app channel, `AppEventDto::
-                // LocalAppOperationFailed`'s `LocalAppPluginErrorCodeDto`, has
-                // no member that means "unknown or expired approval"; reusing
-                // a wrong one is strictly worse, because Android DOES render
-                // it (`LocalAppsViewModel.localizedPluginError`) and would
-                // show confidently wrong copy. See the same four-file recipe
-                // written out at `local_apps_host.rs`'s
-                // `wait_for_native_approval_with_timeout`: append (never
-                // insert — UniFFI encodes by declaration ordinal) a member,
-                // add its string to the five `clients/translations/*.json`
-                // sources, regenerate both catalogs, add the Android arm, then
-                // emit it here. Until that lands this stays English.
-                //
-                // What DID change: `reemit_pending_native_approvals` (wired
-                // into `GetManagedMcpInventory` above) removes the common way
-                // a client ends up answering a request the engine no longer
-                // holds — a reattaching client is now handed the LIVE
-                // `request_id` instead of answering with a stale one.
-                PluginCommandDto::ResolveCreateConfirmation {
-                    request_id,
-                    approved,
-                } => {
-                    if self
-                        .local_apps_host
-                        .resolve_create_confirmation(&request_id, approved)
-                        .await
-                    {
-                        Ok(())
-                    } else {
-                        Err(ClientError::Rejected {
-                            message: "unknown or expired Local App create confirmation".into(),
-                        })
-                    }
-                }
-                PluginCommandDto::ResolveMcpProposalApproval {
-                    request_id,
-                    approved,
-                } => {
-                    if self
-                        .local_apps_host
-                        .resolve_mcp_proposal_approval(&request_id, approved)
-                        .await
-                    {
-                        Ok(())
-                    } else {
-                        Err(ClientError::Rejected {
-                            message: "unknown or expired Local App MCP proposal approval".into(),
-                        })
-                    }
-                }
                 PluginCommandDto::GetManagedMcpInventory => {
                     let inventory = self.local_apps_host.emit_managed_mcp_inventory().await;
                     // r3-failure-paths-02: this is the snapshot command both
@@ -6236,53 +6181,6 @@ impl MobileEngineHandle {
             }
             ClientCommand::ExecuteAppBridgeRequest { request } => {
                 self.local_apps_host.execute_bridge(request).await;
-                Ok(())
-            }
-            ClientCommand::ResolveAppUiRequest {
-                request_id,
-                decision,
-                result_json,
-                error,
-            } => {
-                if !self
-                    .local_apps_host
-                    .resolve_ui(&request_id, decision, result_json, error)
-                    .await
-                {
-                    tracing::debug!(request_id, "unknown or completed local-app UI request");
-                }
-                Ok(())
-            }
-            ClientCommand::ResolveAppCapabilityRequest {
-                request_id,
-                decision,
-            } => {
-                if !self
-                    .local_apps_host
-                    .resolve_capability(&request_id, decision)
-                    .await
-                {
-                    tracing::debug!(
-                        request_id,
-                        "unknown or completed local-app capability request"
-                    );
-                }
-                Ok(())
-            }
-            ClientCommand::ResolveAppDependencyChangeConfirmation {
-                request_id,
-                approved,
-            } => {
-                if !self
-                    .local_apps_host
-                    .resolve_dependency_change_confirmation(&request_id, approved)
-                    .await
-                {
-                    tracing::debug!(
-                        request_id,
-                        "unknown or completed local-app dependency change confirmation"
-                    );
-                }
                 Ok(())
             }
             ClientCommand::ResolveAppProfileProposal {
@@ -6738,6 +6636,150 @@ impl MobileEngineHandle {
 }
 
 impl MobileEngineHandle {
+    /// The commands that only answer a question the Local Apps broker is
+    /// already waiting on. Each one resolves a pending oneshot and reads or
+    /// writes no session state, which is what lets them skip `loop_transition`.
+    fn is_local_app_approval_answer(command: &ClientCommand) -> bool {
+        matches!(
+            command,
+            ClientCommand::ResolveAppUiRequest { .. }
+                | ClientCommand::ResolveAppCapabilityRequest { .. }
+                | ClientCommand::ResolveAppDependencyChangeConfirmation { .. }
+                | ClientCommand::PluginCommand {
+                    command: PluginCommandDto::ResolveCreateConfirmation { .. }
+                        | PluginCommandDto::ResolveMcpProposalApproval { .. }
+                }
+        )
+    }
+
+    async fn resolve_local_app_approval(&self, command: ClientCommand) -> Result<(), ClientError> {
+        match command {
+            ClientCommand::PluginCommand { command } => match command {
+                // r1-backlog-native-confirmation-15, ACCEPTED DIVERGENCE —
+                // ANDROID ONLY as of this round. Both rejection messages below
+                // are raw English on the wire, and there is no channel to fix
+                // that from here, but the two clients no longer degrade the
+                // same way:
+                //   * iOS localizes at the CALL SITE — `LocalAppsStore`'s
+                //     `sendApprovalResolution` catches `ClientError.Rejected`
+                //     from a resolve command and substitutes
+                //     `local_apps_error_operation_interaction_invalid`
+                //     (LocalAppsStore.swift:2252-2255).
+                //   * Android still shows the English, because
+                //     `LocalAppsViewModel.localizedPluginError` covers
+                //     `LocalAppOperationFailed`, not `ClientError`.
+                // Do not read this note as "the iOS fix does not exist"; the
+                // remaining work is the Android half and the typed channel.
+                // `ClientError` is flat by documented design —
+                // every variant is a bare `message: String`, ~250 call sites,
+                // and adding a code field is settled as out of bounds — and
+                // the one typed local-app channel, `AppEventDto::
+                // LocalAppOperationFailed`'s `LocalAppPluginErrorCodeDto`, has
+                // no member that means "unknown or expired approval"; reusing
+                // a wrong one is strictly worse, because Android DOES render
+                // it (`LocalAppsViewModel.localizedPluginError`) and would
+                // show confidently wrong copy. See the same four-file recipe
+                // written out at `local_apps_host.rs`'s
+                // `wait_for_native_approval_with_timeout`: append (never
+                // insert — UniFFI encodes by declaration ordinal) a member,
+                // add its string to the five `clients/translations/*.json`
+                // sources, regenerate both catalogs, add the Android arm, then
+                // emit it here. Until that lands this stays English.
+                //
+                // What DID change: `reemit_pending_native_approvals` (wired
+                // into `GetManagedMcpInventory` above) removes the common way
+                // a client ends up answering a request the engine no longer
+                // holds — a reattaching client is now handed the LIVE
+                // `request_id` instead of answering with a stale one.
+                PluginCommandDto::ResolveCreateConfirmation {
+                    request_id,
+                    approved,
+                } => {
+                    if self
+                        .local_apps_host
+                        .resolve_create_confirmation(&request_id, approved)
+                        .await
+                    {
+                        Ok(())
+                    } else {
+                        Err(ClientError::Rejected {
+                            message: "unknown or expired Local App create confirmation".into(),
+                        })
+                    }
+                }
+                PluginCommandDto::ResolveMcpProposalApproval {
+                    request_id,
+                    approved,
+                } => {
+                    if self
+                        .local_apps_host
+                        .resolve_mcp_proposal_approval(&request_id, approved)
+                        .await
+                    {
+                        Ok(())
+                    } else {
+                        Err(ClientError::Rejected {
+                            message: "unknown or expired Local App MCP proposal approval".into(),
+                        })
+                    }
+                }
+                _ => Err(ClientError::Rejected {
+                    message: "not a Local App approval answer".to_string(),
+                }),
+            },
+            ClientCommand::ResolveAppUiRequest {
+                request_id,
+                decision,
+                result_json,
+                error,
+            } => {
+                if !self
+                    .local_apps_host
+                    .resolve_ui(&request_id, decision, result_json, error)
+                    .await
+                {
+                    tracing::debug!(request_id, "unknown or completed local-app UI request");
+                }
+                Ok(())
+            }
+            ClientCommand::ResolveAppCapabilityRequest {
+                request_id,
+                decision,
+            } => {
+                if !self
+                    .local_apps_host
+                    .resolve_capability(&request_id, decision)
+                    .await
+                {
+                    tracing::debug!(
+                        request_id,
+                        "unknown or completed local-app capability request"
+                    );
+                }
+                Ok(())
+            }
+            ClientCommand::ResolveAppDependencyChangeConfirmation {
+                request_id,
+                approved,
+            } => {
+                if !self
+                    .local_apps_host
+                    .resolve_dependency_change_confirmation(&request_id, approved)
+                    .await
+                {
+                    tracing::debug!(
+                        request_id,
+                        "unknown or completed local-app dependency change confirmation"
+                    );
+                }
+                Ok(())
+            }
+            _ => Err(ClientError::Rejected {
+                message: "not a Local App approval answer".to_string(),
+            }),
+        }
+    }
+
     /// Resolve a parked permission request on the connection-scoped gate (the
     /// inbound side of the inverted handshake). The gate owns the original tool
     /// name and rejects stale/unknown ids rather than accepting a phantom tap.

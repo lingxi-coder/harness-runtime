@@ -6660,6 +6660,172 @@ fn submit_question_answer_bypasses_a_held_transition_lock() {
     });
 }
 
+/// The Local App approval answers only resolve the broker's oneshots, so like
+/// the `AskUserQuestion` answer they must not wait behind the transition lock.
+/// A page bridge request parks on a native capability sheet while `submit_impl`
+/// still holds that lock; the user's answer is the only thing that releases it.
+#[test]
+fn submit_local_app_approval_answers_bypass_a_held_transition_lock() {
+    use client::protocol::local_apps::{AppAuthorizationDecisionDto, PluginCommandDto};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (handle, _listener) = build_submit_handle(tmp.path());
+
+    handle.runtime().block_on(async {
+        let transition = handle.loop_transition.lock().await;
+        let answers = vec![
+            (
+                "ResolveAppCapabilityRequest",
+                ClientCommand::ResolveAppCapabilityRequest {
+                    request_id: "unknown".into(),
+                    decision: AppAuthorizationDecisionDto::Deny,
+                },
+            ),
+            (
+                "ResolveAppUiRequest",
+                ClientCommand::ResolveAppUiRequest {
+                    request_id: "unknown".into(),
+                    decision: AppAuthorizationDecisionDto::Deny,
+                    result_json: None,
+                    error: None,
+                },
+            ),
+            (
+                "ResolveAppDependencyChangeConfirmation",
+                ClientCommand::ResolveAppDependencyChangeConfirmation {
+                    request_id: "unknown".into(),
+                    approved: false,
+                },
+            ),
+            (
+                "ResolveMcpProposalApproval",
+                ClientCommand::PluginCommand {
+                    command: PluginCommandDto::ResolveMcpProposalApproval {
+                        request_id: "unknown".into(),
+                        approved: false,
+                    },
+                },
+            ),
+            (
+                "ResolveCreateConfirmation",
+                ClientCommand::PluginCommand {
+                    command: PluginCommandDto::ResolveCreateConfirmation {
+                        request_id: "unknown".into(),
+                        approved: false,
+                    },
+                },
+            ),
+        ];
+        for (name, command) in answers {
+            // An unknown id is a refusal or a no-op; what matters is that it
+            // is answered at all while the lock is held.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle.submit(command))
+                .await
+                .unwrap_or_else(|_| panic!("{name} must not wait for the transition lock"));
+        }
+        drop(transition);
+    });
+}
+
+/// The deadlock behind the test above, end to end. A page asks to read a file
+/// for which the user has not granted the capability: `ExecuteAppBridgeRequest`
+/// parks on the native sheet for up to five minutes. The answer is a second
+/// `submit`; if it queues behind the parked request on `loop_transition` only
+/// the approval timeout can end the wait, and `Cancel` is stuck with it.
+#[test]
+fn a_bridge_request_parked_on_a_capability_sheet_does_not_block_the_answer() {
+    use client::protocol::local_apps::{
+        AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
+    };
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (handle, listener) = build_submit_handle(tmp.path());
+
+    handle.runtime().block_on(async {
+        handle
+            .submit(ClientCommand::CreateApp {
+                name: "Sheet".into(),
+                origin: AppCreateOriginDto::Library,
+                brief: "capability sheet".into(),
+                git_enabled: true,
+                workflow_model: None,
+                conversation_id: None,
+                surface: None,
+                mode: AppCreateModeDto::Shell,
+                request_id: None,
+            })
+            .await
+            .expect("submit(CreateApp)");
+        let events = drain_events(&handle, &listener).await;
+        let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
+        let app_id = record.id;
+        let layout = local_apps::AppLayout::new(tmp.path(), app_id.clone()).expect("layout");
+        let mut manifest = local_apps::load_manifest(&layout).expect("manifest");
+        manifest
+            .capabilities
+            .push(local_apps::AppCapability::FilesRead);
+        local_apps::save_manifest(&layout, &manifest).expect("declare files.read");
+
+        let engine = handle.clone();
+        let bridge_app = app_id.clone();
+        let bridge = tokio::spawn(async move {
+            engine
+                .submit(ClientCommand::ExecuteAppBridgeRequest {
+                    request: AppBridgeRequestDto {
+                        request_id: "bridge-1".into(),
+                        app_id: bridge_app,
+                        operation: AppBridgeOperationDto::FileRead,
+                        payload_json: Some(serde_json::json!({"path": "note.txt"}).to_string()),
+                    },
+                })
+                .await
+        });
+
+        let request_id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                for event in listener.received.lock().await.iter() {
+                    if let Ev::AppEvent {
+                        event: AppEventDto::AppCapabilityRequested { request },
+                    } = event
+                    {
+                        return request.request_id.clone();
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the parked bridge request must raise the capability sheet");
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle.submit(ClientCommand::ResolveAppCapabilityRequest {
+                request_id,
+                decision: AppAuthorizationDecisionDto::Deny,
+            }),
+        )
+        .await
+        .expect("the sheet's answer must reach the host while the bridge request is parked on it")
+        .expect("the answer is accepted");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), bridge)
+            .await
+            .expect("the denied bridge request finishes")
+            .expect("the bridge task joins")
+            .expect("submit(ExecuteAppBridgeRequest) resolves Ok");
+        let events = drain_events(&handle, &listener).await;
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Ev::AppEvent {
+                    event: AppEventDto::AppBridgeResponse { response }
+                } if response.request_id == "bridge-1" && !response.ok
+            )),
+            "a denied capability answers the page with a failed bridge response, got {events:?}"
+        );
+    });
+}
+
 /// A provider/model failure is terminal for the connection slot just like a
 /// successful or cancelled turn. The orchestrator surfaces authentication
 /// failure as a `model_error` turn, then session control becomes available.
