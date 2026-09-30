@@ -1,3 +1,5 @@
+//! Regression tests for protocol test.
+
 use lingxi_llm_client::protocol::{
     ContentBlock, ConversationMessage, ImageSource, MessageRole, ToolSpec,
 };

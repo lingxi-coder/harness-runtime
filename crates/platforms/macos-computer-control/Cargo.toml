@@ -28,12 +28,7 @@ core = { path = "../../core" }
 async-trait.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Every version pin below is load-bearing: the workspace is hard-pinned to
-# Rust 1.82.0 (rust-toolchain.toml), and the current releases of most of
-# these crates (and several of THEIR transitive deps) have moved to the
-# `edition2024` Cargo feature, which 1.82's cargo cannot parse at all — not a
-# soft warning, a hard resolver failure. Each pin below is the newest release
-# confirmed to still resolve+build clean under 1.82.0.
+# Platform versions are validated with the workspace Rust 1.94 toolchain.
 enigo = "=0.3.0"
 xcap = "=0.5.2"
 # xcap depends on `image = "0.25"` unconstrained; left alone the resolver
@@ -42,11 +37,7 @@ xcap = "=0.5.2"
 # whole graph down to it.
 image = { version = "=0.25.6", default-features = false, features = ["png"] }
 arboard = { version = "3", default-features = false } # default "image"/"image-data" features pull the same moxcms chain; we only need text
-plist = "=1.8.0" # 1.10+ requires rustc 1.88
-# Transitive-only pin (via xcap's zbus/wayland stack) — nothing here imports
-# `time` directly, but leaving it unconstrained lets the resolver float to a
-# `time-core` that requires edition2024.
-time-core = "=0.1.2"
+plist = "=1.10.1" # XML parsing fixes; supported by the workspace Rust 1.94 toolchain
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "NSApplication"] }

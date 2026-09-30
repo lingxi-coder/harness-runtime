@@ -11,12 +11,12 @@ lingxi-llm-client = { workspace = true, features = ["responses-websocket"] }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
-tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 # mTLS client-identity + custom CA-trust (CLAUDE_CODE_CLIENT_CERT/_KEY/_KEY_PASSPHRASE/CERT_STORE):
 # rustls-native-certs = OS trust store, pkcs8+pem = decrypt an encrypted PKCS#8 client key.
 rustls-native-certs = "0.8"
-rustls = "0.22"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "0.26"
 pkcs8 = { version = "0.10", features = ["encryption"] }
 pem = "3"
@@ -43,7 +43,7 @@ async-trait = { workspace = true }
 # stands up a client-auth-required HTTPS server on loopback, tempfile holds the
 # PEM material the transport reads.
 rcgen = { version = "=0.13.2", default-features = false, features = ["ring", "pem"] }
-tokio-rustls = "0.25"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tempfile = "3"
 
 [lints]

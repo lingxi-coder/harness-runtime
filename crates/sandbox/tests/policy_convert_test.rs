@@ -1,3 +1,5 @@
+//! Regression tests for policy convert test.
+
 use sandbox::policy_convert::{
     convert_settings_to_runtime_config, linux_glob_pattern_warnings, SandboxConvertContext,
 };

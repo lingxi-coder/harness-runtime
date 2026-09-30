@@ -481,11 +481,6 @@ mod tests {
         assert!(serde_json::from_str::<Scope>("\"Managed\"").is_ok());
     }
 
-    /// `scope()` answers "which rung" only for store-backed provenance, and
-    /// says `None` for the rest. That `None` must mean "a rung does not
-    /// describe this", never "unknown rung" — if it ever came to mean both,
-    /// a caller could not tell a plugin-delivered hook from one whose rung was
-
     /// `MemoryEntry.tier` has always serialized PascalCase. Pinned on both the
     /// narrow type that carries the field and the wide one it converts to, so
     /// the two cannot drift apart.

@@ -9,9 +9,8 @@
 //! ## Crypto backend
 //!
 //! The TS uses `node-forge`. The faithful Rust equivalent is [`rcgen`] (X.509
-//! building/signing, kept on the **ring** backend to match rustls 0.22's
-//! provider — no `aws-lc-rs` C build) plus the [`rsa`] crate for RSA-2048
-//! keygen (ring can sign RSA but cannot generate RSA keys). The CA is RSA-2048,
+//! building/signing) with the AWS-LC backend for RSA key generation and
+//! signing. TLS continues to use its configured ring provider. The CA is RSA-2048,
 //! SHA-256, validity `[now-1d, now+825d]`, `basicConstraints cA:true critical`,
 //! `keyUsage critical {keyCertSign,cRLSign,digitalSignature}`, plus a
 //! subjectKeyIdentifier — exactly as the TS emits.
@@ -31,8 +30,6 @@ use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose,
     SerialNumber, PKCS_RSA_SHA256,
 };
-use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
-use rsa::RsaPrivateKey;
 use time::{Duration, OffsetDateTime};
 
 /// A minted per-host leaf certificate plus its private key, both PEM-encoded.
@@ -208,28 +205,13 @@ fn load_ca(cert_path: &Path, key_path: &Path) -> Result<MitmCa, MitmCaError> {
     let cert_pem = read_pem(cert_path, "CERTIFICATE", "tlsTerminate.caCertPath")?;
     let key_pem = read_pem(key_path, "PRIVATE KEY", "tlsTerminate.caKeyPath")?;
 
-    // Enforce the key is RSA (the TS checks `'n' in key && 'd' in key` because
-    // node-forge can only sign with RSA private keys; rcgen+ring sign RSA the
-    // same way). Parsing as an RSA PKCS#8 key both validates and proves RSA-ness.
-    let rsa_key = RsaPrivateKey::from_pkcs8_pem(&key_pem).map_err(|_| {
-        MitmCaError::Load(format!(
-            "tlsTerminate.caKeyPath: CA key at {} must be RSA",
-            key_path.display()
-        ))
-    })?;
-    // Re-encode to canonical PKCS#8 PEM so rcgen's KeyPair accepts it (the
-    // on-disk form may be PKCS#1 "RSA PRIVATE KEY").
-    let pkcs8_pem = rsa_key.to_pkcs8_pem(LineEnding::LF).map_err(|err| {
-        MitmCaError::Load(format!(
-            "tlsTerminate: failed to parse CA from {}: {err}",
-            cert_path.display()
-        ))
-    })?;
+    // Selecting the RSA signing algorithm validates the supplied PKCS#8 key
+    // without using the vulnerable RustCrypto RSA implementation.
     let signing_key =
-        KeyPair::from_pkcs8_pem_and_sign_algo(&pkcs8_pem, &PKCS_RSA_SHA256).map_err(|err| {
+        KeyPair::from_pkcs8_pem_and_sign_algo(&key_pem, &PKCS_RSA_SHA256).map_err(|_| {
             MitmCaError::Load(format!(
-                "tlsTerminate: failed to parse CA from {}: {err}",
-                cert_path.display()
+                "tlsTerminate.caKeyPath: CA key at {} must be RSA",
+                key_path.display()
             ))
         })?;
     let params = CertificateParams::from_ca_cert_pem(&cert_pem).map_err(|err| {
@@ -264,17 +246,9 @@ fn load_ca(cert_path: &Path, key_path: &Path) -> Result<MitmCa, MitmCaError> {
 
 /// Generate a fresh ephemeral RSA-2048 self-signed CA into a `0700` temp dir.
 fn generate_ephemeral_ca() -> Result<MitmCa, MitmCaError> {
-    // RSA-2048 keygen via the `rsa` crate (ring cannot generate RSA). `OsRng`
-    // is re-exported by `rsa` at the `rand_core` version it expects.
-    let mut rng = rsa::rand_core::OsRng;
-    let rsa_key = RsaPrivateKey::new(&mut rng, 2048)
+    let signing_key = KeyPair::generate_for(&PKCS_RSA_SHA256)
         .map_err(|err| MitmCaError::Generate(format!("[mitm-ca] RSA keygen failed: {err}")))?;
-    let key_pem = rsa_key
-        .to_pkcs8_pem(LineEnding::LF)
-        .map_err(|err| MitmCaError::Generate(format!("[mitm-ca] key encode failed: {err}")))?
-        .to_string();
-    let signing_key = KeyPair::from_pkcs8_pem_and_sign_algo(&key_pem, &PKCS_RSA_SHA256)
-        .map_err(|err| MitmCaError::Generate(format!("[mitm-ca] key wrap failed: {err}")))?;
+    let key_pem = signing_key.serialize_pem();
 
     let now = OffsetDateTime::now_utc();
     let mut params = CertificateParams::default();

@@ -79,11 +79,16 @@ jobs:
 
   unit-tests:
     runs-on: ubuntu-latest
+    env:
+      # Debug async state machines exceed libtest's 2 MiB default thread stack.
+      RUST_MIN_STACK: "16777216"
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Install runtime integration test dependencies
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap socat
       - name: cargo test
         # `--no-fail-fast` is load-bearing, not tidiness. Without it cargo stops
         # at the first failing test BINARY and never runs the rest, so one red
@@ -172,7 +177,7 @@ jobs:
         # CVSS-4.0 advisory entries now present in the live RUSTSEC DB.
         run: cargo install cargo-deny --locked --version '^0.19'
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked --version '^0.21'
+        run: cargo install cargo-audit --locked --version '^0.22'
       - name: Install cargo-vet
         run: cargo install cargo-vet --locked --version '^0.10'
       - name: cargo deny check
@@ -184,10 +189,8 @@ jobs:
       - name: cargo audit
         run: cargo audit --deny warnings
       - name: cargo vet
-        # vet requires supply-chain/ directory with audits. If absent,
-        # `cargo vet check --locked` prints a setup hint without failing
-        # (the directory lives outside this plan's scope; M4 deliverable).
-        run: cargo vet check --locked || echo "::warning::cargo vet supply-chain/ not yet configured; v0.4.0 ships the workflow, M4 adds the audit data"
+        # Source reviews are required; the checked-in audit store has no exemptions.
+        run: cargo vet check --locked
 
   parity-fixtures:
     # Per the brief: "add parity-fixture gating (every parity_*.rs driver
@@ -225,8 +228,8 @@ jobs:
         include:
           - name: minimal
             features: ""
-          - name: core
-            features: core
+          - name: engine
+            features: engine
           - name: desktop
             features: desktop
           - name: mobile
@@ -262,6 +265,15 @@ jobs:
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Ensure Windows crypto assembler is available
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --no-progress -y
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
       - name: Check desktop runtime against the native platform
         run: cargo check --locked -p harness-runtime --no-default-features --features desktop
 

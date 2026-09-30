@@ -881,8 +881,8 @@ fn pricing_overrides_optional_fields_may_be_absent() {
         "cache_read defaults to 0"
     );
     assert!(
-        (tp.reasoning_per_million - 0.0).abs() < 1e-12,
-        "reasoning defaults to 0"
+        (tp.reasoning_per_million - tp.output_per_million).abs() < 1e-12,
+        "reasoning defaults to the configured output rate"
     );
 }
 

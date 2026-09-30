@@ -1,3 +1,5 @@
+//! Regression tests for model attempt context test.
+
 use std::sync::Arc;
 
 use lingxi_core::host::{ModelAttemptRun, ModelAttemptStage};

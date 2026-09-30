@@ -1,3 +1,5 @@
+//! Regression tests for loop permission parity.
+
 use permission::policy::PermissionPolicy;
 use permission::rule::{
     PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue,

@@ -1,3 +1,5 @@
+//! Regression tests for decision compound test.
+
 // `split_compound_command` was removed from the `sandbox` crate; the canonical
 // quote-aware splitter is `permission::shell_command::split_command` (which
 // `should_use_sandbox` / `should_use_sandbox_for_command` now call internally).

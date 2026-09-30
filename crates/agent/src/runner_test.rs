@@ -5497,7 +5497,7 @@ async fn local_app_create_json_correction_preserves_completed_scaffold_and_read(
     assert_eq!(histories[3].len(), histories[2].len() + 1);
     let correction = user_text(histories[3].last().unwrap()).unwrap();
     assert!(correction.contains("Write JSON correction 1/2"));
-    assert!(correction.contains("EOF while parsing an object"));
+    assert!(correction.contains("invalid JSON tool input"));
     assert!(correction.contains("Call Write again with one complete, concise JSON object"));
     assert!(correction.contains("do not repeat completed tools"));
     assert!(

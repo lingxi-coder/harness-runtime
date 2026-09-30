@@ -1,3 +1,5 @@
+//! Regression tests for cost schema test.
+
 use telemetry::tengu::cost;
 
 #[test]

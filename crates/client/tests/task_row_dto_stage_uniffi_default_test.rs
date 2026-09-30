@@ -17,7 +17,7 @@
 #![cfg(feature = "uniffi")]
 
 use client::protocol::listings::UNIFFI_META_CLIENT_RECORD_TASKROWDTO;
-use uniffi_meta::{LiteralMetadata, Metadata};
+use uniffi_meta::{DefaultValueMetadata, LiteralMetadata, Metadata};
 
 #[test]
 fn task_row_dto_stage_field_carries_a_uniffi_none_default() {
@@ -42,8 +42,8 @@ fn task_row_dto_stage_field_carries_a_uniffi_none_default() {
 
     assert_eq!(
         stage_field.default,
-        Some(LiteralMetadata::None),
-        "TaskRowDto.stage has UniFFI default {:?}, expected `Some(LiteralMetadata::None)`. \
+        Some(DefaultValueMetadata::Literal(LiteralMetadata::None)),
+        "TaskRowDto.stage has UniFFI default {:?}, expected `Some(DefaultValueMetadata::Literal(LiteralMetadata::None))`. \
          Without that default, UniFFI's generated Kotlin/Swift bindings give `stage` a \
          REQUIRED trailing constructor parameter, and every existing 6-arg hand-written \
          `TaskRowDto(...)` call site in the mobile test targets \
@@ -70,7 +70,10 @@ fn task_row_kind_is_appended_and_optional_in_generated_constructors() {
         record.fields[9].name, "kind",
         "later additions must preserve kind's positional index"
     );
-    assert_eq!(field.default, Some(LiteralMetadata::None));
+    assert_eq!(
+        field.default,
+        Some(DefaultValueMetadata::Literal(LiteralMetadata::None))
+    );
 }
 
 #[test]
@@ -106,9 +109,20 @@ fn task_row_display_fields_are_trailing_and_have_generated_constructor_defaults(
     );
     assert_eq!(
         record.fields[10].default,
-        Some(LiteralMetadata::Boolean(false))
+        Some(DefaultValueMetadata::Literal(LiteralMetadata::Boolean(
+            false
+        )))
     );
-    assert_eq!(record.fields[11].default, Some(LiteralMetadata::None));
-    assert_eq!(record.fields[12].default, Some(LiteralMetadata::None));
-    assert_eq!(record.fields[13].default, Some(LiteralMetadata::None));
+    assert_eq!(
+        record.fields[11].default,
+        Some(DefaultValueMetadata::Literal(LiteralMetadata::None))
+    );
+    assert_eq!(
+        record.fields[12].default,
+        Some(DefaultValueMetadata::Literal(LiteralMetadata::None))
+    );
+    assert_eq!(
+        record.fields[13].default,
+        Some(DefaultValueMetadata::Literal(LiteralMetadata::None))
+    );
 }

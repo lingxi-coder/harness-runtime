@@ -1345,7 +1345,7 @@ mod tests {
         assert!(
             !path_in_allowed_working_path(
                 &workspace.join("build/out"),
-                &[workspace.clone()],
+                std::slice::from_ref(&workspace),
                 &roots
             ),
             "writing through a dangling symlink to an outside target must not be contained"

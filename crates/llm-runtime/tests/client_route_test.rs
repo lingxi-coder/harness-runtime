@@ -1,3 +1,5 @@
+//! Regression tests for client route test.
+
 use llm_runtime::client::ModelRuntime;
 use llm_runtime::{
     AuthStrategy, Capabilities, ClientConfig, CredentialConfig, LlmError, LlmRequest, ModelProfile,
@@ -468,7 +470,7 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
     let mut resumed = LlmRequest::new("qwen/qwen3-coder:free");
     assign_history(
         &mut resumed,
-        &vec![
+        &[
             llm_runtime::Message {
                 role: "assistant".to_string(),
                 content: vec![
@@ -553,7 +555,7 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
     let mut image_request = LlmRequest::new("qwen/qwen3-coder:free");
     assign_history(
         &mut image_request,
-        &vec![llm_runtime::Message {
+        &[llm_runtime::Message {
             role: "user".to_string(),
             content: vec![
                 llm_runtime::ContentBlock::Text {
@@ -583,7 +585,7 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
     let mut history_request = LlmRequest::new("qwen/qwen3-coder:free");
     assign_history(
         &mut history_request,
-        &vec![
+        &[
             llm_runtime::Message {
                 role: "user".to_string(),
                 content: vec![

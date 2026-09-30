@@ -1,3 +1,5 @@
+//! Regression tests for provider services.
+
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
@@ -14,7 +16,7 @@ use llm_runtime::{
         },
         sdk, ProviderServices,
     },
-    BoxFuture, LlmError, ProviderRequest, ProviderResponse, StreamingResponse, Transport,
+    BoxFuture, LlmError, ProviderRequest, ProviderResponse, StreamingResponse,
 };
 use serde_json::json;
 
@@ -396,8 +398,7 @@ async fn host_configured_files_honor_explicit_credentials_and_matching_account_s
     ] {
         let transport = Arc::new(HostTransport::default());
         let credentials = Arc::new(HostCredentials::default());
-        let services =
-            host_configured_services(auth.clone(), transport.clone(), credentials.clone());
+        let services = host_configured_services(auth, transport.clone(), credentials.clone());
         let anthropic = services
             .client()
             .provider::<AnthropicClient>("resources")

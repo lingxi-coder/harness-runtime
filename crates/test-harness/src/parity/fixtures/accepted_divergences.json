@@ -168,7 +168,7 @@
       "status": "active",
       "anchors": [
         { "kind": "absent", "path": "crates/plugin", "text": "exportTree" },
-        { "kind": "present", "path": "crates/docs/parity-2.1.267-mcp-plugin-2026-09-10.md", "text": "surface module" }
+        { "kind": "present", "path": "crates/plugin/src/lib.rs", "text": "pub mod manifest;" }
       ]
     },
     {

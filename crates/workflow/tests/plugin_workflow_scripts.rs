@@ -451,7 +451,8 @@ fn every_checked_in_plugin_workflow_passes_the_runtime_validators() {
 fn phase4_and_phase6_workflows_use_real_orchestration() {
     let use_test = std::fs::read_to_string(workflow_dir().join("local-app-use-test.js"))
         .expect("read use-test workflow");
-    for (name, source) in [("local-app-use-test.js", use_test)] {
+    {
+        let (name, source) = ("local-app-use-test.js", use_test);
         let code = strip_line_comments(&source);
         assert!(
             code.contains("agent("),

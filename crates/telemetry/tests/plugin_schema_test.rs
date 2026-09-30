@@ -1,3 +1,5 @@
+//! Regression tests for plugin schema test.
+
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::tengu::plugin::{
     self, EnabledVia, LoadFailedPayload, NameCollisionPayload, PluginEnabledForSessionPayload,

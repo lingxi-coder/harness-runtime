@@ -764,6 +764,7 @@ pub struct CoordinatorWiring {
     pub spawn_seam: Arc<dyn lingxi_core::host::team_spawn::TeamSpawnSeam>,
 }
 
+#[cfg(unix)]
 fn teammate_backend_selector(
     cwd: std::path::PathBuf,
     flag_mode: Option<lingxi_core::settings::schema::TeammateMode>,
@@ -821,6 +822,31 @@ fn teammate_backend_selector(
             backend,
             explicit: matches!(mode, TeammateMode::Tmux | TeammateMode::ITerm2),
             error,
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn teammate_backend_selector(
+    cwd: std::path::PathBuf,
+    flag_mode: Option<lingxi_core::settings::schema::TeammateMode>,
+    _is_tty: bool,
+) -> Arc<dyn Fn() -> pane_teammate::PaneBackendSelection + Send + Sync> {
+    Arc::new(move || {
+        let mode =
+            flag_mode.or_else(|| load_merged_settings(&cwd).and_then(|s| s.settings.teammate_mode));
+        let explicit = matches!(
+            mode,
+            Some(
+                lingxi_core::settings::schema::TeammateMode::Tmux
+                    | lingxi_core::settings::schema::TeammateMode::ITerm2
+            )
+        );
+        pane_teammate::PaneBackendSelection {
+            backend: None,
+            explicit,
+            error: explicit
+                .then(|| "Terminal teammate panes are unavailable on this platform".to_string()),
         }
     })
 }

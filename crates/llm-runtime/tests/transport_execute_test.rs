@@ -1,3 +1,5 @@
+//! Regression tests for transport execute test.
+
 use lingxi_llm_client::protocol::{ContentBlock, StopReason};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -6,7 +8,7 @@ use llm_runtime::client::ModelRuntime;
 use llm_runtime::{
     AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig, LlmError, LlmRequest,
     ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, ProviderRequest,
-    ProviderResponse, StreamingResponse, Transport,
+    ProviderResponse, StreamingResponse,
 };
 
 #[derive(Debug)]

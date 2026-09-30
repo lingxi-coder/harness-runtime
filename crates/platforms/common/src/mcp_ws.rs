@@ -58,7 +58,7 @@ pub fn build_handshake_request_optional(
     // (Sec-WebSocket-Key, Upgrade, Connection, etc.) from a `Url`. We start
     // from that baseline and then add our two custom headers.
     let mut req = url
-        .clone()
+        .as_str()
         .into_client_request()
         .map_err(|e| WsConnectError::InvalidRequest(e.to_string()))?;
     let headers = req.headers_mut();

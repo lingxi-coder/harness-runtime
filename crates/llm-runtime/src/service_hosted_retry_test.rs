@@ -162,7 +162,7 @@ fn service_on(
             "https://api.anthropic.com"
         }
         .into(),
-        protocol: protocol.clone(),
+        protocol,
         auth: AuthStrategy::None,
         credential: CredentialConfig::None,
         models: vec![ModelProfile {
@@ -336,9 +336,8 @@ async fn hosted_stream_failures_never_retry_or_switch_connections() {
             let result = service(transport.clone(), failover)
                 .stream_request(request(true))
                 .await;
-            match result {
-                Ok(stream) => assert!(stream.collect::<Vec<_>>().await.iter().any(Result::is_err)),
-                Err(_) => {}
+            if let Ok(stream) = result {
+                assert!(stream.collect::<Vec<_>>().await.iter().any(Result::is_err));
             }
             assert_eq!(
                 transport.count(),

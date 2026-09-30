@@ -2766,7 +2766,7 @@ pub async fn build_with_credential_stack(
                 Arc::new(PosixRuntime::new()),
                 output.clone(),
                 main_session_id,
-                std::path::PathBuf::from("/tmp"),
+                std::env::temp_dir(),
                 None,
                 false,
                 executable,

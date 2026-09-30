@@ -56,7 +56,7 @@ fn a_controller_on_a_first_party_route_is_still_inert_by_default() {
 /// prevent.
 #[test]
 fn the_turn_loop_passes_the_config_gate_not_a_constant() {
-    const BATCHED: &str = include_str!("../src/turn_loop.rs");
+    const BATCHED: &str = include_str!("../src/turn_loop/api_recovery.rs");
     let call = BATCHED
         .split_once("create_context_hint_controller(")
         .expect("the turn loop must construct the controller")

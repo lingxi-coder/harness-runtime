@@ -1,3 +1,5 @@
+//! Regression tests for compaction orchestrator.
+
 use compaction::{CompactionLayer, CompactionOrchestrator};
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 

@@ -1,3 +1,5 @@
+//! Regression tests for error strings test.
+
 use sandbox::dependency_check::error_strings;
 
 #[test]

@@ -1841,7 +1841,7 @@ mod tests {
     ) -> (AppManifest, String) {
         let mut next = manifest.clone();
         next.revision = manifest.revision + 1;
-        next.collections[0].fields[2].kind = if round % 2 == 0 {
+        next.collections[0].fields[2].kind = if round.is_multiple_of(2) {
             DataFieldKind::Text
         } else {
             DataFieldKind::Integer

@@ -1117,7 +1117,7 @@ mod tests {
                 body[usage_key] = usage;
                 let transport = FakeTransport::always(ProviderResponse::json(200, body.clone()));
                 let service = make_adapter_for_protocol_with_transport(
-                    protocol.clone(),
+                    protocol,
                     provider.clone(),
                     "https://example.test/v1",
                     "test",
@@ -2396,7 +2396,7 @@ mod tests {
             req.input
                 .thinking
                 .as_ref()
-                .and_then(|thinking| thinking.budget.clone()),
+                .and_then(|thinking| thinking.budget),
             Some(lingxi_llm_client::protocol::ThinkingBudget::Tokens(31_999)),
             "haiku-4-5 → fixed budget clamped to max_tokens-1"
         );

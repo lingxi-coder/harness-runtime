@@ -1,3 +1,5 @@
+//! Regression tests for path pattern test.
+
 use sandbox::path_pattern::resolve_path_pattern_for_sandbox;
 use std::path::PathBuf;
 

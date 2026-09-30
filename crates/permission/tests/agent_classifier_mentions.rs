@@ -1,3 +1,5 @@
+//! Regression tests for agent classifier mentions.
+
 use permission::classifier::{classify_tool_call, AutoModeClassifierVerdict};
 use serde_json::json;
 

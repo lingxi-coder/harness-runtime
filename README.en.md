@@ -31,9 +31,9 @@ Replace the placeholder with a published commit. A mobile Rust host uses `featur
 
 | Feature | Purpose |
 | --- | --- |
-| `core` (default) | Shared agent, session, orchestration, and permission components; exposes `Harness`, `HarnessBuilder`, and `SessionHandle`. |
-| `desktop` | Desktop composition, including `core`; `harness_runtime::desktop` exposes `build` and `build_harness`. |
-| `mobile` | Shared iOS/Android Rust composition, including `core`; `harness_runtime::mobile` exposes `build_mobile`. |
+| `engine` (default) | Shared agent, session, orchestration, and permission components; exposes `Harness`, `HarnessBuilder`, and `SessionHandle`. |
+| `desktop` | Desktop composition, including `engine`; `harness_runtime::desktop` exposes `build` and `build_harness`. |
+| `mobile` | Shared iOS/Android Rust composition, including `engine`; `harness_runtime::mobile` exposes `build_mobile`. |
 | `uniffi` | Native mobile bindings; enables `mobile`. |
 | `android-computer-use` | Android device interaction; enables `mobile`. |
 | `realtime-websocket` | Enables WebSocket realtime support in the model runtime. |

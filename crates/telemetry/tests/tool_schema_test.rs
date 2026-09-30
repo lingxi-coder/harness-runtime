@@ -1,3 +1,5 @@
+//! Regression tests for tool schema test.
+
 use telemetry::tengu::tool;
 
 #[test]

@@ -6,7 +6,7 @@
 //! description — module path, every variant name, every field name, every field
 //! type tag, and every `///` docstring on the type, its variants and their
 //! fields — into ONE compile-time `uniffi_core::MetadataBuffer`. That buffer is
-//! a fixed `[u8; BUF_SIZE]` with `BUF_SIZE` hardcoded to 16384 in
+//! a fixed `[u8; BUF_SIZE]` with `BUF_SIZE` hardcoded to 32768 in
 //! `uniffi_core`, and the writers `assert!` on overflow **in a `const`
 //! context**.
 //!
@@ -14,7 +14,7 @@
 //! `error[E0080]: evaluation of constant value failed`, `client::protocol
 //! --features uniffi` stops compiling, and every mobile client — `ios-framework`,
 //! `android-aar`, `engine-mobile` — becomes unbuildable. On 2026-08-27
-//! `ClientCommand` crossed that line at 20156 bytes and the iOS and Android
+//! Under UniFFI 0.28, `ClientCommand` crossed its 16384-byte limit at 20156 bytes and the iOS and Android
 //! apps could not be built at all.
 //!
 //! # Why nothing caught it
@@ -43,11 +43,11 @@ use client::protocol::local_apps::{
 };
 
 /// `uniffi_core::metadata::BUF_SIZE` — the hard, hardcoded ceiling every
-/// `MetadataBuffer` asserts against. Verified against `uniffi_core 0.28.3`
-/// (`src/metadata.rs:87`); `uniffi_core_pin_is_still_the_one_this_budget_was_measured_against`
+/// `MetadataBuffer` asserts against. Verified against `uniffi_core 0.32.2`
+/// (`src/metadata.rs:100`); `uniffi_core_pin_is_still_the_one_this_budget_was_measured_against`
 /// below fails if that pin moves, because a different release may choose a
 /// different `BUF_SIZE`.
-const UNIFFI_METADATA_BUF_SIZE: usize = 16_384;
+const UNIFFI_METADATA_BUF_SIZE: usize = 32_768;
 
 /// How much room the budget deliberately leaves between "this test goes red"
 /// and "the crate stops compiling". 4 KiB is roughly a third of a full
@@ -64,7 +64,7 @@ const REQUIRED_RESERVE: usize = 4_096;
 const PER_TYPE_METADATA_BUDGET: usize = 12_288;
 
 /// The uniffi release `UNIFFI_METADATA_BUF_SIZE` was read from.
-const PINNED_UNIFFI_CORE_VERSION: &str = "0.28.3";
+const PINNED_UNIFFI_CORE_VERSION: &str = "0.32.2";
 
 fn assert_within_budget(type_name: &str, source_path: &str, metadata: &[u8]) {
     let actual = metadata.len();
@@ -166,7 +166,7 @@ fn budget_keeps_a_usable_reserve_below_the_hard_limit() {
 
 /// `UNIFFI_METADATA_BUF_SIZE` is a constant copied out of someone else's crate.
 /// It is private there, so nothing links the two except this pin: if the uniffi
-/// dependency moves, the copied 16384 has to be re-read from the new source
+/// dependency moves, the copied ceiling has to be re-read from the new source
 /// before this gate can be trusted again.
 #[test]
 fn uniffi_core_pin_is_still_the_one_this_budget_was_measured_against() {

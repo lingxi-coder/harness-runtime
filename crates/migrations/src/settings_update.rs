@@ -234,10 +234,7 @@ fn rename_settings_temp(from: &Path, to: &Path) -> io::Result<()> {
             .unwrap_or_else(|poison| poison.into_inner())
             .contains_key(&key)
         {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "injected settings rename failure",
-            ));
+            return Err(io::Error::other("injected settings rename failure"));
         }
     }
     std::fs::rename(from, to)
@@ -667,12 +664,7 @@ mod tests {
             &path,
             b"new bytes\n",
             || Ok(()),
-            |_, _| {
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "injected rename failure",
-                ))
-            },
+            |_, _| Err(io::Error::other("injected rename failure")),
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Other);

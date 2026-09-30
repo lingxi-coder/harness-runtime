@@ -65,8 +65,7 @@ pub trait ClientEventListener: Send + Sync {
         _task_id: String,
         _run_id: String,
         _progress: WorkflowProgressDto,
-    ) {
-    }
+    );
 }
 
 /// Bridges a foreign [`ClientEventListener`] to the adapter's transport-agnostic
@@ -117,7 +116,7 @@ mod tests {
 
     use crate::adapter::sink::ClientEventSink;
 
-    use super::{ClientEventListener, ListenerSink};
+    use super::{ClientEventListener, ListenerSink, WorkflowProgressDto};
 
     /// A host-fake [`ClientEventListener`] that records every delivered event —
     /// the off-device stand-in for a Swift/Kotlin listener (plan F3-02).
@@ -128,6 +127,14 @@ mod tests {
 
     #[async_trait]
     impl ClientEventListener for FakeListener {
+        async fn on_workflow_progress(
+            &self,
+            _: String,
+            _: String,
+            _: String,
+            _: WorkflowProgressDto,
+        ) {
+        }
         async fn on_event(&self, event: ClientEvent) {
             self.received.lock().await.push(event);
         }

@@ -160,6 +160,7 @@ async fn runtime_message_is_prepended_before_additional_context() {
     let runtime = "<system-reminder>\nMobile runtime environment (version 1)\n</system-reminder>";
     orch.mobile_runtime_environment_message = Some(runtime_message(runtime));
     orch.mobile_runtime_environment = Some(mobile_environment("/workspace/a"));
+    orch.mobile_workspace_cwd_resolver = Some(Arc::new(|_| Some("/workspace/a".into())));
     let original = ConversationMessage::user(MessageId::new(), "hello".into());
     let mut messages = vec![original.clone()];
 
@@ -213,6 +214,7 @@ async fn runtime_message_stays_first_when_transient_context_is_reattached() {
     let tail = runtime_message("<system-reminder>tail</system-reminder>");
     orch.mobile_runtime_environment_message = Some(runtime_message(runtime));
     orch.mobile_runtime_environment = Some(mobile_environment("/workspace/a"));
+    orch.mobile_workspace_cwd_resolver = Some(Arc::new(|_| Some("/workspace/a".into())));
     let original = ConversationMessage::user(MessageId::new(), "hello".into());
     let mut messages = vec![original.clone()];
 
@@ -252,6 +254,7 @@ async fn runtime_message_keeps_dynamic_environment_separate() {
         "<system-reminder>\nMobile runtime environment (version 1)\n</system-reminder>",
     ));
     orch.mobile_runtime_environment = Some(mobile_environment("/workspace/a"));
+    orch.mobile_workspace_cwd_resolver = Some(Arc::new(|_| Some("/workspace/a".into())));
 
     let body = text(&orch.additional_context_message().await.expect("date"));
     assert!(body.contains("# Environment\n"));
@@ -308,6 +311,7 @@ async fn system_prompt_override_stays_verbatim_while_runtime_message_is_sent() {
     let runtime = "<system-reminder>\nMobile runtime environment (version 1)\n</system-reminder>";
     orch.mobile_runtime_environment_message = Some(runtime_message(runtime));
     orch.mobile_runtime_environment = Some(mobile_environment("/workspace/a"));
+    orch.mobile_workspace_cwd_resolver = Some(Arc::new(|_| Some("/workspace/a".into())));
 
     orch.run_turn("hi").await.expect("turn");
 

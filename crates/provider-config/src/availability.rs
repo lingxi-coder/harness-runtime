@@ -363,7 +363,14 @@ mod tests {
             kind: crate::CredentialKind::ApiKey,
         };
         // not available with the flag false …
-        let map = compute_availability(&manager(), &[chatgpt.clone()], false, false, false).await;
+        let map = compute_availability(
+            &manager(),
+            std::slice::from_ref(&chatgpt),
+            false,
+            false,
+            false,
+        )
+        .await;
         assert!(
             !map.iter()
                 .find(|a| a.profile_name == "openai-chatgpt")

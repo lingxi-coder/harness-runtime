@@ -877,17 +877,18 @@ fn workflow_input(script: &str) -> TaskSpawnInput {
 }
 
 /// Poll the sink until it reports a terminal status (the worker runs on the
-/// `MockRuntimeSpawner`'s tokio task, so yields let it finish).
+/// `MockRuntimeSpawner`'s tokio task; allow actual wall-clock progress).
 async fn await_terminal(sink: &Arc<RecordingSink>) -> TaskStatus {
-    for _ in 0..400 {
-        if let Some(s) = sink.last_status() {
-            if s.is_terminal() {
-                return s;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(status) = sink.last_status().filter(|status| status.is_terminal()) {
+                return status;
             }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
-        tokio::task::yield_now().await;
-    }
-    sink.last_status().expect("worker never reported a status")
+    })
+    .await
+    .expect("workflow worker did not report a terminal status within 10 seconds")
 }
 
 // ==== Bridge-level tests (run_workflow_script directly) ==================

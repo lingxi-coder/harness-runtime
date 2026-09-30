@@ -286,18 +286,18 @@ pub enum ClientEvent {
     },
 
     /// The layered settings read path (`RefreshListings{Settings}`).
-    ///
-    /// Every structured payload here is a JSON **String**, not a nested
-    /// object: `serde_json::Value` must never enter this crate (decision
-    /// §0.4 — `Value` is not UniFFI-representable), so the bridge lowers
-    /// each map to a string exactly the way `ToolUseStarted.input_json`
-    /// does.
-    ///
-    /// `effective_json` is `{key: value}` after the merge; `provenance_json`
-    /// is `{key: layer}` naming which layer each merged value came from.
-    /// The three optional fields were ADDED to this variant (additive under
-    /// decision §0.10 — no major bump): a client that predates them keeps
-    /// reading the two required payloads unchanged.
+    //
+    // Every structured payload here is a JSON **String**, not a nested
+    // object: `serde_json::Value` must never enter this crate (decision
+    // §0.4 — `Value` is not UniFFI-representable), so the bridge lowers
+    // each map to a string exactly the way `ToolUseStarted.input_json`
+    // does.
+    //
+    // `effective_json` is `{key: value}` after the merge; `provenance_json`
+    // is `{key: layer}` naming which layer each merged value came from.
+    // The three optional fields were ADDED to this variant (additive under
+    // decision §0.10 — no major bump): a client that predates them keeps
+    // reading the two required payloads unchanged.
     SettingsSnapshot {
         /// `{key: value}` — the merged effective settings.
         effective_json: String,

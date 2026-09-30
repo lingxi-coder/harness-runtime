@@ -1,3 +1,5 @@
+//! Regression tests for settings schema test.
+
 use telemetry::tengu::settings;
 
 #[test]

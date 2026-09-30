@@ -1208,7 +1208,7 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .collect::<Vec<_>>();
-        assert_eq!(entries, [destination.clone()]);
+        assert_eq!(entries.as_slice(), std::slice::from_ref(&destination));
         assert!(destination.is_dir());
         std::fs::remove_dir_all(dir).unwrap();
     }

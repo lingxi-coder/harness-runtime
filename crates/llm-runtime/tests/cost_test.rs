@@ -1,3 +1,5 @@
+//! Regression tests for cost test.
+
 use llm_runtime::{
     CostEstimator, LlmError, PricingCatalog, PricingConfig, PricingModelRef, PricingOverride,
     PricingPolicy, ProviderId, TokenPricing,
@@ -455,7 +457,7 @@ async fn api_service_override_prices_omitted_and_explicit_zero_reasoning() {
     use llm_runtime::{
         client::ModelRuntime, parse_provider_profiles_strict, pricing_provider_id_for_profile,
         ApiService, BoxFuture, ClientConfig, ProviderParseOptions, ProviderRequest,
-        ProviderResponse, StreamingResponse, Transport,
+        ProviderResponse, StreamingResponse,
     };
     use std::sync::{atomic::AtomicUsize, atomic::Ordering, Arc};
 

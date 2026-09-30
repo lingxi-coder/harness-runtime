@@ -140,7 +140,7 @@ impl crate::conversation::StreamingApiClient for PatchBarrierStream {
                     content_block_start_text(0),
                     text_delta(0, "edit finished"),
                     content_block_stop(0),
-                    message_delta_stop_with_usage("end_turn", llm_usage(0, 1, 0, 0)),
+                    message_delta_stop_with_usage("end_turn", llm_usage(2, 1, 0, 0)),
                     message_stop(),
                 ]
                 .into_iter()
@@ -589,7 +589,8 @@ async fn batched_turn_drop_retains_and_acks_the_originating_session_charge() {
 async fn streaming_turn_drop_retains_and_acks_the_originating_session_charge() {
     let expected = cost_usage(13, 9, 2, 4);
     let start_usage = llm_usage(13, 0, 2, 4);
-    let delta_usage = llm_usage(0, 9, 0, 0);
+    // Host events carry the SDK's cumulative usage snapshot, not wire deltas.
+    let delta_usage = llm_usage(13, 9, 2, 4);
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
         message_start_with_usage("stream-cost", "claude-opus-4-8", start_usage),
         content_block_start_text(0),
@@ -648,7 +649,7 @@ impl ModelCallPreparer for FreezeDuringPrepare {
 async fn captured_durable_scope_frozen_during_prepare_prevents_stream_dispatch() {
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
         message_start_with_usage("must-not-open", "claude-opus-4-8", llm_usage(1, 0, 0, 0)),
-        message_delta_stop_with_usage("end_turn", llm_usage(0, 1, 0, 0)),
+        message_delta_stop_with_usage("end_turn", llm_usage(1, 1, 0, 0)),
         message_stop(),
     ]]));
     let base = ConversationOrchestrator::new_with_streaming(
@@ -1048,7 +1049,7 @@ async fn streaming_settlement_failure_keeps_the_answer_and_stops_the_next_call()
         content_block_start_text(0),
         text_delta(0, "the paid answer"),
         content_block_stop(0),
-        message_delta_stop_with_usage("end_turn", llm_usage(0, 9, 0, 0)),
+        message_delta_stop_with_usage("end_turn", llm_usage(13, 9, 2, 4)),
         message_stop(),
     ]]));
     let base = ConversationOrchestrator::new_with_streaming(

@@ -1,3 +1,5 @@
+//! Regression tests for streaming upload test.
+
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,

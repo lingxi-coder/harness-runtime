@@ -36,7 +36,7 @@ base64 = { version = "=0.22.1", optional = true }
 # Pure-Rust PARSER (NOT a renderer — page-image extraction is P4b). Optional.
 # default-features = false drops the nom parser (get_pages would fail to link),
 # so defaults stay ON — the parser is exactly what we need. Pinned exact.
-lopdf = { version = "=0.34.0", optional = true }
+lopdf = { version = "=0.45.0", optional = true }
 # pdftoppm renders pages into a scratch directory; TempDir gives a unique dir +
 # automatic cleanup (RAII). Already in the workspace (dev-dep here + elsewhere),
 # so no new external crate enters the lockfile. Optional, gated behind pdf-render.

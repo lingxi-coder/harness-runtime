@@ -1355,7 +1355,7 @@ fn validate_schema_node(
     };
     if at_root {
         let closed = matches!(object.get("additionalProperties"), Some(Value::Bool(false)));
-        let object_root = object.get("type").map_or(false, |value| {
+        let object_root = object.get("type").is_some_and(|value| {
             value == "object"
                 || value
                     .as_array()

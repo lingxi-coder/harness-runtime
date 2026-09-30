@@ -462,14 +462,41 @@ mod tests {
 
     #[test]
     fn fixed_partial_prices_use_known_rates_and_flag_consumed_unknown_buckets() {
-        let providers = llm_runtime::builtin_presets().providers;
+        // Use a fixed partial-price fixture: the live SDK catalog can publish
+        // a previously unknown cache bucket without changing this invariant.
+        let mut profile = llm_runtime::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "grok-responses")
+            .unwrap();
+        profile.profile_name = "fixed-partial-test".into();
+        profile.provider_id = LlmProviderId::OpenAICompatible {
+            name: "fixed-partial-test".into(),
+        };
+        profile
+            .models
+            .retain(|model| model.billing_model == "grok-4.7");
+        let published = profile.models[0].metadata.pricing.as_mut().unwrap();
+        published.input_per_million = Some(2.0);
+        published.output_per_million = Some(6.0);
+        published.cache_read_per_million = Some(0.5);
+        published.cache_write_per_million = None;
+        published.reasoning_per_million = Some(6.0);
+        published.tiers.clear();
+        let source = profile.wire_profile.as_mut().unwrap();
+        source.pricing.peak = None;
+        for model in &mut source.models {
+            if let Some(pricing) = &mut model.pricing {
+                pricing.rules.clear();
+            }
+        }
         let mr = ModelRef {
             provider: CostProviderId::OpenAICompatible {
-                name: "grok-responses".into(),
+                name: "fixed-partial-test".into(),
             },
             model: "grok-4.7".into(),
         };
-        let (price, _) = pricing_for(&providers).resolve(&mr).unwrap();
+        let (price, _) = pricing_for(&[profile]).resolve(&mr).unwrap();
         assert!(matches!(
             price.source,
             PricingSource::PublishedPartial {

@@ -1,3 +1,5 @@
+//! Regression tests for wrap macos test.
+
 use sandbox::runtime_config::{
     FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, SandboxRuntimeConfig,
 };

@@ -638,6 +638,7 @@ mod tests {
     use super::*;
     use crate::env::sandbox_proxy_username;
     use crate::violation_store::SandboxViolationStore;
+    use rustls::pki_types::pem::PemObject;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -1045,7 +1046,10 @@ mod tests {
     /// First cert (the CA) of a PEM string, as DER.
     fn first_cert_der(pem: &str) -> CertificateDer<'static> {
         let mut rd = std::io::BufReader::new(pem.as_bytes());
-        let der = rustls_pemfile::certs(&mut rd).next().unwrap().unwrap();
+        let der = rustls::pki_types::CertificateDer::pem_reader_iter(&mut rd)
+            .next()
+            .unwrap()
+            .unwrap();
         CertificateDer::from(der.to_vec())
     }
 

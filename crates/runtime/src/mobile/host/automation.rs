@@ -112,6 +112,14 @@ pub(super) struct CapturingListener {
 
 #[async_trait]
 impl ClientEventListener for CapturingListener {
+    async fn on_workflow_progress(
+        &self,
+        _: String,
+        _: String,
+        _: String,
+        _: client::protocol::listings::WorkflowProgressDto,
+    ) {
+    }
     async fn on_event(&self, event: ClientEvent) {
         if let ClientEvent::TextDelta { text } = event {
             self.text.lock().await.push_str(&text);

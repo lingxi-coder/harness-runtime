@@ -2478,7 +2478,7 @@ async fn workflow_global_fusion_is_not_exposed_on_mobile() {
     assert!(
         chunk
             .content
-            .contains("ReferenceError: 'fusion' is not defined"),
+            .contains("ReferenceError: fusion is not defined"),
         "the removed workflow fusion global must remain unavailable: {}",
         chunk.content
     );

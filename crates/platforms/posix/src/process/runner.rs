@@ -2185,8 +2185,8 @@ mod hook_env_tests {
             "runner must NOT overwrite GIT_EDITOR on a hook child; env was:\n{dump}",
         );
         // The always-present `Uot` markers are still set on a hook child.
-        assert!(lines.iter().any(|l| *l == "LINGXI=1"));
-        assert!(lines.iter().any(|l| *l == "LINGXI_CHILD_SESSION=1"));
+        assert!(lines.contains(&"LINGXI=1"));
+        assert!(lines.contains(&"LINGXI_CHILD_SESSION=1"));
     }
 
     /// A non-hook command (Bash/REPL/PowerShell tool call, `source:"agent"`)
@@ -2207,7 +2207,7 @@ mod hook_env_tests {
             "non-hook child carries the runner's AI_AGENT value; env was:\n{dump}",
         );
         assert!(
-            lines.iter().any(|l| *l == "GIT_EDITOR=true"),
+            lines.contains(&"GIT_EDITOR=true"),
             "non-hook child carries GIT_EDITOR=true; env was:\n{dump}",
         );
     }

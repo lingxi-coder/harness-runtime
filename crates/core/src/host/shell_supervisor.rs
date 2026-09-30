@@ -673,10 +673,13 @@ impl Drop for ForegroundRecoveryGuard {
             loop {
                 // Ordinary source cancellation closes the control stream and
                 // lets the live supervisor kill its group. Do not steal its writer.
+                // Recovery can be cancelled after killing the child but before
+                // appending its terminal receipt. Finish that receipt whenever
+                // supervisor death is proven, even if the child is already gone.
+                if recover_dead_foreground(&handoff).await{break;}
                 let current=platform().process_start_identity(handoff.pid);
                 if matches!((&handoff.process_start_identity,current.as_ref()),(Some(expected),Some(actual)) if expected!=actual)
                     || (current.is_none()&&platform().process_is_alive(handoff.pid)==Some(false)){break;}
-                if recover_dead_foreground(&handoff).await{break;}
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
         });

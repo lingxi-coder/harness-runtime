@@ -40,7 +40,7 @@ uniffi = { workspace = true, optional = true }
 unicode-width = { version = "=0.1.14", optional = true }
 unicode-segmentation = { version = "=1.12.0", optional = true }
 unicode-normalization = { version = "=0.1.25", optional = true }
-syntect = { version = "=5.3.0", default-features = false, features = ["default-fancy"], optional = true }
+syntect = { path = "../../third_party/syntect", version = "=5.3.0-harness.1", default-features = false, features = ["parsing", "regex-fancy", "default-syntaxes", "default-themes"], optional = true }
 pulldown-cmark = { version = "=0.13.4", default-features = false, optional = true }
 similar = { version = "=2.7.0", optional = true }
 tool-api = { path = "../tool-api", optional = true }
@@ -60,7 +60,7 @@ insta = { version = "1.40", features = ["yaml"] }
 uuid = { version = "1.10", features = ["v4"] }
 llm-runtime = { path = "../llm-runtime" }
 serde_json = { workspace = true }
-uniffi_meta = "=0.28.3"
+uniffi_meta = "=0.32.2"
 
 [lints]
 workspace = true

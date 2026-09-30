@@ -485,6 +485,7 @@ fn bad_gateway() -> Response<ProxyBody> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustls::pki_types::pem::PemObject;
 
     #[test]
     fn client_hello_predicate() {
@@ -677,7 +678,10 @@ mod tests {
     /// Extract the first certificate (the CA) from a PEM string as DER.
     fn first_cert_der(pem: &str) -> CertificateDer<'static> {
         let mut rd = std::io::BufReader::new(pem.as_bytes());
-        let der = rustls_pemfile::certs(&mut rd).next().unwrap().unwrap();
+        let der = rustls::pki_types::CertificateDer::pem_reader_iter(&mut rd)
+            .next()
+            .unwrap()
+            .unwrap();
         CertificateDer::from(der.to_vec())
     }
 

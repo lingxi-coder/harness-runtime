@@ -225,9 +225,7 @@ pub(crate) fn message_string_overrides(
     )
 }
 
-/// Restore host legacy controls that are intentionally outside the SDK's typed
-/// request contract. Scoped continuations still pass through SDK validation.
-
+/// Translate SDK failures into the host execution error contract.
 pub(crate) fn error(error: wire::LlmError) -> LlmError {
     use wire::LlmError as E;
     match error {

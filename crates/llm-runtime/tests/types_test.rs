@@ -1,3 +1,5 @@
+//! Regression tests for types test.
+
 use llm_runtime::{CostEstimate, ExecutionUsage, PricingModelRef, ProviderId};
 
 #[test]

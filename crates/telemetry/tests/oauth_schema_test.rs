@@ -1,3 +1,5 @@
+//! Regression tests for oauth schema test.
+
 use telemetry::tengu::oauth;
 
 #[test]

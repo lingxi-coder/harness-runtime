@@ -1,3 +1,5 @@
+//! Regression tests for session schema test.
+
 use telemetry::tengu::session;
 
 #[test]

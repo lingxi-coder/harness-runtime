@@ -1,3 +1,5 @@
+//! Regression tests for mcp schema test.
+
 use telemetry::pii::Verified;
 use telemetry::tengu::mcp::{
     self, AddPayload, AuthConfigAuthenticatePayload, AuthConfigClearPayload, CommandInlinePayload,

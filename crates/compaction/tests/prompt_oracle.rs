@@ -1,3 +1,5 @@
+//! Regression tests for prompt oracle.
+
 use compaction::{format_compact_summary, get_compact_prompt, get_compact_user_summary_message};
 use serde_json::Value;
 

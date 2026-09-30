@@ -1,3 +1,5 @@
+//! Regression tests for agent schema test.
+
 use telemetry::tengu::agent;
 
 #[test]

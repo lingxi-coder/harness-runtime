@@ -598,7 +598,7 @@ mod tests {
             "SHA256: prefixed base64 accepted"
         );
         assert!(
-            host_key_is_pinned(&raw, &[b64.clone()]),
+            host_key_is_pinned(&raw, std::slice::from_ref(&b64)),
             "bare base64 accepted"
         );
         assert!(

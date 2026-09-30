@@ -1,3 +1,5 @@
+//! Regression tests for retry test.
+
 use std::time::Duration;
 
 use llm_runtime::{LlmError, ResponseMetadata, RetryDecision, RetryPolicy};

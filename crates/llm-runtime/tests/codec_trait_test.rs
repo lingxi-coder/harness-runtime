@@ -1,3 +1,5 @@
+//! Regression tests for codec trait test.
+
 use lingxi_llm_client::{self as sdk, protocol as wire, WireCodec};
 use llm_runtime::{ProviderRequest, ProviderResponse};
 use serde_json::json;

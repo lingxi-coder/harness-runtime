@@ -1,3 +1,5 @@
+//! Regression tests for decision match test.
+
 use sandbox::decision::should_use_sandbox_for_command;
 use sandbox::runtime_config::SandboxRuntimeConfig;
 

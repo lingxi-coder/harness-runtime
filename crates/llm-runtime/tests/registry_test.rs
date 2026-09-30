@@ -1,3 +1,5 @@
+//! Regression tests for registry test.
+
 use llm_runtime::{
     AuthStrategy, Capabilities, ClientConfig, CredentialConfig, ModelProfile, ModelRegistry,
     PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,

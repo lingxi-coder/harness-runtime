@@ -10,16 +10,16 @@
 //!    capability that reached it but registered nothing would be invisible to
 //!    the model anyway.
 //! 2. **The gate is real in BOTH directions.** With no capability, the two tools
-//!    must be ABSENT — not registered-but-failing. A tool the model can call but
+//!    must be absent from the model-facing tool list. A tool the model can call but
 //!    that can only ever error is worse than an absent tool: it burns a turn and
 //!    teaches the model something false about what this app can do. The
 //!    no-capability case is therefore asserted as a statement about the
-//!    registry's contents, not as "nothing panicked".
+//!    registry's available tools, not as "nothing panicked".
 //!
 //! The capability is per-tool, not all-or-nothing: `voice` needs a recorder,
 //! `speech` needs a recognizer or a synthesizer. The two half-wired cases below
-//! pin that, so a future edit cannot collapse the gate into one `is_some()`
-//! without a named failure.
+//! pin the model-facing gate. Both tools stay registered when a service exists
+//! so a later support snapshot can enable an initially unavailable operation.
 
 #![allow(clippy::unwrap_used)]
 
@@ -84,7 +84,11 @@ fn stub_ctx() -> BuiltinToolContext {
 
 /// The desktop tool names assembled from `ctx`.
 fn registered_tool_names(ctx: BuiltinToolContext) -> Vec<String> {
-    desktop_tool_registry(ctx, None, None).all_names()
+    desktop_tool_registry(ctx, None, None)
+        .available_tools(&Default::default())
+        .into_iter()
+        .map(|tool| tool.name().to_string())
+        .collect()
 }
 
 #[test]

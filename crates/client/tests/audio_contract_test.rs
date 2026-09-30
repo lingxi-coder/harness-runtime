@@ -1,3 +1,5 @@
+//! Regression tests for audio contract test.
+
 use client::protocol::audio::{
     AudioCapabilitySnapshotDto, AudioErrorDto, AudioErrorKindDto, AudioInitiatorDto,
     AudioOperationDto, AudioOperationIdDto, AudioOperationKindDto, AudioOperationReadinessDto,

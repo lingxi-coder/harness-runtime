@@ -1,3 +1,5 @@
+//! Regression tests for sse test.
+
 use llm_runtime::SseFrameSplitter;
 
 #[test]

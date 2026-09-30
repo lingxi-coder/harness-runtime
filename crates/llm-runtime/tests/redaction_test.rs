@@ -1,3 +1,5 @@
+//! Regression tests for redaction test.
+
 use std::collections::BTreeMap;
 
 use llm_runtime::Redactor;

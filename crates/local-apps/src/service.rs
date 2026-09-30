@@ -1497,7 +1497,7 @@ impl AppService {
     fn mint_app_id(root: &std::path::Path, existing: &[String]) -> Result<String, AppError> {
         for _ in 0..MAX_ID_MINT_ATTEMPTS {
             let id = ids::generate_app_id();
-            if existing.iter().any(|existing| *existing == id) {
+            if existing.contains(&id) {
                 continue;
             }
             if storage::app_id_present_on_disk(root, &id) {

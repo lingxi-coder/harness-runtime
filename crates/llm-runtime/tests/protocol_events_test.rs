@@ -1,3 +1,5 @@
+//! Regression tests for protocol events test.
+
 use llm_runtime::{
     ContentBlock, ExecutionUsage, HistoryContentDelta, HistoryEvent, HistoryMessageDelta,
     HistoryResponse,

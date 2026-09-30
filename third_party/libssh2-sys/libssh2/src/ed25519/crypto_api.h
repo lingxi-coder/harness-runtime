@@ -24,8 +24,9 @@ typedef uint32_t crypto_uint32;
 typedef int64_t crypto_int64;
 typedef uint64_t crypto_uint64;
 
-#define randombytes(buf, buf_len) arc4random_buf((buf), (buf_len))
-#define small_random32() arc4random()
+/* Use the selected libssh2 crypto backend on every supported platform. */
+void libssh2_ed25519_randombytes(void *buf, size_t len);
+#define randombytes(buf, buf_len) libssh2_ed25519_randombytes((buf), (buf_len))
 
 #define crypto_hash_sha512_BYTES 64U
 

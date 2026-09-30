@@ -16,8 +16,7 @@ use rcgen::{
     CertificateParams, DnType, ExtendedKeyUsagePurpose, Ia5String, IsCa, KeyPair, KeyUsagePurpose,
     SanType, SerialNumber, PKCS_RSA_SHA256,
 };
-use rsa::pkcs8::{EncodePrivateKey, LineEnding};
-use rsa::RsaPrivateKey;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
@@ -78,16 +77,9 @@ pub fn mint_leaf_cert(ca: &MitmCa, hostname: &str) -> Result<Leaf, LeafError> {
         return Ok(cached.clone());
     }
 
-    // RSA-2048 leaf key (ring cannot generate RSA — same as the CA).
-    let mut rng = rsa::rand_core::OsRng;
-    let rsa_key = RsaPrivateKey::new(&mut rng, 2048)
+    let leaf_key = KeyPair::generate_for(&PKCS_RSA_SHA256)
         .map_err(|err| LeafError::Mint(format!("[mitm-leaf] RSA keygen failed: {err}")))?;
-    let key_pem = rsa_key
-        .to_pkcs8_pem(LineEnding::LF)
-        .map_err(|err| LeafError::Mint(format!("[mitm-leaf] key encode failed: {err}")))?
-        .to_string();
-    let leaf_key = KeyPair::from_pkcs8_pem_and_sign_algo(&key_pem, &PKCS_RSA_SHA256)
-        .map_err(|err| LeafError::Mint(format!("[mitm-leaf] key wrap failed: {err}")))?;
+    let key_pem = leaf_key.serialize_pem();
 
     let not_before = OffsetDateTime::now_utc() - Duration::days(1);
     let mut params = CertificateParams::default();
@@ -153,9 +145,10 @@ pub fn server_config_for(
     // Parse the PEM chain + key into DER for rustls. rustls-pemfile yields
     // borrowed/owned DER; collect the full chain (leaf + CA).
     let mut chain_reader = std::io::BufReader::new(leaf.cert_pem.as_bytes());
-    let cert_chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut chain_reader)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| LeafError::Config(format!("[mitm-leaf] cert parse failed: {err}")))?;
+    let cert_chain: Vec<CertificateDer<'static>> =
+        rustls::pki_types::CertificateDer::pem_reader_iter(&mut chain_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| LeafError::Config(format!("[mitm-leaf] cert parse failed: {err}")))?;
     if cert_chain.is_empty() {
         return Err(LeafError::Config(
             "[mitm-leaf] empty cert chain".to_string(),
@@ -163,9 +156,8 @@ pub fn server_config_for(
     }
 
     let mut key_reader = std::io::BufReader::new(leaf.key_pem.as_bytes());
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|err| LeafError::Config(format!("[mitm-leaf] key parse failed: {err}")))?
-        .ok_or_else(|| LeafError::Config("[mitm-leaf] no private key in PEM".to_string()))?;
+    let key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_reader(&mut key_reader)
+        .map_err(|err| LeafError::Config(format!("[mitm-leaf] key parse failed: {err}")))?;
 
     let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -208,9 +200,10 @@ pub fn certified_key_for(ca: &MitmCa, hostname: &str) -> Result<Arc<CertifiedKey
     let leaf = mint_leaf_cert(ca, hostname)?;
 
     let mut chain_reader = std::io::BufReader::new(leaf.cert_pem.as_bytes());
-    let cert_chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut chain_reader)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| LeafError::Config(format!("[mitm-leaf] cert parse failed: {err}")))?;
+    let cert_chain: Vec<CertificateDer<'static>> =
+        rustls::pki_types::CertificateDer::pem_reader_iter(&mut chain_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| LeafError::Config(format!("[mitm-leaf] cert parse failed: {err}")))?;
     if cert_chain.is_empty() {
         return Err(LeafError::Config(
             "[mitm-leaf] empty cert chain".to_string(),
@@ -218,9 +211,8 @@ pub fn certified_key_for(ca: &MitmCa, hostname: &str) -> Result<Arc<CertifiedKey
     }
 
     let mut key_reader = std::io::BufReader::new(leaf.key_pem.as_bytes());
-    let key_der: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|err| LeafError::Config(format!("[mitm-leaf] key parse failed: {err}")))?
-        .ok_or_else(|| LeafError::Config("[mitm-leaf] no private key in PEM".to_string()))?;
+    let key_der: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_reader(&mut key_reader)
+        .map_err(|err| LeafError::Config(format!("[mitm-leaf] key parse failed: {err}")))?;
 
     // Sign with the ring provider (matching rustls 0.22's default provider), so
     // the resolver and the rest of the stack share one crypto backend.
@@ -346,7 +338,7 @@ mod tests {
 
     fn der_of_first_cert(pem: &str) -> Vec<u8> {
         let mut rd = std::io::BufReader::new(pem.as_bytes());
-        let mut certs = rustls_pemfile::certs(&mut rd);
+        let mut certs = rustls::pki_types::CertificateDer::pem_reader_iter(&mut rd);
         certs.next().unwrap().unwrap().to_vec()
     }
 
@@ -478,7 +470,9 @@ mod tests {
         // Split the chain: end-entity + intermediates (here: the CA, sent in chain).
         let mut rd = std::io::BufReader::new(leaf.cert_pem.as_bytes());
         let chain: Vec<CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut rd).map(|c| c.unwrap()).collect();
+            rustls::pki_types::CertificateDer::pem_reader_iter(&mut rd)
+                .map(|c| c.unwrap())
+                .collect();
         let (end_entity, intermediates) = chain.split_first().unwrap();
 
         let server_name = ServerName::try_from("secure.example").unwrap();

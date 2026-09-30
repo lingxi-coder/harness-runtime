@@ -2891,7 +2891,7 @@ mod tests {
         let gone = new_app("wwww5555");
         save_app_files(dir.path(), &keep).unwrap();
         save_app_files(dir.path(), &gone).unwrap();
-        save_index(dir.path(), &[keep.record.clone()]).unwrap();
+        save_index(dir.path(), std::slice::from_ref(&keep.record)).unwrap();
         // A removal that renamed but never finished deleting.
         let trash_path = trash_app_dir(dir.path(), "wwww5555").unwrap().unwrap();
         assert!(trash_path.exists());

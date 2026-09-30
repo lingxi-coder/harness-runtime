@@ -1,3 +1,5 @@
+//! Regression tests for transport stream test.
+
 use lingxi_llm_client::protocol::{LlmError as SdkError, StopReason, StreamEvent};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -8,7 +10,7 @@ use llm_runtime::{
     AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig, FrameStream, LlmError,
     LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
     ProviderRequest, ProviderResponse, RawStreamFrame, ResponsesSession,
-    ResponsesWebSocketTransportSession, StreamingResponse, Transport,
+    ResponsesWebSocketTransportSession, StreamingResponse,
 };
 
 struct ScriptedFrames {

@@ -1,3 +1,5 @@
+//! Regression tests for runtime config test.
+
 use sandbox::runtime_config::{
     FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, RipgrepConfig,
     SandboxRuntimeConfig,

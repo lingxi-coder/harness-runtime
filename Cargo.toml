@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["deps/llm-client", "third_party/git2-rs/git2", "third_party/git2-rs/libgit2-sys", "third_party/libssh2-sys", "third_party/mbedtls-sys"]
+exclude = ["deps/llm-client", "third_party/git2-rs/git2", "third_party/git2-rs/libgit2-sys", "third_party/libssh2-sys", "third_party/mbedtls-sys", "third_party/syntect"]
 resolver = "2"
 members = [
     "crates/runtime",
@@ -175,26 +175,14 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # `headers` so the `getServerKey` config hash byte-matches claude-code, whose
 # `JSON.stringify({type,url,headers})` serializes header keys in the config's
 # insertion order (not sorted). See `platform_api::McpHeaders` / `oauth::server_key`.
-# Capped below 2.8: newer indexmap releases require the `edition2024` Cargo
-# feature, which the workspace's pinned toolchain (rust-toolchain.toml,
-# 1.82.0) cannot parse.
-indexmap = { version = ">=2, <2.8", features = ["serde"] }
+indexmap = { version = "2", features = ["serde"] }
 thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"
-# UniFFI (mobile in-process transport). Pinned to 0.28.3 — the version whose
-# dependency tree is vendored in the local registry cache, so
-# `cargo build --offline --features uniffi` resolves without network (M10 F3-00
-# GATE-ZERO). With `default-features = false` the resolved set is
-# uniffi/uniffi_core/uniffi_macros/uniffi_meta/uniffi_checksum_derive +
-# async-compat (the `tokio` feature) — `uniffi_build`/`uniffi_udl`/`cargo_metadata`
-# are NOT pulled (those only matter with the `bindgen`/`cargo-metadata` default
-# feature). MSRV: 0.28.x declares no explicit `rust-version` and compiles under
-# the workspace toolchain `rust-version = "1.94"` (no bump required — verified by
-# a clean offline build). `tokio` enables the async foreign-executor scaffolding
-# needed by F3-07. `client` adds this as an OPTIONAL dep gated behind
-# its `uniffi` feature, so the default (bridge-server) build never pulls it.
-uniffi = { version = "0.28.3", default-features = false, features = ["tokio"] }
+# UniFFI (mobile in-process transport). Keep native binding generators on
+# the same exact release as the runtime scaffolding. Default features stay off;
+# client opts in through its `uniffi` feature and uses Tokio foreign executors.
+uniffi = { version = "=0.32.2", default-features = false, features = ["tokio"] }
 futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 

@@ -17,8 +17,10 @@ use lingxi_core::types::{AgentId, SessionId};
 use tasks::handlers::TaskStatusSink;
 use tasks::registry::TaskRegistry;
 use tasks::{TaskSpawnInput, TaskStatus, TaskType};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::OwnedWriteHalf;
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
+#[cfg(unix)]
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tool_api::context::ToolUseContext;
@@ -109,13 +111,13 @@ async fn authenticate_until_ready<R: AsyncBufRead + Unpin>(
 }
 
 struct ControlWriter {
-    stream: Mutex<OwnedWriteHalf>,
+    stream: Mutex<Box<dyn AsyncWrite + Unpin + Send>>,
     poisoned: AtomicBool,
 }
 impl ControlWriter {
-    fn new(stream: OwnedWriteHalf) -> Self {
+    fn new(stream: impl AsyncWrite + Unpin + Send + 'static) -> Self {
         Self {
-            stream: Mutex::new(stream),
+            stream: Mutex::new(Box::new(stream)),
             poisoned: AtomicBool::new(false),
         }
     }
@@ -321,6 +323,19 @@ impl PaneTeammateSpawner {
             .await
     }
 
+    #[cfg(not(unix))]
+    async fn launch_pane(
+        &self,
+        _agent_id: AgentId,
+        _name: String,
+        _team_name: String,
+        _request: SubagentSpawnRequest,
+    ) -> Result<String, TeamSpawnError> {
+        Err(internal(
+            "Terminal teammate panes are unavailable on this platform",
+        ))
+    }
+
     async fn launch_owned(
         &self,
         agent_id: AgentId,
@@ -347,6 +362,7 @@ impl PaneTeammateSpawner {
         receiver.await.map_err(internal)?
     }
 
+    #[cfg(unix)]
     async fn launch_pane(
         &self,
         agent_id: AgentId,
@@ -719,7 +735,7 @@ impl TeamSpawnSeam for PaneTeammateSpawner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use lingxi_core::host::swarm::{SwarmError, SwarmHandle, SwarmLayout};

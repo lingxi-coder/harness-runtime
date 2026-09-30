@@ -1,3 +1,5 @@
+//! Regression tests for local app role schemas.
+
 use serde_json::{json, Value};
 
 fn role_schema(role: &str) -> Value {

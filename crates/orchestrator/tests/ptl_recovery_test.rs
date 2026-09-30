@@ -194,8 +194,12 @@ async fn reactive_summary_success_retries_once_below_the_local_auto_threshold() 
         let requests = summary.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(
-            requests[0].messages[0], oldest,
-            "the summary includes the oldest request"
+            requests[0].messages.iter().find(|message| matches!(
+                message,
+                ConversationMessage::User { is_meta: false, .. }
+            )),
+            Some(&oldest),
+            "the summary preserves the oldest user request after leading context"
         );
     }
     assert!(output

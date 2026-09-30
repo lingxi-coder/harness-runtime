@@ -194,6 +194,8 @@ impl Sandbox {
         let runtime = rquickjs::Runtime::new()
             .map_err(|error| FunctionHookError::EngineUnavailable(error.to_string()))?;
         runtime.set_memory_limit(self.memory_limit);
+        // Bound guest recursion before it can exhaust the native worker stack.
+        runtime.set_max_stack_size(256 * 1024);
 
         // Wall-clock enforcement. QuickJS calls the interrupt handler
         // periodically during execution, so an infinite loop in a hook ends the
@@ -224,6 +226,11 @@ impl Sandbox {
         );
 
         context.with(|ctx| {
+            // QuickJS 0.14 adds a guest microtask scheduler to a full context.
+            // Hooks are synchronous; keep their advertised global surface fixed.
+            ctx.globals()
+                .remove("queueMicrotask")
+                .map_err(|error| FunctionHookError::EngineUnavailable(error.to_string()))?;
             match ctx.eval::<Option<String>, _>(program.as_str()) {
                 Ok(Some(text)) => serde_json::from_str(&text)
                     .map_err(|error| FunctionHookError::NotSerialisable(error.to_string())),
@@ -434,6 +441,15 @@ mod tests {
             result,
             Err(FunctionHookError::OutOfMemory),
             "the MEMORY limit must be what stops this, not the clock"
+        );
+    }
+
+    #[test]
+    fn recursion_fails_without_exhausting_the_native_stack() {
+        let error = run("function recurse() { return recurse(); } return recurse();").unwrap_err();
+        assert!(
+            matches!(error, FunctionHookError::Threw(ref detail) if detail.contains("stack")),
+            "unexpected recursion result: {error:?}"
         );
     }
 

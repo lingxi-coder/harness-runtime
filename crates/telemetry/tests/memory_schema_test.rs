@@ -1,3 +1,5 @@
+//! Regression tests for memory schema test.
+
 use telemetry::tengu::memory;
 
 #[test]

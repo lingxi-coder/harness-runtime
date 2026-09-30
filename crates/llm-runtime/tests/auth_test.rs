@@ -1,3 +1,5 @@
+//! Regression tests for auth test.
+
 use llm_runtime::{
     Credential, CredentialProvider, CredentialScope, EnvCredentialProvider, ProviderId,
     StaticCredentialProvider,

@@ -667,6 +667,14 @@ mod tests {
         }
         #[async_trait]
         impl ClientEventListener for Recorder {
+            async fn on_workflow_progress(
+                &self,
+                _: String,
+                _: String,
+                _: String,
+                _: client::protocol::listings::WorkflowProgressDto,
+            ) {
+            }
             async fn on_event(&self, event: ClientEvent) {
                 let label = match event {
                     ClientEvent::TextDelta { text } => text,

@@ -27,7 +27,10 @@
 //! because one function feeds both paths. Order is pinned by that file's
 //! `assert_shared_reminder_order`, not by cross-path equality.
 
-const BATCHED: &str = include_str!("../src/turn_loop.rs");
+const BATCHED: &str = concat!(
+    include_str!("../src/turn_loop.rs"),
+    include_str!("../src/turn_loop/api_recovery.rs"),
+);
 const STREAMING: &str = concat!(
     include_str!("../src/conversation/drivers/mod.rs"),
     include_str!("../src/conversation/drivers/streaming.rs"),

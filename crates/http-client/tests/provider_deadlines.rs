@@ -12,7 +12,11 @@ async fn provider_http_keeps_reading_past_the_sdk_default_idle_limit() {
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut buf = [0; 4096];
-        socket.read(&mut buf).await.unwrap();
+        let received = socket.read(&mut buf).await.unwrap();
+        assert!(
+            received > 0,
+            "client must send a request before the response"
+        );
         socket
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na")
             .await

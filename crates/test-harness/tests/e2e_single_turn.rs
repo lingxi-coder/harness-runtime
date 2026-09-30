@@ -1,7 +1,6 @@
 //! End-to-end: drive the reducer through a complete single-turn conversation
 //! against `MockHttpTransport`. This is the M1.1 acceptance test.
 
-use lingxi_core::host::HttpTransport;
 use lingxi_core::types::{
     ConversationMessage, Effect, HttpResponse, MessageId, RequestId, SessionId,
 };

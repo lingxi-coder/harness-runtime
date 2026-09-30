@@ -1,3 +1,5 @@
+//! Regression tests for dependency check test.
+
 use sandbox::dependency_check::{sandbox_unavailable_reason, MissingDeps, SandboxDependencyCheck};
 use sandbox::runtime_config::Platform;
 

@@ -1,3 +1,5 @@
+//! Regression tests for client auth test.
+
 use std::sync::Arc;
 
 use llm_runtime::client::ModelRuntime;

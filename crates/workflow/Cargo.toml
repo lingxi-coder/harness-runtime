@@ -25,7 +25,7 @@ serde_json.workspace = true
 # async-lock 3.4.2 which requires rustc 1.85 > the workspace MSRV 1.82, so the
 # foundation uses the synchronous engine; the async/`parallel()` integration
 # resolves that pin in a later stage.
-rquickjs = { version = "0.6" }
+rquickjs = { version = "=0.14.0" }
 
 # Real JS parser for `meta`-block validation (claude-code parses the script to an
 # ESTree AST: ExportNamedDeclaration / ObjectExpression / pure-literal walk).
@@ -38,7 +38,7 @@ tree-sitter-javascript = "0.23"
 # Enable its existing bindgen path only on mobile targets; desktop targets keep
 # the exact dependency feature set and runtime behavior above.
 [target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
-rquickjs = { version = "0.6", features = ["bindgen"] }
+rquickjs = { version = "=0.14.0", features = ["bindgen"] }
 
 [lints]
 workspace = true
