@@ -58,7 +58,13 @@ cargo-vet reports 608 dependencies without safe-to-deploy source review.
 The audit store has no exemptions or fabricated reviews. This remains a hard
 source-review failure; the clean vulnerability scan does not close it.
 
-Product binding regeneration and final pinned native/release builds are being
-validated separately in lingxi-app. Physical Android is not
-connected. iPhone/Android install-and-launch authorization is pending. Prior
-app or device results do not certify this dependency and FFI upgrade.
+Product follow-up is committed on main as `68a5153b990b0dde04a2eb1cbb40689e5d578ecd`.
+See its [acceptance record](https://github.com/lingxi-coder/lingxi-app/blob/68a5153b990b0dde04a2eb1cbb40689e5d578ecd/docs/architecture/three-repo-structure-validation.md):
+2756 Rust tests, 1284 Electron tests, Android Direct 998/Play 985 unit tests,
+all product gates, complete Android APK/native-byte checks, three iOS framework
+architectures, iOS device/simulator application compilation and three focused
+native simulator roundtrips pass. The signed macOS package passes static checks;
+its smoke guard refuses to launch while the user's existing app is running.
+Closing that app requires the pending approval. Physical Android is not connected;
+iPhone/Android install-and-launch authorization is also pending. No physical-device
+execution is claimed for this dependency and FFI upgrade.
