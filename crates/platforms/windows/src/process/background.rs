@@ -317,11 +317,46 @@ pub(super) async fn run(
             }
         };
         tokio::pin!(requested);
+        // A supervisor keeps this exact child/job owner alive while stopping.
+        // Its per-command sink notification replaces the old reliance on
+        // dropping StreamingProcessTreeGuard (the Windows platform callback
+        // intentionally has no global process list to signal).
+        let stop = capture.binding.on_exit.as_ref().and_then(|sink| sink.stop_notify());
+        let stopping = async {
+            match stop {
+                Some(notify) => notify.notified().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(stopping);
         let mut out = [0; 8192];
         let mut err = [0; 8192];
         loop {
             tokio::select! {
                 biased;
+                () = &mut stopping => {
+                    // Signal the tree while the held Child preserves its
+                    // process identity, then terminate/reap that held handle.
+                    // Keep a tree failure visible even if the direct child
+                    // stopped; it is not proof that descendants were stopped.
+                    let tree = super::kill_tree::kill_tree_windows(pid).await;
+                    let killed = child.kill().await.map_err(io_error);
+                    let waited = child.wait().await.map_err(io_error);
+                    // wait consumes the native Child handle. Do not leave a
+                    // PID-based Drop cleanup armed after the held child is
+                    // reaped, even if its descendant tree signal failed.
+                    if waited.is_ok() { guard.0 = None; }
+                    waited?;
+                    // Failed tree termination can leave descendants holding
+                    // these pipes open. Report that failure before an unbounded
+                    // output drain; direct-child settlement is already joined.
+                    tree?;
+                    killed?;
+                    drain(&mut child, &mut stdout, &mut stderr, &mut capture, eof).await?;
+                    capture.flush().await?;
+                    capture.finalize_persisted().await?;
+                    return Err(ProcessError::Io("supervisor command cancelled".into()));
+                }
                 () = &mut requested => break,
                 () = &mut deadline => { timed_out = true; break; }
                 result = child.wait(), if eof.iter().all(|eof| *eof) => {
@@ -793,5 +828,163 @@ mod tests {
             ForegroundOutcome::MovedToBackground(_)
         ));
         finished(&sink).await;
+    }
+}
+
+#[cfg(all(test, unix))]
+mod foreground_stop_tests {
+    use super::*;
+    use lingxi_core::host::{
+        BackgroundExitSink, BackgroundTaskBinding, ProcessCommand, SandboxedTag,
+    };
+    use std::sync::Arc;
+    struct StopSink {
+        stop: Arc<tokio::sync::Notify>,
+        started: tokio::sync::Notify,
+        pid: std::sync::atomic::AtomicU32,
+    }
+    #[async_trait::async_trait]
+    impl BackgroundExitSink for StopSink {
+        fn stop_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+            Some(self.stop.clone())
+        }
+        async fn on_spawn(&self, _: &str, pid: u32) -> Result<(), ProcessError> {
+            self.pid.store(pid, std::sync::atomic::Ordering::SeqCst);
+            self.started.notify_one();
+            Ok(())
+        }
+        async fn on_exit(&self, _: &str, _: Option<i32>) {}
+    }
+    #[tokio::test]
+    async fn foreground_stop_joins_child_even_when_tree_termination_reports_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let sink = Arc::new(StopSink {
+            stop: Arc::new(tokio::sync::Notify::new()),
+            started: tokio::sync::Notify::new(),
+            pid: std::sync::atomic::AtomicU32::new(0),
+        });
+        let cmd = SandboxedCommand::__new_sandboxed(
+            ProcessCommand {
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), "exec sleep 30".into()],
+                cwd: Some(root.path().to_path_buf()),
+                env: Default::default(),
+                timeout: Some(std::time::Duration::from_secs(30)),
+                stdin: None,
+            },
+            SandboxedTag::BypassAuditedWithReason {
+                reason: "isolated Windows driver cancellation fixture".into(),
+            },
+        )
+        .with_background_task(BackgroundTaskBinding {
+            task_id: "held-child".into(),
+            output_path: root.path().join("output"),
+            on_exit: Some(sink.clone()),
+            on_demand: None,
+        });
+        let task = tokio::spawn(async move { run(&cmd, Some(100), false).await });
+        sink.started.notified().await;
+        let pid = sink.pid.load(std::sync::atomic::Ordering::SeqCst);
+        sink.stop.notify_one();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "Unix has no taskkill; a tree termination failure must remain failure"
+        );
+        // The command is a direct exec with no descendants. Probe PID liveness
+        // only after the driver's held Child has been explicitly waited/reaped.
+        assert!(!std::process::Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    #[tokio::test]
+    async fn foreground_stop_tree_failure_does_not_wait_for_descendant_held_pipes() {
+        struct Descendant(u32);
+        impl Drop for Descendant {
+            fn drop(&mut self) {
+                // This PID belongs to the fixture's still-live sleep. The
+                // production runner must report its tree signal failure;
+                // only the isolated fixture owner performs this cleanup.
+                let _ = std::process::Command::new("/bin/kill")
+                    .args(["-KILL", &self.0.to_string()])
+                    .status();
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let sink = Arc::new(StopSink {
+            stop: Arc::new(tokio::sync::Notify::new()),
+            started: tokio::sync::Notify::new(),
+            pid: std::sync::atomic::AtomicU32::new(0),
+        });
+        let cmd = SandboxedCommand::__new_sandboxed(
+            ProcessCommand {
+                command: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "sleep 30 & printf '%s' \"$!\" > descendant.pid; wait".into(),
+                ],
+                cwd: Some(root.path().to_path_buf()),
+                env: Default::default(),
+                timeout: Some(std::time::Duration::from_secs(30)),
+                stdin: None,
+            },
+            SandboxedTag::BypassAuditedWithReason {
+                reason: "isolated inherited-pipe cancellation fixture".into(),
+            },
+        )
+        .with_background_task(BackgroundTaskBinding {
+            task_id: "held-pipes".into(),
+            output_path: root.path().join("output"),
+            on_exit: Some(sink.clone()),
+            on_demand: None,
+        });
+        let task = tokio::spawn(async move { run(&cmd, Some(100), false).await });
+        sink.started.notified().await;
+        let child = sink.pid.load(std::sync::atomic::Ordering::SeqCst);
+        let descendant: u32 = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(root.path().join("descendant.pid")) {
+                    if let Ok(pid) = text.parse() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let _cleanup = Descendant(descendant);
+        sink.stop.notify_one();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("a tree signal failure cannot await still-open descendant pipes")
+            .unwrap();
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("taskkill"),
+            "native tree failure is retained: {error}"
+        );
+        assert!(
+            !std::process::Command::new("/bin/kill")
+                .args(["-0", &child.to_string()])
+                .status()
+                .unwrap()
+                .success(),
+            "held direct child was reaped before failure returned"
+        );
+        assert!(
+            std::process::Command::new("/bin/kill")
+                .args(["-0", &descendant.to_string()])
+                .status()
+                .unwrap()
+                .success(),
+            "descendant still owns the output pipe at the failure return"
+        );
     }
 }

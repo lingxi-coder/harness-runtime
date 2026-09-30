@@ -863,6 +863,7 @@ struct ServerSink {
     done: CancellationToken,
     template: ShellProcessHandoff,
     spawned: Arc<tokio::sync::Notify>,
+    cancelled: CancellationToken,
 }
 #[derive(Default)]
 struct ServerState {
@@ -890,10 +891,17 @@ impl BackgroundExitSink for ServerSink {
             let notified = self.spawned.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            if self.cancelled.is_cancelled() {
+                return Err(error("shell capability cancelled before acceptance"));
+            }
             if self.state.lock().await.spawn_accepted {
                 return Ok(());
             }
-            notified.await;
+            tokio::select! {
+                biased;
+                _ = self.cancelled.cancelled() => return Err(error("shell capability cancelled before acceptance")),
+                _ = notified => {},
+            }
         }
     }
     fn manages_output(&self) -> bool {
@@ -963,6 +971,25 @@ pub async fn run_supervisor(
 ) -> Result<(), ProcessError> {
     let directory = PathBuf::from(std::env::args().nth(2).ok_or(ProcessError::Unsupported)?);
     run_at(directory, factory).await
+}
+// Kill is a receipt, not a completion proof. Keep the same child-owning
+// runner alive until its native wait/output drain finishes before replying to
+// Start or closing a disconnected foreground host.
+async fn cancel_and_join_runner<F>(
+    mut running: std::pin::Pin<&mut F>,
+    mut signal: impl FnMut(),
+) -> Result<ForegroundRunResult, ProcessError>
+where
+    F: std::future::Future<Output = Result<ForegroundRunResult, ProcessError>>,
+{
+    loop {
+        signal();
+        tokio::select! {
+            biased;
+            result = &mut running => return result,
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {},
+        }
+    }
 }
 pub async fn run_at(
     directory: PathBuf,
@@ -1035,6 +1062,7 @@ pub async fn run_at(
                         stop: kill.clone(),
                         done: done.clone(),
                         spawned: spawned.clone(),
+                        cancelled: stop.clone(),
                         template: ShellProcessHandoff {
                             supervisor_directory_identity: Some(
                                 start.supervisor_directory_identity,
@@ -1108,7 +1136,25 @@ pub async fn run_at(
                         }
                     };
                     tokio::pin!(run);
-                    let result = tokio::select! { result=&mut run=>result,()=stop.cancelled()=>{platform().cancel_active_processes();Err(error("supervisor command cancelled"))},()=disconnected(&mut stream)=>{platform().cancel_active_processes();done.cancel();return;}};
+                    let result = tokio::select! {
+                        result = &mut run => result,
+                        () = stop.cancelled() => {
+                            let settled = cancel_and_join_runner(run.as_mut(), || { kill.notify_one(); platform().cancel_active_processes(); }).await;
+                            match settled {
+                                Ok(_) => Err(error("supervisor command cancelled")),
+                                Err(cause) => Err(cause),
+                            }
+                        }
+                        () = disconnected(&mut stream) => {
+                            // A pre-exec capability wait has no active child
+                            // registration yet. Cancel that acceptance wait so
+                            // the platform closes its gate and joins spawn.
+                            stop.cancel();
+                            let _ = cancel_and_join_runner(run.as_mut(), || { kill.notify_one(); platform().cancel_active_processes(); }).await;
+                            done.cancel();
+                            return;
+                        }
+                    };
                     match result {
                         Ok(result) => {
                             let handoff = if let ForegroundOutcome::MovedToBackground(handle) =
@@ -1406,5 +1452,44 @@ mod recovery_tests {
                 "no replacement file or lock may be created"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cancellation_join_tests {
+    use super::*;
+    #[tokio::test]
+    async fn cancellation_receipt_waits_for_the_retained_runner_to_settle() {
+        let completed = Arc::new(tokio::sync::Notify::new());
+        let release = completed.clone();
+        let run = async move {
+            release.notified().await;
+            Ok(ForegroundRunResult {
+                outcome: ForegroundOutcome::Completed(mobile_linux_api::ProcessOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    timed_out: false,
+                }),
+                output_file: None,
+            })
+        };
+        tokio::pin!(run);
+        let signals = std::sync::atomic::AtomicUsize::new(0);
+        let stopping = cancel_and_join_runner(run.as_mut(), || {
+            signals.fetch_add(1, Ordering::SeqCst);
+        });
+        tokio::pin!(stopping);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut stopping)
+                .await
+                .is_err()
+        );
+        assert!(signals.load(Ordering::SeqCst) > 0);
+        completed.notify_one();
+        assert!(tokio::time::timeout(Duration::from_secs(1), stopping)
+            .await
+            .unwrap()
+            .is_ok());
     }
 }

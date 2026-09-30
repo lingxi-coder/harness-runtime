@@ -6557,6 +6557,125 @@ mod pre_cancel_tests {
             "only the ordinary Cancel branch should emit an interruption denial"
         );
     }
+    fn orphaned_with_tool(tool: Arc<dyn Tool>) -> (Arc<ConversationOrchestrator>, ToolUseId) {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(tool);
+        let orch = Arc::new(ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        ));
+        let id = ToolUseId::new();
+        (orch, id)
+    }
+
+    async fn seed_orphan(
+        orch: &ConversationOrchestrator,
+        id: &ToolUseId,
+        name: &str,
+        input: serde_json::Value,
+    ) {
+        orch.session().lock().await.history.push(
+            lingxi_core::types::ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: name.into(),
+                    input,
+                    provider_id: None,
+                }],
+                stop_reason: None,
+            },
+        );
+    }
+    fn allow_orphan() -> lingxi_core::host::permission_gate::PermissionOutcome {
+        lingxi_core::host::permission_gate::PermissionOutcome::Allow {
+            updated_input: None,
+            permission_updates: vec![],
+            decision_classification: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn orphaned_replay_cancel_owner_interrupts_noncooperative_cancel_tool() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let (orch, id) = orphaned_with_tool(Arc::new(NonCooperativeCancelTool {
+            started: started.clone(),
+        }));
+        seed_orphan(&orch, &id, "NonCooperativeCancel", json!({})).await;
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let recovered = orch.clone();
+        let result_id = id.clone();
+        let task = tokio::spawn(async move {
+            recovered
+                .run_orphaned_permission_with_cancel(&id, allow_orphan(), token)
+                .await
+        });
+        started.notified().await;
+        cancel.cancel();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        );
+        let expected = format!("Error: {}", ToolError::Aborted.model_facing_message());
+        let session = orch.session();
+        let history = &session.lock().await.history;
+        let results = history.iter().flat_map(|message| match message {
+            lingxi_core::types::ConversationMessage::User { content, .. } => content.as_slice(),
+            _ => &[],
+        }).filter(|block| matches!(block, ContentBlock::ToolResult { tool_use_id, is_error: true, content, .. } if tool_use_id == &result_id && content == &expected)).count();
+        assert_eq!(results, 1, "in-flight abort must be persisted for the exact recovered tool: {history:?}");
+    }
+
+    #[tokio::test]
+    async fn orphaned_replay_cancel_owner_waits_for_block_tool_boundary() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (orch, id) = orphaned_with_tool(Arc::new(BlockingMutationTool {
+            started: started.clone(),
+            release: release.clone(),
+        }));
+        seed_orphan(
+            &orch,
+            &id,
+            "BlockingMutation",
+            json!({"subagent_type":"fusion"}),
+        )
+        .await;
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let recovered = orch.clone();
+        let mut task = tokio::spawn(async move {
+            recovered
+                .run_orphaned_permission_with_cancel(&id, allow_orphan(), token)
+                .await
+        });
+        started.notified().await;
+        cancel.cancel();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut task)
+                .await
+                .is_err()
+        );
+        release.notify_one();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        );
+    }
+
 }
 // RECOV.4: the `max_output_tokens` recovery-reset helper used by both the
 // token-budget continuation and the Stop-hook blocking continuation.

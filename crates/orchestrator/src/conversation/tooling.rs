@@ -249,6 +249,27 @@ impl ConversationOrchestrator {
         tool_use_id: &lingxi_core::types::ToolUseId,
         decision: lingxi_core::host::permission_gate::PermissionOutcome,
     ) -> Result<bool, OrchestratorError> {
+        self.run_orphaned_permission_owned(tool_use_id, decision, None).await
+    }
+
+    /// Replay a recovered tool under the host's retained operation owner. The
+    /// normal dispatcher observes each tool's Cancel/Block policy; the host
+    /// must await this entire recovery, including result persistence.
+    pub async fn run_orphaned_permission_with_cancel(
+        &self,
+        tool_use_id: &lingxi_core::types::ToolUseId,
+        decision: lingxi_core::host::permission_gate::PermissionOutcome,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<bool, OrchestratorError> {
+        self.run_orphaned_permission_owned(tool_use_id, decision, Some(cancel)).await
+    }
+
+    async fn run_orphaned_permission_owned(
+        &self,
+        tool_use_id: &lingxi_core::types::ToolUseId,
+        decision: lingxi_core::host::permission_gate::PermissionOutcome,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<bool, OrchestratorError> {
         use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
         // 1. Locate the orphaned assistant message and confirm its `tool_use` is
@@ -392,7 +413,7 @@ impl ConversationOrchestrator {
             .insert(tool_use_id.clone(), forced);
         let tool_uses = vec![(tool_use_id.clone(), name, final_input, provider_id)];
         let dispatch_result =
-            crate::turn_loop::dispatch_tool_uses_tracked(self, &tool_uses, None).await;
+            crate::turn_loop::dispatch_tool_uses_tracked(self, &tool_uses, cancel).await;
         self.orphan_forced_decisions
             .lock()
             .await

@@ -42,4 +42,43 @@ pub struct BashRunOutput {
 pub trait BashRunner: Send + Sync {
     /// Execute `command` and return its captured stdout/stderr.
     async fn run(&self, command: &str) -> BashRunOutput;
+
+    /// Run typed host input with cancellation that stops and joins its owned
+    /// process before returning. Implementations must keep sandbox execution,
+    /// never transfer cancelled input into model/background work. The default
+    /// refuses execution because dropping an arbitrary run future cannot prove
+    /// that its subprocess stopped.
+    async fn run_with_cancel(
+        &self,
+        _command: &str,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> BashRunOutput {
+        BashRunOutput {
+            stdout: String::new(),
+            stderr: "Cancellable Bash execution is unavailable".into(),
+            exit_code: 1,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Legacy(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl BashRunner for Legacy {
+        async fn run(&self, _: &str) -> BashRunOutput {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            BashRunOutput::default()
+        }
+    }
+    #[tokio::test]
+    async fn cancellable_default_refuses_to_launch_legacy_runner() {
+        let runner = Legacy(std::sync::atomic::AtomicUsize::new(0));
+        let result = runner
+            .run_with_cancel("ignored", tokio_util::sync::CancellationToken::new())
+            .await;
+        assert_ne!(result.exit_code, 0);
+        assert_eq!(runner.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
 }
