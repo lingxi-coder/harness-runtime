@@ -11,7 +11,7 @@ if [[ "${enabled}" == "1" ]]; then
     "${MOBILE_LINUX_EVIDENCE_DIR:?enabled release requires external evidence}/rootfs-manifest.json" "$@"
 else
   sdk_root="$(python3 "${script_dir}/../lib/sdk_source.py" "$@")"
-  bash "${sdk_root}/scripts/check-resource-contracts.sh"
+  bash "${sdk_root}/scripts/checks/check-resource-contracts.sh"
 fi
 "${script_dir}/../local-apps/check-sbom-and-licenses.sh" "$@"
 if [[ "${enabled}" == "1" ]]; then

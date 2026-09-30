@@ -36,6 +36,8 @@ Historical validation files remain records of their original revisions.
 ## Verified locally
 
 - All-feature, all-target workspace compilation: passed.
+- Standalone SDK smoke uses the current `scripts/checks` resource-contract entrypoint;
+  authorization, evidence and supply-chain gates pass with the pinned SDK.
 - Nine repository gates: passed.
 - Windows GNU complete desktop compilation: passed (existing platform warnings).
 - Strict cargo audit: zero vulnerabilities, zero warnings.
