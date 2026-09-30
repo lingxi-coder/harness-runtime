@@ -2755,12 +2755,12 @@ async fn lagged_catalog_listener_recovers_all_supported_catalogs_for_current_gen
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     clear_test_telemetry_events();
     let pause = Arc::new(Notify::new());
-    set_catalog_change_listener_pause_for_test(Some(pause.clone()));
 
     let mock = Arc::new(BridgeMock::new(&[]));
     let registry = Arc::new(McpRegistry::new(mock as Arc<dyn McpTransport>));
     let (connection, peer_tx, mut peer_rx) = drivable_connection();
     let connection_id = ConnId::new();
+    set_catalog_change_listener_pause_for_test(connection_id, Some(pause.clone()));
     let client = Arc::new(
         McpClient::new(
             "srv",
@@ -2845,8 +2845,8 @@ async fn lagged_catalog_listener_recovers_all_supported_catalogs_for_current_gen
         frame.push(b'\n');
         peer_tx.send(Bytes::from(frame)).await.unwrap();
     }
-    set_catalog_change_listener_pause_for_test(None);
-    pause.notify_waiters();
+    set_catalog_change_listener_pause_for_test(connection_id, None);
+    pause.notify_one();
 
     let refresh_registry = registry.clone();
     let refresh = tokio::spawn(async move {
@@ -2943,12 +2943,12 @@ async fn lagged_catalog_listener_recovers_all_supported_catalogs_for_current_gen
 #[tokio::test]
 async fn lagged_catalog_listener_skips_recovery_for_a_replaced_generation() {
     let pause = Arc::new(Notify::new());
-    set_catalog_change_listener_pause_for_test(Some(pause.clone()));
 
     let mock = Arc::new(BridgeMock::new(&[]));
     let registry = McpRegistry::new(mock as Arc<dyn McpTransport>);
     let (connection, peer_tx, _peer_rx) = drivable_connection();
     let old_connection_id = ConnId::new();
+    set_catalog_change_listener_pause_for_test(old_connection_id, Some(pause.clone()));
     let new_connection_id = ConnId::new();
     registry.connections.write().await.insert(
         "srv".into(),
@@ -3031,8 +3031,8 @@ async fn lagged_catalog_listener_skips_recovery_for_a_replaced_generation() {
             connected_at: SystemTime::now(),
         },
     );
-    set_catalog_change_listener_pause_for_test(None);
-    pause.notify_waiters();
+    set_catalog_change_listener_pause_for_test(old_connection_id, None);
+    pause.notify_one();
 
     assert!(
         tokio::time::timeout(Duration::from_millis(200), changes.recv())

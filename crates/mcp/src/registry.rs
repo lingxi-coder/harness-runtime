@@ -4600,16 +4600,25 @@ fn record_test_telemetry_event(name: &'static str, payload: serde_json::Value) {
 }
 
 #[cfg(test)]
-fn catalog_change_listener_pause_slot() -> &'static StdMutex<Option<Arc<Notify>>> {
-    static SLOT: OnceLock<StdMutex<Option<Arc<Notify>>>> = OnceLock::new();
-    SLOT.get_or_init(|| StdMutex::new(None))
+fn catalog_change_listener_pause_slot() -> &'static StdMutex<HashMap<McpConnectionId, Arc<Notify>>>
+{
+    static SLOT: OnceLock<StdMutex<HashMap<McpConnectionId, Arc<Notify>>>> = OnceLock::new();
+    SLOT.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
 #[cfg(test)]
-fn set_catalog_change_listener_pause_for_test(hook: Option<Arc<Notify>>) {
-    *catalog_change_listener_pause_slot()
+fn set_catalog_change_listener_pause_for_test(
+    connection_id: McpConnectionId,
+    hook: Option<Arc<Notify>>,
+) {
+    let mut hooks = catalog_change_listener_pause_slot()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(hook) = hook {
+        hooks.insert(connection_id, hook);
+    } else {
+        hooks.remove(&connection_id);
+    }
 }
 
 #[cfg(test)]
@@ -4646,11 +4655,12 @@ fn test_listener_reopen_park_jitter() -> Option<f64> {
 }
 
 #[cfg(test)]
-async fn maybe_pause_catalog_change_listener_for_test() {
+async fn maybe_pause_catalog_change_listener_for_test(connection_id: McpConnectionId) {
     let hook = catalog_change_listener_pause_slot()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
+        .get(&connection_id)
+        .cloned();
     if let Some(hook) = hook {
         hook.notified().await;
     }

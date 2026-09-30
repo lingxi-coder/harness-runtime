@@ -303,7 +303,7 @@ impl McpRegistry {
         let notifications = connection.notifications();
         tokio::spawn(async move {
             #[cfg(test)]
-            maybe_pause_catalog_change_listener_for_test().await;
+            maybe_pause_catalog_change_listener_for_test(connection_id).await;
             if negotiated.era == lingxi_core::host::McpProtocolEra::Modern {
                 registry
                     .run_modern_catalog_change_listener(
