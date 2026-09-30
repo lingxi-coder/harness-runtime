@@ -36,7 +36,7 @@ tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
 # (the grammar `scope.rs` otherwise mirrors from a copied corpus -- see that
 # module's `MIRRORED GRAMMAR` docs). NOT a production dependency: `tasks` has
 # five dependents (including `cron`/`coordinator`, which pull none of
-# `local-apps`'s bundled SQLite/libgit2/tree-sitter weight today), and
+# `local-apps`'s bundled SQLite/libgit2 weight today), and
 # `check_deps.py` excludes dev-dependencies from its edge check, so this adds
 # nothing to their build.
 local-apps = { path = "../local-apps" }

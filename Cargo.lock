@@ -3292,7 +3292,6 @@ dependencies = [
  "branding",
  "core",
  "git2",
- "mobile-linux-api",
  "rand 0.9.4",
  "rusqlite",
  "serde",
@@ -3302,8 +3301,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tree-sitter",
- "tree-sitter-javascript",
 ]
 
 [[package]]
