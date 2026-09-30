@@ -10,7 +10,7 @@ Historical validation files remain records of their original revisions.
 - Unix pane transport is compiled only on Unix. Windows auto swarm selection
   uses its existing in-process backend; explicit Unix pane selections report
   unavailable. Vendored Ed25519 uses libssh2's platform RNG. Full Windows GNU
-  desktop compilation passes; native MSVC requires the new CI run.
+  desktop compilation and the final native MSVC CI job pass.
 - CI checks the current `engine` feature, installs real Linux sandbox test
   tools, and provides a 16 MiB stack for debug libtest async state machines.
 - Updated usage/model fixtures use SDK cumulative usage and fixed pricing.
@@ -46,11 +46,11 @@ Historical validation files remain records of their original revisions.
   tests across 536 summaries, including nested supervisor helper invocations.
   Subsequent Linux CI corrections pass 7 MCP reload, 8 Mobile Linux sandbox
   and 1 process-tree focused tests.
-- [CI candidate 63e702c](https://github.com/lingxi-coder/harness-runtime/actions/runs/36673930535)
-  passes native Windows MSVC/Linux/macOS desktop, both iOS targets, four Android
-  combinations, feature profiles, parity, repository gates and Linux seccomp.
-  Its unit job is pending; lint receives the separately verified follow-up.
-  Vulnerability/license checks pass; the source-review gate remains red.
+- [Final CI f155e54](https://github.com/lingxi-coder/harness-runtime/actions/runs/36676810833):
+  26 of 27 jobs pass, including strict lint, complete Linux unit tests, native
+  Windows MSVC/Linux/macOS desktop, both iOS targets, four Android combinations,
+  feature profiles, parity, repository gates and Linux seccomp.
+  Vulnerability/license checks pass. Only cargo-vet source review fails.
 
 ## Evidence still required
 
@@ -58,7 +58,7 @@ cargo-vet reports 608 dependencies without safe-to-deploy source review.
 The audit store has no exemptions or fabricated reviews. This remains a hard
 source-review failure; the clean vulnerability scan does not close it.
 
-Product binding regeneration, final pinned native/release builds and fresh
-Linux/Windows/macOS CI must be validated separately. Physical Android is not
+Product binding regeneration and final pinned native/release builds are being
+validated separately in lingxi-app. Physical Android is not
 connected. iPhone/Android install-and-launch authorization is pending. Prior
 app or device results do not certify this dependency and FFI upgrade.
