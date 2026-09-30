@@ -14,12 +14,13 @@
 
 use async_trait::async_trait;
 use jsonrpc::{Connection, ConnectionError, InboundHandler, Request, Response, RouterError};
-use platform_api::{
+use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
     McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream, McpPromptDto, McpProtocolEra,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto, McpToolDto,
     McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
+use lingxi_core::types::McpConnectionId;
 use platform_common::mcp_remote::{
     capabilities_from_wire, initialize_params_for_version, modern_meta, modern_probe_params,
     modern_request_requires_meta, validate_modern_envelope, MCP_PROTOCOL_VERSION,
@@ -27,7 +28,6 @@ use platform_common::mcp_remote::{
 };
 use platform_common::mcp_stdio::{StderrRing, StdioConfig};
 use platform_common::RemoteMcpTransport;
-use protocol::McpConnectionId;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -488,9 +488,9 @@ struct RawTool {
     #[serde(rename = "outputSchema", default)]
     output_schema: Option<Value>,
     #[serde(default)]
-    annotations: Option<platform_api::McpToolAnnotationsDto>,
+    annotations: Option<lingxi_core::host::McpToolAnnotationsDto>,
     #[serde(default)]
-    icons: Vec<platform_api::McpIconDto>,
+    icons: Vec<lingxi_core::host::McpIconDto>,
     #[serde(default, rename = "_meta")]
     meta: Option<Value>,
 }
@@ -1013,7 +1013,7 @@ impl McpTransport for PosixMcpTransport {
                 arguments: p
                     .arguments
                     .into_iter()
-                    .map(|argument| platform_api::McpPromptArgumentDto {
+                    .map(|argument| lingxi_core::host::McpPromptArgumentDto {
                         name: argument.name,
                         description: argument.description,
                         required: argument.required,
@@ -1122,7 +1122,7 @@ impl McpTransport for PosixMcpTransport {
         conn: &McpRawConnection,
         uri: &str,
         output_dir: &std::path::Path,
-    ) -> Result<Vec<platform_api::McpResourceContentsRich>, McpError> {
+    ) -> Result<Vec<lingxi_core::host::McpResourceContentsRich>, McpError> {
         if self.is_remote_connection(conn.connection_id) {
             return self.remote.read_resource_rich(conn, uri, output_dir).await;
         }
@@ -1588,7 +1588,7 @@ mod initialize_params_tests {
 mod error_mapping_tests {
     use super::{handshake_error, is_method_not_found, map_call_err};
     use jsonrpc::{ConnectionError, JsonRpcError, RouterError};
-    use platform_api::McpError;
+    use lingxi_core::host::McpError;
     use serde_json::json;
     use std::time::Duration;
 

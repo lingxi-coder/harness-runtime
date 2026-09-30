@@ -35,7 +35,7 @@ pub(crate) async fn mint_app_init_session(
     lingxi_home: &std::path::Path,
     source_cwd: &str,
     data_root: &std::path::Path,
-    fs: Arc<dyn platform_api::FileSystem>,
+    fs: Arc<dyn lingxi_core::host::FileSystem>,
     record: &local_apps::AppRecord,
 ) -> Result<String, String> {
     let workspace_cwd = canonical_cwd_string(&data_root.join(&record.workspace_rel));
@@ -196,7 +196,7 @@ pub(crate) async fn run_app_boot_backfill_sweep(
     backfill_home: std::path::PathBuf,
     backfill_cwd: String,
     backfill_root: std::path::PathBuf,
-    backfill_fs: Arc<dyn platform_api::FileSystem>,
+    backfill_fs: Arc<dyn lingxi_core::host::FileSystem>,
     backfill_service: Arc<local_apps::AppService>,
     backfill_host: Arc<LocalAppsHostBroker>,
 ) {

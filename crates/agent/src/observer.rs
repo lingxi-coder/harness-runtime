@@ -28,11 +28,11 @@ pub(crate) fn observer_env_lock() -> &'static std::sync::Mutex<()> {
 /// work", and silently ignoring that would start work they asked to stop.
 #[must_use]
 pub fn observer_agents_enabled() -> bool {
-    let disabled = platform_api::env::is_env_truthy(
+    let disabled = lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
             .ok()
             .as_deref(),
-    ) || platform_api::env::is_env_truthy(
+    ) || lingxi_core::host::env::is_env_truthy(
         std::env::var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
             .ok()
             .as_deref(),
@@ -40,7 +40,7 @@ pub fn observer_agents_enabled() -> bool {
     if disabled {
         return false;
     }
-    platform_api::env::is_env_truthy(
+    lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS")
             .ok()
             .as_deref(),
@@ -127,7 +127,7 @@ fn validate_observer_chain<'a>(
     let Some(observer) = definition.observer.as_ref() else {
         return Ok(());
     };
-    if observer.schema_version != platform_api::subagent_spawn::OBSERVER_SCHEMA_VERSION {
+    if observer.schema_version != lingxi_core::host::subagent_spawn::OBSERVER_SCHEMA_VERSION {
         return Err(ObserverValidationError::UnsupportedSchema {
             owner: definition.agent_type.clone(),
             version: observer.schema_version,
@@ -160,7 +160,7 @@ fn validate_observer_chain<'a>(
         else {
             break;
         };
-        if next.schema_version != platform_api::subagent_spawn::OBSERVER_SCHEMA_VERSION {
+        if next.schema_version != lingxi_core::host::subagent_spawn::OBSERVER_SCHEMA_VERSION {
             return Err(ObserverValidationError::UnsupportedSchema {
                 owner: cursor.to_string(),
                 version: next.schema_version,
@@ -216,20 +216,20 @@ pub(crate) struct ActivityObserver {
     /// and its `description` is rewritten to `"<observer>@<observed>"`, so
     /// nothing about the OBSERVED agent survives on it. That is what
     /// [`Self::seed`] is for.
-    pub request: platform_api::SubagentSpawnRequest,
-    pub inheritance: platform_api::SubagentInheritance,
-    pub registry: std::sync::Weak<dyn platform_api::task_registry::TaskRegistryHandle>,
+    pub request: lingxi_core::host::SubagentSpawnRequest,
+    pub inheritance: lingxi_core::host::SubagentInheritance,
+    pub registry: std::sync::Weak<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     /// The observed agent's identity and declaration, captured while its own
     /// request was still intact.
-    pub seed: platform_api::observer_pairing::ObserverPairingSeed,
+    pub seed: lingxi_core::host::observer_pairing::ObserverPairingSeed,
 }
 
 #[async_trait::async_trait]
-impl platform_api::subagent_spawn::SubagentSpawnObserver for ActivityObserver {
-    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
+impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for ActivityObserver {
+    async fn on_event(&self, event: lingxi_core::host::subagent_spawn::SubagentObservation) {
         use crate::observer_delivery::activity_from_message;
         use crate::observer_text::{build_digest, envelope_name, ObservedActivity};
-        use platform_api::subagent_spawn::SubagentObservation;
+        use lingxi_core::host::subagent_spawn::SubagentObservation;
 
         // claude-code 2.1.270 digests what the observed agent DID, rendered one
         // entry per activity (`UIo`) inside a `<name-activity>` envelope with
@@ -317,7 +317,7 @@ mod tests {
             max_turns: 1,
             model: AgentModel::Inherit,
             permission_mode: AgentPermissionMode::Bubble,
-            source: AgentSource::Settings(protocol::SettingsScope::User),
+            source: AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             base_dir: PathBuf::new(),
             system_prompt: None,
             mcp_servers: Vec::new(),

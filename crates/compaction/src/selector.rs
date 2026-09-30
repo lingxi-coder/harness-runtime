@@ -22,7 +22,7 @@
 //! being kept intact".
 
 use crate::prompt::SummarizeDirection;
-use protocol::ConversationMessage;
+use lingxi_core::types::ConversationMessage;
 
 /// `"Nothing to summarize before the selected message."` — oracle `zir`'s
 /// `up_to` guard, byte-exact.
@@ -162,7 +162,7 @@ impl SummarizeSplit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::MessageId;
+    use lingxi_core::types::MessageId;
 
     fn user(text: &str) -> ConversationMessage {
         ConversationMessage::user(MessageId::new(), text.to_string())
@@ -170,7 +170,7 @@ mod tests {
     fn assistant(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
             id: MessageId::new(),
-            content: vec![protocol::ContentBlock::Text {
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: text.to_string(),
             }],
             stop_reason: None,
@@ -188,7 +188,7 @@ mod tests {
                 | ConversationMessage::Assistant { content, .. } => content
                     .iter()
                     .map(|block| match block {
-                        protocol::ContentBlock::Text { text } => text.clone(),
+                        lingxi_core::types::ContentBlock::Text { text } => text.clone(),
                         _ => String::new(),
                     })
                     .collect::<String>(),

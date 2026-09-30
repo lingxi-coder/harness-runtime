@@ -10,7 +10,7 @@
 //! `estimated = true` and contributes $0 — no rate exists to guess a dollar
 //! figure from. A component with no USAGE at all — an attempted call whose
 //! real, already-billed token counts were lost (an in-flight panel cut off
-//! by a timeout/cancel, or an analyst/synthesizer call that failed before
+//! by a timeout/cancel, or an analyst call that failed before
 //! returning any usage) — is estimated from what IS known (the prompt sent,
 //! or the task + successful panel reports a judge call read) using main's
 //! real character-based approximation
@@ -23,7 +23,7 @@
 
 use crate::config::FusionRuntimeConfig;
 use crate::model_resolver::{route_key, ModelLimits, ModelSource, ResolvedPanel, ResolvedSet};
-use platform_api::{
+use lingxi_core::host::{
     BudgetEnforcerHandle, BudgetError, BudgetReservationId, FusionCostClass, FusionError,
     FusionRequest,
 };
@@ -168,7 +168,7 @@ pub struct FusionQuote {
     pub reserved_input_tokens: u64,
     /// Output tokens in the corrected formula.
     pub reserved_output_tokens: u64,
-    /// Provider calls in the peak (panel turns + analyst + synth).
+    /// Provider calls in the peak (panel turns + analyst).
     pub max_calls: u64,
 }
 
@@ -200,6 +200,25 @@ pub fn quote(
     prices: &dyn FusionPriceBook,
     session_has_max: bool,
 ) -> Result<FusionQuote, FusionError> {
+    quote_for(config, resolved, catalog, prices, session_has_max, false)
+}
+
+/// [`quote`] for a run whose analyst may check claims with tools
+/// (`analyst_tools`): the analyst then costs like a panel — up to
+/// `analyst_max_turns` provider calls, each re-reading its context — instead of
+/// one call plus its protocol retry.
+///
+/// # Errors
+///
+/// As [`quote`].
+pub fn quote_for(
+    config: &FusionRuntimeConfig,
+    resolved: &ResolvedSet,
+    catalog: &dyn ModelSource,
+    prices: &dyn FusionPriceBook,
+    session_has_max: bool,
+    analyst_tools: bool,
+) -> Result<FusionQuote, FusionError> {
     let panel_count = u64::from(u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX));
     let turns = u64::from(config.panel_max_turns);
     let mut reserved_input_tokens = 0_u64;
@@ -216,17 +235,28 @@ pub fn quote(
     }
     let analyst_limits = route_limits(catalog, &resolved.analyst);
     let analyst_output_cap = analyst_limits.output_cap(config.analyst_max_output_tokens);
-    let analyst_output = u64::from(analyst_output_cap)
-        .saturating_mul(1 + u64::from(config.analysis_protocol_retries));
-    let synth_output_cap = route_limits(catalog, &resolved.synthesizer)
-        .output_cap(config.synthesizer_max_output_tokens);
-    let synth_output = u64::from(synth_output_cap);
-    let reserved_output_tokens = panel_output
-        .saturating_add(analyst_output)
-        .saturating_add(synth_output);
+    // The single-call analyst is priced for output only, as it always was. A
+    // tool-using analyst re-sends its growing context every turn, so it also
+    // reserves input, on the same per-turn basis a panel does.
+    let analyst_calls = if analyst_tools {
+        u64::from(config.analyst_max_turns)
+    } else {
+        1 + u64::from(config.analysis_protocol_retries)
+    };
+    let analyst_output = u64::from(analyst_output_cap).saturating_mul(analyst_calls);
+    let analyst_input = if analyst_tools {
+        let per_turn = analyst_limits.input_cap(analyst_output_cap).map_or(
+            u64::from(config.panel_reserved_input_tokens_per_turn),
+            |cap| cap.min(u64::from(config.panel_reserved_input_tokens_per_turn)),
+        );
+        analyst_calls.saturating_mul(per_turn)
+    } else {
+        0
+    };
+    reserved_input_tokens = reserved_input_tokens.saturating_add(analyst_input);
+    let reserved_output_tokens = panel_output.saturating_add(analyst_output);
     let panel_calls = panel_count.saturating_mul(turns);
-    let analyst_calls = 1 + u64::from(config.analysis_protocol_retries);
-    let max_calls = panel_calls.saturating_add(analyst_calls).saturating_add(1);
+    let max_calls = panel_calls.saturating_add(analyst_calls);
 
     let mut reserved_usd = 0_u64;
     for panel in &resolved.panels {
@@ -257,18 +287,9 @@ pub fn quote(
         catalog,
         prices,
         session_has_max,
-        0,
+        analyst_input,
         analyst_output,
         analyst_calls,
-    )?);
-    reserved_usd = reserved_usd.saturating_add(model_peak(
-        &resolved.synthesizer,
-        catalog,
-        prices,
-        session_has_max,
-        0,
-        synth_output,
-        1,
     )?);
 
     if let Some(cap) = config.max_reserved_nano_usd {
@@ -291,7 +312,7 @@ fn route_limits(catalog: &dyn ModelSource, route: &ResolvedPanel) -> ModelLimits
         .map_or_else(ModelLimits::unknown, |row| row.limits)
 }
 
-/// Price one component (a panel, the analyst, or the synthesizer/parent) from
+/// Price one component (a panel or the analyst) from
 /// its own token usage. `None` means the model has no price in `prices` and
 /// is not a `Subscription`-class hint — the caller decides whether that is a
 /// hard failure (reservation quote, when the session has a max budget) or an
@@ -490,13 +511,20 @@ impl Drop for ReservationLease {
 pub async fn acquire(
     config: &FusionRuntimeConfig,
     resolved: &ResolvedSet,
-    _request: &FusionRequest,
+    request: &FusionRequest,
     catalog: &dyn ModelSource,
     prices: &dyn FusionPriceBook,
     budget: Arc<dyn BudgetEnforcerHandle>,
 ) -> Result<ReservationLease, FusionError> {
     let session_has_max = budget.max_session_nano_usd().is_some();
-    let quote = quote(config, resolved, catalog, prices, session_has_max)?;
+    let quote = quote_for(
+        config,
+        resolved,
+        catalog,
+        prices,
+        session_has_max,
+        config.analyst_uses_tools(request),
+    )?;
     acquire_quoted(quote, budget).await
 }
 
@@ -530,7 +558,7 @@ mod tests {
     use super::*;
     use crate::config::FusionRuntimeConfig;
     use crate::model_resolver::CatalogModel;
-    use platform_api::{
+    use lingxi_core::host::{
         FusionModelHints, FusionOrigin, FusionPreset, FusionRequest, DEFAULT_FUSION_DIMENSIONS,
     };
     use std::collections::HashMap;
@@ -603,6 +631,7 @@ comparator, not dead API surface and not a production fallback"
 
     fn request() -> FusionRequest {
         FusionRequest {
+            verify_claims: false,
             schema_version: 1,
             origin: FusionOrigin::Slash,
             prompt: "task".into(),
@@ -617,7 +646,8 @@ comparator, not dead API surface and not a production fallback"
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "sonnet".into(),
-            workflow_run_id: None,
+            mode: Default::default(),
+            verify_commands: Vec::new(),
         }
     }
 
@@ -638,10 +668,6 @@ comparator, not dead API surface and not a production fallback"
                 },
             ],
             analyst: ResolvedPanel {
-                profile: "anthropic".into(),
-                model: "sonnet".into(),
-            },
-            synthesizer: ResolvedPanel {
                 profile: "anthropic".into(),
                 model: "sonnet".into(),
             },
@@ -697,6 +723,51 @@ comparator, not dead API surface and not a production fallback"
     }
 
     #[test]
+    fn a_tool_analyst_reserves_its_turns_and_the_input_it_re_reads() {
+        let mut config = FusionRuntimeConfig::defaults();
+        config.analyst_max_turns = 6;
+        let catalog = vec![
+            hinted("anthropic", "sonnet", false),
+            hinted("openai", "terra", false),
+            hinted("deepseek", "pro", false),
+        ];
+        let single = quote_for(
+            &config,
+            &resolved_three(),
+            &catalog,
+            &unit_prices(),
+            true,
+            false,
+        )
+        .unwrap();
+        let tools = quote_for(
+            &config,
+            &resolved_three(),
+            &catalog,
+            &unit_prices(),
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            single,
+            quote(&config, &resolved_three(), &catalog, &unit_prices(), true).unwrap(),
+            "without tools the quote is the one it always was"
+        );
+        // One call plus its protocol retry becomes `analyst_max_turns` calls.
+        assert_eq!(
+            tools.max_calls - single.max_calls,
+            u64::from(config.analyst_max_turns) - (1 + u64::from(config.analysis_protocol_retries))
+        );
+        assert_eq!(
+            tools.reserved_input_tokens - single.reserved_input_tokens,
+            u64::from(config.analyst_max_turns)
+                * u64::from(config.panel_reserved_input_tokens_per_turn)
+        );
+        assert!(tools.reserved_nano_usd > single.reserved_nano_usd);
+    }
+
+    #[test]
     fn subscription_models_quote_zero_dollars() {
         let config = FusionRuntimeConfig::defaults();
         let catalog = vec![
@@ -722,7 +793,7 @@ comparator, not dead API surface and not a production fallback"
 
     /// G003-cache follow-up: `price_component` must charge cache-read and
     /// cache-write tokens the same way it charges input/output — a panel or
-    /// analyst/synth call that used prompt caching is still real spend, and
+    /// analyst call that used prompt caching is still real spend, and
     /// the main turn loop's `CostCalculator` (over the SAME catalog) already
     /// bills all four classes in full.
     #[test]
@@ -904,7 +975,7 @@ comparator, not dead API surface and not a production fallback"
     }
 
     #[async_trait::async_trait]
-    impl platform_api::BudgetSettlementReceipt for TestSettlementReceipt {
+    impl lingxi_core::host::BudgetSettlementReceipt for TestSettlementReceipt {
         async fn finish(self: Box<Self>) -> Result<(), BudgetError> {
             self.state.started.notify_one();
             if self.state.block_finish {
@@ -947,7 +1018,7 @@ comparator, not dead API surface and not a production fallback"
             &self,
             _id: BudgetReservationId,
             _actual_nano_usd: u64,
-        ) -> Result<Option<platform_api::BudgetCommitReceipt>, BudgetError> {
+        ) -> Result<Option<lingxi_core::host::BudgetCommitReceipt>, BudgetError> {
             self.state.begin_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Some(Box::new(TestSettlementReceipt {
                 state: Arc::clone(&self.state),

@@ -1,4 +1,4 @@
-//! Shared UniFFI boundary and platform-api adapter for native audio services.
+//! Shared UniFFI boundary and core::host adapter for native audio services.
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD;
@@ -9,13 +9,13 @@ use client::protocol::audio::{
     AudioOperationResultDto, AudioOwnerDto, AudioReadinessStateDto, MAX_AUDIO_PAYLOAD_BYTES,
     MAX_AUDIO_SAMPLE_RATE_HZ,
 };
-use platform_api::audio::{
+use lingxi_core::host::audio::{
     AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioInitiator, AudioOperation,
     AudioOperationContext, AudioOperationId, AudioOperationKind, AudioOperationReadiness,
     AudioOperationSuccess, AudioOwner, AudioReadinessState, AudioRecordingHandle, AudioService,
     AudioStatus,
 };
-use platform_api::{SttTranscript, TtsAudio, VoiceRecording};
+use lingxi_core::host::{SttTranscript, TtsAudio, VoiceRecording};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 

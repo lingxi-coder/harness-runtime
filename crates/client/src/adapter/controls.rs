@@ -7,16 +7,16 @@ use crate::protocol::controls::{
 };
 
 fn lower_reasoning_selection(
-    selection: &platform_api::ReasoningSelection,
+    selection: &lingxi_core::host::ReasoningSelection,
 ) -> ReasoningSelectionDto {
     match selection {
-        platform_api::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
-        platform_api::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
-        platform_api::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
-        platform_api::ReasoningSelection::Level { id } => {
+        lingxi_core::host::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
+        lingxi_core::host::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
+        lingxi_core::host::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
+        lingxi_core::host::ReasoningSelection::Level { id } => {
             ReasoningSelectionDto::Level { id: id.clone() }
         }
-        platform_api::ReasoningSelection::TokenBudget { tokens } => {
+        lingxi_core::host::ReasoningSelection::TokenBudget { tokens } => {
             ReasoningSelectionDto::TokenBudget { tokens: *tokens }
         }
     }
@@ -25,7 +25,7 @@ fn lower_reasoning_selection(
 /// Lower the exact route-level reasoning contract used by request validation.
 #[must_use]
 pub fn lower_reasoning_control_spec(
-    spec: &platform_api::ReasoningControlSpec,
+    spec: &lingxi_core::host::ReasoningControlSpec,
 ) -> ReasoningControlSpecDto {
     ReasoningControlSpecDto {
         options: spec
@@ -60,14 +60,14 @@ pub fn lower_reasoning_control_spec(
 #[must_use]
 pub fn decode_reasoning_selection(
     selection: ReasoningSelectionDto,
-) -> platform_api::ReasoningSelection {
+) -> lingxi_core::host::ReasoningSelection {
     match selection {
-        ReasoningSelectionDto::Automatic => platform_api::ReasoningSelection::Automatic,
-        ReasoningSelectionDto::Disabled => platform_api::ReasoningSelection::Disabled,
-        ReasoningSelectionDto::Enabled => platform_api::ReasoningSelection::Enabled,
-        ReasoningSelectionDto::Level { id } => platform_api::ReasoningSelection::Level { id },
+        ReasoningSelectionDto::Automatic => lingxi_core::host::ReasoningSelection::Automatic,
+        ReasoningSelectionDto::Disabled => lingxi_core::host::ReasoningSelection::Disabled,
+        ReasoningSelectionDto::Enabled => lingxi_core::host::ReasoningSelection::Enabled,
+        ReasoningSelectionDto::Level { id } => lingxi_core::host::ReasoningSelection::Level { id },
         ReasoningSelectionDto::TokenBudget { tokens } => {
-            platform_api::ReasoningSelection::TokenBudget { tokens }
+            lingxi_core::host::ReasoningSelection::TokenBudget { tokens }
         }
     }
 }
@@ -75,7 +75,7 @@ pub fn decode_reasoning_selection(
 /// Lower the authoritative conversation controls for client transports.
 #[must_use]
 pub fn lower_conversation_controls(
-    controls: platform_api::ConversationControls,
+    controls: lingxi_core::host::ConversationControls,
 ) -> ConversationControlsDto {
     ConversationControlsDto {
         qualified_model: controls.model_reference,

@@ -30,7 +30,7 @@
 //! and lives behind a shared `Arc` — so before this module the port had no
 //! per-call layer mechanism at all. Two of the ten upstream layer kinds were
 //! open-coded as FLAT fields on
-//! [`platform_api::permission_gate::PermissionCheckContext`]:
+//! [`lingxi_core::host::permission_gate::PermissionCheckContext`]:
 //! `mode_override` (the `permission_mode` layer) and `is_non_interactive_session`
 //! (the `avoid_prompts` layer). This module generalizes both into the real
 //! ordered fold, so the remaining eight kinds — in particular
@@ -46,7 +46,7 @@
 //!
 //! ## Wire shape
 //!
-//! [`platform_api::permission_gate::PermissionCheckContext::permission_layers`] carries
+//! [`lingxi_core::host::permission_gate::PermissionCheckContext::permission_layers`] carries
 //! RAW `serde_json::Value` objects (the `platform-api` crate sits BELOW this one and
 //! cannot name [`PermissionLayer`]; same precedent as
 //! `PermissionCheckContext::permission_suggestions`). Each element is the
@@ -208,7 +208,7 @@ impl PermissionLayer {
 }
 
 /// Parse a raw wire array (as carried on
-/// [`platform_api::permission_gate::PermissionCheckContext::permission_layers`]),
+/// [`lingxi_core::host::permission_gate::PermissionCheckContext::permission_layers`]),
 /// dropping entries no upstream `switch` arm would match.
 #[must_use]
 pub fn parse_permission_layers(wire: &[Value]) -> Vec<PermissionLayer> {

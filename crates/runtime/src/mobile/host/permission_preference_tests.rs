@@ -25,7 +25,7 @@ mod permission_preference_tests {
 
         let (restarted, _) = build_submit_handle(tmp.path());
         restarted.runtime().block_on(async {
-            let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 restarted.inner().orchestrator.clone();
             assert_eq!(
                 orchestrator.permission_mode().await.as_deref(),
@@ -87,7 +87,7 @@ mod permission_preference_tests {
                 })
                 .await
                 .unwrap();
-            let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 handle.inner().orchestrator.clone();
             assert_eq!(
                 orchestrator.permission_mode().await.as_deref(),
@@ -130,7 +130,7 @@ mod permission_preference_tests {
                 permission_preference::load(&cfg.lingxi_home),
                 Some(permission::PermissionMode::Plan)
             );
-            let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 handle.inner().orchestrator.clone();
             assert_eq!(
                 orchestrator.permission_mode().await.as_deref(),
@@ -166,7 +166,7 @@ mod permission_preference_tests {
                 })
                 .await
                 .is_err());
-            let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 handle.inner().orchestrator.clone();
             assert_eq!(
                 orchestrator.permission_mode().await.as_deref(),
@@ -193,7 +193,7 @@ mod permission_preference_tests {
             drop(handle);
             let (restarted, _) = build_submit_handle(tmp.path());
             restarted.runtime().block_on(async {
-                let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+                let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                     restarted.inner().orchestrator.clone();
                 assert_eq!(orchestrator.permission_mode().await.as_deref(), Some(mode));
             });
@@ -212,7 +212,7 @@ mod permission_preference_tests {
         .unwrap();
         let (handle, _) = build_submit_handle(tmp.path());
         handle.runtime().block_on(async {
-            let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 handle.inner().orchestrator.clone();
             assert_ne!(
                 orchestrator.permission_mode().await.as_deref(),
@@ -242,17 +242,17 @@ mod permission_preference_tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg = test_config(tmp.path());
         permission_preference::save(&cfg.lingxi_home, "plan").unwrap();
-        cfg.host_environment = Some(platform_api::MobileHostEnvironment::new(
-            platform_api::MobileHostOs::Ios,
+        cfg.host_environment = Some(lingxi_core::host::MobileHostEnvironment::new(
+            lingxi_core::host::MobileHostOs::Ios,
             None,
-            platform_api::MobileDeviceClass::Phone,
-            platform_api::MobileExecutionTarget::PhysicalDevice,
-            platform_api::MobileLaunchMode::ScheduledHeadless,
+            lingxi_core::host::MobileDeviceClass::Phone,
+            lingxi_core::host::MobileExecutionTarget::PhysicalDevice,
+            lingxi_core::host::MobileLaunchMode::ScheduledHeadless,
         ));
         let home = cfg.lingxi_home.clone();
         let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
         handle.runtime().block_on(async {
-            let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 handle.inner().orchestrator.clone();
             assert_ne!(
                 orchestrator.permission_mode().await.as_deref(),
@@ -304,7 +304,7 @@ mod permission_preference_tests {
         .unwrap();
         let (handle, _) = build_submit_handle(tmp.path());
         handle.runtime().block_on(async {
-            let orchestrator: Arc<dyn platform_api::OrchestratorHandle> =
+            let orchestrator: Arc<dyn lingxi_core::host::OrchestratorHandle> =
                 handle.inner().orchestrator.clone();
             let previous_effective = orchestrator.permission_mode().await;
             let previous_requested = handle

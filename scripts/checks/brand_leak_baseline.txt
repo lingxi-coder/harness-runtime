@@ -7,7 +7,7 @@
 # ⚠️ 一条条目断言的是「该文件里该 needle **至少命中一次**」，而不是你以为的
 # 那一次命中。已知的一处不对应：
 #
-#     G2	crates/platform-api/src/uds_inbox.rs	CLAUDE_CODE_TMPDIR
+#     G2	crates/core/src/host/uds_inbox.rs	CLAUDE_CODE_TMPDIR
 #
 # 这一条钉住的是**测试**里 uds_inbox.rs:1116 的
 # `std::env::var_os("CLAUDE_CODE_TMPDIR")` 存档/还原，**不是** uds_inbox.rs:123
@@ -144,11 +144,28 @@ G1	crates/configuration-admin/src/skills_admin.rs	\.lingxi
 G1	crates/coordinator/src/prompt.rs	LingXi
 G1	crates/coordinator/src/team_file.rs	\.lingxi
 G1	crates/coordinator/src/tool_send_message.rs	LINGXI
+G1	crates/core/src/host/env.rs	LINGXI
+G1	crates/core/src/host/fork_subagent.rs	LINGXI
+G1	crates/core/src/host/live_sessions.rs	CLAUDE\.md
+G1	crates/core/src/host/live_sessions.rs	LINGXI
+G1	crates/core/src/host/live_sessions.rs	\.claude(?![A-Za-z0-9_.\-])
+G1	crates/core/src/host/mobile_runtime_environment.rs	LingXi
+G1	crates/core/src/host/plan_files.rs	\.claude(?![A-Za-z0-9_.\-])
+G1	crates/core/src/host/rooted_fs.rs	\.lingxi
+G1	crates/core/src/host/shell_support.rs	LINGXI
+G1	crates/core/src/host/subagent_output_guard.rs	\.claude(?![A-Za-z0-9_.\-])
+G1	crates/core/src/host/subagent_output_guard.rs	\.claude\.json
+G1	crates/core/src/host/subagent_output_guard.rs	\.lingxi
+G1	crates/core/src/host/subagent_spawn.rs	LINGXI
+G1	crates/core/src/host/traffic_mode.rs	LINGXI
+G1	crates/core/src/host/uds_inbox.rs	LINGXI
+G1	crates/core/src/host/worktree.rs	\.lingxi
 G1	crates/core/src/settings/env_parser.rs	LINGXI
 G1	crates/core/src/settings/merger.rs	LINGXI
 G1	crates/core/src/settings/mod.rs	LINGXI
 G1	crates/core/src/settings/mod.rs	\.lingxi
 G1	crates/core/src/settings/tracer.rs	\.lingxi
+G1	crates/core/src/types/messages.rs	LINGXI
 G1	crates/core/tests/settings_4layer_test.rs	LINGXI
 G1	crates/core/tests/settings_4layer_test.rs	\.lingxi
 G1	crates/cost/build.rs	LINGXI
@@ -169,9 +186,9 @@ G1	crates/hooks/src/executor_test.rs	\.lingxi
 G1	crates/hooks/src/hook_payload_test.rs	LINGXI
 G1	crates/hooks/src/user_config.rs	LINGXI
 G1	crates/http-client/src/tls_config.rs	LINGXI
-G1	crates/llm-runtime/src/aws_auth.rs	\.claude\.json
-G1	crates/llm-runtime/src/copilot/auth.rs	LingXi
-G1	crates/llm-runtime/src/copilot/login.rs	LINGXI
+G1	crates/llm-runtime/src/auth/copilot.rs	LINGXI
+G1	crates/llm-runtime/src/auth/copilot.rs	LingXi
+G1	crates/llm-runtime/src/auth/external_aws.rs	\.claude\.json
 G1	crates/llm-runtime/src/model/context_window.rs	LINGXI
 G1	crates/llm-runtime/src/model/retry.rs	LINGXI
 G1	crates/llm-runtime/src/model/retry_test.rs	LINGXI
@@ -393,22 +410,6 @@ G1	crates/permission/tests/auto_mode_classifier_scope.rs	\.lingxi
 G1	crates/permission/tests/loop_permission_parity.rs	\.lingxi
 G1	crates/permission/tests/powershell_wiring.rs	LingXi
 G1	crates/permission/tests/powershell_wiring.rs	\.lingxi
-G1	crates/platform-api/src/env.rs	LINGXI
-G1	crates/platform-api/src/fork_subagent.rs	LINGXI
-G1	crates/platform-api/src/live_sessions.rs	CLAUDE\.md
-G1	crates/platform-api/src/live_sessions.rs	LINGXI
-G1	crates/platform-api/src/live_sessions.rs	\.claude(?![A-Za-z0-9_.\-])
-G1	crates/platform-api/src/mobile_runtime_environment.rs	LingXi
-G1	crates/platform-api/src/plan_files.rs	\.claude(?![A-Za-z0-9_.\-])
-G1	crates/platform-api/src/rooted_fs.rs	\.lingxi
-G1	crates/platform-api/src/shell_support.rs	LINGXI
-G1	crates/platform-api/src/subagent_output_guard.rs	\.claude(?![A-Za-z0-9_.\-])
-G1	crates/platform-api/src/subagent_output_guard.rs	\.claude\.json
-G1	crates/platform-api/src/subagent_output_guard.rs	\.lingxi
-G1	crates/platform-api/src/subagent_spawn.rs	LINGXI
-G1	crates/platform-api/src/traffic_mode.rs	LINGXI
-G1	crates/platform-api/src/uds_inbox.rs	LINGXI
-G1	crates/platform-api/src/worktree.rs	\.lingxi
 G1	crates/platforms/android/src/lib.rs	\.lingxi
 G1	crates/platforms/android/src/mobile_linux.rs	\.lingxi
 G1	crates/platforms/common/src/mcp_sse.rs	LingXi
@@ -495,13 +496,13 @@ G1	crates/plugins/lingxi-local-app/skills/frontend-qa/agents/openai.yaml	LingXi
 G1	crates/plugins/lingxi-local-app/skills/ionic-react-local-app/agents/openai.yaml	LingXi
 G1	crates/plugins/lingxi-local-app/skills/phaser-2d-local-app/agents/openai.yaml	LingXi
 G1	crates/plugins/lingxi-local-app/skills/threejs-local-app/agents/openai.yaml	LingXi
-G1	crates/protocol/src/messages.rs	LINGXI
 G1	crates/runtime/build.rs	\.lingxi
 G1	crates/runtime/src/desktop/agent_skill_loader.rs	LINGXI
 G1	crates/runtime/src/desktop/assembly.rs	LINGXI
 G1	crates/runtime/src/desktop/auto_mode_propose.rs	LINGXI
 G1	crates/runtime/src/desktop/connect.rs	LingXi
 G1	crates/runtime/src/desktop/cron_management.rs	\.lingxi
+G1	crates/runtime/src/desktop/fusion_implement_e2e_test.rs	\.lingxi
 G1	crates/runtime/src/desktop/ide.rs	LingXi
 G1	crates/runtime/src/desktop/mod.rs	LINGXI
 G1	crates/runtime/src/desktop/pane_teammate.rs	LINGXI
@@ -580,6 +581,8 @@ G1	crates/tasks/src/registry_test.rs	\.lingxi
 G1	crates/telemetry/src/bus.rs	LINGXI
 G1	crates/telemetry/src/otel/config.rs	LINGXI
 G1	crates/telemetry/src/otel/record.rs	LINGXI
+G1	crates/telemetry/src/settings_observer.rs	LINGXI
+G1	crates/telemetry/src/settings_observer.rs	\.lingxi
 G1	crates/test-harness/src/contracts/worktree.rs	\.lingxi
 G1	crates/test-harness/src/parity/fixtures/agent_task_tools.json	LingXi
 G1	crates/test-harness/src/parity/fixtures/betas.json	LingXi
@@ -674,7 +677,6 @@ G1	crates/tools/web/src/web_search.rs	LINGXI
 G1	crates/tools/web/src/web_search_client.rs	LINGXI
 G1	crates/tools/web/src/web_search_client.rs	LingXi
 G1	crates/tools/workflow/src/lib.rs	LINGXI
-G1	crates/tools/workflow/src/lib.rs	LingXi
 G1	crates/tools/workflow/src/lib.rs	\.lingxi
 G1	crates/tools/workflow/src/ultracode.rs	LINGXI
 G1	crates/tools/workflow/src/workflow_input_schema.json	\.lingxi
@@ -716,9 +718,17 @@ G2	crates/agent/src/model_resolution.rs	CLAUDE_CODE_USE_VERTEX
 G2	crates/agent/src/observer.rs	CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
 G2	crates/agent/src/tool_resolver.rs	CLAUDE_CODE_DISABLE_AUTO_MEMORY
 G2	crates/compaction/src/thresholds.rs	CLAUDE_CODE_DISABLE_1M_CONTEXT
+G2	crates/core/src/host/fork_subagent.rs	CLAUDE_CODE_FORK_SUBAGENT
+G2	crates/core/src/host/live_sessions.rs	CLAUDE_CODE_HARBOR_KITE
+G2	crates/core/src/host/subagent_spawn.rs	CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS
+G2	crates/core/src/host/subagent_spawn.rs	CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH
+G2	crates/core/src/host/traffic_mode.rs	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+G2	crates/core/src/host/uds_inbox.rs	CLAUDE_CODE_TMPDIR
 G2	crates/http-client/src/tls_config.rs	CLAUDE_CODE_CERT_STORE
 G2	crates/http-client/src/tls_config.rs	CLAUDE_CODE_CLIENT_CERT
 G2	crates/http-client/src/tls_config.rs	CLAUDE_CODE_CLIENT_KEY
+G2	crates/llm-runtime/src/auth/anthropic/resolver.rs	CLAUDE_CODE_HOST_AUTH_ENV_VAR
+G2	crates/llm-runtime/src/auth/anthropic/resolver.rs	CLAUDE_CODE_REMOTE
 G2	crates/llm-runtime/src/cloud_provider_env.rs	CLAUDE_CODE_SKIP_BEDROCK_AUTH
 G2	crates/llm-runtime/src/cloud_provider_env.rs	CLAUDE_CODE_SKIP_FOUNDRY_AUTH
 G2	crates/llm-runtime/src/cloud_provider_env.rs	CLAUDE_CODE_SKIP_VERTEX_AUTH
@@ -728,8 +738,6 @@ G2	crates/llm-runtime/src/model/retry.rs	CLAUDE_CODE_RETRY_WATCHDOG
 G2	crates/llm-runtime/src/model/stream_watchdog.rs	CLAUDE_ENABLE_BYTE_WATCHDOG
 G2	crates/llm-runtime/src/model/stream_watchdog.rs	CLAUDE_ENABLE_STREAM_WATCHDOG
 G2	crates/llm-runtime/src/model/stream_watchdog.rs	CLAUDE_STREAM_IDLE_TIMEOUT_MS
-G2	crates/llm-runtime/src/oauth/anthropic/resolver.rs	CLAUDE_CODE_HOST_AUTH_ENV_VAR
-G2	crates/llm-runtime/src/oauth/anthropic/resolver.rs	CLAUDE_CODE_REMOTE
 G2	crates/llm-runtime/src/service.rs	CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
 G2	crates/llm-runtime/src/service_test.rs	CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
 G2	crates/mcp/src/client.rs	CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT
@@ -758,12 +766,6 @@ G2	crates/orchestrator/src/prompt/total_tokens.rs	CLAUDE_CODE_TOTAL_TOKENS_REMIN
 G2	crates/orchestrator/src/prompt/total_tokens.rs	CLAUDE_CODE_TOTAL_TOKENS_REMINDER_AFTER_USER_TURN
 G2	crates/orchestrator/src/prompt/total_tokens.rs	CLAUDE_CODE_TOTAL_TOKENS_REMINDER_BUDGET
 G2	crates/orchestrator/src/turn_loop/error_reporting.rs	CLAUDE_CODE_REMOTE
-G2	crates/platform-api/src/fork_subagent.rs	CLAUDE_CODE_FORK_SUBAGENT
-G2	crates/platform-api/src/live_sessions.rs	CLAUDE_CODE_HARBOR_KITE
-G2	crates/platform-api/src/subagent_spawn.rs	CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS
-G2	crates/platform-api/src/subagent_spawn.rs	CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH
-G2	crates/platform-api/src/traffic_mode.rs	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
-G2	crates/platform-api/src/uds_inbox.rs	CLAUDE_CODE_TMPDIR
 G2	crates/plugin/src/discovery.rs	CLAUDE_CODE_PLUGIN_SEED_DIR
 G2	crates/plugin/src/manager.rs	CLAUDE_CODE_PLUGIN_SEED_DIR
 G2	crates/runtime/src/desktop/assembly.rs	CLAUDE_CODE_EXPERIMENTAL_SKILL_SEARCH
@@ -870,9 +872,17 @@ G3	crates/configuration-admin/src/settings_bridge.rs	.lingxi
 G3	crates/configuration-admin/src/skills_admin.rs	.lingxi
 G3	crates/configuration-admin/src/skills_admin.rs	.lingxi-*
 G3	crates/coordinator/src/team_file.rs	.lingxi
+G3	crates/core/src/host/live_sessions.rs	LINGXI_CONFIG_DIR
+G3	crates/core/src/host/mobile_runtime_environment.rs	MANAGED_DIR_MACOS
+G3	crates/core/src/host/rooted_fs.rs	.lingxi
+G3	crates/core/src/host/rooted_fs.rs	.lingxi-*
+G3	crates/core/src/host/subagent_output_guard.rs	.lingxi
+G3	crates/core/src/host/subagent_output_guard.rs	.lingxi.json
+G3	crates/core/src/host/worktree.rs	.lingxi
 G3	crates/core/src/settings/merger.rs	LINGXI.md
 G3	crates/core/src/settings/mod.rs	.lingxi
 G3	crates/core/src/settings/tracer.rs	.lingxi
+G3	crates/core/src/types/messages.rs	LINGXI.md
 G3	crates/core/tests/settings_4layer_test.rs	.lingxi
 G3	crates/cron/src/autonomous_loop.rs	.lingxi
 G3	crates/cron/src/run_due.rs	.lingxi
@@ -1020,13 +1030,6 @@ G3	crates/permission/src/workspace_lease.rs	LINGXI.md
 G3	crates/permission/tests/auto_mode_classifier_scope.rs	.lingxi
 G3	crates/permission/tests/loop_permission_parity.rs	.lingxi
 G3	crates/permission/tests/powershell_wiring.rs	.lingxi
-G3	crates/platform-api/src/live_sessions.rs	LINGXI_CONFIG_DIR
-G3	crates/platform-api/src/mobile_runtime_environment.rs	MANAGED_DIR_MACOS
-G3	crates/platform-api/src/rooted_fs.rs	.lingxi
-G3	crates/platform-api/src/rooted_fs.rs	.lingxi-*
-G3	crates/platform-api/src/subagent_output_guard.rs	.lingxi
-G3	crates/platform-api/src/subagent_output_guard.rs	.lingxi.json
-G3	crates/platform-api/src/worktree.rs	.lingxi
 G3	crates/platforms/android/src/lib.rs	.lingxi
 G3	crates/platforms/android/src/mobile_linux.rs	.lingxi-*
 G3	crates/platforms/common/src/worktree_create_guard.rs	.lingxi
@@ -1082,12 +1085,12 @@ G3	crates/plugins/lingxi-local-app/skills/device/SKILL.md	.lingxi
 G3	crates/plugins/lingxi-local-app/skills/local-app-data/SKILL.md	LINGXI.md
 G3	crates/plugins/lingxi-local-app/skills/local-app-test/SKILL.md	LINGXI.md
 G3	crates/plugins/lingxi-local-app/skills/local-app-use/SKILL.md	LINGXI.md
-G3	crates/protocol/src/messages.rs	LINGXI.md
 G3	crates/runtime/build.rs	.lingxi-plugin
 G3	crates/runtime/builtin-plugin-inventory.txt	.lingxi
 G3	crates/runtime/builtin-plugin-inventory.txt	.lingxi-plugin
 G3	crates/runtime/src/desktop/auto_mode_propose.rs	LINGXI.md
 G3	crates/runtime/src/desktop/cron_management.rs	.lingxi
+G3	crates/runtime/src/desktop/fusion_implement_e2e_test.rs	.lingxi
 G3	crates/runtime/src/desktop/settings_watch.rs	.lingxi
 G3	crates/runtime/src/desktop/settings_watch.rs	LINGXI.md
 G3	crates/runtime/src/desktop/tests/bash_edit_diff_wiring_tests.rs	.lingxi
@@ -1142,6 +1145,7 @@ G3	crates/tasks/src/handlers/in_process_teammate_test.rs	.lingxi
 G3	crates/tasks/src/handlers/local_agent.rs	.lingxi
 G3	crates/tasks/src/registry.rs	.lingxi
 G3	crates/tasks/src/registry_test.rs	.lingxi
+G3	crates/telemetry/src/settings_observer.rs	.lingxi
 G3	crates/test-harness/src/contracts/worktree.rs	.lingxi
 G3	crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json	.lingxi
 G3	crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json	LINGXI.local.md

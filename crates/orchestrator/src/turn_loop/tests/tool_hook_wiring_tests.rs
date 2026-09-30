@@ -6,9 +6,11 @@ use crate::turn_loop::dispatch_tool_uses_tracked;
 use crate::OrchestratorConfig;
 use async_trait::async_trait;
 use hooks::events::HookEventType;
-use platform_api::permission_gate::{PermissionDecision, PermissionGate, PermissionResolution};
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker};
-use protocol::{ContentBlock, HookId, ToolUseId};
+use lingxi_core::host::permission_gate::{
+    PermissionDecision, PermissionGate, PermissionResolution,
+};
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker};
+use lingxi_core::types::{ContentBlock, HookId, ToolUseId};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -203,40 +205,44 @@ impl hooks::BuiltinHookHandler for FixedPermissionRequestHook {
 struct UnusedHookHttp;
 
 #[async_trait]
-impl platform_api::HttpTransport for UnusedHookHttp {
+impl lingxi_core::host::HttpTransport for UnusedHookHttp {
     async fn request(
         &self,
-        _req: protocol::HttpRequest,
-    ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-        Err(platform_api::HttpError::InvalidRequest("unused".into()))
+        _req: lingxi_core::types::HttpRequest,
+    ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+        Err(lingxi_core::host::HttpError::InvalidRequest(
+            "unused".into(),
+        ))
     }
 
     async fn stream_sse(
         &self,
-        _req: protocol::HttpRequest,
-    ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-        Err(platform_api::HttpError::InvalidRequest("unused".into()))
+        _req: lingxi_core::types::HttpRequest,
+    ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+        Err(lingxi_core::host::HttpError::InvalidRequest(
+            "unused".into(),
+        ))
     }
 }
 
 struct UnusedHookRuntime;
 
 #[async_trait]
-impl platform_api::RuntimeSpawner for UnusedHookRuntime {
+impl lingxi_core::host::RuntimeSpawner for UnusedHookRuntime {
     async fn spawn(
         &self,
         _name: &str,
         _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-        Err(platform_api::RuntimeError::Internal("unused".into()))
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError> {
+        Err(lingxi_core::host::RuntimeError::Internal("unused".into()))
     }
 
     async fn sleep(&self, _duration: std::time::Duration) {}
 
     async fn cancel(
         &self,
-        _handle: &platform_api::BackgroundTaskHandle,
-    ) -> Result<(), platform_api::RuntimeError> {
+        _handle: &lingxi_core::host::BackgroundTaskHandle,
+    ) -> Result<(), lingxi_core::host::RuntimeError> {
         Ok(())
     }
 }
@@ -286,7 +292,7 @@ impl PermissionGate for ReadDenyGate {
     async fn resolve_detailed(&self, _t: &str, _i: &Value) -> PermissionResolution {
         PermissionResolution::Deny {
             reason: "prompted-and-declined".into(),
-            source: platform_api::permission_gate::PermissionDecisionSource::Rule,
+            source: lingxi_core::host::permission_gate::PermissionDecisionSource::Rule,
             rule_source: Some("userSettings".into()),
             decision_reason_type: Some("rule".into()),
             decision_reason: None,
@@ -692,7 +698,7 @@ async fn workflow_script_path_read_deny_overrides_subagent_allow() {
         permission_pause_observer: None,
         parent_agent_id: None,
         origin_session_id: None,
-        tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+        tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
         agent_name: Some("researcher".into()),
         team_name: Some("alpha".into()),
         is_async: false,
@@ -714,6 +720,6 @@ async fn workflow_script_path_read_deny_overrides_subagent_allow() {
         .await
         .expect_err("nested Read denial must stop subagent Workflow");
     assert!(
-        matches!(error, platform_api::tool_invoker::ToolInvokerError::Internal(ref reason) if reason == "prompted-and-declined")
+        matches!(error, lingxi_core::host::tool_invoker::ToolInvokerError::Internal(ref reason) if reason == "prompted-and-declined")
     );
 }

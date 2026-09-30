@@ -13,11 +13,11 @@ use command_api::builtins::{
 };
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
-use orchestrator::test_support::MockOrchestratorHandle;
-use platform_api::{
+use lingxi_core::host::{
     AgentInfo, AuthError, AuthHandle, HookInfo, LoginInfo, McpServerInfo, McpStatus,
     SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
 };
+use orchestrator::test_support::MockOrchestratorHandle;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use tokio::sync::RwLock;

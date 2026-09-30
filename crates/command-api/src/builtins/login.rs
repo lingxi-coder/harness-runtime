@@ -8,7 +8,7 @@ use crate::builtin_support::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::AuthHandle;
+use lingxi_core::host::AuthHandle;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
 
@@ -114,7 +114,7 @@ impl BuiltinCommandHandler for LoginHandler {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use platform_api::{AuthError, LoginInfo};
+    use lingxi_core::host::{AuthError, LoginInfo};
     use std::sync::Mutex as StdMutex;
 
     /// Test double for [`AuthHandle`]. Exposes the same `Ok` / `Err`

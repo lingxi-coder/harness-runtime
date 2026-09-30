@@ -14,7 +14,7 @@ use crate::test_support::{PermissionDecision, PermissionDecisionSource, Permissi
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use hooks::response::HookDecision;
-use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use std::path::{Component, Path, PathBuf};
 use telemetry::tengu::orchestrator as orch_events;
 use tool_api::context::{ToolUseContext, ToolUseOptions};
@@ -22,7 +22,7 @@ use tool_api::tool_trait::tool_result_turn_end;
 use tool_api::ContextModifier;
 
 pub(super) async fn forward_tool_progress(
-    output: &dyn platform_api::OutputStream,
+    output: &dyn lingxi_core::host::OutputStream,
     parent_tool_use_id: &str,
     progress: tool_api::progress::ToolProgress,
 ) {
@@ -607,7 +607,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             agent_name: None,
             team_name: None,
             origin_session_id: None,
-            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+            tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             content_replacement_state: None,
             session: Some(orch.session.clone()),
             observer_pairings: orch.model_runtime.observer_pairings.clone(),
@@ -634,7 +634,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             file_history: orch
                 .file_history
                 .clone()
-                .map(|fh| fh as std::sync::Arc<dyn platform_api::FileHistorySink>),
+                .map(|fh| fh as std::sync::Arc<dyn lingxi_core::host::FileHistorySink>),
         };
 
         // validate_input gate (claude-code `toolExecution.ts:683-723`): a
@@ -1182,7 +1182,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
         } else if hook_allowed && !plan_mode {
             // Carry the REAL tool_use_id so a hook-allow→ask-rule re-check emits a
             // byte-faithful stdio `can_use_tool` (correlatable id + decision_reason).
-            let ctx = platform_api::permission_gate::PermissionCheckContext {
+            let ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
                 tool_use_id: Some(tool_use_id.to_string()),
                 requires_user_interaction,
                 suppress_always_allow_rule: requires_user_interaction
@@ -1195,7 +1195,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                 .await;
             let mut hook_decision_classification = None;
             let hook_decision = match hook_outcome {
-                platform_api::permission_gate::PermissionOutcome::Allow {
+                lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                     updated_input,
                     decision_classification,
                     permission_updates: _,
@@ -1206,7 +1206,9 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                     }
                     PermissionDecision::Allow
                 }
-                platform_api::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+                lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
+                    updated_input,
+                } => {
                     if let Some(updated) = updated_input {
                         effective_input = updated;
                     }
@@ -1223,12 +1225,12 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                         // `match` is unconditional, so writing the label here
                         // could never be observed (it was, and was not).
                         hook_decision_classification = Some(
-                            platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
+                            lingxi_core::host::permission_gate::ToolDecisionClassification::UserTemporary,
                         );
                     }
                     PermissionDecision::Allow
                 }
-                platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
+                lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => {
                     PermissionDecision::Deny { reason }
                 }
             };
@@ -1242,7 +1244,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             decision_otel_source = if matches!(hook_decision, PermissionDecision::Allow) {
                 hook_decision_classification.map_or(
                     "hook",
-                    platform_api::permission_gate::ToolDecisionClassification::as_str,
+                    lingxi_core::host::permission_gate::ToolDecisionClassification::as_str,
                 )
             } else {
                 "config"
@@ -1252,7 +1254,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             // NORMAL permission path. Resolve the decision SOURCE first (without
             // delegating to the prompt transport) so the source-gated permission
             // hooks fire the way claude-code does.
-            let resolution_ctx = platform_api::permission_gate::PermissionCheckContext {
+            let resolution_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
                 tool_use_id: Some(tool_use_id.to_string()),
                 requires_user_interaction,
                 suppress_always_allow_rule: requires_user_interaction
@@ -1448,7 +1450,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                     // `decide_outcome_with_context` emission (subagent dispatch) is
                     // never reached here — emit through the outer gate, which
                     // forwards to the stdio transport. No-op on non-stdio transports.
-                    let sysmsg_ctx = platform_api::permission_gate::PermissionCheckContext {
+                    let sysmsg_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
                         tool_use_id: Some(tool_use_id.to_string()),
                         ..Default::default()
                     };
@@ -1571,21 +1573,22 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                                 // REAL tool_use_id (so a stdio `can_use_tool` request is
                                 // byte-faithful) and applying the host's `updatedInput`
                                 // rewrite to the input the tool actually runs with.
-                                let ctx = platform_api::permission_gate::PermissionCheckContext {
-                                    tool_use_id: Some(tool_use_id.to_string()),
-                                    requires_user_interaction,
-                                    suppress_always_allow_rule,
-                                    // HOOK-ASKFLOOR-03: a PreToolUse hook `ask` sets the
-                                    // floor so the Auto classifier can't re-allow past it
-                                    // (policy_gate Ask arm gates the classifier on this).
-                                    hook_ask_floor: hook_ask,
-                                    is_non_interactive_session: !orch
-                                        .config
-                                        .interactive_permissions,
-                                    decision_reason_type: ask_reason_context.0.clone(),
-                                    decision_reason: ask_reason_context.1.clone(),
-                                    ..Default::default()
-                                };
+                                let ctx =
+                                    lingxi_core::host::permission_gate::PermissionCheckContext {
+                                        tool_use_id: Some(tool_use_id.to_string()),
+                                        requires_user_interaction,
+                                        suppress_always_allow_rule,
+                                        // HOOK-ASKFLOOR-03: a PreToolUse hook `ask` sets the
+                                        // floor so the Auto classifier can't re-allow past it
+                                        // (policy_gate Ask arm gates the classifier on this).
+                                        hook_ask_floor: hook_ask,
+                                        is_non_interactive_session: !orch
+                                            .config
+                                            .interactive_permissions,
+                                        decision_reason_type: ask_reason_context.0.clone(),
+                                        decision_reason: ask_reason_context.1.clone(),
+                                        ..Default::default()
+                                    };
                                 // BASH-10: an ask that the TOOL raised must NOT be
                                 // re-derived from the rule/mode layer — `PolicyPermissionGate`
                                 // would recompute the very allow the tool escalated
@@ -1605,7 +1608,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                                         .await
                                 };
                                 match outcome {
-                                    platform_api::permission_gate::PermissionOutcome::Allow {
+                                    lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                                         updated_input,
                                         // `permission_updates` (the host's
                                         // `updatedPermissions`) are applied + persisted
@@ -1620,14 +1623,14 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                                         // temporary-allow fallback.
                                         decision_otel_source = decision_classification.map_or(
                                         "user_temporary",
-                                        platform_api::permission_gate::ToolDecisionClassification::as_str,
+                                        lingxi_core::host::permission_gate::ToolDecisionClassification::as_str,
                                     );
                                         if let Some(u) = updated_input {
                                             effective_input = u;
                                         }
                                         PermissionDecision::Allow
                                     }
-                                    platform_api::permission_gate::PermissionOutcome::AllowAuto {
+                                    lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
                                         updated_input,
                                     } => {
                                         if let Some(u) = updated_input {
@@ -1645,7 +1648,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                                         }
                                         PermissionDecision::Allow
                                     }
-                                    platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
+                                    lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => {
                                         // An ABORTED prompt is a distinct label: claude-code
                                         // denies with `decisionReason: iYt` ("tool permission
                                         // request aborted") when `signal.aborted`, and `eQ_`
@@ -1725,7 +1728,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                     } else {
                         let (decision_reason_type, decision_reason) =
                             tool_ask_reason_context(reason);
-                        let ask_ctx = platform_api::permission_gate::PermissionCheckContext {
+                        let ask_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
                             tool_use_id: Some(tool_use_id.to_string()),
                             requires_user_interaction,
                             suppress_always_allow_rule: requires_user_interaction
@@ -1740,7 +1743,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                             .ask_via_transport(name, &effective_input, &ask_ctx)
                             .await
                         {
-                            platform_api::permission_gate::PermissionOutcome::Allow {
+                            lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                                 updated_input,
                                 ..
                             } => {
@@ -1749,7 +1752,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                                 }
                                 PermissionDecision::Allow
                             }
-                            platform_api::permission_gate::PermissionOutcome::AllowAuto {
+                            lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
                                 updated_input,
                             } => {
                                 if let Some(updated) = updated_input {
@@ -1757,9 +1760,9 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                                 }
                                 PermissionDecision::Allow
                             }
-                            platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
-                                PermissionDecision::Deny { reason }
-                            }
+                            lingxi_core::host::permission_gate::PermissionOutcome::Deny {
+                                reason,
+                            } => PermissionDecision::Deny { reason },
                         }
                     }
                 }
@@ -2591,8 +2594,8 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
             let real_agent_id = emit_payload
                 .get("agentId")
                 .and_then(serde_json::Value::as_str)
-                .and_then(protocol::AgentId::parse_prefixed);
-            let child_id = real_agent_id.unwrap_or_else(protocol::AgentId::new);
+                .and_then(lingxi_core::types::AgentId::parse_prefixed);
+            let child_id = real_agent_id.unwrap_or_else(lingxi_core::types::AgentId::new);
             // R7: did the child runner already fire the canonical SubagentStart
             // (+ its own frontmatter SubagentStop)? Only the REAL Agent tool sets
             // this; FakeAgentTool fixtures and the failure path leave it absent.
@@ -2741,7 +2744,7 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                 persistence.content,
                 persistence
                     .utf16_code_units
-                    .map(protocol::js_utf16::tool_result_sidecar),
+                    .map(lingxi_core::types::js_utf16::tool_result_sidecar),
             )
         } else {
             (persistence.content, content_blocks)

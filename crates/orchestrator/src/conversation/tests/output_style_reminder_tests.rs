@@ -5,8 +5,8 @@ use crate::test_support::{
     MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use crate::OrchestratorConfig;
+use lingxi_core::types::ContentBlock;
 use llm_runtime::ContentBlock as LlmContentBlock;
-use protocol::ContentBlock;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
@@ -151,7 +151,7 @@ fn orch_with(cfg: OrchestratorConfig) -> ConversationOrchestrator {
 /// effect no matter how it was wired.
 #[tokio::test]
 async fn a_runtime_switch_changes_the_style_the_next_turn_resolves() {
-    use platform_api::OrchestratorHandle;
+    use lingxi_core::host::OrchestratorHandle;
     let orch = orch_with(config_with_style("Explanatory"));
     assert_eq!(
         orch.resolve_active_output_style().await.map(|s| s.name),
@@ -173,7 +173,7 @@ async fn a_runtime_switch_changes_the_style_the_next_turn_resolves() {
 /// the one style a session could never return to.
 #[tokio::test]
 async fn switching_back_to_default_overrides_the_boot_setting() {
-    use platform_api::OrchestratorHandle;
+    use lingxi_core::host::OrchestratorHandle;
     let orch = orch_with(config_with_style("Explanatory"));
     orch.set_output_style("default")
         .await
@@ -186,7 +186,7 @@ async fn switching_back_to_default_overrides_the_boot_setting() {
 
 #[tokio::test]
 async fn an_unknown_style_is_refused_rather_than_silently_ignored() {
-    use platform_api::OrchestratorHandle;
+    use lingxi_core::host::OrchestratorHandle;
     let orch = orch_with(config_with_style("Explanatory"));
     assert!(orch.set_output_style("Nonexistent").await.is_err());
     assert_eq!(
@@ -201,7 +201,7 @@ async fn an_unknown_style_is_refused_rather_than_silently_ignored() {
 /// description because its style table maps that key to `null`.
 #[tokio::test]
 async fn the_listing_contains_default_plus_every_builtin() {
-    use platform_api::OrchestratorHandle;
+    use lingxi_core::host::OrchestratorHandle;
     let orch = orch_with(config_with_style("Learning"));
     let listing = orch.output_styles().await.expect("a listing");
     assert_eq!(listing.current, "Learning");
@@ -299,9 +299,9 @@ async fn the_new_builtins_resolve_to_their_verbatim_bodies() {
 async fn batched_active_style_appends_transient_reminder_not_persisted() {
     let dir = tempfile::tempdir().expect("tempdir");
     let session_path = dir.path().join("session.jsonl");
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
-        dir.path().to_path_buf(),
-    ));
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+        platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+    );
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
         session_path.clone(),
         fs,
@@ -435,9 +435,9 @@ async fn batched_default_style_sends_no_reminder() {
 async fn streaming_active_style_appends_transient_reminder_not_persisted() {
     let dir = tempfile::tempdir().expect("tempdir");
     let session_path = dir.path().join("session.jsonl");
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
-        dir.path().to_path_buf(),
-    ));
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+        platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+    );
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
         session_path.clone(),
         fs,

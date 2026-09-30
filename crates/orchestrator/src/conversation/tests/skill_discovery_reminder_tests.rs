@@ -4,7 +4,7 @@ use crate::test_support::{
 };
 use crate::OrchestratorConfig;
 use async_trait::async_trait;
-use protocol::ContentBlock;
+use lingxi_core::types::ContentBlock;
 use skill_api::DiscoveredSkill;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,14 +13,14 @@ use tool_api::registry::ToolRegistry;
 /// A runtime that actually RUNS the spawned future so the one-shot resolves.
 struct InlineRuntime;
 #[async_trait]
-impl platform_api::RuntimeSpawner for InlineRuntime {
+impl lingxi_core::host::RuntimeSpawner for InlineRuntime {
     async fn spawn(
         &self,
         name: &str,
         task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError> {
         tokio::spawn(task);
-        Ok(platform_api::BackgroundTaskHandle {
+        Ok(lingxi_core::host::BackgroundTaskHandle {
             task_name: name.to_string(),
             task_id: 0,
         })
@@ -28,8 +28,8 @@ impl platform_api::RuntimeSpawner for InlineRuntime {
     async fn sleep(&self, _d: std::time::Duration) {}
     async fn cancel(
         &self,
-        _h: &platform_api::BackgroundTaskHandle,
-    ) -> Result<(), platform_api::RuntimeError> {
+        _h: &lingxi_core::host::BackgroundTaskHandle,
+    ) -> Result<(), lingxi_core::host::RuntimeError> {
         Ok(())
     }
 }
@@ -58,7 +58,7 @@ fn orch_bare() -> ConversationOrchestrator {
 
 /// Build an orchestrator whose skill prefetch resolves to `seed`.
 fn orch_with_seed(seed: Vec<DiscoveredSkill>) -> ConversationOrchestrator {
-    let runtime: Arc<dyn platform_api::RuntimeSpawner> = Arc::new(InlineRuntime);
+    let runtime: Arc<dyn lingxi_core::host::RuntimeSpawner> = Arc::new(InlineRuntime);
     let prefetch = Arc::new(skill_api::SkillDiscoveryPrefetch::with_fixed_result(
         runtime, seed,
     ));
@@ -71,7 +71,7 @@ async fn push_write_pivot(orch: &ConversationOrchestrator) {
     let msg = ConversationMessage::Assistant {
         id: MessageId::new(),
         content: vec![ContentBlock::ToolUse {
-            id: protocol::ToolUseId::new(),
+            id: lingxi_core::types::ToolUseId::new(),
             name: "Edit".into(),
             input: serde_json::json!({}),
             provider_id: None,

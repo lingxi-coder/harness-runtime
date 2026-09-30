@@ -1,6 +1,6 @@
 //! Snapshots of the in-memory state per agent type.
 
-use protocol::SnapshotId;
+use lingxi_core::types::SnapshotId;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;

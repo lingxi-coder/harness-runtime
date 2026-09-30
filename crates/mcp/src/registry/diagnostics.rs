@@ -4,8 +4,8 @@ use super::record_test_telemetry_event;
 use super::{McpCatalogChanged, McpCatalogKind};
 use crate::connection::{ConfigScope, McpServerConfig};
 use crate::oauth;
-use platform_api::McpError;
-use protocol::McpConnectionId;
+use lingxi_core::host::McpError;
+use lingxi_core::types::McpConnectionId;
 use tokio::sync::broadcast;
 
 /// Sanitize a model-visible diagnostic string (an MCP server name or failure
@@ -180,7 +180,7 @@ pub(super) fn discovery_source_emission(
 pub(super) fn tools_listed_payload(
     transport_kind: &str,
     elapsed: std::time::Duration,
-    tools: &[platform_api::McpToolDto],
+    tools: &[lingxi_core::host::McpToolDto],
     server_name: &str,
 ) -> telemetry::tengu::mcp::ToolsListedPayload {
     use telemetry::pii::Verified;
@@ -229,13 +229,13 @@ pub(super) fn server_config_invalid_payload(
 
 pub(super) fn config_scope_wire(scope: ConfigScope) -> &'static str {
     match scope {
-        ConfigScope::Settings(protocol::SettingsScope::Local) => "local",
-        ConfigScope::Settings(protocol::SettingsScope::User) => "user",
-        ConfigScope::Settings(protocol::SettingsScope::Project) => "project",
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Local) => "local",
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::User) => "user",
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project) => "project",
         ConfigScope::Dynamic => "dynamic",
         ConfigScope::Enterprise => "enterprise",
         ConfigScope::ClaudeAi => "claudeai",
-        ConfigScope::Settings(protocol::SettingsScope::Managed) => "managed",
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed) => "managed",
         ConfigScope::Agent => "agent",
     }
 }
@@ -249,10 +249,10 @@ pub(super) fn negotiation_mode_wire(
     }
 }
 
-pub(super) fn protocol_era_wire(era: platform_api::McpProtocolEra) -> &'static str {
+pub(super) fn protocol_era_wire(era: lingxi_core::host::McpProtocolEra) -> &'static str {
     match era {
-        platform_api::McpProtocolEra::Legacy => "legacy",
-        platform_api::McpProtocolEra::Modern => "modern",
+        lingxi_core::host::McpProtocolEra::Legacy => "legacy",
+        lingxi_core::host::McpProtocolEra::Modern => "modern",
     }
 }
 
@@ -267,7 +267,7 @@ pub(super) fn server_connection_succeeded_payload(
     config: &McpServerConfig,
     connection_duration_ms: u64,
     negotiation_mode: crate::protocol_negotiation::NegotiationMode,
-    negotiated: &platform_api::McpNegotiatedProtocol,
+    negotiated: &lingxi_core::host::McpNegotiatedProtocol,
 ) -> telemetry::tengu::mcp::ServerConnectionSucceededPayload {
     use telemetry::pii::Verified;
     telemetry::tengu::mcp::ServerConnectionSucceededPayload {
@@ -330,7 +330,7 @@ pub(super) fn list_changed_payload(
 }
 
 pub(super) fn resource_templates_fetched_payload(
-    templates: &[platform_api::McpResourceTemplateDto],
+    templates: &[lingxi_core::host::McpResourceTemplateDto],
 ) -> telemetry::tengu::mcp::ResourceTemplatesFetchedPayload {
     telemetry::tengu::mcp::ResourceTemplatesFetchedPayload {
         template_count: u32::try_from(templates.len()).unwrap_or(u32::MAX),
@@ -399,7 +399,7 @@ pub(super) fn emit_xaa_oauth_flow_success(
 }
 
 pub(super) fn telemetry_mcp_server_base_url(
-    spec: &platform_api::McpTransportSpec,
+    spec: &lingxi_core::host::McpTransportSpec,
 ) -> Option<telemetry::Verified> {
     let mut url = url::Url::parse(spec_url(spec)).ok()?;
     url.set_query(None);

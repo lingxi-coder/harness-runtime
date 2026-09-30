@@ -6,7 +6,7 @@
 //! by `HookEventType` (the type-tag enum) and inspect the carried `HookEvent`
 //! payload when invoked.
 
-use protocol::{AgentId, SessionId, ToolUseId};
+use lingxi_core::types::{AgentId, SessionId, ToolUseId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -155,9 +155,9 @@ pub enum ConfigChangeSource {
 /// sibling `InstructionsLoadReason` below is `snake_case`, and that difference
 /// is the reference's, not an oversight.
 ///
-/// Narrow on purpose: a bare `protocol::Scope` would let this payload carry
+/// Narrow on purpose: a bare `lingxi_core::types::Scope` would let this payload carry
 /// `Team` or `Session`, which claude-code never sends.
-pub use protocol::SettingsScope as InstructionsMemoryType;
+pub use lingxi_core::types::SettingsScope as InstructionsMemoryType;
 
 /// Why an [`HookEvent::InstructionsLoaded`] file was (re)loaded. 1:1 with
 /// claude-code's `INSTRUCTIONS_LOAD_REASONS` (`coreSchemas.ts:680-686`); the

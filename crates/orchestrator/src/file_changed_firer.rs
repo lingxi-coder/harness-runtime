@@ -143,35 +143,40 @@ mod tests {
     // so neither is ever called. Mirrors `test_support::noop_hook_executor`.
     struct UnusedHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for UnusedHttp {
+    impl lingxi_core::host::HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
     struct UnusedRuntime;
     #[async_trait]
-    impl platform_api::RuntimeSpawner for UnusedRuntime {
+    impl lingxi_core::host::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-            Err(platform_api::RuntimeError::Internal("unused".into()))
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: std::time::Duration) {}
         async fn cancel(
             &self,
-            _handle: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
@@ -210,7 +215,7 @@ mod tests {
 
         let mut registry = HookRegistry::new();
         registry.register(HookDefinition {
-            id: protocol::HookId::new(),
+            id: lingxi_core::types::HookId::new(),
             name: "file-changed".into(),
             events: vec![HookEventType::FileChanged],
             if_condition: None,
@@ -231,8 +236,8 @@ mod tests {
         let reg = Arc::new(tokio::sync::RwLock::new(registry));
         let mut exec = HookExecutorImpl::new(
             reg,
-            Arc::new(UnusedHttp) as Arc<dyn platform_api::HttpTransport>,
-            Arc::new(UnusedRuntime) as Arc<dyn platform_api::RuntimeSpawner>,
+            Arc::new(UnusedHttp) as Arc<dyn lingxi_core::host::HttpTransport>,
+            Arc::new(UnusedRuntime) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
         );
         exec.register_builtin(handler);
 

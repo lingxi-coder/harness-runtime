@@ -1,6 +1,6 @@
 //! Versioned, session-aware scheduling shared by desktop and mobile hosts.
 use crate::{CronJobFirer, CronTask, FireStatus, FiredJob};
-use platform_api::{Clock, FileSystem};
+use lingxi_core::host::{Clock, FileSystem};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc, time::SystemTime};
 

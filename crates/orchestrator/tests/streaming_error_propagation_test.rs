@@ -1,4 +1,4 @@
-use llm_runtime::{LlmError, LlmEvent};
+use llm_runtime::{HistoryEvent, LlmError};
 use orchestrator::test_support::{
     message_start, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -52,7 +52,7 @@ fn orch(
 ///   — which is the invariant #10 is about.
 #[tokio::test]
 async fn mid_stream_err_ends_turn_gracefully_as_model_error() {
-    let turn: Vec<Result<LlmEvent, LlmError>> = vec![
+    let turn: Vec<Result<HistoryEvent, LlmError>> = vec![
         Ok(message_start("m1", "claude-opus-4-7")),
         Err(LlmError::TlsCert {
             code: "CERT_HAS_EXPIRED".into(),
@@ -77,7 +77,7 @@ async fn mid_stream_err_ends_turn_gracefully_as_model_error() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            platform_api::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
+            lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "model_error"
         )),
         "turn must end with stop_reason model_error; events={events:#?}"
     );

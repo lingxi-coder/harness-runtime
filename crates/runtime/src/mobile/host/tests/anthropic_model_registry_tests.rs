@@ -20,7 +20,7 @@ fn registry_routes_every_curated_anthropic_model() {
         "claude-haiku-4-5",
     ] {
         assert!(
-            platform_api::is_curated_model("anthropic", curated),
+            lingxi_core::host::is_curated_model("anthropic", curated),
             "{curated} is no longer curated; update this test with the shortlist"
         );
         assert!(

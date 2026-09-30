@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use protocol::{ContentBlock, ConversationMessage};
+use lingxi_core::types::{ContentBlock, ConversationMessage};
 use serde_json::{json, Value};
 use tool_api::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolProgressSender,
@@ -208,7 +208,7 @@ impl Tool for EndConversationTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::MessageId;
+    use lingxi_core::types::MessageId;
 
     fn tool() -> EndConversationTool {
         EndConversationTool::new(true, Arc::new(AtomicBool::new(false)))
@@ -315,7 +315,7 @@ mod tests {
             ConversationMessage::user(MessageId::new(), "ack".into()),
             asst_calling_endconv(),
         ]);
-        ctx.agent_id = Some(protocol::AgentId::new());
+        ctx.agent_id = Some(lingxi_core::types::AgentId::new());
         let r = t.call(json!({}), ctx, tx).await.expect("ok");
         assert_eq!(
             r.data["ended"], false,

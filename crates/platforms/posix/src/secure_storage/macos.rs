@@ -4,8 +4,8 @@
 use crate::secure_storage::helpers::KEYCHAIN_CACHE_TTL;
 use async_trait::async_trait;
 use base64::Engine as _;
-use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
-use protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
+use lingxi_core::host::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use lingxi_core::types::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -582,7 +582,7 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{SecretKindDto, SecureStorageMetadata};
+    use lingxi_core::types::{SecretKindDto, SecureStorageMetadata};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::time::SystemTime;

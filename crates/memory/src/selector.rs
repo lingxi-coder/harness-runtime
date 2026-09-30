@@ -68,8 +68,8 @@ impl MemorySelector {
             model: self.selector_model.clone(),
             profile: None,
             system_prompt: Some("You select memory files relevant to the query.".into()),
-            messages: vec![protocol::ConversationMessage::user(
-                protocol::MessageId::new(),
+            messages: vec![lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
                 prompt,
             )],
             tools: vec![],
@@ -130,7 +130,7 @@ impl MemorySelector {
     }
 }
 
-/// Convert a `scan_memdir`-produced [`protocol::MemoryEntry`] into the
+/// Convert a `scan_memdir`-produced [`lingxi_core::types::MemoryEntry`] into the
 /// selector-input [`MemoryFile`] shape, so the prefetch path (and any future
 /// consumer) can feed memdir entries straight into [`MemorySelector`] /
 /// surfacing without re-walking disk.
@@ -153,7 +153,7 @@ impl MemorySelector {
 /// Lives in the memory crate (not the orchestrator) so prefetch + the surfacing
 /// channel + any future consumer share ONE converter (shared-helper contract).
 #[must_use]
-pub fn memory_entry_to_memory_file(entry: &protocol::MemoryEntry) -> MemoryFile {
+pub fn memory_entry_to_memory_file(entry: &lingxi_core::types::MemoryEntry) -> MemoryFile {
     memory_entry_to_memory_file_with_frontmatter(entry, None)
 }
 
@@ -162,7 +162,7 @@ pub fn memory_entry_to_memory_file(entry: &protocol::MemoryEntry) -> MemoryFile 
 /// scanner supplies the already-redacted metadata through this sidecar.
 #[must_use]
 pub(crate) fn memory_entry_to_memory_file_with_frontmatter(
-    entry: &protocol::MemoryEntry,
+    entry: &lingxi_core::types::MemoryEntry,
     sidecar: Option<&crate::MemoryFrontmatter>,
 ) -> MemoryFile {
     let (parsed, content) = crate::parse_markdown_with_frontmatter(&entry.body)
@@ -247,7 +247,7 @@ fn parse_filenames(value: Option<&serde_json::Value>) -> Vec<String> {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use protocol::{MemoryEntry, MemoryEntryTier};
+    use lingxi_core::types::{MemoryEntry, MemoryEntryTier};
     use sidequery::{SideQueryError, SideQueryResponse};
     use std::path::PathBuf;
 

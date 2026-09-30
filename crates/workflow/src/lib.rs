@@ -6,14 +6,14 @@
 //! a JS `AsyncFunction`; LingXi embeds QuickJS (via `rquickjs`) so the same
 //! model-authored scripts run with matching semantics.
 //!
-//! The full global surface is implemented (`agent`, `fusion`, `parallel`,
+//! The full global surface is implemented (`agent`, `parallel`,
 //! `pipeline`, `phase`, `log`, `budget`, `args`, `workflow`) with CONCURRENT
 //! batch dispatch of `agent()` calls (agents pending together run as one batch)
 //! via the pluggable `agent_runner`. The host
 //! (`tasks::handlers::local_workflow`) bridges `agent_runner` to `LingXi`'s
 //! subagent spawner and adds live progress, a real token budget
 //! ([`WorkflowBudgetSource`]), structured-output `agent({schema})`,
-//! journaling/resume, workflow-scoped Fusion, and `workflow()` nesting; the
+//! journaling/resume, and `workflow()` nesting; the
 //! `Workflow` tool (`tool-workflow`) is registered + wired at the desktop
 //! composition root.
 
@@ -33,7 +33,7 @@ use std::sync::Arc;
 mod plugin_registry;
 pub use plugin_registry::{PluginWorkflowEntry, PluginWorkflowRegistry, MAX_WORKFLOW_SCRIPT_BYTES};
 
-/// JS prelude defining `agent()` / `fusion()` (deferred promises) + the
+/// JS prelude defining `agent()` (deferred promises) + the
 /// `parallel()` / `pipeline()` orchestration primitives, injected before the
 /// workflow body.
 /// The argument-validation `throw` messages are byte-locked to claude-code's.
@@ -49,7 +49,6 @@ const WORKFLOW_PRELUDE: &str = r#"
 // before the first await (parallel's fan-out) run concurrently, while a
 // sequential `await agent()` chain dispatches one at a time.
 globalThis.__wf_queue = [];
-globalThis.__wf_fusion_queue = [];
 // Generalized "throw this agent()" channel: when the host refuses a spawn
 // (agent-cap `k6a`/`c0p`, or budget ceiling `I6a`), it returns the result slot
 // as `THROW_PREFIX + message`; the pump then REJECTS that agent()'s promise with
@@ -67,7 +66,6 @@ globalThis.__WF_NULL = String.fromCharCode(1) + "__wf_null__" + String.fromCharC
 // Keep the fallback so the prelude remains usable in standalone harnesses.
 if (!('__wf_record_failure' in globalThis)) globalThis.__wf_record_failure = () => {};
 globalThis.agent = (prompt, opts) => new Promise((res, rej) => { globalThis.__wf_queue.push({ prompt: String(prompt), opts: opts || {}, res, rej }); });
-globalThis.fusion = (prompt, opts) => new Promise((res, rej) => { globalThis.__wf_fusion_queue.push({ prompt: String(prompt), opts: opts || {}, res, rej }); });
 globalThis.__wf_error_info = (e) => {
   if (e && typeof e === "object") {
     return {
@@ -116,67 +114,7 @@ globalThis.__wf_pump = () => {
     }
     return true;
   }
-  const fq = globalThis.__wf_fusion_queue;
-  if (fq.length === 0) return false;
-  globalThis.__wf_fusion_queue = [];
-  const fusionResults = globalThis.__wf_dispatch_fusion_batch(fq.map((x) => x.prompt), fq.map((x) => JSON.stringify(x.opts || {})));
-  for (let i = 0; i < fq.length; i++) {
-    const item = fq[i];
-    const r = fusionResults[i];
-    if (typeof r === "string" && r.startsWith(globalThis.__WF_THROW_PREFIX)) {
-      // The host-side refusal shapes `tasks::handlers::local_workflow` can
-      // send back before ever calling the executor (`err.name` mirrors the
-      // agent() throw channel's WorkflowBudgetExceededError /
-      // WorkflowAgentCapError above so a script can branch on `e.name`
-      // instead of string-matching `e.message`). The full table is pinned by
-      // the `fusion_rejection_name` tests at the bottom of this file.
-      const msg = r.slice(globalThis.__WF_THROW_PREFIX.length);
-      const err = new Error(msg);
-      if (msg.startsWith("Workflow token budget exceeded")) err.name = "WorkflowBudgetExceededError";
-      else if (msg.startsWith("Workflow fusion() call cap reached")) err.name = "WorkflowFusionCapError";
-      else if (msg === "fusion is disabled") err.name = "WorkflowFusionDisabledError";
-      // THREE more shapes reach this same channel with no host-side refusal
-      // recognized above: `FusionError::UnavailableOnPlatform`'s Display
-      // (mobile hosts build the workflow handler without a Fusion executor),
-      // `WORKFLOW_FUSION_UNAVAILABLE_MESSAGE` (the fusion dispatch channel
-      // closed), and `FusionError::InvalidConfiguration`'s Display — which
-      // `parse_workflow_fusion_request` surfaces verbatim from
-      // `executor.preflight_error()` AHEAD of the `enabled` gate
-      // (tasks/src/handlers/local_workflow.rs), so an operator-side `fusion.*`
-      // config the merged re-check rejects arrives here too. From a script's
-      // point of view all three are the same "not available, fall back"
-      // condition as the disabled case above — every one of them is preflight
-      // (`fusion_error_is_preflight`, tools/agent/src/agent.rs: zero provider
-      // calls) and permanent for the run — so they carry the same documented
-      // `err.name` rather than leaving `err.name` at the JS default "Error",
-      // which the fusion() bullet in workflow_description.txt never
-      // distinguishes from the others.
-      else if (msg === "fusion is unavailable on this platform") err.name = "WorkflowFusionDisabledError";
-      else if (msg === "fusion() is unavailable in this workflow runtime") err.name = "WorkflowFusionDisabledError";
-      // Prefix rather than equality: `InvalidConfiguration` carries a detail
-      // string ("invalid fusion configuration: fusion.maxPanel must be in
-      // 2..=8"). F008's intent is preserved — the MESSAGE still names the real
-      // configuration problem instead of being collapsed into "fusion is
-      // disabled"; only the `err.name` classification is shared. This one
-      // branch also covers the quote-time
-      // `InvalidConfiguration("token-billed model `p/m` has no price")`
-      // (fusion/src/budget.rs), which is likewise preflight and likewise
-      // unfixable by retrying the same fusion() call.
-      else if (msg.startsWith("invalid fusion configuration: ")) err.name = "WorkflowFusionDisabledError";
-      // Unlike the three checks above, this one goes through
-      // `FusionError::InvalidRequest`'s Display, which prepends "invalid
-      // fusion request: " — search rather than anchor at the start.
-      else if (msg.indexOf("Workflow fusion() received an unknown option") !== -1) err.name = "WorkflowFusionOptionError";
-      item.rej(err);
-      continue;
-    }
-    try {
-      item.res(JSON.parse(r));
-    } catch (e) {
-      item.rej(new Error("fusion() host returned invalid JSON"));
-    }
-  }
-  return true;
+  return false;
 };
 // parallel(): start EVERY thunk first (so their agents queue together → one
 // concurrent batch), then collect; a throwing thunk / rejected promise → null.
@@ -266,11 +204,6 @@ pub const WF_NULL_SENTINEL: &str = "\u{1}__wf_null__\u{1}";
 /// message, the prelude rejects that `agent()` promise. Byte-identical to
 /// `globalThis.__WF_THROW_PREFIX`.
 pub const WF_THROW_PREFIX: &str = "\u{1}__wf_throw__\u{1}";
-
-/// Default host-side `fusion()` rejection when the runtime did not wire a
-/// Fusion bridge.
-pub const WORKFLOW_FUSION_UNAVAILABLE_MESSAGE: &str =
-    "fusion() is unavailable in this workflow runtime";
 
 /// State of a `workflow_agent` progress event (oracle §8).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1142,6 +1075,7 @@ where
 /// # Errors
 /// Returns [`WorkflowError`] if the engine fails to start, the script throws, or
 /// a job raises.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub fn run_with_progress<R, P>(
     script: &str,
     agent_runner: R,
@@ -1171,92 +1105,6 @@ where
     // Fires for every `phase()`/`log()` as it is emitted (live).
     P: FnMut(&Progress) + 'static,
 {
-    run_with_progress_and_fusion(
-        script,
-        agent_runner,
-        |_, _| format!("{WF_THROW_PREFIX}{WORKFLOW_FUSION_UNAVAILABLE_MESSAGE}"),
-        on_progress,
-        budget,
-        allow_nested,
-        args,
-        cancel,
-    )
-}
-
-/// Like [`run_with_progress`], but also wires the workflow-global `fusion()`
-/// bridge used by the desktop task host.
-// `budget`/`args`/`cancel` are taken by value to keep this signature's shape
-// identical to `run_with_progress` (the sibling `tasks::handlers::local_workflow`
-// builds both calls from the same locals); narrowing only this variant to
-// references would fork the two functions' call-site contracts for no
-// behavioral gain. The one extra `fusion_runner` callback (over
-// `run_with_progress`'s param list) is what pushes the count past the
-// pedantic threshold. And the body itself is the full rquickjs Context/job-queue
-// wiring `run_with_progress` used to own directly before this commit made it a
-// thin wrapper delegating here — splitting the QuickJS FFI glue further is a
-// correctness-risk restructure out of proportion to a lint, not a genuine
-// readability problem.
-#[allow(
-    clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    clippy::too_many_lines
-)]
-pub fn run_with_progress_and_fusion<R, F, P>(
-    script: &str,
-    agent_runner: R,
-    mut fusion_runner: F,
-    on_progress: P,
-    budget: Option<Arc<dyn WorkflowBudgetSource>>,
-    allow_nested: bool,
-    args: Option<String>,
-    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
-) -> Result<RunOutcome, WorkflowError>
-where
-    R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
-    F: FnMut(&str, &str) -> String + 'static,
-    P: FnMut(&Progress) + 'static,
-{
-    run_with_progress_and_fusion_batch(
-        script,
-        agent_runner,
-        move |prompts, opts| {
-            prompts
-                .iter()
-                .zip(opts)
-                .map(|(prompt, opts)| fusion_runner(prompt, opts))
-                .collect()
-        },
-        on_progress,
-        budget,
-        allow_nested,
-        args,
-        cancel,
-    )
-}
-
-/// Execute queued Fusion calls through one ordered batch callback. The host
-/// chooses safe concurrency; this VM layer neither grants budget nor spawns
-/// parallel workers. The scalar API remains a sequential compatibility adapter.
-#[allow(
-    clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    clippy::too_many_lines
-)]
-pub fn run_with_progress_and_fusion_batch<R, F, P>(
-    script: &str,
-    agent_runner: R,
-    fusion_runner: F,
-    on_progress: P,
-    budget: Option<Arc<dyn WorkflowBudgetSource>>,
-    allow_nested: bool,
-    args: Option<String>,
-    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
-) -> Result<RunOutcome, WorkflowError>
-where
-    R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
-    F: FnMut(&[String], &[String]) -> Vec<String> + 'static,
-    P: FnMut(&Progress) + 'static,
-{
     use rquickjs::{Context, Function, Runtime};
 
     let rt = Runtime::new().map_err(|e| WorkflowError::Engine(e.to_string()))?;
@@ -1279,7 +1127,6 @@ where
     let result_slot: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let failures: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let runner = Rc::new(RefCell::new(agent_runner));
-    let fusion_runner = Rc::new(RefCell::new(fusion_runner));
     let on_progress = Rc::new(RefCell::new(on_progress));
     let prepared = strip_meta_export(script);
     // Wrap in an async IIFE; route a throw into `__wf_error` so it survives the
@@ -1375,27 +1222,6 @@ where
                             })
                             .collect();
                         (r.borrow_mut())(&prompts, &augmented)
-                    },
-                )
-                .map_err(eng)?,
-            )
-            .map_err(eng)?;
-
-        let fr = fusion_runner.clone();
-        globals
-            .set(
-                "__wf_dispatch_fusion_batch",
-                Function::new(
-                    ctx.clone(),
-                    move |prompts: Vec<String>, opts_json: Vec<String>| -> Vec<String> {
-                        if prompts.len() != opts_json.len() {
-                            return vec![format!("{WF_THROW_PREFIX}fusion() batch prompt/options length mismatch"); prompts.len()];
-                        }
-                        let results = (fr.borrow_mut())(&prompts, &opts_json);
-                        if results.len() != prompts.len() {
-                            return vec![format!("{WF_THROW_PREFIX}fusion() host returned {} results for {} calls", results.len(), prompts.len()); prompts.len()];
-                        }
-                        results
                     },
                 )
                 .map_err(eng)?,
@@ -2614,314 +2440,5 @@ log('wf=' + (typeof workflow))
             }]
         );
         assert_eq!(out.result.as_deref(), Some(r#"{"ok":true,"n":1}"#));
-    }
-
-    #[test]
-    fn fusion_returns_a_parsed_object() {
-        let out = run_with_progress_and_fusion(
-            "const r = await fusion('compare models'); log('status=' + r.status); return r;",
-            no_agents,
-            |prompt: &str, opts_json: &str| {
-                assert_eq!(prompt, "compare models");
-                assert_eq!(opts_json, "{}");
-                r#"{"status":"completed","panels":[]}"#.to_string()
-            },
-            |_: &Progress| {},
-            None,
-            false,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            out.progress,
-            vec![Progress::Log {
-                message: "status=completed".into()
-            }]
-        );
-        assert_eq!(
-            out.result.as_deref(),
-            Some(r#"{"status":"completed","panels":[]}"#)
-        );
-    }
-
-    #[test]
-    fn fusion_stringifies_the_opts_object_without_touching_agent_batches() {
-        let out = run_with_progress_and_fusion(
-            "const a = agent('one'); const f = fusion('two', { maxPanel: 4, partialOk: false, crossProvider: true }); log(await a); return await f;",
-            |prompts: &[String], _opts: &[String]| {
-                assert_eq!(prompts, &["one".to_string()]);
-                vec!["agent:one".to_string()]
-            },
-            |prompt: &str, opts_json: &str| {
-                assert_eq!(prompt, "two");
-                assert_eq!(
-                    opts_json,
-                    r#"{"maxPanel":4,"partialOk":false,"crossProvider":true}"#
-                );
-                r#"{"status":"needs_parent"}"#.to_string()
-            },
-            |_: &Progress| {},
-            None,
-            false,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            out.progress,
-            vec![Progress::Log {
-                message: "agent:one".into()
-            }]
-        );
-        assert_eq!(out.result.as_deref(), Some(r#"{"status":"needs_parent"}"#));
-    }
-
-    #[test]
-    fn fusion_batch_dispatches_pending_calls_together_in_order() {
-        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let recorded = calls.clone();
-        let out = run_with_progress_and_fusion_batch(
-            "return await Promise.all([fusion('a', {maxPanel: 2}), fusion('b')]);",
-            no_agents,
-            move |prompts, opts| {
-                recorded.lock().unwrap().push(prompts.to_vec());
-                assert_eq!(opts, &[r#"{"maxPanel":2}"#.to_string(), "{}".into()]);
-                prompts
-                    .iter()
-                    .map(|prompt| serde_json::json!({"answer":prompt}).to_string())
-                    .collect()
-            },
-            |_: &Progress| {},
-            None,
-            false,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            *calls.lock().unwrap(),
-            vec![vec!["a".to_string(), "b".to_string()]]
-        );
-        assert_eq!(
-            out.result.as_deref(),
-            Some(r#"[{"answer":"a"},{"answer":"b"}]"#)
-        );
-    }
-
-    #[test]
-    fn fusion_batch_scalar_adapter_remains_ordered_and_sequential() {
-        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let recorded = calls.clone();
-        let out = run_with_progress_and_fusion(
-            "return await Promise.all([fusion('a'), fusion('b')]);",
-            no_agents,
-            move |prompt, _| {
-                recorded.lock().unwrap().push(prompt.to_string());
-                serde_json::json!({"answer":prompt}).to_string()
-            },
-            |_: &Progress| {},
-            None,
-            false,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(*calls.lock().unwrap(), vec!["a", "b"]);
-        assert_eq!(
-            out.result.as_deref(),
-            Some(r#"[{"answer":"a"},{"answer":"b"}]"#)
-        );
-    }
-
-    #[test]
-    fn fusion_batch_rejections_keep_per_item_error_names() {
-        let out = run_with_progress_and_fusion_batch(
-            "return await Promise.all([fusion('a').catch(e => e.name), fusion('b')]);",
-            no_agents,
-            |_, _| {
-                vec![
-                    format!("{WF_THROW_PREFIX}Workflow fusion() call cap reached (20)"),
-                    r#"{"answer":"b"}"#.into(),
-                ]
-            },
-            |_: &Progress| {},
-            None,
-            false,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            out.result.as_deref(),
-            Some(r#"["WorkflowFusionCapError",{"answer":"b"}]"#)
-        );
-    }
-
-    #[test]
-    fn fusion_batch_rejects_short_and_extra_host_result_vectors() {
-        for count in [1, 3] {
-            let out = run_with_progress_and_fusion_batch(
-                "return await Promise.all([fusion('a').catch(e => e.message), fusion('b').catch(e => e.message)]);", no_agents,
-                move |_, _| vec!["{}".into(); count],
-                |_: &Progress| {}, None, false, None, None,
-            ).unwrap();
-            let messages: Vec<String> =
-                serde_json::from_str(out.result.as_deref().unwrap()).unwrap();
-            assert_eq!(
-                messages,
-                vec![format!("fusion() host returned {count} results for 2 calls"); 2]
-            );
-        }
-    }
-
-    /// Host-side `fusion()` rejections carry a distinguishable `err.name`
-    /// (mirroring the `agent()` throw channel's `WorkflowBudgetExceededError`
-    /// / `WorkflowAgentCapError` at lines 87-88) so a script can `catch (e)`
-    /// and branch on `e.name` instead of string-matching `e.message`.
-    fn fusion_rejection_name(thrown_message: &str) -> String {
-        let script = r"
-try {
-  await fusion('x');
-  log('no throw');
-} catch (e) {
-  log(e.name + ':' + e.message);
-}
-";
-        let msg = thrown_message.to_string();
-        let out = run_with_progress_and_fusion(
-            script,
-            no_agents,
-            move |_: &str, _: &str| format!("{WF_THROW_PREFIX}{msg}"),
-            |_: &Progress| {},
-            None,
-            false,
-            None,
-            None,
-        )
-        .unwrap();
-        match out.progress.as_slice() {
-            [Progress::Log { message }] => message.clone(),
-            other => panic!("expected exactly one log line, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn fusion_call_cap_rejection_is_named_workflow_fusion_cap_error() {
-        assert_eq!(
-            fusion_rejection_name("Workflow fusion() call cap reached (20)"),
-            "WorkflowFusionCapError:Workflow fusion() call cap reached (20)"
-        );
-    }
-
-    #[test]
-    fn fusion_disabled_rejection_is_named_workflow_fusion_disabled_error() {
-        assert_eq!(
-            fusion_rejection_name("fusion is disabled"),
-            "WorkflowFusionDisabledError:fusion is disabled"
-        );
-    }
-
-    #[test]
-    fn fusion_budget_rejection_is_named_workflow_budget_exceeded_error_like_agent() {
-        let msg = "Workflow token budget exceeded (500 / 500 output tokens). Stopping further agent() calls. In-flight agents will complete; their results are preserved.";
-        assert_eq!(
-            fusion_rejection_name(msg),
-            format!("WorkflowBudgetExceededError:{msg}")
-        );
-    }
-
-    #[test]
-    fn fusion_unknown_option_rejection_is_named_workflow_fusion_option_error() {
-        // `local_workflow::parse_workflow_fusion_request` wraps the detail in
-        // `FusionError::InvalidRequest`, whose Display prepends "invalid
-        // fusion request: " — the prelude must find the marker anywhere in
-        // the message, not only at its start.
-        let msg = "invalid fusion request: Workflow fusion() received an unknown option (unknown field `nope`, expected one of `preset`, `models`, `dimensions`, `partialOk`, `maxPanel`, `crossProvider`)";
-        assert_eq!(
-            fusion_rejection_name(msg),
-            format!("WorkflowFusionOptionError:{msg}")
-        );
-    }
-
-    #[test]
-    fn fusion_rejection_with_no_recognized_prefix_keeps_the_plain_error_name() {
-        // `new Error(msg)` already carries `.name === "Error"` — the
-        // recognized shapes (budget / cap / disabled / unavailable-on-platform
-        // / unavailable-in-runtime / invalid configuration / unknown option)
-        // OVERRIDE it; anything else — every `executor.run` outcome, and the
-        // two `InvalidRequest` parent-model refusals in
-        // `parse_workflow_fusion_request` — is left as a plain `Error`, not
-        // re-labeled or stripped of a name entirely.
-        assert_eq!(
-            fusion_rejection_name(
-                "invalid fusion request: fusion preset `sloppy` must be quality or fast"
-            ),
-            "Error:invalid fusion request: fusion preset `sloppy` must be quality or fast"
-        );
-    }
-
-    #[test]
-    fn fusion_unavailable_on_platform_rejection_is_named_workflow_fusion_disabled_error() {
-        // Mobile hosts build `LocalWorkflowHandler` without `.with_fusion(...)`,
-        // so `parse_workflow_fusion_request` (tasks/src/handlers/local_workflow.rs)
-        // returns `FusionError::UnavailableOnPlatform` on the very first line —
-        // whose Display is "fusion is unavailable on this platform"
-        // (platform-api/src/fusion.rs). From a script's point of view this is
-        // the same "not available, fall back" condition as the session-disabled
-        // case, so it must carry the same documented `err.name`.
-        assert_eq!(
-            fusion_rejection_name("fusion is unavailable on this platform"),
-            "WorkflowFusionDisabledError:fusion is unavailable on this platform"
-        );
-    }
-
-    #[test]
-    fn fusion_unavailable_in_runtime_rejection_is_named_workflow_fusion_disabled_error() {
-        // The other unnamed "unavailable" shape: `WORKFLOW_FUSION_UNAVAILABLE_MESSAGE`,
-        // thrown when the fusion dispatch channel is closed
-        // (tasks/src/handlers/local_workflow.rs).
-        assert_eq!(
-            fusion_rejection_name(WORKFLOW_FUSION_UNAVAILABLE_MESSAGE),
-            format!("WorkflowFusionDisabledError:{WORKFLOW_FUSION_UNAVAILABLE_MESSAGE}")
-        );
-    }
-
-    #[test]
-    fn fusion_invalid_configuration_rejection_is_named_workflow_fusion_disabled_error() {
-        // The THIRD host-side refusal shape the earlier sweeps missed:
-        // `parse_workflow_fusion_request` surfaces `executor.preflight_error()`
-        // verbatim, BEFORE the `enabled` gate (tasks/src/handlers/local_workflow.rs),
-        // and the desktop executor's `preflight_error()` returns
-        // `FusionError::InvalidConfiguration` — Display "invalid fusion
-        // configuration: {0}" (platform-api/src/fusion.rs). Every one of these
-        // is as permanent for the run, and as recoverable by falling back to
-        // `agent()`, as the disabled / unavailable cases above, so they must
-        // carry the same documented `err.name` rather than the JS default.
-        for msg in [
-            // A merged cross-tier invariant that the deliberately-relaxed
-            // per-file `FusionSettingsJson::validate` lets through and only
-            // `FusionRuntimeConfig::from_settings` rejects (fusion/src/config.rs).
-            "invalid fusion configuration: fusion.minSuccessfulPanels (4) must not exceed min(fusion.qualityPanelCount, fusion.fastPanelCount) (2)",
-            // A managed-policy / `--settings` tier, merged with no per-file
-            // `validate()` call at all (runtime/src/desktop/mod.rs), so
-            // `from_settings`'s own `settings.validate()` (fusion/src/config.rs)
-            // rejects it — that inner error is `SettingsError::SchemaViolation`,
-            // whose Display adds the second "schema validation failed: " layer.
-            "invalid fusion configuration: schema validation failed: fusion.maxPanel must be in 2..=8",
-            // The loader-level Err that `load_effective_settings_for_config`
-            // swallows with `.ok()` (runtime/src/desktop/mod.rs).
-            "invalid fusion configuration: settings failed to load",
-            // The quote-time shape from `fusion::budget` — also a preflight
-            // variant (`fusion_error_is_preflight`, tools/agent/src/agent.rs),
-            // so zero provider calls were made and falling back is right.
-            "invalid fusion configuration: token-billed model `openai/gpt-5.4` has no price",
-        ] {
-            assert_eq!(
-                fusion_rejection_name(msg),
-                format!("WorkflowFusionDisabledError:{msg}"),
-                "invalid-configuration rejection must carry the documented err.name"
-            );
-        }
     }
 }

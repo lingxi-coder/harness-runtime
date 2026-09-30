@@ -1,9 +1,9 @@
-use platform_api::{
+use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
     McpNotificationStream, McpRawConnection, McpResourceContentDto, McpResourceDto,
     McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
-use protocol::McpConnectionId;
+use lingxi_core::types::McpConnectionId;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,7 +46,7 @@ impl McpTransport for HangingConnectTransport {
     async fn list_tools(
         &self,
         _conn: &McpRawConnection,
-    ) -> Result<Vec<platform_api::McpToolDto>, McpError> {
+    ) -> Result<Vec<lingxi_core::host::McpToolDto>, McpError> {
         Ok(Vec::new())
     }
 
@@ -60,7 +60,7 @@ impl McpTransport for HangingConnectTransport {
     async fn list_prompts(
         &self,
         _conn: &McpRawConnection,
-    ) -> Result<Vec<platform_api::McpPromptDto>, McpError> {
+    ) -> Result<Vec<lingxi_core::host::McpPromptDto>, McpError> {
         Ok(Vec::new())
     }
 
@@ -121,14 +121,14 @@ fn record_spec(name: &str) -> agent::AgentMcpServerSpec {
 }
 
 async fn connect_loop_fixture() -> (
-    protocol::AgentId,
+    lingxi_core::types::AgentId,
     String,
     Arc<mcp::McpRegistry>,
     tool_api::BuiltinToolContext,
     agent::AgentDefinition,
     Arc<tokio::sync::Notify>,
 ) {
-    let agent_id = protocol::AgentId::new();
+    let agent_id = lingxi_core::types::AgentId::new();
     let opened_key = mcp::registry::agent_scope_table_key(agent_id, "opened");
     let entered = Arc::new(tokio::sync::Notify::new());
     let registry = Arc::new(mcp::McpRegistry::new(Arc::new(HangingConnectTransport {
@@ -147,8 +147,8 @@ async fn connect_loop_fixture() -> (
         opened_key.clone(),
         mcp::McpConnectionState::Connected {
             config,
-            connection_id: protocol::McpConnectionId::new(),
-            capabilities: platform_api::ServerCapabilitiesDto {
+            connection_id: lingxi_core::types::McpConnectionId::new(),
+            capabilities: lingxi_core::host::ServerCapabilitiesDto {
                 tools: true,
                 resources: false,
                 prompts: false,
@@ -157,8 +157,8 @@ async fn connect_loop_fixture() -> (
                 experimental: std::collections::HashMap::new(),
                 extensions: std::collections::HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: vec![],
@@ -172,7 +172,7 @@ async fn connect_loop_fixture() -> (
     let mut def = agent::parse_agent_from_json(
         "tester",
         &serde_json::json!({"description": "d", "prompt": "p"}),
-        agent::AgentSource::Settings(protocol::SettingsScope::Project),
+        agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
     )
     .expect("agent definition parses");
     def.mcp_servers = vec![record_spec("opened"), record_spec("hangs")];
@@ -225,7 +225,7 @@ async fn restored_identity_stays_reserved_until_cancelled_connect_loop_cleanup_f
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     struct NoWork;
     #[async_trait::async_trait]
-    impl platform_api::ToolInvoker for NoWork {
+    impl lingxi_core::host::ToolInvoker for NoWork {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
@@ -233,14 +233,14 @@ async fn restored_identity_stays_reserved_until_cancelled_connect_loop_cleanup_f
             &self,
             _: &str,
             _: serde_json::Value,
-            _: platform_api::tool_invoker::SubagentInvocationContext,
-        ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+            _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
             Ok(serde_json::Value::Null)
         }
     }
     #[async_trait::async_trait]
-    impl platform_api::BudgetEnforcerHandle for NoWork {
-        async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::BudgetError> {
+    impl lingxi_core::host::BudgetEnforcerHandle for NoWork {
+        async fn check_and_charge(&self, _: u64) -> Result<(), lingxi_core::host::BudgetError> {
             Ok(())
         }
         async fn snapshot_total_nano_usd(&self) -> u64 {
@@ -248,8 +248,8 @@ async fn restored_identity_stays_reserved_until_cancelled_connect_loop_cleanup_f
         }
     }
     #[async_trait::async_trait]
-    impl platform_api::subagent_spawn::SubagentSpawnObserver for NoWork {
-        async fn on_event(&self, _: platform_api::subagent_spawn::SubagentObservation) {}
+    impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for NoWork {
+        async fn on_event(&self, _: lingxi_core::host::subagent_spawn::SubagentObservation) {}
     }
     struct LeaseProbe {
         _lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>,
@@ -289,15 +289,15 @@ async fn restored_identity_stays_reserved_until_cancelled_connect_loop_cleanup_f
         2,
     ));
     let spawner = Arc::new(agent::PoolSubagentSpawner::new(pool).with_mcp_tool_builder(builder));
-    let request = platform_api::SubagentSpawnRequest {
+    let request = lingxi_core::host::SubagentSpawnRequest {
         subagent_type: "general-purpose".into(),
-        resumed_history: Some(vec![protocol::ConversationMessage::user(
-            protocol::MessageId::new(),
+        resumed_history: Some(vec![lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
             "restored history".into(),
         )]),
         ..Default::default()
     };
-    let inherit = || platform_api::SubagentInheritance {
+    let inherit = || lingxi_core::host::SubagentInheritance {
         tool_invoker: Arc::new(NoWork),
         budget: Arc::new(NoWork),
     };

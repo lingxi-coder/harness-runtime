@@ -18,10 +18,10 @@
 //!   a note saying its context was lost; only a user stop is terminal.
 
 use crate::observer_text::{build_digest, framing_prompt, ObservedActivity, ObserverFraming};
-use platform_api::observer_pairing::{
+use lingxi_core::host::observer_pairing::{
     ObserverPairing, ObserverPairings, PairingState, QueuedDigest,
 };
-use protocol::AgentId;
+use lingxi_core::types::AgentId;
 use std::sync::Arc;
 
 /// Oracle's `[Note: …]`, appended to the framing prompt when an observer is
@@ -246,7 +246,7 @@ pub async fn run_delivery_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::subagent_spawn::ObserverSpec;
+    use lingxi_core::host::subagent_spawn::ObserverSpec;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -441,8 +441,10 @@ mod tests {
 /// contributes nothing — the observer is briefed separately and has no business
 /// seeing the observed agent's system prompt.
 #[must_use]
-pub fn activity_from_message(message: &protocol::ConversationMessage) -> Vec<ObservedActivity> {
-    use protocol::{ContentBlock, ConversationMessage};
+pub fn activity_from_message(
+    message: &lingxi_core::types::ConversationMessage,
+) -> Vec<ObservedActivity> {
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
     let mut out = Vec::new();
     match message {
         ConversationMessage::Assistant { content, .. } => {
@@ -488,7 +490,7 @@ pub fn activity_from_message(message: &protocol::ConversationMessage) -> Vec<Obs
 #[cfg(test)]
 mod projection_tests {
     use super::*;
-    use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 
     #[test]
     fn an_assistant_turn_contributes_its_text_and_each_tool_call() {

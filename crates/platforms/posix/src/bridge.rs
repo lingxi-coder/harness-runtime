@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use futures::stream::{empty, Stream};
-use platform_api::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
+use lingxi_core::host::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 use std::pin::Pin;
 
 /// POSIX `BridgeTransport` — M2 stub returning `Unsupported` on connect.

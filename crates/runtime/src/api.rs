@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use platform_api::{CostSnapshot, HandleError, OutputStream, TurnOutcome};
-pub use protocol::{ConversationMessage, SessionId};
+pub use lingxi_core::host::{CostSnapshot, HandleError, OutputStream, TurnOutcome};
+pub use lingxi_core::types::{ConversationMessage, SessionId};
 pub use tokio_util::sync::CancellationToken;
 
 /// Input for the existing Agent execution path.
@@ -42,7 +42,7 @@ pub struct ShutdownReport {
     /// Failures retained for a subsequent retry.
     pub errors: Vec<String>,
     /// Durable Fusion publications observed during shutdown.
-    pub publications: Vec<platform_api::FusionPublicationReceipt>,
+    pub publications: Vec<lingxi_core::host::FusionPublicationReceipt>,
 }
 
 /// Lifecycle operations owned by the host composition.

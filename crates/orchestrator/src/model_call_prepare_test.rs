@@ -8,7 +8,7 @@ use crate::test_support_stream::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockStreamingApiClient,
 };
-use protocol::{ContentBlock, MessageId};
+use lingxi_core::types::{ContentBlock, MessageId};
 use std::sync::{Arc, Mutex as StdMutex};
 use tool_api::registry::ToolRegistry;
 
@@ -236,7 +236,7 @@ async fn thinking_strip_persistence_ignores_worker_only_rejections() {
             _system: Option<&str>,
             _msgs: Vec<ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+        ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
             unreachable!("persistence must not call the provider")
         }
         fn thinking_stripped_messages(&self) -> std::collections::HashMap<MessageId, usize> {

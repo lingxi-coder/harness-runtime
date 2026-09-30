@@ -19,14 +19,14 @@
 /// records why each raise happened.
 #[test]
 fn the_advertised_version_is_the_one_the_last_sweep_verified() {
-    assert_eq!(platform_api::CLAUDE_CODE_VERSION, "2.1.267");
+    assert_eq!(lingxi_core::host::CLAUDE_CODE_VERSION, "2.1.267");
 }
 
 #[test]
 fn the_ai_agent_stamp_follows_the_oracle_template() {
     let derived = format!(
         "claude-code_{}_agent",
-        platform_api::CLAUDE_CODE_VERSION.replace('.', "-")
+        lingxi_core::host::CLAUDE_CODE_VERSION.replace('.', "-")
     );
     assert_eq!(derived, "claude-code_2-1-267_agent");
 }
@@ -35,7 +35,7 @@ fn the_ai_agent_stamp_follows_the_oracle_template() {
 fn the_web_fetch_user_agent_follows_the_oracle_template() {
     let derived = format!(
         "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
-        platform_api::CLAUDE_CODE_VERSION
+        lingxi_core::host::CLAUDE_CODE_VERSION
     );
     assert_eq!(
         derived,
@@ -48,7 +48,7 @@ fn the_web_fetch_user_agent_follows_the_oracle_template() {
 /// have told language servers a different version than it told web servers.
 #[test]
 fn no_version_facing_identifier_keeps_its_own_copy() {
-    let version = platform_api::CLAUDE_CODE_VERSION;
+    let version = lingxi_core::host::CLAUDE_CODE_VERSION;
     let dashed = version.replace('.', "-");
     assert!(format!("claude-code_{dashed}_agent").contains(&dashed));
     assert!(
@@ -63,7 +63,7 @@ fn no_version_facing_identifier_keeps_its_own_copy() {
     let lsp_client =
         std::fs::read_to_string(sources.join("lsp/src/client.rs")).expect("read lsp client");
     assert!(
-        lsp_client.contains("platform_api::CLAUDE_CODE_VERSION"),
+        lsp_client.contains("lingxi_core::host::CLAUDE_CODE_VERSION"),
         "the LSP clientInfo version must derive from the shared constant, not a literal"
     );
 }

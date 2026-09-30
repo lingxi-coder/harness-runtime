@@ -7,8 +7,8 @@ use crate::error::OrchestratorError;
 #[doc = " Re-exported from `model::prompt_too_long` (the orchestrator's own copy),"]
 #[doc = " which is the authoritative source for this string in this crate."]
 use crate::model::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE;
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use llm_runtime::LlmError;
-use protocol::{ContentBlock, ConversationMessage, MessageId};
 
 /// Append the byte-exact [`PROMPT_TOO_LONG_ERROR_MESSAGE`] as an assistant text
 /// message to history (and emit it to the output stream), returning its id so
@@ -308,7 +308,7 @@ pub(crate) async fn clear_goal_after_unrecoverable_error(
     // are inseparable here.
     //
     // DIVERGENCE (recorded): the oracle stamps the goal-status attachment with
-    // `context_limit` / `api_error`; `platform_api::GoalStatusKind` has only
+    // `context_limit` / `api_error`; `lingxi_core::host::GoalStatusKind` has only
     // `Set|Cleared|Achieved`, and widening it would change a serialized
     // transcript enum, so the teardown records `Cleared`.
     // `kB(e, d==="context_limit" ? "context_limit" : "api_error")` — upstream
@@ -317,9 +317,9 @@ pub(crate) async fn clear_goal_after_unrecoverable_error(
     // yields `Auth` / `Billing` / `ModelUnavailable` / no-clear), so testing the
     // bucket here is the same test.
     let cleared_reason = if bucket == GoalClearBucket::ContextLimit {
-        platform_api::GoalClearedReason::ContextLimit
+        lingxi_core::host::GoalClearedReason::ContextLimit
     } else {
-        platform_api::GoalClearedReason::ApiError
+        lingxi_core::host::GoalClearedReason::ApiError
     };
     let Some(goal) = orch.clear_active_goal_state_and_hook(cleared_reason).await else {
         return;
@@ -411,7 +411,7 @@ pub(crate) fn terminal_api_error_text(
     interactive: bool,
     stop_reason: &str,
     request_id: Option<&str>,
-    stop_details: Option<&llm_runtime::StopDetails>,
+    stop_details: Option<&llm_runtime::HistoryStopDetails>,
 ) -> Option<String> {
     match stop_reason {
         "max_tokens" => Some(format!(
@@ -563,7 +563,7 @@ pub(super) fn refusal_explanation_clause(explanation: Option<&str>) -> String {
 pub(crate) async fn surface_terminal_api_error(
     orch: &ConversationOrchestrator,
     stop_reason: &str,
-    stop_details: Option<&llm_runtime::StopDetails>,
+    stop_details: Option<&llm_runtime::HistoryStopDetails>,
 ) -> Option<MessageId> {
     let (model, interactive) = {
         let s = orch.session.lock().await;

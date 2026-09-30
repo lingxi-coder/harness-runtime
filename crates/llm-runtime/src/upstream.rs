@@ -1,11 +1,16 @@
 //! Projection between LingXi's host contracts and the independent wire client.
 //! Provider encoding and decoding are always delegated to lingxi-llm-client.
+use crate::convert::input_projection::native_family;
+#[cfg(test)]
+use crate::convert::input_projection::{message_content, replay_companion};
+#[cfg(test)]
+use crate::history_projection::{project_response, HistoryProjector as Decoder};
 use crate::*;
-use base64::Engine;
 use lingxi_llm_client::{self as client, protocol as wire};
-use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use serde_json::json;
+#[cfg(test)]
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 fn invalid(error: impl std::fmt::Display) -> LlmError {
     LlmError::InvalidRequest {
@@ -13,8 +18,7 @@ fn invalid(error: impl std::fmt::Display) -> LlmError {
     }
 }
 pub(crate) fn family(protocol: &ProtocolFamily) -> wire::ProtocolFamily {
-    serde_json::from_value(serde_json::to_value(protocol).expect("protocol serializes"))
-        .expect("host and client protocol family mapping")
+    *protocol
 }
 pub(crate) fn provider_name(provider: &ProviderId) -> &str {
     match provider {
@@ -118,10 +122,10 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
         }
     }
     projected.pricing.billing_mode = match profile.pricing.billing_mode {
-        platform_api::ModelBillingMode::PerToken => wire::BillingMode::PerToken,
-        platform_api::ModelBillingMode::Subscription => wire::BillingMode::Subscription,
-        platform_api::ModelBillingMode::Free => wire::BillingMode::Free,
-        platform_api::ModelBillingMode::Unknown => wire::BillingMode::Unknown,
+        lingxi_core::host::ModelBillingMode::PerToken => wire::BillingMode::PerToken,
+        lingxi_core::host::ModelBillingMode::Subscription => wire::BillingMode::Subscription,
+        lingxi_core::host::ModelBillingMode::Free => wire::BillingMode::Free,
+        lingxi_core::host::ModelBillingMode::Unknown => wire::BillingMode::Unknown,
     };
     for model in &mut projected.models {
         if let Some((_, price)) = profile.pricing.overrides.iter().find(|(name, _)| {
@@ -129,672 +133,100 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
                 || name == &model.request_model
                 || name == &model.billing_model
         }) {
-            model.pricing = Some(price.to_wire("override"));
+            model.pricing = Some(price.to_sdk().with_fixed_standard_override());
             model.billing_mode = Some(wire::BillingMode::PerToken);
         }
     }
     Ok(projected)
 }
 
-fn cache(cache: &CacheControl) -> wire::CacheControl {
-    match cache {
-        CacheControl::Ephemeral => wire::CacheControl::default(),
-        CacheControl::EphemeralScoped { scope, ttl_1h } => wire::CacheControl {
-            scope: scope.map(|_| wire::CacheScope::Global),
-            ttl: ttl_1h.then(|| serde_json::from_value(json!("1h")).expect("legacy cache TTL")),
-        },
-    }
-}
-
-fn native_family(family: wire::ProtocolFamily) -> wire::ProtocolFamily {
-    match family {
-        wire::ProtocolFamily::BedrockClaude
-        | wire::ProtocolFamily::VertexClaude
-        | wire::ProtocolFamily::FoundryClaude => wire::ProtocolFamily::AnthropicMessages,
-        wire::ProtocolFamily::AzureOpenAi => wire::ProtocolFamily::OpenAiChat,
-        other => other,
-    }
-}
-
-fn skip_unsigned_reasoning(message: &Message, family: wire::ProtocolFamily) -> bool {
-    native_family(family) == wire::ProtocolFamily::AnthropicMessages
-        && message.content.iter().any(|block| {
-            let ContentBlock::ProviderContent { protocol, value } = block else {
-                return false;
-            };
-            matches!(value["type"].as_str(), Some("reasoning" | "chat_reasoning"))
-                && serde_json::from_value(json!(protocol))
-                    .is_ok_and(|source| native_family(source) != native_family(family))
-        })
-}
-
-fn skip_replay_block(
-    block: &ContentBlock,
-    family: wire::ProtocolFamily,
-    skip_unsigned_reasoning: bool,
-) -> Result<bool, LlmError> {
-    if replay_companion(block).is_some()
-        || matches!(block, ContentBlock::ProviderContent { value, .. } if value["type"] == "lingxi_observation")
-    {
-        return Ok(true);
-    }
-    match block {
-        // Responses/Chat summaries remain visible in history, but are not
-        // signed Anthropic thinking and cannot be replayed on that wire.
-        ContentBlock::Reasoning {
-            signature: None, ..
-        } if skip_unsigned_reasoning => Ok(true),
-        ContentBlock::ProviderContent { protocol, value } => {
-            let source = serde_json::from_value(json!(protocol)).map_err(invalid)?;
-            // Native state belongs to its wire. Keep visible text when it was
-            // embedded in a native block, but never send another wire's state.
-            Ok(native_family(source) != native_family(family)
-                && !(value["type"].as_str() == Some("text") && value["text"].is_string()))
-        }
-        ContentBlock::ServerToolUse { .. }
-        | ContentBlock::ConnectorText { .. }
-        | ContentBlock::AdvisorToolResult { .. }
-        | ContentBlock::CacheEdits { .. } => {
-            Ok(native_family(family) != wire::ProtocolFamily::AnthropicMessages)
-        }
-        _ => Ok(false),
-    }
-}
-
-fn block(
-    block: &ContentBlock,
-    protocol: wire::ProtocolFamily,
-) -> Result<wire::ContentBlock, LlmError> {
-    let claude = matches!(
-        protocol,
-        wire::ProtocolFamily::AnthropicMessages
-            | wire::ProtocolFamily::BedrockClaude
-            | wire::ProtocolFamily::VertexClaude
-            | wire::ProtocolFamily::FoundryClaude
-    );
-    let native = |value| wire::ContentBlock::ProviderContent {
-        protocol: wire::ProtocolFamily::AnthropicMessages,
-        value,
-    };
-    let base64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
-    Ok(match block {
-        ContentBlock::ProviderContent {
-            protocol: source,
-            value,
-        } => {
-            let source = serde_json::from_value(json!(source)).map_err(invalid)?;
-            if native_family(source) == native_family(protocol) {
-                wire::ContentBlock::ProviderContent {
-                    protocol: native_family(source),
-                    value: value.clone(),
-                }
-            } else {
-                wire::ContentBlock::Text {
-                    text: value["text"].as_str().unwrap_or_default().into(),
-                    thought_signature: None,
-                }
-            }
-        }
-        ContentBlock::Text {
-            text,
-            cache_control,
-        }
-        | ContentBlock::TextJsUtf16 {
-            text,
-            cache_control,
-            ..
-        } => {
-            if claude && cache_control.is_some() {
-                native(
-                    json!({"type":"text","text":text,"cache_control":cache(cache_control.as_ref().unwrap()).wire_value()}),
-                )
-            } else {
-                wire::ContentBlock::Text {
-                    text: text.clone(),
-                    thought_signature: None,
-                }
-            }
-        }
-        ContentBlock::Image { media_type, bytes } => wire::ContentBlock::Image {
-            source: wire::ImageSource::Base64 {
-                media_type: media_type.clone(),
-                data: base64(bytes),
-            },
-        },
-        ContentBlock::ImageUrl { url } => wire::ContentBlock::Image {
-            source: wire::ImageSource::Url { url: url.clone() },
-        },
-        ContentBlock::Document { media_type, bytes } => wire::ContentBlock::Document {
-            source: wire::DocumentSource::Base64 {
-                media_type: media_type.clone(),
-                data: base64(bytes),
-            },
-            title: None,
-        },
-        ContentBlock::ToolCall { id, name, input } => wire::ContentBlock::ToolUse {
-            id: wire::ToolUseId::new(id),
-            name: name.clone(),
-            input: input.clone(),
-            provider_id: None,
-            caller: None,
-            toolset_name: None,
-            thought_signature: None,
-        },
-        ContentBlock::ToolResult {
-            tool_call_id,
-            output,
-            is_error,
-            cache_control,
-            cache_reference,
-        } => {
-            let exact_text = ::protocol::js_utf16::tool_result_display(output).map(Value::String);
-            let output = exact_text.as_ref().unwrap_or(output);
-            if claude && (cache_control.is_some() || cache_reference.is_some()) {
-                let content = if output.is_string() || output.is_array() {
-                    output.clone()
-                } else {
-                    Value::String(output.to_string())
-                };
-                let mut value = json!({"type":"tool_result","tool_use_id":tool_call_id,"content":content,"is_error":is_error});
-                if let Some(control) = cache_control {
-                    value["cache_control"] = cache(control).wire_value();
-                }
-                if let Some(reference) = cache_reference {
-                    value["cache_reference"] = json!(reference);
-                }
-                native(value)
-            } else {
-                wire::ContentBlock::ToolResult {
-                    tool_use_id: wire::ToolUseId::new(tool_call_id),
-                    content: output
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| output.to_string()),
-                    is_error: *is_error,
-                    blocks: output.as_array().cloned(),
-                    toolset_name: None,
-                }
-            }
-        }
-        ContentBlock::Reasoning { text, signature } => wire::ContentBlock::Thinking {
-            text: text.clone(),
-            signature: signature.clone(),
-        },
-        ContentBlock::RedactedThinking { data } => {
-            wire::ContentBlock::RedactedThinking { data: data.clone() }
-        }
-        ContentBlock::ServerToolUse { id, name, input } => {
-            native(json!({"type":"server_tool_use","id":id,"name":name,"input":input}))
-        }
-        ContentBlock::ConnectorText {
-            connector_text,
-            signature,
-        } => native(
-            json!({"type":"connector_text","connector_text":connector_text,"signature":signature}),
-        ),
-        ContentBlock::AdvisorToolResult {
-            tool_use_id,
-            content,
-            is_error,
-        } => native(
-            json!({"type":"advisor_tool_result","tool_use_id":tool_use_id,"content":content,"is_error":is_error}),
-        ),
-        ContentBlock::CacheEdits { edits } => native(json!({"type":"cache_edits","edits":edits})),
-    })
-}
-
-fn gemini_family(family: wire::ProtocolFamily) -> bool {
-    matches!(
-        family,
-        wire::ProtocolFamily::GeminiGenerateContent | wire::ProtocolFamily::VertexGemini
+/// SDK protocol adaptation plus reindexing of host-owned exact-string sidecars.
+pub(crate) fn adapt_request(
+    request: &LlmRequest,
+    source: wire::ProtocolFamily,
+    target: wire::ProtocolFamily,
+) -> Result<LlmRequest, LlmError> {
+    let projection = client::replay::adapt_request(
+        &request.input,
+        source,
+        target,
+        client::replay::ReplayPolicy::DropIncompatible,
     )
-}
-
-// Canonical SDK metadata is kept beside the host block in the transcript.
-// Rehydrate it before encoding; the companion is never sent as a second part.
-fn replay_companion(block: &ContentBlock) -> Option<(wire::ProtocolFamily, wire::ContentBlock)> {
-    let ContentBlock::ProviderContent { protocol, value } = block else {
-        return None;
-    };
-    let family = serde_json::from_value(json!(protocol)).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("lingxi_replay_metadata") {
-        return None;
-    }
-    let block: wire::ContentBlock = serde_json::from_value(value.get("block")?.clone()).ok()?;
-    has_replay_metadata(&block).then_some((family, block))
-}
-fn native_cited_text(block: &wire::ContentBlock) -> Option<&str> {
-    let wire::ContentBlock::ProviderContent { protocol, value } = block else {
-        return None;
-    };
-    (native_family(*protocol) == wire::ProtocolFamily::AnthropicMessages
-        && value["type"] == "text"
-        && value["citations"]
-            .as_array()
-            .is_some_and(|citations| !citations.is_empty()))
-    .then(|| value["text"].as_str())
-    .flatten()
-}
-
-fn has_replay_metadata(block: &wire::ContentBlock) -> bool {
-    if native_cited_text(block).is_some() {
-        return true;
-    }
-    match block {
-        wire::ContentBlock::Text {
-            thought_signature, ..
-        } => thought_signature.is_some(),
-        wire::ContentBlock::ToolUse {
-            thought_signature,
-            provider_id,
-            caller,
-            toolset_name,
-            ..
-        } => {
-            thought_signature.is_some()
-                || provider_id.is_some()
-                || caller.is_some()
-                || toolset_name.is_some()
-        }
-        _ => false,
-    }
-}
-fn companion(
-    block: &wire::ContentBlock,
-    family: wire::ProtocolFamily,
-) -> Result<ContentBlock, LlmError> {
-    Ok(ContentBlock::ProviderContent {
-        protocol: serde_json::to_value(family)
-            .map_err(invalid)?
-            .as_str()
-            .unwrap()
-            .into(),
-        value: json!({"type":"lingxi_replay_metadata", "block":serde_json::to_value(block).map_err(invalid)?}),
-    })
-}
-fn message_content(
-    message: &Message,
-    family: wire::ProtocolFamily,
-) -> Result<Vec<wire::ContentBlock>, LlmError> {
-    let skip_unsigned_reasoning = skip_unsigned_reasoning(message, family);
-    let mut metadata: Vec<_> = message
-        .content
-        .iter()
-        .enumerate()
-        .filter_map(|(index, block)| {
-            replay_companion(block).map(|(protocol, block)| (index, protocol, block))
-        })
-        .filter(|(_, protocol, _)| native_family(*protocol) == native_family(family))
-        .map(|(index, _, block)| (index, block))
-        .collect();
-    let mut content = Vec::new();
-    for (item_index, item) in message.content.iter().enumerate() {
-        if skip_replay_block(item, family, skip_unsigned_reasoning)? {
+    .map_err(error)?;
+    let mut adapted = request.clone();
+    adapted.input = projection.request;
+    adapted.execution.input_protocol = Some(target);
+    adapted.execution.message_json_string_overrides.clear();
+    for (path, units) in &request.execution.message_json_string_overrides {
+        let Some(path) = path.strip_prefix("/messages/") else {
             continue;
-        }
-        let position = metadata
-            .iter()
-            .position(|(native_index, native)| match (item, native) {
-                (
-                    ContentBlock::ToolCall { id, .. },
-                    wire::ContentBlock::ToolUse { id: native_id, .. },
-                ) => id == native_id.as_str(),
-                (
-                    ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. },
-                    wire::ContentBlock::Text {
-                        text: native_text, ..
-                    },
-                ) => text == native_text,
-                (
-                    ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. },
-                    native,
-                ) if *native_index == item_index + 1 => {
-                    native_cited_text(native) == Some(text.as_str())
-                }
-                _ => false,
-            });
-        if let Some(position) = position {
-            let (_, mut native) = metadata.remove(position);
-            if let (
-                ContentBlock::ToolCall { name, input, .. },
-                wire::ContentBlock::ToolUse {
-                    name: native_name,
-                    input: native_input,
-                    ..
-                },
-            ) = (item, &mut native)
-            {
-                native_name.clone_from(name);
-                native_input.clone_from(input);
-            }
-            content.push(native);
-        } else {
-            content.push(block(item, family)?);
+        };
+        let Some((message, path)) = path.split_once("/content/") else {
+            continue;
+        };
+        let Some((block, field)) = path.split_once('/') else {
+            continue;
+        };
+        let (Ok(message), Ok(block)) = (message.parse::<usize>(), block.parse::<usize>()) else {
+            continue;
+        };
+        if let Some((message, block)) = projection.block_positions.get(&(message, block)) {
+            adapted.execution.message_json_string_overrides.insert(
+                format!("/messages/{message}/content/{block}/{field}"),
+                units.clone(),
+            );
         }
     }
-    Ok(content)
+    Ok(adapted)
 }
 
-/// Exact host strings use the SDK's JSON override mechanism after projection.
-/// Count retained blocks so dropping foreign replay metadata cannot shift an
-/// override onto a different text or tool result.
-pub(crate) fn message_string_overrides(
-    req: &LlmRequest,
-    family: wire::ProtocolFamily,
-) -> Result<BTreeMap<String, Vec<u16>>, LlmError> {
-    let mut overrides = BTreeMap::new();
-    if native_family(family) != wire::ProtocolFamily::AnthropicMessages {
-        return Ok(overrides);
-    }
-    let mut mi = 0;
-    for message in &req.messages {
-        let skip_unsigned_reasoning = skip_unsigned_reasoning(message, family);
-        let mut bi = 0;
-        for block in &message.content {
-            if skip_replay_block(block, family, skip_unsigned_reasoning)? {
-                continue;
-            }
-            let exact = match block {
-                ContentBlock::TextJsUtf16 {
-                    utf16_code_units, ..
-                } => Some(("text", utf16_code_units.clone())),
-                ContentBlock::ToolResult { output, .. } => {
-                    ::protocol::js_utf16::tool_result_units(output).map(|units| ("content", units))
-                }
-                _ => None,
-            };
-            if let Some((field, units)) = exact {
-                overrides.insert(format!("/messages/{mi}/content/{bi}/{field}"), units);
-            }
-            bi += 1;
-        }
-        if bi > 0 {
-            mi += 1;
-        }
-    }
-    Ok(overrides)
-}
-
+/// Canonical requests need no model DTO projection. Responses host defaults are
+/// explicit per-call controls; preserving them does not encode provider JSON.
 pub(crate) fn request(
     req: &LlmRequest,
     protocol: wire::ProtocolFamily,
 ) -> Result<wire::ChatRequest, LlmError> {
-    let mut result: wire::ChatRequest =
-        serde_json::from_value(json!({"model":req.model,"messages":[]})).map_err(invalid)?;
-    let mut message_positions = BTreeMap::new();
-    for (message_index, message) in req.messages.iter().enumerate() {
-        let content = message_content(message, protocol)?;
-        if content.is_empty() {
-            continue;
-        }
-        let skip_unsigned = skip_unsigned_reasoning(message, protocol);
-        let mut projected_block = 0;
-        for (block_index, block) in message.content.iter().enumerate() {
-            if !skip_replay_block(block, protocol, skip_unsigned)? {
-                message_positions.insert(
-                    (message_index, block_index),
-                    (result.messages.len(), projected_block),
-                );
-                projected_block += 1;
-            }
-        }
-        result.messages.push(wire::ConversationMessage {
-            role: serde_json::from_value(json!(message.role)).map_err(invalid)?,
-            content,
-            native_options: Vec::new(),
-        });
-    }
-    let toolsets: BTreeMap<_, _> = req
-        .messages
-        .iter()
-        .flat_map(|message| &message.content)
-        .filter_map(replay_companion)
-        .filter(|(source, _)| native_family(*source) == native_family(protocol))
-        .filter_map(|(_, block)| match block {
-            wire::ContentBlock::ToolUse {
-                id,
-                toolset_name: Some(toolset),
-                ..
-            } => Some((id, toolset)),
-            _ => None,
-        })
-        .collect();
-    for message in &mut result.messages {
-        for block in &mut message.content {
-            match block {
-                wire::ContentBlock::ToolResult {
-                    tool_use_id,
-                    toolset_name,
-                    ..
-                } => {
-                    *toolset_name = toolsets.get(tool_use_id).cloned();
-                }
-                wire::ContentBlock::ProviderContent {
-                    protocol: wire::ProtocolFamily::AnthropicMessages,
-                    value,
-                } if value["type"] == "tool_result" => {
-                    if let Some(name) = value["tool_use_id"]
-                        .as_str()
-                        .and_then(|id| toolsets.get(&wire::ToolUseId::new(id)))
-                    {
-                        value["toolset_name"] = json!(name);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    result.system = req
-        .system
-        .iter()
-        .map(|b| wire::SystemBlock {
-            text: b.text.clone(),
-        })
-        .collect();
-    result.hosted_tools = req.hosted_tools.clone();
-    result.native_options = req.native_options.clone();
-    result.prompt_cache = req.prompt_cache.clone();
-    for breakpoint in &mut result.prompt_cache.breakpoints {
-        if let wire::CachePosition::Message { index, block } = breakpoint.position {
-            let Some(&(index, block)) = message_positions.get(&(index, block)) else {
-                return Err(invalid(
-                    "prompt-cache breakpoint targets content removed during protocol projection",
-                ));
-            };
-            breakpoint.position = wire::CachePosition::Message { index, block };
-        }
-    }
-    result.continuation = req.continuation.clone();
-    // Legacy system markers now use the SDK's positional cache policy.
-    if native_family(protocol) == wire::ProtocolFamily::AnthropicMessages {
-        for (index, block) in req.system.iter().enumerate() {
-            if let Some(control) = &block.cache_control {
-                let ttl = match control {
-                    CacheControl::EphemeralScoped { ttl_1h: true, .. } => wire::CacheTtl::OneHour,
-                    _ => wire::CacheTtl::FiveMinutes,
-                };
-                let position = wire::CachePosition::System { index };
-                if let Some(existing) = result
-                    .prompt_cache
-                    .breakpoints
-                    .iter_mut()
-                    .find(|b| b.position == position)
-                {
-                    existing.scope = cache(control).scope.or(existing.scope);
-                    if existing.ttl != ttl {
-                        return Err(invalid("conflicting legacy and typed system cache TTL"));
-                    }
-                } else {
-                    result.prompt_cache.breakpoints.push(wire::CacheBreakpoint {
-                        scope: cache(control).scope,
-                        position,
-                        ttl,
-                    });
-                }
-            }
-        }
-    }
-    result.tools = req
-        .tools
-        .iter()
-        .map(|t| wire::ToolSpec {
-            name: t.name.clone(),
-            description: t.description.clone(),
-            input_schema: t.input_schema.clone(),
-            strict: t.strict,
-            tool_type: t.tool_type.clone(),
-            defer_loading: t.defer_loading,
-            native_options: Vec::new(),
-            extra: Value::Object(t.extra.clone()),
-        })
-        .collect();
-    for tool in &mut result.tools {
-        if let Some(extra) = tool.extra.as_object_mut() {
-            if let Some(callers) = extra.remove("allowed_callers") {
-                tool.set_anthropic_allowed_callers(
-                    serde_json::from_value(callers).map_err(invalid)?,
-                );
-            }
-        }
-        if tool.strict {
-            match crate::strict_schema::to_strict_schema(&tool.input_schema) {
-                Ok(schema) => tool.input_schema = schema,
-                Err(_) => tool.strict = false,
-            }
-        }
-    }
-    result.tool_choice = match &req.tool_choice {
-        Some(ToolChoice::Required) => wire::ToolChoice::Any,
-        Some(ToolChoice::None) => wire::ToolChoice::None,
-        Some(ToolChoice::Tool { name }) => wire::ToolChoice::Tool { name: name.clone() },
-        _ => wire::ToolChoice::Auto,
-    };
-    result.max_tokens = req.max_tokens;
-    result.temperature = req.temperature.map(|t| t as f32);
-    result.stop_sequences = req.stop_sequences.clone();
-    result.metadata = req
-        .metadata
-        .as_ref()
-        .map(|m| json!({"user_id":m.user_id}))
-        .unwrap_or(Value::Null);
-    result.controls.top_p = req.top_p;
-    let legacy_format = req.response_format.as_ref().map(|format| match format {
-        ResponseFormat::JsonObject => wire::OutputFormat::JsonObject,
-        ResponseFormat::JsonSchema { schema } => wire::OutputFormat::JsonSchema {
-            name: "response".into(),
-            schema: schema.clone(),
-            strict: true,
-        },
-    });
-    result.output_format = req.output_format.clone();
-    if let Some(legacy_format) = legacy_format {
-        if result.output_format != wire::OutputFormat::Text && result.output_format != legacy_format
-        {
-            return Err(invalid("conflicting legacy and typed output formats"));
-        }
-        result.output_format = legacy_format;
-    }
-    result.controls.anthropic.context_hint = req.context_hint.clone();
-    result.controls.responses = wire::ResponsesControls {
-        previous_response_id: req.openai_responses.previous_response_id.clone(),
-        parallel_tool_calls: req
-            .openai_responses
+    let mut input = req.input.clone();
+    if protocol == wire::ProtocolFamily::OpenAiResponses {
+        input
+            .controls
+            .responses
             .parallel_tool_calls
-            .or((protocol == wire::ProtocolFamily::OpenAiResponses).then_some(false)),
-        include: req.openai_responses.include.clone(),
-        prompt_cache_key: req.openai_responses.prompt_cache_key.clone(),
-        client_metadata: req.openai_responses.client_metadata.clone(),
-        store: req
-            .openai_responses
-            .store
-            .or((protocol == wire::ProtocolFamily::OpenAiResponses).then_some(false)),
-        generate: req.openai_responses.generate,
-    };
-    if req.reasoning.is_some() || req.effort.is_some() {
-        let mut thinking = wire::ThinkingConfig::default();
-        match req.reasoning {
-            Some(ReasoningConfig::Adaptive) => thinking.mode = Some(wire::ThinkingMode::Adaptive),
-            Some(ReasoningConfig::Enabled { budget_tokens }) => {
-                thinking.mode = Some(wire::ThinkingMode::Enabled);
-                thinking.budget = Some(wire::ThinkingBudget::Tokens(budget_tokens));
-            }
-            None => {}
+            .get_or_insert(false);
+        input.controls.responses.store.get_or_insert(false);
+        if input.thinking.is_some()
+            && !input
+                .controls
+                .responses
+                .include
+                .iter()
+                .any(|value| value == "reasoning.encrypted_content")
+        {
+            input
+                .controls
+                .responses
+                .include
+                .push("reasoning.encrypted_content".into());
         }
-        if let Some(effort) = &req.effort {
-            if let Some(mode) = effort
-                .as_str()
-                .filter(|s| matches!(*s, "enabled" | "disabled"))
-            {
-                thinking.mode = Some(serde_json::from_value(json!(mode)).map_err(invalid)?);
-            } else if effort.is_string() {
-                thinking.effort = Some(serde_json::from_value(effort.clone()).map_err(invalid)?);
-            } else if let Some(tokens) = effort.as_u64() {
-                thinking.budget = Some(wire::ThinkingBudget::Tokens(
-                    tokens.try_into().map_err(invalid)?,
-                ));
-            }
-        }
-        result.thinking = Some(thinking);
     }
-    if protocol == wire::ProtocolFamily::OpenAiResponses
-        && result.thinking.is_some()
-        && !result
-            .controls
-            .responses
-            .include
-            .iter()
-            .any(|value| value == "reasoning.encrypted_content")
-    {
-        result
-            .controls
-            .responses
-            .include
-            .push("reasoning.encrypted_content".into());
-    }
-    result.service_tier = match req
-        .speed
-        .as_deref()
-        .or(req.openai_responses.service_tier.as_deref())
-    {
-        Some("fast" | "priority") => Some(wire::ServiceTier::Fast),
-        Some("standard" | "default") => Some(wire::ServiceTier::Standard),
-        None => None,
-        Some(other) => return Err(invalid(format!("unsupported service tier: {other}"))),
-    };
-    Ok(result)
+    Ok(input)
+}
+
+pub(crate) fn message_string_overrides(
+    req: &LlmRequest,
+    family: wire::ProtocolFamily,
+) -> Result<BTreeMap<String, Vec<u16>>, LlmError> {
+    Ok(
+        if native_family(family) == wire::ProtocolFamily::AnthropicMessages {
+            req.execution.message_json_string_overrides.clone()
+        } else {
+            BTreeMap::new()
+        },
+    )
 }
 
 /// Restore host legacy controls that are intentionally outside the SDK's typed
 /// request contract. Scoped continuations still pass through SDK validation.
-
-fn upstream_metadata(metadata: &mut Value) -> &mut serde_json::Map<String, Value> {
-    if !metadata.is_object() {
-        *metadata = if metadata.is_null() {
-            json!({})
-        } else {
-            json!({"native": metadata.take()})
-        };
-    }
-    let namespace = metadata
-        .as_object_mut()
-        .expect("metadata object")
-        .entry("llm_client")
-        .or_insert_with(|| json!({}));
-    if !namespace.is_object() {
-        *namespace = json!({"native": namespace.take()});
-    }
-    namespace.as_object_mut().expect("upstream metadata object")
-}
-
-fn append_observation(metadata: &mut Value, key: &str, value: Value) {
-    let entries = upstream_metadata(metadata)
-        .entry(key)
-        .or_insert_with(|| json!([]));
-    entries
-        .as_array_mut()
-        .expect("observation array")
-        .push(value);
-}
 
 pub(crate) fn error(error: wire::LlmError) -> LlmError {
     use wire::LlmError as E;
@@ -831,7 +263,7 @@ pub(crate) fn error(error: wire::LlmError) -> LlmError {
 pub(crate) fn usage(
     report: &wire::UsageReport,
     inference: &wire::InferenceReport,
-) -> Option<(Usage, ModelAttemptUsageCompleteness)> {
+) -> Option<(ExecutionUsage, ModelAttemptUsageCompleteness)> {
     let counts = report.usage?;
     let completeness = if report.state == wire::UsageState::Complete {
         ModelAttemptUsageCompleteness::Complete
@@ -856,911 +288,25 @@ pub(crate) fn usage(
             serde_json::to_value(server_tools).expect("server usage serializes");
     }
     Some((
-        Usage {
-            billable_tokens: TokenUsage {
-                input: counts.input_tokens,
-                output: counts.output_tokens.saturating_sub(counts.reasoning_tokens),
-                cache_write: counts.cache_write_tokens,
-                cache_read: counts.cache_read_tokens,
-                reasoning_output: counts.reasoning_tokens,
-            },
+        ExecutionUsage {
+            report: report.clone(),
+            inference: inference.clone(),
             context_tokens: Some(counts.total()),
             provider_reported_total_tokens: Some(counts.total()),
-            server_tool_use: counts.server_tool_usage.and_then(|u| {
-                u.web_search_requests
-                    .map(|web_search_requests| ServerToolUsage {
-                        web_search_requests,
-                    })
-            }),
             provider_metadata: metadata,
-            speed: (inference.service_tier == Some(wire::ServiceTier::Fast)).then(|| "fast".into()),
             cost_estimate: None,
         },
         completeness,
     ))
 }
 
-fn host_block(block: wire::ContentBlock) -> Result<ContentBlock, LlmError> {
-    Ok(match block {
-        wire::ContentBlock::Text { text, .. } => ContentBlock::Text {
-            text,
-            cache_control: None,
-        },
-        wire::ContentBlock::Thinking { text, signature } => {
-            ContentBlock::Reasoning { text, signature }
-        }
-        wire::ContentBlock::RedactedThinking { data } => ContentBlock::RedactedThinking { data },
-        wire::ContentBlock::ToolUse {
-            id, name, input, ..
-        } => ContentBlock::ToolCall {
-            id: id.as_str().into(),
-            name,
-            input,
-        },
-        wire::ContentBlock::ProviderContent { protocol, value } => {
-            if protocol == wire::ProtocolFamily::AnthropicMessages
-                && matches!(
-                    value["type"].as_str(),
-                    Some("server_tool_use" | "connector_text" | "advisor_tool_result")
-                )
-                && value.as_object().is_some_and(|object| {
-                    object.keys().all(|key| match value["type"].as_str() {
-                        Some("server_tool_use") => {
-                            matches!(key.as_str(), "type" | "id" | "name" | "input")
-                        }
-                        Some("connector_text") => {
-                            matches!(key.as_str(), "type" | "connector_text" | "signature")
-                        }
-                        Some("advisor_tool_result") => matches!(
-                            key.as_str(),
-                            "type" | "tool_use_id" | "content" | "is_error"
-                        ),
-                        _ => false,
-                    })
-                })
-            {
-                serde_json::from_value(value).map_err(invalid)?
-            } else {
-                ContentBlock::ProviderContent {
-                    protocol: serde_json::to_value(protocol)
-                        .map_err(invalid)?
-                        .as_str()
-                        .unwrap()
-                        .into(),
-                    value,
-                }
-            }
-        }
-        _ => {
-            return Err(LlmError::UnsupportedCapability {
-                capability: "non-conversation output block".into(),
-            })
-        }
-    })
-}
-fn stop(reason: wire::StopReason) -> String {
-    match reason {
-        wire::StopReason::EndTurn => "end_turn".into(),
-        wire::StopReason::ToolUse => "tool_use".into(),
-        wire::StopReason::MaxTokens => "max_tokens".into(),
-        wire::StopReason::StopSequence => "stop_sequence".into(),
-        wire::StopReason::Refusal => "refusal".into(),
-        wire::StopReason::Other(s) => s,
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct Codec {
-    profile: wire::ProviderProfile,
-    inner: Arc<dyn client::WireCodec>,
-}
-impl std::fmt::Debug for Codec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UpstreamCodec")
-            .field("family", &self.profile.protocol)
-            .finish()
-    }
-}
-impl Codec {
-    fn standalone(protocol: wire::ProtocolFamily, base_url: impl Into<String>) -> Self {
-        let profile=serde_json::from_value(json!({"provider_id":"configured","profile_name":"configured","base_url":base_url.into(),"protocol":protocol,"auth":"none","models":[],"extra":{"supports_previous_response_id":true}})).expect("static codec profile");
-        Self::new(profile)
-    }
-    pub(crate) fn new(profile: wire::ProviderProfile) -> Self {
-        let inner: Arc<dyn client::WireCodec> = match profile.protocol {
-            wire::ProtocolFamily::AnthropicMessages => Arc::new(client::AnthropicMessagesCodec),
-            wire::ProtocolFamily::OpenAiChat => Arc::new(client::OpenAiChatCodec),
-            wire::ProtocolFamily::OpenAiResponses => Arc::new(client::OpenAiResponsesCodec),
-            wire::ProtocolFamily::GeminiGenerateContent => Arc::new(client::GeminiCodec),
-            wire::ProtocolFamily::AzureOpenAi => Arc::new(client::AzureOpenAiCodec),
-            wire::ProtocolFamily::BedrockClaude => Arc::new(client::BedrockClaudeCodec),
-            wire::ProtocolFamily::VertexClaude => Arc::new(client::VertexClaudeCodec),
-            wire::ProtocolFamily::VertexGemini => Arc::new(client::VertexGeminiCodec),
-            wire::ProtocolFamily::FoundryClaude => Arc::new(client::FoundryClaudeCodec),
-        };
-        Self { profile, inner }
-    }
-    fn context(&self, model: &str, mode: client::RequestMode) -> client::CodecContext {
-        if let [selected] = self.profile.models.as_slice() {
-            if model.is_empty()
-                || model == selected.request_model
-                || model == selected.display_model
-            {
-                return client::CodecContext::for_model(&self.profile, selected, mode);
-            }
-        }
-        client::CodecContext::new(&self.profile, model, mode)
-    }
-    fn raw_response(response: &ProviderResponse) -> client::HttpResponse {
-        client::HttpResponse {
-            status: response.status,
-            headers: response
-                .headers
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            body: serde_json::to_vec(&response.body_json)
-                .expect("response JSON")
-                .into(),
-        }
-    }
-    fn encode(
-        &self,
-        req: &LlmRequest,
-        mode: client::RequestMode,
-    ) -> Result<ProviderRequest, LlmError> {
-        let context = self
-            .context(&req.model, mode)
-            .with_account_scope(req.account_scope.as_deref())
-            .with_file_scope(req.file_account_scope.as_deref());
-        let input = request(req, self.profile.protocol)?;
-        let output = self
-            .inner
-            .encode_request(client::EncodeRequest::new(&input), &context)
-            .map_err(error)?;
-        let mut result = ProviderRequest::post_json(
-            output.url,
-            serde_json::from_slice(&output.body).map_err(invalid)?,
-        );
-        result.method = output.method;
-        result.headers = output.headers.into_iter().collect();
-        if self.profile.protocol == wire::ProtocolFamily::BedrockClaude {
-            result.stream_framing = StreamFraming::AwsEventStream;
-        }
-        result.json_string_overrides = message_string_overrides(req, self.profile.protocol)?;
-        Ok(result)
-    }
-}
-
-macro_rules! named_codec {
-    ($name:ident, $family:ident) => {
-        #[derive(Debug, Clone)]
-        pub struct $name(Codec);
-        impl $name {
-            pub fn new(base_url: impl Into<String>) -> Self {
-                Self(Codec::standalone(wire::ProtocolFamily::$family, base_url))
-            }
-            pub fn with_profile_name(mut self, name: impl Into<String>) -> Self {
-                self.0.profile.profile_name = name.into();
-                if let Some(source) = client::builtin_providers()
-                    .expect("pinned catalog parses")
-                    .into_iter()
-                    .find(|p| p.profile_name == self.0.profile.profile_name)
-                {
-                    self.0.profile.extra = source.extra;
-                    self.0.profile.inference = source.inference;
-                    self.0.profile.info = source.info;
-                    self.0.profile.models = source.models;
-                }
-                self
-            }
-        }
-        impl WireCodec for $name {
-            fn encode_request(&self, req: &LlmRequest) -> Result<ProviderRequest, LlmError> {
-                self.0.encode_request(req)
-            }
-            fn response_usage(
-                &self,
-                response: &ProviderResponse,
-            ) -> Option<(Usage, ModelAttemptUsageCompleteness)> {
-                self.0.response_usage(response)
-            }
-            fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError> {
-                self.0.decode_response(response)
-            }
-            fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
-                self.0.stream_decoder()
-            }
-            fn clone_box(&self) -> Box<dyn WireCodec> {
-                Box::new(self.clone())
-            }
-        }
-    };
-}
-named_codec!(OpenAiChatCodec, OpenAiChat);
-named_codec!(OpenAiResponsesCodec, OpenAiResponses);
-named_codec!(GeminiCodec, GeminiGenerateContent);
-named_codec!(BedrockClaudeCodec, BedrockClaude);
-named_codec!(VertexClaudeCodec, VertexClaude);
-named_codec!(VertexGeminiCodec, VertexGemini);
-named_codec!(FoundryClaudeCodec, FoundryClaude);
-
-#[derive(Debug, Clone)]
-pub struct AnthropicMessagesCodec(Codec);
-impl AnthropicMessagesCodec {
-    pub fn new(base_url: impl Into<String>, version: impl Into<String>) -> Self {
-        let mut codec = Codec::standalone(wire::ProtocolFamily::AnthropicMessages, base_url);
-        codec.profile.extra["api_version"] = json!(version.into());
-        Self(codec)
-    }
-    pub fn encode_count_tokens_request(
-        &self,
-        req: &LlmRequest,
-    ) -> Result<ProviderRequest, LlmError> {
-        self.0.encode(req, client::RequestMode::CountTokens)
-    }
-    pub fn decode_count_tokens_response(
-        &self,
-        response: &ProviderResponse,
-    ) -> Result<u64, LlmError> {
-        if response.status >= 400 {
-            return Err(self
-                .0
-                .decode_response(response.clone())
-                .err()
-                .unwrap_or(LlmError::ProviderInternal));
-        }
-        response.body_json["input_tokens"]
-            .as_u64()
-            .ok_or_else(|| invalid("token count response has no numeric input_tokens"))
-    }
-}
-impl WireCodec for AnthropicMessagesCodec {
-    fn encode_request(&self, req: &LlmRequest) -> Result<ProviderRequest, LlmError> {
-        self.0.encode_request(req)
-    }
-    fn response_usage(
-        &self,
-        response: &ProviderResponse,
-    ) -> Option<(Usage, ModelAttemptUsageCompleteness)> {
-        self.0.response_usage(response)
-    }
-    fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError> {
-        self.0.decode_response(response)
-    }
-    fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
-        self.0.stream_decoder()
-    }
-    fn clone_box(&self) -> Box<dyn WireCodec> {
-        Box::new(self.clone())
-    }
-}
-#[derive(Debug, Clone)]
-pub struct AzureOpenAiCodec(Codec);
-impl AzureOpenAiCodec {
-    pub fn new(base_url: impl Into<String>, version: impl Into<String>) -> Self {
-        let mut codec = Codec::standalone(wire::ProtocolFamily::AzureOpenAi, base_url);
-        codec.profile.azure = Some(wire::AzureConfig {
-            api_version: Some(version.into()),
-            deployment: None,
-        });
-        Self(codec)
-    }
-}
-impl WireCodec for AzureOpenAiCodec {
-    fn encode_request(&self, req: &LlmRequest) -> Result<ProviderRequest, LlmError> {
-        self.0.encode_request(req)
-    }
-    fn response_usage(
-        &self,
-        response: &ProviderResponse,
-    ) -> Option<(Usage, ModelAttemptUsageCompleteness)> {
-        self.0.response_usage(response)
-    }
-    fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError> {
-        self.0.decode_response(response)
-    }
-    fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
-        self.0.stream_decoder()
-    }
-    fn clone_box(&self) -> Box<dyn WireCodec> {
-        Box::new(self.clone())
-    }
-}
-impl WireCodec for Codec {
-    fn for_route(&self, route: &ResolvedRoute) -> Box<dyn WireCodec> {
-        let mut codec = self.clone();
-        codec.profile.models.retain(|model| {
-            model.display_model == route.display_model && model.request_model == route.request_model
-        });
-        Box::new(codec)
-    }
-    fn encode_request(&self, req: &LlmRequest) -> Result<ProviderRequest, LlmError> {
-        self.encode(
-            req,
-            if req.stream {
-                client::RequestMode::Stream
-            } else {
-                client::RequestMode::Complete
-            },
-        )
-    }
-    fn response_usage(
-        &self,
-        response: &ProviderResponse,
-    ) -> Option<(Usage, ModelAttemptUsageCompleteness)> {
-        let context = self.context("", client::RequestMode::Complete);
-        let response = Self::raw_response(response);
-        usage(
-            &self.inner.response_usage(&response, &context),
-            &self.inner.response_inference(&response, &context),
-        )
-    }
-    fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError> {
-        let raw = Self::raw_response(&response);
-        let decoded = self
-            .inner
-            .decode_response(&raw, &self.context("", client::RequestMode::Complete))
-            .map_err(|failure| {
-                if (200..300).contains(&raw.status) {
-                    if let wire::LlmError::ProviderInternal { message } = failure {
-                        return invalid(message);
-                    }
-                }
-                error(failure)
-            })?;
-        project_response(decoded, response, self.profile.protocol)
-    }
-
-    fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
-        Box::new(Decoder {
-            inner: Some(
-                self.inner
-                    .stream_decoder(&self.context("", client::RequestMode::Stream)),
-            ),
-            observation: Default::default(),
-            family: self.profile.protocol,
-            blocks: BTreeSet::new(),
-            closed: BTreeSet::new(),
-            metadata: Value::Null,
-            done: false,
-            started: false,
-            replay: BTreeMap::new(),
-            arguments: BTreeMap::new(),
-            pending_tools: BTreeSet::new(),
-            legacy_connectors: Default::default(),
-        })
-    }
-    fn clone_box(&self) -> Box<dyn WireCodec> {
-        Box::new(self.clone())
-    }
-}
-
-fn wire_block_index(block: usize) -> Result<u32, LlmError> {
-    u32::try_from(block)
-        .ok()
-        .filter(|index| *index < 0x8000_0000)
-        .ok_or_else(|| invalid("provider output block index exceeds the host range"))
-}
-
-pub(crate) struct Decoder {
-    inner: Option<Box<dyn client::StreamDecoder>>,
-    observation: (wire::UsageReport, wire::InferenceReport),
-    family: wire::ProtocolFamily,
-    blocks: BTreeSet<u32>,
-    closed: BTreeSet<u32>,
-    metadata: Value,
-    done: bool,
-    started: bool,
-    replay: BTreeMap<u32, wire::ContentBlock>,
-    arguments: BTreeMap<u32, String>,
-    pending_tools: BTreeSet<u32>,
-    legacy_connectors: client::providers::anthropic::ConnectorTextAccumulator,
-}
-impl std::fmt::Debug for Decoder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UpstreamStreamDecoder")
-            .field("family", &self.family)
-            .finish()
-    }
-}
-impl Decoder {
-    fn flush_replay(&mut self, out: &mut Vec<LlmEvent>) -> Result<(), LlmError> {
-        let mut ready = Vec::new();
-        for (index, block) in &self.replay {
-            if !gemini_family(self.family) && !self.closed.contains(index) {
-                continue;
-            }
-            if !has_replay_metadata(block) {
-                continue;
-            }
-            let mut block = block.clone();
-            if let wire::ContentBlock::ToolUse { input, .. } = &mut block {
-                let Some(arguments) = self.arguments.get(index) else {
-                    continue;
-                };
-                *input = if arguments.is_empty() && self.closed.contains(index) {
-                    // A provider may close a zero-argument call without emitting
-                    // input deltas. Match the visible host call's empty object
-                    // only after that explicit completion boundary.
-                    json!({})
-                } else {
-                    let Ok(value) = serde_json::from_str(arguments) else {
-                        continue;
-                    };
-                    value
-                };
-            }
-            ready.push((*index | 0x8000_0000, companion(&block, self.family)?));
-        }
-        for (index, block) in ready {
-            self.start(index, block, out);
-            if self.closed.contains(&(index & 0x7fff_ffff)) && self.closed.insert(index) {
-                out.push(LlmEvent::ContentBlockStop { index });
-            }
-        }
-        Ok(())
-    }
-
-    fn start(&mut self, index: u32, block: ContentBlock, out: &mut Vec<LlmEvent>) {
-        if !self.started {
-            self.started = true;
-            out.push(LlmEvent::MessageStart {
-                response: Box::new(LlmResponse {
-                    id: String::new(),
-                    model: String::new(),
-                    content: vec![],
-                    stop_reason: None,
-                    stop_details: None,
-                    usage: Usage::default(),
-                    cost: None,
-                    provider_metadata: self.metadata.clone(),
-                }),
-            });
-        }
-        if self.blocks.insert(index) {
-            out.push(LlmEvent::ContentBlockStart {
-                index,
-                content_block: block,
-            });
-        }
-    }
-    fn events(
-        &mut self,
-        events: Vec<Result<wire::StreamEvent, wire::LlmError>>,
-    ) -> Result<Vec<LlmEvent>, LlmError> {
-        let mut out = Vec::new();
-        for event in events {
-            match event.map_err(error)? {
-                wire::StreamEvent::BlockEnd { block } => {
-                    for index in [
-                        wire_block_index(block)?,
-                        (wire_block_index(block)?).saturating_add(1 << 31),
-                    ] {
-                        if self.blocks.contains(&index) && self.closed.insert(index) {
-                            out.push(LlmEvent::ContentBlockStop { index });
-                        }
-                    }
-                }
-                wire::StreamEvent::NativeDelta {
-                    block,
-                    protocol,
-                    delta,
-                } => {
-                    if protocol == wire::ProtocolFamily::AnthropicMessages {
-                        let projected = match delta["type"].as_str() {
-                            Some("citations_delta") => Some(ContentDelta::CitationsDelta {
-                                citation: delta["citation"].clone(),
-                            }),
-                            Some("connector_text_delta") => {
-                                Some(ContentDelta::ConnectorTextDelta {
-                                    connector_text: delta["connector_text"]
-                                        .as_str()
-                                        .unwrap_or_default()
-                                        .into(),
-                                })
-                            }
-                            _ => None,
-                        };
-                        if let Some(delta) = projected {
-                            if self.blocks.contains(&(wire_block_index(block)?)) {
-                                out.push(LlmEvent::ContentBlockDelta {
-                                    index: wire_block_index(block)?,
-                                    delta,
-                                });
-                            }
-                        }
-                    }
-                }
-                wire::StreamEvent::Start { model, response_id } => {
-                    if self.started {
-                        continue;
-                    }
-                    self.started = true;
-                    out.push(LlmEvent::MessageStart {
-                        response: Box::new(LlmResponse {
-                            id: response_id.map(|id| id.as_str().into()).unwrap_or_default(),
-                            model,
-                            content: vec![],
-                            stop_reason: None,
-                            stop_details: None,
-                            usage: usage(&self.observation.0, &self.observation.1)
-                                .map(|(u, _)| u)
-                                .unwrap_or_default(),
-                            cost: None,
-                            provider_metadata: self.metadata.clone(),
-                        }),
-                    });
-                }
-                wire::StreamEvent::TextDelta { block, text } => {
-                    let index = wire_block_index(block)?;
-                    if gemini_family(self.family) {
-                        let value =
-                            self.replay
-                                .entry(index)
-                                .or_insert_with(|| wire::ContentBlock::Text {
-                                    text: String::new(),
-                                    thought_signature: None,
-                                });
-                        if let wire::ContentBlock::Text { text: buffered, .. } = value {
-                            buffered.push_str(&text);
-                        }
-                    }
-                    self.start(
-                        index,
-                        ContentBlock::Text {
-                            text: String::new(),
-                            cache_control: None,
-                        },
-                        &mut out,
-                    );
-                    out.push(LlmEvent::ContentBlockDelta {
-                        index,
-                        delta: ContentDelta::TextDelta { text },
-                    });
-                }
-                wire::StreamEvent::ReasoningDelta { block, text } => {
-                    let index = wire_block_index(block)?;
-                    self.start(
-                        index,
-                        ContentBlock::Reasoning {
-                            text: String::new(),
-                            signature: None,
-                        },
-                        &mut out,
-                    );
-                    out.push(LlmEvent::ContentBlockDelta {
-                        index,
-                        delta: ContentDelta::ThinkingDelta { thinking: text },
-                    });
-                }
-                wire::StreamEvent::ThoughtSignature { block, signature } => {
-                    if let Some(
-                        wire::ContentBlock::Text {
-                            thought_signature, ..
-                        }
-                        | wire::ContentBlock::ToolUse {
-                            thought_signature, ..
-                        },
-                    ) = self.replay.get_mut(&wire_block_index(block)?)
-                    {
-                        *thought_signature = Some(signature);
-                        continue;
-                    }
-                    self.start(
-                        wire_block_index(block)?,
-                        ContentBlock::Reasoning {
-                            text: String::new(),
-                            signature: None,
-                        },
-                        &mut out,
-                    );
-                    out.push(LlmEvent::ContentBlockDelta {
-                        index: wire_block_index(block)?,
-                        delta: ContentDelta::SignatureDelta { signature },
-                    });
-                }
-                wire::StreamEvent::RedactedThinking { block, data } => self.start(
-                    wire_block_index(block)?,
-                    ContentBlock::RedactedThinking { data },
-                    &mut out,
-                ),
-                wire::StreamEvent::ToolCallDelta {
-                    block,
-                    id,
-                    name,
-                    arguments_fragment,
-                    provider_id,
-                    caller,
-                    toolset_name,
-                } => {
-                    let index = wire_block_index(block)?;
-                    if gemini_family(self.family)
-                        || caller.is_some()
-                        || toolset_name.is_some()
-                        || provider_id.is_some()
-                    {
-                        self.replay
-                            .entry(index)
-                            .or_insert_with(|| wire::ContentBlock::ToolUse {
-                                id: id.clone(),
-                                name: name.clone(),
-                                input: Value::Null,
-                                provider_id,
-                                caller,
-                                toolset_name,
-                                thought_signature: None,
-                            });
-                        self.arguments
-                            .entry(index)
-                            .or_default()
-                            .push_str(&arguments_fragment);
-                        if gemini_family(self.family) {
-                            self.pending_tools.insert(index);
-                        }
-                    }
-                    self.start(
-                        index,
-                        ContentBlock::ToolCall {
-                            id: id.as_str().into(),
-                            name,
-                            input: json!({}),
-                        },
-                        &mut out,
-                    );
-                    if !arguments_fragment.is_empty() {
-                        out.push(LlmEvent::ContentBlockDelta {
-                            index,
-                            delta: ContentDelta::InputJsonDelta {
-                                partial_json: arguments_fragment,
-                            },
-                        });
-                    }
-                }
-                wire::StreamEvent::ProviderContent {
-                    block,
-                    protocol,
-                    value,
-                } => {
-                    let index = wire_block_index(block)?;
-                    let native = wire::ContentBlock::ProviderContent { protocol, value };
-                    let projected = if let Some(text) = native_cited_text(&native) {
-                        // The SDK emits both display deltas and complete cited
-                        // replay data for this same provider block. Keep the
-                        // native payload as metadata for the visible text.
-                        if !self.blocks.contains(&index) {
-                            self.start(
-                                index,
-                                ContentBlock::Text {
-                                    text: String::new(),
-                                    cache_control: None,
-                                },
-                                &mut out,
-                            );
-                            out.push(LlmEvent::ContentBlockDelta {
-                                index,
-                                delta: ContentDelta::TextDelta { text: text.into() },
-                            });
-                        }
-                        companion(&native, protocol)?
-                    } else {
-                        host_block(native)?
-                    };
-                    self.start(index | 0x8000_0000, projected, &mut out);
-                }
-                wire::StreamEvent::End {
-                    stop_reason,
-                    usage: report,
-                    inference,
-                } => {
-                    if !self.done {
-                        self.flush_replay(&mut out)?;
-                        if usage(&report, &inference).is_none() && !self.metadata.is_null() {
-                            // Observations can exist without billable token measurements.
-                            // Preserve them in a host-only transcript companion rather
-                            // than fabricating a zero-usage report. Replay filters this tag.
-                            let index = (0..=u32::MAX)
-                                .rev()
-                                .find(|index| !self.blocks.contains(index))
-                                .ok_or_else(|| {
-                                    invalid("no stream index available for provider observations")
-                                })?;
-                            self.start(index, ContentBlock::ProviderContent {
-                                protocol: serde_json::to_value(self.family).map_err(invalid)?.as_str().unwrap().into(),
-                                value: json!({"type":"lingxi_observation", "metadata": self.metadata}),
-                            }, &mut out);
-                        }
-                        self.done = true;
-                        for index in self.blocks.difference(&self.closed) {
-                            out.push(LlmEvent::ContentBlockStop { index: *index });
-                        }
-                        out.push(LlmEvent::MessageDelta {
-                            delta: MessageDeltaPayload {
-                                stop_reason: Some(stop(stop_reason)),
-                                stop_details: None,
-                            },
-                            usage: usage(&report, &inference).map(|(mut u, _)| {
-                                if !self.metadata.is_null() {
-                                    u.provider_metadata["stream"] = self.metadata.clone();
-                                }
-                                u
-                            }),
-                        });
-                        out.push(LlmEvent::MessageStop);
-                    }
-                }
-                wire::StreamEvent::ProviderEvent { protocol, payload } => {
-                    if protocol == wire::ProtocolFamily::AnthropicMessages {
-                        if let Some((index, block)) = self.legacy_connectors.push(&payload) {
-                            let index = wire_block_index(usize::try_from(index).map_err(invalid)?)?;
-                            self.start(index | 0x8000_0000, host_block(block)?, &mut out);
-                        }
-                    }
-                    append_observation(
-                        &mut self.metadata,
-                        "provider_events",
-                        json!({"protocol": protocol, "payload": payload}),
-                    );
-                }
-                wire::StreamEvent::WebSearch { result } => {
-                    out.push(LlmEvent::WebSearch {
-                        result: result.clone(),
-                    });
-                    append_observation(
-                        &mut self.metadata,
-                        "web_search",
-                        serde_json::to_value(result).map_err(invalid)?,
-                    );
-                }
-                wire::StreamEvent::FileSearch { result } => {
-                    append_observation(
-                        &mut self.metadata,
-                        "file_search",
-                        serde_json::to_value(result).map_err(invalid)?,
-                    );
-                }
-                wire::StreamEvent::Inference { .. } => {}
-            }
-        }
-        if !self.done {
-            self.flush_replay(&mut out)?;
-            for index in std::mem::take(&mut self.pending_tools) {
-                for index in [index, index | 0x8000_0000] {
-                    if self.blocks.contains(&index) && self.closed.insert(index) {
-                        out.push(LlmEvent::ContentBlockStop { index });
-                    }
-                }
-            }
-        }
-        Ok(out)
-    }
-}
-impl StreamDecoder for Decoder {
-    fn observed_usage(&self) -> Option<(Usage, ModelAttemptUsageCompleteness)> {
-        usage(&self.observation.0, &self.observation.1)
-    }
-    fn set_provider_metadata(&mut self, metadata: Value) {
-        self.metadata = metadata;
-    }
-    fn decode_frame(&mut self, frame: RawStreamFrame) -> Result<Vec<LlmEvent>, LlmError> {
-        let bytes = if self.family == wire::ProtocolFamily::BedrockClaude {
-            frame.bytes
-        } else {
-            let mut bytes = b"data: ".to_vec();
-            bytes.extend(frame.bytes);
-            bytes.extend(b"\n\n");
-            bytes
-        };
-        let inner = self.inner.as_mut().expect("codec decoder");
-        let events = inner.push_bytes(&bytes);
-        self.observation = (inner.usage_report(), inner.inference_report());
-        self.events(events)
-    }
-    fn finish(&mut self) -> Result<Vec<LlmEvent>, LlmError> {
-        let Some(inner) = self.inner.as_mut() else {
-            return Ok(Vec::new());
-        };
-        let events = inner.finish();
-        self.observation = (inner.usage_report(), inner.inference_report());
-        self.events(events)
-    }
-}
-
-pub(crate) fn project_response(
-    decoded: wire::ChatResponse,
-    response: ProviderResponse,
-    protocol: wire::ProtocolFamily,
-) -> Result<LlmResponse, LlmError> {
-    crate::execution::validate_response_content(&decoded, &response.body_json, protocol)?;
-    let normalized = usage(&decoded.usage, &decoded.inference)
-        .map(|(u, _)| u)
-        .unwrap_or_default();
-    let mut content = Vec::new();
-    for block in decoded.message.content {
-        let replay = if has_replay_metadata(&block) {
-            Some(companion(&block, protocol)?)
-        } else {
-            None
-        };
-        if let Some(text) = native_cited_text(&block) {
-            content.push(ContentBlock::Text {
-                text: text.into(),
-                cache_control: None,
-            });
-        } else {
-            content.push(host_block(block)?);
-        }
-        content.extend(replay);
-    }
-    let mut metadata = response.body_json;
-    for (key, value) in [
-        ("web_search", serde_json::to_value(&decoded.web_search)),
-        ("file_search", serde_json::to_value(&decoded.file_search)),
-        (
-            "native_metadata",
-            serde_json::to_value(
-                (!decoded.native_metadata.is_empty()).then_some(&decoded.native_metadata),
-            ),
-        ),
-        (
-            "response_cache",
-            serde_json::to_value(&decoded.response_cache),
-        ),
-        ("continuation", serde_json::to_value(&decoded.continuation)),
-    ] {
-        let value = value.map_err(invalid)?;
-        if !value.is_null() {
-            upstream_metadata(&mut metadata).insert(key.into(), value);
-        }
-    }
-    Ok(LlmResponse {
-        id: decoded
-            .response_id
-            .map(|id| id.as_str().to_owned())
-            .or(response.request_id)
-            .unwrap_or_else(|| metadata["id"].as_str().unwrap_or_default().into()),
-        model: decoded.model,
-        content,
-        stop_reason: Some(stop(decoded.stop_reason)),
-        stop_details: metadata
-            .get("stop_details")
-            .filter(|v| !v.is_null())
-            .map(|v| serde_json::from_value(v.clone()).map_err(invalid))
-            .transpose()?,
-        usage: normalized,
-        cost: None,
-        provider_metadata: metadata,
-    })
-}
-
-impl Decoder {
-    pub(crate) fn projection(family: wire::ProtocolFamily, metadata: Value) -> Self {
-        Self {
-            inner: None,
-            observation: Default::default(),
-            family,
-            blocks: BTreeSet::new(),
-            closed: BTreeSet::new(),
-            metadata,
-            done: false,
-            started: false,
-            replay: BTreeMap::new(),
-            arguments: BTreeMap::new(),
-            pending_tools: BTreeSet::new(),
-            legacy_connectors: Default::default(),
-        }
-    }
-    pub(crate) fn project_batch(
-        &mut self,
-        batch: client::StreamBatch,
-    ) -> Result<Vec<LlmEvent>, LlmError> {
-        self.observation = (batch.usage, batch.inference);
-        self.events(batch.events)
-    }
-}
+#[cfg(test)]
+#[path = "codec_fixtures.rs"]
+pub(crate) mod codec_fixtures;
 
 #[cfg(test)]
 mod upgrade_tests {
+    use super::codec_fixtures::{Codec, FixtureCodec, FixtureInput, HistoryFixture};
     use super::*;
     use lingxi_llm_client::providers::anthropic::{
         native::AnthropicHostedTool,
@@ -1769,6 +315,21 @@ mod upgrade_tests {
             AnthropicWebFetchConfig,
         },
     };
+
+    fn projected_history(native: wire::ContentBlock) -> Vec<ContentBlock> {
+        let decoded: wire::ChatResponse = serde_json::from_value(json!({
+            "message": {"role": "assistant", "content": [native]},
+            "model": "m", "stop_reason": "end_turn", "usage": wire::UsageReport::default()
+        }))
+        .unwrap();
+        project_response(
+            decoded,
+            ProviderResponse::json(200, json!({"content": []})),
+            wire::ProtocolFamily::AnthropicMessages,
+        )
+        .unwrap()
+        .content
+    }
 
     fn anthropic_codec() -> Codec {
         Codec::new(
@@ -1789,7 +350,7 @@ mod upgrade_tests {
         )
         .unwrap();
         let mut req = LlmRequest::new("claude-sonnet-4-6").with_user_text("Hello");
-        req.native_options.push(extension.clone());
+        req.input.native_options.push(extension.clone());
         let projected = request(&req, wire::ProtocolFamily::AnthropicMessages).unwrap();
         assert_eq!(projected.native_options, vec![extension]);
         assert_eq!(
@@ -1801,14 +362,17 @@ mod upgrade_tests {
     #[test]
     fn legacy_tool_caller_policy_uses_the_provider_native_options_contract() {
         use lingxi_llm_client::providers::anthropic::types::AnthropicToolCaller;
-        let mut req = LlmRequest::new("claude-sonnet-4-6");
+        let mut req = HistoryFixture::new("claude-sonnet-4-6");
         req.tools.push(ToolDeclaration {
             name: "lookup".into(),
             input_schema: json!({"type":"object"}),
             extra: serde_json::from_value(json!({"allowed_callers":["direct"]})).unwrap(),
             ..Default::default()
         });
-        let projected = request(&req, wire::ProtocolFamily::AnthropicMessages).unwrap();
+        let projected = req
+            .canonical(wire::ProtocolFamily::AnthropicMessages)
+            .unwrap()
+            .input;
         assert_eq!(
             projected.tools[0].anthropic_allowed_callers(),
             &[AnthropicToolCaller::Direct]
@@ -1850,8 +414,8 @@ mod upgrade_tests {
     fn hosted_search_fetch_and_remote_skills_reach_the_native_encoder() {
         let mut req =
             LlmRequest::new("claude-sonnet-4-6").with_user_text("Read the source and make a PDF");
-        req.max_tokens = Some(1024);
-        req.hosted_tools = vec![
+        req.input.max_tokens = Some(1024);
+        req.input.hosted_tools = vec![
             wire::HostedTool::WebSearch(wire::WebSearchConfig::default()),
             AnthropicHostedTool::WebFetch(AnthropicWebFetchConfig::default()).into(),
             AnthropicHostedTool::CodeExecution(AnthropicCodeExecutionConfig {
@@ -1878,27 +442,27 @@ mod upgrade_tests {
             AnthropicSkillScope::new("anthropic", "https://api.anthropic.com", "workspace-a")
                 .unwrap();
         let mut req = LlmRequest::new("claude-sonnet-4-6").with_user_text("Run the skill");
-        req.max_tokens = Some(1024);
-        req.hosted_tools.push(
+        req.input.max_tokens = Some(1024);
+        req.input.hosted_tools.push(
             AnthropicHostedTool::CodeExecution(AnthropicCodeExecutionConfig {
                 skills: vec![AnthropicSkillRef::custom("skill_example", scope)],
                 ..Default::default()
             })
             .into(),
         );
-        req.account_scope = Some("workspace-b".into());
+        req.execution.account_scope = Some("workspace-b".into());
         assert!(anthropic_codec().encode_request(&req).is_err());
-        req.account_scope = Some("workspace-a".into());
+        req.execution.account_scope = Some("workspace-a".into());
         assert!(anthropic_codec().encode_request(&req).is_ok());
         let roundtrip: LlmRequest =
             serde_json::from_value(serde_json::to_value(req).unwrap()).unwrap();
-        assert!(roundtrip.account_scope.is_none());
+        assert!(roundtrip.execution.account_scope.is_none());
     }
 
     #[test]
     fn legacy_system_cache_scope_and_ttl_survive_typed_cache_projection() {
-        let mut req = LlmRequest::new("claude-sonnet-4-6").with_user_text("Hello");
-        req.max_tokens = Some(1024);
+        let mut req = HistoryFixture::new("claude-sonnet-4-6").with_user_text("Hello");
+        req.request.input.max_tokens = Some(1024);
         req.system.push(SystemBlock {
             text: "System".into(),
             cache_control: Some(CacheControl::EphemeralScoped {
@@ -1926,10 +490,7 @@ mod upgrade_tests {
         };
         let message = Message {
             role: "assistant".into(),
-            content: vec![
-                host_block(native.clone()).unwrap(),
-                companion(&native, wire::ProtocolFamily::AnthropicMessages).unwrap(),
-            ],
+            content: projected_history(native.clone()),
         };
         let restored = message_content(&message, wire::ProtocolFamily::AnthropicMessages).unwrap();
         assert_eq!(restored, vec![native]);
@@ -1965,7 +526,7 @@ mod upgrade_tests {
         ]).unwrap();
         assert!(!events.iter().any(|event| matches!(
             event,
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 content_block: ContentBlock::ToolCall { .. },
                 ..
             }
@@ -1973,7 +534,7 @@ mod upgrade_tests {
         let usage = events
             .iter()
             .find_map(|event| match event {
-                LlmEvent::MessageDelta { usage, .. } => usage.as_ref(),
+                HistoryEvent::MessageDelta { usage, .. } => usage.as_ref(),
                 _ => None,
             })
             .unwrap();
@@ -1995,19 +556,28 @@ mod upgrade_tests {
     #[test]
     fn native_hosted_extensions_are_not_lost_to_legacy_server_tool_types() {
         let value = json!({"type":"server_tool_use","id":"server-1","name":"web_fetch","input":{},"caller":{"type":"code_execution_20260120","tool_id":"exec-1"}});
-        let projected = host_block(wire::ContentBlock::ProviderContent {
+        let projected = projected_history(wire::ContentBlock::ProviderContent {
             protocol: wire::ProtocolFamily::AnthropicMessages,
             value: value.clone(),
-        })
+        });
+        assert!(matches!(
+            &projected[0],
+            ContentBlock::ProviderContent { .. }
+        ));
+        let restored = message_content(
+            &Message {
+                role: "assistant".into(),
+                content: projected,
+            },
+            wire::ProtocolFamily::AnthropicMessages,
+        )
         .unwrap();
-        assert!(matches!(&projected, ContentBlock::ProviderContent { .. }));
-        let restored = block(&projected, wire::ProtocolFamily::AnthropicMessages).unwrap();
         assert_eq!(
             restored,
-            wire::ContentBlock::ProviderContent {
+            vec![wire::ContentBlock::ProviderContent {
                 protocol: wire::ProtocolFamily::AnthropicMessages,
                 value,
-            }
+            }]
         );
     }
 
@@ -2030,7 +600,7 @@ mod upgrade_tests {
             assert!(
                 !events
                     .iter()
-                    .any(|event| matches!(event, LlmEvent::ContentBlockStop { .. })),
+                    .any(|event| matches!(event, HistoryEvent::ContentBlockStop { .. })),
                 "{events:?}"
             );
         }
@@ -2039,11 +609,11 @@ mod upgrade_tests {
             .unwrap();
         assert!(events
             .iter()
-            .any(|event| matches!(event, LlmEvent::ContentBlockStop { index: 0 })));
+            .any(|event| matches!(event, HistoryEvent::ContentBlockStop { index: 0 })));
         let companion = events
             .iter()
             .find_map(|event| match event {
-                LlmEvent::ContentBlockStart { content_block, .. } => {
+                HistoryEvent::ContentBlockStart { content_block, .. } => {
                     replay_companion(content_block).map(|(_, block)| block)
                 }
                 _ => None,
@@ -2071,12 +641,12 @@ mod upgrade_tests {
                 })])
                 .unwrap();
             assert!(!opening.iter().any(|event| matches!(event,
-                LlmEvent::ContentBlockStart { content_block, .. } if replay_companion(content_block).is_some())));
+                HistoryEvent::ContentBlockStart { content_block, .. } if replay_companion(content_block).is_some())));
             let closed = decoder
                 .events(vec![Ok(wire::StreamEvent::BlockEnd { block: 0 })])
                 .unwrap();
             let replay = closed.iter().find_map(|event| match event {
-                LlmEvent::ContentBlockStart { content_block, .. } => {
+                HistoryEvent::ContentBlockStart { content_block, .. } => {
                     replay_companion(content_block).map(|(_, block)| block)
                 }
                 _ => None,
@@ -2105,13 +675,10 @@ mod upgrade_tests {
             toolset_name: Some("browser".into()),
             thought_signature: None,
         };
-        let mut req = LlmRequest::new("claude-sonnet-4-6");
+        let mut req = HistoryFixture::new("claude-sonnet-4-6");
         req.messages.push(Message {
             role: "assistant".into(),
-            content: vec![
-                host_block(native.clone()).unwrap(),
-                companion(&native, wire::ProtocolFamily::AnthropicMessages).unwrap(),
-            ],
+            content: projected_history(native.clone()),
         });
         req.messages.push(Message {
             role: "user".into(),
@@ -2123,14 +690,17 @@ mod upgrade_tests {
                 cache_reference: None,
             }],
         });
-        let projected = request(&req, wire::ProtocolFamily::AnthropicMessages).unwrap();
+        let projected = req
+            .canonical(wire::ProtocolFamily::AnthropicMessages)
+            .unwrap()
+            .input;
         assert!(
             matches!(&projected.messages[1].content[0], wire::ContentBlock::ToolResult { toolset_name: Some(name), .. } if name == "browser")
         );
     }
 
     #[test]
-    fn cache_breakpoints_follow_projection_and_reject_removed_metadata() {
+    fn history_cache_breakpoints_follow_filtered_message_and_block_positions() {
         let native = wire::ContentBlock::ToolUse {
             id: wire::ToolUseId::new("call-1"),
             name: "lookup".into(),
@@ -2140,35 +710,35 @@ mod upgrade_tests {
             toolset_name: None,
             thought_signature: None,
         };
-        let mut req = LlmRequest::new("claude-sonnet-4-6");
+        let mut req = HistoryFixture::new("claude-sonnet-4-6");
         req.messages.push(Message {
             role: "assistant".into(),
             content: vec![],
         });
+        let mut history = projected_history(native);
+        assert_eq!(
+            history.len(),
+            2,
+            "display block plus native replay companion"
+        );
+        history.push(ContentBlock::Text {
+            text: "retained".into(),
+            cache_control: Some(CacheControl::Ephemeral),
+        });
         req.messages.push(Message {
             role: "assistant".into(),
-            content: vec![
-                host_block(native.clone()).unwrap(),
-                companion(&native, wire::ProtocolFamily::AnthropicMessages).unwrap(),
-                ContentBlock::Text {
-                    text: "retained".into(),
-                    cache_control: None,
-                },
-            ],
+            content: history,
         });
-        req.prompt_cache.breakpoints.push(wire::CacheBreakpoint {
-            scope: None,
-            position: wire::CachePosition::Message { index: 1, block: 2 },
-            ttl: wire::CacheTtl::FiveMinutes,
-        });
-        let projected = request(&req, wire::ProtocolFamily::AnthropicMessages).unwrap();
+        let projected = req
+            .canonical(wire::ProtocolFamily::AnthropicMessages)
+            .unwrap()
+            .input;
+        assert_eq!(projected.messages.len(), 1);
+        assert_eq!(projected.messages[0].content.len(), 2);
         assert_eq!(
             projected.prompt_cache.breakpoints[0].position,
             wire::CachePosition::Message { index: 0, block: 1 }
         );
-        req.prompt_cache.breakpoints[0].position =
-            wire::CachePosition::Message { index: 1, block: 1 };
-        assert!(request(&req, wire::ProtocolFamily::AnthropicMessages).is_err());
     }
 
     #[test]
@@ -2194,11 +764,11 @@ mod upgrade_tests {
             .unwrap();
         assert!(events
             .iter()
-            .any(|event| matches!(event, LlmEvent::MessageDelta { usage: None, .. })));
+            .any(|event| matches!(event, HistoryEvent::MessageDelta { usage: None, .. })));
         let observation = events
             .iter()
             .find_map(|event| match event {
-                LlmEvent::ContentBlockStart {
+                HistoryEvent::ContentBlockStart {
                     content_block: block @ ContentBlock::ProviderContent { value, .. },
                     ..
                 } if value["type"] == "lingxi_observation" => Some(block.clone()),
@@ -2283,5 +853,51 @@ mod upgrade_tests {
         let proxy = profile(&host).unwrap();
         assert_eq!(proxy.audio, Default::default());
         assert_eq!(proxy.embeddings, Default::default());
+    }
+}
+
+#[cfg(test)]
+mod route_adaptation_tests {
+    use super::*;
+    #[test]
+    fn dropping_foreign_blocks_remaps_exact_strings_without_changing_source() {
+        let mut request = LlmRequest::new("model");
+        request.input.messages.push(wire::ConversationMessage {
+            role: wire::MessageRole::Assistant,
+            native_options: vec![],
+            content: vec![
+                wire::ContentBlock::Thinking {
+                    text: "foreign".into(),
+                    signature: Some("gemini-signature".into()),
+                },
+                wire::ContentBlock::Text {
+                    text: "retained".into(),
+                    thought_signature: None,
+                },
+            ],
+        });
+        request
+            .execution
+            .message_json_string_overrides
+            .insert("/messages/0/content/1/text".into(), vec![0xd800]);
+        let adapted = adapt_request(
+            &request,
+            wire::ProtocolFamily::GeminiGenerateContent,
+            wire::ProtocolFamily::AnthropicMessages,
+        )
+        .unwrap();
+        assert_eq!(adapted.input.messages[0].content.len(), 1);
+        assert_eq!(
+            adapted
+                .execution
+                .message_json_string_overrides
+                .get("/messages/0/content/0/text"),
+            Some(&vec![0xd800])
+        );
+        assert_eq!(request.input.messages[0].content.len(), 2);
+        assert!(request
+            .execution
+            .message_json_string_overrides
+            .contains_key("/messages/0/content/1/text"));
     }
 }

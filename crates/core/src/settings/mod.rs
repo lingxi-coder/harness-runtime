@@ -68,6 +68,23 @@ pub enum SettingsError {
 
 pub use schema::{ProviderRegion, SettingsJson};
 
+/// Observes settings-load outcomes without coupling the shared core to a
+/// particular analytics transport or its privacy-tagged wire format.
+#[async_trait::async_trait]
+pub trait SettingsLoadObserver: Send + Sync {
+    /// A setting supplied through the environment could not be parsed.
+    async fn invalid_env(&self, var: String, value: String);
+    /// A settings file was skipped after a read or validation error.
+    async fn parse_error(&self, path: &std::path::Path, class: &'static str);
+    /// The merge completed, including the count of contributing layers.
+    async fn loaded(
+        &self,
+        layers_present: i64,
+        had_env_override: bool,
+        user_path: Option<&std::path::Path>,
+    );
+}
+
 /// Inputs to [`Settings::load`].
 ///
 /// We pass env in explicitly rather than calling `std::env::vars()` so unit
@@ -171,7 +188,7 @@ impl Settings {
     /// managed layers.
     ///
     /// Answers: which settings VALUE wins a conflict.
-    /// One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
+    /// One of several orderings over these rungs; `crate::types::scope`'s module docs index them all and say which question each answers.
     ///
     /// Priority (highest first): env → managed → cli → local → project
     /// → user → defaults. `managed_layers` must already be sorted in ASCENDING
@@ -308,46 +325,41 @@ impl Settings {
         )
     }
 
-    /// Same as [`Settings::load`] but emits telemetry through the supplied bus.
+    /// Same as [`Settings::load`] but reports diagnostics to an observer.
     ///
-    /// Synchronous [`Settings::load`] stays available for callers that don't
-    /// want async-color. This one is async because
-    /// [`telemetry::AnalyticsBus::log_event`] is async.
+    /// This method is async because the observer may perform asynchronous work.
     ///
-    /// Three events fire:
-    /// - `tengu_settings_loaded` on every successful load,
-    /// - `tengu_settings_invalid_env` once per unrecognized env var, and
-    /// - `tengu_settings_parse_error` before returning a `ParseError` /
-    ///   `SchemaViolation` / `Io` from a per-file read.
+    /// The observer receives one completion event, one event per invalid
+    /// environment variable, and one event per settings file skipped after an
+    /// error. The telemetry crate formats these as analytics events.
     ///
-    /// `bus = None` means "no telemetry sink wired" and is the path unit tests
-    /// take when they don't care about events.
+    /// `observer = None` disables diagnostic callbacks.
     ///
     /// # Errors
     ///
-    /// Same as [`Settings::load`]. On a read error from a settings file,
-    /// `tengu_settings_parse_error` is emitted before the error is returned.
+    /// Same as [`Settings::load`]. An unreadable or invalid file is skipped and
+    /// reported through the observer before the remaining layers are merged.
     #[allow(clippy::too_many_lines)]
-    pub async fn load_with_telemetry(
+    pub async fn load_with_observer(
         inputs: LoadInputs<'_>,
-        bus: Option<&std::sync::Arc<telemetry::AnalyticsBus>>,
+        observer: Option<&dyn SettingsLoadObserver>,
     ) -> Result<EffectiveSettings, SettingsError> {
-        Self::load_with_telemetry_layers(
+        Self::load_with_observer_layers(
             inputs,
             FileLayerScope::ALL,
             SupplementalLayers::default(),
-            bus,
+            observer,
         )
         .await
     }
 
-    /// Async telemetry variant of [`Settings::load_with_layers`].
+    /// Async diagnostic variant of [`Settings::load_with_layers`].
     #[allow(clippy::too_many_lines)]
-    pub async fn load_with_telemetry_layers(
+    pub async fn load_with_observer_layers(
         inputs: LoadInputs<'_>,
         file_scope: FileLayerScope,
         supplemental: SupplementalLayers<'_>,
-        bus: Option<&std::sync::Arc<telemetry::AnalyticsBus>>,
+        observer: Option<&dyn SettingsLoadObserver>,
     ) -> Result<EffectiveSettings, SettingsError> {
         let LoadInputs {
             env,
@@ -379,7 +391,7 @@ impl Settings {
                     // still surfaced via telemetry; it just no longer discards the
                     // other layers.
                     Err(e) => {
-                        emit_parse_error(bus, up, &e).await;
+                        emit_parse_error(observer, up, &e).await;
                     }
                 }
             }
@@ -396,7 +408,7 @@ impl Settings {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    emit_parse_error(bus, &project_path, &e).await;
+                    emit_parse_error(observer, &project_path, &e).await;
                 }
             }
         }
@@ -412,7 +424,7 @@ impl Settings {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    emit_parse_error(bus, &local_path, &e).await;
+                    emit_parse_error(observer, &local_path, &e).await;
                 }
             }
         }
@@ -446,46 +458,17 @@ impl Settings {
         acc = merger::merge(acc, env_layer);
 
         // Emit per-invalid-env event before the loaded event.
-        if let Some(bus) = bus {
+        if let Some(observer) = observer {
             for (var, value) in invalid_env {
-                let mut md = telemetry::LogEventMetadata::new();
-                md.insert(
-                    "var".into(),
-                    telemetry::AnalyticsValue::String(
-                        telemetry::Verified::assert_safe(var).as_str().to_string(),
-                    ),
-                );
-                md.insert(
-                    "_PROTO_value".into(),
-                    telemetry::AnalyticsValue::String(
-                        telemetry::PiiTagged::assert_pii_tagged_column(value).into_inner(),
-                    ),
-                );
-                bus.log_event("tengu_settings_invalid_env", md).await;
+                observer.invalid_env(var, value).await;
             }
         }
 
         // Emit the success event.
-        if let Some(bus) = bus {
-            let mut md = telemetry::LogEventMetadata::new();
-            md.insert(
-                "layers_present".into(),
-                telemetry::AnalyticsValue::Int(layers_present),
-            );
-            md.insert(
-                "had_env_override".into(),
-                telemetry::AnalyticsValue::Bool(had_env_override),
-            );
-            if let Some(up) = &user_path {
-                md.insert(
-                    "_PROTO_user_path".into(),
-                    telemetry::AnalyticsValue::String(
-                        telemetry::PiiTagged::assert_pii_tagged_column(up.display().to_string())
-                            .into_inner(),
-                    ),
-                );
-            }
-            bus.log_event("tengu_settings_loaded", md).await;
+        if let Some(observer) = observer {
+            observer
+                .loaded(layers_present, had_env_override, user_path.as_deref())
+                .await;
         }
 
         Ok(EffectiveSettings {
@@ -516,23 +499,14 @@ fn read_layer_or_skip(path: &std::path::Path) -> Option<SettingsJson> {
     }
 }
 
-/// Emit `tengu_settings_parse_error` on the bus before returning a settings-file
-/// read error to the caller. PII is routed under `_PROTO_path`; the structural
-/// error class lives in a `Verified` field — never echo the raw error message
-/// because it may include file content.
+/// Report only the error class for a skipped file. The observer owns the
+/// privacy treatment of its path; raw error text may contain file content.
 async fn emit_parse_error(
-    bus: Option<&std::sync::Arc<telemetry::AnalyticsBus>>,
+    observer: Option<&dyn SettingsLoadObserver>,
     path: &std::path::Path,
     err: &SettingsError,
 ) {
-    let Some(bus) = bus else { return };
-    let mut md = telemetry::LogEventMetadata::new();
-    md.insert(
-        "_PROTO_path".into(),
-        telemetry::AnalyticsValue::String(
-            telemetry::PiiTagged::assert_pii_tagged_column(path.display().to_string()).into_inner(),
-        ),
-    );
+    let Some(observer) = observer else { return };
     // Structural error class only — never the raw error message which may
     // echo file content.
     let class = match err {
@@ -542,15 +516,7 @@ async fn emit_parse_error(
         SettingsError::Missing(_) => "missing",
         SettingsError::InvalidEnv { .. } => "invalid_env",
     };
-    md.insert(
-        "error".into(),
-        telemetry::AnalyticsValue::String(
-            telemetry::Verified::assert_safe(class.into())
-                .as_str()
-                .to_string(),
-        ),
-    );
-    bus.log_event("tengu_settings_parse_error", md).await;
+    observer.parse_error(path, class).await;
 }
 
 #[cfg(test)]
@@ -851,208 +817,5 @@ mod load_tests {
                 "region": "managed"
             }))
         );
-    }
-
-    // We deliberately hold the `HOME_LOCK` std::sync::Mutex across `.await`
-    // in these tests — it serializes the whole test against other HOME
-    // mutators, which is the whole point. Switching to tokio's async Mutex
-    // would break the non-async load_tests sharing the same lock.
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn emits_tengu_settings_loaded_with_pii_routing() {
-        use async_trait::async_trait;
-        use std::sync::{Arc, Mutex};
-        use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
-
-        #[derive(Default)]
-        struct CaptureSink {
-            events: Mutex<Vec<(String, LogEventMetadata)>>,
-        }
-        #[async_trait]
-        impl AnalyticsSink for CaptureSink {
-            async fn log_event(&self, name: &str, m: LogEventMetadata) {
-                self.events.lock().unwrap().push((name.to_string(), m));
-            }
-            async fn log_event_async(&self, name: &str, m: LogEventMetadata) {
-                self.log_event(name, m).await;
-            }
-            fn name(&self) -> &str {
-                "capture"
-            }
-        }
-
-        let _guard = HOME_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let bus = Arc::new(AnalyticsBus::new());
-        let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
-        bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
-            .await;
-
-        let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path().join("home_t10"));
-        let mut env = std::collections::BTreeMap::new();
-        env.insert("LINGXI_MODEL".to_string(), "opus".to_string());
-
-        let _eff = Settings::load_with_telemetry(
-            LoadInputs {
-                env: &env,
-                project_dir: tmp.path(),
-                defaults: schema::SettingsJson::default(),
-            },
-            Some(&bus),
-        )
-        .await
-        .unwrap();
-
-        let captured = sink.events.lock().unwrap().clone();
-        let loaded = captured
-            .iter()
-            .find(|(n, _)| n == "tengu_settings_loaded")
-            .expect("tengu_settings_loaded must be emitted");
-        assert!(matches!(
-            loaded.1.get("had_env_override"),
-            Some(AnalyticsValue::Bool(true))
-        ));
-        assert!(
-            loaded.1.contains_key("_PROTO_user_path"),
-            "user path is PII; must be PROTO-routed"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn emits_tengu_settings_invalid_env_for_bad_bool() {
-        use async_trait::async_trait;
-        use std::sync::{Arc, Mutex};
-        use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
-
-        #[derive(Default)]
-        struct CaptureSink {
-            events: Mutex<Vec<(String, LogEventMetadata)>>,
-        }
-        #[async_trait]
-        impl AnalyticsSink for CaptureSink {
-            async fn log_event(&self, n: &str, m: LogEventMetadata) {
-                self.events.lock().unwrap().push((n.to_string(), m));
-            }
-            async fn log_event_async(&self, n: &str, m: LogEventMetadata) {
-                self.log_event(n, m).await;
-            }
-            fn name(&self) -> &str {
-                "capture"
-            }
-        }
-
-        let _guard = HOME_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let bus = Arc::new(AnalyticsBus::new());
-        let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
-        bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
-            .await;
-
-        let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path().join("home_t10b"));
-        let mut env = std::collections::BTreeMap::new();
-        env.insert("LINGXI_TELEMETRY_ENABLED".to_string(), "yes".to_string());
-
-        let _ = Settings::load_with_telemetry(
-            LoadInputs {
-                env: &env,
-                project_dir: tmp.path(),
-                defaults: schema::SettingsJson::default(),
-            },
-            Some(&bus),
-        )
-        .await
-        .unwrap();
-
-        let captured = sink.events.lock().unwrap().clone();
-        let invalid = captured
-            .iter()
-            .find(|(n, _)| n == "tengu_settings_invalid_env")
-            .expect("tengu_settings_invalid_env must be emitted");
-        assert!(matches!(
-            invalid.1.get("var"),
-            Some(AnalyticsValue::String(s)) if s == "LINGXI_TELEMETRY_ENABLED"
-        ));
-        assert!(invalid.1.contains_key("_PROTO_value"));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn emits_tengu_settings_parse_error_on_malformed_project_json() {
-        use async_trait::async_trait;
-        use std::sync::{Arc, Mutex};
-        use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
-
-        #[derive(Default)]
-        struct CaptureSink {
-            events: Mutex<Vec<(String, LogEventMetadata)>>,
-        }
-        #[async_trait]
-        impl AnalyticsSink for CaptureSink {
-            async fn log_event(&self, n: &str, m: LogEventMetadata) {
-                self.events.lock().unwrap().push((n.to_string(), m));
-            }
-            async fn log_event_async(&self, n: &str, m: LogEventMetadata) {
-                self.log_event(n, m).await;
-            }
-            fn name(&self) -> &str {
-                "capture"
-            }
-        }
-
-        let _guard = HOME_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let bus = Arc::new(AnalyticsBus::new());
-        let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
-        bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
-            .await;
-
-        let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path().join("home_t10c"));
-        let project_subdir = tmp.path().join(".lingxi");
-        std::fs::create_dir_all(&project_subdir).unwrap();
-        // Malformed JSON in the project layer.
-        let mut pf = std::fs::File::create(project_subdir.join("settings.json")).unwrap();
-        writeln!(pf, "{{not-json").unwrap();
-
-        let result = Settings::load_with_telemetry(
-            LoadInputs {
-                env: &BTreeMap::new(),
-                project_dir: tmp.path(),
-                defaults: schema::SettingsJson::default(),
-            },
-            Some(&bus),
-        )
-        .await;
-        // (review #2) A malformed file is SKIPPED, not fatal: the load still
-        // succeeds (here yielding just the defaults, since the only configured
-        // layer was the bad project file) — claude-code skips files with errors
-        // and keeps merging the rest. The parse error is still surfaced via
-        // telemetry.
-        let effective = result.expect("a malformed file is skipped; the load still succeeds");
-        assert_eq!(
-            effective.settings,
-            schema::SettingsJson::default(),
-            "the skipped bad layer contributes nothing; defaults remain"
-        );
-
-        let captured = sink.events.lock().unwrap().clone();
-        let parse_err = captured
-            .iter()
-            .find(|(n, _)| n == "tengu_settings_parse_error")
-            .expect("tengu_settings_parse_error must still be emitted for the skipped file");
-        assert!(parse_err.1.contains_key("_PROTO_path"));
-        assert!(matches!(
-            parse_err.1.get("error"),
-            Some(AnalyticsValue::String(s)) if s == "parse"
-        ));
     }
 }

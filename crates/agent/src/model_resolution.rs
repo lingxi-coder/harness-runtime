@@ -49,9 +49,9 @@
 //!   alias logic twice.
 
 use crate::definition::{AgentDefinition, AgentModel, AgentSource};
+use lingxi_core::host::env::is_env_truthy;
 use llm_runtime::model::allowlist::{self, ModelEnforcement};
 use permission::PermissionMode;
-use platform_api::env::is_env_truthy;
 
 /// Managed model-restriction context threaded into the plan-mode upgrade swap
 /// (binary `RF`) and the subagent model-request gate (binary `ble`/`Qly`). Boot
@@ -626,7 +626,7 @@ pub fn resolve_builtin_explore_model(
     if def.agent_type != "Explore" || !matches!(def.source, AgentSource::BuiltIn) {
         return def.model.clone();
     }
-    if platform_api::env::is_env_truthy(
+    if lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_DISABLE_EXPLORE_INHERIT_CAP")
             .or_else(|_| std::env::var("CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP"))
             .ok()
@@ -1622,7 +1622,7 @@ mod tests {
         // A USER-DEFINED agent literally named "Explore": source != built-in →
         // untouched (GAe early-return on source).
         let mut user_explore = builtin_explore_def();
-        user_explore.source = AgentSource::Settings(protocol::SettingsScope::User);
+        user_explore.source = AgentSource::Settings(lingxi_core::types::SettingsScope::User);
         user_explore.model = AgentModel::Alias("sonnet".to_string());
         assert!(matches!(
             resolve_builtin_explore_model(&user_explore, "claude-fable-5-1", true),

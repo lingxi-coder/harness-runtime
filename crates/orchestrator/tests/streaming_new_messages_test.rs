@@ -20,6 +20,10 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
+use lingxi_core::host::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
+use lingxi_core::types::{
+    ContentBlock, ConversationMessage, HookId, HttpRequest, HttpResponse, MessageId, ToolUseId,
+};
 use orchestrator::test_support::{
     content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
     message_delta_stop, message_start, message_stop, noop_hook_executor, text_delta, MockApiClient,
@@ -28,10 +32,6 @@ use orchestrator::test_support::{
 use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
-use protocol::{
-    ContentBlock, ConversationMessage, HookId, HttpRequest, HttpResponse, MessageId, ToolUseId,
-};
 use serde_json::json;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -55,7 +55,7 @@ impl HttpTransport for UnusedHttp {
     async fn stream_sse(
         &self,
         _req: HttpRequest,
-    ) -> Result<platform_api::http::SseStream, HttpError> {
+    ) -> Result<lingxi_core::host::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -66,11 +66,14 @@ impl RuntimeSpawner for UnusedRuntime {
         &self,
         _name: &str,
         _task: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, RuntimeError> {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _d: Duration) {}
-    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+    async fn cancel(
+        &self,
+        _h: &lingxi_core::host::BackgroundTaskHandle,
+    ) -> Result<(), RuntimeError> {
         Ok(())
     }
 }

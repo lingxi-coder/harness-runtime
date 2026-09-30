@@ -71,11 +71,9 @@ pub struct DescriptionDivergence {
 
 /// Which byte-locked oracle text a divergence attaches to.
 ///
-/// 2.1.267 split the description in two, and the two registered divergences
-/// went to opposite halves: the local-app opt-in clause belongs with the
-/// per-request description, while the `fusion()` hook belongs with the authoring
-/// reference that documents every other script-body hook. Naming the target
-/// keeps `compose` from searching the wrong document and silently reporting a
+/// 2.1.267 split the description in two, so a divergence can belong to either
+/// half: the per-request description or the authoring reference that documents
+/// every script-body hook. Naming the target keeps `compose` from searching the wrong document and silently reporting a
 /// missing anchor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -199,7 +197,7 @@ pub fn authoring_skill_body(model_forced: bool) -> String {
 /// `set_var`, which flakes the moment the suite runs in parallel.
 #[must_use]
 pub fn subagent_model_forced() -> bool {
-    platform_api::env::is_env_truthy(
+    lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_SUBAGENT_MODEL_FORCE")
             .or_else(|_| std::env::var("CLAUDE_CODE_SUBAGENT_MODEL_FORCE"))
             .ok()
@@ -225,8 +223,8 @@ pub fn authoring_skill_prompt() -> String {
 ///
 /// ⛔ The fallback is not an optimisation detail — it is a reachability
 /// invariant. A script only ever learns which hooks exist from this text, so
-/// pointing at a skill the model cannot load would make every hook (including
-/// LingXi's `fusion()`) unreachable. Upstream inlines for the same reason.
+/// pointing at a skill the model cannot load would make every hook
+/// unreachable. Upstream inlines for the same reason.
 pub fn assemble_description(skill_reachable: bool, model_forced: bool) -> String {
     if skill_reachable {
         format!("{}\n\n{}", *DESCRIPTION, AUTHORING_SKILL_POINTER)

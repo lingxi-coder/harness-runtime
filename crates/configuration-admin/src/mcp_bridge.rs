@@ -368,9 +368,9 @@ pub async fn reconcile_writable_servers(
         if let Some(current) = registry.get_config(&config.name).await {
             if !matches!(
                 current.scope,
-                ConfigScope::Settings(protocol::SettingsScope::User)
-                    | ConfigScope::Settings(protocol::SettingsScope::Local)
-                    | ConfigScope::Settings(protocol::SettingsScope::Project)
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::User)
+                    | ConfigScope::Settings(lingxi_core::types::SettingsScope::Local)
+                    | ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
             ) {
                 // Plugin/managed/agent/dynamic servers own their registry slot.
                 // A writable definition with the same name stays on disk but
@@ -395,9 +395,9 @@ pub async fn reconcile_writable_servers(
         };
         if matches!(
             current.scope,
-            ConfigScope::Settings(protocol::SettingsScope::User)
-                | ConfigScope::Settings(protocol::SettingsScope::Local)
-                | ConfigScope::Settings(protocol::SettingsScope::Project)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User)
+                | ConfigScope::Settings(lingxi_core::types::SettingsScope::Local)
+                | ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
         ) && !desired_names.contains(&name)
         {
             registry
@@ -451,13 +451,13 @@ mod tests {
 
         let cfgs = mcp::parse_mcp_json_string(
             &raw,
-            mcp::ConfigScope::Settings(protocol::SettingsScope::Project),
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "linear");
         match &cfgs[0].spec {
-            platform_api::McpTransportSpec::Stdio { command, args, .. } => {
+            lingxi_core::host::McpTransportSpec::Stdio { command, args, .. } => {
                 assert_eq!(command, "npx");
                 assert_eq!(args, &vec!["-y".to_string(), "linear-mcp".to_string()]);
             }
@@ -508,7 +508,7 @@ mod tests {
 
         let cfgs = mcp::parse_global_config_mcp_servers(
             &raw,
-            mcp::ConfigScope::Settings(protocol::SettingsScope::User),
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert_eq!(cfgs.len(), 1);
@@ -557,7 +557,7 @@ mod tests {
         let cfgs = mcp::parse_local_config_mcp_servers(
             &raw,
             &key,
-            mcp::ConfigScope::Settings(protocol::SettingsScope::Local),
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Local),
         )
         .unwrap();
         assert_eq!(cfgs.len(), 1);

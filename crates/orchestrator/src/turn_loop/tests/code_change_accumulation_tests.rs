@@ -1,6 +1,6 @@
 use super::accumulate_code_change;
 use cost::{CostTracker, PricingCatalog};
-use protocol::SessionId;
+use lingxi_core::types::SessionId;
 use serde_json::json;
 use std::sync::Arc;
 

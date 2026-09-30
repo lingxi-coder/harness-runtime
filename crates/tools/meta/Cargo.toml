@@ -9,8 +9,6 @@ license.workspace = true
 mobile-linux-api.workspace = true
 branding = { path = "../../branding" }
 tool-api = { path = "../../tool-api" }
-platform-api = { path = "../../platform-api" }
-protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
 core = { path = "../../core" }

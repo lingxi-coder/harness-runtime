@@ -40,12 +40,12 @@ use serde_json::{Map, Value};
 
 use command_api::CommandRegistry;
 use hooks::{HookDefinition, HookExecutor, HookRegistry};
+use lingxi_core::host::task_registry::{MonitorRegistration, TaskRegistryHandle};
+use lingxi_core::host::{FileSystem, HttpTransport, RuntimeSpawner};
+use lingxi_core::types::PluginId;
 use lsp::LspRegistry;
 use mcp::{McpRegistry, McpServerConfig};
 use outputstyles::{OutputStyle, OutputStyleFrontmatter, OutputStyleRegistry, OutputStyleSource};
-use platform_api::task_registry::{MonitorRegistration, TaskRegistryHandle};
-use platform_api::{FileSystem, HttpTransport, RuntimeSpawner};
-use protocol::PluginId;
 use secret::CredentialManager;
 use skill_api::{parse_skill_markdown, LoadedFrom, SkillRegistry, SkillSource};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1403,7 +1403,7 @@ impl PluginManager {
                 // shell — reject the server (byte-faithful msg). `args` / `env`
                 // ARE safe to substitute (discrete argv / env block), so only
                 // the `command` field is gated.
-                if let platform_api::McpTransportSpec::Stdio { command, .. } = &cfg.spec {
+                if let lingxi_core::host::McpTransportSpec::Stdio { command, .. } = &cfg.spec {
                     if user_config::references_user_config(command) {
                         tracing::warn!(
                             "{}",
@@ -1794,7 +1794,7 @@ fn component_root(component: &ComponentPath, fallback: PathBuf) -> PathBuf {
 /// left untouched. A no-op when the substitution context is empty (the common
 /// no-userConfig case), so a plugin without userConfig is byte-unchanged.
 fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Map<String, Value>) {
-    use platform_api::McpTransportSpec;
+    use lingxi_core::host::McpTransportSpec;
     if ctx.is_empty() {
         return;
     }
@@ -1839,7 +1839,7 @@ fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Map<String, Value>) {
 /// names for third-party plugin compatibility and the LingXi aliases for local
 /// plugins authored against this port.
 fn substitute_lsp_config(
-    cfg: &mut platform_api::LspServerConfig,
+    cfg: &mut lingxi_core::host::LspServerConfig,
     ctx: &Map<String, Value>,
     install_dir: &Path,
     plugin_data_dir: Option<&Path>,
@@ -2269,7 +2269,7 @@ mod user_config_tests {
     use super::*;
     use hooks::events::HookEventType;
     use hooks::{HookDefinition, HookExecutor, HookSource};
-    use protocol::HookId;
+    use lingxi_core::types::HookId;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -2413,18 +2413,18 @@ mod unload_tests {
     use async_trait::async_trait;
     use command_api::{CommandRegistry, CommandSource, SlashCommand, SlashCommandKind};
     use hooks::HookRegistry;
-    use lsp::LspRegistry;
-    use outputstyles::OutputStyleRegistry;
-    use platform_api::{
+    use lingxi_core::host::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
         McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
     };
+    use lingxi_core::types::McpConnectionId;
+    use lsp::LspRegistry;
+    use outputstyles::OutputStyleRegistry;
     use platform_posix::{
         PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
         PosixRuntime,
     };
-    use protocol::McpConnectionId;
     use skill_api::SkillRegistry;
     use std::collections::HashMap;
     use std::fs;
@@ -2511,7 +2511,7 @@ mod unload_tests {
         async fn list_resource_templates(
             &self,
             _c: &McpRawConnection,
-        ) -> Result<Vec<platform_api::McpResourceTemplateDto>, McpError> {
+        ) -> Result<Vec<lingxi_core::host::McpResourceTemplateDto>, McpError> {
             unreachable!("unused in unload test")
         }
 
@@ -2663,8 +2663,8 @@ mod unload_tests {
                         experimental: HashMap::new(),
                         extensions: HashMap::new(),
                     },
-                    negotiated: platform_api::McpNegotiatedProtocol {
-                        era: platform_api::McpProtocolEra::Legacy,
+                    negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                        era: lingxi_core::host::McpProtocolEra::Legacy,
                         version: "2025-11-25".into(),
                     },
                     tools: vec![],
@@ -3206,12 +3206,12 @@ mod monitor_lifecycle_tests {
     use async_trait::async_trait;
     use command_api::CommandRegistry;
     use hooks::HookRegistry;
-    use lsp::LspRegistry;
-    use outputstyles::OutputStyleRegistry;
-    use platform_api::task_registry::{
+    use lingxi_core::host::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
     };
+    use lsp::LspRegistry;
+    use outputstyles::OutputStyleRegistry;
     use platform_posix::{
         PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
         PosixMcpTransport, PosixRuntime,

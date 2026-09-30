@@ -1,12 +1,11 @@
-use llm_runtime::oauth::anthropic::client::ClaudeAiOAuthClient;
-use llm_runtime::oauth::anthropic::config::ClaudeAiOAuthConfig;
-use llm_runtime::oauth::anthropic::handle::OAuthHandle;
-use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
-use llm_runtime::oauth::openai as openai_oauth;
-use llm_runtime::{DefaultLlmClient, Transport};
+use lingxi_core::host::{AuthHandle, CredentialStoragePolicy};
+use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
+use llm_runtime::auth::anthropic::handle::OAuthHandle;
+use llm_runtime::auth::anthropic::{OAuthCredentialProvider, RefreshDriver};
+use llm_runtime::auth::openai as openai_oauth;
+use llm_runtime::{ModelRuntime, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
-use platform_api::{AuthHandle, CredentialStoragePolicy};
 use platform_posix::{PosixClock, PosixHttp, PosixRuntime};
 #[cfg(windows)]
 use platform_windows::process::supervisor as shell_supervisor;
@@ -17,13 +16,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{
-    anthropic_models_for, api_provider, connect, connected_provider_fallback,
-    desktop_fusion_catalog_row, filter_fusion_catalog, fusion_route_flag,
-    load_effective_settings_for_config, managed_model_policy_source,
-    managed_model_setting_for_config, model_provenance_for_config, provider_profile_label,
-    register_fusion_catalog_refresher, subscription_seed, subscription_snapshot_from, ApiProvider,
-    BuildError, DefaultModelFallbackNotice, DesktopConfig, FusionCatalogClearingAuth,
-    FusionCatalogModelSource, FusionCatalogRefresher, FusionCatalogRegistry,
+    anthropic_models_for, api_provider, connected_provider_fallback, desktop_fusion_catalog_row,
+    filter_fusion_catalog, fusion_route_flag, load_effective_settings_for_config,
+    managed_model_policy_source, managed_model_setting_for_config, model_provenance_for_config,
+    provider_profile_label, register_fusion_catalog_refresher, subscription_seed,
+    subscription_snapshot_from, ApiProvider, BuildError, DefaultModelFallbackNotice, DesktopConfig,
+    FusionCatalogClearingAuth, FusionCatalogModelSource, FusionCatalogRefresher,
+    FusionCatalogRegistry,
 };
 
 /// Desktop [`ClaudeAiAuthProvider`](tool_cron::ClaudeAiAuthProvider) backed by
@@ -79,7 +78,7 @@ impl tool_cron::ClaudeAiAuthProvider for CredentialStoreAuthProvider {
 }
 
 /// The resolved LLM stack: credentials, the assembled multi-provider config,
-/// and the routed [`DefaultLlmClient`] every model-facing surface needs.
+/// and the routed [`ModelRuntime`] every model-facing surface needs.
 ///
 /// Extracted verbatim out of [`build`] so that headless one-shot commands
 /// (which must NOT boot a session, fire `SessionStart` hooks, or start MCP
@@ -98,19 +97,19 @@ pub struct LlmStack {
     /// See [`build`] for the resolution rules behind `clock`.
     pub clock: Arc<PosixClock>,
     /// See [`build`] for the resolution rules behind `mcp_oauth_storage`.
-    pub mcp_oauth_storage: Arc<dyn platform_api::SecureStorage>,
+    pub mcp_oauth_storage: Arc<dyn lingxi_core::host::SecureStorage>,
     /// See [`build`] for the resolution rules behind `credentials`.
     pub credentials: Arc<CredentialManager>,
     /// See [`build`] for the resolution rules behind `auth`.
     pub auth: Arc<dyn AuthHandle>,
     /// See [`build`] for the resolution rules behind `subscription`.
-    pub subscription: platform_api::subscription::SharedSubscription,
+    pub subscription: lingxi_core::host::subscription::SharedSubscription,
     /// See [`build`] for the resolution rules behind `resolved_anthropic_api_key`.
     pub resolved_anthropic_api_key: Option<String>,
     /// See [`build`] for the resolution rules behind `is_subscriber`.
     pub is_subscriber: bool,
-    /// See [`build`] for the resolution rules behind `openai_oauth_client`.
-    pub openai_oauth_client: Arc<openai_oauth::OpenAiOAuthClient>,
+    /// See [`build`] for the resolution rules behind `openai_oauth_handle`.
+    pub openai_oauth_handle: Arc<openai_oauth::OpenAiOAuthHandle>,
     /// See [`build`] for the resolution rules behind `pricing`.
     pub pricing: cost::PricingCatalog,
     /// See [`build`] for the resolution rules behind `chains`.
@@ -135,7 +134,7 @@ pub struct LlmStack {
     /// [`FusionCatalogRefresher::refresh`].
     pub fusion_catalog_refresher: FusionCatalogRefresher,
     /// See [`build`] for the resolution rules behind `default_listings`.
-    pub default_listings: Vec<platform_api::ModelListing>,
+    pub default_listings: Vec<lingxi_core::host::ModelListing>,
     /// See [`build`] for the resolution rules behind `default_model_id`.
     pub default_model_id: String,
     /// See [`build`] for the resolution rules behind `default_model_profile`.
@@ -151,7 +150,7 @@ pub struct LlmStack {
     /// See [`build`] for the resolution rules behind `default_model_fallback`.
     pub default_model_fallback: Option<DefaultModelFallbackNotice>,
     /// See [`build`] for the resolution rules behind `model_provenance`.
-    pub model_provenance: platform_api::ModelProvenance,
+    pub model_provenance: lingxi_core::host::ModelProvenance,
     /// See [`build`] for the resolution rules behind `session_model_restriction`.
     pub session_model_restriction:
         Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
@@ -162,7 +161,7 @@ pub struct LlmStack {
     /// Resolved provider tag for the session's boot auto-mode gate.
     pub session_auto_mode_provider: String,
     /// See [`build`] for the resolution rules behind `llm_runtime`.
-    pub llm_runtime: Arc<DefaultLlmClient>,
+    pub llm_runtime: Arc<ModelRuntime>,
     /// See [`build`] for the resolution rules behind `llm_transport`.
     pub llm_transport: Arc<dyn Transport>,
     /// See [`build`] for the resolution rules behind `cost_estimator`.
@@ -190,7 +189,7 @@ pub struct SharedCredentialStack {
     /// Platform clock used by the credential manager.
     pub clock: Arc<PosixClock>,
     /// Shared storage handle, also reused by MCP OAuth persistence.
-    pub storage: Arc<dyn platform_api::SecureStorage>,
+    pub storage: Arc<dyn lingxi_core::host::SecureStorage>,
     /// Canonical provider/OAuth credential manager.
     pub credentials: Arc<CredentialManager>,
 }
@@ -306,7 +305,7 @@ pub(super) async fn build_shared_credential_stack_for_config(
 
 pub(super) async fn build_platform_plaintext_secure_storage(
     credentials_path: PathBuf,
-) -> Result<Arc<dyn platform_api::SecureStorage>, platform_api::SecureStorageError> {
+) -> Result<Arc<dyn lingxi_core::host::SecureStorage>, lingxi_core::host::SecureStorageError> {
     #[cfg(windows)]
     {
         platform_windows::plaintext_secure_storage(credentials_path).await
@@ -322,7 +321,7 @@ pub(super) async fn build_platform_secure_storage(
     lingxi_home: PathBuf,
     credentials_path: PathBuf,
     policy: CredentialStoragePolicy,
-) -> Result<Arc<dyn platform_api::SecureStorage>, platform_api::SecureStorageError> {
+) -> Result<Arc<dyn lingxi_core::host::SecureStorage>, lingxi_core::host::SecureStorageError> {
     #[cfg(windows)]
     {
         platform_windows::secure_storage_for_policy(user, lingxi_home, credentials_path, policy)
@@ -397,7 +396,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // resolved OAuth `AuthState` (`Some` only for an OAuth-effective subscriber
     // session) that step (2) bridges into the assembled client's credential
     // seam as an `oauth_delegate`.
-    let mut oauth_auth_state: Option<Arc<llm_runtime::oauth::anthropic::refresh::AuthState>> = None;
+    let mut oauth_auth_state: Option<Arc<llm_runtime::auth::anthropic::refresh::AuthState>> = None;
     let mut openai_oauth_state: Option<Arc<openai_oauth::AuthState>> = None;
     // (3) Credential manager + OAuth client (used by /login, /logout).
     //
@@ -406,9 +405,9 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // `Ok(Some(tokens))` arm below re-seeds it with the resolved subscriber
     // flag, and (for subscribers) a background profile+roles fetch overwrites
     // it with the full snapshot once the endpoints respond.
-    let subscription: platform_api::subscription::SharedSubscription =
+    let subscription: lingxi_core::host::subscription::SharedSubscription =
         std::sync::Arc::new(std::sync::RwLock::new(Some(
-            platform_api::subscription::SubscriptionSnapshot::default(),
+            lingxi_core::host::subscription::SubscriptionSnapshot::default(),
         )));
     // `mcp_oauth_storage` and `credentials` originate from the same shared
     // stack, so provider keys and MCP OAuth never split across backends.
@@ -432,19 +431,19 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         Some(cfg.api_key.clone())
     };
     let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
-    let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
+    let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(
         oauth_cfg.clone(),
-        http.clone(),
+        llm_transport.clone(),
         credentials.clone(),
+        clock.clone(),
     ));
-    let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(oauth_client));
 
     // (3.1) M5-13 / Task 10: build the OAuth refresh driver when the keychain
     //        already holds a logged-in OAuth token.  `init_refresh_driver` spawns
     //        the proactive-refresh task and returns the shared `AuthState`.  The
     //        returned state is used BOTH for the old api-client hook path (removed
     //        in Plan 3a Task 9) and to wire `OAuthCredentialProvider` into the
-    //        new `DefaultLlmClient` path.
+    //        new `ModelRuntime` path.
     //
     //        (3.2) API.6: while we have the token in hand, resolve the Claude.ai
     //        subscriber flag from its scopes (see [`oauth_subscriber_flag`]).
@@ -467,8 +466,8 @@ pub(super) async fn resolve_llm_stack_with_credentials(
             // below-OAuth sources (settings key / helper / Bedrock) cannot
             // change the outcome once `has_stored_oauth` is true, so their
             // slots stay conservative.
-            let auth_source = llm_runtime::oauth::anthropic::resolver::resolve(
-                &llm_runtime::oauth::anthropic::resolver::ResolverContext {
+            let auth_source = llm_runtime::auth::anthropic::resolver::resolve(
+                &llm_runtime::auth::anthropic::resolver::ResolverContext {
                     // The ONLY thing that demotes an env key below the
                     // stored session is `KWr()` (@228931361), read HERE —
                     // the credential-resolution point, exactly where
@@ -477,7 +476,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                     // pass through the CLI's `build_runtime_from_config`
                     // (`mcp serve`, `auto-mode-setup`, bridge-server).
                     managed_oauth_only: cfg.managed_oauth_only
-                        || llm_runtime::oauth::anthropic::resolver::host_managed_oauth_only(),
+                        || llm_runtime::auth::anthropic::resolver::host_managed_oauth_only(),
                     env_auth_token: std::env::var("ANTHROPIC_AUTH_TOKEN")
                         .ok()
                         .filter(|v| !v.is_empty()),
@@ -506,7 +505,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
             // LingXi equivalent, and everything else takes the `/login` wording
             // anyway.
             credential_origin = match &auth_source {
-                llm_runtime::oauth::anthropic::resolver::AuthSource::EnvApiKey => {
+                llm_runtime::auth::anthropic::resolver::AuthSource::EnvApiKey => {
                     // This is the ANTHROPIC auth resolver, and its `EnvApiKey`
                     // is defined as `ANTHROPIC_API_KEY` (see `AuthSource`), so
                     // naming the variable here is a fact, not a guess. Another
@@ -515,7 +514,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                         var: "ANTHROPIC_API_KEY".to_string(),
                     }
                 }
-                llm_runtime::oauth::anthropic::resolver::AuthSource::ApiKeyHelper { .. } => {
+                llm_runtime::auth::anthropic::resolver::AuthSource::ApiKeyHelper { .. } => {
                     orchestrator::api_error_copy::CredentialOrigin::ApiKeyHelper
                 }
                 _ => orchestrator::api_error_copy::CredentialOrigin::Other,
@@ -541,13 +540,14 @@ pub(super) async fn resolve_llm_stack_with_credentials(
             if let Ok(mut guard) = subscription.write() {
                 *guard = Some(seed);
             }
-            let profile_token = protocol::Secret::new(tokens.access_token.expose_secret().clone());
-            match llm_runtime::oauth::anthropic::client::init_refresh_driver(
+            let profile_token =
+                lingxi_core::types::Secret::new(tokens.access_token.expose_secret().clone());
+            match llm_runtime::auth::anthropic::login::init_refresh_driver(
                 oauth_cfg,
                 tokens.access_token,
                 tokens.refresh_token,
                 tokens.expires_at,
-                http.clone(),
+                llm_transport.clone(),
                 clock.clone(),
                 Some(Arc::new(telemetry::AnalyticsBus::new())),
                 Some(credentials.clone()),
@@ -586,8 +586,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                         // calls and never logged or formatted.
                         {
                             let slot = subscription.clone();
-                            let transport: std::sync::Arc<dyn platform_api::HttpTransport> =
-                                http.clone();
+                            let transport: Arc<dyn Transport> = llm_transport.clone();
                             let creds = credentials.clone();
                             // Move (not copy) the token into the task — its
                             // only consumer.
@@ -595,17 +594,19 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                             tokio::spawn(async move {
                                 let token = token.expose_secret();
                                 let Some(profile) =
-                                    llm_runtime::oauth::anthropic::fetch_profile_from_oauth_token(
-                                        token, &transport,
+                                    lingxi_llm_client::auth::oauth::anthropic::fetch_profile_from_oauth_token(
+                                        token, transport.as_ref(),
                                     )
                                     .await
                                 else {
                                     return;
                                 };
-                                let roles = llm_runtime::oauth::anthropic::fetch_user_roles(
-                                    token, &transport,
-                                )
-                                .await;
+                                let roles =
+                                    lingxi_llm_client::auth::oauth::anthropic::fetch_user_roles(
+                                        token,
+                                        transport.as_ref(),
+                                    )
+                                    .await;
                                 let snap = subscription_snapshot_from(
                                     true,
                                     Some(&profile),
@@ -649,20 +650,28 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     //        Returns `Arc<openai_oauth::AuthState>` for the credential delegate;
     //        on Ok(None) / Err we leave `openai_oauth_state = None` (warn on Err).
     //        No subscriber-flag / profile-fetch needed for OpenAI — minimal path.
-    let openai_oauth_cfg = openai_oauth::OpenAiOAuthConfig::default();
-    let openai_oauth_client = Arc::new(openai_oauth::OpenAiOAuthClient::new(
-        openai_oauth_cfg.clone(),
-        http.clone(),
-    ));
+    let openai_oauth_cfg = lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig::default();
+    let openai_oauth_handle = Arc::new(
+        openai_oauth::OpenAiOAuthHandle::new(
+            openai_oauth_cfg.clone(),
+            llm_transport.clone(),
+            credentials.clone(),
+        )
+        .with_clock(clock.clone()),
+    );
 
     // (3.2a-pre) P3 enterprise precedence for the openai-chatgpt credential:
     // PAT env  >  external-tokens env  >  OAuth login session. First hit wins.
     let mut openai_chatgpt_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> = None;
     if let Ok(pat) = std::env::var("OPENAI_PERSONAL_ACCESS_TOKEN") {
         if !pat.trim().is_empty() {
-            let http_dyn: Arc<dyn platform_api::HttpTransport> =
-                http.clone() as Arc<dyn platform_api::HttpTransport>;
-            match openai_oauth::whoami(&openai_oauth_cfg, &http_dyn, &pat).await {
+            match lingxi_llm_client::auth::oauth::openai::whoami(
+                llm_transport.as_ref(),
+                &openai_oauth_cfg,
+                &pat,
+            )
+            .await
+            {
                 Ok(md) => {
                     openai_chatgpt_delegate =
                         Some(Arc::new(openai_oauth::PatCredentialProvider::new(pat, md))
@@ -699,7 +708,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     if openai_chatgpt_delegate.is_none() {
         match credentials.get_openai_oauth_tokens().await {
             Ok(Some(tokens)) => {
-                match openai_oauth::client::init_refresh_driver(
+                match openai_oauth::login::init_refresh_driver(
                     openai_oauth_cfg.clone(),
                     tokens.access_token,
                     tokens.refresh_token,
@@ -707,7 +716,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                     tokens.account_id,
                     tokens.fedramp,
                     tokens.email,
-                    http.clone(),
+                    llm_transport.clone(),
                     clock.clone(),
                     Some(Arc::new(telemetry::AnalyticsBus::new())),
                     Some(credentials.clone()),
@@ -816,30 +825,32 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // configured default_model so a shared id routes deterministically on the
     // first turn.  Must run while `assembled.client_config.providers` is still
     // owned (before `from_config` moves it).
-    let default_listings: Vec<platform_api::ModelListing> = assembled
+    let default_listings: Vec<lingxi_core::host::ModelListing> = assembled
         .client_config
         .providers
         .iter()
         .flat_map(|p| {
             let profile = p.profile_name.clone();
             let label = provider_profile_label(&p.profile_name);
-            p.models.iter().map(move |m| platform_api::ModelListing {
-                display_model: m.display_model.clone(),
-                request_model: m.request_model.clone(),
-                provider_id: profile.clone(),
-                provider_label: label.clone(),
-                description: m.description.clone(),
-                metadata: Default::default(),
-                capabilities: Default::default(),
-                reasoning: Default::default(),
-                supports_reasoning: m.capabilities.reasoning,
-                fusion_analyst_capable: false,
-                connection: Default::default(),
-            })
+            p.models
+                .iter()
+                .map(move |m| lingxi_core::host::ModelListing {
+                    display_model: m.display_model.clone(),
+                    request_model: m.request_model.clone(),
+                    provider_id: profile.clone(),
+                    provider_label: label.clone(),
+                    description: m.description.clone(),
+                    metadata: Default::default(),
+                    capabilities: Default::default(),
+                    reasoning: Default::default(),
+                    supports_reasoning: m.capabilities.reasoning,
+                    fusion_analyst_capable: false,
+                    connection: Default::default(),
+                })
         })
         .collect();
     let (mut default_model_id, mut default_model_profile) =
-        platform_api::parse_model_ref(&configured_model, &default_listings);
+        lingxi_core::host::parse_model_ref(&configured_model, &default_listings);
 
     // Per-profile Claude provider tag, captured while
     // `assembled.client_config.providers` is still owned (`from_config` moves it
@@ -865,7 +876,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         .map(|(profile, provider)| (profile.clone(), provider == "firstParty"))
         .collect();
 
-    let mut client = DefaultLlmClient::from_config(assembled.client_config)
+    let mut client = ModelRuntime::from_config(assembled.client_config)
         .map_err(|e| BuildError::ApiBase(format!("llm-runtime config: {e}")))?;
     // §6.1: ONE composite credential slot for ALL providers (anthropic api-key /
     // oauth-delegate + every per-profile credential source).
@@ -999,7 +1010,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
             // A disconnected-provider fallback is a catalog choice, not an
             // administrator default, even when the displaced model came from
             // a lower-priority settings source.
-            model_provenance = platform_api::ModelProvenance::ProviderCatalogTier;
+            model_provenance = lingxi_core::host::ModelProvenance::ProviderCatalogTier;
             default_model_id = fb.model;
             default_model_profile = Some(fb.profile);
         }
@@ -1067,7 +1078,8 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                         "default model is not in the managed availableModels allowlist; \
                          resolving Default to the first allowed availableModels entry"
                     );
-                    model_provenance = platform_api::ModelProvenance::ManagedAdministratorDefault;
+                    model_provenance =
+                        lingxi_core::host::ModelProvenance::ManagedAdministratorDefault;
                     default_model_id = picked;
                     default_model_profile = picked_profile.or(default_model_profile);
                 }
@@ -1188,7 +1200,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // id passes straight through unchanged.
     let copilot_creds = llm_runtime::CopilotExchangeCredentialProvider::new(
         Arc::new(composite),
-        Arc::new(connect::PosixCopilotHttp::new()),
+        llm_transport.clone(),
         "github-copilot",
     );
     client = client.with_credential_provider(Arc::new(copilot_creds));
@@ -1308,7 +1320,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         subscription,
         resolved_anthropic_api_key,
         is_subscriber,
-        openai_oauth_client,
+        openai_oauth_handle,
         pricing: assembled.pricing,
         chains: assembled.chains,
         model_providers,
@@ -1515,14 +1527,14 @@ pub(super) fn aws_auth_refresher(
 pub(super) fn capture_legacy_opening_balance(
     config_path: Option<&Path>,
     cwd: &Path,
-) -> Option<(protocol::SessionId, u64)> {
+) -> Option<(lingxi_core::types::SessionId, u64)> {
     let config_path = config_path?;
     let project_key = migrations::global_config::project_path_for_config(cwd);
     let project = migrations::global_config::get_project_config(config_path, &project_key).ok()?;
     let session = project
         .get("lastSessionId")
         .and_then(serde_json::Value::as_str)?;
-    let session_id = protocol::SessionId::parse_prefixed(session)?;
+    let session_id = lingxi_core::types::SessionId::parse_prefixed(session)?;
     let dollars = project
         .get("lastCost")
         .and_then(serde_json::Value::as_f64)?;

@@ -6,8 +6,8 @@ use command_api::builtins::hooks::HooksHandler;
 use command_api::builtins::mcp::McpHandler;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use lingxi_core::host::{AgentInfo, HookInfo, McpServerInfo, McpStatus};
 use orchestrator::test_support::MockOrchestratorHandle;
-use platform_api::{AgentInfo, HookInfo, McpServerInfo, McpStatus};
 use serde_json::Value;
 use std::sync::Arc;
 

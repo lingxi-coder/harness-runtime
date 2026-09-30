@@ -62,11 +62,11 @@ const BRIEF_GATE_FLAG: &str = "tengu_kairos_brief";
 /// `/brief` runtime toggle — OR the `tengu_kairos_brief` Statsig gate is on
 /// (code-default `false`). This is DEFAULT-OFF, matching the shipped binary:
 /// without either trigger the tool is invisible to the model. The state lives
-/// in `platform_api::session_flags`, rather than a process-environment snapshot,
+/// in `lingxi_core::host::session_flags`, rather than a process-environment snapshot,
 /// so a runtime toggle is observed by subsequent tool-list assemblies.
 #[must_use]
 pub fn brief_tool_enabled() -> bool {
-    platform_api::session_flags::brief_mode_enabled()
+    lingxi_core::host::session_flags::brief_mode_enabled()
         || telemetry::flag_bool(BRIEF_GATE_FLAG, false)
 }
 
@@ -488,7 +488,7 @@ mod tests {
     fn brief_guard() -> std::sync::MutexGuard<'static, ()> {
         static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        platform_api::session_flags::set_brief_mode_enabled(false);
+        lingxi_core::host::session_flags::set_brief_mode_enabled(false);
         telemetry::test_clear_flag(BRIEF_GATE_FLAG);
         g
     }
@@ -505,9 +505,9 @@ mod tests {
 
         // Startup `--brief` and runtime `/brief` both publish the same live
         // session flag → tool enabled.
-        platform_api::session_flags::set_brief_mode_enabled(true);
+        lingxi_core::host::session_flags::set_brief_mode_enabled(true);
         assert!(tool.is_enabled(&ctx));
-        platform_api::session_flags::set_brief_mode_enabled(false);
+        lingxi_core::host::session_flags::set_brief_mode_enabled(false);
         assert!(!tool.is_enabled(&ctx));
 
         // The Statsig gate `tengu_kairos_brief` (default false) also enables it.

@@ -23,7 +23,10 @@
 //! through the public entries, so they stay meaningful whether preparation lives
 //! in `turn_loop.rs` (today) or in a `BatchedRound` strategy (after PR 2).
 
-use llm_runtime::{ContentBlock as LlmContentBlock, LlmError, LlmResponse, Usage};
+use lingxi_core::types::ConversationMessage;
+use llm_runtime::{
+    ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryResponse, LlmError,
+};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, MockStreamingApiClient,
     NoOpPermissionGate, StaticMemoryProvider,
@@ -31,7 +34,6 @@ use orchestrator::test_support::{
 use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, TurnOutcome,
 };
-use protocol::ConversationMessage;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -61,8 +63,8 @@ where
     handle.join().expect("large-stack test thread panicked");
 }
 
-fn text_response(text: &str) -> LlmResponse {
-    LlmResponse {
+fn text_response(text: &str) -> HistoryResponse {
+    HistoryResponse {
         id: "msg_prep".into(),
         model: "claude-opus-4-7".into(),
         content: vec![LlmContentBlock::Text {
@@ -84,12 +86,12 @@ fn text_response(text: &str) -> LlmResponse {
 /// `ptl_recovery_test`'s `PtlMockApi` records only message COUNTS — these tests
 /// have to look inside the messages for the reminder text.
 struct ScriptedApi {
-    script: tokio::sync::Mutex<std::collections::VecDeque<Result<LlmResponse, LlmError>>>,
+    script: tokio::sync::Mutex<std::collections::VecDeque<Result<HistoryResponse, LlmError>>>,
     captured: tokio::sync::Mutex<Vec<Vec<ConversationMessage>>>,
 }
 
 impl ScriptedApi {
-    fn new(script: Vec<Result<LlmResponse, LlmError>>) -> Self {
+    fn new(script: Vec<Result<HistoryResponse, LlmError>>) -> Self {
         Self {
             script: tokio::sync::Mutex::new(script.into()),
             captured: tokio::sync::Mutex::new(Vec::new()),
@@ -109,7 +111,7 @@ impl OrchestratorApiClient for ScriptedApi {
         _system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.captured.lock().await.push(msgs);
         self.script.lock().await.pop_front().unwrap_or_else(|| {
             Err(LlmError::Transport {
@@ -131,7 +133,7 @@ struct ParkingDiagnostics {
 }
 
 #[async_trait::async_trait]
-impl platform_api::NewDiagnosticsSource for ParkingDiagnostics {
+impl lingxi_core::host::NewDiagnosticsSource for ParkingDiagnostics {
     async fn take_new_diagnostics_block(&self) -> Option<String> {
         self.entries.fetch_add(1, Ordering::SeqCst);
         self.entered.notify_one();
@@ -271,12 +273,12 @@ async fn seed_rounds(orch: &ConversationOrchestrator, rounds: usize) {
     let mut s = session.lock().await;
     for i in 0..rounds {
         s.history.push(ConversationMessage::user(
-            protocol::MessageId::new(),
+            lingxi_core::types::MessageId::new(),
             format!("round-{i} user message with filler text to give the round a token estimate"),
         ));
         s.history.push(ConversationMessage::Assistant {
-            id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::Text {
+            id: lingxi_core::types::MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: format!("round-{i} assistant reply with filler text to give it weight"),
             }],
             stop_reason: Some("end_turn".to_string()),
@@ -291,7 +293,7 @@ struct CountingDiagnostics {
 }
 
 #[async_trait::async_trait]
-impl platform_api::NewDiagnosticsSource for CountingDiagnostics {
+impl lingxi_core::host::NewDiagnosticsSource for CountingDiagnostics {
     async fn take_new_diagnostics_block(&self) -> Option<String> {
         // Consume-once: the first drain yields the block, later ones yield
         // nothing — the same shape as the real source.
@@ -436,13 +438,15 @@ fn a_stream_fallback_reuses_this_steps_reminders_without_redraining_them() {
 }
 
 /// A one-shot task-notification source.
-struct OnceTaskNotifications(std::sync::Mutex<Vec<platform_api::task_registry::TaskNotification>>);
+struct OnceTaskNotifications(
+    std::sync::Mutex<Vec<lingxi_core::host::task_registry::TaskNotification>>,
+);
 
 #[async_trait::async_trait]
 impl orchestrator::prompt::task_notification::TaskNotificationProvider for OnceTaskNotifications {
     async fn take_pending_task_notifications(
         &self,
-    ) -> Vec<platform_api::task_registry::TaskNotification> {
+    ) -> Vec<lingxi_core::host::task_registry::TaskNotification> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
 }
@@ -467,7 +471,7 @@ fn a_ptl_retry_does_not_duplicate_the_durable_task_notification() {
             Ok(text_response("recovered")),
         ]));
 
-        let notification = platform_api::task_registry::TaskNotification {
+        let notification = lingxi_core::host::task_registry::TaskNotification {
             task_id: "b12345678".into(),
             task_type: "local_bash".into(),
             status: "completed".into(),

@@ -16,7 +16,7 @@
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::OrchestratorHandle;
+use lingxi_core::host::OrchestratorHandle;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -163,8 +163,8 @@ mod tests {
 
     #[tokio::test]
     async fn handle_renders_files_relative_to_cwd() {
+        use lingxi_core::host::StatusSnapshot;
         use orchestrator::test_support::MockOrchestratorHandle;
-        use platform_api::StatusSnapshot;
         // Pre-seed the read-file-state cache (absolute keys, insertion order)
         // and a matching cwd, then drive the real handler: proves the
         // `files_in_context` override + `render_files` compose 1:1 with the

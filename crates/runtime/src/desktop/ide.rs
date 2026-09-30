@@ -2,14 +2,14 @@
 //!
 //! The controller is intentionally provider-neutral: it consumes the
 //! lockfile contract and the existing MCP registry, then exposes only the
-//! platform-api [`IdeHandle`] seam to command/orchestrator code. Local
+//! core::host [`IdeHandle`] seam to command/orchestrator code. Local
 //! lockfile tokens are held only long enough to build an `SseIde`/`WsIde`
 //! transport spec and are never included in a status snapshot or log line.
 
 use async_trait::async_trait;
 use bridge::lockfile::{discover_all, IdeLockfile};
+use lingxi_core::host::{IdeEndpointInfo, IdeHandle, IdeStatus, IdeTransport, McpTransportSpec};
 use mcp::{ConfigScope, McpConnectionState, McpRegistry, McpServerConfig, McpServerMetadata};
-use platform_api::{IdeEndpointInfo, IdeHandle, IdeStatus, IdeTransport, McpTransportSpec};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use tokio::sync::{Mutex, RwLock};
 
 const IDE_SERVER_NAME: &str = "ide";
 
-/// Live desktop implementation of [`platform_api::IdeHandle`].
+/// Live desktop implementation of [`lingxi_core::host::IdeHandle`].
 pub struct DesktopIdeHandle {
     ide_dir: PathBuf,
     mcp_registry: Arc<McpRegistry>,
@@ -419,7 +419,7 @@ mod tests {
             spec: McpTransportSpec::InProcess {
                 registry_key: "user-static-ide".to_string(),
             },
-            scope: ConfigScope::Settings(protocol::SettingsScope::User),
+            scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             disabled: false,
             discovery_cache: None,
             timeout_ms: None,
@@ -439,7 +439,7 @@ mod tests {
             .config();
         assert_eq!(
             config.scope,
-            ConfigScope::Settings(protocol::SettingsScope::User)
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User)
         );
         assert!(matches!(
             &config.spec,

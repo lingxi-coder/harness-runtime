@@ -2,15 +2,15 @@
 use std::sync::Arc;
 
 pub(crate) struct MobileForkResumeGate {
-    pub spawner: Arc<dyn platform_api::SubagentSpawner>,
+    pub spawner: Arc<dyn lingxi_core::host::SubagentSpawner>,
     pub commands: Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
 }
 
 #[async_trait::async_trait]
-impl platform_api::fork_resume_gate::ForkResumeGate for MobileForkResumeGate {
+impl lingxi_core::host::fork_resume_gate::ForkResumeGate for MobileForkResumeGate {
     async fn check_resume(
         &self,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         task_forked_skill_name: Option<&str>,
     ) -> Result<(), String> {
         let transcript = self

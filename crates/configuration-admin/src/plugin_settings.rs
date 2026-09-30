@@ -38,9 +38,9 @@ use crate::plugin_policy;
 /// `<cwd>/.lingxi/settings.json`; `local` = `<cwd>/.lingxi/settings.local.json`.
 /// (`managed` is a read-only enterprise scope and is not editable here — it is
 /// only a valid `--scope` for `plugin update`, handled separately. That refusal
-/// is why this stays [`protocol::WritableScope`] rather than a bare
-/// `protocol::Scope`.)
-pub use protocol::WritableScope;
+/// is why this stays [`lingxi_core::types::WritableScope`] rather than a bare
+/// `lingxi_core::types::Scope`.)
+pub use lingxi_core::types::WritableScope;
 
 /// The editable scopes, in auto-detect / `--all` search order.
 const EDITABLE: [WritableScope; 3] = [
@@ -53,7 +53,7 @@ const EDITABLE: [WritableScope; 3] = [
 /// marketplace command).
 /// Answers: which scope `plugin enable` auto-detects first.
 ///
-/// One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
+/// One of several orderings over these rungs; `lingxi_core::types::scope`'s module docs index them all and say which question each answers.
 pub const SCOPES: [WritableScope; 3] = EDITABLE;
 
 /// The scope's wire label (matches the `(scope: …)` success suffix).

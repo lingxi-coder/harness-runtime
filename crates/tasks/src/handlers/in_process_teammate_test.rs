@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 
-use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-use platform_api::RuntimeSpawner;
+use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use lingxi_core::host::RuntimeSpawner;
 use test_harness::mocks::MockRuntimeSpawner;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -95,7 +95,7 @@ impl FileSystem for InMemoryFs {
 /// terminates and the persistent runner parks for the next message. An
 /// `Err` entry surfaces as an API error (driving the runner to `Failed`).
 struct ScriptedApiClient {
-    responses: StdMutex<VecDeque<Result<llm_runtime::LlmResponse, String>>>,
+    responses: StdMutex<VecDeque<Result<llm_runtime::HistoryResponse, String>>>,
     calls: AtomicUsize,
 }
 
@@ -105,7 +105,7 @@ struct GatedApiClient {
     calls: AtomicUsize,
     first_started: tokio::sync::Semaphore,
     release_first: tokio::sync::Semaphore,
-    histories: StdMutex<Vec<Vec<protocol::ConversationMessage>>>,
+    histories: StdMutex<Vec<Vec<lingxi_core::types::ConversationMessage>>>,
 }
 
 impl GatedApiClient {
@@ -125,9 +125,9 @@ impl SubagentApiClient for GatedApiClient {
         &self,
         _model: &str,
         _system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         self.histories.lock().unwrap().push(messages);
         if call == 0 {
@@ -167,9 +167,9 @@ impl SubagentApiClient for ScriptedApiClient {
         &self,
         _model: &str,
         _system: Option<&str>,
-        _messages: Vec<protocol::ConversationMessage>,
+        _messages: Vec<lingxi_core::types::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let next = self.responses.lock().unwrap().pop_front();
         match next {
@@ -180,8 +180,8 @@ impl SubagentApiClient for ScriptedApiClient {
     }
 }
 
-fn text_response(text: &str) -> llm_runtime::LlmResponse {
-    llm_runtime::LlmResponse {
+fn text_response(text: &str) -> llm_runtime::HistoryResponse {
+    llm_runtime::HistoryResponse {
         id: "mock".into(),
         model: "mock".into(),
         content: vec![llm_runtime::ContentBlock::Text {
@@ -190,7 +190,7 @@ fn text_response(text: &str) -> llm_runtime::LlmResponse {
         }],
         stop_reason: Some("end_turn".into()),
         stop_details: None,
-        usage: llm_runtime::Usage::default(),
+        usage: llm_runtime::ExecutionUsage::default(),
         cost: None,
         provider_metadata: serde_json::Value::Null,
     }
@@ -448,7 +448,7 @@ impl TeammateSystemPromptRenderer for StaticSystemPromptRenderer {
 struct TaggedDiagnosticsSource(usize);
 
 #[async_trait]
-impl platform_api::NewDiagnosticsSource for TaggedDiagnosticsSource {
+impl lingxi_core::host::NewDiagnosticsSource for TaggedDiagnosticsSource {
     async fn take_new_diagnostics_block(&self) -> Option<String> {
         Some(format!("diagnostics-cursor-{}", self.0))
     }
@@ -461,20 +461,21 @@ async fn build_context_creates_an_independent_diagnostics_source_per_teammate() 
     let handler =
         model_test_handler(None).with_new_diagnostics_source_factory(Arc::new(move || {
             let cursor = factory_counter.fetch_add(1, Ordering::SeqCst) + 1;
-            Arc::new(TaggedDiagnosticsSource(cursor)) as Arc<dyn platform_api::NewDiagnosticsSource>
+            Arc::new(TaggedDiagnosticsSource(cursor))
+                as Arc<dyn lingxi_core::host::NewDiagnosticsSource>
         }));
 
     let first_definition = DefaultTeammateDefinition
-        .resolve(&protocol::AgentId::new(), "first")
+        .resolve(&lingxi_core::types::AgentId::new(), "first")
         .await
         .unwrap();
     let second_definition = DefaultTeammateDefinition
-        .resolve(&protocol::AgentId::new(), "second")
+        .resolve(&lingxi_core::types::AgentId::new(), "second")
         .await
         .unwrap();
     let first = handler
         .build_context(
-            protocol::AgentId::new(),
+            lingxi_core::types::AgentId::new(),
             "first",
             "team",
             "task one",
@@ -484,7 +485,7 @@ async fn build_context_creates_an_independent_diagnostics_source_per_teammate() 
         .unwrap();
     let second = handler
         .build_context(
-            protocol::AgentId::new(),
+            lingxi_core::types::AgentId::new(),
             "second",
             "team",
             "task two",
@@ -513,13 +514,19 @@ async fn build_context_renders_default_addendum_then_custom_prompt() {
         StaticSystemPromptRenderer("BASE DEFAULT PROMPT\n"),
     ));
     let mut def = DefaultTeammateDefinition
-        .resolve(&protocol::AgentId::new(), "lead")
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
         .await
         .unwrap();
     def.system_prompt = Some("CUSTOM AGENT PROMPT".to_string());
 
     let ctx = handler
-        .build_context(protocol::AgentId::new(), "lead", "alpha", "task", def)
+        .build_context(
+            lingxi_core::types::AgentId::new(),
+            "lead",
+            "alpha",
+            "task",
+            def,
+        )
         .await
         .unwrap();
     let expected = format!(
@@ -535,11 +542,17 @@ async fn build_context_renders_default_addendum_then_custom_prompt() {
 async fn build_context_carries_owning_session_interactivity() {
     let handler = model_test_handler(None).with_session_interactive(false);
     let def = DefaultTeammateDefinition
-        .resolve(&protocol::AgentId::new(), "lead")
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
         .await
         .unwrap();
     let ctx = handler
-        .build_context(protocol::AgentId::new(), "lead", "alpha", "task", def)
+        .build_context(
+            lingxi_core::types::AgentId::new(),
+            "lead",
+            "alpha",
+            "task",
+            def,
+        )
         .await
         .unwrap();
 
@@ -555,12 +568,12 @@ async fn build_context_resolves_inherit_to_default_model() {
     // the same `resolve_agent_model` seam as the spawner).
     let handler = model_test_handler(Some("claude-opus-4-7"));
     let def = DefaultTeammateDefinition
-        .resolve(&protocol::AgentId::new(), "lead")
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
         .await
         .unwrap();
     let ctx = handler
         .build_context(
-            protocol::AgentId::new(),
+            lingxi_core::types::AgentId::new(),
             "lead",
             "alpha",
             "go research",
@@ -591,8 +604,11 @@ async fn build_context_resolves_inherit_to_default_model() {
 async fn build_context_wires_budget_description_and_tool_resolution() {
     struct DummyBudget;
     #[async_trait]
-    impl platform_api::budget::BudgetEnforcerHandle for DummyBudget {
-        async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::budget::BudgetError> {
+    impl lingxi_core::host::budget::BudgetEnforcerHandle for DummyBudget {
+        async fn check_and_charge(
+            &self,
+            _: u64,
+        ) -> Result<(), lingxi_core::host::budget::BudgetError> {
             Ok(())
         }
         async fn snapshot_total_nano_usd(&self) -> u64 {
@@ -606,12 +622,12 @@ async fn build_context_wires_budget_description_and_tool_resolution() {
         // `resolve_subagent_tools` tests (shared code path).
         .with_tool_registry(Arc::new(agent::ToolRegistry::new()));
     let def = DefaultTeammateDefinition
-        .resolve(&protocol::AgentId::new(), "lead")
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
         .await
         .unwrap();
     let ctx = handler
         .build_context(
-            protocol::AgentId::new(),
+            lingxi_core::types::AgentId::new(),
             "lead",
             "alpha",
             "do the task",
@@ -640,11 +656,11 @@ async fn build_context_without_default_model_leaves_model_raw() {
     // No default model wired → legacy behavior: Inherit is left untouched.
     let handler = model_test_handler(None);
     let def = DefaultTeammateDefinition
-        .resolve(&protocol::AgentId::new(), "lead")
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
         .await
         .unwrap();
     let ctx = handler
-        .build_context(protocol::AgentId::new(), "lead", "", "", def)
+        .build_context(lingxi_core::types::AgentId::new(), "lead", "", "", def)
         .await
         .expect("context should build");
     assert!(matches!(&ctx.agent_definition.model, AgentModel::Inherit));
@@ -685,11 +701,11 @@ async fn build_context_opusplan_plan_mode_resolves_inherit_to_opus() {
         .with_permission_mode(PermissionMode::Plan)
         .with_model_setting("opusplan");
     let def = DefaultTeammateDefinition
-        .resolve(&protocol::AgentId::new(), "lead")
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
         .await
         .unwrap();
     let ctx = handler
-        .build_context(protocol::AgentId::new(), "lead", "", "", def)
+        .build_context(lingxi_core::types::AgentId::new(), "lead", "", "", def)
         .await
         .expect("context should build");
     assert!(
@@ -715,11 +731,11 @@ async fn build_context_opusplan_default_mode_returns_resolved_parent() {
         .with_permission_mode(PermissionMode::Default)
         .with_model_setting("opusplan");
     let def = DefaultTeammateDefinition
-        .resolve(&protocol::AgentId::new(), "lead")
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
         .await
         .unwrap();
     let ctx = handler
-        .build_context(protocol::AgentId::new(), "lead", "", "", def)
+        .build_context(lingxi_core::types::AgentId::new(), "lead", "", "", def)
         .await
         .expect("context should build");
     assert!(
@@ -803,7 +819,7 @@ async fn explicit_activation_prevents_provider_and_status_work_before_commit() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: String::new(),
                 description: "work".into(),
@@ -845,7 +861,7 @@ async fn spawn_send_message_then_kill_lifecycle() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
                 description: String::new(),
@@ -941,7 +957,7 @@ async fn failed_turn_set_spools_failed_and_reports_terminal() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
                 description: String::new(),
@@ -982,7 +998,7 @@ async fn failed_turn_set_reports_error_reason_through_set_failed() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
                 description: String::new(),
@@ -1016,7 +1032,7 @@ async fn send_message_after_runner_terminated_is_not_found() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
                 description: String::new(),
@@ -1127,13 +1143,13 @@ async fn completed_turn_set_fires_teammate_idle_hook() {
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
-                spawn_request: Some(platform_api::subagent_spawn::SubagentSpawnRequest {
-                    origin_session_id: Some(protocol::SessionId::nil()),
+                spawn_request: Some(lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
+                    origin_session_id: Some(lingxi_core::types::SessionId::nil()),
                     mode: Some("plan".into()),
                     ..Default::default()
                 }),
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
                 description: String::new(),
@@ -1150,7 +1166,7 @@ async fn completed_turn_set_fires_teammate_idle_hook() {
     await_spool(&fs, &spool_str, |b| b.contains("answer one")).await;
     let fires = await_fires(&firer, 1).await;
     assert_eq!(fires.len(), 1, "one idle fire after turn-set 1: {fires:?}");
-    assert_eq!(fires[0].session_id, protocol::SessionId::nil());
+    assert_eq!(fires[0].session_id, lingxi_core::types::SessionId::nil());
     assert_eq!(fires[0].permission_mode, "plan");
     assert_eq!(fires[0].teammate_name, "buddy", "carries the teammate name");
     assert_eq!(
@@ -1187,7 +1203,7 @@ async fn no_idle_firer_is_a_noop() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "alpha".into(),
                 description: String::new(),
@@ -1239,7 +1255,7 @@ async fn blocking_idle_hook_feedback_drives_one_follow_up_turn() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: String::new(),
                 description: String::new(),
@@ -1290,7 +1306,7 @@ async fn idle_hook_prevent_continuation_terminates_the_teammate() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: String::new(),
                 description: String::new(),
@@ -1332,7 +1348,7 @@ async fn hook_follow_up_injection_failure_cleans_status_entry_and_pool_slot() {
     )
     .with_status_sink(sink.clone())
     .with_teammate_idle_firer(firer.clone());
-    let agent_id = protocol::AgentId::new();
+    let agent_id = lingxi_core::types::AgentId::new();
     let handle = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
@@ -1405,7 +1421,7 @@ async fn explicit_kill_during_idle_hook_is_not_overwritten_by_late_feedback() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: String::new(),
                 description: "work".into(),
@@ -1454,7 +1470,7 @@ async fn message_received_while_busy_waits_for_the_idle_poll() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: String::new(),
                 description: "initial".into(),
@@ -1512,7 +1528,7 @@ async fn message_received_while_busy_waits_for_the_idle_poll() {
 #[test]
 fn idle_fire_payload_shape() {
     let fire = hooks::TeammateIdleFire {
-        session_id: protocol::SessionId::nil(),
+        session_id: lingxi_core::types::SessionId::nil(),
         permission_mode: "default".into(),
         teammate_name: "buddy".into(),
         team_name: "alpha".into(),
@@ -1695,7 +1711,7 @@ async fn spawn_auto_claims_next_available_task() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: team.into(),
                 description: "seeded description".into(),
@@ -1750,7 +1766,7 @@ async fn pool_allocation_failure_rolls_back_startup_claim() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: team.into(),
                 description: "work".into(),
@@ -1795,7 +1811,7 @@ async fn spawn_auto_claims_next_available_task_from_injected_config_home() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: team.into(),
                 description: "seeded description".into(),
@@ -1841,7 +1857,7 @@ async fn idle_poll_claims_late_task_and_drives_next_turn_set() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: team.into(),
                 description: String::new(),
@@ -1904,7 +1920,7 @@ async fn killed_teammate_stops_claiming() {
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: team.into(),
                 description: String::new(),
@@ -1940,12 +1956,12 @@ async fn build_context_keeps_session_transcript_storage() {
     let directory = PathBuf::from("/session/subagents");
     let handler = model_test_handler(None).with_transcript(fs.clone(), directory.clone());
     let def = DefaultTeammateDefinition
-        .resolve(&protocol::AgentId::new(), "worker")
+        .resolve(&lingxi_core::types::AgentId::new(), "worker")
         .await
         .unwrap();
     let context = handler
         .build_context(
-            protocol::AgentId::new(),
+            lingxi_core::types::AgentId::new(),
             "worker",
             "session-12345678",
             "work",
@@ -1961,12 +1977,12 @@ async fn build_context_keeps_session_transcript_storage() {
 async fn assigned_teammate_color_reaches_actual_agent_context() {
     let handler = model_test_handler(None);
     let def = DefaultTeammateDefinition
-        .resolve(&protocol::AgentId::new(), "worker")
+        .resolve(&lingxi_core::types::AgentId::new(), "worker")
         .await
         .unwrap();
     let mut context = handler
         .build_context(
-            protocol::AgentId::new(),
+            lingxi_core::types::AgentId::new(),
             "worker",
             "session-12345678",
             "work",
@@ -1976,7 +1992,7 @@ async fn assigned_teammate_color_reaches_actual_agent_context() {
         .unwrap();
     apply_spawn_context(
         &mut context,
-        platform_api::SubagentSpawnRequest {
+        lingxi_core::host::SubagentSpawnRequest {
             teammate_color: Some("blue".into()),
             ..Default::default()
         },
@@ -1989,18 +2005,18 @@ struct PlanReviewTransport {
     modes: StdMutex<Vec<String>>,
 }
 #[async_trait]
-impl platform_api::ToolInvoker for PlanReviewTransport {
+impl lingxi_core::host::ToolInvoker for PlanReviewTransport {
     async fn invoke(
         &self,
         name: &str,
         _input: serde_json::Value,
-        ctx: platform_api::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         let mode = ctx.mode_override.unwrap_or_default();
         self.modes.lock().unwrap().push(mode.clone());
         assert_eq!(ctx.frozen_command_denies, vec!["Bash(rm)"]);
         if name == "Write" && mode == "plan" {
-            return Err(platform_api::tool_invoker::ToolInvokerError::Abort(
+            return Err(lingxi_core::host::tool_invoker::ToolInvokerError::Abort(
                 "plan mode disallows mutation".into(),
             ));
         }
@@ -2011,29 +2027,30 @@ impl platform_api::ToolInvoker for PlanReviewTransport {
     }
 }
 #[async_trait]
-impl platform_api::mailbox::MailboxRouterHandle for PlanReviewTransport {
+impl lingxi_core::host::mailbox::MailboxRouterHandle for PlanReviewTransport {
     async fn route(
         &self,
         from: &str,
         to: &str,
-        message: platform_api::mailbox::MailboxMessage,
-    ) -> Result<platform_api::mailbox::RouteAck, platform_api::mailbox::MailboxError> {
+        message: lingxi_core::host::mailbox::MailboxMessage,
+    ) -> Result<lingxi_core::host::mailbox::RouteAck, lingxi_core::host::mailbox::MailboxError>
+    {
         assert_eq!(from, "planner");
         assert_eq!(to, "team-lead");
         self.requests
             .lock()
             .unwrap()
             .push(serde_json::from_str(&message.content).unwrap());
-        Ok(platform_api::mailbox::RouteAck {
+        Ok(lingxi_core::host::mailbox::RouteAck {
             claimed_at: std::time::SystemTime::now(),
             claim_window_secs: 30,
         })
     }
 }
-fn plan_invocation() -> platform_api::tool_invoker::SubagentInvocationContext {
-    platform_api::tool_invoker::SubagentInvocationContext {
+fn plan_invocation() -> lingxi_core::host::tool_invoker::SubagentInvocationContext {
+    lingxi_core::host::tool_invoker::SubagentInvocationContext {
         permission_pause_observer: None,
-        tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+        tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
         parent_agent_id: None,
         origin_session_id: None,
         agent_name: Some("planner".into()),
@@ -2055,7 +2072,7 @@ fn plan_invocation() -> platform_api::tool_invoker::SubagentInvocationContext {
 }
 #[tokio::test]
 async fn lead_review_rejection_keeps_plan_then_approval_changes_next_tool_permission() {
-    use platform_api::{
+    use lingxi_core::host::{
         teammate_plan::{PlanApprovalResponse, TeammatePlanRequester},
         ToolInvoker,
     };
@@ -2137,7 +2154,7 @@ async fn lead_review_rejection_keeps_plan_then_approval_changes_next_tool_permis
 }
 #[tokio::test]
 async fn mismatched_plan_review_never_elevates_permission() {
-    use platform_api::{
+    use lingxi_core::host::{
         teammate_plan::{PlanApprovalResponse, TeammatePlanRequester},
         ToolInvoker,
     };
@@ -2175,9 +2192,9 @@ async fn mismatched_plan_review_never_elevates_permission() {
 
 struct PlanModeAvailability(bool);
 #[async_trait]
-impl platform_api::PermissionGate for PlanModeAvailability {
-    async fn check(&self, _: &str, _: &serde_json::Value) -> platform_api::PermissionDecision {
-        platform_api::PermissionDecision::Allow
+impl lingxi_core::host::PermissionGate for PlanModeAvailability {
+    async fn check(&self, _: &str, _: &serde_json::Value) -> lingxi_core::host::PermissionDecision {
+        lingxi_core::host::PermissionDecision::Allow
     }
     fn can_request_auto_mode(&self) -> bool {
         self.0
@@ -2188,7 +2205,7 @@ impl platform_api::PermissionGate for PlanModeAvailability {
 }
 #[tokio::test]
 async fn approved_modes_use_live_host_availability() {
-    use platform_api::{
+    use lingxi_core::host::{
         teammate_plan::{PlanApprovalResponse, TeammatePlanRequester},
         ToolInvoker,
     };
@@ -2246,7 +2263,7 @@ async fn typed_plan_verdict_waits_for_idle_then_resumes_with_approval_prose() {
         .with_status_sink(sink.clone())
         .with_tool_invoker(transport.clone())
         .with_plan_approval_mailbox(transport);
-    let agent_id = protocol::AgentId::new();
+    let agent_id = lingxi_core::types::AgentId::new();
     let context = ctx(fs.clone(), rt);
     let handle = handler
         .spawn(
@@ -2256,7 +2273,7 @@ async fn typed_plan_verdict_waits_for_idle_then_resumes_with_approval_prose() {
                 team_name: "team".into(),
                 description: "make a plan".into(),
                 inheritance: None,
-                spawn_request: Some(platform_api::SubagentSpawnRequest {
+                spawn_request: Some(lingxi_core::host::SubagentSpawnRequest {
                     mode: Some("plan".into()),
                     ..Default::default()
                 }),
@@ -2266,7 +2283,7 @@ async fn typed_plan_verdict_waits_for_idle_then_resumes_with_approval_prose() {
         .await
         .unwrap();
     api.first_started.acquire().await.unwrap().forget();
-    let requester = platform_api::teammate_plan::requester(&agent_id).unwrap();
+    let requester = lingxi_core::host::teammate_plan::requester(&agent_id).unwrap();
     let submitted = requester
         .submit(serde_json::json!({"plan":"Scoped proposal"}))
         .await
@@ -2274,7 +2291,7 @@ async fn typed_plan_verdict_waits_for_idle_then_resumes_with_approval_prose() {
     handler
         .apply_plan_approval(
             &handle.task_id,
-            platform_api::teammate_plan::PlanApprovalResponse {
+            lingxi_core::host::teammate_plan::PlanApprovalResponse {
                 request_id: submitted["requestId"].as_str().unwrap().into(),
                 approved: true,
                 feedback: None,
@@ -2321,15 +2338,15 @@ async fn teammate_plan_file_comes_from_the_published_identity() {
         .with_tool_invoker(transport.clone())
         .with_plan_approval_mailbox(transport)
         .with_plan_files(Arc::new(
-            platform_api::plan_files::PlanFileMatcher::with_identity(
-                platform_api::plan_files::PlanFileIdentity {
+            lingxi_core::host::plan_files::PlanFileMatcher::with_identity(
+                lingxi_core::host::plan_files::PlanFileIdentity {
                     plans_dir: plans_dir.clone(),
                     slug: "brave-quiet-otter".into(),
                     workshop_enabled: false,
                 },
             ),
         ));
-    let agent_id = protocol::AgentId::new();
+    let agent_id = lingxi_core::types::AgentId::new();
     let context = ctx(fs.clone(), rt);
     let handle = handler
         .spawn(
@@ -2339,7 +2356,7 @@ async fn teammate_plan_file_comes_from_the_published_identity() {
                 team_name: "team".into(),
                 description: "make a plan".into(),
                 inheritance: None,
-                spawn_request: Some(platform_api::SubagentSpawnRequest {
+                spawn_request: Some(lingxi_core::host::SubagentSpawnRequest {
                     mode: Some("plan".into()),
                     ..Default::default()
                 }),
@@ -2349,7 +2366,7 @@ async fn teammate_plan_file_comes_from_the_published_identity() {
         .await
         .unwrap();
     api.first_started.acquire().await.unwrap().forget();
-    let requester = platform_api::teammate_plan::requester(&agent_id).unwrap();
+    let requester = lingxi_core::host::teammate_plan::requester(&agent_id).unwrap();
     let expected = plans_dir.join(format!("brave-quiet-otter-agent-{}.md", agent_id.as_uuid()));
     assert_eq!(
         requester.writable_plan_path(),

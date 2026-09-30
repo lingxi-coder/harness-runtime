@@ -1,17 +1,17 @@
 use super::tool_results::persist_keep_recent_clears;
 use crate::conversation::ConversationOrchestrator;
 use crate::error::OrchestratorError;
-use llm_runtime::{LlmError, LlmResponse};
-use protocol::ConversationMessage;
+use lingxi_core::types::ConversationMessage;
+use llm_runtime::{HistoryResponse, LlmError};
 use std::sync::Arc;
 
 /// Outcome of [`call_api_with_ptl_recovery`]: either a successful
-/// `LlmResponse`, or a signal that the prompt-too-long reactive recovery
+/// `HistoryResponse`, or a signal that the prompt-too-long reactive recovery
 /// (Batch 5) was exhausted and the turn should end with the byte-exact
 /// [`PROMPT_TOO_LONG_ERROR_MESSAGE`].
 pub(crate) enum PtlCallOutcome {
     /// The API call (or a retry after truncation/compaction) succeeded.
-    Response(Box<LlmResponse>),
+    Response(Box<HistoryResponse>),
     /// The PTL retry budget + reactive-compact fallback were all exhausted.
     /// End the turn with terminal reason `"prompt_too_long"` (the REACTIVE
     /// exhaustion path, `query.ts:1175`).
@@ -130,12 +130,14 @@ pub(crate) async fn call_api_with_ptl_recovery(
         compaction::is_compact_warning_suppressed(),
         None,
     )
-    .map(|b| platform_api::ContextPressureBanner {
+    .map(|b| lingxi_core::host::ContextPressureBanner {
         text: b.text,
         level: match b.color {
-            compaction::TokenWarningColor::Dim => platform_api::ContextPressureLevel::Dim,
-            compaction::TokenWarningColor::Warning => platform_api::ContextPressureLevel::Warning,
-            compaction::TokenWarningColor::Error => platform_api::ContextPressureLevel::Error,
+            compaction::TokenWarningColor::Dim => lingxi_core::host::ContextPressureLevel::Dim,
+            compaction::TokenWarningColor::Warning => {
+                lingxi_core::host::ContextPressureLevel::Warning
+            }
+            compaction::TokenWarningColor::Error => lingxi_core::host::ContextPressureLevel::Error,
         },
     });
     // Context usage as a 0-1 fraction of the model's effective context window
@@ -406,7 +408,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
     if let Some(compactor) = orch.compaction_runtime.compaction.clone() {
         let snapshot = orch.session.lock().await.model_context_history();
         let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
-        let bytes_before: u64 = snapshot.iter().map(protocol::text_byte_size).sum();
+        let bytes_before: u64 = snapshot
+            .iter()
+            .map(lingxi_core::types::text_byte_size)
+            .sum();
         // Capture the boundary's preTokens before the summary consumes the snapshot.
         let pre_tokens_estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
         // hooks compaction lifecycle: PreCompact fires before the reactive
@@ -595,7 +600,7 @@ pub(super) async fn reissue_after_model_fallback(
     original_model: &str,
     fallback_model: String,
     tools: Vec<serde_json::Value>,
-) -> Result<LlmResponse, LlmError> {
+) -> Result<HistoryResponse, LlmError> {
     // (i) Switch the working/session model to the fallback.
     {
         let mut s = orch.session.lock().await;

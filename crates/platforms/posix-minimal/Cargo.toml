@@ -7,8 +7,7 @@ license.workspace = true
 
 [dependencies]
 mobile-linux-api.workspace = true
-protocol = { path = "../../protocol" }
-platform-api = { path = "../../platform-api" }
+core = { path = "../../core" }
 http-client = { path = "../../http-client" }
 # `mcp` (+ its `jsonrpc` re-export via `RawConnectionProvider`) lets the stub
 # transport satisfy `mcp::RawConnectionProvider` so `engine-desktop` can build

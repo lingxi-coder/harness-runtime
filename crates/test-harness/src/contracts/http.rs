@@ -13,8 +13,8 @@
 //!   terminates rather than hanging forever.
 
 use futures::StreamExt;
-use platform_api::HttpTransport;
-use protocol::{HttpMethod, HttpRequest};
+use lingxi_core::host::HttpTransport;
+use lingxi_core::types::{HttpMethod, HttpRequest};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::time::Duration;

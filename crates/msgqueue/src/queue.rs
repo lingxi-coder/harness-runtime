@@ -25,7 +25,7 @@
 //!   [`tokio_util::sync::CancellationToken`] (twin of
 //!   `subscribeToCommandQueue` ⇒ `abortController.abort()` in print.ts).
 
-use protocol::{AgentId, HookId, ToolUseId};
+use lingxi_core::types::{AgentId, HookId, ToolUseId};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;

@@ -2,13 +2,13 @@
 //!
 //! The TUI intercepts this command and opens its interactive workflow picker.
 //! This handler is the shared registry/headless projection used by mobile and
-//! bridge clients: it reads the same [`platform_api::task_registry::TaskRegistryHandle`]
+//! bridge clients: it reads the same [`lingxi_core::host::task_registry::TaskRegistryHandle`]
 //! and renders the picker's snapshot as text.
 
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::task_registry::{TaskRegistryHandle, WorkflowRecord};
+use lingxi_core::host::task_registry::{TaskRegistryHandle, WorkflowRecord};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

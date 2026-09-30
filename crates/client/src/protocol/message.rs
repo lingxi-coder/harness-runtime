@@ -77,7 +77,7 @@ pub enum MessageBlockDto {
         /// The text body.
         text: String,
     },
-    /// Extended-thinking reasoning trace (mirrors `protocol::ContentBlock::Thinking`).
+    /// Extended-thinking reasoning trace (mirrors `lingxi_core::types::ContentBlock::Thinking`).
     Thinking {
         /// The reasoning text.
         thinking: String,

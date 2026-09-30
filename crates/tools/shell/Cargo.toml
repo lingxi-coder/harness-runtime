@@ -7,10 +7,9 @@ license.workspace = true
 
 [dependencies]
 mobile-linux-api.workspace = true
+core = { path = "../../core" }
 base64 = "0.22"
 tool-api = { path = "../../tool-api" }
-platform-api = { path = "../../platform-api" }
-protocol = { path = "../../protocol" }
 # Internal path dep (no new Cargo.lock package — `hooks`'s graph is already
 # pulled in transitively via `tool-api` → `engine`): names the `CwdChangedFirer`
 # seam BashTool fires after a `cd` (1:1 `onCwdChangedForHooks`, Shell.ts:409).

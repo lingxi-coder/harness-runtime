@@ -534,13 +534,13 @@ const DEFAULT_FILE_READ_MAX_OUTPUT_TOKENS: u64 = 25_000;
 /// `AOg` (`mcpOutputStorage`): `LINGXI_FILE_READ_MAX_OUTPUT_TOKENS` when it
 /// parses to a valid positive integer, else [`DEFAULT_FILE_READ_MAX_OUTPUT_TOKENS`].
 /// The value is parsed by claude-code's shared `hp` helper
-/// ([`platform_api::env::parse_int_env`]) — `if(e){let t=hp(e);if(!isNaN(t)&&t>0)return t}` —
+/// ([`lingxi_core::host::env::parse_int_env`]) — `if(e){let t=hp(e);if(!isNaN(t)&&t>0)return t}` —
 /// which since 2.1.211 accepts scientific notation and digit-group separators.
 /// The `tengu_amber_wren` Statsig config layer is unportable and omitted; its
 /// `{}` default selects the same constant, so this matches the runtime default.
 fn file_read_max_output_tokens() -> u64 {
     if let Ok(raw) = std::env::var("LINGXI_FILE_READ_MAX_OUTPUT_TOKENS") {
-        let t = platform_api::env::parse_int_env(&raw);
+        let t = lingxi_core::host::env::parse_int_env(&raw);
         if !t.is_nan() && t > 0.0 {
             return t as u64;
         }

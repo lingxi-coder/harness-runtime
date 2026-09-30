@@ -1,7 +1,7 @@
 //! End-to-end: build an `AnalyticsBus` with each sink in turn, emit a few
 //! representative events from each tengu category, assert the sink saw them.
 
-use protocol::Secret;
+use lingxi_core::types::Secret;
 use std::collections::HashMap;
 use std::sync::Arc;
 use telemetry::{

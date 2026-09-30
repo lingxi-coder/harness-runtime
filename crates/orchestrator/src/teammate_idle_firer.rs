@@ -129,7 +129,7 @@ mod tests {
         // Must not panic / hang.
         let outcome = firer
             .fire(TeammateIdleFire {
-                session_id: protocol::SessionId::nil(),
+                session_id: lingxi_core::types::SessionId::nil(),
                 permission_mode: "default".into(),
                 teammate_name: "buddy".into(),
                 team_name: "alpha".into(),

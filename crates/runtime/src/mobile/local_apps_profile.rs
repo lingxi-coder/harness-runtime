@@ -5,9 +5,10 @@ use crate::mobile::local_apps_llm::LocalAppsLlm;
 use async_trait::async_trait;
 use client::adapter::ClientEventSink;
 use client::protocol::events::ClientEvent;
+use lingxi_core::host::Clock;
 use local_apps::{AppError, AppEventFanout, AppService};
 use mobile_linux_api::MobileLinuxRuntime;
-use platform_api::Clock;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

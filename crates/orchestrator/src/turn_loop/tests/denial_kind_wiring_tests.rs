@@ -5,10 +5,10 @@ use crate::test_support::{
 use crate::turn_loop::dispatch_tool_uses_tracked;
 use crate::OrchestratorConfig;
 use async_trait::async_trait;
-use platform_api::permission_gate::{
+use lingxi_core::host::permission_gate::{
     PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
 };
-use protocol::ToolUseId;
+use lingxi_core::types::ToolUseId;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;

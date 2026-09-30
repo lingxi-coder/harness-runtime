@@ -1,8 +1,8 @@
 //! Native iTerm2 panes through the it2 CLI, matching Claude Code 2.1.263.
 
 use async_trait::async_trait;
-use platform_api::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
-use protocol::AgentId;
+use lingxi_core::host::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+use lingxi_core::types::AgentId;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -97,11 +97,11 @@ impl SwarmBackend for ITermSwarmBackend {
     async fn pane_metadata(
         &self,
         pane: &PaneId,
-    ) -> Result<platform_api::team_spawn::PaneLaunchMetadata, SwarmError> {
+    ) -> Result<lingxi_core::host::team_spawn::PaneLaunchMetadata, SwarmError> {
         // iTerm2 has no tmux session/window coordinates. These are the logical
         // swarm-view labels emitted by upstream spawnTeammate (pe).
         let inside_tmux = super::tmux::TmuxBackend::is_running_inside();
-        Ok(platform_api::team_spawn::PaneLaunchMetadata {
+        Ok(lingxi_core::host::team_spawn::PaneLaunchMetadata {
             backend_type: "iterm2".into(),
             session_name: if inside_tmux {
                 "current"

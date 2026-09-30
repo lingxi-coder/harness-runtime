@@ -12,7 +12,7 @@ license.workspace = true
 # registered directly in the engine-desktop / engine-mobile composition roots).
 
 [dependencies]
-core = { path = "../core", optional = true }
+core = { path = "../core" }
 schemars = { version = "0.8", optional = true }
 skill-api = { path = "../skill-api", optional = true }
 workflow = { path = "../workflow", optional = true }
@@ -23,8 +23,6 @@ cost = { path = "../cost", optional = true }
 indexmap = { version = "2", optional = true }
 regex = { version = "1", optional = true }
 branding.workspace = true
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
 # #39 UserPromptExpansion: the dispatcher fires the `UserPromptExpansion` hook
 # the moment it expands a markdown / MCP-prompt slash command (claude-code
 # `WFa`→`b$t`). `hooks` does NOT depend on `command-api` (it pulls protocol /
@@ -44,7 +42,6 @@ workspace = true
 [features]
 default = []
 builtin-handlers = [
-    "dep:core",
     "dep:schemars",
     "dep:skill-api",
     "dep:workflow",

@@ -35,7 +35,7 @@
 /// Restore the exact API counters after SessionResumed resets client state.
 #[must_use]
 pub fn lower_current_usage(
-    usage: platform_api::CurrentUsageSnapshot,
+    usage: lingxi_core::host::CurrentUsageSnapshot,
 ) -> crate::protocol::events::ClientEvent {
     crate::protocol::events::ClientEvent::UsageUpdate {
         is_snapshot: Some(true),
@@ -55,13 +55,13 @@ use crate::protocol::listings::{
     StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 
-use permission::PromptDefault;
-use platform_api::orchestrator::{
+use lingxi_core::host::orchestrator::{
     AgentInfo, CheckStatus, CostSnapshot, DoctorCheck, DoctorReport, DoctorSummary, HookInfo,
     McpServerInfo, McpStatus, SkillInfo, StatusSnapshot,
 };
-use platform_api::task_registry::{TaskOutputChunk, TaskRecord};
-use platform_api::team_registry::WorkerInfo;
+use lingxi_core::host::task_registry::{TaskOutputChunk, TaskRecord};
+use lingxi_core::host::team_registry::WorkerInfo;
+use permission::PromptDefault;
 use session::jsonl::loader::SessionMetadata;
 
 pub use crate::adapter::controls::lower_reasoning_control_spec;
@@ -355,7 +355,7 @@ pub fn lower_task_record(rec: &TaskRecord) -> TaskRowDto {
     }
 }
 
-/// Lower a `platform_api::team_registry::WorkerInfo` (the POD projection of the
+/// Lower a `lingxi_core::host::team_registry::WorkerInfo` (the POD projection of the
 /// coordinator's `WorkerAgent`) to a [`CoordinatorWorkerDto`] (T18).
 ///
 /// The mapping is 1:1 — `WorkerInfo` is already the simplified roster shape that

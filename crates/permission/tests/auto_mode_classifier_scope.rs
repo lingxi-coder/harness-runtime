@@ -8,6 +8,7 @@
 //! permission PROMPT, which is why Auto mode prompted on ordinary development
 //! commands. These tests pin the scope in both directions.
 
+use lingxi_core::host::{PermissionDecision, PermissionGate};
 use permission::classifier::{AutoModeClassifierVerdict, LoopPermissionClassifier};
 use permission::filesystem::FsRoots;
 use permission::policy::PermissionPolicy;
@@ -16,7 +17,6 @@ use permission::rule::{
     PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue,
 };
 use permission::PermissionMode;
-use platform_api::{PermissionDecision, PermissionGate};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -234,7 +234,7 @@ async fn explicit_rules_still_outrank_the_classifier() {
             rule_content: None,
         },
         behavior: PermissionBehavior::Deny,
-        source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
     };
     let prompt = Arc::new(Prompt(AtomicUsize::new(0)));
     let classifier = Arc::new(Recording {
@@ -280,7 +280,7 @@ fn allow_rule(tool: &str, content: Option<&str>) -> PermissionRule {
             rule_content: content.map(str::to_string),
         },
         behavior: PermissionBehavior::Allow,
-        source: PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
     }
 }
 

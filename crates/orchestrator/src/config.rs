@@ -204,7 +204,7 @@ pub struct OrchestratorConfig {
     /// fetch (`anthropic_oauth::fetch_profile_from_oauth_token` +
     /// `fetch_user_roles`) now runs as a background task in
     /// `harness_runtime::desktop::build` (llm-runtime future-work batch 4), filling the
-    /// shared `platform_api::subscription::SharedSubscription` slot, and the
+    /// shared `lingxi_core::host::subscription::SharedSubscription` slot, and the
     /// provider adapter reads that live slot at drive time via
     /// `effective_subscriber()` (batch 5) — so the 429/enterprise retry gate
     /// sees the resolved tier even though this static field stays `false` at
@@ -242,7 +242,7 @@ pub struct OrchestratorConfig {
     /// === "apiKeyHelper"`). `false` — the default — yields the /login copy,
     /// which is the right advice for a stored or OAuth credential.
     ///
-    /// Set from `llm_runtime::oauth::anthropic::AuthSource` at the composition
+    /// Set from `llm_runtime::auth::anthropic::AuthSource` at the composition
     /// root. Started life as a `bool`; widened because the org-disabled copy
     /// tells an env-var user and an `apiKeyHelper` user to unset DIFFERENT
     /// things, which a single flag cannot express.
@@ -290,7 +290,7 @@ pub struct OrchestratorConfig {
     /// `feature('TRANSCRIPT_CLASSIFIER')`, an ant-internal GrowthBook/Statsig
     /// flag that is OFF in every external build). It guards the auto-mode
     /// classifier's `PermissionDenied`-hook retry path: only when this is `true`
-    /// AND the deny came from a [`platform_api::permission_gate::PermissionDecisionSource::Classifier`]
+    /// AND the deny came from a [`lingxi_core::host::permission_gate::PermissionDecisionSource::Classifier`]
     /// source does the turn loop honour a `PermissionDenied` hook's
     /// `{retry: true}` by pushing the verbatim `isMeta` retry message
     /// (`toolExecution.ts:1075-1101`).
@@ -377,7 +377,7 @@ pub struct OrchestratorConfig {
     ///
     /// Runtime-only: never serialized with the rest of the config.
     #[serde(skip)]
-    pub plan_files: Option<std::sync::Arc<platform_api::plan_files::PlanFileMatcher>>,
+    pub plan_files: Option<std::sync::Arc<lingxi_core::host::plan_files::PlanFileMatcher>>,
 
     /// (2.1.212) The session's resolved reasoning-effort LEVEL string
     /// (`low`/`medium`/`high`/`xhigh`/`max`), sourced from CLI `--effort`

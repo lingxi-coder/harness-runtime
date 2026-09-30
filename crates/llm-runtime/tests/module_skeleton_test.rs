@@ -3,20 +3,20 @@
 
 #[test]
 fn refresh_module_exports_auth_state_and_driver() {
-    fn _accepts_state(_: &llm_runtime::oauth::anthropic::refresh::AuthState) {}
-    fn _accepts_driver(_: &llm_runtime::oauth::anthropic::refresh::RefreshDriver) {}
+    fn _accepts_state(_: &llm_runtime::auth::anthropic::refresh::AuthState) {}
+    fn _accepts_driver(_: &llm_runtime::auth::anthropic::refresh::RefreshDriver) {}
 }
 
 #[test]
-fn scope_upgrade_module_exports_parser() {
-    let _: Option<llm_runtime::oauth::anthropic::scope_upgrade::ScopeUpgradeRequired> =
-        llm_runtime::oauth::anthropic::scope_upgrade::parse_scope_upgrade("{}");
+fn scope_upgrade_uses_sdk_parser() {
+    let _: Option<lingxi_llm_client::auth::oauth::anthropic::ScopeUpgradeRequired> =
+        lingxi_llm_client::auth::oauth::anthropic::parse_scope_upgrade("{}");
 }
 
 #[test]
 fn config_default_uses_current_claude_code_endpoints() {
-    use llm_runtime::oauth::anthropic::config::CLAUDE_CODE_OAUTH_SCOPES;
-    use llm_runtime::oauth::anthropic::ClaudeAiOAuthConfig;
+    use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
+    use lingxi_llm_client::auth::oauth::anthropic::CLAUDE_CODE_OAUTH_SCOPES;
     let c = ClaudeAiOAuthConfig::default_with_port(0);
     assert_eq!(
         c.authorization_endpoint,
@@ -38,9 +38,9 @@ fn config_default_uses_current_claude_code_endpoints() {
 
 #[tokio::test]
 async fn auth_state_new_returns_arc() {
-    use llm_runtime::oauth::anthropic::refresh::AuthState;
-    use llm_runtime::oauth::anthropic::ClaudeAiOAuthConfig;
-    use protocol::Secret;
+    use lingxi_core::types::Secret;
+    use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
+    use llm_runtime::auth::anthropic::refresh::AuthState;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
@@ -59,9 +59,9 @@ async fn auth_state_new_returns_arc() {
 
 #[tokio::test]
 async fn refresh_driver_new_holds_state() {
-    use llm_runtime::oauth::anthropic::refresh::{AuthState, RefreshDriver};
-    use llm_runtime::oauth::anthropic::ClaudeAiOAuthConfig;
-    use protocol::Secret;
+    use lingxi_core::types::Secret;
+    use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
+    use llm_runtime::auth::anthropic::refresh::{AuthState, RefreshDriver};
     use std::time::{Duration, SystemTime};
 
     let cfg = ClaudeAiOAuthConfig::default_with_port(0);

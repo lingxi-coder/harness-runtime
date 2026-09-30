@@ -5,13 +5,14 @@
 //! locked at 108.
 
 use crate::parser::ParsedSlashCommand;
-use platform_api::{
-    normalize_dimensions, FusionModelRef, FusionOrigin, FusionPreset, FusionRequest,
-    DEFAULT_FUSION_DIMENSIONS, FUSION_MAX_PANEL, FUSION_MIN_PANEL, FUSION_SCHEMA_VERSION,
+use lingxi_core::host::{
+    normalize_dimensions, normalize_dimensions_for, validate_verify_commands, FusionModelRef,
+    FusionOrigin, FusionPanelMode, FusionPreset, FusionRequest, FUSION_MAX_PANEL, FUSION_MIN_PANEL,
+    FUSION_SCHEMA_VERSION,
 };
 
 /// Usage line for empty / invalid invocations.
-pub const FUSION_SLASH_USAGE: &str = "Usage: /fusion [--quality|--fast] [--same-provider|--cross-provider] [--models profile:model,...] [--dimensions dim,...] [--partial-ok|--no-partial] [--max-panel N] PROMPT\n   or: /fusion setup\n   or: /fusion --retry-publication fu_RUN_ID";
+pub const FUSION_SLASH_USAGE: &str = "Usage: /fusion [--quality|--fast] [--same-provider|--cross-provider] [--models profile:model,...] [--dimensions dim,...] [--partial-ok|--no-partial] [--max-panel N] [--verify-claims] [--implement [--verify \"COMMAND\"]...] PROMPT\n   or: /fusion setup\n   or: /fusion clean\n   or: /fusion --retry-publication fu_RUN_ID";
 
 /// Parsed `/fusion` flags plus the remaining prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,16 @@ pub struct FusionSlashArgs {
     pub partial_ok: Option<bool>,
     /// Panel cap override.
     pub max_panel: Option<u8>,
+    /// `--implement`: the panels change the code in their own worktrees
+    /// instead of answering read-only.
+    pub implement: bool,
+    /// Verification commands typed with `--verify`, in order. They replace
+    /// `fusion.implement.verifyCommands` for this run and only exist together
+    /// with `--implement`.
+    pub verify_commands: Vec<String>,
+    /// `--verify-claims`: the analyst checks the panels' claims with read-only
+    /// tools for this run. Analysis runs only.
+    pub verify_claims: bool,
     /// Non-empty task prompt.
     pub prompt: String,
 }
@@ -44,6 +55,9 @@ struct FusionFlagAccum {
     models: Option<Vec<FusionModelRef>>,
     dimensions: Option<Vec<String>>,
     max_panel: Option<u8>,
+    implement: bool,
+    verify_commands: Vec<String>,
+    verify_claims: bool,
 }
 
 /// Outcome of consuming one token in the `/fusion` flag loop.
@@ -157,6 +171,37 @@ fn consume_fusion_flag(
                 next_cursor: advance_past_token(raw, next_cursor, value),
             })
         }
+        "--verify-claims" => {
+            if acc.verify_claims {
+                return Err("--verify-claims specified more than once".into());
+            }
+            acc.verify_claims = true;
+            Ok(consumed_one(cursor))
+        }
+        "--implement" => {
+            if acc.implement {
+                return Err("--implement specified more than once".into());
+            }
+            acc.implement = true;
+            Ok(consumed_one(cursor))
+        }
+        flag if flag.starts_with("--verify=") => {
+            acc.verify_commands
+                .push(flag["--verify=".len()..].to_string());
+            Ok(consumed_one(cursor))
+        }
+        "--verify" => {
+            let next_cursor = advance_past_token(raw, cursor, tok);
+            let value = tokens
+                .get(i + 1)
+                .filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| "--verify requires a quoted command".to_string())?;
+            acc.verify_commands.push(value.clone());
+            Ok(FlagStep::Consumed {
+                next_i: i + 2,
+                next_cursor: advance_past_token(raw, next_cursor, value),
+            })
+        }
         flag if flag.starts_with("--") => {
             Err(format!("unknown flag `{flag}`\n{FUSION_SLASH_USAGE}"))
         }
@@ -198,6 +243,22 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
     if prompt.is_empty() {
         return Err(FUSION_SLASH_USAGE.to_string());
     }
+    if !acc.verify_commands.is_empty() && !acc.implement {
+        return Err("--verify requires --implement".into());
+    }
+    if acc.verify_claims && acc.implement {
+        return Err(
+            "--verify-claims applies to analysis runs; an implement run's evidence is the patches and the verification commands"
+                .into(),
+        );
+    }
+    let mode = if acc.implement {
+        FusionPanelMode::Implement
+    } else {
+        FusionPanelMode::Analysis
+    };
+    let verify_commands =
+        validate_verify_commands(mode, acc.verify_commands).map_err(|error| error.to_string())?;
     Ok(FusionSlashArgs {
         preset: acc.preset,
         cross_provider: acc.cross_provider,
@@ -205,6 +266,9 @@ pub fn parse_fusion_slash(args: &ParsedSlashCommand) -> Result<FusionSlashArgs, 
         dimensions: acc.dimensions,
         partial_ok: acc.partial_ok,
         max_panel: acc.max_panel,
+        implement: acc.implement,
+        verify_commands,
+        verify_claims: acc.verify_claims,
         prompt,
     })
 }
@@ -312,13 +376,17 @@ pub fn fusion_request_from_slash(
     default_preset: FusionPreset,
     default_partial_ok: bool,
 ) -> FusionRequest {
+    let mode = if parsed.implement {
+        FusionPanelMode::Implement
+    } else {
+        FusionPanelMode::Analysis
+    };
     let dimensions = parsed.dimensions.unwrap_or_else(|| {
-        DEFAULT_FUSION_DIMENSIONS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect()
+        // An empty list normalizes to the mode's own defaults.
+        normalize_dimensions_for(mode, Vec::new()).unwrap_or_default()
     });
     FusionRequest {
+        verify_claims: parsed.verify_claims,
         schema_version: FUSION_SCHEMA_VERSION,
         origin: FusionOrigin::Slash,
         prompt: parsed.prompt,
@@ -332,7 +400,8 @@ pub fn fusion_request_from_slash(
             .unwrap_or(slash_cross_provider_default),
         parent_profile,
         parent_model,
-        workflow_run_id: None,
+        mode,
+        verify_commands: parsed.verify_commands,
     }
 }
 
@@ -388,14 +457,15 @@ fn parse_csv(raw: &str, flag: &str) -> Result<Vec<String>, String> {
 }
 
 /// Splits `raw` on commas, then parses each entry through the single
-/// `platform_api::parse_fusion_model_ref` the Agent tool and workflow
-/// `fusion()`'s preset parsing also route through, so a malformed entry (e.g.
-/// `openai:` — a colon with an empty model) is rejected identically from
-/// every entrypoint.
+/// `lingxi_core::host::parse_fusion_model_ref` the Agent tool also routes through,
+/// so a malformed entry (e.g. `openai:` — a colon with an empty model) is
+/// rejected identically from every entrypoint.
 fn parse_models(raw: &str) -> Result<Vec<FusionModelRef>, String> {
     let mut out = Vec::new();
     for item in parse_csv(raw, "--models")? {
-        out.push(platform_api::parse_fusion_model_ref(&item).map_err(|error| error.to_string())?);
+        out.push(
+            lingxi_core::host::parse_fusion_model_ref(&item).map_err(|error| error.to_string())?,
+        );
     }
     if out.len() < usize::from(FUSION_MIN_PANEL) {
         return Err("explicit --models must contain at least 2 entries".into());
@@ -507,7 +577,7 @@ mod tests {
 
     #[test]
     fn a_colon_with_an_empty_model_is_rejected_with_the_same_message_as_the_agent_tool() {
-        // `platform_api::parse_fusion_model_ref` is the single implementation
+        // `lingxi_core::host::parse_fusion_model_ref` is the single implementation
         // both `/fusion` and the Agent tool (`tools/agent/src/agent.rs`'s
         // `parse_fusion_models`) route a `--models`/`models[]` entry through,
         // so an invalid entry rejects identically from either entrypoint.
@@ -672,5 +742,99 @@ mod tests {
         assert_eq!(args.prompt, "review the plan");
         assert_eq!(args.preset, Some(FusionPreset::Fast));
         assert_eq!(args.max_panel, Some(4));
+    }
+
+    #[test]
+    fn implement_and_verify_flags_are_parsed_and_the_prompt_is_recovered() {
+        let args = parse(
+            "/fusion --implement --verify \"cargo check --locked\" --verify 'cargo test -p foo && echo ok' fix the flaky retry",
+        )
+        .unwrap();
+        assert!(args.implement);
+        assert_eq!(
+            args.verify_commands,
+            vec![
+                "cargo check --locked".to_string(),
+                "cargo test -p foo && echo ok".to_string()
+            ]
+        );
+        assert_eq!(args.prompt, "fix the flaky retry");
+
+        let equals = parse("/fusion --implement --verify=\"cargo check\" do it").unwrap();
+        assert_eq!(equals.verify_commands, vec!["cargo check".to_string()]);
+        assert_eq!(equals.prompt, "do it");
+
+        let plain = parse("/fusion --implement refactor the parser").unwrap();
+        assert!(plain.implement);
+        assert!(plain.verify_commands.is_empty());
+        assert_eq!(plain.prompt, "refactor the parser");
+        assert!(!parse("/fusion review this").unwrap().implement);
+    }
+
+    #[test]
+    fn verify_claims_is_an_analysis_flag_that_reaches_the_request() {
+        let args = parse("/fusion --verify-claims review the retry logic").unwrap();
+        assert!(args.verify_claims);
+        assert_eq!(args.prompt, "review the retry logic");
+        assert!(!parse("/fusion review it").unwrap().verify_claims);
+        let request = fusion_request_from_slash(
+            args,
+            "anthropic".into(),
+            "claude-sonnet-5".into(),
+            true,
+            FusionPreset::Fast,
+            true,
+        );
+        assert!(request.verify_claims);
+        let err = parse("/fusion --verify-claims --implement do it").unwrap_err();
+        assert!(err.contains("analysis runs"), "{err}");
+        let err = parse("/fusion --verify-claims --verify-claims review").unwrap_err();
+        assert!(err.contains("more than once"), "{err}");
+    }
+
+    #[test]
+    fn verify_needs_implement_and_a_command() {
+        let err = parse("/fusion --verify \"cargo check\" review").unwrap_err();
+        assert!(err.contains("--verify requires --implement"), "{err}");
+        let err = parse("/fusion --implement --verify").unwrap_err();
+        assert!(err.contains("--verify requires a quoted command"), "{err}");
+        let err = parse("/fusion --implement --verify --quality review").unwrap_err();
+        assert!(err.contains("--verify requires a quoted command"), "{err}");
+        let err = parse("/fusion --implement --implement review").unwrap_err();
+        assert!(err.contains("specified more than once"), "{err}");
+    }
+
+    #[test]
+    fn implement_requests_carry_the_commands_and_default_to_implement_dimensions() {
+        let request = |line: &str| {
+            fusion_request_from_slash(
+                parse(line).unwrap(),
+                "anthropic".into(),
+                "claude-sonnet-5".into(),
+                true,
+                FusionPreset::Quality,
+                true,
+            )
+        };
+        let implement = request("/fusion --implement --verify \"cargo check\" do it");
+        assert_eq!(implement.mode, FusionPanelMode::Implement);
+        assert_eq!(implement.verify_commands, vec!["cargo check".to_string()]);
+        assert_eq!(
+            implement.dimensions,
+            lingxi_core::host::DEFAULT_IMPLEMENT_FUSION_DIMENSIONS
+        );
+        let custom = request("/fusion --implement --dimensions scope,speed do it");
+        assert_eq!(
+            custom.dimensions,
+            vec!["scope".to_string(), "speed".to_string()]
+        );
+
+        let analysis = request("/fusion review it");
+        assert_eq!(analysis.mode, FusionPanelMode::Analysis);
+        assert!(analysis.verify_commands.is_empty());
+        assert_eq!(
+            analysis.dimensions,
+            lingxi_core::host::DEFAULT_FUSION_DIMENSIONS
+        );
     }
 }

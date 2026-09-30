@@ -1,7 +1,7 @@
 //! Session state model. Persistence lives in `lingxi-session` (Plan 10).
 
 use crate::token::Usage;
-use protocol::{ConversationMessage, MessageId, SessionId, ToolUseId};
+use crate::types::{ConversationMessage, MessageId, SessionId, ToolUseId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
@@ -314,7 +314,7 @@ impl SessionState {
 #[cfg(test)]
 mod m4_04_session_extension_tests {
     use super::*;
-    use protocol::SessionId;
+    use crate::types::SessionId;
 
     #[test]
     fn fresh_session_has_empty_todos_and_plan_mode_false() {

@@ -5,7 +5,7 @@
 //! `CwdChanged` firer is driven by a `pwd -P` readback inside the shell tool,
 //! the `FileChanged` firer is driven by a long-lived filesystem watcher: the
 //! composition root resolves the watch paths from the user's `FileChanged` hook
-//! config, watches them via [`platform_api::FileSystem::watch`], and fires this seam
+//! config, watches them via [`lingxi_core::host::FileSystem::watch`], and fires this seam
 //! once per debounced change (`fileChangedWatcher.ts:80-106`).
 //!
 //! The trait is defined HERE (the `hooks` crate) — not in the watcher's home

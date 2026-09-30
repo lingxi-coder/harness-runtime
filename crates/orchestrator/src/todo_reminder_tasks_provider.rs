@@ -11,7 +11,7 @@
 //! 2. in-process teammate `teamName` — N/A at the orchestrator seam (no tool
 //!    `ToolUseContext` here), so skipped;
 //! 3. `LINGXI_TEAM_NAME` env (`zp()`, process-based teammate);
-//! 4. leader team name ([`platform_api::team_registry::leader_team_name_for_session`]);
+//! 4. leader team name ([`lingxi_core::host::team_registry::leader_team_name_for_session`]);
 //! 5. live orchestrator session id fallback.
 //!
 //! This is the SAME resolution the V2 `Task*` tools use ([`tool_task`]
@@ -49,7 +49,7 @@ impl TodoStoreReminderTasks {
 
     /// Resolve the active task-list id via the `KF()` precedence, using the
     /// live orchestrator session as the standalone fallback.
-    fn resolve_list_id(session_id: protocol::SessionId) -> String {
+    fn resolve_list_id(session_id: lingxi_core::types::SessionId) -> String {
         // 1. Explicit env override.
         if let Some(explicit) = std::env::var_os("LINGXI_TASK_LIST_ID") {
             if !explicit.is_empty() {
@@ -64,7 +64,7 @@ impl TodoStoreReminderTasks {
         }
         // 4. Leader team name belonging to this session.
         if let Some(team) =
-            platform_api::team_registry::leader_team_name_for_session(&session_id.to_string())
+            lingxi_core::host::team_registry::leader_team_name_for_session(&session_id.to_string())
                 .filter(|t| !t.is_empty())
         {
             return team;
@@ -82,7 +82,7 @@ impl Default for TodoStoreReminderTasks {
 
 #[async_trait]
 impl TodoReminderTaskProvider for TodoStoreReminderTasks {
-    async fn task_items(&self, session_id: protocol::SessionId) -> Vec<TaskReminderItem> {
+    async fn task_items(&self, session_id: lingxi_core::types::SessionId) -> Vec<TaskReminderItem> {
         let list_id = Self::resolve_list_id(session_id);
         let store = self.config_home.as_ref().map_or_else(
             || tool_task::todo_store::TodoStore::for_list(&list_id),
@@ -120,7 +120,7 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         std::env::set_var(branding::CONFIG_DIR_ENV, temp.path());
-        let session_id = protocol::SessionId::new();
+        let session_id = lingxi_core::types::SessionId::new();
         let store = TodoStore::for_list(&session_id.to_string());
         let id = store
             .create(TodoTask::new(
@@ -166,8 +166,8 @@ mod tests {
         let prev_team = std::env::var_os("LINGXI_TEAM_NAME");
         std::env::set_var("LINGXI_TASK_LIST_ID", "explicit-list");
         std::env::set_var("LINGXI_TEAM_NAME", "env-team");
-        let session_id = protocol::SessionId::new();
-        platform_api::team_registry::set_leader_team_name_for_session(
+        let session_id = lingxi_core::types::SessionId::new();
+        lingxi_core::host::team_registry::set_leader_team_name_for_session(
             &session_id.to_string(),
             Some("leader-team"),
         );
@@ -187,8 +187,8 @@ mod tests {
             TodoStoreReminderTasks::resolve_list_id(session_id),
             "leader-team"
         );
-        let other = protocol::SessionId::new();
-        platform_api::team_registry::set_leader_team_name_for_session(
+        let other = lingxi_core::types::SessionId::new();
+        lingxi_core::host::team_registry::set_leader_team_name_for_session(
             &other.to_string(),
             Some("other-team"),
         );
@@ -197,8 +197,11 @@ mod tests {
             TodoStoreReminderTasks::resolve_list_id(session_id),
             "leader-team"
         );
-        platform_api::team_registry::set_leader_team_name_for_session(&other.to_string(), None);
-        platform_api::team_registry::set_leader_team_name_for_session(
+        lingxi_core::host::team_registry::set_leader_team_name_for_session(
+            &other.to_string(),
+            None,
+        );
+        lingxi_core::host::team_registry::set_leader_team_name_for_session(
             &session_id.to_string(),
             None,
         );

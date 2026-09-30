@@ -8,7 +8,7 @@ use hooks::executor::{BuiltinHookHandler, HookExecutorImpl};
 use hooks::registry::HookRegistry;
 use hooks::response::HookResponse;
 use hooks::{HookContext, HookOutcome, HookResult};
-use protocol::{ContentBlock, ConversationMessage, HookId, ToolUseId};
+use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, ToolUseId};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -102,36 +102,40 @@ impl Tool for EchoTool {
 
 struct UnusedHttp;
 #[async_trait]
-impl platform_api::HttpTransport for UnusedHttp {
+impl lingxi_core::host::HttpTransport for UnusedHttp {
     async fn request(
         &self,
-        _req: protocol::HttpRequest,
-    ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-        Err(platform_api::HttpError::InvalidRequest("unused".into()))
+        _req: lingxi_core::types::HttpRequest,
+    ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+        Err(lingxi_core::host::HttpError::InvalidRequest(
+            "unused".into(),
+        ))
     }
     async fn stream_sse(
         &self,
-        _req: protocol::HttpRequest,
-    ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-        Err(platform_api::HttpError::InvalidRequest("unused".into()))
+        _req: lingxi_core::types::HttpRequest,
+    ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+        Err(lingxi_core::host::HttpError::InvalidRequest(
+            "unused".into(),
+        ))
     }
 }
 
 struct UnusedRuntime;
 #[async_trait]
-impl platform_api::RuntimeSpawner for UnusedRuntime {
+impl lingxi_core::host::RuntimeSpawner for UnusedRuntime {
     async fn spawn(
         &self,
         _name: &str,
         _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-        Err(platform_api::RuntimeError::Internal("unused".into()))
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError> {
+        Err(lingxi_core::host::RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _d: std::time::Duration) {}
     async fn cancel(
         &self,
-        _h: &platform_api::BackgroundTaskHandle,
-    ) -> Result<(), platform_api::RuntimeError> {
+        _h: &lingxi_core::host::BackgroundTaskHandle,
+    ) -> Result<(), lingxi_core::host::RuntimeError> {
         Ok(())
     }
 }
@@ -634,12 +638,12 @@ async fn blocking_error_is_ordered_before_stopped_continuation() {
 /// in `conversation.rs`, so neither file's unit tests alone prove the seam.
 #[tokio::test]
 async fn dispatched_tool_result_reaches_the_transcript_as_tool_use_result() {
-    use protocol::MessageId;
+    use lingxi_core::types::MessageId;
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("session.jsonl");
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
-        dir.path().to_path_buf(),
-    ));
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+        platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+    );
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
     let mut tools = ToolRegistry::new();
     tools.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
@@ -762,7 +766,7 @@ fn orch_with_pre_hook(
         None => orch,
         Some(path) => {
             let root = path.parent().expect("parent").to_path_buf();
-            let fs: Arc<dyn platform_api::FileSystem> =
+            let fs: Arc<dyn lingxi_core::host::FileSystem> =
                 Arc::new(platform_posix::fs::PosixFileSystem::new(root));
             orch.with_jsonl_writer(Arc::new(session::jsonl::writer::JsonlWriter::new(
                 path.to_path_buf(),

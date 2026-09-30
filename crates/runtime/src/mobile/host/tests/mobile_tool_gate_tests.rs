@@ -44,13 +44,13 @@ fn mobile_git_gate_disables_selected_but_unavailable_runtime() {
     assert!(!gated.enabled);
 }
 
-fn ios_host() -> platform_api::MobileHostEnvironment {
-    platform_api::MobileHostEnvironment::new(
-        platform_api::MobileHostOs::Ios,
+fn ios_host() -> lingxi_core::host::MobileHostEnvironment {
+    lingxi_core::host::MobileHostEnvironment::new(
+        lingxi_core::host::MobileHostOs::Ios,
         Some("19.0".into()),
-        platform_api::MobileDeviceClass::Phone,
-        platform_api::MobileExecutionTarget::PhysicalDevice,
-        platform_api::MobileLaunchMode::Interactive,
+        lingxi_core::host::MobileDeviceClass::Phone,
+        lingxi_core::host::MobileExecutionTarget::PhysicalDevice,
+        lingxi_core::host::MobileLaunchMode::Interactive,
     )
 }
 
@@ -80,7 +80,7 @@ fn unavailable_gated_shell_is_not_described_as_mobile_linux() {
 
     assert_eq!(
         environment.tool_runtime,
-        platform_api::MobileToolRuntime::Unavailable
+        lingxi_core::host::MobileToolRuntime::Unavailable
     );
     assert_eq!(environment.guest_cwd(), None);
     let reminder = environment.render_body();
@@ -138,14 +138,14 @@ fn mobile_subagent_env_renderer_uses_guest_paths_only() {
         let cwd = override_cwd.unwrap_or_else(|| std::path::Path::new("/native/workspace"));
         model_visible_mobile_cwd(cwd, &provider_mounts, true)
     });
-    let environment = platform_api::MobileRuntimeEnvironment::new(
+    let environment = lingxi_core::host::MobileRuntimeEnvironment::new(
         ios_host(),
-        platform_api::MobileToolRuntime::MobileLinuxGuest,
+        lingxi_core::host::MobileToolRuntime::MobileLinuxGuest,
         Some("/workspace/app".into()),
         Some("/bin/sh".into()),
         Some("mobile-linux".into()),
-        platform_api::MobileNetworkPolicy::PermissionMediated,
-        platform_api::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
+        lingxi_core::host::MobileNetworkPolicy::PermissionMediated,
+        lingxi_core::host::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
     );
     let renderer = build_mobile_subagent_env_renderer(
         std::path::PathBuf::from(
@@ -178,9 +178,9 @@ fn mobile_subagent_env_renderer_uses_guest_paths_only() {
 fn only_explicit_scheduled_launches_use_headless_prompt_semantics() {
     let mut host = ios_host();
     assert!(mobile_launch_is_interactive(Some(&host)));
-    host.launch_mode = platform_api::MobileLaunchMode::Unknown;
+    host.launch_mode = lingxi_core::host::MobileLaunchMode::Unknown;
     assert!(mobile_launch_is_interactive(Some(&host)));
     assert!(mobile_launch_is_interactive(None));
-    host.launch_mode = platform_api::MobileLaunchMode::ScheduledHeadless;
+    host.launch_mode = lingxi_core::host::MobileLaunchMode::ScheduledHeadless;
     assert!(!mobile_launch_is_interactive(Some(&host)));
 }

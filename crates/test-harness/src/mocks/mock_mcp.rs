@@ -10,12 +10,12 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use jsonrpc::{Connection, Mode};
-use platform_api::{
+use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
-use protocol::McpConnectionId;
+use lingxi_core::types::McpConnectionId;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

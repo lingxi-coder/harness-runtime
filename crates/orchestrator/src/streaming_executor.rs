@@ -7,7 +7,7 @@
 
 use crate::conversation::ConversationOrchestrator;
 use futures::{stream::FuturesUnordered, StreamExt};
-use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use tool_api::tool_trait::ToolStaticContext;
 use tool_api::ContextModifier;
 
@@ -1090,7 +1090,7 @@ mod synthetic_denial_kind_tests {
     };
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
-    use protocol::MessageId;
+    use lingxi_core::types::MessageId;
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;

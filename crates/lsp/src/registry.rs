@@ -23,8 +23,8 @@ use crate::diagnostic_registry::{
 use crate::open_file_tracker::OpenFileTracker;
 use crate::passive_feedback::PassiveDiagnosticSubscriber;
 use crate::path_mapper::{DesktopLspPathMapper, LspDocumentPath, LspPathMapper};
-use platform_api::{LspError, LspServerConfig, LspTransport};
-use protocol::{McpConnectionId, PluginId};
+use lingxi_core::host::{LspError, LspServerConfig, LspTransport};
+use lingxi_core::types::{McpConnectionId, PluginId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -1344,7 +1344,7 @@ mod routing_tests {
     use super::*;
     use async_trait::async_trait;
     use jsonrpc::Connection;
-    use platform_api::{LspRawConnection, LspServerCapabilities};
+    use lingxi_core::host::{LspRawConnection, LspServerCapabilities};
     use serde_json::Value;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};

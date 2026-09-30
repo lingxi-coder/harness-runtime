@@ -6,8 +6,8 @@
 //! - When the sandbox is actually available on the host, `prepare()` wraps the
 //!   inner command in `/bin/sh -c "<bwrap … | sandbox-exec …>"`.
 
+use lingxi_core::host::{ProcessCommand, Sandbox, SandboxPolicy, SandboxedTag};
 use mobile_linux_api::{NetworkPolicy, ResourceLimits, SandboxBackend};
-use platform_api::{ProcessCommand, Sandbox, SandboxPolicy, SandboxedTag};
 use platform_posix::sandbox::PosixSandbox;
 use std::collections::HashMap;
 use std::path::PathBuf;

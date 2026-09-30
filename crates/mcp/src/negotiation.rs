@@ -26,7 +26,7 @@
 //! `claudeai-proxy` connector surface, an explicit non-goal for this port
 //! (no first-party-auth concept exists in the Rust registry to trigger it).
 
-use platform_api::{McpError, McpHeaders, McpTransportSpec};
+use lingxi_core::host::{McpError, McpHeaders, McpTransportSpec};
 
 /// Oracle `J8e(e)` (@155987335): `Object.keys(e).some((t)=>t.toLowerCase()===
 /// "authorization")`. HTTP field names are case-insensitive (RFC 9110 §5.1),
@@ -123,7 +123,7 @@ mod tests {
     fn http_spec(headers: &[(&str, &str)]) -> McpTransportSpec {
         McpTransportSpec::Http {
             url: "https://mcp.example".into(),
-            headers: platform_api::McpHeaders::from_iter(
+            headers: lingxi_core::host::McpHeaders::from_iter(
                 headers
                     .iter()
                     .map(|(k, v)| ((*k).to_string(), (*v).to_string())),

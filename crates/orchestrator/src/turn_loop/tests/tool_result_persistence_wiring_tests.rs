@@ -3,7 +3,7 @@ use crate::test_support::{MockApiClient, MockOutputStream, NoOpPermissionGate};
 use crate::tool_result_persistence::{PERSISTED_OUTPUT_OPEN, TOOL_RESULTS_DIR};
 use crate::OrchestratorConfig;
 use async_trait::async_trait;
-use protocol::{ContentBlock, ToolUseId};
+use lingxi_core::types::{ContentBlock, ToolUseId};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -144,8 +144,8 @@ async fn dispatch_content(
 
 #[tokio::test]
 async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
-    use llm_runtime::WireCodec;
-    use protocol::{ConversationMessage, MessageId};
+    use lingxi_core::types::{ConversationMessage, MessageId};
+    use llm_runtime::services::sdk::{self, WireCodec};
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("history.jsonl");
     let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
@@ -177,17 +177,31 @@ async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
     let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(path).unwrap());
     let history =
         crate::resume::state_from_messages(uuid::Uuid::nil(), &loaded.messages_in_order).history;
-    let request = llm_runtime::LlmRequest {
-        model: "claude-opus-4-7".into(),
-        messages: llm_runtime::convert::to_llm_messages(history).unwrap(),
-        ..Default::default()
-    };
-    let codec = llm_runtime::AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
-    for encoded in [
-        codec.encode_request(&request).unwrap(),
-        codec.encode_count_tokens_request(&request).unwrap(),
-    ] {
-        let wire = String::from_utf8(encoded.wire_body_bytes().unwrap()).unwrap();
+    let messages = llm_runtime::convert::to_llm_messages(history).unwrap();
+    let (input, overrides) = llm_runtime::convert::history_input(
+        "claude-opus-4-7",
+        &messages,
+        &[],
+        &[],
+        sdk::protocol::ProtocolFamily::AnthropicMessages,
+    )
+    .unwrap();
+    let profile: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
+        "provider_id":"anthropic", "profile_name":"test", "base_url":"https://api.anthropic.com",
+        "protocol":"anthropic_messages", "auth":"none", "models":[]
+    }))
+    .unwrap();
+    let codec = sdk::AnthropicMessagesCodec;
+    for mode in [sdk::RequestMode::Complete, sdk::RequestMode::CountTokens] {
+        let encoded = codec
+            .encode_request(
+                sdk::EncodeRequest::new(&input),
+                &sdk::CodecContext::new(&profile, &input.model, mode),
+            )
+            .unwrap();
+        let body = serde_json::from_slice(&encoded.body).unwrap();
+        let wire =
+            String::from_utf8(sdk::exact_json::serialize(&body, &overrides).unwrap()).unwrap();
         assert!(
             wire.contains("\\ud83d\\n..."),
             "exact JS surrogate must reach wire: {wire}"

@@ -8,10 +8,11 @@ license.workspace = true
 [features]
 default = []
 test-support = []
-# Independent duplex realtime sessions; Responses WebSockets still use the host transport.
+# Independent duplex realtime sessions; Responses WebSockets use the SDK transport.
 realtime-websocket = ["lingxi-llm-client/realtime-websocket"]
 
 [dependencies]
+core = { path = "../core" }
 lingxi-llm-client.workspace = true
 bytes.workspace = true
 serde.workspace = true
@@ -24,8 +25,6 @@ sha2 = "0.10"
 # "process" — `aws_auth::ShellAwsAuthProcess` runs the awsAuthRefresh /
 # awsCredentialExport scripts (2.1.198 ZBd/gIn/t2d port).
 tokio = { workspace = true, features = ["sync", "time", "net", "io-util", "macros", "rt-multi-thread", "process"] }
-platform-api = { path = "../platform-api" }
-protocol = { path = "../protocol" }
 async-trait = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }

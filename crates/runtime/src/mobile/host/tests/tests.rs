@@ -13,8 +13,10 @@ use async_trait::async_trait;
 use client::adapter::{ClientEventListener, ListenerSink, MockSink, PermissionRequestSink};
 use client::protocol::events::ClientEvent;
 use client::protocol::listings::SessionModeDto;
-use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
-use platform_api::{OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult};
+use lingxi_core::host::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
+use lingxi_core::host::{
+    OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult,
+};
 use tokio::sync::Notify;
 use tool_skill::skill::SkillCommandType;
 
@@ -71,8 +73,10 @@ fn mobile_provider_catalog_matches_engine_presets_without_secrets() {
                 .models
                 .iter()
                 .filter(|model| {
-                    platform_api::is_curated_model(&provider.profile_name, &model.request_model)
-                        || !platform_api::provider_has_curated_list(&provider.profile_name)
+                    lingxi_core::host::is_curated_model(
+                        &provider.profile_name,
+                        &model.request_model,
+                    ) || !lingxi_core::host::provider_has_curated_list(&provider.profile_name)
                 })
                 .map(|model| model.request_model.clone())
                 .collect::<Vec<_>>()
@@ -114,7 +118,7 @@ async fn mobile_workflow_script_path_is_read_gated_before_launcher_io() {
     let script_path = tmp.path().join("secret.js");
     std::fs::create_dir(&script_path).expect("directory path must be unreadable as a script");
 
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
     let permission_sink: Arc<dyn PermissionRequestSink> =
@@ -148,14 +152,14 @@ async fn session_agent_helpers_find_nested_workflow_transcripts() {
     tokio::fs::create_dir_all(&nested)
         .await
         .expect("create nested transcript dir");
-    let agent_id = protocol::AgentId::new().to_string();
+    let agent_id = lingxi_core::types::AgentId::new().to_string();
     let path = nested.join(format!("agent-{agent_id}.jsonl"));
     tokio::fs::write(
         &path,
         serde_json::to_string(&serde_json::json!({
-            "message": protocol::ConversationMessage::Assistant {
-                id: protocol::MessageId::new(),
-                content: vec![protocol::ContentBlock::Text {
+            "message": lingxi_core::types::ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "nested child".to_string(),
                 }],
                 stop_reason: None,
@@ -181,16 +185,16 @@ async fn session_agent_helpers_find_nested_workflow_transcripts() {
 
 #[test]
 fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
-    let visible = protocol::ConversationMessage::Assistant {
-        id: protocol::MessageId::new(),
-        content: vec![protocol::ContentBlock::Text {
+    let visible = lingxi_core::types::ConversationMessage::Assistant {
+        id: lingxi_core::types::MessageId::new(),
+        content: vec![lingxi_core::types::ContentBlock::Text {
             text: "visible".to_string(),
         }],
         stop_reason: None,
     };
-    let compact = protocol::ConversationMessage::User {
-        id: protocol::MessageId::new(),
-        content: vec![protocol::ContentBlock::Text {
+    let compact = lingxi_core::types::ConversationMessage::User {
+        id: lingxi_core::types::MessageId::new(),
+        content: vec![lingxi_core::types::ContentBlock::Text {
             text: "replacement summary".to_string(),
         }],
         is_meta: false,
@@ -212,8 +216,8 @@ fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
 
 #[test]
 fn session_agent_transcript_event_is_dropped_after_session_switch() {
-    let requested_session_id = protocol::SessionId::new();
-    let current_session_id = protocol::SessionId::new();
+    let requested_session_id = lingxi_core::types::SessionId::new();
+    let current_session_id = lingxi_core::types::SessionId::new();
 
     assert!(session_agent_transcript_event(
         requested_session_id,
@@ -248,7 +252,7 @@ fn session_agent_transcript_event_is_dropped_after_session_switch() {
 
 #[test]
 fn session_agent_id_from_nested_transcript_path_requires_agent_jsonl_shape() {
-    let agent_id = protocol::AgentId::nil().to_string();
+    let agent_id = lingxi_core::types::AgentId::nil().to_string();
     let transcript_path = format!("/tmp/subagents/workflows/wf_1/agent-{agent_id}.jsonl");
     assert_eq!(
         super::session_agent_id_from_path(std::path::Path::new(&transcript_path)),
@@ -264,31 +268,31 @@ fn session_agent_id_from_nested_transcript_path_requires_agent_jsonl_shape() {
 
 #[test]
 fn session_agent_index_excludes_hidden_transcript_records() {
-    let hidden_meta = protocol::ConversationMessage::User {
-        id: protocol::MessageId::new(),
-        content: vec![protocol::ContentBlock::Text {
+    let hidden_meta = lingxi_core::types::ConversationMessage::User {
+        id: lingxi_core::types::MessageId::new(),
+        content: vec![lingxi_core::types::ContentBlock::Text {
             text: "<runtime-reminder>internal</runtime-reminder>".to_string(),
         }],
         is_meta: true,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
     };
-    let hidden_summary = protocol::ConversationMessage::User {
-        id: protocol::MessageId::new(),
+    let hidden_summary = lingxi_core::types::ConversationMessage::User {
+        id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         is_meta: false,
         is_compact_summary: true,
         is_visible_in_transcript_only: false,
     };
-    let hidden_transcript_only = protocol::ConversationMessage::User {
-        id: protocol::MessageId::new(),
+    let hidden_transcript_only = lingxi_core::types::ConversationMessage::User {
+        id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: true,
     };
-    let visible = protocol::ConversationMessage::Assistant {
-        id: protocol::MessageId::new(),
+    let visible = lingxi_core::types::ConversationMessage::Assistant {
+        id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         stop_reason: None,
     };
@@ -319,7 +323,7 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
     let sink = ListenerSink::arc(listener.clone());
     let session_uuid = Arc::new(std::sync::Mutex::new("session-a".to_string()));
     let observer = MobileSessionAgentObserver::new(sink, session_uuid.clone());
-    let agent_id = protocol::AgentId::new();
+    let agent_id = lingxi_core::types::AgentId::new();
 
     observer
         .on_event(SubagentObservation::Allocated {
@@ -337,9 +341,9 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: protocol::ConversationMessage::Assistant {
-                id: protocol::MessageId::new(),
-                content: vec![protocol::ContentBlock::Text {
+            message: lingxi_core::types::ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "working".to_string(),
                 }],
                 stop_reason: None,
@@ -350,7 +354,7 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
         .on_event(SubagentObservation::Completed {
             agent_id,
             content: serde_json::json!("done"),
-            usage: platform_api::SubagentUsage::default(),
+            usage: lingxi_core::host::SubagentUsage::default(),
             total_tool_use_count: 0,
             total_duration_ms: 0,
             assistant_message_count: 0,
@@ -402,7 +406,7 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
         ListenerSink::arc(listener.clone()),
         Arc::new(std::sync::Mutex::new("session-a".to_string())),
     );
-    let agent_id = protocol::AgentId::new();
+    let agent_id = lingxi_core::types::AgentId::new();
     observer
         .on_event(SubagentObservation::Allocated {
             agent_id,
@@ -420,8 +424,8 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: protocol::ConversationMessage::System {
-                id: protocol::MessageId::new(),
+            message: lingxi_core::types::ConversationMessage::System {
+                id: lingxi_core::types::MessageId::new(),
                 subtype: Some("agent_idle".to_string()),
                 content: "idle".to_string(),
                 compact_metadata: None,
@@ -453,9 +457,9 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: protocol::ConversationMessage::User {
-                id: protocol::MessageId::new(),
-                content: vec![protocol::ContentBlock::Text {
+            message: lingxi_core::types::ConversationMessage::User {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "follow-up".to_string(),
                 }],
                 is_meta: true,
@@ -481,9 +485,9 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: protocol::ConversationMessage::Assistant {
-                id: protocol::MessageId::new(),
-                content: vec![protocol::ContentBlock::Text {
+            message: lingxi_core::types::ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "resumed".to_string(),
                 }],
                 stop_reason: None,
@@ -511,7 +515,7 @@ async fn workflow_agent_observer_uses_pinned_origin_session() {
     let sink = ListenerSink::arc(listener.clone());
     let session_uuid = Arc::new(std::sync::Mutex::new("session-b".to_string()));
     let observer = MobileSessionAgentObserver::new(sink, session_uuid);
-    let agent_id = protocol::AgentId::new();
+    let agent_id = lingxi_core::types::AgentId::new();
     let workflow_dir = std::path::PathBuf::from(
         "/profile/projects/workspace/session-a/subagents/workflows/wf_abcdef",
     );
@@ -623,7 +627,7 @@ fn provider_connection_requires_selected_model_in_recognized_catalog() {
 #[test]
 fn provider_connection_maps_auth_failure_without_echoing_response_body() {
     let result = classify_provider_connection_response(
-        Err(platform_api::HttpError::Status {
+        Err(lingxi_core::host::HttpError::Status {
             status: 401,
             body: "secret-bearing upstream response".to_string(),
         }),
@@ -644,7 +648,7 @@ fn provider_connection_maps_auth_failure_without_echoing_response_body() {
 fn provider_connection_maps_forbidden_rate_limit_and_timeout_without_secrets() {
     for (response, status, expected_fragment) in [
         (
-            Err(platform_api::HttpError::Status {
+            Err(lingxi_core::host::HttpError::Status {
                 status: 403,
                 body: "private upstream detail".to_string(),
             }),
@@ -652,7 +656,7 @@ fn provider_connection_maps_forbidden_rate_limit_and_timeout_without_secrets() {
             "拒绝访问",
         ),
         (
-            Err(platform_api::HttpError::Status {
+            Err(lingxi_core::host::HttpError::Status {
                 status: 429,
                 body: "retry-after: 30".to_string(),
             }),
@@ -660,7 +664,7 @@ fn provider_connection_maps_forbidden_rate_limit_and_timeout_without_secrets() {
             "频率",
         ),
         (
-            Err(platform_api::HttpError::Timeout(
+            Err(lingxi_core::host::HttpError::Timeout(
                 std::time::Duration::from_secs(1),
             )),
             None,
@@ -715,17 +719,17 @@ async fn lightweight_cron_store_crud_and_due_occurrence_need_no_engine() {
 /// writes without involving a platform keychain.
 #[derive(Default)]
 struct FakeEncryptedStore {
-    map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+    map: StdMutex<HashMap<(String, String), lingxi_core::types::SecureStorageData>>,
 }
 
 #[async_trait]
-impl platform_api::SecureStorage for FakeEncryptedStore {
+impl lingxi_core::host::SecureStorage for FakeEncryptedStore {
     async fn store(
         &self,
         service: &str,
         account: &str,
-        data: protocol::SecureStorageData,
-    ) -> Result<(), platform_api::SecureStorageError> {
+        data: lingxi_core::types::SecureStorageData,
+    ) -> Result<(), lingxi_core::host::SecureStorageError> {
         self.map
             .lock()
             .unwrap()
@@ -737,7 +741,8 @@ impl platform_api::SecureStorage for FakeEncryptedStore {
         &self,
         service: &str,
         account: &str,
-    ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
+    ) -> Result<Option<lingxi_core::types::SecureStorageData>, lingxi_core::host::SecureStorageError>
+    {
         Ok(self
             .map
             .lock()
@@ -750,7 +755,7 @@ impl platform_api::SecureStorage for FakeEncryptedStore {
         &self,
         service: &str,
         account: &str,
-    ) -> Result<(), platform_api::SecureStorageError> {
+    ) -> Result<(), lingxi_core::host::SecureStorageError> {
         self.map
             .lock()
             .unwrap()
@@ -758,7 +763,10 @@ impl platform_api::SecureStorage for FakeEncryptedStore {
         Ok(())
     }
 
-    async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
+    async fn list(
+        &self,
+        service: &str,
+    ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
         Ok(self
             .map
             .lock()
@@ -773,8 +781,8 @@ impl platform_api::SecureStorage for FakeEncryptedStore {
         true
     }
 
-    fn backend(&self) -> platform_api::SecureStorageBackend {
-        platform_api::SecureStorageBackend::EncryptedFile
+    fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
+        lingxi_core::host::SecureStorageBackend::EncryptedFile
     }
 }
 
@@ -789,7 +797,7 @@ fn mobile_config_default_is_constructible() {
     assert_eq!(cfg.default_model, "anthropic/claude-sonnet-5");
     // The boot default must be a CURATED Anthropic id, so a client with no
     // configured provider lands inside the shortlist its picker renders.
-    assert!(platform_api::is_curated_model(
+    assert!(lingxi_core::host::is_curated_model(
         "anthropic",
         cfg.default_model.rsplit('/').next().unwrap_or_default()
     ));
@@ -811,7 +819,7 @@ fn mobile_config_default_is_constructible() {
 #[tokio::test]
 async fn build_mobile_constructs_orchestrator() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
@@ -823,7 +831,7 @@ async fn build_mobile_constructs_orchestrator() {
     // The orchestrator exists and exposes the `OrchestratorHandle` surface
     // the command registry binds to. Constructing it at all proves the full
     // mobile assembly (tool registry + command registry + adapter sinks).
-    let _handle: Arc<dyn platform_api::OrchestratorHandle> = rt.orchestrator.clone();
+    let _handle: Arc<dyn lingxi_core::host::OrchestratorHandle> = rt.orchestrator.clone();
 
     // SKILLLIST.1: the production composition must attach the listing
     // provider before the orchestrator is wrapped, and the provider's live
@@ -954,7 +962,7 @@ async fn mobile_local_app_exposure_is_host_cwd_bounded_and_chat_stays_isolated()
         let mut cfg = test_config(data_root);
         cfg.cwd = cwd;
         cfg.session_mode = session_mode;
-        let platform: Arc<dyn platform_api::Platform> =
+        let platform: Arc<dyn lingxi_core::host::Platform> =
             Arc::new(HostFakePlatform::new(data_root.to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let permission_sink: Arc<dyn PermissionRequestSink> =
@@ -1164,7 +1172,7 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
     )
     .expect("write loop decoy");
 
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
@@ -1441,7 +1449,7 @@ async fn listing_and_invocation_share_one_registry() {
         agent_name,
     );
 
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
@@ -1576,7 +1584,7 @@ async fn listing_and_invocation_share_one_registry() {
 #[tokio::test]
 async fn mobile_boot_materializes_the_builtin_bundle() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
@@ -1757,7 +1765,7 @@ async fn mobile_boot_materializes_the_builtin_bundle() {
         .expect("Plugin agent bare skill must resolve through its namespace");
     assert!(matches!(
         preloaded.content.as_slice(),
-        [protocol::ContentBlock::Text { text }]
+        [lingxi_core::types::ContentBlock::Text { text }]
             if text.contains("# Frontend QA")
                 && text.contains("Verify the running app, not only the build output.")
     ));
@@ -1911,7 +1919,7 @@ async fn injected_encrypted_store_enables_oauth() {
     );
 
     // Inject an encrypted store → OAuth /login enabled.
-    let platform: Arc<dyn platform_api::Platform> = Arc::new(
+    let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
         HostFakePlatform::new(tmp.path().to_path_buf())
             .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
     );
@@ -1960,7 +1968,7 @@ async fn mobile_build_returns_before_interactive_mcp_oauth() {
             ),
         )
         .expect("write MCP config");
-    let platform: Arc<dyn platform_api::Platform> = Arc::new(
+    let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
         HostFakePlatform::new(tmp.path().to_path_buf())
             .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
     );
@@ -1988,7 +1996,7 @@ async fn mobile_build_returns_before_interactive_mcp_oauth() {
 
 #[test]
 fn mobile_mcp_boot_and_reload_preflight_reject_plaintext_oauth_before_dial() {
-    let oauth = platform_api::McpOAuthConfigDto {
+    let oauth = lingxi_core::host::McpOAuthConfigDto {
         client_id: Some("mobile-test".into()),
         callback_port: None,
         auth_server_metadata_url: None,
@@ -1997,13 +2005,13 @@ fn mobile_mcp_boot_and_reload_preflight_reject_plaintext_oauth_before_dial() {
     };
     let config = McpServerConfig {
         name: "remote".into(),
-        spec: platform_api::McpTransportSpec::Http {
+        spec: lingxi_core::host::McpTransportSpec::Http {
             url: "https://127.0.0.1:1/mcp".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth: Some(oauth),
         },
-        scope: McpConfigScope::Settings(protocol::SettingsScope::User),
+        scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -2022,18 +2030,18 @@ fn mobile_mcp_boot_and_reload_preflight_reject_plaintext_oauth_before_dial() {
 
 #[test]
 fn mobile_mcp_reload_snapshot_is_complete_and_stable() {
-    let mut headers = platform_api::McpHeaders::new();
+    let mut headers = lingxi_core::host::McpHeaders::new();
     headers.insert("X-First".into(), "one".into());
     headers.insert("X-Second".into(), "two".into());
     let config = McpServerConfig {
         name: "remote".into(),
-        spec: platform_api::McpTransportSpec::Http {
+        spec: lingxi_core::host::McpTransportSpec::Http {
             url: "https://example.test/mcp".into(),
             headers,
             headers_helper: Some("helper".into()),
             oauth: None,
         },
-        scope: McpConfigScope::Settings(protocol::SettingsScope::User),
+        scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         disabled: false,
         timeout_ms: Some(5000),
         always_load: true,
@@ -2047,13 +2055,13 @@ fn mobile_mcp_reload_snapshot_is_complete_and_stable() {
     assert!(mobile_mcp_config_unchanged(&config, &same));
 
     let mut changed = config.clone();
-    if let platform_api::McpTransportSpec::Http { headers, .. } = &mut changed.spec {
+    if let lingxi_core::host::McpTransportSpec::Http { headers, .. } = &mut changed.spec {
         headers.insert("X-Third".into(), "three".into());
     }
     assert!(!mobile_mcp_config_unchanged(&config, &changed));
 
     let mut reordered = config.clone();
-    if let platform_api::McpTransportSpec::Http { headers, .. } = &mut reordered.spec {
+    if let lingxi_core::host::McpTransportSpec::Http { headers, .. } = &mut reordered.spec {
         let first = headers.shift_remove("X-First").unwrap();
         headers.insert("X-First".into(), first);
     }
@@ -2069,13 +2077,13 @@ struct RecordingDeepLinkOpener {
 }
 
 #[async_trait]
-impl platform_api::DeepLinkOpener for RecordingDeepLinkOpener {
-    async fn open(&self, url: String) -> Result<(), platform_api::DeepLinkError> {
+impl lingxi_core::host::DeepLinkOpener for RecordingDeepLinkOpener {
+    async fn open(&self, url: String) -> Result<(), lingxi_core::host::DeepLinkError> {
         self.opened.lock().unwrap().push(url);
         if self.succeed {
             Ok(())
         } else {
-            Err(platform_api::DeepLinkError::Unavailable)
+            Err(lingxi_core::host::DeepLinkError::Unavailable)
         }
     }
 }
@@ -2144,7 +2152,7 @@ async fn mobile_mcp_authorization_url_slot_survives_open_success_failure_and_abs
 #[tokio::test]
 async fn mobile_runtime_binds_adapter_sinks() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
     let sink = Arc::new(RecordingPermissionSink::default());
@@ -2157,11 +2165,11 @@ async fn mobile_runtime_binds_adapter_sinks() {
     // The policy gate is the same enforcing gate injected into the mobile
     // builtin tool context. A headless ExitPlanMode check must deny before
     // it can mutate plan state rather than relying on a prompt transport.
-    let headless_ctx = platform_api::permission_gate::PermissionCheckContext {
+    let headless_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
         is_non_interactive_session: true,
         ..Default::default()
     };
-    let outcome = platform_api::permission_gate::PermissionGate::check_exit_plan_mode(
+    let outcome = lingxi_core::host::permission_gate::PermissionGate::check_exit_plan_mode(
         rt.permission_policy_gate.as_ref(),
         "1. Ship it",
         &headless_ctx,
@@ -2169,7 +2177,7 @@ async fn mobile_runtime_binds_adapter_sinks() {
     .await;
     assert!(matches!(
         outcome,
-        platform_api::permission_gate::PermissionOutcome::Deny { reason }
+        lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason }
             if reason.starts_with("Permission to use ExitPlanMode has been denied.")
     ));
 
@@ -2245,12 +2253,12 @@ fn write_project_hook(cwd: &std::path::Path, event: &str) {
 /// dispatched against (mobile sibling of the desktop test).
 #[tokio::test]
 async fn build_mobile_fires_session_start_against_a_registered_hook() {
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     write_project_hook(tmp.path(), "SessionStart");
 
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
@@ -2284,7 +2292,7 @@ async fn workflow_launches_and_completes_on_mobile() {
     use tool_workflow::WorkflowLauncher as _;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener = Arc::new(FakeListener::default());
     let listener_for_build: Arc<dyn ClientEventListener> = listener.clone();
@@ -2348,7 +2356,7 @@ async fn workflow_launches_and_completes_on_mobile() {
     );
 
     // Poll to a terminal status (the script thread is fast; bound the wait).
-    let registry: &dyn platform_api::task_registry::TaskRegistryHandle = &*rt.task_registry;
+    let registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle = &*rt.task_registry;
     let mut status = String::new();
     for _ in 0..100 {
         let record = registry
@@ -2399,11 +2407,11 @@ async fn workflow_launches_and_completes_on_mobile() {
 }
 
 #[tokio::test]
-async fn workflow_global_fusion_is_unavailable_on_mobile() {
+async fn workflow_global_fusion_is_not_exposed_on_mobile() {
     use tool_workflow::WorkflowLauncher as _;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener = Arc::new(FakeListener::default());
     let listener_for_build: Arc<dyn ClientEventListener> = listener.clone();
@@ -2430,7 +2438,7 @@ async fn workflow_global_fusion_is_unavailable_on_mobile() {
             .await
             .expect("launch succeeds");
 
-    let registry: &dyn platform_api::task_registry::TaskRegistryHandle = &*rt.task_registry;
+    let registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle = &*rt.task_registry;
     let status = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let record = registry
@@ -2455,8 +2463,8 @@ async fn workflow_global_fusion_is_unavailable_on_mobile() {
     assert!(
         chunk
             .content
-            .contains("fusion is unavailable on this platform"),
-        "mobile workflow fusion should fail with the typed platform error: {}",
+            .contains("ReferenceError: 'fusion' is not defined"),
+        "the removed workflow fusion global must remain unavailable: {}",
         chunk.content
     );
 }
@@ -2466,7 +2474,7 @@ async fn workflow_relative_script_path_uses_live_cwd_but_session_files_stay_unde
     use tool_workflow::WorkflowLauncher as _;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener = Arc::new(FakeListener::default());
     let listener_for_build: Arc<dyn ClientEventListener> = listener.clone();
@@ -2547,12 +2555,12 @@ async fn workflow_relative_script_path_uses_live_cwd_but_session_files_stay_unde
 /// real registry wiring.)
 #[tokio::test]
 async fn build_mobile_fires_instructions_loaded_against_a_registered_hook() {
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     write_project_hook(tmp.path(), "InstructionsLoaded");
 
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
@@ -2595,7 +2603,7 @@ async fn build_mobile_with_injected_memory_reaches_system_prompt() {
         orchestrator::test_support::StaticMemoryProvider::with_files(vec![memory_file]),
     ));
 
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
@@ -2643,7 +2651,7 @@ async fn build_mobile_default_loads_no_memory() {
         "default config must leave memory_provider None (empty, deterministic)"
     );
 
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
@@ -2669,7 +2677,7 @@ use client::protocol::commands::ClientCommand;
 use client::protocol::error::ClientError;
 use client::protocol::events::{ClientEvent as Ev, TurnRecoveryStateDto};
 use client::protocol::permission::PermissionResponseDto;
-use platform_api::audio::{
+use lingxi_core::host::audio::{
     AudioCapabilitySnapshot, AudioError, AudioOperation, AudioOperationContext, AudioOperationId,
     AudioOperationKind, AudioOperationSuccess, AudioOwner, AudioRecordingHandle, AudioService,
 };
@@ -2692,7 +2700,7 @@ fn build_submit_handle(root: &std::path::Path) -> (Arc<MobileEngineHandle>, Arc<
 
 fn build_submit_handle_with_platform(
     root: &std::path::Path,
-    platform: Arc<dyn platform_api::Platform>,
+    platform: Arc<dyn lingxi_core::host::Platform>,
 ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
     let listener = Arc::new(FakeListener::default());
     let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
@@ -2708,28 +2716,28 @@ struct AudioHostFakePlatform {
     audio: Arc<dyn AudioService>,
 }
 
-impl platform_api::Platform for AudioHostFakePlatform {
-    fn filesystem(&self) -> Arc<dyn platform_api::FileSystem> {
+impl lingxi_core::host::Platform for AudioHostFakePlatform {
+    fn filesystem(&self) -> Arc<dyn lingxi_core::host::FileSystem> {
         self.base.filesystem()
     }
 
-    fn http(&self) -> Arc<dyn platform_api::HttpTransport> {
+    fn http(&self) -> Arc<dyn lingxi_core::host::HttpTransport> {
         self.base.http()
     }
 
-    fn clock(&self) -> Arc<dyn platform_api::Clock> {
+    fn clock(&self) -> Arc<dyn lingxi_core::host::Clock> {
         self.base.clock()
     }
 
-    fn process(&self) -> Arc<dyn platform_api::ProcessRunner> {
+    fn process(&self) -> Arc<dyn lingxi_core::host::ProcessRunner> {
         self.base.process()
     }
 
-    fn sandbox(&self) -> Arc<dyn platform_api::Sandbox> {
+    fn sandbox(&self) -> Arc<dyn lingxi_core::host::Sandbox> {
         self.base.sandbox()
     }
 
-    fn worktree(&self) -> Arc<dyn platform_api::WorktreeManager> {
+    fn worktree(&self) -> Arc<dyn lingxi_core::host::WorktreeManager> {
         self.base.worktree()
     }
 
@@ -2769,7 +2777,7 @@ impl AudioService for AudioOwnerTeardownProbe {
         match operation {
             AudioOperation::EndOwner => Ok(AudioOperationSuccess::OwnerEnded),
             _ => Err(AudioError::new(
-                platform_api::audio::AudioErrorKind::Unsupported,
+                lingxi_core::host::audio::AudioErrorKind::Unsupported,
                 "teardown probe only accepts EndOwner",
             )),
         }
@@ -3368,7 +3376,7 @@ fn build_submit_handle_with_config(
     cfg: MobileConfig,
     root: &std::path::Path,
 ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(root.to_path_buf()));
     let listener = Arc::new(FakeListener::default());
     let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
@@ -3382,7 +3390,7 @@ fn build_submit_handle_with_config(
 fn build_submit_handle_with_secure_store(
     root: &std::path::Path,
 ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
-    let platform: Arc<dyn platform_api::Platform> = Arc::new(
+    let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(
         HostFakePlatform::new(root.to_path_buf())
             .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
     );
@@ -3423,16 +3431,16 @@ fn mobile_mcp_reload_identical_config_is_read_only() {
     .into_iter()
     .find(|config| config.name == "remote")
     .expect("settings MCP entry");
-    let connection_id = protocol::McpConnectionId::new();
+    let connection_id = lingxi_core::types::McpConnectionId::new();
     handle.runtime().block_on(async {
         handle.inner.mcp_registry.connections.write().await.insert(
             "remote".into(),
             mcp::connection::McpConnectionState::Connected {
                 config: desired.clone(),
                 connection_id,
-                capabilities: platform_api::ServerCapabilitiesDto::default(),
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                capabilities: lingxi_core::host::ServerCapabilitiesDto::default(),
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: Vec::new(),
@@ -3533,13 +3541,13 @@ fn mobile_mcp_reload_retains_plugin_scoped_servers() {
 fn mobile_reload_test_config(url: &str) -> McpServerConfig {
     McpServerConfig {
         name: "remote".into(),
-        spec: platform_api::McpTransportSpec::Http {
+        spec: lingxi_core::host::McpTransportSpec::Http {
             url: url.into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         },
-        scope: McpConfigScope::Settings(protocol::SettingsScope::User),
+        scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -3572,104 +3580,104 @@ impl BlockingMobileMcpTransport {
 }
 
 #[async_trait]
-impl platform_api::McpTransport for BlockingMobileMcpTransport {
+impl lingxi_core::host::McpTransport for BlockingMobileMcpTransport {
     async fn connect(
         &self,
-        _spec: &platform_api::McpTransportSpec,
-    ) -> Result<platform_api::McpRawConnection, platform_api::McpError> {
+        _spec: &lingxi_core::host::McpTransportSpec,
+    ) -> Result<lingxi_core::host::McpRawConnection, lingxi_core::host::McpError> {
         self.connect_calls.fetch_add(1, Ordering::SeqCst);
         self.connect_started.notify_one();
         if self.block_connect.load(Ordering::SeqCst) {
             self.connect_release.notified().await;
         }
-        Ok(platform_api::McpRawConnection {
-            connection_id: protocol::McpConnectionId::new(),
+        Ok(lingxi_core::host::McpRawConnection {
+            connection_id: lingxi_core::types::McpConnectionId::new(),
         })
     }
 
     async fn initialize(
         &self,
-        _conn: &platform_api::McpRawConnection,
-    ) -> Result<platform_api::ServerCapabilitiesDto, platform_api::McpError> {
-        Ok(platform_api::ServerCapabilitiesDto::default())
+        _conn: &lingxi_core::host::McpRawConnection,
+    ) -> Result<lingxi_core::host::ServerCapabilitiesDto, lingxi_core::host::McpError> {
+        Ok(lingxi_core::host::ServerCapabilitiesDto::default())
     }
 
     async fn list_tools(
         &self,
-        _conn: &platform_api::McpRawConnection,
-    ) -> Result<Vec<platform_api::McpToolDto>, platform_api::McpError> {
+        _conn: &lingxi_core::host::McpRawConnection,
+    ) -> Result<Vec<lingxi_core::host::McpToolDto>, lingxi_core::host::McpError> {
         Ok(Vec::new())
     }
 
     async fn list_resources(
         &self,
-        _conn: &platform_api::McpRawConnection,
-    ) -> Result<Vec<platform_api::McpResourceDto>, platform_api::McpError> {
+        _conn: &lingxi_core::host::McpRawConnection,
+    ) -> Result<Vec<lingxi_core::host::McpResourceDto>, lingxi_core::host::McpError> {
         Ok(Vec::new())
     }
 
     async fn list_prompts(
         &self,
-        _conn: &platform_api::McpRawConnection,
-    ) -> Result<Vec<platform_api::McpPromptDto>, platform_api::McpError> {
+        _conn: &lingxi_core::host::McpRawConnection,
+    ) -> Result<Vec<lingxi_core::host::McpPromptDto>, lingxi_core::host::McpError> {
         Ok(Vec::new())
     }
 
     async fn call_tool(
         &self,
-        _conn: &platform_api::McpRawConnection,
+        _conn: &lingxi_core::host::McpRawConnection,
         _tool: &str,
         _input: serde_json::Value,
-    ) -> Result<platform_api::McpToolResultDto, platform_api::McpError> {
-        Err(platform_api::McpError::Internal(
+    ) -> Result<lingxi_core::host::McpToolResultDto, lingxi_core::host::McpError> {
+        Err(lingxi_core::host::McpError::Internal(
             "unused test tool call".into(),
         ))
     }
 
     async fn read_resource(
         &self,
-        _conn: &platform_api::McpRawConnection,
+        _conn: &lingxi_core::host::McpRawConnection,
         _uri: &str,
-    ) -> Result<platform_api::McpResourceContentDto, platform_api::McpError> {
-        Err(platform_api::McpError::Internal(
+    ) -> Result<lingxi_core::host::McpResourceContentDto, lingxi_core::host::McpError> {
+        Err(lingxi_core::host::McpError::Internal(
             "unused test resource read".into(),
         ))
     }
 
     async fn ping(
         &self,
-        _connection_id: protocol::McpConnectionId,
-    ) -> Result<(), platform_api::McpError> {
+        _connection_id: lingxi_core::types::McpConnectionId,
+    ) -> Result<(), lingxi_core::host::McpError> {
         Ok(())
     }
 
     async fn notifications(
         &self,
-        _conn: &platform_api::McpRawConnection,
-    ) -> Result<platform_api::McpNotificationStream, platform_api::McpError> {
+        _conn: &lingxi_core::host::McpRawConnection,
+    ) -> Result<lingxi_core::host::McpNotificationStream, lingxi_core::host::McpError> {
         Ok(Box::pin(futures_util::stream::empty()))
     }
 
     async fn handle_elicitation(
         &self,
-        _conn: &platform_api::McpRawConnection,
-        _request: platform_api::ElicitRequestDto,
-    ) -> Result<platform_api::ElicitResultDto, platform_api::McpError> {
-        Err(platform_api::McpError::Internal(
+        _conn: &lingxi_core::host::McpRawConnection,
+        _request: lingxi_core::host::ElicitRequestDto,
+    ) -> Result<lingxi_core::host::ElicitResultDto, lingxi_core::host::McpError> {
+        Err(lingxi_core::host::McpError::Internal(
             "unused test elicitation".into(),
         ))
     }
 
     async fn disconnect(
         &self,
-        _connection_id: protocol::McpConnectionId,
-    ) -> Result<(), platform_api::McpError> {
+        _connection_id: lingxi_core::types::McpConnectionId,
+    ) -> Result<(), lingxi_core::host::McpError> {
         self.disconnect_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    fn supported_transports(&self) -> Vec<platform_api::McpTransportKind> {
-        vec![platform_api::McpTransportKind::Http]
+    fn supported_transports(&self) -> Vec<lingxi_core::host::McpTransportKind> {
+        vec![lingxi_core::host::McpTransportKind::Http]
     }
 }
 
@@ -3680,7 +3688,7 @@ fn mobile_mcp_startup_blocked_a_is_superseded_by_b() {
         let transport = BlockingMobileMcpTransport::new();
         transport.block_connect.store(true, Ordering::SeqCst);
         let registry = Arc::new(McpRegistry::new(
-            transport.clone() as Arc<dyn platform_api::McpTransport>
+            transport.clone() as Arc<dyn lingxi_core::host::McpTransport>
         ));
         let generations = Arc::new(StdMutex::new(HashMap::new()));
         let config_a = mobile_reload_test_config("http://127.0.0.1:1/startup-a");
@@ -3800,7 +3808,7 @@ fn mobile_mcp_repeated_identical_reload_keeps_blocked_startup_owner() {
         let transport = BlockingMobileMcpTransport::new();
         transport.block_connect.store(true, Ordering::SeqCst);
         let registry = Arc::new(McpRegistry::new(
-            transport.clone() as Arc<dyn platform_api::McpTransport>
+            transport.clone() as Arc<dyn lingxi_core::host::McpTransport>
         ));
         let generations = Arc::new(StdMutex::new(HashMap::new()));
         let config = mobile_reload_test_config("http://127.0.0.1:1/repeated");
@@ -3927,7 +3935,7 @@ fn mobile_mcp_blocked_a_to_b_to_a_keeps_latest_a_owner() {
         let transport = BlockingMobileMcpTransport::new();
         transport.block_connect.store(true, Ordering::SeqCst);
         let registry = Arc::new(McpRegistry::new(
-            transport.clone() as Arc<dyn platform_api::McpTransport>
+            transport.clone() as Arc<dyn lingxi_core::host::McpTransport>
         ));
         let generations = Arc::new(StdMutex::new(HashMap::new()));
         let config_a = mobile_reload_test_config("http://127.0.0.1:1/a");
@@ -3988,7 +3996,7 @@ fn mobile_mcp_blocked_a_to_deleted_to_a_keeps_latest_a_owner() {
         let transport = BlockingMobileMcpTransport::new();
         transport.block_connect.store(true, Ordering::SeqCst);
         let registry = Arc::new(McpRegistry::new(
-            transport.clone() as Arc<dyn platform_api::McpTransport>
+            transport.clone() as Arc<dyn lingxi_core::host::McpTransport>
         ));
         let generations = Arc::new(StdMutex::new(HashMap::new()));
         let config_a = mobile_reload_test_config("http://127.0.0.1:1/a");
@@ -4046,7 +4054,7 @@ fn mobile_mcp_changed_to_disabled_reloads_without_dialing() {
     runtime.block_on(async {
         let transport = BlockingMobileMcpTransport::new();
         let registry = Arc::new(McpRegistry::new(
-            transport.clone() as Arc<dyn platform_api::McpTransport>
+            transport.clone() as Arc<dyn lingxi_core::host::McpTransport>
         ));
         let config_a = mobile_reload_test_config("http://127.0.0.1:1/a");
         let mut disabled = config_a.clone();
@@ -4203,13 +4211,13 @@ fn mobile_mcp_reload_pending_generations_are_nonblocking_and_cas_guarded() {
     let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
     let old_config = McpServerConfig {
         name: "remote".into(),
-        spec: platform_api::McpTransportSpec::Http {
+        spec: lingxi_core::host::McpTransportSpec::Http {
             url: "http://127.0.0.1:1/old".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         },
-        scope: McpConfigScope::Settings(protocol::SettingsScope::User),
+        scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -4314,13 +4322,13 @@ fn mobile_mcp_reload_deleted_pending_generation_is_nonblocking() {
     let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
     let old_config = McpServerConfig {
         name: "remote".into(),
-        spec: platform_api::McpTransportSpec::Http {
+        spec: lingxi_core::host::McpTransportSpec::Http {
             url: "http://127.0.0.1:1/pending".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         },
-        scope: McpConfigScope::Settings(protocol::SettingsScope::User),
+        scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -4459,7 +4467,8 @@ fn build_mobile_marks_builtin_workflow_guideline_default_when_unset() {
     let (handle, _listener) = build_submit_handle(tmp.path());
 
     handle.runtime().block_on(async {
-        let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
+        let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> =
+            handle.inner.orchestrator.clone();
         assert!(
             orch.dynamic_workflows_enabled().await,
             "mobile should default enableWorkflows to true when no tier sets it"
@@ -4508,7 +4517,8 @@ fn build_mobile_applies_explicit_workflow_settings_from_user_project_local() {
     let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
 
     handle.runtime().block_on(async {
-        let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
+        let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> =
+            handle.inner.orchestrator.clone();
         assert!(
             !orch.dynamic_workflows_enabled().await,
             "the local enableWorkflows=false override must disable workflows for the session"
@@ -4546,7 +4556,7 @@ fn submit_lists_and_loads_nested_workflow_agents() {
         tokio::fs::create_dir_all(&dir)
             .await
             .expect("create nested workflow dir");
-        let expected_agent_id = protocol::AgentId::new().to_string();
+        let expected_agent_id = lingxi_core::types::AgentId::new().to_string();
         let transcript_path = dir.join(format!("agent-{expected_agent_id}.jsonl"));
         let body = [
             serde_json::to_string(&serde_json::json!({
@@ -4556,9 +4566,9 @@ fn submit_lists_and_loads_nested_workflow_agents() {
             }))
             .unwrap(),
             serde_json::to_string(&serde_json::json!({
-                "message": protocol::ConversationMessage::Assistant {
-                    id: protocol::MessageId::new(),
-                    content: vec![protocol::ContentBlock::Text {
+                "message": lingxi_core::types::ConversationMessage::Assistant {
+                    id: lingxi_core::types::MessageId::new(),
+                    content: vec![lingxi_core::types::ContentBlock::Text {
                         text: "nested workflow child".to_string(),
                     }],
                     stop_reason: None,
@@ -4636,11 +4646,11 @@ fn submit_task_message_reaches_registry_after_workspace_trust() {
 fn submit_task_message_enters_the_real_human_inbox_without_using_model_send() {
     struct ModelInbox;
     #[async_trait::async_trait]
-    impl platform_api::task_registry::TaskMessageReceiver for ModelInbox {
+    impl lingxi_core::host::task_registry::TaskMessageReceiver for ModelInbox {
         async fn send(
             &self,
             _: String,
-        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+        ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
             panic!("human command must use the dedicated human inbox");
         }
     }
@@ -4649,10 +4659,10 @@ fn submit_task_message_enters_the_real_human_inbox_without_using_model_send() {
     cfg.workspace_trusted = true;
     let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
     handle.runtime().block_on(async {
-            use platform_api::task_registry::{TaskCreateInput, TaskRegistryHandle};
+            use lingxi_core::host::task_registry::{TaskCreateInput, TaskRegistryHandle};
             let registry = handle.inner.task_registry.as_ref();
             let task = TaskRegistryHandle::create(registry, TaskCreateInput { task_type: "local_agent".into(), description: "active agent fixture".into() }).await.unwrap();
-            let agent_id = protocol::AgentId::new();
+            let agent_id = lingxi_core::types::AgentId::new();
             registry.bind_agent_id(&task.task_id, agent_id).await.unwrap();
             registry.bind_agent_message_receiver(&task.task_id, Arc::new(ModelInbox)).await.unwrap();
             handle.submit(ClientCommand::TaskMessage { task_id: task.task_id.clone(), message: "  continue with care\nnext line".into() }).await.unwrap();
@@ -4666,13 +4676,13 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
     use std::io::{Read, Write};
     struct NoWork;
     #[async_trait::async_trait]
-    impl platform_api::ToolInvoker for NoWork {
+    impl lingxi_core::host::ToolInvoker for NoWork {
         async fn invoke(
             &self,
             _: &str,
             _: serde_json::Value,
-            _: platform_api::tool_invoker::SubagentInvocationContext,
-        ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+            _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
             unreachable!("fixture model never calls tools")
         }
         fn as_any(&self) -> &dyn std::any::Any {
@@ -4680,8 +4690,8 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
         }
     }
     #[async_trait::async_trait]
-    impl platform_api::BudgetEnforcerHandle for NoWork {
-        async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::BudgetError> {
+    impl lingxi_core::host::BudgetEnforcerHandle for NoWork {
+        async fn check_and_charge(&self, _: u64) -> Result<(), lingxi_core::host::BudgetError> {
             Ok(())
         }
         async fn snapshot_total_nano_usd(&self) -> u64 {
@@ -4776,7 +4786,7 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
     // is needed to prove this targeted producer reaches a real model turn.
     handle.task_notification_watcher.abort();
     handle.runtime().block_on(async {
-        use platform_api::task_registry::{TaskCreateInput, TaskRegistryHandle};
+        use lingxi_core::host::task_registry::{TaskCreateInput, TaskRegistryHandle};
         let registry = handle.inner.task_registry.as_ref();
         let task = TaskRegistryHandle::create(
             registry,
@@ -4787,7 +4797,7 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
         )
         .await
         .unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         registry.bind_agent_id(&task.task_id, id).await.unwrap();
         let session_id = handle.inner.orchestrator.current_session_id().await;
         let dir = orchestrator::transcript_paths::subagents_dir(
@@ -4797,8 +4807,8 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
         );
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let transcript = session::forked_skill::agent_transcript_path(&dir, &id.to_string());
-        let previous = protocol::ConversationMessage::user(
-            protocol::MessageId::new(),
+        let previous = lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
             "original review context".into(),
         );
         tokio::fs::write(
@@ -4813,14 +4823,14 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
         TaskRegistryHandle::register_agent_resume_recipe(
             registry,
             &task.task_id,
-            platform_api::SubagentSpawnRequest {
+            lingxi_core::host::SubagentSpawnRequest {
                 subagent_type: "general-purpose".into(),
                 prompt: "do not replay this initial prompt".into(),
                 cwd: Some(tmp.path().display().to_string()),
                 model: Some("claude-sonnet-4-5".into()),
                 ..Default::default()
             },
-            platform_api::SubagentInheritance {
+            lingxi_core::host::SubagentInheritance {
                 tool_invoker: Arc::new(NoWork),
                 budget: Arc::new(NoWork),
             },
@@ -4888,8 +4898,6 @@ fn submit_task_stop_skips_second_workflow_status_event() {
                     resume_from_run_id: None,
                     args: None,
                     run_id: None,
-                    parent_model: None,
-                    parent_model_profile: None,
                     invocation_mode: Some("inline".to_string()),
                     workflow_source: Some("inline".to_string()),
                     script_is_verbatim_builtin: Some(false),
@@ -5081,7 +5089,8 @@ fn set_model_rejects_a_provider_the_allowlist_removed() {
     let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
 
     handle.runtime().block_on(async {
-        let before: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
+        let before: Arc<dyn lingxi_core::host::OrchestratorHandle> =
+            handle.inner.orchestrator.clone();
         let before = before.get_status_snapshot().await;
 
         let result = handle
@@ -5094,7 +5103,8 @@ fn set_model_rejects_a_provider_the_allowlist_removed() {
             "switching to a non-configured provider must be rejected, got {result:?}"
         );
 
-        let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
+        let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> =
+            handle.inner.orchestrator.clone();
         let after = orch.get_status_snapshot().await;
         assert_eq!(
             (after.model, after.model_profile),
@@ -5119,7 +5129,8 @@ fn new_session_with_an_unroutable_model_is_refused_without_clearing_the_session(
     let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
 
     handle.runtime().block_on(async {
-        let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
+        let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> =
+            handle.inner.orchestrator.clone();
         let before = orch.current_session_id().await;
 
         let result = handle
@@ -5209,7 +5220,8 @@ fn a_user_defined_provider_is_offered_and_selectable() {
             })
             .await
             .expect("a custom provider's model must be selectable");
-        let orch: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
+        let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> =
+            handle.inner.orchestrator.clone();
         let snapshot = orch.get_status_snapshot().await;
         assert_eq!(snapshot.model, "internal-7b");
         assert_eq!(snapshot.model_profile.as_deref(), Some("my-proxy"));
@@ -6551,7 +6563,7 @@ fn fixed_loop_scheduler_delivers_one_meta_mobile_turn_without_dream_agent() {
             handle.session_cron.is_some(),
             "mobile construction binds a real session cron scheduler"
         );
-        let registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle> =
+        let registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle> =
             handle.inner.task_registry.clone();
         assert!(!handle.message_queue.has_main_thread_commands().await);
         assert!(
@@ -6779,7 +6791,7 @@ fn dynamic_loop_session_switch_cancels_previous_session_timer() {
 fn mobile_session_switch_ends_only_the_previous_audio_owner() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let audio = Arc::new(AudioOwnerTeardownProbe::default());
-    let platform: Arc<dyn platform_api::Platform> = Arc::new(AudioHostFakePlatform {
+    let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(AudioHostFakePlatform {
         base: HostFakePlatform::new(tmp.path().to_path_buf()),
         audio: audio.clone(),
     });
@@ -6936,7 +6948,7 @@ fn mobile_drop_does_not_wait_for_ui_bound_audio_callback() {
         )),
     });
     let state = service.state.clone();
-    let platform: Arc<dyn platform_api::Platform> = Arc::new(AudioHostFakePlatform {
+    let platform: Arc<dyn lingxi_core::host::Platform> = Arc::new(AudioHostFakePlatform {
         base: HostFakePlatform::new(tmp.path().to_path_buf()),
         audio: service,
     });
@@ -6995,7 +7007,7 @@ fn submit_model_error_releases_slot() {
     use orchestrator::test_support_stream::MockStreamingApiClient;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let platform: Arc<dyn platform_api::Platform> =
+    let platform: Arc<dyn lingxi_core::host::Platform> =
         Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener = Arc::new(FakeListener::default());
     let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
@@ -7315,7 +7327,7 @@ fn submit_new_session_emits_session_started() {
     let (handle, listener) = build_submit_handle(tmp.path());
 
     handle.runtime().block_on(async {
-        use platform_api::OrchestratorHandle;
+        use lingxi_core::host::OrchestratorHandle;
         let oh: Arc<dyn OrchestratorHandle> = handle.inner().orchestrator.clone();
         let before = oh.current_session_id().await.to_string();
 
@@ -7390,7 +7402,7 @@ fn submit_resume_session_restores_anchored_empty_session_with_same_uuid() {
     let (handle, listener) = build_submit_handle(tmp.path());
 
     handle.runtime().block_on(async {
-        use platform_api::OrchestratorHandle;
+        use lingxi_core::host::OrchestratorHandle;
 
         handle
             .submit(ClientCommand::NewSession {
@@ -7455,7 +7467,7 @@ fn submit_resume_session_restores_its_persisted_permission_mode() {
 
     let (handle, _) = build_submit_handle(tmp.path());
     handle.runtime().block_on(async {
-        use platform_api::OrchestratorHandle;
+        use lingxi_core::host::OrchestratorHandle;
 
         handle
             .submit(ClientCommand::ResumeSession {
@@ -7663,7 +7675,7 @@ fn resume_empty_session_bootstraps_legacy_project_index_uuid() {
     let expected = "dddddddd-4444-4444-8444-dddddddddddd";
 
     handle.runtime().block_on(async {
-        use platform_api::OrchestratorHandle;
+        use lingxi_core::host::OrchestratorHandle;
 
         handle
             .resume_empty_session(expected.into(), "旧空会话".into())
@@ -7764,7 +7776,7 @@ fn submit_resume_session_rehydrates_and_emits() {
     let (handle, listener) = build_submit_handle(tmp.path());
 
     handle.runtime().block_on(async {
-        use platform_api::OrchestratorHandle;
+        use lingxi_core::host::OrchestratorHandle;
 
         let result = handle
             .submit(ClientCommand::ResumeSession {
@@ -7971,7 +7983,7 @@ fn mobile_default_model_parse_qualified_and_bare() {
     // from `assembled.client_config.providers` (display_model == request_model
     // on mobile; provider_label == profile_name).
     let listings = vec![
-        platform_api::ModelListing {
+        lingxi_core::host::ModelListing {
             connection: Default::default(),
             display_model: "gpt-5.2".to_string(),
             request_model: "gpt-5.2".to_string(),
@@ -7984,7 +7996,7 @@ fn mobile_default_model_parse_qualified_and_bare() {
             supports_reasoning: false,
             fusion_analyst_capable: false,
         },
-        platform_api::ModelListing {
+        lingxi_core::host::ModelListing {
             connection: Default::default(),
             display_model: "gpt-5.2".to_string(),
             request_model: "gpt-5.2".to_string(),
@@ -7997,7 +8009,7 @@ fn mobile_default_model_parse_qualified_and_bare() {
             supports_reasoning: false,
             fusion_analyst_capable: false,
         },
-        platform_api::ModelListing {
+        lingxi_core::host::ModelListing {
             connection: Default::default(),
             display_model: "claude-sonnet-4-20250514".to_string(),
             request_model: "claude-sonnet-4-20250514".to_string(),
@@ -8013,7 +8025,7 @@ fn mobile_default_model_parse_qualified_and_bare() {
     ];
 
     // Qualified: "openai/gpt-5.2" → bare id "gpt-5.2" + profile "openai"
-    let (id, profile) = platform_api::parse_model_ref("openai/gpt-5.2", &listings);
+    let (id, profile) = lingxi_core::host::parse_model_ref("openai/gpt-5.2", &listings);
     assert_eq!(id, "gpt-5.2", "qualified ref must strip the profile prefix");
     assert_eq!(
         profile.as_deref(),
@@ -8022,7 +8034,7 @@ fn mobile_default_model_parse_qualified_and_bare() {
     );
 
     // Bare: "claude-sonnet-4-20250514" → same id, no profile (no-op seed path)
-    let (id2, profile2) = platform_api::parse_model_ref("claude-sonnet-4-20250514", &listings);
+    let (id2, profile2) = lingxi_core::host::parse_model_ref("claude-sonnet-4-20250514", &listings);
     assert_eq!(
         id2, "claude-sonnet-4-20250514",
         "bare model id must pass through"
@@ -8030,7 +8042,7 @@ fn mobile_default_model_parse_qualified_and_bare() {
     assert!(profile2.is_none(), "bare model must yield None profile");
 
     // Shared id with two providers and explicit profile qualifier
-    let (id3, profile3) = platform_api::parse_model_ref("github-copilot/gpt-5.2", &listings);
+    let (id3, profile3) = lingxi_core::host::parse_model_ref("github-copilot/gpt-5.2", &listings);
     assert_eq!(id3, "gpt-5.2");
     assert_eq!(profile3.as_deref(), Some("github-copilot"));
 }
@@ -8038,7 +8050,7 @@ fn mobile_default_model_parse_qualified_and_bare() {
 #[test]
 fn mobile_model_refs_keep_duplicate_provider_models_distinct() {
     let listings = vec![
-        platform_api::ModelListing {
+        lingxi_core::host::ModelListing {
             connection: Default::default(),
             display_model: "gpt-5.6-sol".into(),
             request_model: "gpt-5.6-sol".into(),
@@ -8051,7 +8063,7 @@ fn mobile_model_refs_keep_duplicate_provider_models_distinct() {
             supports_reasoning: true,
             fusion_analyst_capable: false,
         },
-        platform_api::ModelListing {
+        lingxi_core::host::ModelListing {
             connection: Default::default(),
             display_model: "gpt-5.6-sol".into(),
             request_model: "gpt-5.6-sol".into(),
@@ -8066,7 +8078,7 @@ fn mobile_model_refs_keep_duplicate_provider_models_distinct() {
         },
     ];
 
-    let refs = platform_api::curated_model_refs(
+    let refs = lingxi_core::host::curated_model_refs(
         &listings,
         &["gpt-5.6-sol".into()],
         "gpt-5.6-sol",
@@ -8491,7 +8503,7 @@ async fn mint_forks_from_the_recorded_origin_cwd_not_the_callers_cwd() {
     )
     .record;
     record.origin_cwd = Some(origin_cwd.clone());
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
         platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
     );
     // The caller is anchored somewhere else entirely — the sweep's case.
@@ -8570,7 +8582,7 @@ async fn chat_origin_mint_forks_the_source_conversation() {
         1,
     )
     .record;
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
         platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
     );
     let init_id = super::mint_app_init_session(&lingxi_home, &source_cwd, &data_root, fs, &record)
@@ -8615,24 +8627,28 @@ async fn chat_origin_mint_forks_the_source_conversation() {
 /// can prove the first write's bytes get cleaned up rather than
 /// stranded.
 struct FlakyAppendFs {
-    inner: Arc<dyn platform_api::FileSystem>,
+    inner: Arc<dyn lingxi_core::host::FileSystem>,
     target_suffix: String,
     calls: std::sync::atomic::AtomicUsize,
     fail_on_call: usize,
 }
 
 #[async_trait]
-impl platform_api::FileSystem for FlakyAppendFs {
+impl lingxi_core::host::FileSystem for FlakyAppendFs {
     async fn read_file(
         &self,
         path: &str,
         offset: Option<u64>,
         limit: Option<u64>,
-    ) -> Result<platform_api::FileContent, platform_api::FsError> {
+    ) -> Result<lingxi_core::host::FileContent, lingxi_core::host::FsError> {
         self.inner.read_file(path, offset, limit).await
     }
 
-    async fn write_file(&self, path: &str, content: &str) -> Result<(), platform_api::FsError> {
+    async fn write_file(
+        &self,
+        path: &str,
+        content: &str,
+    ) -> Result<(), lingxi_core::host::FsError> {
         self.inner.write_file(path, content).await
     }
 
@@ -8644,13 +8660,19 @@ impl platform_api::FileSystem for FlakyAppendFs {
         &self,
         dir: &str,
     ) -> Result<
-        std::pin::Pin<Box<dyn futures_util::stream::Stream<Item = platform_api::FileEvent> + Send>>,
-        platform_api::FsError,
+        std::pin::Pin<
+            Box<dyn futures_util::stream::Stream<Item = lingxi_core::host::FileEvent> + Send>,
+        >,
+        lingxi_core::host::FsError,
     > {
         self.inner.watch(dir).await
     }
 
-    async fn append_file(&self, path: &str, content: &str) -> Result<(), platform_api::FsError> {
+    async fn append_file(
+        &self,
+        path: &str,
+        content: &str,
+    ) -> Result<(), lingxi_core::host::FsError> {
         self.inner.append_file(path, content).await
     }
 
@@ -8659,11 +8681,11 @@ impl platform_api::FileSystem for FlakyAppendFs {
         path: &str,
         content: &str,
         mode: u32,
-    ) -> Result<(), platform_api::FsError> {
+    ) -> Result<(), lingxi_core::host::FsError> {
         if path.ends_with(&self.target_suffix) {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             if n == self.fail_on_call {
-                return Err(platform_api::FsError::Io(
+                return Err(lingxi_core::host::FsError::Io(
                     "r1-engine-core-002 planted failure".into(),
                 ));
             }
@@ -8671,34 +8693,37 @@ impl platform_api::FileSystem for FlakyAppendFs {
         self.inner.append_file_with_mode(path, content, mode).await
     }
 
-    async fn truncate(&self, path: &str, len: u64) -> Result<(), platform_api::FsError> {
+    async fn truncate(&self, path: &str, len: u64) -> Result<(), lingxi_core::host::FsError> {
         self.inner.truncate(path, len).await
     }
 
-    async fn file_mtime(&self, path: &str) -> Result<std::time::SystemTime, platform_api::FsError> {
+    async fn file_mtime(
+        &self,
+        path: &str,
+    ) -> Result<std::time::SystemTime, lingxi_core::host::FsError> {
         self.inner.file_mtime(path).await
     }
 
-    async fn file_size(&self, path: &str) -> Result<u64, platform_api::FsError> {
+    async fn file_size(&self, path: &str) -> Result<u64, lingxi_core::host::FsError> {
         self.inner.file_size(path).await
     }
 
-    async fn delete_file(&self, path: &str) -> Result<(), platform_api::FsError> {
+    async fn delete_file(&self, path: &str) -> Result<(), lingxi_core::host::FsError> {
         self.inner.delete_file(path).await
     }
 
-    async fn symlink(&self, target: &str, link: &str) -> Result<(), platform_api::FsError> {
+    async fn symlink(&self, target: &str, link: &str) -> Result<(), lingxi_core::host::FsError> {
         self.inner.symlink(target, link).await
     }
 
     async fn flock_exclusive(
         &self,
         path: &str,
-    ) -> Result<Box<dyn platform_api::FlockGuard>, platform_api::FsError> {
+    ) -> Result<Box<dyn lingxi_core::host::FlockGuard>, lingxi_core::host::FsError> {
         self.inner.flock_exclusive(path).await
     }
 
-    async fn fsync(&self, path: &str) -> Result<(), platform_api::FsError> {
+    async fn fsync(&self, path: &str) -> Result<(), lingxi_core::host::FsError> {
         self.inner.fsync(path).await
     }
 }
@@ -8727,10 +8752,10 @@ async fn mint_app_init_session_cleans_up_orphan_transcript_on_partial_failure() 
     )
     .record;
 
-    let inner: Arc<dyn platform_api::FileSystem> = Arc::new(
+    let inner: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
         platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
     );
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(FlakyAppendFs {
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(FlakyAppendFs {
         inner,
         target_suffix: ".jsonl".to_string(),
         calls: std::sync::atomic::AtomicUsize::new(0),
@@ -8812,10 +8837,10 @@ async fn mint_app_init_session_cleans_up_a_forked_transcript_on_partial_failure(
     )
     .record;
 
-    let inner: Arc<dyn platform_api::FileSystem> = Arc::new(
+    let inner: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
         platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
     );
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(FlakyAppendFs {
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(FlakyAppendFs {
         inner,
         target_suffix: ".jsonl".to_string(),
         calls: std::sync::atomic::AtomicUsize::new(0),
@@ -8883,7 +8908,7 @@ async fn boot_backfill_adopts_an_existing_unpinned_conversation_instead_of_minti
     let backfill_home = tmp.path().join(".claude");
     let backfill_root = tmp.path().to_path_buf();
     let backfill_cwd = tmp.path().to_string_lossy().to_string();
-    let backfill_fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+    let backfill_fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
         platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
     );
     let backfill_service = Arc::new(
@@ -9292,7 +9317,7 @@ fn initial_app_cold_boot_exposes_only_its_enabled_managed_mcp() {
             .expect("seed app");
         let layout =
             local_apps::AppLayout::new(tmp.path(), record.id.clone()).expect("seed app layout");
-        let definition = platform_api::McpToolDefinitionDto::new(
+        let definition = lingxi_core::host::McpToolDefinitionDto::new(
             "read_value",
             serde_json::json!({
                 "type": "object",

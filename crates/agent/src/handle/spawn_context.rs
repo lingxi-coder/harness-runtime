@@ -9,11 +9,11 @@ use crate::definition::{
     AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
 };
 use crate::display::{AgentColor, AgentDisplay};
-use permission::PermissionMode;
-use platform_api::subagent_spawn::{
+use lingxi_core::host::subagent_spawn::{
     SubagentInheritance, SubagentListingEntry, SubagentSpawnError, SubagentSpawnRequest,
 };
-use protocol::{AgentId, ConversationMessage, MessageId};
+use lingxi_core::types::{AgentId, ConversationMessage, MessageId};
+use permission::PermissionMode;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -96,7 +96,7 @@ pub fn normalizes_to_fusion(agent_type: &str) -> bool {
 /// version is strictly wider — recorded rather than guessed at.
 #[must_use]
 pub fn append_subagent_system_prompt_suffix() -> Option<String> {
-    if !platform_api::env::is_env_truthy(
+    if !lingxi_core::host::env::is_env_truthy(
         std::env::var(APPEND_SUBAGENT_PROMPT_GATE_ENV)
             .ok()
             .as_deref(),
@@ -151,7 +151,7 @@ pub fn tools_description(def: &AgentDefinition) -> String {
 pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEntry> {
     let mut by_type: HashMap<String, &AgentDefinition> = HashMap::new();
     for def in defs {
-        if def.agent_type == platform_api::FUSION_PANEL_TYPE {
+        if def.agent_type == lingxi_core::host::FUSION_PANEL_TYPE {
             continue;
         }
         // `workflow-subagent` is NOT a catalog agent. The oracle declares it
@@ -436,12 +436,12 @@ impl PoolSubagentSpawner {
         // it (claude uses the synthetic FORK_AGENT on the fork path, never the
         // catalog — forkSubagent.ts:60-71 / AgentTool.tsx:335). It is NOT in the
         // 6-element built-in vec (claude does not register it in builtInAgents).
-        if subagent_type == platform_api::fork_subagent::FORK_SUBAGENT_TYPE {
+        if subagent_type == lingxi_core::host::fork_subagent::FORK_SUBAGENT_TYPE {
             return crate::builtins::fork_agent_definition();
         }
         // 0b. Hidden Fusion panel: resolved BEFORE the catalog so a user agent
         // named `fusion-panel` cannot shadow the synthetic definition.
-        if subagent_type == platform_api::FUSION_PANEL_TYPE {
+        if subagent_type == lingxi_core::host::FUSION_PANEL_TYPE {
             return crate::builtins::fusion_panel_definition();
         }
         // 0c. [Finding 25] `fusion` is reserved for the Fusion Agent surface:
@@ -699,7 +699,7 @@ impl PoolSubagentSpawner {
             // Overwritten by `spawn` from `request.schema` (like `tool_schemas`).
             schema: None,
             // Overwritten by `build_subagent_context` from `request.structured_output_mode`.
-            structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode::Forced,
+            structured_output_mode: lingxi_core::host::subagent_spawn::StructuredOutputMode::Forced,
             structured_output_parse_retries: 0,
             budget: None,
             // Filled by `spawn` from the set-once `hook_executor` / `skill_loader`
@@ -708,7 +708,7 @@ impl PoolSubagentSpawner {
             hook_executor: None,
             strict_plugin_only_hooks: false,
             skill_loader: None,
-            hook_session_id: protocol::SessionId::nil(),
+            hook_session_id: lingxi_core::types::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
             // Default 0; `build_subagent_context` overwrites it with `request.depth`.
             depth: 0,
@@ -789,7 +789,7 @@ impl PoolSubagentSpawner {
     pub(super) async fn apply_agent_spawn_hook(
         &self,
         request: &SubagentSpawnRequest,
-        origin_session_id: Option<protocol::SessionId>,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
     ) -> Result<Option<SubagentSpawnRequest>, SubagentSpawnError> {
         // `RuntimeLink::get` already hands back an owned `Arc`; the
         // `OnceLock` this arrived on borrows and needs a `.cloned()`.

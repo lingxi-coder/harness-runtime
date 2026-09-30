@@ -3,7 +3,7 @@ use super::*;
 
 pub(crate) struct BudgetCacheRetirement {
     budget: Arc<BudgetEnforcer>,
-    session_id: protocol::SessionId,
+    session_id: lingxi_core::types::SessionId,
     expected: Option<Arc<BudgetSessionState>>,
 }
 
@@ -16,7 +16,7 @@ impl BudgetEnforcer {
     /// bookkeeping gate. New external views/admissions are already excluded.
     pub(crate) async fn prepare_cache_retirement(
         self: &Arc<Self>,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
     ) -> Result<Option<BudgetCacheRetirement>, crate::CostPersistError> {
         if self.session_scope.is_some_and(|id| id != session_id) {
             return Err(crate::CostPersistError::Rejected(
@@ -126,8 +126,8 @@ mod tests {
 
     #[tokio::test]
     async fn retirement_removes_only_origin_completed_settlements_without_recharging_old_ids() {
-        let session_a = protocol::SessionId::new();
-        let session_b = protocol::SessionId::new();
+        let session_a = lingxi_core::types::SessionId::new();
+        let session_b = lingxi_core::types::SessionId::new();
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         let tracker = Arc::new(CostTracker::new(
             session_a,

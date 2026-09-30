@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use llm_runtime::client::DefaultLlmClient;
+use llm_runtime::client::ModelRuntime;
 use llm_runtime::BoxFuture;
 use llm_runtime::{
     AuthStrategy, AzureConfig, Capabilities, ClientConfig, Credential, CredentialConfig,
@@ -32,7 +32,7 @@ async fn codex_builtin_uses_oauth_endpoint_and_rejects_api_keys() {
         Credential::ApiKey("api-key-must-not-be-used".into()),
     ] {
         let oauth = matches!(&credential, Credential::ChatGptOAuth { .. });
-        let client = DefaultLlmClient::from_config(ClientConfig {
+        let client = ModelRuntime::from_config(ClientConfig {
             providers: llm_runtime::builtin_presets().providers,
         })
         .unwrap()
@@ -89,7 +89,7 @@ async fn chatgpt_oauth_injects_bearer_and_account_id_headers() {
         }
     }
 
-    let client = DefaultLlmClient::from_config(ClientConfig {
+    let client = ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: lingxi_llm_client::protocol::Region::all(),
@@ -128,10 +128,10 @@ async fn chatgpt_oauth_injects_bearer_and_account_id_headers() {
     .with_credential_provider(Arc::new(ChatGptStore));
 
     let mut request = LlmRequest::new("p-model");
-    request.max_tokens = Some(1024);
-    request.temperature = Some(0.5);
-    request.top_p = Some(0.9);
-    request.openai_responses.store = Some(true);
+    request.input.max_tokens = Some(1024);
+    request.input.temperature = Some(0.5);
+    request.input.controls.top_p = Some(0.9);
+    request.input.controls.responses.store = Some(true);
     let prepared = client.prepare(&request).await.expect("prepare");
 
     let body = &prepared.provider_request.body_json;
@@ -214,8 +214,8 @@ fn client_with(
     base_url: &str,
     auth: AuthStrategy,
     credential: CredentialConfig,
-) -> DefaultLlmClient {
-    DefaultLlmClient::from_config(ClientConfig {
+) -> ModelRuntime {
+    ModelRuntime::from_config(ClientConfig {
         providers: vec![profile(provider_id, protocol, base_url, auth, credential)],
     })
     .expect("client")
@@ -347,7 +347,7 @@ async fn host_managed_credentials_resolve_through_injected_provider() {
         }
     }
 
-    let client = DefaultLlmClient::from_config(ClientConfig {
+    let client = ModelRuntime::from_config(ClientConfig {
         providers: vec![profile(
             ProviderId::OpenAI,
             ProtocolFamily::OpenAiChat,
@@ -420,7 +420,7 @@ async fn sigv4_without_signing_config_fails_at_prepare() {
     }
 
     // Build a profile with AwsSigV4 auth but NO signing config.
-    let client = DefaultLlmClient::from_config(ClientConfig {
+    let client = ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: lingxi_llm_client::protocol::Region::all(),
@@ -471,7 +471,7 @@ async fn sigv4_without_signing_config_fails_at_prepare() {
     );
 }
 
-/// GcpToken auth injects an `Authorization: Bearer` header (reuses BearerAuthenticator).
+/// GcpToken auth injects an `Authorization: Bearer` header (applied by the SDK).
 #[tokio::test]
 async fn gcp_token_injects_bearer_header() {
     std::env::set_var("LLM_CLIENT_AUTH_TEST_GCP", "gcp-bearer-token");
@@ -506,7 +506,7 @@ async fn azure_token_injects_api_key_header() {
     std::env::set_var("LLM_CLIENT_AUTH_TEST_AZURE", "azure-api-key-value");
 
     // Build an Azure OpenAI profile with AzureToken auth.
-    let client = DefaultLlmClient::from_config(ClientConfig {
+    let client = ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: lingxi_llm_client::protocol::Region::all(),
@@ -673,7 +673,7 @@ async fn prepare_count_tokens_rejects_non_anthropic_routes() {
 /// sent "null" → signature mismatch → 403.
 #[tokio::test]
 async fn sigv4_null_body_signs_as_null_string() {
-    use llm_runtime::sigv4;
+    use lingxi_llm_client::auth::sigv4;
     use std::collections::BTreeMap;
 
     // SHA-256("null") — the 4-byte ASCII string.
@@ -740,7 +740,7 @@ async fn sigv4_null_body_content_sha256_via_client() {
     // Value::Null.to_string() == "null", so that's what the bridge sends.
     let expected_hash = "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b";
 
-    let client = DefaultLlmClient::from_config(ClientConfig {
+    let client = ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: lingxi_llm_client::protocol::Region::all(),
@@ -807,7 +807,7 @@ async fn sigv4_null_body_content_sha256_via_client() {
         })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let re_signed = llm_runtime::sigv4::sign_request(
+    let re_signed = lingxi_llm_client::auth::sigv4::sign_request(
         method,
         url,
         &pre_sign_headers,
@@ -882,7 +882,7 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
     }
 
     // Build an AnthropicMessages client with AwsSigV4 auth.
-    let client = DefaultLlmClient::from_config(ClientConfig {
+    let client = ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: lingxi_llm_client::protocol::Region::all(),
@@ -966,7 +966,7 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    let expected = llm_runtime::sigv4::sign_request(
+    let expected = lingxi_llm_client::auth::sigv4::sign_request(
         method,
         url,
         &pre_sign_headers,

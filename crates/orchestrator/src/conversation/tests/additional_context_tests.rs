@@ -5,7 +5,7 @@ use crate::test_support::{
     StaticMemoryProvider,
 };
 use crate::OrchestratorConfig;
-use protocol::ContentBlock;
+use lingxi_core::types::ContentBlock;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
@@ -43,28 +43,31 @@ fn runtime_message(body: &str) -> ConversationMessage {
 }
 
 fn mobile_environment_with_runtime(
-    tool_runtime: platform_api::MobileToolRuntime,
+    tool_runtime: lingxi_core::host::MobileToolRuntime,
     cwd: Option<&str>,
-) -> platform_api::MobileRuntimeEnvironment {
-    platform_api::MobileRuntimeEnvironment::new(
-        platform_api::MobileHostEnvironment::new(
-            platform_api::MobileHostOs::Ios,
+) -> lingxi_core::host::MobileRuntimeEnvironment {
+    lingxi_core::host::MobileRuntimeEnvironment::new(
+        lingxi_core::host::MobileHostEnvironment::new(
+            lingxi_core::host::MobileHostOs::Ios,
             Some("19.0".into()),
-            platform_api::MobileDeviceClass::Phone,
-            platform_api::MobileExecutionTarget::PhysicalDevice,
-            platform_api::MobileLaunchMode::Interactive,
+            lingxi_core::host::MobileDeviceClass::Phone,
+            lingxi_core::host::MobileExecutionTarget::PhysicalDevice,
+            lingxi_core::host::MobileLaunchMode::Interactive,
         ),
         tool_runtime,
         cwd.map(str::to_string),
         Some("/bin/sh".into()),
         Some("Mobile Linux sh".into()),
-        platform_api::MobileNetworkPolicy::PermissionMediated,
-        platform_api::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
+        lingxi_core::host::MobileNetworkPolicy::PermissionMediated,
+        lingxi_core::host::MobileLifecyclePolicy::IosFiniteBackgroundAssertion,
     )
 }
 
-fn mobile_environment(cwd: &str) -> platform_api::MobileRuntimeEnvironment {
-    mobile_environment_with_runtime(platform_api::MobileToolRuntime::MobileLinuxGuest, Some(cwd))
+fn mobile_environment(cwd: &str) -> lingxi_core::host::MobileRuntimeEnvironment {
+    mobile_environment_with_runtime(
+        lingxi_core::host::MobileToolRuntime::MobileLinuxGuest,
+        Some(cwd),
+    )
 }
 
 #[tokio::test]
@@ -195,7 +198,7 @@ fn scheduled_mobile_runtime_uses_headless_prompt_guidance() {
     assert!(orch.prompt_is_interactive());
 
     let mut environment = mobile_environment("/workspace/a");
-    environment.host.launch_mode = platform_api::MobileLaunchMode::ScheduledHeadless;
+    environment.host.launch_mode = lingxi_core::host::MobileLaunchMode::ScheduledHeadless;
     orch.mobile_runtime_environment = Some(environment);
 
     assert!(!orch.prompt_is_interactive());
@@ -271,7 +274,7 @@ async fn non_guest_mobile_runtime_keeps_environment_re_emission_when_excluded() 
         std::env::temp_dir(),
     );
     orch.mobile_runtime_environment = Some(mobile_environment_with_runtime(
-        platform_api::MobileToolRuntime::AndroidLegacy,
+        lingxi_core::host::MobileToolRuntime::AndroidLegacy,
         None,
     ));
 
@@ -324,7 +327,10 @@ async fn system_prompt_override_stays_verbatim_while_runtime_message_is_sent() {
 
 /// Rewind the memoized session-start date so the live local date always
 /// differs — the "session started yesterday" setup.
-fn seed_stale_session_date(orch: &ConversationOrchestrator, session_id: protocol::SessionId) {
+fn seed_stale_session_date(
+    orch: &ConversationOrchestrator,
+    session_id: lingxi_core::types::SessionId,
+) {
     let mut state = orch
         .prompt_runtime
         .date_change
@@ -367,7 +373,7 @@ fn date_change_none_when_date_unchanged() {
     // First producer run seeds the session-start memo (`LGe = Vr(wcs)`), so
     // a same-day session NEVER emits — the locked fixtures stay identical.
     let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
-    let sid = protocol::SessionId::new();
+    let sid = lingxi_core::types::SessionId::new();
     assert!(orch.date_change_reminder_message(sid).is_none());
     assert!(orch.date_change_reminder_message(sid).is_none());
 }
@@ -375,7 +381,7 @@ fn date_change_none_when_date_unchanged() {
 #[test]
 fn date_change_emits_once_after_midnight() {
     let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
-    let sid = protocol::SessionId::new();
+    let sid = lingxi_core::types::SessionId::new();
     seed_stale_session_date(&orch, sid);
     let msg = orch
         .date_change_reminder_message(sid)
@@ -401,7 +407,7 @@ fn date_change_stays_deduped_after_a_compact_boundary() {
     // `currentDate` remains the session-start memo and the changed date was
     // already delivered once.
     let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
-    let sid = protocol::SessionId::new();
+    let sid = lingxi_core::types::SessionId::new();
     seed_stale_session_date(&orch, sid);
     assert!(orch.date_change_reminder_message(sid).is_some());
     orch.commit_date_change_reminder();
@@ -415,11 +421,11 @@ fn date_change_re_seeds_the_session_start_date_on_a_new_session() {
     // a `/clear` (fresh `SessionId`) or in-place resume (adopted id) must
     // NOT fire a reminder into the brand-new conversation.
     let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
-    let old = protocol::SessionId::new();
+    let old = lingxi_core::types::SessionId::new();
     seed_stale_session_date(&orch, old);
     assert!(orch.date_change_reminder_message(old).is_some());
 
-    let fresh = protocol::SessionId::new();
+    let fresh = lingxi_core::types::SessionId::new();
     assert!(
         orch.date_change_reminder_message(fresh).is_none(),
         "a new session re-seeds the start date to today"

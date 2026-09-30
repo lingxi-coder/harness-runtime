@@ -1,16 +1,16 @@
 use async_trait::async_trait;
-use mcp::{ConfigScope, McpRegistry, McpServerConfig};
-use orchestrator::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-};
-use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::{
+use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpStatus, McpToolDto,
     McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, OrchestratorHandle,
     ServerCapabilitiesDto,
 };
-use protocol::McpConnectionId as ConnId;
+use lingxi_core::types::McpConnectionId as ConnId;
+use mcp::{ConfigScope, McpRegistry, McpServerConfig};
+use orchestrator::test_support::{
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+};
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -80,7 +80,7 @@ fn stdio_cfg(name: &str) -> McpServerConfig {
             args: vec![],
             env: std::collections::HashMap::new(),
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::Project),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         disabled: false,
         timeout_ms: None,
         always_load: false,

@@ -38,21 +38,15 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use async_trait::async_trait;
 use futures::stream::StreamExt;
-use platform_api::filesystem::FileSystem;
-use platform_api::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry};
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
-use platform_api::{
-    BackgroundTaskHandle, BudgetEnforcerHandle, FusionActivation, FusionError, FusionExecutor,
-    FusionInheritance, FusionModelRef, FusionOrigin, FusionPreparedSummary, FusionPreset,
-    FusionRunFactsRecorder, FusionRunId, FusionRunIdentity, FusionRunRecorder,
-    FusionRunRecorderFactory, FusionSubmission, FusionTerminalCapability, PreparedFusionRun,
-    RuntimeSpawner, SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest,
-    SubagentSpawner, ToolInvoker,
+use lingxi_core::host::filesystem::FileSystem;
+use lingxi_core::host::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry};
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
+use lingxi_core::host::{
+    BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
+    SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
-use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio_util::sync::CancellationToken;
 
 use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;
@@ -352,363 +346,10 @@ fn workflow_agent_display_model(opts: &Value) -> Option<String> {
         .or_else(|| opts.get("model_profile"))
         .and_then(Value::as_str)
         .filter(|profile| !profile.is_empty());
-    Some(platform_api::qualified_model_ref(
+    Some(lingxi_core::host::qualified_model_ref(
         agent_model,
         agent_model_profile,
     ))
-}
-
-/// [R5-18] The marker the `workflow/src/lib.rs` prelude's `__wf_pump`
-/// searches for (anywhere in the message — `FusionError::InvalidRequest`'s
-/// Display prepends "invalid fusion request: ") to set
-/// `err.name = "WorkflowFusionOptionError"` on the rejected `fusion()`
-/// promise. EVERY rejection derived from the caller's `opts` object must
-/// carry it, not just the `deny_unknown_fields` "unknown field" shape:
-/// `workflow_description.txt` tells the model, unqualified, to catch a
-/// `fusion()` rejection and branch on that name, so a wrong-typed /
-/// out-of-range / otherwise malformed option value that reached JS with the
-/// default name "Error" skipped the script's recovery branch and aborted
-/// the whole workflow over a fully recoverable mistake. Byte-locked with
-/// the prelude's `indexOf` and with `local_workflow_test::
-/// every_workflow_fusion_option_rejection_carries_the_prelude_option_marker`.
-///
-/// [R7-3/R7-7] The class this marker has to cover is "every rejection a
-/// workflow `fusion(prompt, opts)` call can earn from `opts` alone", and
-/// R5-18 swept only the three sites inside `parse_workflow_fusion_request`.
-/// The rest were raised later, inside `executor.run`, and reached JS
-/// unmarked. The full class, and where each member is now caught:
-///
-/// * unknown option KEY — serde `deny_unknown_fields` (here) — marked
-/// * wrong-typed / out-of-range / unparseable opts — serde (here) — marked
-/// * `preset` — [`parse_workflow_fusion_preset`] (here) — marked
-/// * `models[i]` blank profile/model —
-///   [`validate_workflow_fusion_model_ref`] (here) — marked
-/// * `dimensions` (non-snake_case, reserved, >12) — was
-///   `orchestrator::validate_request`; now also
-///   [`validate_workflow_fusion_dimensions`] (here) — marked
-/// * `models` list shape (<2, over the panel cap, duplicates) — was
-///   `model_resolver::resolve_custom`; now also
-///   [`validate_workflow_fusion_model_list`] (here) — marked
-/// * `models` unknown model / disallowed profile, `crossProvider` denial —
-///   host catalog and host policy, NOT opts alone: deliberately left
-///   unmarked (see [`workflow_fusion_option_error`])
-/// * empty `prompt` (`orchestrator::validate_request`) — the positional
-///   argument, not a member of `opts`; the documented recovery ("retry
-///   without opts") cannot fix it, so it stays unmarked
-///
-/// The two `executor.run` fallbacks stay in place because the parse-time
-/// gates duplicate no rules: both call the shared oracle
-/// (`platform_api::normalize_dimensions`) or mirror `resolve_custom`'s
-/// arithmetic under a test that compares the two.
-///
-/// Accepted consequence: a workflow-origin bad `dimensions`/`models` list
-/// no longer reaches `fusion::orchestrator`, so it no longer emits that
-/// crate's `tengu_fusion_failed` event with `error_category:
-/// "invalid_request"` / `"invalid_custom_models"`. That matches what the
-/// surface already did for every option error R5-18 covered (none of them
-/// ever reached the orchestrator either) and what `/fusion` does, which
-/// likewise normalizes dimensions at parse time.
-const WORKFLOW_FUSION_OPTION_MARKER: &str = "Workflow fusion() received an unknown option";
-
-/// [R5-18] Wraps a malformed option VALUE (wrong type, out-of-range number,
-/// unrecognized preset, blank `models` entry, unparseable opts JSON) in
-/// [`WORKFLOW_FUSION_OPTION_MARKER`] so it names itself to the prelude the
-/// same way an unknown option KEY does — the unknown-key branch keeps its
-/// own byte-locked wording, this one says "or an invalid option value" and
-/// carries the raw detail in parentheses.
-///
-/// Host-state rejections (no parent model/profile, disabled executor, call
-/// cap, boot-time invalid `fusion.*` settings) must NOT go through here:
-/// they are not something a script's option-recovery branch can fix, and
-/// mislabelling them would make a script silently retry a call that can
-/// never succeed. `every_workflow_fusion_option_rejection_carries_the_
-/// prelude_option_marker`'s negative case pins that boundary.
-fn workflow_fusion_option_error(detail: impl std::fmt::Display) -> FusionError {
-    FusionError::InvalidRequest(format!(
-        "{WORKFLOW_FUSION_OPTION_MARKER} or an invalid option value ({detail})"
-    ))
-}
-
-/// `default_preset` keeps its own parameter (the runtime's `fusion.preset`
-/// default when the script omits `opts.preset`) — only the wire-string ⇒
-/// [`FusionPreset`] parse itself delegates to the shared `FromStr` impl, so
-/// an unrecognized preset names the same accepted values the Agent tool and
-/// `/fusion` do.
-///
-/// [R5-18] The shared message is then wrapped in
-/// [`WORKFLOW_FUSION_OPTION_MARKER`]: `opts.preset` is one of the caller's
-/// options, so a script must be able to recover from a bad one through the
-/// same `e.name === "WorkflowFusionOptionError"` branch as any other bad
-/// option. The wrapping happens HERE (the workflow-only call path) rather
-/// than in `FusionPreset::from_str`, so the CLI and Agent-tool entrypoints
-/// keep the bare shared message.
-fn parse_workflow_fusion_preset(
-    raw: Option<&str>,
-    default_preset: FusionPreset,
-) -> Result<FusionPreset, FusionError> {
-    match raw {
-        None => Ok(default_preset),
-        Some(other) => other.parse().map_err(|error| match error {
-            FusionError::InvalidRequest(detail) => workflow_fusion_option_error(detail),
-            other => other,
-        }),
-    }
-}
-
-fn workflow_fusion_cap(executor: Option<&Arc<dyn FusionExecutor>>) -> u32 {
-    executor
-        .map(|executor| executor.workflow_fusion_call_cap())
-        .unwrap_or(platform_api::FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT)
-        .clamp(1, platform_api::FUSION_WORKFLOW_CALL_CAP_HARD_LIMIT)
-}
-
-fn workflow_fusion_cap_message(cap: u32) -> String {
-    format!("Workflow fusion() call cap reached ({cap})")
-}
-
-/// [R4-18] `WorkflowFusionOpts.models` (`fusion()`'s structured `models`
-/// option) is deserialized straight from the caller's JSON with no
-/// emptiness check on either half — unlike the CLI (`/fusion --models`) and
-/// Agent-tool string entrypoints, which both route through
-/// `platform_api::parse_fusion_model_ref` and reject a blank profile/model
-/// up front (`"invalid fusion models entry"`). A workflow script can easily
-/// produce `{profile: cfg.profile ?? "", model: "gpt-5.4"}`; without this
-/// check the blank profile reaches `model_resolver::resolve_custom` and
-/// surfaces as an unrelated `cross-provider fusion is not allowed` (or, for
-/// a blank model, an ``unknown model `<profile>/` `` lookup failure)
-/// instead of a malformed-entry error naming the actual problem. Mirrors
-/// `parse_fusion_model_ref`'s emptiness rule for the already-structured
-/// form — there is no `"profile:model"` string here to re-parse, so the
-/// check is duplicated rather than shared (`FusionModelRef` gives no
-/// on-the-wire string to hand the string-grammar parser).
-fn validate_workflow_fusion_model_ref(model_ref: &FusionModelRef) -> Result<(), FusionError> {
-    if model_ref
-        .profile
-        .as_deref()
-        .is_some_and(|profile| profile.trim().is_empty())
-    {
-        return Err(workflow_fusion_option_error(format!(
-            "invalid fusion models entry: profile must not be empty (model `{}`)",
-            model_ref.model
-        )));
-    }
-    if model_ref.model.trim().is_empty() {
-        return Err(workflow_fusion_option_error(
-            "invalid fusion models entry: model must not be empty",
-        ));
-    }
-    Ok(())
-}
-
-/// [R7-3/R7-7] `opts.dimensions` is the caller's option, but until now the
-/// ONLY thing that validated it was `fusion::orchestrator::validate_request`
-/// -> [`platform_api::normalize_dimensions`], deep inside `executor.run` —
-/// far past the last site the R5-18 sweep wrapped. Its `InvalidRequest` came
-/// back out through `wf_throw(&error.to_string())` (the `executor.run` Err
-/// arm) carrying no [`WORKFLOW_FUSION_OPTION_MARKER`], so a capitalized
-/// dimension name (`{dimensions: ['Coverage']}` — `workflow_description.txt`
-/// documents `dimensions?: string[]` with no format constraint, so that is
-/// the natural thing for a model to write) reached JS with the default
-/// `err.name = "Error"` and the script's documented recovery branch could
-/// not fire.
-///
-/// Validated HERE, where the marker already lives, by calling the very same
-/// shared function the orchestrator calls — not a re-implementation of its
-/// rules — so the gate cannot drift into rejecting something
-/// `validate_request` would have accepted. Mirrors `/fusion`, which likewise
-/// normalizes at parse time (`commands/core/src/fusion.rs:403`). The
-/// normalized value is deliberately discarded: `FusionRequest.dimensions`
-/// keeps the caller's list and the orchestrator re-normalizes it
-/// (idempotent), so this adds a gate without moving where the canonical
-/// value is produced.
-fn validate_workflow_fusion_dimensions(dimensions: Option<&[String]>) -> Result<(), FusionError> {
-    let Some(dimensions) = dimensions else {
-        return Ok(());
-    };
-    platform_api::normalize_dimensions(dimensions.to_vec())
-        .map(|_| ())
-        .map_err(|error| match error {
-            FusionError::InvalidRequest(detail) => workflow_fusion_option_error(detail),
-            other => other,
-        })
-}
-
-/// [R7-3/R7-7] The effective panel cap `fusion::model_resolver::resolve`
-/// computes (model_resolver.rs:81-84) from the caller's `opts.maxPanel` and
-/// the runtime's `fusion.maxPanel`, re-derived here so
-/// [`validate_workflow_fusion_model_list`] can apply the same cap at parse
-/// time. `FusionAgentSurface::max_panel` IS `FusionRuntimeConfig::max_panel`
-/// (`fusion::orchestrator`'s `agent_surface`), so the two agree.
-///
-/// Written with `min`/`max` rather than `clamp` on purpose: `clamp` panics
-/// when its lower bound exceeds its upper one, which a runtime config with
-/// `maxPanel < 2` would produce — a workflow bridge must not panic over a
-/// settings value.
-fn workflow_fusion_effective_max_panel(
-    surface: &platform_api::FusionAgentSurface,
-    requested: Option<u8>,
-) -> u8 {
-    let ceiling = surface
-        .max_panel
-        .min(platform_api::FUSION_MAX_PANEL)
-        .max(platform_api::FUSION_MIN_PANEL);
-    requested
-        .unwrap_or(ceiling)
-        .max(platform_api::FUSION_MIN_PANEL)
-        .min(ceiling)
-}
-
-/// [R7-3/R7-7] The LIST-shape rules on `opts.models` — the same class the
-/// per-entry [`validate_workflow_fusion_model_ref`] check belongs to, and
-/// the same class R5-18 stopped short of. Until now these three were
-/// enforced only by `fusion::model_resolver::resolve_custom`
-/// (model_resolver.rs:136 / 144 / 179) inside `executor.run`, so
-/// `{models: [{model: 'gpt-5.4'}]}` — one entry — came back to the script as
-/// a plain `Error` while its sibling `{models: [{profile: '', model: 'x'}]}`
-/// (blank profile) was correctly named `WorkflowFusionOptionError`. That
-/// arity split was visible inside the guard test's own table.
-///
-/// `resolve_custom`'s OTHER rejections are deliberately NOT mirrored here:
-/// `profile ... is not in fusion.allowedProfiles` (host policy),
-/// ``unknown model `p/m` `` (the credential-filtered availability catalog)
-/// and `CrossProviderDenied` (host policy) depend on host state, not on the
-/// opts object, and naming them an option error would invite a script to
-/// retry a call that retrying cannot fix — the boundary
-/// [`workflow_fusion_option_error`]'s doc and the guard test's negative case
-/// exist to hold.
-fn validate_workflow_fusion_model_list(
-    models: &[FusionModelRef],
-    parent_profile: &str,
-    max_panel: u8,
-) -> Result<(), FusionError> {
-    if models.len() < usize::from(platform_api::FUSION_MIN_PANEL) {
-        return Err(workflow_fusion_option_error(
-            "explicit models must contain at least 2 entries",
-        ));
-    }
-    if models.len() > usize::from(max_panel) {
-        return Err(workflow_fusion_option_error(format!(
-            "explicit models has {} entries, exceeding the {max_panel} panel cap",
-            models.len()
-        )));
-    }
-    // Distinctness is judged on the RESOLVED (profile, model) pair, exactly
-    // as `resolve_custom` does — an entry that omits `profile` inherits the
-    // parent profile, so `[{model:'a'}, {profile:'<parent>', model:'a'}]` is
-    // a duplicate even though the two JSON objects differ.
-    let mut seen: Vec<(&str, &str)> = Vec::with_capacity(models.len());
-    for model_ref in models {
-        let entry = (
-            model_ref.profile.as_deref().unwrap_or(parent_profile),
-            model_ref.model.as_str(),
-        );
-        if seen.contains(&entry) {
-            return Err(workflow_fusion_option_error(
-                "explicit models must be distinct",
-            ));
-        }
-        seen.push(entry);
-    }
-    Ok(())
-}
-
-fn parse_workflow_fusion_request(
-    executor: Option<&Arc<dyn FusionExecutor>>,
-    prompt: &str,
-    opts_json: &str,
-    run_id: &str,
-    parent_model: Option<&str>,
-    parent_model_profile: Option<&str>,
-) -> Result<platform_api::FusionRequest, FusionError> {
-    let Some(executor) = executor else {
-        return Err(FusionError::UnavailableOnPlatform);
-    };
-    if run_id.trim().is_empty() {
-        return Err(FusionError::InvalidRequest(
-            "workflow fusion requires a non-empty workflow run id".into(),
-        ));
-    }
-    // F008: a composition-root-pinned rejection (an invalid `fusion.*`
-    // setting at boot — see `RejectedFusionExecutor`) is surfaced AS ITSELF,
-    // before the `enabled` gate below, so a workflow's `fusion()` call sees
-    // the real `InvalidConfiguration` instead of the generic `Disabled`
-    // every OTHER disabled-executor path produces.
-    if let Some(error) = executor.preflight_error() {
-        return Err(error);
-    }
-    if !executor.agent_surface().enabled {
-        return Err(FusionError::Disabled);
-    }
-    let opts: WorkflowFusionOpts = serde_json::from_str(opts_json).map_err(|error| {
-        let detail = error.to_string();
-        // `#[serde(deny_unknown_fields)]` reports this shape ("unknown field
-        // `x`, expected ..."); wrap it in a prefix the prelude's `__wf_pump`
-        // recognizes (workflow/src/lib.rs) so a script can `catch (e)` and
-        // branch on `e.name === "WorkflowFusionOptionError"` instead of
-        // string-matching the raw serde message.
-        //
-        // [R5-18] EVERY other deserialization failure of this same object is
-        // just as much a bad-option error — `{maxPanel: 300}` (out of u8
-        // range), `{maxPanel: "3"}` / `{partialOk: 1}` / `{dimensions:
-        // "speed"}` (wrong types), or unparseable JSON — and used to fall
-        // through with the bare serde message, reaching JS with the default
-        // `err.name = "Error"` so the script's documented recovery branch
-        // never fired. Both halves now carry
-        // `WORKFLOW_FUSION_OPTION_MARKER`.
-        if detail.contains("unknown field") {
-            FusionError::InvalidRequest(format!("{WORKFLOW_FUSION_OPTION_MARKER} ({detail})"))
-        } else {
-            workflow_fusion_option_error(detail)
-        }
-    })?;
-    if let Some(models) = &opts.models {
-        for model_ref in models {
-            validate_workflow_fusion_model_ref(model_ref)?;
-        }
-    }
-    // [R7-3/R7-7] Ordered AFTER the per-entry check on purpose: a blank
-    // profile/model keeps naming the actual malformed entry rather than
-    // being masked by the list-arity message below.
-    validate_workflow_fusion_dimensions(opts.dimensions.as_deref())?;
-    let surface = executor.agent_surface();
-    let preset = parse_workflow_fusion_preset(opts.preset.as_deref(), surface.default_preset)?;
-    let parent_model = parent_model
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            FusionError::InvalidRequest("workflow parent model is unavailable".into())
-        })?;
-    let parent_profile = executor
-        .resolve_parent_profile(parent_model, parent_model_profile)
-        .ok_or_else(|| {
-            FusionError::InvalidRequest(format!(
-                "workflow parent model profile is unavailable for `{parent_model}`"
-            ))
-        })?;
-    // [R7-3/R7-7] Last, because the distinctness rule needs the resolved
-    // parent profile (an entry that omits `profile` inherits it) and the cap
-    // needs `surface`.
-    if let Some(models) = &opts.models {
-        validate_workflow_fusion_model_list(
-            models,
-            &parent_profile,
-            workflow_fusion_effective_max_panel(&surface, opts.max_panel),
-        )?;
-    }
-    Ok(platform_api::FusionRequest {
-        schema_version: platform_api::FUSION_SCHEMA_VERSION,
-        origin: FusionOrigin::Workflow,
-        prompt: prompt.to_string(),
-        preset,
-        models: opts.models,
-        dimensions: opts.dimensions.unwrap_or_default(),
-        partial_ok: opts.partial_ok.unwrap_or(surface.default_partial_ok),
-        max_panel: opts.max_panel,
-        cross_provider: opts.cross_provider.unwrap_or(false),
-        parent_profile,
-        parent_model: parent_model.to_string(),
-        workflow_run_id: Some(run_id.to_string()),
-    })
 }
 
 fn format_workflow_agent_snapshot(progress: &WorkflowProgressUpdate) -> Option<String> {
@@ -951,7 +592,7 @@ impl ToolInvoker for WorkspaceLeaseToolInvoker {
         input: Value,
         ctx: SubagentInvocationContext,
         _workspace_lease_token: Option<u64>,
-    ) -> Result<platform_api::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         self.inner
             .invoke_detailed(name, input, ctx, Some(self.token))
             .await
@@ -1067,21 +708,6 @@ fn sort_value(v: Value) -> Value {
     }
 }
 
-/// Deterministic chain-key input for a `fusion()` call's raw opts JSON.
-///
-/// Unlike [`normalize_opts_for_chain_key`] — `agent()`'s fixed-field
-/// projection that strips display-only fields like `label`/`phase` — every
-/// field of `WorkflowFusionOpts` (`preset`, `models`, `dimensions`,
-/// `partialOk`, `maxPanel`, `crossProvider`) affects the run Fusion actually
-/// performs, so none of them can be dropped from cache identity. This only
-/// canonicalizes key ORDER (via the shared recursive [`sort_value`] sorter)
-/// so the same options object hashes identically regardless of the script's
-/// literal key order.
-fn normalize_fusion_opts_for_chain_key(opts_json: &str) -> String {
-    let value: Value = serde_json::from_str(opts_json).unwrap_or(Value::Null);
-    serde_json::to_string(&sort_value(value)).unwrap_or_else(|_| "{}".to_string())
-}
-
 /// The chained resume-cache key for an `agent(prompt, opts)` call (claude-code
 /// `qKa(se, te, m)`): a running hash that folds in the PREVIOUS key (`prev`), so
 /// any change in the preceding sequence of agent() calls cascades into every
@@ -1090,39 +716,6 @@ fn normalize_fusion_opts_for_chain_key(opts_json: &str) -> String {
 /// hash bytes are private to LingXi (the journal is its own same-session format),
 /// so a stable FNV-1a-64 over `prev | prompt | opts` suffices.
 fn chain_key(prev: &str, prompt: &str, opts_json: &str) -> String {
-    chain_key_with_discriminator(prev, None, prompt, opts_json)
-}
-
-/// Shared FNV-1a-64 fold behind [`chain_key`] (agent()) and
-/// [`fusion_chain_key`] (fusion()). `discriminator`, when present, is folded
-/// as its own out-of-band field — between `prev` and `prompt`, wrapped in a
-/// `0xFF` sentinel byte — rather than being prepended as plain text into the
-/// `prompt` slot both call kinds hash over.
-///
-/// [Finding 19] `0xFF` is not a plain "reserved" convention; it is a byte
-/// value that can **never** occur anywhere in the byte representation of a
-/// valid Rust `&str` — `prev`, `prompt`, `discriminator` and `opts_json` are
-/// all `&str`, and the Rust compiler guarantees `&str` is well-formed UTF-8,
-/// whose encoding never emits 0xFF (nor 0xC0/0xC1/0xF5-0xFE) as a byte,
-/// under RFC 3629. An earlier version of this fold used `\x1d` (U+001D,
-/// GROUP SEPARATOR) as the sentinel instead: `\x1d` IS a valid single-byte
-/// UTF-8 character, so a `prompt` that happened to SPELL the exact framing
-/// bytes (`\x1d` + tag + `\x1d`) could reproduce a `fusion()` key
-/// byte-for-byte — the "disjoint BY CONSTRUCTION" claim did not actually
-/// hold for that choice of sentinel. `0xFF` closes that hole for real: no
-/// `&str` content can ever fold to the same bytes as the discriminator
-/// frame, so the two key spaces are disjoint whenever `discriminator` is
-/// `Some` for one call and `None` (or a different tag) for the other, with
-/// no dependence on what text the prompt spells. Passing
-/// `discriminator: None` reproduces the pre-existing `chain_key` byte
-/// sequence exactly, so agent()'s own keys — and every journal entry a
-/// prior release already wrote to disk — are unchanged by this split.
-fn chain_key_with_discriminator(
-    prev: &str,
-    discriminator: Option<&str>,
-    prompt: &str,
-    opts_json: &str,
-) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut fold = |bytes: &[u8]| {
         for &b in bytes {
@@ -1132,24 +725,10 @@ fn chain_key_with_discriminator(
     };
     fold(prev.as_bytes());
     fold(b"\x1e");
-    if let Some(tag) = discriminator {
-        fold(b"\xff");
-        fold(tag.as_bytes());
-        fold(b"\xff");
-    }
     fold(prompt.as_bytes());
     fold(b"\x1f");
     fold(opts_json.as_bytes());
     format!("{h:016x}")
-}
-
-/// The chained resume-cache key for a `fusion(prompt, opts)` call — same
-/// running-cursor chaining as [`chain_key`], but folding a `"fusion"`
-/// discriminator as its own hashed field (see
-/// [`chain_key_with_discriminator`]) so this key space can never collide
-/// with `chain_key`'s, no matter what text an agent() prompt spells.
-fn fusion_chain_key(prev: &str, prompt: &str, opts_json: &str) -> String {
-    chain_key_with_discriminator(prev, Some("fusion"), prompt, opts_json)
 }
 
 /// Append-only workflow cache journal. Claude Code writes one `started` record
@@ -1248,31 +827,8 @@ fn group_en_us(n: u64) -> String {
 /// default workflow subagent.
 pub const DEFAULT_WORKFLOW_SUBAGENT: &str = "workflow-subagent";
 
-#[derive(Debug, Deserialize, Default)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct WorkflowFusionOpts {
-    #[serde(default)]
-    preset: Option<String>,
-    #[serde(default)]
-    models: Option<Vec<FusionModelRef>>,
-    #[serde(default)]
-    dimensions: Option<Vec<String>>,
-    #[serde(default)]
-    partial_ok: Option<bool>,
-    #[serde(default)]
-    max_panel: Option<u8>,
-    #[serde(default)]
-    cross_provider: Option<bool>,
-}
-
-struct WorkflowFusionDispatch {
-    calls: Vec<(String, String)>,
-    reply: oneshot::Sender<Vec<String>>,
-}
-
 enum WorkflowBridgeRequest {
     AgentBatch(Vec<(String, String)>, oneshot::Sender<Vec<String>>),
-    FusionBatch(WorkflowFusionDispatch),
 }
 
 /// A live worker-cancel record: the background-task handle plus the runtime that
@@ -1286,10 +842,8 @@ pub struct WorkerCancel {
     /// interrupt handler. Flipped by [`Task::kill`] / cleanup so a runaway
     /// pure-JS loop aborts instead of leaking the OS thread.
     cancel: Arc<std::sync::atomic::AtomicBool>,
-    /// Cancels any in-flight workflow-global `fusion()` call.
-    fusion_cancel: CancellationToken,
     /// Worker completion signal. `kill` waits briefly on this after flipping
-    /// the cooperative cancel flags so in-flight Fusion can unwind before the
+    /// the cooperative cancel flag so an in-flight batch can unwind before the
     /// runtime fallback aborts the task.
     completion_rx: StdMutex<Option<oneshot::Receiver<()>>>,
     /// Natural completion owns the terminal transition once this flips. Kill
@@ -1315,7 +869,6 @@ impl Drop for WorkerCompletionSignal {
 
 async fn cancel_workflow_worker(rec: WorkerCancel) -> Result<(), TaskError> {
     rec.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-    rec.fusion_cancel.cancel();
     let mut completion_rx = rec
         .completion_rx
         .lock()
@@ -1346,7 +899,7 @@ async fn cancel_workflow_worker(rec: WorkerCancel) -> Result<(), TaskError> {
 /// worker drives the script to completion (via [`run_workflow_script`]), spools
 /// the script's return value, reports the terminal status, and removes its own
 /// cancel record on exit. `kill` cancels the in-flight worker.
-type ProcessOwners = Arc<StdMutex<HashSet<protocol::AgentId>>>;
+type ProcessOwners = Arc<StdMutex<HashSet<lingxi_core::types::AgentId>>>;
 
 /// Runs workflow workers and retains the process identities of their subagents.
 pub struct LocalWorkflowHandler {
@@ -1369,7 +922,7 @@ pub struct LocalWorkflowHandler {
     /// {isolation:"worktree"})` calls. When wired, each isolated workflow
     /// subagent gets a fresh worktree cwd and the terminal keep/cleanup
     /// judgment runs after the spawn returns.
-    worktree_manager: Option<Arc<dyn platform_api::worktree::WorktreeManager>>,
+    worktree_manager: Option<Arc<dyn lingxi_core::host::worktree::WorktreeManager>>,
     /// `task_id` → live worker-cancel record (removed by the worker on exit, or
     /// by [`Task::kill`] / cleanup).
     workers: Arc<Mutex<HashMap<String, WorkerCancel>>>,
@@ -1392,7 +945,7 @@ pub struct LocalWorkflowHandler {
     /// that the main loop also feeds, so `spent()` reads main loop + all
     /// workflows. When unset (tests), a run falls back to its own private pool.
     output_pool_cell: Option<Arc<OnceLock<Arc<AtomicU64>>>>,
-    output_scopes: Option<Arc<dyn platform_api::WorkflowOutputScopes>>,
+    output_scopes: Option<Arc<dyn lingxi_core::host::WorkflowOutputScopes>>,
     /// Late-bound turn-start output baseline (claude-code `xtr`): the cumulative
     /// output at the start of the CURRENT turn. The composition root publishes
     /// the orchestrator's `turn_start_output_baseline` here. At spawn the handler
@@ -1414,14 +967,6 @@ pub struct LocalWorkflowHandler {
     /// saved-workflow directories have already missed (see
     /// [`resolve_nested_script`]).
     plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
-    /// Optional shared Fusion orchestrator for the workflow-global `fusion()`
-    /// helper. Mobile leaves this unset and reports
-    /// [`FusionError::UnavailableOnPlatform`] if a script calls `fusion()`.
-    fusion: Option<Arc<dyn FusionExecutor>>,
-    /// Host-owned terminal recorder attached to each prepared Fusion run.
-    terminal_recorder: Option<Arc<dyn FusionRunRecorder>>,
-    /// Pure per-session recorder factory for hot session switches.
-    terminal_recorder_factory: Option<Arc<dyn FusionRunRecorderFactory>>,
 }
 
 impl LocalWorkflowHandler {
@@ -1455,9 +1000,6 @@ impl LocalWorkflowHandler {
             workspace_leases: None,
             workspace_root: None,
             plugin_workflows: None,
-            fusion: None,
-            terminal_recorder: None,
-            terminal_recorder_factory: None,
         }
     }
 
@@ -1503,7 +1045,7 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_worktree_manager(
         mut self,
-        manager: Arc<dyn platform_api::worktree::WorktreeManager>,
+        manager: Arc<dyn lingxi_core::host::worktree::WorktreeManager>,
     ) -> Self {
         self.worktree_manager = Some(manager);
         self
@@ -1541,7 +1083,7 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_output_scopes(
         mut self,
-        scopes: Arc<dyn platform_api::WorkflowOutputScopes>,
+        scopes: Arc<dyn lingxi_core::host::WorkflowOutputScopes>,
     ) -> Self {
         self.output_scopes = Some(scopes);
         self
@@ -1565,42 +1107,6 @@ impl LocalWorkflowHandler {
     ) -> Self {
         self.workspace_leases = Some(registry);
         self.workspace_root = Some(app_data_root);
-        self
-    }
-
-    /// Wire the shared Fusion executor for workflow-global `fusion()`.
-    #[must_use]
-    pub fn with_fusion(mut self, executor: Arc<dyn FusionExecutor>) -> Self {
-        self.fusion = Some(executor);
-        self
-    }
-
-    /// Attach the host-owned common terminal recorder for workflow Fusion
-    /// calls. Workflow never receives a Slash publication target.
-    #[must_use]
-    pub fn with_terminal_recorder(mut self, recorder: Arc<dyn FusionRunRecorder>) -> Self {
-        self.terminal_recorder = Some(recorder);
-        self
-    }
-
-    /// Optional composition-root form used by mobile/ephemeral hosts.
-    #[must_use]
-    pub fn with_terminal_recorder_opt(
-        mut self,
-        recorder: Option<Arc<dyn FusionRunRecorder>>,
-    ) -> Self {
-        self.terminal_recorder = recorder;
-        self
-    }
-
-    /// Attach a pure per-session recorder factory. A workflow's prepared
-    /// Fusion runs then pin the coordinator that owned the workflow session.
-    #[must_use]
-    pub fn with_terminal_recorder_factory(
-        mut self,
-        factory: Arc<dyn FusionRunRecorderFactory>,
-    ) -> Self {
-        self.terminal_recorder_factory = Some(factory);
         self
     }
 
@@ -1643,7 +1149,7 @@ impl LocalWorkflowHandler {
 struct WorkflowIsolationSpawner {
     process_owners: ProcessOwners,
     inner: Arc<dyn SubagentSpawner>,
-    worktree: Option<Arc<dyn platform_api::worktree::WorktreeManager>>,
+    worktree: Option<Arc<dyn lingxi_core::host::worktree::WorktreeManager>>,
     slug_prefix: String,
     sequence: AtomicU64,
     transcript_subdir: Option<PathBuf>,
@@ -1655,8 +1161,8 @@ impl WorkflowIsolationSpawner {
         mut request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
-        watchdog: Option<platform_api::subagent_spawn::WorkflowQueryWatchdog>,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: Option<lingxi_core::host::subagent_spawn::WorkflowQueryWatchdog>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         // Process cleanup depends on synchronous allocation receipts, not on
         // whether a live-progress UI or journal happens to be enabled.
@@ -1664,7 +1170,7 @@ impl WorkflowIsolationSpawner {
             owners: self.process_owners.clone(),
             inner: observer,
         })
-            as Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>);
+            as Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>);
         let worktree = if request.isolation.as_deref() == Some("worktree") {
             if let Some(manager) = self.worktree.as_ref() {
                 let seq = self
@@ -1712,7 +1218,8 @@ impl WorkflowIsolationSpawner {
             })
             .await;
         if let (Some(manager), Some(handle)) = (self.worktree.as_ref(), worktree.as_ref()) {
-            let _ = platform_api::worktree::agent_worktree_result(manager.as_ref(), handle).await;
+            let _ =
+                lingxi_core::host::worktree::agent_worktree_result(manager.as_ref(), handle).await;
         }
         result
     }
@@ -1720,14 +1227,14 @@ impl WorkflowIsolationSpawner {
 
 struct WorkflowProcessObserver {
     owners: ProcessOwners,
-    inner: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+    inner: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
 }
 
 #[async_trait]
-impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowProcessObserver {
+impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for WorkflowProcessObserver {
     async fn on_model_selected(
         &self,
-        event: &platform_api::subagent_spawn::SubagentObservation,
+        event: &lingxi_core::host::subagent_spawn::SubagentObservation,
         effort: Option<&str>,
     ) {
         if let Some(inner) = &self.inner {
@@ -1737,15 +1244,17 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowProcessObse
 
     async fn before_start(
         &self,
-        event: &platform_api::subagent_spawn::SubagentObservation,
+        event: &lingxi_core::host::subagent_spawn::SubagentObservation,
     ) -> Result<(), SubagentSpawnError> {
         if let Some(inner) = &self.inner {
             inner.before_start(event).await?;
         }
         Ok(())
     }
-    fn on_allocated(&self, event: &platform_api::subagent_spawn::SubagentObservation) {
-        if let platform_api::subagent_spawn::SubagentObservation::Allocated { agent_id, .. } = event
+    fn on_allocated(&self, event: &lingxi_core::host::subagent_spawn::SubagentObservation) {
+        if let lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
+            agent_id, ..
+        } = event
         {
             self.owners
                 .lock()
@@ -1757,9 +1266,10 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowProcessObse
         }
     }
 
-    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
-        if let platform_api::subagent_spawn::SubagentObservation::Allocated { agent_id, .. } =
-            &event
+    async fn on_event(&self, event: lingxi_core::host::subagent_spawn::SubagentObservation) {
+        if let lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
+            agent_id, ..
+        } = &event
         {
             self.owners
                 .lock()
@@ -1815,7 +1325,7 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.spawn_inner(request, inherit, progress, observer, None)
             .await
@@ -1826,8 +1336,8 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
-        observer: Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
-        watchdog: platform_api::subagent_spawn::WorkflowQueryWatchdog,
+        observer: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
+        watchdog: lingxi_core::host::subagent_spawn::WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.spawn_inner(request, inherit, progress, observer, Some(watchdog))
             .await
@@ -1856,11 +1366,11 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         self.inner.resolve_selection(subagent_type, model).await
     }
 
-    async fn register_name(&self, name: &str, agent_id: protocol::AgentId) {
+    async fn register_name(&self, name: &str, agent_id: lingxi_core::types::AgentId) {
         self.inner.register_name(name, agent_id).await;
     }
 
-    async fn resolve_name(&self, name: &str) -> Option<protocol::AgentId> {
+    async fn resolve_name(&self, name: &str) -> Option<lingxi_core::types::AgentId> {
         self.inner.resolve_name(name).await
     }
 
@@ -1868,7 +1378,7 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
         &self,
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
-    ) -> Result<platform_api::subagent_spawn::AsyncLaunch, SubagentSpawnError> {
+    ) -> Result<lingxi_core::host::subagent_spawn::AsyncLaunch, SubagentSpawnError> {
         self.inner.spawn_async(request, inherit).await
     }
 }
@@ -2111,9 +1621,8 @@ fn make_request(
             .filter(|v| !v.is_null())
             .map(std::string::ToString::to_string),
         // Workflow `agent({schema})` keeps the pre-existing forced-every-turn
-        // contract (byte-parity with pre-WP2a behavior); only Fusion panels
-        // request `WhenDone`.
-        structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode::Forced,
+        // contract (byte-parity with pre-WP2a behavior).
+        structured_output_mode: lingxi_core::host::subagent_spawn::StructuredOutputMode::Forced,
         structured_output_parse_retries: structured_output_parse_retries(&opts).unwrap_or(0),
         // `agent(prompt, { effort })` → override the subagent's thinking effort
         // (claude-code `me={...ie,effort:ae}`). A level string or integer, carried
@@ -2393,10 +1902,10 @@ impl WorkflowAgentLiveObserver {
 }
 
 #[async_trait]
-impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver {
-    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
+impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveObserver {
+    async fn on_event(&self, event: lingxi_core::host::subagent_spawn::SubagentObservation) {
         match event {
-            platform_api::subagent_spawn::SubagentObservation::Allocated {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
                 agent_id,
                 agent_type,
                 model,
@@ -2410,7 +1919,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                 self.publish_with(move |state| {
                     state.agent_id = Some(agent_id.to_string());
                     state.agent_type = Some(agent_type);
-                    state.model = Some(platform_api::qualified_model_ref(
+                    state.model = Some(lingxi_core::host::qualified_model_ref(
                         &model,
                         model_profile.as_deref(),
                     ));
@@ -2420,7 +1929,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                 })
                 .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Progress {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Progress {
                 tool_use_count,
                 token_count,
                 ..
@@ -2433,8 +1942,10 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                 })
                 .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Retry {
-                attempt, reason, ..
+            lingxi_core::host::subagent_spawn::SubagentObservation::Retry {
+                attempt,
+                reason,
+                ..
             } => {
                 let now = unix_time_ms_now();
                 self.publish_with(move |state| {
@@ -2445,13 +1956,15 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                 })
                 .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Message { message, .. } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Message { message, .. } => {
                 let now = unix_time_ms_now();
                 self.publish_with(move |state| {
                     state.last_progress_at_ms = Some(now);
-                    if let protocol::ConversationMessage::Assistant { content, .. } = message {
+                    if let lingxi_core::types::ConversationMessage::Assistant { content, .. } =
+                        message
+                    {
                         for block in content {
-                            if let protocol::ContentBlock::ToolUse { name, .. } = block {
+                            if let lingxi_core::types::ContentBlock::ToolUse { name, .. } = block {
                                 state.last_tool_name = Some(name.clone());
                                 state.last_tool_summary = Some(name);
                             }
@@ -2460,7 +1973,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                 })
                 .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Completed {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Completed {
                 total_tool_use_count,
                 total_duration_ms,
                 usage,
@@ -2487,7 +2000,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                         .record_duration(self.call_index, total_duration_ms);
                 }
             }
-            platform_api::subagent_spawn::SubagentObservation::Failed { error, .. } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Failed { error, .. } => {
                 let now = unix_time_ms_now();
                 self.publish_with(move |state| {
                     state.state = Some("error".to_string());
@@ -2496,7 +2009,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for WorkflowAgentLiveOb
                 })
                 .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Killed { .. } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Killed { .. } => {
                 let now = unix_time_ms_now();
                 self.publish_with(move |state| {
                     state.state = Some("error".to_string());
@@ -2520,7 +2033,7 @@ struct OwnSpendBudget {
     spent: Arc<std::sync::atomic::AtomicU64>,
     /// Cumulative output at the start of the turn this workflow was spawned in.
     baseline: u64,
-    output_scope: Option<platform_api::WorkflowOutputScope>,
+    output_scope: Option<lingxi_core::host::WorkflowOutputScope>,
 }
 impl OwnSpendBudget {
     fn turn_spent(&self) -> u64 {
@@ -2541,68 +2054,19 @@ impl workflow::WorkflowBudgetSource for OwnSpendBudget {
     }
 }
 
-/// Drive progress in the same owner as activation. When activation finishes,
-/// synchronously consume buffered final facts before returning to accounting.
-async fn workflow_fusion_with_progress<T>(
-    activation: impl std::future::Future<Output = T>,
-    mut progress: mpsc::Receiver<platform_api::FusionProgress>,
-    forward: Option<mpsc::UnboundedSender<String>>,
-) -> (T, Option<u64>) {
-    tokio::pin!(activation);
-    let mut last_output = None;
-    let mut open = true;
-    let mut observe = |event: platform_api::FusionProgress| {
-        if let Some(tokens) = event.realized_output_tokens {
-            last_output = Some(tokens);
-        }
-        if let Some(tx) = &forward {
-            let _ = tx.send(format!("[workflow_fusion] {}", event.stage.label()));
-        }
-    };
-    loop {
-        tokio::select! {
-            biased;
-            outcome = &mut activation => {
-                while let Ok(event) = progress.try_recv() {
-                    observe(event);
-                }
-                return (outcome, last_output);
-            }
-            event = progress.recv(), if open => {
-                match event {
-                    Some(event) => observe(event),
-                    None => open = false,
-                }
-            }
-        }
-    }
-}
-
-fn encode_workflow_fusion_result(
-    result: &platform_api::FusionResult,
-    settlement: Option<&platform_api::FusionAttemptSettlementStatus>,
-) -> Result<String, serde_json::Error> {
-    let Some(settlement) = settlement else {
-        return serde_json::to_string(result);
-    };
-    let mut value = serde_json::to_value(result)?;
-    value["attempt_settlement"] = serde_json::to_value(settlement)?;
-    serde_json::to_string(&value)
-}
-
 /// Known output across the entire agent run, including separately reported
 /// reasoning. Older spawners omit cumulative usage, so retain their final
 /// report as a fallback. A failed run can still have already-billed output.
 fn known_workflow_agent_output(
     result: &SubagentResult,
-) -> Result<Option<u64>, platform_api::BudgetError> {
+) -> Result<Option<u64>, lingxi_core::host::BudgetError> {
     let usage = match result {
         SubagentResult::Completed {
             usage,
             cumulative_usage,
             ..
         } => {
-            if *cumulative_usage == platform_api::SubagentUsage::default() {
+            if *cumulative_usage == lingxi_core::host::SubagentUsage::default() {
                 usage
             } else {
                 cumulative_usage
@@ -2615,27 +2079,29 @@ fn known_workflow_agent_output(
         .output_tokens
         .checked_add(usage.reasoning_output_tokens)
         .map(Some)
-        .ok_or_else(|| platform_api::BudgetError::Internal("workflow agent output overflow".into()))
+        .ok_or_else(|| {
+            lingxi_core::host::BudgetError::Internal("workflow agent output overflow".into())
+        })
 }
 
 #[cfg(test)]
 mod captured_output_tests {
     use super::*;
-    use platform_api::{
+    use lingxi_core::host::{
         BudgetError, WorkflowOutputAccount, WorkflowOutputEventId, WorkflowOutputScope,
     };
     use std::sync::atomic::Ordering;
 
     struct Account {
-        session: protocol::SessionId,
-        generation: protocol::MessageId,
+        session: lingxi_core::types::SessionId,
+        generation: lingxi_core::types::MessageId,
         spent: AtomicU64,
     }
     impl WorkflowOutputAccount for Account {
-        fn session_id(&self) -> protocol::SessionId {
+        fn session_id(&self) -> lingxi_core::types::SessionId {
             self.session
         }
-        fn generation_id(&self) -> protocol::MessageId {
+        fn generation_id(&self) -> lingxi_core::types::MessageId {
             self.generation
         }
         fn spent(&self) -> u64 {
@@ -2646,10 +2112,10 @@ mod captured_output_tests {
             Ok(())
         }
     }
-    fn scope(session: protocol::SessionId) -> WorkflowOutputScope {
+    fn scope(session: lingxi_core::types::SessionId) -> WorkflowOutputScope {
         WorkflowOutputScope::new(Arc::new(Account {
             session,
-            generation: protocol::MessageId::new(),
+            generation: lingxi_core::types::MessageId::new(),
             spent: AtomicU64::new(0),
         }))
     }
@@ -2663,17 +2129,17 @@ mod captured_output_tests {
     }
 
     struct ExecutionProbe {
-        session: protocol::SessionId,
-        generation: protocol::MessageId,
+        session: lingxi_core::types::SessionId,
+        generation: lingxi_core::types::MessageId,
         events: std::sync::Mutex<HashMap<WorkflowOutputEventId, u64>>,
         calls: AtomicU64,
         result: Option<SubagentResult>,
     }
     impl WorkflowOutputAccount for ExecutionProbe {
-        fn session_id(&self) -> protocol::SessionId {
+        fn session_id(&self) -> lingxi_core::types::SessionId {
             self.session
         }
-        fn generation_id(&self) -> protocol::MessageId {
+        fn generation_id(&self) -> lingxi_core::types::MessageId {
             self.generation
         }
         fn spent(&self) -> u64 {
@@ -2705,9 +2171,9 @@ mod captured_output_tests {
                 return Ok(result.clone());
             }
             Ok(SubagentResult::Completed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 content: Value::String("answer".into()),
-                usage: platform_api::SubagentUsage {
+                usage: lingxi_core::host::SubagentUsage {
                     output_tokens: 7,
                     ..Default::default()
                 },
@@ -2717,7 +2183,7 @@ mod captured_output_tests {
                 assistant_message_count: 0,
                 response_char_count: 0,
                 last_request_id: None,
-                cumulative_usage: platform_api::SubagentUsage::default(),
+                cumulative_usage: lingxi_core::host::SubagentUsage::default(),
                 usage_complete: true,
             })
         }
@@ -2749,8 +2215,8 @@ mod captured_output_tests {
     #[tokio::test]
     async fn captured_output_resume_cache_misses_have_distinct_execution_events() {
         let probe = Arc::new(ExecutionProbe {
-            session: protocol::SessionId::new(),
-            generation: protocol::MessageId::new(),
+            session: lingxi_core::types::SessionId::new(),
+            generation: lingxi_core::types::MessageId::new(),
             events: std::sync::Mutex::new(HashMap::new()),
             calls: AtomicU64::new(0),
             result: None,
@@ -2762,7 +2228,7 @@ mod captured_output_tests {
             "return await agent('changed prompt');",
             "return await agent('changed prompt');",
         ] {
-            run_workflow_script_with_live_updates_and_fusion_recorded(
+            run_workflow_script_with_live_updates_recorded(
                 script,
                 DEFAULT_WORKFLOW_SUBAGENT,
                 "workflow",
@@ -2778,14 +2244,7 @@ mod captured_output_tests {
                 0,
                 NestedConfig::default(),
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                CancellationToken::new(),
-                None,
-                Some("same-resumed-run".into()),
-                None,
-                None,
-                None,
                 Arc::new(AnalyticsBus::new()),
-                None,
                 None,
                 None,
                 None,
@@ -2810,12 +2269,12 @@ mod captured_output_tests {
     fn completed_usage(
         output: u64,
         reasoning: u64,
-        cumulative: platform_api::SubagentUsage,
+        cumulative: lingxi_core::host::SubagentUsage,
     ) -> SubagentResult {
         SubagentResult::Completed {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             content: Value::String("answer".into()),
-            usage: platform_api::SubagentUsage {
+            usage: lingxi_core::host::SubagentUsage {
                 output_tokens: output,
                 reasoning_output_tokens: reasoning,
                 ..Default::default()
@@ -2838,7 +2297,7 @@ mod captured_output_tests {
                 completed_usage(
                     7,
                     3,
-                    platform_api::SubagentUsage {
+                    lingxi_core::host::SubagentUsage {
                         output_tokens: 21,
                         reasoning_output_tokens: 9,
                         ..Default::default()
@@ -2850,7 +2309,7 @@ mod captured_output_tests {
                 completed_usage(
                     7,
                     3,
-                    platform_api::SubagentUsage {
+                    lingxi_core::host::SubagentUsage {
                         reasoning_output_tokens: 11,
                         ..Default::default()
                     },
@@ -2858,14 +2317,14 @@ mod captured_output_tests {
                 11,
             ),
             (
-                completed_usage(7, 3, platform_api::SubagentUsage::default()),
+                completed_usage(7, 3, lingxi_core::host::SubagentUsage::default()),
                 10,
             ),
             (
                 SubagentResult::Failed {
-                    agent_id: protocol::AgentId::new(),
+                    agent_id: lingxi_core::types::AgentId::new(),
                     reason: "after paid round".into(),
-                    usage: platform_api::SubagentUsage {
+                    usage: lingxi_core::host::SubagentUsage {
                         output_tokens: 12,
                         reasoning_output_tokens: 5,
                         ..Default::default()
@@ -2881,15 +2340,15 @@ mod captured_output_tests {
                     _ => 0,
                 };
                 let probe = Arc::new(ExecutionProbe {
-                    session: protocol::SessionId::new(),
-                    generation: protocol::MessageId::new(),
+                    session: lingxi_core::types::SessionId::new(),
+                    generation: lingxi_core::types::MessageId::new(),
                     events: std::sync::Mutex::new(HashMap::new()),
                     calls: AtomicU64::new(0),
                     result: Some(result.clone()),
                 });
                 let scope = WorkflowOutputScope::new(probe.clone());
                 let legacy_pool = Arc::new(AtomicU64::new(0));
-                let _ = run_workflow_script_with_live_updates_and_fusion_recorded(
+                let _ = run_workflow_script_with_live_updates_recorded(
                     "try { return await agent('probe'); } catch (error) { return 'failed'; }",
                     DEFAULT_WORKFLOW_SUBAGENT,
                     "workflow",
@@ -2905,14 +2364,7 @@ mod captured_output_tests {
                     0,
                     NestedConfig::default(),
                     Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    CancellationToken::new(),
-                    None,
-                    Some("run".into()),
-                    None,
-                    None,
-                    None,
                     Arc::new(AnalyticsBus::new()),
-                    None,
                     None,
                     None,
                     None,
@@ -2932,11 +2384,11 @@ mod captured_output_tests {
 
     #[test]
     fn captured_output_rejects_overflow_without_inventing_killed_usage() {
-        let overflow = completed_usage(u64::MAX, 1, platform_api::SubagentUsage::default());
+        let overflow = completed_usage(u64::MAX, 1, lingxi_core::host::SubagentUsage::default());
         assert!(known_workflow_agent_output(&overflow).is_err());
         assert_eq!(
             known_workflow_agent_output(&SubagentResult::Killed {
-                agent_id: protocol::AgentId::new()
+                agent_id: lingxi_core::types::AgentId::new()
             })
             .unwrap(),
             None
@@ -2946,24 +2398,22 @@ mod captured_output_tests {
     #[tokio::test]
     async fn captured_output_caught_overflow_cannot_spawn_again() {
         let probe = Arc::new(ExecutionProbe {
-            session: protocol::SessionId::new(),
-            generation: protocol::MessageId::new(),
+            session: lingxi_core::types::SessionId::new(),
+            generation: lingxi_core::types::MessageId::new(),
             events: std::sync::Mutex::new(HashMap::new()),
             calls: AtomicU64::new(0),
             result: Some(completed_usage(
                 u64::MAX,
                 1,
-                platform_api::SubagentUsage::default(),
+                lingxi_core::host::SubagentUsage::default(),
             )),
         });
         let scope = WorkflowOutputScope::new(probe.clone());
-        run_workflow_script_with_live_updates_and_fusion_recorded(
+        run_workflow_script_with_live_updates_recorded(
             "try { await agent('overflow'); } catch (e) {} try { await agent('must not dispatch'); } catch (e) {} return 'done';",
             DEFAULT_WORKFLOW_SUBAGENT, "workflow", probe.clone(), probe.clone(), probe.clone(),
             None, None, None, None, Some(100), None, 0, NestedConfig::default(),
-            Arc::new(std::sync::atomic::AtomicBool::new(false)), CancellationToken::new(), None,
-            Some("run".into()), None, None, None, Arc::new(AnalyticsBus::new()), None, None, None,
-            None, Some(scope.clone()),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(AnalyticsBus::new()), None, None, None, Some(scope.clone()),
         ).await.unwrap();
         assert_eq!(probe.calls.load(Ordering::Relaxed), 1);
         assert!(
@@ -2974,12 +2424,12 @@ mod captured_output_tests {
 
     #[test]
     fn captured_output_workflows_share_main_and_workflow_spend() {
-        let scope = scope(protocol::SessionId::new());
+        let scope = scope(lingxi_core::types::SessionId::new());
         let first = reader(scope.clone());
         let second = reader(scope.clone());
         scope
             .record_legacy(
-                WorkflowOutputEventId::MainResponse(protocol::MessageId::new()),
+                WorkflowOutputEventId::MainResponse(lingxi_core::types::MessageId::new()),
                 7,
             )
             .unwrap();
@@ -2998,246 +2448,22 @@ mod captured_output_tests {
 
     #[test]
     fn captured_output_late_parent_and_nested_reads_keep_original_generation() {
-        let session = protocol::SessionId::new();
+        let session = lingxi_core::types::SessionId::new();
         let old = scope(session);
         let parent = reader(old.clone());
         let nested = reader(old.clone());
         let current = reader(scope(session));
         old.record_legacy(
-            WorkflowOutputEventId::LegacyFusion(FusionRunId::generated()),
+            WorkflowOutputEventId::WorkflowAgent {
+                run_id: "wf_test".into(),
+                call_index: 0,
+            },
             23,
         )
         .unwrap();
         assert_eq!(parent.turn_spent(), 23);
         assert_eq!(nested.turn_spent(), 23);
         assert_eq!(current.turn_spent(), 0);
-    }
-
-    #[tokio::test]
-    async fn captured_output_ready_outcome_drains_final_buffered_progress() {
-        let (tx, rx) = mpsc::channel(2);
-        let (forward, mut forwarded) = mpsc::unbounded_channel();
-        let scope = scope(protocol::SessionId::new());
-        let run = FusionRunId::generated();
-        let activation = async move {
-            tx.try_send(platform_api::FusionProgress {
-                stage: platform_api::FusionStage::Analyzing,
-                panel_id: None,
-                message: String::new(),
-                realized_output_tokens: Some(31),
-                egress_profiles: None,
-                panels_allocated: None,
-            })
-            .unwrap();
-            "failed without usage facts"
-        };
-        let (_, output) = workflow_fusion_with_progress(activation, rx, Some(forward)).await;
-        // No intervening await between completed activation and publication.
-        scope
-            .record_legacy(WorkflowOutputEventId::LegacyFusion(run), output.unwrap())
-            .unwrap();
-        assert_eq!(scope.spent(), 31);
-        assert!(forwarded
-            .try_recv()
-            .unwrap()
-            .starts_with("[workflow_fusion]"));
-    }
-
-    struct BillingProbe {
-        mode: platform_api::ModelAttemptBillingMode,
-        succeeds: bool,
-        settlement_failed: bool,
-        calls: Arc<AtomicU64>,
-        expected_scope: Option<WorkflowOutputScope>,
-    }
-
-    #[async_trait]
-    impl FusionExecutor for BillingProbe {
-        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
-            platform_api::FusionAgentSurface {
-                enabled: true,
-                ..Default::default()
-            }
-        }
-
-        fn prepare(
-            self: Arc<Self>,
-            submission: FusionSubmission,
-        ) -> Result<PreparedFusionRun, FusionError> {
-            if let Some(expected) = &self.expected_scope {
-                assert!(
-                    submission
-                        .inherit
-                        .output_scope
-                        .as_ref()
-                        .is_some_and(|actual| actual.shares_account(expected)),
-                    "workflow preparation must forward the exact captured output account"
-                );
-            }
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            let control = platform_api::FusionRunControl::new_with_billing_mode(
-                submission.identity.clone(),
-                1_000,
-                submission.inherit.cancel.clone(),
-                FusionRunFactsRecorder::default(),
-                self.mode,
-            );
-            let summary = FusionPreparedSummary {
-                identity: submission.identity,
-                duration_ms: 1_000,
-                planned_panels: Some(2),
-            };
-            Ok(PreparedFusionRun::new(
-                summary,
-                control.clone(),
-                move |_, progress| async move {
-                    if let Some(tx) = progress {
-                        tx.try_send(platform_api::FusionProgress {
-                            stage: platform_api::FusionStage::Analyzing,
-                            panel_id: None,
-                            message: String::new(),
-                            realized_output_tokens: Some(31),
-                            egress_profiles: None,
-                            panels_allocated: None,
-                        })
-                        .unwrap();
-                    }
-                    let result = if self.succeeds {
-                        Ok(platform_api::FusionResult {
-                            schema_version: 1,
-                            run_id: control.identity().run_id.to_string(),
-                            status: platform_api::FusionStatus::Completed,
-                            decision: platform_api::FusionDecision::Merged,
-                            final_text: "answer".into(),
-                            analysis: None,
-                            panels: vec![],
-                            usage: platform_api::FusionUsage {
-                                output_tokens: 17,
-                                ..Default::default()
-                            },
-                            timing: Default::default(),
-                            egress_profiles: vec![],
-                        })
-                    } else {
-                        Err(FusionError::Internal)
-                    };
-                    if self.mode == platform_api::ModelAttemptBillingMode::MeteredAttempts {
-                        let status = if self.settlement_failed {
-                            platform_api::FusionAttemptSettlementStatus::Failed {
-                                reason: "ledger unavailable".into(),
-                            }
-                        } else {
-                            platform_api::FusionAttemptSettlementStatus::Settled
-                        };
-                        control.facts().set_attempt_settlement(status);
-                    }
-                    platform_api::FusionRunOutcome::from_control(&control, result)
-                },
-            ))
-        }
-    }
-
-    #[tokio::test]
-    async fn captured_output_failed_settlement_preserves_answer_and_blocks_next_call() {
-        let probe = Arc::new(ExecutionProbe {
-            session: protocol::SessionId::new(),
-            generation: protocol::MessageId::new(),
-            events: std::sync::Mutex::new(HashMap::new()),
-            calls: AtomicU64::new(0),
-            result: None,
-        });
-        let calls = Arc::new(AtomicU64::new(0));
-        let executor = Arc::new(BillingProbe {
-            mode: platform_api::ModelAttemptBillingMode::MeteredAttempts,
-            succeeds: true,
-            settlement_failed: true,
-            calls: calls.clone(),
-            expected_scope: Some(WorkflowOutputScope::new(probe.clone())),
-        });
-        run_workflow_script_with_live_updates_and_fusion_recorded(
-            "const first = await fusion('first'); if (first.final_text !== 'answer' || first.attempt_settlement.status !== 'failed') throw new Error('lost answer or failure'); try { await fusion('second'); } catch (error) { if (String(error).includes('accounting failed')) return first.final_text; throw error; } throw new Error('second call was admitted');",
-            DEFAULT_WORKFLOW_SUBAGENT, "workflow", probe.clone(), probe.clone(), probe.clone(),
-            None, None, None, None, Some(100), None, 0, NestedConfig::default(),
-            Arc::new(std::sync::atomic::AtomicBool::new(false)), CancellationToken::new(),
-            Some(executor), Some("settlement-failure".into()), Some("model".into()), Some("profile".into()),
-            None, Arc::new(AnalyticsBus::new()), None, None, None, None,
-            Some(WorkflowOutputScope::new(probe)),
-        ).await.unwrap();
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test]
-    async fn captured_output_metered_fusion_never_recharges_legacy_output() {
-        use platform_api::ModelAttemptBillingMode::{LegacyAggregate, MeteredAttempts};
-        for mode in [LegacyAggregate, MeteredAttempts] {
-            for succeeds in [false, true] {
-                for scoped in [false, true] {
-                    let probe = Arc::new(ExecutionProbe {
-                        session: protocol::SessionId::new(),
-                        generation: protocol::MessageId::new(),
-                        events: std::sync::Mutex::new(HashMap::new()),
-                        calls: AtomicU64::new(0),
-                        result: None,
-                    });
-                    let account = WorkflowOutputScope::new(probe.clone());
-                    let pool = Arc::new(AtomicU64::new(0));
-                    let result = run_workflow_script_with_live_updates_and_fusion_recorded(
-                        "return await fusion('question');",
-                        DEFAULT_WORKFLOW_SUBAGENT,
-                        "workflow",
-                        probe.clone(),
-                        probe.clone(),
-                        probe.clone(),
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(100),
-                        Some(pool.clone()),
-                        0,
-                        NestedConfig::default(),
-                        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                        CancellationToken::new(),
-                        Some(Arc::new(BillingProbe {
-                            mode,
-                            succeeds,
-                            settlement_failed: false,
-                            calls: Arc::new(AtomicU64::new(0)),
-                            expected_scope: scoped.then(|| account.clone()),
-                        })),
-                        Some("billing-probe".into()),
-                        Some("model".into()),
-                        Some("profile".into()),
-                        None,
-                        Arc::new(AnalyticsBus::new()),
-                        None,
-                        None,
-                        None,
-                        None,
-                        scoped.then(|| account.clone()),
-                    )
-                    .await;
-                    assert_eq!(
-                        result.is_ok(),
-                        succeeds,
-                        "{mode:?}, scoped={scoped}: {result:?}"
-                    );
-                    let expected = if mode == MeteredAttempts {
-                        0
-                    } else if succeeds {
-                        17
-                    } else {
-                        31
-                    };
-                    assert_eq!(account.spent(), if scoped { expected } else { 0 });
-                    assert_eq!(
-                        pool.load(Ordering::Relaxed),
-                        if scoped { 0 } else { expected },
-                        "{mode:?}, scoped={scoped}: {result:?}"
-                    );
-                }
-            }
-        }
     }
 }
 
@@ -3258,9 +2484,8 @@ pub struct NestedConfig {
     /// `None` ⇒ only built-in/project/user workflows resolve, exactly
     /// today's behavior.
     pub plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
-    /// Session that owns this workflow run. Fusion requests keep this
-    /// original session identity even if the active router/model changes
-    /// before a background workflow reaches its next `fusion()` call.
+    /// Session that owns this workflow run, kept even if the active
+    /// router/model changes while a background workflow is still running.
     pub session_uuid: Option<String>,
 }
 
@@ -3460,7 +2685,7 @@ fn plugin_namespace_for_workflow(
 
 // Argument-defaulting wrappers over the recorded entrypoint. Production has
 // no caller: every host goes through `..._recorded`. They exist so a test can
-// omit the recorder, fusion and telemetry arguments, so they are compiled only
+// omit the recorder and telemetry arguments, so they are compiled only
 // for tests rather than shipped as public API.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
@@ -3542,7 +2767,7 @@ async fn run_workflow_script_with_live_updates(
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
     workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
-    run_workflow_script_with_live_updates_and_fusion(
+    run_workflow_script_with_live_updates_full(
         script,
         subagent_type,
         workflow_id,
@@ -3558,12 +2783,6 @@ async fn run_workflow_script_with_live_updates(
         turn_start_baseline,
         nested,
         cancel,
-        CancellationToken::new(),
-        None,
-        None,
-        None,
-        None,
-        None,
         bus,
         agent_count_out,
         phase_telemetry_ctx,
@@ -3574,7 +2793,7 @@ async fn run_workflow_script_with_live_updates(
 
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-async fn run_workflow_script_with_live_updates_and_fusion(
+async fn run_workflow_script_with_live_updates_full(
     script: &str,
     subagent_type: &str,
     workflow_id: &str,
@@ -3590,18 +2809,12 @@ async fn run_workflow_script_with_live_updates_and_fusion(
     turn_start_baseline: u64,
     nested: NestedConfig,
     cancel: Arc<std::sync::atomic::AtomicBool>,
-    fusion_cancel: CancellationToken,
-    fusion: Option<Arc<dyn FusionExecutor>>,
-    workflow_run_id: Option<String>,
-    parent_model: Option<String>,
-    parent_model_profile: Option<String>,
-    transcript_subdir: Option<PathBuf>,
     bus: Arc<AnalyticsBus>,
     agent_count_out: Option<Arc<AtomicU64>>,
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
     workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
-    run_workflow_script_with_live_updates_and_fusion_recorded(
+    run_workflow_script_with_live_updates_recorded(
         script,
         subagent_type,
         workflow_id,
@@ -3617,24 +2830,17 @@ async fn run_workflow_script_with_live_updates_and_fusion(
         turn_start_baseline,
         nested,
         cancel,
-        fusion_cancel,
-        fusion,
-        workflow_run_id,
-        parent_model,
-        parent_model_profile,
-        transcript_subdir,
         bus,
         agent_count_out,
         phase_telemetry_ctx,
         workflow_metrics_out,
-        None,
         None,
     )
     .await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_workflow_script_with_live_updates_and_fusion_recorded(
+async fn run_workflow_script_with_live_updates_recorded(
     script: &str,
     subagent_type: &str,
     workflow_id: &str,
@@ -3650,28 +2856,11 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
     turn_start_baseline: u64,
     nested: NestedConfig,
     cancel: Arc<std::sync::atomic::AtomicBool>,
-    fusion_cancel: CancellationToken,
-    fusion: Option<Arc<dyn FusionExecutor>>,
-    workflow_run_id: Option<String>,
-    parent_model: Option<String>,
-    parent_model_profile: Option<String>,
-    // The same workflow-scoped child transcript directory the `agent()` batch
-    // path applies via `WorkflowIsolationSpawner::spawn_inner` (`agent::
-    // with_transcript_subdir_override`). NOT currently applied to the
-    // fusion() arm below — see the comment at that call site (G012 residual):
-    // a `tokio::task_local!` scope wrapped only around `executor.run(..)`
-    // does not survive `fusion::panel::run_panels`'s per-panel `JoinSet`
-    // spawn, so wrapping here would have no production effect. Kept as a
-    // parameter (currently unused) rather than threaded through the ~10
-    // call sites below and in local_workflow_test.rs, so the real fix can
-    // wire it up without another signature churn.
-    _transcript_subdir: Option<PathBuf>,
     bus: Arc<AnalyticsBus>,
     agent_count_out: Option<Arc<AtomicU64>>,
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
     workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
-    terminal_recorder: Option<Arc<dyn FusionRunRecorder>>,
-    output_scope: Option<platform_api::WorkflowOutputScope>,
+    output_scope: Option<lingxi_core::host::WorkflowOutputScope>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     let NestedConfig {
         allow_nested,
@@ -3684,7 +2873,7 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
     // Resume reuses the persisted run/journal identity, but a real script
     // execution can issue new calls at the same call indices. Its accounting
     // namespace must therefore be fresh; nested calls share this execution.
-    let output_execution_id = protocol::MessageId::new().to_string();
+    let output_execution_id = lingxi_core::types::MessageId::new().to_string();
     // Script try/catch must not turn an accounting failure into permission
     // for another paid call, including later calls in the same batch.
     let output_accounting_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3710,7 +2899,6 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
     // on its reply before sending the next.
     let (req_tx, mut req_rx) =
         mpsc::channel::<(Vec<(String, String)>, oneshot::Sender<Vec<String>>)>(1);
-    let (fusion_req_tx, mut fusion_req_rx) = mpsc::channel::<WorkflowFusionDispatch>(1);
     let (outcome_tx, outcome_rx) =
         oneshot::channel::<Result<workflow::RunOutcome, workflow::WorkflowError>>();
     let script_owned = script.to_string();
@@ -3739,25 +2927,6 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                 }
                 reply_rx.blocking_recv().unwrap_or_default()
             };
-            let fusion_runner = move |prompts: &[String], opts_json: &[String]| -> Vec<String> {
-                let (reply_tx, reply_rx) = oneshot::channel();
-                let unavailable =
-                    || vec![wf_throw(workflow::WORKFLOW_FUSION_UNAVAILABLE_MESSAGE); prompts.len()];
-                if fusion_req_tx
-                    .blocking_send(WorkflowFusionDispatch {
-                        calls: prompts
-                            .iter()
-                            .cloned()
-                            .zip(opts_json.iter().cloned())
-                            .collect(),
-                        reply: reply_tx,
-                    })
-                    .is_err()
-                {
-                    return unavailable();
-                }
-                reply_rx.blocking_recv().unwrap_or_else(|_| unavailable())
-            };
             // `phase()`/`log()` fire this live; an unbounded `send` is non-blocking
             // and needs no runtime, so it is safe from the script thread. The host
             // drains `progress_tx` concurrently (e.g. spools to the task output).
@@ -3777,10 +2946,9 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                     let _ = tx.send(workflow_progress_update(p));
                 }
             };
-            let outcome = workflow::run_with_progress_and_fusion_batch(
+            let outcome = workflow::run_with_progress(
                 &script_owned,
                 runner,
-                fusion_runner,
                 on_progress,
                 Some(budget_source),
                 allow_nested,
@@ -3815,15 +2983,12 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
     // journal.
     let mut running_key = String::new();
     let mut gone_live = false;
-    let mut fusion_calls_seen = 0_u32;
-    let fusion_cap = workflow_fusion_cap(fusion.as_ref());
 
     // Async worker: answer each batch. Phase A decides cached-vs-live per call in
     // order (advancing the prefix cursor); Phase B runs the plans concurrently
     // (bounded, order-preserving). The loop ends when the runner's sender is
     // dropped — i.e. when `workflow::run` returns.
     let mut agent_open = true;
-    let mut fusion_open = true;
     loop {
         let maybe_work = tokio::select! {
             maybe = req_rx.recv(), if agent_open => {
@@ -3835,19 +3000,10 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                     }
                 }
             }
-            maybe = fusion_req_rx.recv(), if fusion_open => {
-                match maybe {
-                    Some(call) => Some(WorkflowBridgeRequest::FusionBatch(call)),
-                    None => {
-                        fusion_open = false;
-                        None
-                    }
-                }
-            }
             else => None,
         };
         let Some(work) = maybe_work else {
-            if !agent_open && !fusion_open {
+            if !agent_open {
                 break;
             }
             continue;
@@ -3855,9 +3011,6 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
         if output_accounting_failed.load(Ordering::Acquire) {
             let error = wf_throw("workflow output accounting failed; further dispatch is disabled");
             match work {
-                WorkflowBridgeRequest::FusionBatch(batch) => {
-                    let _ = batch.reply.send(vec![error; batch.calls.len()]);
-                }
                 WorkflowBridgeRequest::AgentBatch(calls, reply) => {
                     let _ = reply.send(vec![error; calls.len()]);
                 }
@@ -3865,366 +3018,6 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
             continue;
         }
         match work {
-            WorkflowBridgeRequest::FusionBatch(batch) => {
-                let fusion_concurrency = fusion.as_ref().map_or(1, |executor| {
-                    executor.workflow_batch_concurrency().clamp(1, 2)
-                });
-                // Only plan the next call when an execution slot is available.
-                // In rollback=1 this retains the prior budget/cap/cache timing.
-                // Prefix and cap state never move into concurrent futures.
-                let fusion = &fusion;
-                let workflow_run_id = &workflow_run_id;
-                let workflow_session_uuid = &workflow_session_uuid;
-                let parent_model = &parent_model;
-                let parent_model_profile = &parent_model_profile;
-                let tool_invoker = &tool_invoker;
-                let budget = &budget;
-                let fusion_cancel = &fusion_cancel;
-                let output_scope = &output_scope;
-                let output_accounting_failed = &output_accounting_failed;
-                let terminal_recorder = &terminal_recorder;
-                let worker_progress_tx = &worker_progress_tx;
-                let spent = &spent;
-                let journal = &journal;
-                let journal_writer = &journal_writer;
-                let results = futures::stream::iter(batch.calls).map(|(prompt, opts_json)| {
-                // Advance the SAME resume cursor `agent()` advances (`running_key`)
-                // for EVERY fusion() dispatch — cap refusal, budget refusal, parse
-                // rejection, or a real run — mirroring the agent() arm's Phase A,
-                // which advances unconditionally at line ~2801 before its own
-                // budget/cap gates run in Phase B. Computing `key` here (rather
-                // than only inside the `Ok(request)` branch below, as before) does
-                // not touch the executor: `fusion_chain_key`/
-                // `normalize_fusion_opts_for_chain_key` are pure functions over
-                // `call.prompt`/`call.opts_json`, so this cannot skip any
-                // validation `parse_workflow_fusion_request` still performs below.
-                // Without this, a call refused here leaves the cursor exactly
-                // where it was, so every subsequently journaled agent() key
-                // (chained off the pre-refusal cursor) misses on replay and the
-                // whole downstream fleet re-spawns instead of hitting the journal.
-                let normalized_opts = normalize_fusion_opts_for_chain_key(&opts_json);
-                let key = fusion_chain_key(&running_key, &prompt, &normalized_opts);
-                running_key.clone_from(&key);
-                let ready = (|| {
-                if output_accounting_failed.load(Ordering::Acquire) {
-                    return Some(wf_throw("workflow output accounting failed; further dispatch is disabled"));
-                }
-                if fusion_calls_seen >= fusion_cap {
-                    return Some(wf_throw(&workflow_fusion_cap_message(fusion_cap)));
-                }
-                // Mirror the agent() batch's budget ceiling (line ~2547 below):
-                // fusion() output tokens are NOT free just because they are
-                // dispatched from a different queue — a workflow that has
-                // already spent its turn budget must not be able to launch a
-                // 4-5x-cost Fusion run. Same message/format as agent()'s
-                // check, so the prelude's `err.name = "WorkflowBudgetExceededError"`
-                // detection (workflow/src/lib.rs) recognizes it identically.
-                //
-                // The cap slot is consumed only AFTER this gate (parity with
-                // the agent() arm's `metrics.call_count += 1`, which also
-                // runs after its budget check below): a call refused for
-                // budget must not burn a cap slot, or a workflow retried
-                // after a budget refusal could exhaust its cap on refusals
-                // alone and never see a real cap failure once budget frees
-                // up.
-                if let Some(total) = token_budget_total.filter(|&t| t > 0) {
-                    let turn_spent = output_scope.as_ref().map_or_else(
-                        || {
-                            spent
-                                .load(Ordering::Relaxed)
-                                .saturating_sub(turn_start_baseline)
-                        },
-                        platform_api::WorkflowOutputScope::spent,
-                    );
-                    if turn_spent >= total {
-                        return Some(wf_throw(&workflow_budget_exceeded_message(
-                            turn_spent, total,
-                        )));
-                    }
-                }
-                fusion_calls_seen = fusion_calls_seen.saturating_add(1);
-                // [R4-12] Look the journal up BEFORE re-deriving the request
-                // from LIVE executor state. `parse_workflow_fusion_request`
-                // calls `executor.preflight_error()` (re-validates the
-                // `fusion.*` settings from disk on every call on desktop),
-                // `executor.agent_surface().enabled`, and
-                // `executor.resolve_parent_profile(..)` (fail-closed on an
-                // ambiguous catalog match) — any of which can flip between
-                // the run that journaled this key and a later resume, even
-                // though replaying an already-journaled string needs no
-                // executor at all. R3-16 hoisted `key`/`running_key` above
-                // the cap/budget gates so a refusal still advances the
-                // resume cursor for later calls; this hoists the cache
-                // lookup itself above the live re-derivation for the same
-                // reason — a cache HIT must not be discarded just because
-                // live executor state now rejects a fresh request. Chains
-                // into the SAME resume cursor `agent()` calls advance
-                // (`running_key`/`gone_live`), discriminated by an
-                // out-of-band `"fusion"` field (`chain_key_with_discriminator`)
-                // folded as its own hashed field rather than prepended as
-                // text into the prompt slot agent() also hashes over — that
-                // keeps this key space disjoint from agent()'s BY
-                // CONSTRUCTION, so a fusion() call can never
-                // journal-cache-collide with an agent() call, even one whose
-                // prompt happens to be spelled "fusion:<the same text>".
-                // Every fusion opt participates in the key (unlike agent()'s
-                // fixed-field projection) since `WorkflowFusionOpts` has no
-                // display-only fields to strip.
-                let cached = if gone_live {
-                    None
-                } else {
-                    journal
-                        .as_ref()
-                        .and_then(|j| j.lock().unwrap().get(&key).cloned())
-                };
-                if cached.is_none() { gone_live = true; }
-                cached
-                })();
-                async move {
-                    if let Some(ready) = ready { return ready; }
-                    if output_accounting_failed.load(Ordering::Acquire) {
-                        return wf_throw("workflow output accounting failed; further dispatch is disabled");
-                    }
-                    match parse_workflow_fusion_request(
-                        fusion.as_ref(),
-                        &prompt,
-                        &opts_json,
-                        workflow_run_id.as_deref().unwrap_or_default(),
-                        parent_model.as_deref(),
-                        parent_model_profile.as_deref(),
-                    ) {
-                        Ok(request) => {
-                            // Keep a background workflow tied to the session
-                            // that launched it: the identity below names that
-                            // session, so the scoped budget is never inferred
-                            // from router/model state at dispatch time.
-                            let executor = fusion
-                                .as_ref()
-                                .expect("fusion request parsing requires an executor")
-                                .clone();
-                            let inherit = FusionInheritance::new(
-                                SubagentInheritance {
-                                    tool_invoker: tool_invoker.clone(),
-                                    budget: budget.clone(),
-                                },
-                                fusion_cancel.clone(),
-                            )
-                            .with_output_scope(output_scope.clone());
-                            let identity = FusionRunIdentity::new(
-                                FusionRunId::generated(),
-                                workflow_session_uuid
-                                    .as_deref()
-                                    .and_then(protocol::SessionId::parse_prefixed),
-                                FusionOrigin::Workflow,
-                                workflow_run_id.clone(),
-                            );
-                            let prepared_result = executor.clone().prepare(FusionSubmission {
-                                request,
-                                inherit,
-                                identity: identity.clone(),
-                            }).and_then(|prepared| {
-                                if fusion_concurrency > 1
-                                    && (output_scope.is_none() || prepared.control().billing_mode()
-                                        != platform_api::ModelAttemptBillingMode::MeteredAttempts)
-                                {
-                                    // Use the same recorded preflight-refusal
-                                    // path below; do not lose this run's terminal
-                                    // merely because the host capability is invalid.
-                                    Err(FusionError::InvalidConfiguration(
-                                        "parallel fusion requires metered attempts and the captured output scope".into(),
-                                    ))
-                                } else {
-                                    Ok(prepared)
-                                }
-                            });
-                            let preparation_error = prepared_result
-                                .as_ref()
-                                .err()
-                                .map(ToString::to_string);
-                            if let Some(error) = preparation_error {
-                                let control = platform_api::FusionRunControl::new(
-                                    identity.clone(),
-                                    0,
-                                    fusion_cancel.clone(),
-                                    FusionRunFactsRecorder::default(),
-                                );
-                                let summary = FusionPreparedSummary {
-                                    identity: identity.clone(),
-                                    duration_ms: 0,
-                                    planned_panels: None,
-                                };
-                                let prepared = PreparedFusionRun::failed(
-                                    summary,
-                                    control,
-                                    FusionError::InvalidRequest(error.clone()),
-                                );
-                                let prepared = if let Some(recorder) = terminal_recorder.as_ref() {
-                                    prepared.with_terminal_capability(
-                                        FusionTerminalCapability::new(recorder.clone()),
-                                    )
-                                } else {
-                                    prepared
-                                };
-                                let _ = prepared.activate(FusionActivation::now(), None).await;
-                                wf_throw(&error)
-                            } else {
-                            let prepared = prepared_result
-                                .expect("Fusion preparation error was checked above");
-                            let prepared = if let Some(recorder) = terminal_recorder.as_ref() {
-                                prepared.with_terminal_capability(
-                                    FusionTerminalCapability::new(recorder.clone()),
-                                )
-                            } else {
-                                prepared
-                            };
-                            // KNOWN GAP (G012, tracked as a cross-lane
-                            // residual — see local_workflow_test.rs's removed
-                            // `workflow_fusion_run_inherits_the_workflow_
-                            // transcript_subdir_override` history / WP7 fix
-                            // round 1 review): panels are ordinary hidden
-                            // subagents spawned through the shared
-                            // `PoolSubagentSpawner`, and ideally would pick up
-                            // this run's transcript subdir the same way
-                            // `WorkflowIsolationSpawner::spawn_inner` wraps
-                            // every agent() spawn in
-                            // `agent::with_transcript_subdir_override`.
-                            // Wrapping ONLY this call does not achieve that:
-                            // `fusion::panel::run_panels` spawns every panel
-                            // on its own `JoinSet` task, and a
-                            // `tokio::task_local!` scope (which is what
-                            // `with_transcript_subdir_override` is) does not
-                            // cross a `tokio::spawn`/`JoinSet::spawn`
-                            // boundary — the override would be invisible
-                            // inside each panel's task and
-                            // `resolved_transcript_subdir()` would fall back
-                            // to the session default there regardless. A real
-                            // fix needs the value re-entered inside each
-                            // panel's spawned future (`fusion/src/panel.rs`,
-                            // not owned by this package) and consumed at
-                            // `agent::handle::AgentHandle::
-                            // build_subagent_context`'s
-                            // `resolved_transcript_subdir()` call (also not
-                            // owned by this package) — e.g. via an additive
-                            // `transcript_subdir` field on
-                            // `FusionInheritance`/`SubagentSpawnRequest`
-                            // threaded through both. Left unwrapped here
-                            // rather than shipping an override that never
-                            // takes effect.
-                                // F005: forward Fusion progress into the SAME
-                                // `worker_progress_tx` string-line channel
-                                // `emit_workflow_agent_snapshot` uses for agent()
-                                // batches, so a workflow's `fusion()` call is no
-                                // longer completely silent between dispatch and
-                                // its (up to 15-minute) result.
-                                let (fusion_prog_tx, fusion_prog_rx) =
-                                    tokio::sync::mpsc::channel::<platform_api::FusionProgress>(32);
-                                let forward_progress_tx = worker_progress_tx.clone();
-                                // [Finding 12] Track the LAST `realized_output_tokens`
-                                // seen on the progress channel — the orchestrator
-                                // emits one when `check_panel_bar` fails after real
-                                // panel spend (`fusion::orchestrator::run_inner`) so
-                                // this bridge can charge that spend against the
-                                // workflow's own token budget (`spent`) even when
-                                // the overall call ends in `Err` below, instead of
-                                // leaving `spent` unmoved for a call that already
-                                // burned a real panel fan-out.
-                                let (outcome, last_realized_output_tokens) =
-                                    // A different in-flight call may have failed
-                                    // accounting while this call was preparing.
-                                    if output_accounting_failed.load(Ordering::Acquire) {
-                                        return wf_throw("workflow output accounting failed; further dispatch is disabled");
-                                    } else {
-                                    workflow_fusion_with_progress(
-                                        prepared.activate(
-                                            FusionActivation::now(),
-                                            Some(fusion_prog_tx),
-                                        ),
-                                        fusion_prog_rx,
-                                        forward_progress_tx,
-                                    )
-                                    .await
-                                    };
-                                let known_output = outcome
-                                    .result
-                                    .as_ref()
-                                    .ok()
-                                    .map(|result| result.usage.output_tokens)
-                                    .or_else(|| {
-                                        outcome
-                                            .facts
-                                            .usage
-                                            .as_ref()
-                                            .map(|usage| usage.output_tokens)
-                                    })
-                                    .or(last_realized_output_tokens);
-                                if matches!(
-                                    outcome.facts.attempt_settlement,
-                                    Some(
-                                        platform_api::FusionAttemptSettlementStatus::Failed { .. }
-                                    )
-                                ) {
-                                    // Preserve the computed answer below, but a script
-                                    // cannot use it as permission for another paid call.
-                                    output_accounting_failed.store(true, Ordering::Release);
-                                }
-                                let record_output = |tokens| {
-                                    if let Some(scope) = &output_scope {
-                                        scope.record_legacy(
-                                            platform_api::WorkflowOutputEventId::LegacyFusion(
-                                                identity.run_id.clone(),
-                                            ),
-                                            tokens,
-                                        )
-                                    } else {
-                                        spent.fetch_add(tokens, Ordering::Relaxed);
-                                        Ok(())
-                                    }
-                                };
-                                // There is no await between final progress drain and publication.
-                                let output_record = if outcome.billing_mode()
-                                    == platform_api::ModelAttemptBillingMode::LegacyAggregate
-                                {
-                                    known_output.map(record_output).transpose()
-                                } else {
-                                    // The captured attempt receipts already own output,
-                                    // including unknown/failed calls. Never charge it twice.
-                                    Ok(None)
-                                };
-                                if let Err(error) = output_record {
-                                    output_accounting_failed.store(true, Ordering::Release);
-                                    wf_throw(&error.to_string())
-                                } else {
-                                    match outcome.result {
-                                        Ok(result) => match encode_workflow_fusion_result(
-                                            &result,
-                                            outcome.facts.attempt_settlement.as_ref(),
-                                        ) {
-                                            Ok(encoded) => {
-                                                if let Some(j) = journal.as_ref() {
-                                                    j.lock()
-                                                        .unwrap()
-                                                        .insert(key.clone(), encoded.clone());
-                                                }
-                                                if let Some(writer) = &journal_writer {
-                                                    writer.append_result(&key, "", &encoded).await;
-                                                }
-                                                encoded
-                                            }
-                                            Err(_) => wf_throw(
-                                                "fusion() host could not serialize the result",
-                                            ),
-                                        },
-                                        Err(error) => wf_throw(&error.to_string()),
-                                    }
-                                }
-                            }
-                        }
-                        Err(error) => wf_throw(&error.to_string()),
-                    }
-                }
-                }).buffered(fusion_concurrency).collect::<Vec<_>>().await;
-                let _ = batch.reply.send(results);
-            }
             WorkflowBridgeRequest::AgentBatch(calls, reply) => {
                 // Phase A — sequential, in call order: prefix-cache decision per call.
                 let mut plans: Vec<Plan> = Vec::with_capacity(calls.len());
@@ -4317,7 +3110,7 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                             if let Some(total) = budget_total.filter(|&t| t > 0) {
                                 let turn_spent = output_scope.as_ref().map_or_else(
                                     || spent.load(Ordering::Relaxed).saturating_sub(baseline),
-                                    platform_api::WorkflowOutputScope::spent,
+                                    lingxi_core::host::WorkflowOutputScope::spent,
                                 );
                                 if turn_spent >= total {
                                     let should_emit = {
@@ -4546,7 +3339,7 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                         let mut request = make_request(&subagent_type, &prompt, &opts_json);
                         request.origin_session_id = workflow_session_uuid
                             .as_deref()
-                            .and_then(protocol::SessionId::parse_prefixed);
+                            .and_then(lingxi_core::types::SessionId::parse_prefixed);
                         let queued_ms = unix_time_ms_now();
                         emit_workflow_agent_queued(
                             ptx.as_ref(),
@@ -4612,10 +3405,10 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                                     Some(
                                         observer
                                             as Arc<
-                                                dyn platform_api::subagent_spawn::SubagentSpawnObserver,
+                                                dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver,
                                             >,
                                     ),
-                                    platform_api::subagent_spawn::WorkflowQueryWatchdog::default(),
+                                    lingxi_core::host::subagent_spawn::WorkflowQueryWatchdog::default(),
                                 )
                                 .await
                         } else {
@@ -4626,7 +3419,7 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                             let recorded = known_workflow_agent_output(result).and_then(|tokens| {
                                 tokens.map(|tokens| {
                                     scope.record_legacy(
-                                        platform_api::WorkflowOutputEventId::WorkflowAgent {
+                                        lingxi_core::host::WorkflowOutputEventId::WorkflowAgent {
                                             run_id: output_run_id.clone(),
                                             call_index,
                                         },
@@ -4803,7 +3596,7 @@ async fn resolve_nested_script(
 
 #[async_trait]
 impl Task for LocalWorkflowHandler {
-    async fn process_owner_ids(&self, task_id: &str) -> Vec<protocol::AgentId> {
+    async fn process_owner_ids(&self, task_id: &str) -> Vec<lingxi_core::types::AgentId> {
         let owners = self
             .process_owners
             .lock()
@@ -4846,8 +3639,6 @@ impl Task for LocalWorkflowHandler {
             resume_from_run_id,
             args: workflow_args,
             run_id: provided_run_id,
-            parent_model,
-            parent_model_profile,
             invocation_mode,
             workflow_source,
             script_is_verbatim_builtin,
@@ -4871,7 +3662,7 @@ impl Task for LocalWorkflowHandler {
         // standalone hosts that intentionally have no session binding.
         if session_uuid
             .as_deref()
-            .is_some_and(|raw| protocol::SessionId::parse_prefixed(raw).is_none())
+            .is_some_and(|raw| lingxi_core::types::SessionId::parse_prefixed(raw).is_none())
         {
             return Err(TaskError::Internal(
                 "workflow session_uuid must be a valid session id".into(),
@@ -4885,7 +3676,7 @@ impl Task for LocalWorkflowHandler {
             .map(|scopes| {
                 let session = session_uuid
                     .as_deref()
-                    .and_then(protocol::SessionId::parse_prefixed)
+                    .and_then(lingxi_core::types::SessionId::parse_prefixed)
                     .ok_or_else(|| {
                         TaskError::Internal("scoped workflow requires a canonical session".into())
                     })?;
@@ -4955,13 +3746,13 @@ impl Task for LocalWorkflowHandler {
         let worktree_manager = self.worktree_manager.clone();
         let tool_invoker = self.tool_invoker.clone();
         // A background workflow keeps the budget ledger of the session that
-        // launched it. Scope once at task spawn so every later agent() and
-        // fusion() dispatch inherits the same handle even after a clear/resume
+        // launched it. Scope once at task spawn so every later agent()
+        // dispatch inherits the same handle even after a clear/resume
         // switches the active router. Legacy/unparseable ids retain the
         // composition-root handle.
         let budget = session_uuid
             .as_deref()
-            .and_then(protocol::SessionId::parse_prefixed)
+            .and_then(lingxi_core::types::SessionId::parse_prefixed)
             .and_then(|session_id| self.budget.scoped_for_session(session_id))
             .unwrap_or_else(|| self.budget.clone());
         let status_sink = self.status_sink.clone();
@@ -4972,18 +3763,6 @@ impl Task for LocalWorkflowHandler {
         let plugin_workflows = self.plugin_workflows.clone();
         let runtime = ctx.runtime.clone();
         let token_budget_total = self.token_budget_total;
-        let fusion = self.fusion.clone();
-        let terminal_recorder = if let Some(factory) = self.terminal_recorder_factory.as_ref() {
-            session_uuid.as_deref().map_or_else(
-                || self.terminal_recorder.clone(),
-                |raw| {
-                    protocol::SessionId::parse_prefixed(raw)
-                        .and_then(|session_id| factory.recorder_for(session_id))
-                },
-            )
-        } else {
-            self.terminal_recorder.clone()
-        };
         // The shared `budget.spent()` pool (main loop + all workflows), published
         // by the root once the orchestrator exists. `None` in tests ⇒ the run
         // uses its own private pool (own-spend only).
@@ -5012,8 +3791,6 @@ impl Task for LocalWorkflowHandler {
         // record `kill` flips. `false` until killed.
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = cancel.clone();
-        let fusion_cancel = CancellationToken::new();
-        let worker_fusion_cancel = fusion_cancel.clone();
         let (completion_tx, completion_rx) = oneshot::channel();
         // Cloned for kill-detection in tengu_workflow_completed status derivation
         // (oracle §7: `abortController?.signal.aborted ? "killed" : error ? "failed" : "completed"`).
@@ -5254,7 +4031,7 @@ impl Task for LocalWorkflowHandler {
                     workflow_name: meta_name.clone(),
                     invocation_mode: invocation_mode.clone(),
                 };
-                let run = run_workflow_script_with_live_updates_and_fusion_recorded(
+                let run = run_workflow_script_with_live_updates_recorded(
                     &script,
                     DEFAULT_WORKFLOW_SUBAGENT,
                     &workflow_id,
@@ -5276,12 +4053,6 @@ impl Task for LocalWorkflowHandler {
                         session_uuid: session_uuid.clone(),
                     },
                     worker_cancel,
-                    worker_fusion_cancel,
-                    fusion,
-                    Some(run_id.clone()),
-                    parent_model,
-                    parent_model_profile,
-                    transcript_subdir.clone(),
                     worker_bus.clone(),
                     None,
                     // Pass the phase telemetry context so run_workflow_script can
@@ -5289,7 +4060,6 @@ impl Task for LocalWorkflowHandler {
                     // workflow_source, workflow_name, and built-in-source gate.
                     Some(phase_telemetry_ctx.clone()),
                     Some(workflow_metrics.clone()),
-                    terminal_recorder.clone(),
                     output_scope,
                 );
                 let (outcome, (), ()) = tokio::join!(run, drain, live_drain);
@@ -5406,7 +4176,7 @@ impl Task for LocalWorkflowHandler {
                 let (agents_done, agents_error, agents_skipped, agents_empty_result) =
                     workflow_metrics_snapshot.terminal_counts();
                 let terminal_outcome = match &outcome {
-                    Ok(out) => platform_api::task_registry::WorkflowTerminalOutcome {
+                    Ok(out) => lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                         result: out.result.clone(),
                         failures: out.failures.clone(),
                         agent_count: workflow_metrics_snapshot.call_count,
@@ -5420,7 +4190,7 @@ impl Task for LocalWorkflowHandler {
                         progress_counts_available: true,
                         ..Default::default()
                     },
-                    Err(error) => platform_api::task_registry::WorkflowTerminalOutcome {
+                    Err(error) => lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                         error: Some(error.to_string()),
                         agent_count: workflow_metrics_snapshot.call_count,
                         total_tokens: workflow_metrics_snapshot.total_tokens,
@@ -5468,7 +4238,6 @@ impl Task for LocalWorkflowHandler {
                 handle: bg_handle,
                 runtime: ctx.runtime.clone(),
                 cancel,
-                fusion_cancel,
                 completion_rx: StdMutex::new(Some(completion_rx)),
                 finalizing: false,
             },

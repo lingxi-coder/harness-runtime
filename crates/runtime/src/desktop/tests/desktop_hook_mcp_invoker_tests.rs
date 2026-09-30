@@ -2,13 +2,13 @@ use super::{
     hook_mcp_full_name, map_hook_mcp_tool_error, map_hook_mcp_tool_result, DesktopHookMcpInvoker,
 };
 use hooks::HookMcpInvoker;
-use platform_api::{
+use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError, McpHeaders,
     McpNotificationStream, McpProtocolEra, McpRawConnection, McpResourceContentDto, McpResourceDto,
     McpResourceTemplateDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
     ServerCapabilitiesDto,
 };
-use protocol::McpConnectionId;
+use lingxi_core::types::McpConnectionId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -36,7 +36,7 @@ impl McpTransport for NoopTransport {
         Ok(McpConnectResult {
             connection: conn,
             capabilities,
-            negotiated: platform_api::McpNegotiatedProtocol {
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
                 era: McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
@@ -61,7 +61,7 @@ impl McpTransport for NoopTransport {
     async fn list_tools(
         &self,
         _conn: &McpRawConnection,
-    ) -> Result<Vec<platform_api::McpToolDto>, McpError> {
+    ) -> Result<Vec<lingxi_core::host::McpToolDto>, McpError> {
         Ok(Vec::new())
     }
 
@@ -82,7 +82,7 @@ impl McpTransport for NoopTransport {
     async fn list_prompts(
         &self,
         _conn: &McpRawConnection,
-    ) -> Result<Vec<platform_api::McpPromptDto>, McpError> {
+    ) -> Result<Vec<lingxi_core::host::McpPromptDto>, McpError> {
         Ok(Vec::new())
     }
 
@@ -142,7 +142,7 @@ fn http_cfg(name: &str) -> mcp::McpServerConfig {
             headers_helper: None,
             oauth: None,
         },
-        scope: mcp::ConfigScope::Settings(protocol::SettingsScope::User),
+        scope: mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         disabled: false,
         timeout_ms: None,
         discovery_cache: None,
@@ -294,7 +294,7 @@ async fn invoker_uses_get_client_and_does_not_lazy_connect_cached_servers() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
                 era: McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },

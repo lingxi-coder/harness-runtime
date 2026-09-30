@@ -9,7 +9,7 @@ use std::sync::Arc;
 #[tokio::test]
 async fn scheduled_turn_uses_saved_model_but_preserves_human_defaults() {
     let api = Arc::new(MockApiClient::new(Vec::new()));
-    api.set_model_listings(vec![platform_api::ModelListing {
+    api.set_model_listings(vec![lingxi_core::host::ModelListing {
         request_model: "scheduled-model".into(),
         provider_id: "test-provider".into(),
         ..Default::default()
@@ -41,7 +41,7 @@ async fn scheduled_turn_uses_saved_model_but_preserves_human_defaults() {
     orch.run_scheduled_turn(
         "scheduled prompt",
         "test-provider/scheduled-model",
-        platform_api::ReasoningSelection::Automatic,
+        lingxi_core::host::ReasoningSelection::Automatic,
         CancellationToken::new(),
     )
     .await
@@ -70,7 +70,7 @@ async fn missing_saved_model_fails_before_appending_prompt() {
         .run_scheduled_turn(
             "must not append",
             "gone/model",
-            platform_api::ReasoningSelection::Automatic,
+            lingxi_core::host::ReasoningSelection::Automatic,
             CancellationToken::new(),
         )
         .await;
@@ -80,7 +80,7 @@ async fn missing_saved_model_fails_before_appending_prompt() {
 
 fn scheduled_session_fixture() -> ConversationOrchestrator {
     let api = Arc::new(MockApiClient::new(Vec::new()));
-    api.set_model_listings(vec![platform_api::ModelListing {
+    api.set_model_listings(vec![lingxi_core::host::ModelListing {
         request_model: "scheduled-model".into(),
         provider_id: "test-provider".into(),
         ..Default::default()
@@ -110,13 +110,13 @@ fn scheduled_session_fixture() -> ConversationOrchestrator {
 async fn scheduled_target_gate_spans_binding_execution_and_result_capture() {
     let orch = scheduled_session_fixture();
     let original_session = orch.session.lock().await.session_id;
-    let resumed_session = protocol::SessionId::new();
+    let resumed_session = lingxi_core::types::SessionId::new();
     let (release_binding, binding_released) = tokio::sync::oneshot::channel();
     let scheduled = orch.run_scheduled_turn_in_session(
         original_session,
         "saved prompt",
         "test-provider/scheduled-model",
-        platform_api::ReasoningSelection::Automatic,
+        lingxi_core::host::ReasoningSelection::Automatic,
         CancellationToken::new(),
         async {
             assert!(orch.turn_gate.try_lock().is_err());
@@ -126,14 +126,15 @@ async fn scheduled_target_gate_spans_binding_execution_and_result_capture() {
     tokio::pin!(scheduled);
     assert!(futures::poll!(scheduled.as_mut()).is_pending());
 
-    let resume = <ConversationOrchestrator as platform_api::OrchestratorHandle>::resume_session(
-        &orch,
-        resumed_session,
-        Vec::new(),
-        None,
-        None,
-        platform_api::ResumeRuntimeSnapshot::default(),
-    );
+    let resume =
+        <ConversationOrchestrator as lingxi_core::host::OrchestratorHandle>::resume_session(
+            &orch,
+            resumed_session,
+            Vec::new(),
+            None,
+            None,
+            lingxi_core::host::ResumeRuntimeSnapshot::default(),
+        );
     tokio::pin!(resume);
     assert!(futures::poll!(resume.as_mut()).is_pending());
     assert_eq!(orch.session.lock().await.session_id, original_session);
@@ -141,7 +142,7 @@ async fn scheduled_target_gate_spans_binding_execution_and_result_capture() {
         .run_scheduled_turn(
             "cannot enter while binding",
             "test-provider/scheduled-model",
-            platform_api::ReasoningSelection::Automatic,
+            lingxi_core::host::ReasoningSelection::Automatic,
             CancellationToken::new(),
         )
         .await
@@ -165,10 +166,10 @@ async fn scheduled_target_mismatch_is_retryable_without_binding_or_appending() {
     let attempted_binding = std::sync::atomic::AtomicBool::new(false);
     let result = orch
         .run_scheduled_turn_in_session(
-            protocol::SessionId::new(),
+            lingxi_core::types::SessionId::new(),
             "must never be appended to the new foreground session",
             "test-provider/scheduled-model",
-            platform_api::ReasoningSelection::Automatic,
+            lingxi_core::host::ReasoningSelection::Automatic,
             CancellationToken::new(),
             async {
                 attempted_binding.store(true, std::sync::atomic::Ordering::SeqCst);

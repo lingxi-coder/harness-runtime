@@ -6,11 +6,11 @@
 //! and fail-closed recovery.  All methods are synchronous: callers must run
 //! them on a blocking worker when used from an async runtime.
 
-use platform_api::rooted_fs::{
+use lingxi_core::host::rooted_fs::{
     atomic_write_pinned, lock_exclusive_pinned, open_append_file_pinned, open_read_file_pinned,
     root_identity, sync_parent_pinned, truncate_file_pinned, AtomicWriteOptions, RootIdentity,
 };
-use platform_api::FsError;
+use lingxi_core::host::FsError;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -438,7 +438,7 @@ impl DurableJournal {
     /// the platform's no-follow directory-handle walk. The returned root path
     /// and identity refer to the same opened directory.
     pub fn open_under(root: &Path, relative: &Path) -> Result<Self, JournalError> {
-        let identity = platform_api::rooted_fs::ensure_private_directory(
+        let identity = lingxi_core::host::rooted_fs::ensure_private_directory(
             root,
             relative,
             SESSION_STATE_DIR_MODE,
@@ -486,7 +486,7 @@ impl DurableJournal {
         self.identity
     }
 
-    fn lock(&self) -> Result<platform_api::RootedFileLock, JournalError> {
+    fn lock(&self) -> Result<lingxi_core::host::RootedFileLock, JournalError> {
         Ok(lock_exclusive_pinned(
             &self.root,
             Path::new(JOURNAL_LOCK_FILE_NAME),
@@ -511,7 +511,7 @@ impl DurableJournal {
         // lock. There is no rooted rename primitive; a rename between two
         // checked names inside that one directory is the narrowest operation
         // that preserves the evidence.
-        let identity = platform_api::rooted_fs::root_identity(&self.root)?;
+        let identity = lingxi_core::host::rooted_fs::root_identity(&self.root)?;
         if identity != self.identity {
             return Err(JournalError::InvalidRoot(
                 self.root.to_string_lossy().into_owned(),
@@ -520,11 +520,12 @@ impl DurableJournal {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis());
-        let directory = platform_api::rooted_fs::checked_join(&self.root, Path::new("quarantine"))?;
+        let directory =
+            lingxi_core::host::rooted_fs::checked_join(&self.root, Path::new("quarantine"))?;
         std::fs::create_dir_all(&directory).map_err(|error| FsError::Io(error.to_string()))?;
         let mut moved = Vec::new();
         for name in [JOURNAL_FILE_NAME, SNAPSHOT_FILE_NAME] {
-            let from = platform_api::rooted_fs::checked_join(&self.root, Path::new(name))?;
+            let from = lingxi_core::host::rooted_fs::checked_join(&self.root, Path::new(name))?;
             if !from.exists() {
                 continue;
             }
@@ -532,7 +533,7 @@ impl DurableJournal {
             std::fs::rename(&from, &to).map_err(|error| FsError::Io(error.to_string()))?;
             moved.push(to);
         }
-        platform_api::rooted_fs::sync_parent_pinned(
+        lingxi_core::host::rooted_fs::sync_parent_pinned(
             &self.root,
             Path::new(JOURNAL_FILE_NAME),
             Some(&self.identity),

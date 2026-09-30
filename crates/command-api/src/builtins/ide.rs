@@ -1,6 +1,6 @@
 //! `/ide` — inspect and control local IDE integrations.
 //!
-//! Discovery and credentials live behind [`platform_api::IdeHandle`]. This
+//! Discovery and credentials live behind [`lingxi_core::host::IdeHandle`]. This
 //! handler only renders the secret-free status snapshot and delegates
 //! connect/disconnect/open actions to the live host.
 
@@ -9,7 +9,7 @@ use crate::builtin_support::list_render::render_list;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::{IdeEndpointInfo, IdeStatus, IdeTransport, OrchestratorHandle};
+use lingxi_core::host::{IdeEndpointInfo, IdeStatus, IdeTransport, OrchestratorHandle};
 use std::sync::Arc;
 
 /// Handle for `/ide`, backed by the live orchestrator.

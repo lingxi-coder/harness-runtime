@@ -14,8 +14,8 @@
 //!   with a nonexistent binary surfaces an [`LspError`] rather than hanging
 //!   or succeeding.
 
-use platform_api::{LspServerConfig, LspTransport};
-use protocol::McpConnectionId;
+use lingxi_core::host::{LspServerConfig, LspTransport};
+use lingxi_core::types::McpConnectionId;
 use std::collections::HashMap;
 
 /// Run the standard [`LspTransport`] contract against an impl.

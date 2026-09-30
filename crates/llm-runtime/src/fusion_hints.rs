@@ -5,7 +5,7 @@
 //! skipped (the model stays ineligible). Unknown models default to
 //! `fusion_hints: None`.
 
-use platform_api::{FusionCostClass, FusionLatencyClass, FusionModelHints};
+use lingxi_core::host::{FusionCostClass, FusionLatencyClass, FusionModelHints};
 
 /// Look up checked-in hints for an exact `(profile_name, request_model)` pair.
 #[must_use]

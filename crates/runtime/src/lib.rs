@@ -1,15 +1,18 @@
-//! LingXi's existing Harness components and platform composition profiles.
+//! Public Harness SDK and platform composition profiles.
 //!
-//! The core profile exposes the same tested execution components without a UI
-//! or foreign-binding requirement. Desktop and mobile select their existing
-//! product assembly; neither introduces a second agent loop or state store.
+//! Hosts use [`Harness`] and [`SessionHandle`] for session execution and
+//! lifecycle. Desktop and mobile features select their platform assemblies.
 
 #![forbid(unsafe_code)]
 
-#[cfg(feature = "core")]
+#[cfg(feature = "engine")]
 pub mod api;
-#[cfg(feature = "core")]
-pub use api::{Harness, HarnessBuilder, SessionHandle};
+#[cfg(feature = "engine")]
+pub use api::{
+    CancellationToken, ConversationMessage, CostSnapshot, HandleError, Harness, HarnessBuilder,
+    LifecycleService, OutputStream, RunInput, SessionHandle, SessionId, SessionService,
+    ShutdownReport, TurnOutcome,
+};
 pub mod models;
 
 #[cfg(feature = "collaboration")]
@@ -23,6 +26,9 @@ pub use workflow;
 /// Existing desktop product assembly.
 #[cfg(feature = "desktop")]
 pub mod desktop;
+/// Build an embedded desktop Harness from the production composition.
+#[cfg(feature = "desktop")]
+pub use desktop::build_harness;
 /// Existing mobile product assembly, usable without UniFFI.
 #[cfg(feature = "mobile")]
 pub mod mobile;

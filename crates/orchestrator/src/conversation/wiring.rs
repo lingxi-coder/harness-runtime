@@ -31,7 +31,7 @@ impl ConversationOrchestrator {
         // prompt/request semantics are distinct from the permission-gate
         // transport, so TUI/REPL sessions can carry interactive guidance even
         // when `interactive_permissions` remains on the headless default.
-        platform_api::session_flags::set_non_interactive_session(!config.interactive_session);
+        lingxi_core::host::session_flags::set_non_interactive_session(!config.interactive_session);
         // claude-code `Dx(()=>HR(rt()))` — publish the session main-loop model
         // the `OO()` todo/task tool gate reads back through `J$e()`. This init
         // value is the launch model; `build_wire_tools` republishes it from the
@@ -49,7 +49,7 @@ impl ConversationOrchestrator {
         // per-request assembly refreshes it once the model/profile are known, so
         // any side query fired before the first main-loop turn still sees the
         // session's mode+provider decision rather than the bare `false` default.
-        platform_api::session_flags::set_tool_search_enabled(
+        lingxi_core::host::session_flags::set_tool_search_enabled(
             tools.deferral().mode().is_enabled()
                 && tool_search_supported_for_request(&config.model, None),
         );
@@ -58,8 +58,8 @@ impl ConversationOrchestrator {
         let current_effort = config.effort.clone();
         let current_reasoning_selection = current_effort
             .as_ref()
-            .map(|effort| platform_api::ReasoningSelection::Level { id: effort.clone() })
-            .unwrap_or(platform_api::ReasoningSelection::Automatic);
+            .map(|effort| lingxi_core::host::ReasoningSelection::Level { id: effort.clone() })
+            .unwrap_or(lingxi_core::host::ReasoningSelection::Automatic);
         let current_effort_explicit = current_effort.is_some();
         Self {
             config,
@@ -76,9 +76,10 @@ impl ConversationOrchestrator {
             ),
             turn_gate: Arc::new(Mutex::new(())),
             model_switch_gate: Mutex::new(()),
-            dynamic_workflows_gate: platform_api::session_flags::DynamicWorkflowsGate::default(),
+            dynamic_workflows_gate: lingxi_core::host::session_flags::DynamicWorkflowsGate::default(
+            ),
             workflow_size_guideline:
-                platform_api::session_flags::WorkflowSizeGuidelineState::default(),
+                lingxi_core::host::session_flags::WorkflowSizeGuidelineState::default(),
             current_cwd: Arc::new(std::sync::Mutex::new(cwd.clone())),
             session_cwd: tool_api::SessionCwd::new(cwd.clone(), vec![cwd.clone()]),
             prompt_probe_cwd_resolver: None,
@@ -247,7 +248,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_dynamic_workflows_gate(
         mut self,
-        gate: platform_api::session_flags::DynamicWorkflowsGate,
+        gate: lingxi_core::host::session_flags::DynamicWorkflowsGate,
     ) -> Self {
         self.dynamic_workflows_gate = gate;
         self
@@ -258,7 +259,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_workflow_size_guideline(
         mut self,
-        state: platform_api::session_flags::WorkflowSizeGuidelineState,
+        state: lingxi_core::host::session_flags::WorkflowSizeGuidelineState,
     ) -> Self {
         self.workflow_size_guideline = state;
         self
@@ -290,7 +291,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_mobile_runtime_environment(
         mut self,
-        environment: platform_api::mobile_runtime_environment::MobileRuntimeEnvironment,
+        environment: lingxi_core::host::mobile_runtime_environment::MobileRuntimeEnvironment,
     ) -> Self {
         self.mobile_runtime_environment_message = Some(ConversationMessage::user_meta(
             MessageId::new(),
@@ -358,7 +359,10 @@ impl ConversationOrchestrator {
 
     /// Attach a `/usage` Loops provider (typically the live cron scheduler).
     #[must_use]
-    pub fn with_loop_usage(mut self, provider: Arc<dyn platform_api::LoopUsageProvider>) -> Self {
+    pub fn with_loop_usage(
+        mut self,
+        provider: Arc<dyn lingxi_core::host::LoopUsageProvider>,
+    ) -> Self {
         self.model_runtime.loop_usage = Some(provider);
         self
     }
@@ -367,7 +371,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_loop_usage_opt(
         mut self,
-        provider: Option<Arc<dyn platform_api::LoopUsageProvider>>,
+        provider: Option<Arc<dyn lingxi_core::host::LoopUsageProvider>>,
     ) -> Self {
         self.model_runtime.loop_usage = provider;
         self
@@ -382,7 +386,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_observer_pairings(
         mut self,
-        table: Arc<platform_api::observer_pairing::ObserverPairings>,
+        table: Arc<lingxi_core::host::observer_pairing::ObserverPairings>,
     ) -> Self {
         self.model_runtime.observer_pairings = Some(table);
         self
@@ -392,7 +396,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_workflow_output_scopes(
         mut self,
-        scopes: Arc<dyn platform_api::WorkflowOutputScopes>,
+        scopes: Arc<dyn lingxi_core::host::WorkflowOutputScopes>,
     ) -> Self {
         self.model_runtime.output_scopes = Some(scopes);
         self
@@ -491,7 +495,7 @@ impl ConversationOrchestrator {
 
     /// Attach the provider-neutral local IDE lifecycle handle.
     #[must_use]
-    pub fn with_ide_handle(mut self, ide: Arc<dyn platform_api::IdeHandle>) -> Self {
+    pub fn with_ide_handle(mut self, ide: Arc<dyn lingxi_core::host::IdeHandle>) -> Self {
         self.ide_handle = Some(ide);
         self
     }
@@ -598,7 +602,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_coordinator_mode(
         mut self,
-        mode: std::sync::Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>,
+        mode: std::sync::Arc<dyn lingxi_core::host::coordinator_mode::CoordinatorModeHandle>,
     ) -> Self {
         self.coordinator_mode = Some(mode);
         self
@@ -624,7 +628,7 @@ impl ConversationOrchestrator {
     }
 
     fn coordinator_simple_mode() -> bool {
-        platform_api::env::is_env_truthy(
+        lingxi_core::host::env::is_env_truthy(
             std::env::var("LINGXI_SIMPLE")
                 .or_else(|_| std::env::var("CLAUDE_CODE_SIMPLE"))
                 .ok()
@@ -664,7 +668,7 @@ impl ConversationOrchestrator {
             .unwrap_or_default();
         Self::coordinator_optional_tool(
             tool,
-            platform_api::session_flags::brief_mode_enabled(),
+            lingxi_core::host::session_flags::brief_mode_enabled(),
             extra.split(',').map(str::trim).filter(|s| !s.is_empty()),
         )
     }
@@ -1016,7 +1020,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_fork_spawner(
         mut self,
-        spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner>,
+        spawner: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner>,
     ) -> Self {
         self.fork_spawner = Some(spawner);
         self
@@ -1027,7 +1031,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_fork_budget(
         mut self,
-        budget: Arc<dyn platform_api::budget::BudgetEnforcerHandle>,
+        budget: Arc<dyn lingxi_core::host::budget::BudgetEnforcerHandle>,
     ) -> Self {
         self.fork_budget = Some(budget);
         self
@@ -1041,7 +1045,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_bg_session_forker(
         mut self,
-        forker: Arc<dyn platform_api::bg_session_forker::BgSessionForker>,
+        forker: Arc<dyn lingxi_core::host::bg_session_forker::BgSessionForker>,
     ) -> Self {
         self.bg_session_forker = Some(forker);
         self
@@ -1052,7 +1056,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_repo_root_reloader(
         mut self,
-        reloader: Arc<dyn platform_api::RepoRootReloader>,
+        reloader: Arc<dyn lingxi_core::host::RepoRootReloader>,
     ) -> Self {
         self.repo_root_reloader = Some(reloader);
         self
@@ -1095,7 +1099,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_new_diagnostics_source(
         mut self,
-        source: Arc<dyn platform_api::NewDiagnosticsSource>,
+        source: Arc<dyn lingxi_core::host::NewDiagnosticsSource>,
     ) -> Self {
         self.prompt_runtime.new_diagnostics_source = Some(source);
         self
@@ -1157,7 +1161,7 @@ impl ConversationOrchestrator {
     ///
     /// The REPL checks this after each dispatch and breaks the loop if
     /// `true`. The flag is set via
-    /// [`platform_api::OrchestratorHandle::request_exit`]; once set it
+    /// [`lingxi_core::host::OrchestratorHandle::request_exit`]; once set it
     /// never resets (idempotent `/exit`).
     pub fn current_should_exit(&self) -> bool {
         self.should_exit.load(std::sync::atomic::Ordering::SeqCst)

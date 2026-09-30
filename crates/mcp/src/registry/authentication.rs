@@ -5,12 +5,12 @@ use super::diagnostics::{
 use super::{GrantProvenance, McpRegistry, OAuthDeps};
 use crate::connection::{McpConnectionState, McpServerConfig};
 use crate::oauth;
-use platform_api::{McpError, McpTransportSpec};
+use lingxi_core::host::{McpError, McpTransportSpec};
 use std::time::{Duration, SystemTime};
 
 /// Borrow the `oauth` config block of an SSE/HTTP spec, if present. Other
 /// transports (stdio, websocket, …) never carry OAuth → `None`.
-pub(super) fn spec_oauth(spec: &McpTransportSpec) -> Option<&platform_api::McpOAuthConfigDto> {
+pub(super) fn spec_oauth(spec: &McpTransportSpec) -> Option<&lingxi_core::host::McpOAuthConfigDto> {
     match spec {
         McpTransportSpec::Sse { oauth, .. } | McpTransportSpec::Http { oauth, .. } => {
             oauth.as_ref()
@@ -556,7 +556,9 @@ impl McpRegistry {
         resource_metadata_url: Option<&str>,
     ) -> Result<oauth::Tokens, McpError> {
         // Gate on the enable flag (mirror of CLAUDE_CODE_ENABLE_XAA).
-        if !platform_api::env::is_env_truthy(std::env::var("LINGXI_ENABLE_XAA").ok().as_deref()) {
+        if !lingxi_core::host::env::is_env_truthy(
+            std::env::var("LINGXI_ENABLE_XAA").ok().as_deref(),
+        ) {
             return Err(McpError::OAuth(format!(
                 "XAA is not enabled (set LINGXI_ENABLE_XAA=1). Remove 'xaa' from \
                  server '{}' to use the standard consent flow.",
@@ -787,7 +789,7 @@ impl McpRegistry {
     pub(super) async fn run_interactive_oauth(
         &self,
         config: &McpServerConfig,
-        oauth_cfg: &platform_api::McpOAuthConfigDto,
+        oauth_cfg: &lingxi_core::host::McpOAuthConfigDto,
         key: &str,
         deps: &OAuthDeps,
         scope_override: Option<&str>,

@@ -8,14 +8,14 @@ use tool_api::registry::ToolRegistry;
 
 struct MockDiag(Option<String>);
 #[async_trait::async_trait]
-impl platform_api::NewDiagnosticsSource for MockDiag {
+impl lingxi_core::host::NewDiagnosticsSource for MockDiag {
     async fn take_new_diagnostics_block(&self) -> Option<String> {
         self.0.clone()
     }
 }
 
 fn orch_with_diag(
-    source: Option<Arc<dyn platform_api::NewDiagnosticsSource>>,
+    source: Option<Arc<dyn lingxi_core::host::NewDiagnosticsSource>>,
 ) -> ConversationOrchestrator {
     let o = ConversationOrchestrator::new(
         OrchestratorConfig::default(),

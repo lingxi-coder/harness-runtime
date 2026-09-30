@@ -106,7 +106,7 @@ pub struct WorkflowLaunchSpec {
     pub creator_teammate_name: Option<String>,
     /// Team containing the creator, when it belongs to one.
     pub creator_team_name: Option<String>,
-    /// Stringified `protocol::AgentId`; the launcher boundary is intentionally
+    /// Stringified `lingxi_core::types::AgentId`; the launcher boundary is intentionally
     /// protocol-agnostic and the host parses the prefixed wire form.
     pub creator_agent_id: Option<String>,
     /// Canonical/rooted snapshot captured by `WorkflowTool::check_permissions`
@@ -299,7 +299,7 @@ fn path_for_read(path: &Path) -> String {
 pub fn read_script_path_after_permission(
     approval: &WorkflowScriptPathApproval,
 ) -> Result<String, WorkflowLaunchError> {
-    let snapshot = platform_api::rooted_fs::read_file_after_permission(
+    let snapshot = lingxi_core::host::rooted_fs::read_file_after_permission(
         &approval.root,
         &approval.relative,
         &approval.requested,
@@ -401,7 +401,7 @@ where
 /// (`$LINGXI_CONFIG_DIR` / `~/.lingxi`, `+ /workflows`). Defaults to `Project`
 /// (oracle `useState("project")`).
 ///
-/// These two rungs are [`protocol::Scope::Project`] and [`protocol::Scope::User`]
+/// These two rungs are [`lingxi_core::types::Scope::Project`] and [`lingxi_core::types::Scope::User`]
 /// — see the `From` impl below, which a test pins. It stays a separate type
 /// rather than joining the shared narrowings because [`Self::toggled`] is a
 /// two-element cycle: the dialog offers exactly these two choices (oracle
@@ -441,7 +441,7 @@ impl WorkflowScope {
     }
 }
 
-impl From<WorkflowScope> for protocol::Scope {
+impl From<WorkflowScope> for lingxi_core::types::Scope {
     fn from(value: WorkflowScope) -> Self {
         match value {
             WorkflowScope::Project => Self::Project,
@@ -461,13 +461,13 @@ mod workflow_scope_tests {
     #[test]
     fn the_two_rungs_are_the_shared_projects_and_user_scopes() {
         for (scope, expected) in [
-            (WorkflowScope::Project, protocol::Scope::Project),
-            (WorkflowScope::User, protocol::Scope::User),
+            (WorkflowScope::Project, lingxi_core::types::Scope::Project),
+            (WorkflowScope::User, lingxi_core::types::Scope::User),
         ] {
-            assert_eq!(protocol::Scope::from(scope), expected);
+            assert_eq!(lingxi_core::types::Scope::from(scope), expected);
             assert_eq!(
                 scope.wire(),
-                protocol::scope::snake_case::name(expected),
+                lingxi_core::types::scope::snake_case::name(expected),
                 "workflow's wire spelling must not diverge from the shared one"
             );
         }
@@ -610,24 +610,24 @@ pub fn save_dynamic_workflow(
     };
     let relative = relative_dir.join(format!("{sanitized}.js"));
     let lock_relative = relative_dir.join(".save.lock");
-    let io_error = |error: platform_api::FsError| {
+    let io_error = |error: lingxi_core::host::FsError| {
         WorkflowSaveError::Io(std::io::Error::other(error.to_string()))
     };
-    let _lock = platform_api::rooted_fs::lock_exclusive(
+    let _lock = lingxi_core::host::rooted_fs::lock_exclusive(
         &root,
         &lock_relative,
-        platform_api::rooted_fs::PRIVATE_DIR_MODE,
-        platform_api::rooted_fs::PRIVATE_FILE_MODE,
+        lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
+        lingxi_core::host::rooted_fs::PRIVATE_FILE_MODE,
     )
     .map_err(io_error)?;
-    let options = platform_api::AtomicWriteOptions {
+    let options = lingxi_core::host::AtomicWriteOptions {
         overwrite,
-        ..platform_api::AtomicWriteOptions::default()
+        ..lingxi_core::host::AtomicWriteOptions::default()
     };
     if let Err(error) =
-        platform_api::rooted_fs::atomic_write(&root, &relative, script.as_bytes(), options)
+        lingxi_core::host::rooted_fs::atomic_write(&root, &relative, script.as_bytes(), options)
     {
-        if matches!(error, platform_api::FsError::AlreadyExists(_)) {
+        if matches!(error, lingxi_core::host::FsError::AlreadyExists(_)) {
             return Err(WorkflowSaveError::AlreadyExists {
                 name: sanitized,
                 path,
@@ -676,7 +676,7 @@ pub struct WorkflowTool {
     /// `Read` operation before the launcher is allowed to read it. Hosts that
     /// do not have a live gate may provide the boot policy instead; the
     /// no-policy fallback is an explicit `Ask`, never an unconditional allow.
-    permission_gate: Option<Arc<dyn platform_api::permission_gate::PermissionGate>>,
+    permission_gate: Option<Arc<dyn lingxi_core::host::permission_gate::PermissionGate>>,
     permission_policy: Option<Arc<permission::PermissionPolicy>>,
     /// Approval snapshots keyed by the originating tool-use id and lexical
     /// path. `check_permissions` runs before the main call, so this shared
@@ -702,11 +702,11 @@ pub struct WorkflowTool {
     /// Session-owned dynamic-workflow gate shared with the orchestrator
     /// handle. When absent, tests and lightweight hosts fall back to the
     /// construction-time snapshot in `session_enabled`.
-    dynamic_workflows_gate: Option<platform_api::session_flags::DynamicWorkflowsGate>,
+    dynamic_workflows_gate: Option<lingxi_core::host::session_flags::DynamicWorkflowsGate>,
     /// Session-owned workflow-size setting shared with the orchestrator
     /// handle. When absent, tests and lightweight hosts fall back to the
     /// legacy process-global compatibility snapshot.
-    size_guideline_state: Option<platform_api::session_flags::WorkflowSizeGuidelineState>,
+    size_guideline_state: Option<lingxi_core::host::session_flags::WorkflowSizeGuidelineState>,
     /// Session-scoped dynamic-workflow gate (`pA()`): launch/runtime policy may
     /// leave Workflow installed but unavailable for this session.
     session_enabled: bool,
@@ -749,7 +749,7 @@ impl WorkflowTool {
     #[must_use]
     pub fn with_permission_gate(
         mut self,
-        gate: Arc<dyn platform_api::permission_gate::PermissionGate>,
+        gate: Arc<dyn lingxi_core::host::permission_gate::PermissionGate>,
     ) -> Self {
         self.permission_gate = Some(gate);
         self
@@ -899,9 +899,11 @@ impl WorkflowTool {
             let managed = state.managed();
             let _ = state.set(size.as_wire(), managed);
         } else {
-            let managed = platform_api::session_flags::workflow_size_guideline_is_managed();
-            let _ =
-                platform_api::session_flags::set_workflow_size_guideline(size.as_wire(), managed);
+            let managed = lingxi_core::host::session_flags::workflow_size_guideline_is_managed();
+            let _ = lingxi_core::host::session_flags::set_workflow_size_guideline(
+                size.as_wire(),
+                managed,
+            );
         }
         self
     }
@@ -920,7 +922,7 @@ impl WorkflowTool {
         if let Some(state) = self.size_guideline_state.as_ref() {
             let _ = state.set_with_source(size.as_wire(), managed, is_default);
         } else {
-            let _ = platform_api::session_flags::set_workflow_size_guideline_with_source(
+            let _ = lingxi_core::host::session_flags::set_workflow_size_guideline_with_source(
                 size.as_wire(),
                 managed,
                 is_default,
@@ -933,7 +935,7 @@ impl WorkflowTool {
     #[must_use]
     pub fn with_size_guideline_state(
         mut self,
-        state: platform_api::session_flags::WorkflowSizeGuidelineState,
+        state: lingxi_core::host::session_flags::WorkflowSizeGuidelineState,
     ) -> Self {
         self.size_guideline = WorkflowSizeGuideline::from_wire(state.value());
         self.size_guideline_state = Some(state);
@@ -957,7 +959,7 @@ impl WorkflowTool {
     #[must_use]
     pub fn with_dynamic_workflows_gate(
         mut self,
-        gate: platform_api::session_flags::DynamicWorkflowsGate,
+        gate: lingxi_core::host::session_flags::DynamicWorkflowsGate,
     ) -> Self {
         self.dynamic_workflows_gate = Some(gate);
         self
@@ -983,7 +985,7 @@ impl WorkflowTool {
             .map(|state| WorkflowSizeGuideline::from_wire(state.value()))
             .unwrap_or_else(|| {
                 WorkflowSizeGuideline::from_wire(
-                    platform_api::session_flags::workflow_size_guideline(),
+                    lingxi_core::host::session_flags::workflow_size_guideline(),
                 )
             })
     }
@@ -1010,7 +1012,7 @@ impl WorkflowTool {
     /// which costs tokens; a wrongly-set one points at a skill the model cannot
     /// load, which makes every documented hook unreachable.
     fn authoring_skill_reachable(&self, _options: &PromptOptions) -> bool {
-        platform_api::session_flags::workflow_authoring_skill_reachable()
+        lingxi_core::host::session_flags::workflow_authoring_skill_reachable()
     }
 
     /// Is the tool disabled, by env var OR managed setting? Binary `fbn()`.
@@ -1278,7 +1280,7 @@ impl Tool for WorkflowTool {
         // canonical file-read tool/input shape, not about Workflow, so a
         // `Read(...)` rule has the same scope and symlink behavior as FileRead.
         if let Some(gate) = &self.permission_gate {
-            let check_ctx = platform_api::permission_gate::PermissionCheckContext {
+            let check_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
                 tool_use_id: ctx.tool_use_id.as_ref().map(|id| id.as_str().to_string()),
                 is_non_interactive_session: ctx.options.is_non_interactive_session,
                 ..Default::default()
@@ -1287,17 +1289,18 @@ impl Tool for WorkflowTool {
                 .resolve_detailed_or_abort("Read", &read_input, &check_ctx)
                 .await
             {
-                Ok(platform_api::permission_gate::PermissionResolution::Allow { .. }) => {
+                Ok(lingxi_core::host::permission_gate::PermissionResolution::Allow { .. }) => {
                     Self::allow_script_path_permission(&path)
                 }
-                Ok(platform_api::permission_gate::PermissionResolution::Deny {
-                    reason, ..
+                Ok(lingxi_core::host::permission_gate::PermissionResolution::Deny {
+                    reason,
+                    ..
                 })
-                | Err(platform_api::permission_gate::PermissionAbort { message: reason }) => {
+                | Err(lingxi_core::host::permission_gate::PermissionAbort { message: reason }) => {
                     Self::deny_script_path_permission(&path, reason)
                 }
-                Ok(platform_api::permission_gate::PermissionResolution::Ask)
-                | Ok(platform_api::permission_gate::PermissionResolution::AskWithContext {
+                Ok(lingxi_core::host::permission_gate::PermissionResolution::Ask)
+                | Ok(lingxi_core::host::permission_gate::PermissionResolution::AskWithContext {
                     ..
                 }) => Self::ask_script_path_permission(&path),
             };
@@ -1560,9 +1563,9 @@ impl Tool for WorkflowTool {
         // 2.1.266 `a0`: refuse while THIS agent's own stop is still completing
         // (see `agent_processes::mark_stop_pending`).
         if let Some(agent_id) = ctx.agent_id {
-            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+            if lingxi_core::host::agent_processes::is_stop_pending(&agent_id.to_string()) {
                 return Err(ToolError::InvalidInput(
-                    platform_api::agent_processes::stop_pending_refusal(
+                    lingxi_core::host::agent_processes::stop_pending_refusal(
                         "launch workflows or act on existing runs.",
                     ),
                 ));
@@ -1574,19 +1577,18 @@ impl Tool for WorkflowTool {
         })?;
         let mut spec = Self::spec_from_input(&input);
         // A Workflow task can outlive the turn that launched it. Capture the
-        // owning session at this boundary so later `fusion()` calls continue
+        // owning session at this boundary so later `agent()` calls continue
         // to use the original session-scoped budget after a clear/resume or
         // model/router change.
         if let Some(session) = ctx.session.as_ref() {
             // WorkflowLaunchSpec is a host boundary: desktop/mobile task
-            // launchers use the bare UUID for transcript directory identity,
-            // while Fusion requests may add the `sess:` wire prefix later.
+            // launchers use the bare UUID for transcript directory identity.
             spec.session_uuid = Some(session.lock().await.session_id.as_uuid().to_string());
         } else if let Some(session_id) = ctx.origin_session_id {
             // Subagent tool invocations intentionally do not clone the live
             // SessionState mutex. Their trusted origin id is propagated on
             // the invocation context instead, so a background Workflow still
-            // binds later Fusion calls to the session that launched it.
+            // binds later calls to the session that launched it.
             spec.session_uuid = Some(session_id.as_uuid().to_string());
         }
         spec.tool_use_id = ctx.tool_use_id.as_ref().map(ToString::to_string);
@@ -1790,16 +1792,16 @@ mod tests {
 
     struct RecordingPermissionGate {
         calls: Arc<StdMutex<Vec<(String, Value)>>>,
-        decision: platform_api::permission_gate::PermissionDecision,
+        decision: lingxi_core::host::permission_gate::PermissionDecision,
     }
 
     #[async_trait]
-    impl platform_api::permission_gate::PermissionGate for RecordingPermissionGate {
+    impl lingxi_core::host::permission_gate::PermissionGate for RecordingPermissionGate {
         async fn check(
             &self,
             name: &str,
             input: &Value,
-        ) -> platform_api::permission_gate::PermissionDecision {
+        ) -> lingxi_core::host::permission_gate::PermissionDecision {
             self.calls
                 .lock()
                 .unwrap()
@@ -1810,16 +1812,16 @@ mod tests {
 
     struct ContextAwarePermissionGate {
         calls: Arc<StdMutex<Vec<(String, Value)>>>,
-        contexts: Arc<StdMutex<Vec<platform_api::permission_gate::PermissionCheckContext>>>,
+        contexts: Arc<StdMutex<Vec<lingxi_core::host::permission_gate::PermissionCheckContext>>>,
     }
 
     #[async_trait]
-    impl platform_api::permission_gate::PermissionGate for ContextAwarePermissionGate {
+    impl lingxi_core::host::permission_gate::PermissionGate for ContextAwarePermissionGate {
         async fn check(
             &self,
             _name: &str,
             _input: &Value,
-        ) -> platform_api::permission_gate::PermissionDecision {
+        ) -> lingxi_core::host::permission_gate::PermissionDecision {
             panic!("Workflow scriptPath must use resolve_detailed_or_abort")
         }
 
@@ -1827,10 +1829,10 @@ mod tests {
             &self,
             name: &str,
             input: &Value,
-            ctx: &platform_api::permission_gate::PermissionCheckContext,
+            ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
         ) -> Result<
-            platform_api::permission_gate::PermissionResolution,
-            platform_api::permission_gate::PermissionAbort,
+            lingxi_core::host::permission_gate::PermissionResolution,
+            lingxi_core::host::permission_gate::PermissionAbort,
         > {
             self.calls
                 .lock()
@@ -1838,9 +1840,9 @@ mod tests {
                 .push((name.to_string(), input.clone()));
             self.contexts.lock().unwrap().push(ctx.clone());
             if ctx.is_non_interactive_session {
-                return Ok(platform_api::permission_gate::PermissionResolution::Deny {
+                return Ok(lingxi_core::host::permission_gate::PermissionResolution::Deny {
                     reason: permission::headless_gate::headless_deny_message(name),
-                    source: platform_api::permission_gate::PermissionDecisionSource::Unspecified,
+                    source: lingxi_core::host::permission_gate::PermissionDecisionSource::Unspecified,
                     rule_source: None,
                     decision_reason_type: None,
                     decision_reason: None,
@@ -1848,7 +1850,7 @@ mod tests {
                     content_blocks: Vec::new(),
                 });
             }
-            Ok(platform_api::permission_gate::PermissionResolution::Ask)
+            Ok(lingxi_core::host::permission_gate::PermissionResolution::Ask)
         }
     }
 
@@ -2287,8 +2289,8 @@ mod tests {
 
     /// Put the reachability flags in a known state and report the previous one.
     fn set_gate(registered: bool, skill_tool: bool) {
-        platform_api::session_flags::set_workflow_authoring_skill_registered(registered);
-        platform_api::session_flags::set_skill_tool_advertised(skill_tool);
+        lingxi_core::host::session_flags::set_workflow_authoring_skill_registered(registered);
+        lingxi_core::host::session_flags::set_skill_tool_advertised(skill_tool);
     }
 
     /// Both halves of `nre` must hold. Either one false inlines the reference,
@@ -2303,8 +2305,7 @@ mod tests {
         set_gate(true, true);
         let pointed = tool.prompt(&opts).await;
         assert!(
-            pointed.contains("`workflow-authoring`")
-                && !pointed.contains("- fusion(prompt: string"),
+            pointed.contains("`workflow-authoring`") && !pointed.contains("- workflow(nameOrRef:"),
             "with the skill registered and the Skill tool advertised, the description must point"
         );
 
@@ -2320,7 +2321,7 @@ mod tests {
             set_gate(registered, skill_tool);
             let inlined = tool.prompt(&opts).await;
             assert!(
-                inlined.contains("- fusion(prompt: string"),
+                inlined.contains("- workflow(nameOrRef:"),
                 "the reference must be inlined when {why}: otherwise the description points at \
                  documentation the model cannot load, and every hook it lists is unreachable"
             );
@@ -2346,7 +2347,6 @@ mod tests {
             "- parallel(thunks:",
             "- phase(",
             "- workflow(nameOrRef:",
-            "- fusion(prompt: string",
         ] {
             assert!(
                 inline.contains(hook),
@@ -2362,7 +2362,7 @@ mod tests {
             "the short branch must name the skill that carries the reference"
         );
         assert!(
-            !pointed.contains("- fusion(prompt: string"),
+            !pointed.contains("- workflow(nameOrRef:"),
             "the short branch is pointless if it still inlines the reference"
         );
         assert!(
@@ -2402,7 +2402,7 @@ mod tests {
             MODEL_FORCE_OMISSIONS.iter().map(|f| f.len()).sum::<usize>()
         );
         assert!(forced.starts_with("# Workflow authoring reference"));
-        assert!(forced.contains("- fusion(prompt: string"));
+        assert!(forced.contains("- workflow(nameOrRef:"));
     }
 
     /// The point of the 2.1.267 split, stated as a number so a regression that
@@ -2492,117 +2492,6 @@ mod tests {
         );
     }
 
-    /// The second registered divergence: the `fusion()` script hook. Agent
-    /// Fusion has no claude-code counterpart, so the oracle cannot document a
-    /// hook the shipped runtime provides — a script that never learns `fusion()`
-    /// exists cannot call it. Asserted on both sides so the bullet can neither
-    /// vanish from the shipped text nor creep into the oracle.
-    #[test]
-    fn the_shipped_authoring_reference_documents_the_fusion_hook() {
-        assert!(
-            !ORACLE_AUTHORING_SKILL.contains("fusion(prompt: string, opts?:"),
-            "the oracle must stay free of LingXi-only hooks; that is what the register is for"
-        );
-        assert!(
-            AUTHORING_SKILL.contains("fusion(prompt: string, opts?:"),
-            "the shipped description must document the fusion() script hook"
-        );
-        assert!(
-            AUTHORING_SKILL.contains("WorkflowFusionOptionError"),
-            "the catchable rejection names must be documented, or a script cannot handle them"
-        );
-        // `platform_api::normalize_dimensions`' real rules. Pinned as prose, not
-        // just as length: an undocumented `dimensions: ['Coverage']` is rejected,
-        // and until it was written down the rejection did not even reach the
-        // script as a named error.
-        assert!(
-            AUTHORING_SKILL
-                .contains("lowercase snake_case, at most 12, never a provider/model/panel name"),
-            "the dimensions rule must stay documented on the option it constrains"
-        );
-        // It belongs in the script-body hook list, next to the other hooks a
-        // script can call — not in the prose after it.
-        let hooks = AUTHORING_SKILL
-            .find("Script body hooks:")
-            .expect("the hook list must exist");
-        let bullet = AUTHORING_SKILL
-            .find("- fusion(prompt: string")
-            .expect("checked above");
-        let after_hooks = AUTHORING_SKILL
-            .find("Subagents are told their final text IS the return value")
-            .expect("the paragraph after the hook list must exist");
-        assert!(
-            hooks < bullet && bullet < after_hooks,
-            "the fusion() bullet must sit inside the hook list ({hooks}..{after_hooks}), got {bullet}"
-        );
-    }
-
-    /// Drift gate for the `fusion()` bullet's documented resolved-object shape.
-    /// Round 1 shipped `{runId, status, decision, panels, usage, timing, egress}`
-    /// in the description while `platform_api::FusionResult` actually
-    /// serializes `run_id` / `egress_profiles` (no `#[serde(rename_all)]`) and
-    /// carries `final_text` — the ONLY field with the deliberation's answer —
-    /// under no documented key at all. Nothing caught it: the byte-lock test
-    /// above only pins length + a handful of substrings, and the round-trip
-    /// test in `tasks` pins the real shape without ever comparing it back to
-    /// this description text. Parse the object literal out of the bullet and
-    /// assert every key it lists is an actual top-level key of a serialized
-    /// `FusionResult`, so the two can never independently drift again.
-    #[test]
-    fn fusion_bullet_documents_only_real_fusion_result_keys() {
-        let marker = "compact result object ({";
-        let start = AUTHORING_SKILL
-            .find(marker)
-            .expect("fusion() bullet documents the resolved object shape")
-            + marker.len()
-            - 1; // keep the leading '{'
-        let rest = &AUTHORING_SKILL[start..];
-        let end = rest
-            .find('}')
-            .expect("object literal in the fusion() bullet is closed");
-        let object_literal = &rest[1..end]; // strip the leading '{'
-        let documented_keys: Vec<&str> = object_literal
-            .split(',')
-            .map(|part| part.trim().split(':').next().unwrap().trim())
-            .collect();
-        assert!(
-            documented_keys.contains(&"run_id") && documented_keys.contains(&"final_text"),
-            "sanity: expected run_id and final_text among parsed keys, got {documented_keys:?}"
-        );
-
-        let sample = platform_api::FusionResult {
-            schema_version: 1,
-            run_id: "fu_test".into(),
-            status: platform_api::FusionStatus::Completed,
-            decision: platform_api::FusionDecision::Picked {
-                panel_id: "P1".into(),
-            },
-            final_text: "the answer".into(),
-            analysis: None,
-            panels: vec![platform_api::PanelOutcome {
-                panel_id: "P1".into(),
-                status: platform_api::PanelRunStatus::Completed,
-                duration_ms: 7,
-                error_category: None,
-                error_detail: None,
-                usage: None,
-            }],
-            usage: platform_api::FusionUsage::default(),
-            timing: platform_api::FusionTiming::default(),
-            egress_profiles: vec!["anthropic".into()],
-        };
-        let serialized = serde_json::to_value(&sample).expect("FusionResult serializes");
-        let actual_keys = serialized.as_object().expect("object");
-        for key in &documented_keys {
-            assert!(
-                actual_keys.contains_key(*key),
-                "fusion() bullet documents key `{key}` but FusionResult never serializes it \
-                 (actual keys: {:?}) — the description and the wire shape have drifted",
-                actual_keys.keys().collect::<Vec<_>>()
-            );
-        }
-    }
-
     /// Managed `disableWorkflows: true` must disable the tool. Before this was
     /// wired there was no seam for the setting at all, so an organization that
     /// set it still had Workflow advertised AND executable — the policy was
@@ -2671,8 +2560,8 @@ mod tests {
     #[test]
     fn session_owned_gate_is_live_and_isolated() {
         let ctx = ToolStaticContext::default();
-        let first_gate = platform_api::session_flags::DynamicWorkflowsGate::new(true, false);
-        let second_gate = platform_api::session_flags::DynamicWorkflowsGate::new(false, true);
+        let first_gate = lingxi_core::host::session_flags::DynamicWorkflowsGate::new(true, false);
+        let second_gate = lingxi_core::host::session_flags::DynamicWorkflowsGate::new(false, true);
         let first = WorkflowTool::new(None).with_dynamic_workflows_gate(first_gate.clone());
         let second = WorkflowTool::new(None).with_dynamic_workflows_gate(second_gate.clone());
 
@@ -2689,7 +2578,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_owned_gate_rejects_after_live_toggle() {
-        let gate = platform_api::session_flags::DynamicWorkflowsGate::new(true, false);
+        let gate = lingxi_core::host::session_flags::DynamicWorkflowsGate::new(true, false);
         let tool = WorkflowTool::new(None).with_dynamic_workflows_gate(gate.clone());
         let ctx = tool_api::test_support::fresh_ctx();
 
@@ -2779,27 +2668,28 @@ mod tests {
         // `/config` updates the session snapshot after construction; the next
         // prompt must reflect it without rebuilding the tool registry.
         let live = WorkflowTool::new(None).with_size_guideline(WorkflowSizeGuideline::Medium);
-        let _ = platform_api::session_flags::set_workflow_size_guideline("small", false);
+        let _ = lingxi_core::host::session_flags::set_workflow_size_guideline("small", false);
         assert_eq!(
             live.prompt(&opts).await,
             format!("{}{}", base, WorkflowSizeGuideline::Small.prompt_appendix())
         );
-        let _ = platform_api::session_flags::set_workflow_size_guideline("medium", false);
+        let _ = lingxi_core::host::session_flags::set_workflow_size_guideline("medium", false);
 
-        let session_state =
-            platform_api::session_flags::WorkflowSizeGuidelineState::new("large", false, false)
-                .unwrap();
+        let session_state = lingxi_core::host::session_flags::WorkflowSizeGuidelineState::new(
+            "large", false, false,
+        )
+        .unwrap();
         let session_owned = WorkflowTool::new(None)
             .with_size_guideline_state(session_state.clone())
             .with_size_guideline_source(WorkflowSizeGuideline::Large, false, false);
-        let _ = platform_api::session_flags::set_workflow_size_guideline("small", false);
+        let _ = lingxi_core::host::session_flags::set_workflow_size_guideline("small", false);
         assert_eq!(
             session_owned.prompt(&opts).await,
             format!("{}{}", base, WorkflowSizeGuideline::Large.prompt_appendix()),
             "session-owned state must win over the process-global compatibility snapshot"
         );
         let _ = session_state.set("medium", false);
-        let _ = platform_api::session_flags::set_workflow_size_guideline("medium", false);
+        let _ = lingxi_core::host::session_flags::set_workflow_size_guideline("medium", false);
     }
 
     #[test]
@@ -2893,7 +2783,7 @@ mod tests {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let gate = Arc::new(RecordingPermissionGate {
             calls: calls.clone(),
-            decision: platform_api::permission_gate::PermissionDecision::Allow,
+            decision: lingxi_core::host::permission_gate::PermissionDecision::Allow,
         });
         let tool = tool(None)
             .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
@@ -2997,7 +2887,7 @@ mod tests {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let gate = Arc::new(RecordingPermissionGate {
             calls,
-            decision: platform_api::permission_gate::PermissionDecision::Deny {
+            decision: lingxi_core::host::permission_gate::PermissionDecision::Deny {
                 reason: "Read denied by policy".into(),
             },
         });
@@ -3034,7 +2924,7 @@ mod tests {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let gate = Arc::new(RecordingPermissionGate {
             calls: calls.clone(),
-            decision: platform_api::permission_gate::PermissionDecision::Allow,
+            decision: lingxi_core::host::permission_gate::PermissionDecision::Allow,
         });
         let tool = tool(None)
             .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
@@ -3097,7 +2987,7 @@ mod tests {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let gate = Arc::new(RecordingPermissionGate {
             calls,
-            decision: platform_api::permission_gate::PermissionDecision::Allow,
+            decision: lingxi_core::host::permission_gate::PermissionDecision::Allow,
         });
         let tool = tool(None)
             .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
@@ -3140,7 +3030,7 @@ mod tests {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let gate = Arc::new(RecordingPermissionGate {
             calls,
-            decision: platform_api::permission_gate::PermissionDecision::Allow,
+            decision: lingxi_core::host::permission_gate::PermissionDecision::Allow,
         });
         let tool = tool(None)
             .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))

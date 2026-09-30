@@ -58,9 +58,9 @@ async fn an_ephemeral_host_gets_a_private_working_ledger_root() {
 
     // A coordinator opened under it behaves like any other: this is the
     // same ledger code, only rooted somewhere disposable.
-    let session_id = protocol::SessionId::new();
+    let session_id = lingxi_core::types::SessionId::new();
     struct Lease(String);
-    impl platform_api::live_sessions::SessionWriterLease for Lease {
+    impl lingxi_core::host::live_sessions::SessionWriterLease for Lease {
         fn session_id(&self) -> &str {
             &self.0
         }
@@ -89,14 +89,14 @@ async fn desktop_config_forwards_process_local_credential_policy() {
     let mut cfg = DesktopConfig::default();
     cfg.lingxi_home = home.path().to_path_buf();
     cfg.isolated_credential_storage = false;
-    cfg.credential_storage_policy = platform_api::CredentialStoragePolicy::NativeOrMemory;
+    cfg.credential_storage_policy = lingxi_core::host::CredentialStoragePolicy::NativeOrMemory;
 
     let stack = build_shared_credential_stack_for_config(&cfg)
         .await
         .expect("credential stack");
     assert_eq!(
         stack.storage.backend(),
-        platform_api::SecureStorageBackend::MemorySession
+        lingxi_core::host::SecureStorageBackend::MemorySession
     );
 }
 
@@ -232,16 +232,16 @@ struct RecordingNetworkPermissionGate {
 }
 
 #[async_trait::async_trait]
-impl platform_api::PermissionGate for RecordingNetworkPermissionGate {
-    async fn check(&self, name: &str, input: &Value) -> platform_api::PermissionDecision {
+impl lingxi_core::host::PermissionGate for RecordingNetworkPermissionGate {
+    async fn check(&self, name: &str, input: &Value) -> lingxi_core::host::PermissionDecision {
         assert_eq!(name, "SandboxNetworkAccess");
         assert_eq!(input["host"], "api.example.test");
         assert_eq!(input["port"], 8443);
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.allow {
-            platform_api::PermissionDecision::Allow
+            lingxi_core::host::PermissionDecision::Allow
         } else {
-            platform_api::PermissionDecision::Deny {
+            lingxi_core::host::PermissionDecision::Deny {
                 reason: "blocked".into(),
             }
         }
@@ -560,7 +560,7 @@ async fn desktop_registry_exposes_connect() {
         ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
         CopilotConnectStep,
     };
-    use platform_api::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
+    use lingxi_core::host::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
 
     // Minimal `AuthHandle` double — no sibling registry test exists in this
     // module, so we construct the lightest object-safe stand-in here.
@@ -641,7 +641,7 @@ async fn safe_mode_and_bare_skip_custom_command_discovery() {
         ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
         CopilotConnectStep,
     };
-    use platform_api::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
+    use lingxi_core::host::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
 
     struct MockAuth;
     #[async_trait]
@@ -758,7 +758,7 @@ async fn an_add_dir_root_contributes_its_skills() {
         ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
         CopilotConnectStep,
     };
-    use platform_api::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
+    use lingxi_core::host::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
 
     struct MockAuth;
     #[async_trait]
@@ -848,7 +848,7 @@ async fn engine_credential_writer_roundtrips_through_keychain() {
     use super::connect::{EngineCredentialWriter, SecureKeyPrompt};
     use async_trait::async_trait;
     use command_api::builtins::ConnectCredentialWriter;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
     use std::collections::HashMap;
@@ -857,7 +857,7 @@ async fn engine_credential_writer_roundtrips_through_keychain() {
     // In-memory secure store (the posix-minimal stub does not persist).
     #[derive(Default)]
     struct MemStorage {
-        map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        map: StdMutex<HashMap<(String, String), lingxi_core::types::SecureStorageData>>,
     }
     #[async_trait]
     impl SecureStorage for MemStorage {
@@ -865,7 +865,7 @@ async fn engine_credential_writer_roundtrips_through_keychain() {
             &self,
             service: &str,
             account: &str,
-            data: protocol::SecureStorageData,
+            data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             self.map
                 .lock()
@@ -877,7 +877,7 @@ async fn engine_credential_writer_roundtrips_through_keychain() {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -950,7 +950,7 @@ async fn connect_writer_wrapper_refreshes_fusion_catalog_availability_after_a_re
     use super::connect::{EngineCredentialWriter, SecureKeyPrompt};
     use async_trait::async_trait;
     use command_api::builtins::ConnectCredentialWriter;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
     use std::collections::HashMap;
@@ -958,7 +958,7 @@ async fn connect_writer_wrapper_refreshes_fusion_catalog_availability_after_a_re
 
     #[derive(Default)]
     struct MemStorage {
-        map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        map: StdMutex<HashMap<(String, String), lingxi_core::types::SecureStorageData>>,
     }
     #[async_trait]
     impl SecureStorage for MemStorage {
@@ -966,7 +966,7 @@ async fn connect_writer_wrapper_refreshes_fusion_catalog_availability_after_a_re
             &self,
             service: &str,
             account: &str,
-            data: protocol::SecureStorageData,
+            data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             self.map
                 .lock()
@@ -978,7 +978,7 @@ async fn connect_writer_wrapper_refreshes_fusion_catalog_availability_after_a_re
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -1087,7 +1087,7 @@ with no restart and no ModelSource reconstruction"
 async fn oauth_connect_publishes_before_return_and_starts_one_detached_refresh() {
     use async_trait::async_trait;
     use command_api::builtins::OAuthConnectDriver;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
 
@@ -1112,7 +1112,7 @@ async fn oauth_connect_publishes_before_return_and_starts_one_detached_refresh()
             &self,
             _service: &str,
             _account: &str,
-            _data: protocol::SecureStorageData,
+            _data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             Ok(())
         }
@@ -1120,7 +1120,7 @@ async fn oauth_connect_publishes_before_return_and_starts_one_detached_refresh()
             &self,
             _service: &str,
             _account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(None)
         }
         async fn contains(
@@ -1304,7 +1304,7 @@ async fn oauth_connect_on_a_cold_api_key_route_requires_restart_without_false_re
 #[tokio::test]
 async fn a_degraded_reprobe_must_not_erase_known_good_availability() {
     use async_trait::async_trait;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
 
@@ -1317,7 +1317,7 @@ async fn a_degraded_reprobe_must_not_erase_known_good_availability() {
             &self,
             _service: &str,
             _account: &str,
-            _data: protocol::SecureStorageData,
+            _data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             Ok(())
         }
@@ -1325,7 +1325,7 @@ async fn a_degraded_reprobe_must_not_erase_known_good_availability() {
             &self,
             _service: &str,
             _account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(None)
         }
         async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
@@ -1483,7 +1483,7 @@ async fn credential_notifications_stay_in_their_runtime_scope() {
 async fn the_scoped_notifier_reaches_a_registered_refresher() {
     let catalog_registry = super::FusionCatalogRegistry::default();
     use async_trait::async_trait;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
     use std::collections::HashMap;
@@ -1491,7 +1491,7 @@ async fn the_scoped_notifier_reaches_a_registered_refresher() {
 
     #[derive(Default)]
     struct MemStorage {
-        map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        map: StdMutex<HashMap<(String, String), lingxi_core::types::SecureStorageData>>,
     }
     #[async_trait]
     impl SecureStorage for MemStorage {
@@ -1499,7 +1499,7 @@ async fn the_scoped_notifier_reaches_a_registered_refresher() {
             &self,
             service: &str,
             account: &str,
-            data: protocol::SecureStorageData,
+            data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             self.map
                 .lock()
@@ -1511,7 +1511,7 @@ async fn the_scoped_notifier_reaches_a_registered_refresher() {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -1698,11 +1698,11 @@ too much empties Fusion's catalog, the mirror-image defect: {published:?}"
 async fn signing_out_clears_the_anthropic_entry_a_sign_in_published() {
     let catalog_registry = super::FusionCatalogRegistry::default();
     use async_trait::async_trait;
-    use platform_api::auth::{AuthError, LoginInfo};
+    use lingxi_core::host::auth::{AuthError, LoginInfo};
 
     struct OkLogout;
     #[async_trait]
-    impl platform_api::AuthHandle for OkLogout {
+    impl lingxi_core::host::AuthHandle for OkLogout {
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             Err(AuthError::Cancelled)
         }
@@ -1741,7 +1741,7 @@ async fn signing_out_clears_the_anthropic_entry_a_sign_in_published() {
         },
     );
 
-    let auth: Arc<dyn platform_api::AuthHandle> = Arc::new(FusionCatalogClearingAuth {
+    let auth: Arc<dyn lingxi_core::host::AuthHandle> = Arc::new(FusionCatalogClearingAuth {
         catalog_registry: catalog_registry.clone(),
         inner: Arc::new(OkLogout),
     });
@@ -1911,7 +1911,7 @@ async fn oauth_logout_does_not_fall_back_to_an_unwired_boot_api_key() {
         mutation_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         credentials: fusion_delete_test_credentials(),
         // Both credentials existed at boot, but assemble selected exactly
-        // one OAuth source and DefaultLlmClient copied that fixed route.
+        // one OAuth source and ModelRuntime copied that fixed route.
         credential_sources: vec![provider_config::CredentialSource {
             provider_id: llm_runtime::ProviderId::AnthropicFirstParty,
             profile_name: "anthropic".to_string(),
@@ -2213,7 +2213,7 @@ route and resurrects the stale `true`"
 /// secret/src/credential.rs).
 fn fusion_test_credentials_with_stored_anthropic_key() -> Arc<secret::CredentialManager> {
     use async_trait::async_trait;
-    use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
+    use lingxi_core::host::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
     struct AnthropicKeyPresentStorage;
     #[async_trait]
@@ -2222,7 +2222,7 @@ fn fusion_test_credentials_with_stored_anthropic_key() -> Arc<secret::Credential
             &self,
             _service: &str,
             _account: &str,
-            _data: protocol::SecureStorageData,
+            _data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             Ok(())
         }
@@ -2230,7 +2230,7 @@ fn fusion_test_credentials_with_stored_anthropic_key() -> Arc<secret::Credential
             &self,
             _service: &str,
             _account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(None)
         }
         async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
@@ -2267,7 +2267,7 @@ fn fusion_test_credentials_with_stored_anthropic_key() -> Arc<secret::Credential
 /// pass for the wrong reason.
 fn fusion_delete_test_credentials() -> Arc<secret::CredentialManager> {
     use async_trait::async_trait;
-    use platform_api::{SecureStorage, SecureStorageBackend, SecureStorageError};
+    use lingxi_core::host::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
     struct InertStorage;
     #[async_trait]
@@ -2276,7 +2276,7 @@ fn fusion_delete_test_credentials() -> Arc<secret::CredentialManager> {
             &self,
             _service: &str,
             _account: &str,
-            _data: protocol::SecureStorageData,
+            _data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             Ok(())
         }
@@ -2284,7 +2284,7 @@ fn fusion_delete_test_credentials() -> Arc<secret::CredentialManager> {
             &self,
             _service: &str,
             _account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(None)
         }
         async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
@@ -2321,7 +2321,7 @@ fn fusion_delete_test_credentials() -> Arc<secret::CredentialManager> {
 #[tokio::test]
 async fn isolated_refresher_does_not_count_ambient_env_var_credentials() {
     use async_trait::async_trait;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
 
@@ -2336,7 +2336,7 @@ async fn isolated_refresher_does_not_count_ambient_env_var_credentials() {
             &self,
             _service: &str,
             _account: &str,
-            _data: protocol::SecureStorageData,
+            _data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             Ok(())
         }
@@ -2344,7 +2344,7 @@ async fn isolated_refresher_does_not_count_ambient_env_var_credentials() {
             &self,
             _service: &str,
             _account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(None)
         }
         async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
@@ -2772,7 +2772,7 @@ async fn desktop_workflow_script_path_is_read_gated_before_launcher_io() {
         .expect("flag settings deny rule must parse"),
     );
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let permission_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -2808,7 +2808,7 @@ fn merge_cli_flag_agents_precedence_and_safe_mode() {
         agent::parse_agent_from_json(
             name,
             &serde_json::json!({"description": "from dir", "prompt": "p"}),
-            agent::AgentSource::Settings(protocol::SettingsScope::Project),
+            agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .expect("valid dir agent")
     }
@@ -2865,12 +2865,12 @@ fn merge_agent_frontmatter_mcp_servers_fwt_gates_and_merge() {
     fn existing(name: &str) -> mcp::McpServerConfig {
         mcp::McpServerConfig {
             name: name.to_string(),
-            spec: platform_api::McpTransportSpec::Stdio {
+            spec: lingxi_core::host::McpTransportSpec::Stdio {
                 command: "prior".into(),
                 args: vec![],
                 env: std::collections::HashMap::new(),
             },
-            scope: mcp::ConfigScope::Settings(protocol::SettingsScope::Project),
+            scope: mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
             disabled: false,
             timeout_ms: None,
             always_load: false,
@@ -2907,7 +2907,7 @@ fn merge_agent_frontmatter_mcp_servers_fwt_gates_and_merge() {
     // scope Agent, exactly like a `--mcp-config` server.
     let def = agent_with_server(
         "docs",
-        agent::AgentSource::Settings(protocol::SettingsScope::Project),
+        agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
     );
     let mut configs = vec![existing("keep")];
     let blocked = super::merge_agent_frontmatter_mcp_servers(
@@ -2935,7 +2935,7 @@ fn merge_agent_frontmatter_mcp_servers_fwt_gates_and_merge() {
     assert_eq!(configs.len(), 2);
     assert_eq!(configs[0].name, "docs");
     assert!(
-        matches!(&configs[0].spec, platform_api::McpTransportSpec::Stdio { command, .. } if command == "npx"),
+        matches!(&configs[0].spec, lingxi_core::host::McpTransportSpec::Stdio { command, .. } if command == "npx"),
         "the agent's config must win over a discovered one"
     );
     assert_eq!(configs[0].scope, mcp::ConfigScope::Agent);
@@ -2971,12 +2971,12 @@ fn merge_agent_frontmatter_mcp_servers_fwt_gates_and_merge() {
     );
     assert_eq!(configs.len(), 1);
     assert!(
-        matches!(&configs[0].spec, platform_api::McpTransportSpec::Stdio { command, .. } if command == "prior"),
+        matches!(&configs[0].spec, lingxi_core::host::McpTransportSpec::Stdio { command, .. } if command == "prior"),
         "a --mcp-config server must win on name collision"
     );
     assert_eq!(
         configs[0].scope,
-        mcp::ConfigScope::Settings(protocol::SettingsScope::Project)
+        mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
     );
 
     // Gl(): safe mode → no merge.
@@ -3052,7 +3052,7 @@ fn merge_agent_frontmatter_mcp_servers_fwt_gates_and_merge() {
     // warning), an allowed sibling still merges.
     let mut two = agent_with_server(
         "docs",
-        agent::AgentSource::Settings(protocol::SettingsScope::Project),
+        agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
     );
     let mut denied = serde_json::Map::new();
     denied.insert("denied".to_string(), serde_json::json!({"command": "evil"}));
@@ -3083,16 +3083,16 @@ fn merge_agent_frontmatter_mcp_servers_fwt_gates_and_merge() {
 fn mcp_tool_policy_rules_are_composed_into_the_boot_policy() {
     let server = mcp::McpServerConfig {
         name: "remote.server".into(),
-        spec: platform_api::McpTransportSpec::InProcess {
+        spec: lingxi_core::host::McpTransportSpec::InProcess {
             registry_key: "remote.server".into(),
         },
         scope: mcp::ConfigScope::Dynamic,
         disabled: false,
         timeout_ms: None,
         always_load: false,
-        tools: vec![platform_api::McpConfiguredToolPolicyDto {
+        tools: vec![lingxi_core::host::McpConfiguredToolPolicyDto {
             name: "delete_data".into(),
-            permission_policy: Some(platform_api::McpToolPermissionPolicy::AlwaysDeny),
+            permission_policy: Some(lingxi_core::host::McpToolPermissionPolicy::AlwaysDeny),
             org_max_permission: None,
         }],
         tool_permissions: std::collections::BTreeMap::new(),
@@ -3117,7 +3117,7 @@ fn mcp_tool_policy_rules_are_composed_into_the_boot_policy() {
 
 #[tokio::test]
 async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
-    let agent_id = protocol::AgentId::new();
+    let agent_id = lingxi_core::types::AgentId::new();
     let config_json = serde_json::json!({
         "command": "unused-in-test",
         "tools": [
@@ -3132,7 +3132,7 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
     let config = mcp::build_server_from_json_entry("srv", &config_json, mcp::ConfigScope::Agent)
         .expect("agent MCP config parses");
     let table_key = mcp::registry::agent_scope_table_key(agent_id, "srv");
-    let dto = |tool_name: &str, requires_user_interaction: bool| platform_api::McpToolDto {
+    let dto = |tool_name: &str, requires_user_interaction: bool| lingxi_core::host::McpToolDto {
         server_name: "srv".into(),
         tool_name: tool_name.into(),
         description: tool_name.into(),
@@ -3146,7 +3146,7 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
         always_load: None,
         requires_user_interaction,
     };
-    let connection_id = protocol::McpConnectionId::new();
+    let connection_id = lingxi_core::types::McpConnectionId::new();
     let registry = Arc::new(mcp::McpRegistry::new(Arc::new(
         platform_posix::PosixMcpTransport::new(),
     )));
@@ -3155,7 +3155,7 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
         mcp::McpConnectionState::Connected {
             config,
             connection_id,
-            capabilities: platform_api::ServerCapabilitiesDto {
+            capabilities: lingxi_core::host::ServerCapabilitiesDto {
                 tools: true,
                 resources: false,
                 prompts: false,
@@ -3164,8 +3164,8 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
                 experimental: std::collections::HashMap::new(),
                 extensions: std::collections::HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: vec![
@@ -3182,7 +3182,7 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
     let mut def = agent::parse_agent_from_json(
         "tester",
         &serde_json::json!({"description": "d", "prompt": "p"}),
-        agent::AgentSource::Settings(protocol::SettingsScope::Project),
+        agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
     )
     .expect("agent definition parses");
     let mut server = serde_json::Map::new();
@@ -3235,7 +3235,7 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
 
 #[test]
 fn oauth_subscriber_flag_gating() {
-    use llm_runtime::oauth::anthropic::resolver::{resolve, ResolverContext};
+    use llm_runtime::auth::anthropic::resolver::{resolve, ResolverContext};
     let inference = vec!["user:inference".to_string(), "user:profile".to_string()];
     let no_inference = vec!["user:profile".to_string()];
     // The context `resolve_llm_stack` builds for a stored-OAuth session,
@@ -3307,7 +3307,7 @@ fn oauth_subscriber_flag_gating() {
 /// the resolver keeps the stored session as the effective source.
 #[test]
 fn subscription_seed_gates_persisted_tier_on_effective_oauth() {
-    use llm_runtime::oauth::anthropic::resolver::AuthSource;
+    use llm_runtime::auth::anthropic::resolver::AuthSource;
     let inference = vec!["user:inference".to_string()];
     let tier = "enterprise".to_string();
     let limit = "default_claude_max_20x".to_string();
@@ -3375,7 +3375,7 @@ async fn embedded_harness_keeps_sessions_and_shutdown_owners_independent() {
     config_b.isolated_credential_storage = true;
     let output = || {
         Arc::new(orchestrator::test_support::MockOutputStream::new())
-            as Arc<dyn platform_api::OutputStream>
+            as Arc<dyn lingxi_core::host::OutputStream>
     };
     let harness_a = super::build_harness(config_a, output(), Arc::new(permission::DenyOnAskGate))
         .await
@@ -3406,7 +3406,7 @@ pub(super) fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) 
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
         isolated_credential_storage: false,
-        credential_storage_policy: platform_api::CredentialStoragePolicy::NativeOrMemory,
+        credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::NativeOrMemory,
         injected_plugin_secrets: std::collections::BTreeMap::new(),
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
@@ -3539,7 +3539,7 @@ async fn apply_worktree_launch_creates_and_populates_session() {
         vec![boot_cwd.clone()],
     );
     let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-    ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
+    ctx.worktree = mock.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>;
 
     super::apply_worktree_launch(&Some("feat".to_string()), &None, &ctx)
         .await
@@ -3640,10 +3640,10 @@ impl RecordingProcessRunner {
 }
 
 #[async_trait::async_trait]
-impl platform_api::ProcessRunner for RecordingProcessRunner {
+impl lingxi_core::host::ProcessRunner for RecordingProcessRunner {
     async fn run(
         &self,
-        cmd: &platform_api::SandboxedCommand,
+        cmd: &lingxi_core::host::SandboxedCommand,
     ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
         let inner = cmd.inner();
         let exit_code = if inner.args == vec!["-V".to_string()] {
@@ -3669,14 +3669,14 @@ impl platform_api::ProcessRunner for RecordingProcessRunner {
 
     async fn spawn_background(
         &self,
-        _cmd: &platform_api::SandboxedCommand,
-    ) -> Result<platform_api::ProcessHandle, mobile_linux_api::ProcessError> {
+        _cmd: &lingxi_core::host::SandboxedCommand,
+    ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError> {
         Err(mobile_linux_api::ProcessError::Unsupported)
     }
 
     async fn kill(
         &self,
-        _handle: &platform_api::ProcessHandle,
+        _handle: &lingxi_core::host::ProcessHandle,
     ) -> Result<(), mobile_linux_api::ProcessError> {
         Ok(())
     }
@@ -3702,9 +3702,9 @@ async fn apply_worktree_launch_with_tmux_creates_and_records_session_name() {
         vec![boot_cwd.clone()],
     );
     let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-    ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
+    ctx.worktree = mock.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>;
     let runner = Arc::new(RecordingProcessRunner::new(0));
-    ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
+    ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
     super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
         .await
@@ -3741,9 +3741,9 @@ async fn apply_worktree_launch_tmux_failure_is_non_fatal() {
         vec![boot_cwd.clone()],
     );
     let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-    ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
+    ctx.worktree = mock.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>;
     let runner = Arc::new(RecordingProcessRunner::new(1));
-    ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
+    ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
     super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
         .await
@@ -3779,9 +3779,9 @@ async fn apply_worktree_launch_without_tmux_flag_issues_no_tmux_call() {
         vec![boot_cwd.clone()],
     );
     let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-    ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
+    ctx.worktree = mock.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>;
     let runner = Arc::new(RecordingProcessRunner::new(0));
-    ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
+    ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
     super::apply_worktree_launch(&Some("feat".to_string()), &None, &ctx)
         .await
@@ -3842,11 +3842,11 @@ async fn apply_worktree_launch_native_tmux_not_installed_is_hard_error() {
         vec![boot_cwd.clone()],
     );
     let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-    ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
+    ctx.worktree = mock.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>;
     // `tmux -V` probe returns non-zero ⇒ "not installed"; create exit is
     // irrelevant (never reached).
     let runner = Arc::new(RecordingProcessRunner::with_exits(127, 0));
-    ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
+    ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
     let err = super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
         .await
@@ -3890,11 +3890,11 @@ async fn apply_worktree_launch_classic_tmux_skips_install_preflight() {
         vec![boot_cwd.clone()],
     );
     let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
-    ctx.worktree = mock.clone() as Arc<dyn platform_api::worktree::WorktreeManager>;
+    ctx.worktree = mock.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>;
     // Probe would report "not installed" IF it ran; create fails. Classic
     // must not run the probe, and the create failure must be non-fatal.
     let runner = Arc::new(RecordingProcessRunner::with_exits(127, 1));
-    ctx.process = runner.clone() as Arc<dyn platform_api::ProcessRunner>;
+    ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
     super::apply_worktree_launch(
         &Some("feat".to_string()),
@@ -3938,7 +3938,7 @@ async fn worktree_launch_flag_creates_and_enters_worktree_at_boot() {
     init_git_repo_for_worktree_launch_test(tmp.path()).await;
     cfg.worktree_launch = Some("feat".to_string());
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -3973,7 +3973,7 @@ async fn no_worktree_flag_leaves_boot_cwd_untouched_at_boot() {
         "test_config's default must be inert"
     );
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4027,7 +4027,7 @@ async fn init_git_repo_for_worktree_launch_test(dir: &std::path::Path) {
 #[tokio::test]
 async fn build_constructs_runtime_deterministically() {
     let (_tmp, cfg) = test_config(true);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4137,7 +4137,7 @@ async fn failed_task_drain_preserves_desktop_runtime_authorities_for_retry() {
 #[tokio::test]
 async fn drained_desktop_composition_releases_registry_and_session_claim() {
     let (_tmp, cfg) = test_config(true);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4221,7 +4221,7 @@ async fn drained_desktop_composition_releases_registry_and_session_claim() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_shutdown_waits_for_blocked_known_cost_wal_ack() {
     let (_tmp, cfg) = test_config(true);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4231,7 +4231,7 @@ async fn desktop_shutdown_waits_for_blocked_known_cost_wal_ack() {
     let weak_lease = Arc::downgrade(&writer_lease);
     drop(writer_lease);
     let journal = coordinator.journal();
-    let journal_lock = platform_api::rooted_fs::lock_exclusive_pinned(
+    let journal_lock = lingxi_core::host::rooted_fs::lock_exclusive_pinned(
         journal.root(),
         std::path::Path::new(session::jsonl::JOURNAL_LOCK_FILE_NAME),
         session::jsonl::journal::SESSION_STATE_DIR_MODE,
@@ -4338,7 +4338,7 @@ async fn build_threads_add_dir_into_trusted_dirs_and_mcp_roots() {
     std::fs::create_dir_all(&extra).expect("mkdir extra");
     cfg.add_dir = vec![extra.clone()];
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4386,7 +4386,7 @@ async fn build_expands_relative_add_dir_before_seeding_mcp_roots() {
     cfg.add_dir = vec![std::path::PathBuf::from("data")];
     let expected = cfg.cwd.join("data"); // expand_trusted_dir(relative) = cwd.join
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4419,7 +4419,7 @@ async fn build_expands_relative_add_dir_before_seeding_mcp_roots() {
 #[tokio::test]
 async fn build_wires_mcp_oauth_seam() {
     let (_tmp, cfg) = test_config(true);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4444,7 +4444,7 @@ async fn build_wires_mcp_oauth_seam() {
 #[tokio::test]
 async fn build_wires_mcp_discovery_cache_store() {
     let (_tmp, cfg) = test_config(true);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4473,7 +4473,7 @@ async fn build_wires_xaa_config_when_xaaidp_settings_present() {
     )
     .unwrap();
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4507,7 +4507,7 @@ async fn build_discovers_and_materialises_an_installed_plugin() {
     )
     .unwrap();
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4542,7 +4542,7 @@ async fn build_discovers_and_materialises_an_installed_plugin() {
 #[tokio::test]
 async fn build_exposes_dispatcher_shared_command_registry() {
     let (_tmp, cfg) = test_config(true);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4590,7 +4590,7 @@ async fn build_discovers_a_plugin_via_enabledplugins_cache_layout() {
     )
     .unwrap();
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4615,7 +4615,7 @@ async fn build_discovers_a_plugin_via_enabledplugins_cache_layout() {
 #[tokio::test]
 async fn build_with_no_plugins_dir_is_a_noop() {
     let (_tmp, cfg) = test_config(true);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4632,7 +4632,7 @@ async fn build_with_json_schema_surfaces_structured_output_slot() {
     // and surfaces its capture slot for the print path.
     let (_tmp, mut cfg) = test_config(true);
     cfg.json_schema = Some(serde_json::json!({ "type": "object" }));
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4646,7 +4646,7 @@ async fn build_with_json_schema_surfaces_structured_output_slot() {
 #[tokio::test]
 async fn build_without_json_schema_has_no_structured_output_slot() {
     let (_tmp, cfg) = test_config(true);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4782,7 +4782,7 @@ fn anthropic_models_for_excludes_foreign_profile_qualified_default() {
 #[tokio::test]
 async fn build_surfaces_provider_availability_and_adapter() {
     let (_tmp, cfg) = test_config(true);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4835,7 +4835,7 @@ async fn build_reroutes_disconnected_default_to_connected_provider() {
     });
     // Unique test-only var: guarantees ≥1 connected provider on any host.
     std::env::set_var("LINGXI_TEST_REROUTE_KEY", "k");
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4889,7 +4889,7 @@ async fn build_keeps_explicit_model_despite_disconnected_provider() {
         m
     });
     std::env::set_var("LINGXI_TEST_REROUTE_KEY_EXPLICIT", "k");
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4926,7 +4926,7 @@ async fn build_keeps_env_pinned_model_despite_disconnected_provider() {
         m
     });
     std::env::set_var("LINGXI_TEST_REROUTE_KEY_ENVPIN", "k");
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4946,7 +4946,7 @@ async fn build_keeps_env_pinned_model_despite_disconnected_provider() {
 #[tokio::test]
 async fn build_surfaces_provider_auth_methods_from_catalog() {
     let (_tmp, cfg) = test_config(true);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -4999,7 +4999,7 @@ async fn build_with_providers_and_routing_merges_config_chains_availability() {
         }
     }));
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -5072,7 +5072,7 @@ fn fusion_catalog_row(profile: &str, model: &str) -> fusion::CatalogModel {
     fusion::CatalogModel {
         profile: profile.to_string(),
         model: model.to_string(),
-        hints: platform_api::FusionModelHints::default(),
+        hints: lingxi_core::host::FusionModelHints::default(),
         structured_output: false,
         limits: fusion::ModelLimits {
             context_window_tokens: Some(200_000),
@@ -5365,7 +5365,7 @@ fn fusion_catalog_model_source_reloads_managed_model_policy() {
 async fn a_completed_reprobe_re_arms_availability_filtering_after_a_boot_probe_timeout() {
     use async_trait::async_trait;
     use fusion::ModelSource as _;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
     use std::collections::HashMap;
@@ -5373,7 +5373,7 @@ async fn a_completed_reprobe_re_arms_availability_filtering_after_a_boot_probe_t
 
     #[derive(Default)]
     struct MemStorage {
-        map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        map: StdMutex<HashMap<(String, String), lingxi_core::types::SecureStorageData>>,
     }
     #[async_trait]
     impl SecureStorage for MemStorage {
@@ -5381,7 +5381,7 @@ async fn a_completed_reprobe_re_arms_availability_filtering_after_a_boot_probe_t
             &self,
             service: &str,
             account: &str,
-            data: protocol::SecureStorageData,
+            data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             self.map
                 .lock()
@@ -5393,7 +5393,7 @@ async fn a_completed_reprobe_re_arms_availability_filtering_after_a_boot_probe_t
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -5521,7 +5521,7 @@ providers with no credential: got {after:?}"
 #[tokio::test]
 async fn a_late_write_probe_cannot_resurrect_a_newer_delete() {
     use async_trait::async_trait;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
 
@@ -5535,7 +5535,7 @@ async fn a_late_write_probe_cannot_resurrect_a_newer_delete() {
             &self,
             _service: &str,
             _account: &str,
-            _data: protocol::SecureStorageData,
+            _data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             Ok(())
         }
@@ -5543,7 +5543,7 @@ async fn a_late_write_probe_cannot_resurrect_a_newer_delete() {
             &self,
             _service: &str,
             _account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(None)
         }
         async fn contains(
@@ -5632,7 +5632,7 @@ async fn a_late_write_probe_cannot_resurrect_a_newer_delete() {
 async fn a_degraded_reprobe_must_not_re_arm_availability_filtering() {
     use async_trait::async_trait;
     use fusion::ModelSource as _;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
 
@@ -5643,7 +5643,7 @@ async fn a_degraded_reprobe_must_not_re_arm_availability_filtering() {
             &self,
             _service: &str,
             _account: &str,
-            _data: protocol::SecureStorageData,
+            _data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             Ok(())
         }
@@ -5651,7 +5651,7 @@ async fn a_degraded_reprobe_must_not_re_arm_availability_filtering() {
             &self,
             _service: &str,
             _account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(None)
         }
         async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
@@ -5749,7 +5749,7 @@ from a degraded credential broker and must NOT re-arm filtering"
 async fn a_frozen_anthropic_boot_boolean_must_not_re_arm_availability_filtering() {
     use async_trait::async_trait;
     use fusion::ModelSource as _;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
 
@@ -5762,7 +5762,7 @@ async fn a_frozen_anthropic_boot_boolean_must_not_re_arm_availability_filtering(
             &self,
             _service: &str,
             _account: &str,
-            _data: protocol::SecureStorageData,
+            _data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             Ok(())
         }
@@ -5770,7 +5770,7 @@ async fn a_frozen_anthropic_boot_boolean_must_not_re_arm_availability_filtering(
             &self,
             _service: &str,
             _account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(None)
         }
         async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
@@ -5877,7 +5877,7 @@ Fusion's catalog for the rest of the process: got {after:?}"
 async fn an_env_var_only_row_must_not_re_arm_availability_filtering() {
     use async_trait::async_trait;
     use fusion::ModelSource as _;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
 
@@ -5888,7 +5888,7 @@ async fn an_env_var_only_row_must_not_re_arm_availability_filtering() {
             &self,
             _service: &str,
             _account: &str,
-            _data: protocol::SecureStorageData,
+            _data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             Ok(())
         }
@@ -5896,7 +5896,7 @@ async fn an_env_var_only_row_must_not_re_arm_availability_filtering() {
             &self,
             _service: &str,
             _account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(None)
         }
         async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
@@ -6009,7 +6009,7 @@ env-derived: got {after:?}"
 async fn an_anthropic_only_install_can_still_re_arm_availability_filtering() {
     use async_trait::async_trait;
     use fusion::ModelSource as _;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
 
@@ -6024,7 +6024,7 @@ async fn an_anthropic_only_install_can_still_re_arm_availability_filtering() {
             &self,
             _service: &str,
             _account: &str,
-            _data: protocol::SecureStorageData,
+            _data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             Ok(())
         }
@@ -6032,7 +6032,7 @@ async fn an_anthropic_only_install_can_still_re_arm_availability_filtering() {
             &self,
             _service: &str,
             _account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(None)
         }
         async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
@@ -6132,7 +6132,7 @@ got {after:?}"
 async fn an_all_env_var_install_can_still_re_arm_availability_filtering() {
     use async_trait::async_trait;
     use fusion::ModelSource as _;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
 
@@ -6143,7 +6143,7 @@ async fn an_all_env_var_install_can_still_re_arm_availability_filtering() {
             &self,
             _service: &str,
             _account: &str,
-            _data: protocol::SecureStorageData,
+            _data: lingxi_core::types::SecureStorageData,
         ) -> Result<(), SecureStorageError> {
             Ok(())
         }
@@ -6151,7 +6151,7 @@ async fn an_all_env_var_install_can_still_re_arm_availability_filtering() {
             &self,
             _service: &str,
             _account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+        ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError> {
             Ok(None)
         }
         async fn delete(&self, _service: &str, _account: &str) -> Result<(), SecureStorageError> {
@@ -6318,7 +6318,7 @@ async fn desktop_fusion_runtime_config_managed_tier_beats_project_tier() {
 #[tokio::test]
 async fn build_with_noop_gate_uses_noop() {
     let (_tmp, cfg) = test_config(true);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6333,7 +6333,7 @@ async fn build_with_noop_gate_uses_noop() {
 
 #[tokio::test]
 async fn build_applies_persisted_reasoning_default_before_the_first_turn() {
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     let (_tmp, mut cfg) = test_config(true);
     cfg.default_model = "claude-opus-4-8".to_string();
@@ -6343,7 +6343,7 @@ async fn build_applies_persisted_reasoning_default_before_the_first_turn() {
         r#"{"reasoning":{"defaultSelection":{"type":"level","id":"high"}}}"#,
     )
     .expect("write persisted reasoning default");
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6358,11 +6358,11 @@ async fn build_applies_persisted_reasoning_default_before_the_first_turn() {
         .expect("conversation controls should be available");
     assert_eq!(
         controls.requested_reasoning_selection,
-        platform_api::ReasoningSelection::Level { id: "high".into() }
+        lingxi_core::host::ReasoningSelection::Level { id: "high".into() }
     );
     assert_eq!(
         controls.effective_reasoning_selection,
-        platform_api::ReasoningSelection::Level { id: "high".into() }
+        lingxi_core::host::ReasoningSelection::Level { id: "high".into() }
     );
 }
 
@@ -6378,7 +6378,7 @@ async fn build_with_injected_gate_prefers_it_over_noop() {
     // injected gate must win.
     let (_tmp, mut cfg) = test_config(true);
     cfg.injected_permission_gate = Some(Arc::new(permission::DenyOnAskGate));
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6400,7 +6400,7 @@ async fn build_with_injected_gate_prefers_it_over_noop() {
 #[tokio::test]
 async fn build_default_uses_adapter_gate() {
     let (_tmp, cfg) = test_config(false);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let sink = Arc::new(RecordingPermissionSink::default());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> = sink.clone();
@@ -6473,7 +6473,7 @@ fn default_config_is_not_coordinator() {
 #[tokio::test]
 async fn runtime_exposes_coordinator_handles() {
     let (_tmp, cfg) = test_config(true);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6505,7 +6505,7 @@ async fn runtime_exposes_coordinator_handles() {
 /// hook the wired `fire_session_start("startup")` call dispatched against.
 #[tokio::test]
 async fn build_fires_session_start_against_a_registered_hook() {
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     let (_tmp, cfg) = test_config(true);
     // Project settings the hooks loader reads at boot
@@ -6520,7 +6520,7 @@ async fn build_fires_session_start_against_a_registered_hook() {
     )
     .expect("write settings.json");
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6549,7 +6549,7 @@ async fn build_fires_session_start_against_a_registered_hook() {
 /// frontmatter bucket), proving the boot path installed the agent's hook.
 #[tokio::test]
 async fn build_registers_main_thread_agent_frontmatter_hooks() {
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     let (_tmp, mut cfg) = test_config(true);
     // `--agents` flag agent declaring a frontmatter `Stop` hook. `--agent`
@@ -6566,7 +6566,7 @@ async fn build_registers_main_thread_agent_frontmatter_hooks() {
     );
     cfg.cli_agent = Some("tester".to_string());
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6606,7 +6606,7 @@ async fn build_applies_selected_agent_frontmatter_permission_mode() {
     );
     cfg.cli_agent = Some("tester".to_string());
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6639,7 +6639,7 @@ async fn build_explicit_cli_default_beats_agent_frontmatter_permission_mode() {
     );
     cfg.cli_agent = Some("tester".to_string());
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6677,7 +6677,7 @@ async fn build_registers_agent_frontmatter_mcp_servers() {
     );
     cfg.cli_agent = Some("tester".to_string());
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6716,7 +6716,7 @@ async fn build_without_agent_selection_registers_no_frontmatter_mcp_servers() {
     );
     cfg.cli_agent = None;
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6742,7 +6742,7 @@ async fn build_without_agent_selection_registers_no_frontmatter_mcp_servers() {
 /// on-disk `<uuid>.jsonl`.
 #[tokio::test]
 async fn build_persists_and_restores_agent_setting_on_resume() {
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     let (_tmp, mut cfg) = test_config(true);
     let agents = r#"{ "tester": {
@@ -6765,7 +6765,7 @@ async fn build_persists_and_restores_agent_setting_on_resume() {
 
     // First boot: `--agent tester` applies + persists the `agent-setting`.
     cfg.cli_agent = Some("tester".to_string());
-    let output1: Arc<dyn platform_api::OutputStream> =
+    let output1: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm1: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6776,7 +6776,7 @@ async fn build_persists_and_restores_agent_setting_on_resume() {
     drop(rt1);
 
     // Resume boot: no `--agent`; `rVe` reads the persisted record and re-adopts.
-    let output2: Arc<dyn platform_api::OutputStream> =
+    let output2: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm2: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6814,7 +6814,7 @@ async fn build_resume_restores_agent_frontmatter_permission_mode() {
     resume_cfg.cli_agent = None;
     cfg.cli_agent = Some("tester".to_string());
 
-    let output1: Arc<dyn platform_api::OutputStream> =
+    let output1: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm1: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6824,7 +6824,7 @@ async fn build_resume_restores_agent_frontmatter_permission_mode() {
     assert!(rt1.session_lifecycle.shutdown_and_drain().await.complete);
     drop(rt1);
 
-    let output2: Arc<dyn platform_api::OutputStream> =
+    let output2: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm2: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6842,7 +6842,7 @@ async fn build_resume_restores_agent_frontmatter_permission_mode() {
 /// therefore fall back to the default when the name is unavailable.
 #[tokio::test]
 async fn build_resume_missing_catalog_agent_uses_persisted_snapshot() {
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     let (_tmp, mut cfg) = test_config(true);
     let agents = r#"{ "tester": {
@@ -6863,7 +6863,7 @@ async fn build_resume_missing_catalog_agent_uses_persisted_snapshot() {
     resume_cfg.cli_agents_json = None;
 
     cfg.cli_agent = Some("tester".to_string());
-    let output1: Arc<dyn platform_api::OutputStream> =
+    let output1: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm1: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6873,7 +6873,7 @@ async fn build_resume_missing_catalog_agent_uses_persisted_snapshot() {
     assert!(rt1.session_lifecycle.shutdown_and_drain().await.complete);
     drop(rt1);
 
-    let output2: Arc<dyn platform_api::OutputStream> =
+    let output2: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm2: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6894,7 +6894,7 @@ async fn build_resume_missing_catalog_agent_uses_persisted_snapshot() {
 /// when that catalog entry is no longer available.
 #[tokio::test]
 async fn build_resume_legacy_missing_agent_falls_back_to_default() {
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     let (_tmp, mut cfg) = test_config(true);
     let session_id = "55555555-6666-7777-8888-999999999999";
@@ -6904,14 +6904,14 @@ async fn build_resume_legacy_missing_agent_falls_back_to_default() {
 
     let transcript_path =
         session::jsonl::session_path(&cfg.lingxi_home, &cfg.cwd.to_string_lossy(), session_id);
-    let fs: Arc<dyn platform_api::FileSystem> =
+    let fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(platform_posix::fs::PosixFileSystem::new(cfg.cwd.clone()));
     session::jsonl::JsonlWriter::new(transcript_path, fs)
         .append_agent_setting(session_id, "tester")
         .await
         .expect("write legacy agent-setting");
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let permission_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -6935,13 +6935,13 @@ fn agent_source_trusted_set_matches_binary_qxh() {
     assert!(super::agent_source_is_trusted(agent::AgentSource::BuiltIn));
     assert!(super::agent_source_is_trusted(agent::AgentSource::Plugin));
     assert!(super::agent_source_is_trusted(
-        agent::AgentSource::Settings(protocol::SettingsScope::Managed)
+        agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Managed)
     ));
     assert!(!super::agent_source_is_trusted(
-        agent::AgentSource::Settings(protocol::SettingsScope::User)
+        agent::AgentSource::Settings(lingxi_core::types::SettingsScope::User)
     ));
     assert!(!super::agent_source_is_trusted(
-        agent::AgentSource::Settings(protocol::SettingsScope::Project)
+        agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Project)
     ));
     assert!(!super::agent_source_is_trusted(agent::AgentSource::Flag));
     assert!(!super::agent_source_is_trusted(
@@ -7073,7 +7073,7 @@ async fn late_safe_mode_blocks_resolved_ambient_mcp_but_keeps_explicit_servers()
 #[tokio::test]
 async fn safe_mode_and_bare_skip_settings_hooks_at_boot() {
     use super::CustomizationGates;
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     for gates in [
         CustomizationGates {
@@ -7097,7 +7097,7 @@ async fn safe_mode_and_bare_skip_settings_hooks_at_boot() {
         )
         .expect("write settings.json");
 
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -7119,7 +7119,7 @@ async fn session_persistence_flag_gates_jsonl_writer() {
     for (persist, want_writer) in [(true, true), (false, false)] {
         let (_tmp, mut cfg) = test_config(true);
         cfg.session_persistence = persist;
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
         let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
@@ -7138,12 +7138,12 @@ async fn session_persistence_flag_gates_jsonl_writer() {
                 .into_iter()
                 .filter(|state| state.base().task_type == tasks::TaskType::LocalFusion)
                 .count();
-            let dispatched = platform_api::SlashCommandDispatcher::dispatch(
+            let dispatched = lingxi_core::host::SlashCommandDispatcher::dispatch(
                 &rt.dispatcher,
                 "/fusion compare these approaches",
             )
             .await;
-            let platform_api::SlashDispatchResult::Handled { display } = dispatched else {
+            let lingxi_core::host::SlashDispatchResult::Handled { display } = dispatched else {
                 panic!("expected handled /fusion preflight, got {dispatched:?}");
             };
             assert!(
@@ -7191,7 +7191,7 @@ async fn session_persistence_flag_gates_jsonl_writer() {
 /// (never the real filesystem).
 #[tokio::test]
 async fn build_fires_instructions_loaded_against_a_registered_hook() {
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     let (_tmp, cfg) = test_config(true);
     // Project settings the hooks loader reads at boot
@@ -7206,7 +7206,7 @@ async fn build_fires_instructions_loaded_against_a_registered_hook() {
     )
     .expect("write settings.json");
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -7255,7 +7255,7 @@ async fn build_fires_instructions_loaded_against_a_registered_hook() {
 /// runs over the injected file (best-effort) inside `build()`.
 #[tokio::test]
 async fn build_with_injected_memory_reaches_system_prompt() {
-    use platform_api::OrchestratorHandle as _;
+    use lingxi_core::host::OrchestratorHandle as _;
 
     let (_tmp, mut cfg) = test_config(true);
 
@@ -7290,7 +7290,7 @@ async fn build_with_injected_memory_reaches_system_prompt() {
         orchestrator::test_support::StaticMemoryProvider::with_files(vec![memory_file]),
     ));
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -7355,7 +7355,7 @@ async fn build_default_loads_no_memory() {
         cfg.memory_provider.is_none(),
         "default config must leave memory_provider None (empty, deterministic)"
     );
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -7384,7 +7384,7 @@ async fn coordinator_session_assembles_coordinator_system_prompt() {
     let (_tmp, mut cfg) = test_config(true);
     cfg.session_started_as_coordinator = true;
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -7420,7 +7420,7 @@ async fn default_session_does_not_assemble_coordinator_prompt() {
     let (_tmp, cfg) = test_config(true);
     assert!(!cfg.session_started_as_coordinator);
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -7440,17 +7440,20 @@ async fn default_session_does_not_assemble_coordinator_prompt() {
 struct NoopSeam;
 
 #[async_trait::async_trait]
-impl platform_api::team_spawn::TeamSpawnSeam for NoopSeam {
+impl lingxi_core::host::team_spawn::TeamSpawnSeam for NoopSeam {
     async fn spawn_teammate(
         &self,
-        _agent_id: protocol::AgentId,
+        _agent_id: lingxi_core::types::AgentId,
         _name: String,
         _team_name: String,
         _description: String,
-    ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
+    ) -> Result<String, lingxi_core::host::team_spawn::TeamSpawnError> {
         Ok(String::new())
     }
-    async fn kill(&self, _task_id: &str) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+    async fn kill(
+        &self,
+        _task_id: &str,
+    ) -> Result<(), lingxi_core::host::team_spawn::TeamSpawnError> {
         Ok(())
     }
 }
@@ -7468,7 +7471,9 @@ fn stub_tool_ctx() -> tool_api::BuiltinToolContext {
 
 fn coordinator_wiring() -> CoordinatorWiring {
     CoordinatorWiring {
-        team: Arc::new(coordinator::TeamRegistry::new(protocol::AgentId::new())),
+        team: Arc::new(coordinator::TeamRegistry::new(
+            lingxi_core::types::AgentId::new(),
+        )),
         spawn_seam: Arc::new(NoopSeam),
     }
 }
@@ -7504,7 +7509,7 @@ fn tool_registry_uses_implicit_teams_in_every_mode() {
 async fn build_coordinator_session_enters_mode() {
     let (_tmp, mut cfg) = test_config(true);
     cfg.session_started_as_coordinator = true;
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -7530,7 +7535,7 @@ async fn build_coordinator_session_enters_mode() {
 async fn restricted_build_hides_default_restricted_builtins_from_advertising() {
     let (_tmp, mut cfg) = test_config(true);
     cfg.restricted = true;
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -7564,7 +7569,7 @@ async fn restricted_build_keeps_explicit_tool_allowlist_visible() {
     let (_tmp, mut cfg) = test_config(true);
     cfg.restricted = true;
     cfg.restricted_tools = Some(vec!["Bash".into(), "WebFetch".into()]);
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -7609,7 +7614,9 @@ async fn restricted_build_keeps_explicit_tool_allowlist_visible() {
 async fn mailbox_router_is_wired_when_coordinator() {
     // The shared coordinator router — exactly what `build()` clones into
     // `tool_ctx.mailbox_router` on the coordinator branch.
-    let team = Arc::new(coordinator::TeamRegistry::new(protocol::AgentId::new()));
+    let team = Arc::new(coordinator::TeamRegistry::new(
+        lingxi_core::types::AgentId::new(),
+    ));
     let worker = team
         .spawn_worker("explorer".into(), "alpha".into(), String::new())
         .await
@@ -7620,8 +7627,9 @@ async fn mailbox_router_is_wired_when_coordinator() {
     // context (still wired for the tools that read it), plus the coordinator
     // wiring that splices the coordinator `SendMessage` in.
     let mut ctx = stub_tool_ctx();
-    ctx.mailbox_router =
-        Some(team.mailbox_router.clone() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
+    ctx.mailbox_router = Some(
+        team.mailbox_router.clone() as Arc<dyn lingxi_core::host::mailbox::MailboxRouterHandle>
+    );
     let wiring = CoordinatorWiring {
         team: team.clone(),
         spawn_seam: Arc::new(NoopSeam),
@@ -8452,7 +8460,7 @@ fn model_setting_provenance_is_provider_neutral() {
     );
     assert_eq!(
         super::model_provenance_for_config(&cfg, Some(&managed)),
-        platform_api::ModelProvenance::ManagedAdministratorDefault
+        lingxi_core::host::ModelProvenance::ManagedAdministratorDefault
     );
     assert_eq!(
         super::managed_model_setting_for_config(&cfg, Some(&managed)).as_deref(),
@@ -8462,7 +8470,7 @@ fn model_setting_provenance_is_provider_neutral() {
     let blank_managed = effective_model(" ", lingxi_core::settings::tracer::Source::Managed);
     assert_eq!(
         super::model_provenance_for_config(&cfg, Some(&blank_managed)),
-        platform_api::ModelProvenance::ProviderCatalogTier
+        lingxi_core::host::ModelProvenance::ProviderCatalogTier
     );
     assert!(
         super::managed_model_setting_for_config(&cfg, Some(&blank_managed)).is_none(),
@@ -8475,7 +8483,7 @@ fn model_setting_provenance_is_provider_neutral() {
     );
     assert_eq!(
         super::model_provenance_for_config(&cfg, Some(&user)),
-        platform_api::ModelProvenance::UserOrEnv
+        lingxi_core::host::ModelProvenance::UserOrEnv
     );
     assert!(super::managed_model_setting_for_config(&cfg, Some(&user)).is_none());
 
@@ -8485,14 +8493,14 @@ fn model_setting_provenance_is_provider_neutral() {
     );
     assert_eq!(
         super::model_provenance_for_config(&cfg, Some(&catalog)),
-        platform_api::ModelProvenance::ProviderCatalogTier
+        lingxi_core::host::ModelProvenance::ProviderCatalogTier
     );
 
     let mut explicit = cfg.clone();
     explicit.default_model_explicit = true;
     assert_eq!(
         super::model_provenance_for_config(&explicit, Some(&managed)),
-        platform_api::ModelProvenance::UserOrEnv
+        lingxi_core::host::ModelProvenance::UserOrEnv
     );
     assert!(super::managed_model_setting_for_config(&explicit, Some(&managed)).is_none());
 
@@ -8500,7 +8508,7 @@ fn model_setting_provenance_is_provider_neutral() {
     env_pinned.default_model_env_pinned = true;
     assert_eq!(
         super::model_provenance_for_config(&env_pinned, Some(&managed)),
-        platform_api::ModelProvenance::UserOrEnv
+        lingxi_core::host::ModelProvenance::UserOrEnv
     );
 }
 
@@ -8589,8 +8597,8 @@ async fn managed_permission_deny_rule_binds_and_cites_policy_settings() {
             tiers
                 .rules
                 .iter()
-                .any(|r| r.source == permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)),
-            "managed tier rules must parse with PermissionRuleSource::Settings(protocol::SettingsScope::Managed)"
+                .any(|r| r.source == permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)),
+            "managed tier rules must parse with PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)"
         );
     // The managed raw text also feeds the sandbox derivation (appended last).
     assert_eq!(
@@ -8605,7 +8613,9 @@ async fn managed_permission_deny_rule_binds_and_cites_policy_settings() {
         permission::PermissionResult::Deny { reason, .. } => match reason {
             permission::PermissionDecisionReason::MatchedRule { rule } => assert_eq!(
                 rule.source,
-                permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+                permission::PermissionRuleSource::Settings(
+                    lingxi_core::types::SettingsScope::Managed
+                ),
                 "the deny must cite the managed (enterprise) rule"
             ),
             other => panic!("expected MatchedRule reason, got {other:?}"),
@@ -8696,7 +8706,7 @@ async fn setting_sources_scope_cannot_exclude_managed_tier() {
     assert_eq!(tiers.rules.len(), 1, "only the managed rule loads");
     assert_eq!(
         tiers.rules[0].source,
-        permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
+        permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)
     );
 
     std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
@@ -8737,7 +8747,7 @@ async fn managed_only_lockdown_drops_non_managed_rules() {
     assert!(tiers.allow_managed_permission_rules_only);
     assert_eq!(
         tiers.rules[0].source,
-        permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
+        permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)
     );
     assert_eq!(tiers.rules[0].value.tool_name, "Bash");
 
@@ -8770,7 +8780,7 @@ async fn managed_drop_in_permission_rules_load_after_base() {
     let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
     assert_eq!(tiers.rules.len(), 2, "base + drop-in rules both accumulate");
     assert!(tiers.rules.iter().all(|r| r.source
-        == permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)));
+        == permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)));
     assert_eq!(
         tiers.mode,
         permission::PermissionMode::Plan,
@@ -8788,7 +8798,7 @@ async fn managed_drop_in_permission_rules_load_after_base() {
 /// `available_models()` + the alias resolves via the registry.
 ///
 /// This exercises the full settings → `apply_settings_providers` →
-/// `DefaultLlmClient::from_config` → registry path without any network call.
+/// `ModelRuntime::from_config` → registry path without any network call.
 /// The `build()` call is the composition-root assertion; the model/alias
 /// assertions use `apply_settings_providers` directly (same code path, but
 /// callable without digging into the orchestrator internals).
@@ -8814,7 +8824,7 @@ async fn custom_openai_profile_available_and_alias_resolves() {
         "aliases": { "llama": "groq/llama-3.3-70b-versatile" }
     }));
 
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -8848,7 +8858,7 @@ async fn custom_openai_profile_available_and_alias_resolves() {
     platform_common::apply_settings_providers(&mut llm_cfg, &providers, Some(&routing))
         .expect("apply_settings_providers must succeed");
 
-    let client = llm_runtime::DefaultLlmClient::from_config(llm_cfg).expect("config must be valid");
+    let client = llm_runtime::ModelRuntime::from_config(llm_cfg).expect("config must be valid");
 
     // (1) available_models() includes the custom groq model.
     let available: Vec<String> = client
@@ -8888,7 +8898,7 @@ async fn routing_only_settings_alias_applies_to_builtin_model() {
     }));
 
     // Composition-root assertion: build() succeeds with routing-only settings.
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
         Arc::new(RecordingPermissionSink::default());
@@ -8905,7 +8915,7 @@ async fn routing_only_settings_alias_applies_to_builtin_model() {
     });
     platform_common::apply_settings_providers(&mut llm_cfg, &empty, Some(&routing))
         .expect("routing-only apply must succeed");
-    let client = llm_runtime::DefaultLlmClient::from_config(llm_cfg).expect("config must be valid");
+    let client = llm_runtime::ModelRuntime::from_config(llm_cfg).expect("config must be valid");
     let aliased = client
         .available_models()
         .into_iter()
@@ -8928,7 +8938,7 @@ async fn routing_only_settings_alias_applies_to_builtin_model() {
 /// tokens × $2.50/M = $2.50 exactly.
 #[test]
 fn pricing_override_end_to_end_estimator_yields_overridden_cost() {
-    use llm_runtime::{CostEstimator, PricingModelRef, PricingPolicy, TokenUsage, Usage};
+    use llm_runtime::{CostEstimator, PricingModelRef, PricingPolicy, Usage};
     use orchestrator::cost_wiring::llm_catalog_from_cost;
 
     // Build a ClientConfig with a custom "myprovider" profile that declares a
@@ -8963,7 +8973,7 @@ fn pricing_override_end_to_end_estimator_yields_overridden_cost() {
                     p.models
                         .iter()
                         .find(|m| m.display_model == *model_id)
-                        .map(|m| (p.provider_id.clone(), m.billing_model.clone(), *tp))
+                        .map(|m| (p.provider_id.clone(), m.billing_model.clone(), tp.to_sdk()))
                 })
             })
             .collect();
@@ -8976,7 +8986,7 @@ fn pricing_override_end_to_end_estimator_yields_overridden_cost() {
     let cost_cat = cost::pricing::PricingCatalog::builtin_reference();
     let mut llm_cat = llm_catalog_from_cost(&cost_cat);
     for (provider_id, bm, tp) in &pricing_overrides {
-        llm_cat.add_override(provider_id.clone(), bm.clone(), *tp);
+        llm_cat.add_override(provider_id.clone(), bm.clone(), tp.clone());
     }
     let estimator = CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated);
 
@@ -8988,10 +8998,7 @@ fn pricing_override_end_to_end_estimator_yields_overridden_cost() {
         display_model: "my-model".to_string(),
     };
     let usage = Usage {
-        billable_tokens: TokenUsage {
-            input: 1_000_000,
-            ..Default::default()
-        },
+        input_tokens: 1_000_000,
         ..Default::default()
     };
     let estimate = estimator
@@ -9025,17 +9032,19 @@ fn pricing_override_end_to_end_estimator_yields_overridden_cost() {
 
 #[test]
 fn subscription_snapshot_maps_profile_and_roles() {
-    let profile = llm_runtime::oauth::anthropic::OAuthProfileResponse {
-        organization: Some(llm_runtime::oauth::anthropic::OAuthOrganization {
-            organization_type: Some("claude_team".to_string()),
-            rate_limit_tier: Some("default_claude_max_5x".to_string()),
-            billing_type: Some("stripe_subscription".to_string()),
-            has_extra_usage_enabled: Some(true),
-            ..Default::default()
-        }),
+    let profile = lingxi_llm_client::auth::oauth::anthropic::OAuthProfileResponse {
+        organization: Some(
+            lingxi_llm_client::auth::oauth::anthropic::OAuthOrganization {
+                organization_type: Some("claude_team".to_string()),
+                rate_limit_tier: Some("default_claude_max_5x".to_string()),
+                billing_type: Some("stripe_subscription".to_string()),
+                has_extra_usage_enabled: Some(true),
+                ..Default::default()
+            },
+        ),
         account: None,
     };
-    let roles = llm_runtime::oauth::anthropic::UserRolesResponse {
+    let roles = lingxi_llm_client::auth::oauth::anthropic::UserRolesResponse {
         organization_role: Some("admin".to_string()),
         ..Default::default()
     };
@@ -9074,11 +9083,13 @@ fn subscription_snapshot_free_or_unknown_tier_maps_to_none() {
     // is unreachable from real profile parsing (purely defensive). This
     // test pins the observable contract: a non-paid/unknown org type folds
     // to `subscription_type: None` in the snapshot.
-    let profile = llm_runtime::oauth::anthropic::OAuthProfileResponse {
-        organization: Some(llm_runtime::oauth::anthropic::OAuthOrganization {
-            organization_type: Some("claude_free".to_string()),
-            ..Default::default()
-        }),
+    let profile = lingxi_llm_client::auth::oauth::anthropic::OAuthProfileResponse {
+        organization: Some(
+            lingxi_llm_client::auth::oauth::anthropic::OAuthOrganization {
+                organization_type: Some("claude_free".to_string()),
+                ..Default::default()
+            },
+        ),
         account: None,
     };
     let snap = super::subscription_snapshot_from(true, Some(&profile), None);
@@ -9092,11 +9103,13 @@ fn subscription_snapshot_explicit_extra_usage_false_stays_false() {
     // reports `has_extra_usage_enabled: Some(false)` must fold to `false`
     // in the snapshot (same as the absent-`None` case, distinct from
     // `Some(true)`).
-    let profile = llm_runtime::oauth::anthropic::OAuthProfileResponse {
-        organization: Some(llm_runtime::oauth::anthropic::OAuthOrganization {
-            has_extra_usage_enabled: Some(false),
-            ..Default::default()
-        }),
+    let profile = lingxi_llm_client::auth::oauth::anthropic::OAuthProfileResponse {
+        organization: Some(
+            lingxi_llm_client::auth::oauth::anthropic::OAuthOrganization {
+                has_extra_usage_enabled: Some(false),
+                ..Default::default()
+            },
+        ),
         account: None,
     };
     let snap = super::subscription_snapshot_from(true, Some(&profile), None);
@@ -9115,7 +9128,7 @@ fn default_model_parse_qualified_and_bare() {
     // Construct the same listing shape the composition root builds from
     // `assembled.client_config.providers`.
     let listings = vec![
-        platform_api::ModelListing {
+        lingxi_core::host::ModelListing {
             display_model: "gpt-4o".to_string(),
             request_model: "gpt-4o".to_string(),
             provider_id: "openai".to_string(),
@@ -9128,7 +9141,7 @@ fn default_model_parse_qualified_and_bare() {
             fusion_analyst_capable: false,
             connection: Default::default(),
         },
-        platform_api::ModelListing {
+        lingxi_core::host::ModelListing {
             display_model: "gpt-4o".to_string(),
             request_model: "gpt-4o".to_string(),
             provider_id: "github-copilot".to_string(),
@@ -9141,7 +9154,7 @@ fn default_model_parse_qualified_and_bare() {
             fusion_analyst_capable: false,
             connection: Default::default(),
         },
-        platform_api::ModelListing {
+        lingxi_core::host::ModelListing {
             display_model: "claude-sonnet-4-6".to_string(),
             request_model: "claude-sonnet-4-6".to_string(),
             provider_id: "anthropic".to_string(),
@@ -9157,7 +9170,7 @@ fn default_model_parse_qualified_and_bare() {
     ];
 
     // Qualified: "openai/gpt-4o" → bare id "gpt-4o" + profile "openai"
-    let (id, profile) = platform_api::parse_model_ref("openai/gpt-4o", &listings);
+    let (id, profile) = lingxi_core::host::parse_model_ref("openai/gpt-4o", &listings);
     assert_eq!(id, "gpt-4o", "qualified ref must strip the profile prefix");
     assert_eq!(
         profile.as_deref(),
@@ -9166,12 +9179,12 @@ fn default_model_parse_qualified_and_bare() {
     );
 
     // Bare: "claude-sonnet-4-6" → same id, no profile (no-op seed path)
-    let (id2, profile2) = platform_api::parse_model_ref("claude-sonnet-4-6", &listings);
+    let (id2, profile2) = lingxi_core::host::parse_model_ref("claude-sonnet-4-6", &listings);
     assert_eq!(id2, "claude-sonnet-4-6", "bare model id must pass through");
     assert!(profile2.is_none(), "bare model must yield None profile");
 
     // Shared id with two providers and explicit profile qualifier
-    let (id3, profile3) = platform_api::parse_model_ref("github-copilot/gpt-4o", &listings);
+    let (id3, profile3) = lingxi_core::host::parse_model_ref("github-copilot/gpt-4o", &listings);
     assert_eq!(id3, "gpt-4o");
     assert_eq!(profile3.as_deref(), Some("github-copilot"));
 }
@@ -9757,21 +9770,21 @@ impl BlockingReloadPluginTransport {
 }
 
 #[async_trait::async_trait]
-impl platform_api::McpTransport for FailOnceReloadPluginTransport {
+impl lingxi_core::host::McpTransport for FailOnceReloadPluginTransport {
     async fn connect(
         &self,
-        _s: &platform_api::McpTransportSpec,
-    ) -> Result<platform_api::McpRawConnection, platform_api::McpError> {
-        Ok(platform_api::McpRawConnection {
-            connection_id: protocol::McpConnectionId::new(),
+        _s: &lingxi_core::host::McpTransportSpec,
+    ) -> Result<lingxi_core::host::McpRawConnection, lingxi_core::host::McpError> {
+        Ok(lingxi_core::host::McpRawConnection {
+            connection_id: lingxi_core::types::McpConnectionId::new(),
         })
     }
 
     async fn initialize(
         &self,
-        _c: &platform_api::McpRawConnection,
-    ) -> Result<platform_api::ServerCapabilitiesDto, platform_api::McpError> {
-        Ok(platform_api::ServerCapabilitiesDto {
+        _c: &lingxi_core::host::McpRawConnection,
+    ) -> Result<lingxi_core::host::ServerCapabilitiesDto, lingxi_core::host::McpError> {
+        Ok(lingxi_core::host::ServerCapabilitiesDto {
             tools: false,
             resources: false,
             prompts: false,
@@ -9784,94 +9797,99 @@ impl platform_api::McpTransport for FailOnceReloadPluginTransport {
 
     async fn list_tools(
         &self,
-        _c: &platform_api::McpRawConnection,
-    ) -> Result<Vec<platform_api::McpToolDto>, platform_api::McpError> {
+        _c: &lingxi_core::host::McpRawConnection,
+    ) -> Result<Vec<lingxi_core::host::McpToolDto>, lingxi_core::host::McpError> {
         Ok(Vec::new())
     }
 
     async fn list_resources(
         &self,
-        _c: &platform_api::McpRawConnection,
-    ) -> Result<Vec<platform_api::McpResourceDto>, platform_api::McpError> {
+        _c: &lingxi_core::host::McpRawConnection,
+    ) -> Result<Vec<lingxi_core::host::McpResourceDto>, lingxi_core::host::McpError> {
         Ok(Vec::new())
     }
 
     async fn list_resource_templates(
         &self,
-        _c: &platform_api::McpRawConnection,
-    ) -> Result<Vec<platform_api::McpResourceTemplateDto>, platform_api::McpError> {
+        _c: &lingxi_core::host::McpRawConnection,
+    ) -> Result<Vec<lingxi_core::host::McpResourceTemplateDto>, lingxi_core::host::McpError> {
         Ok(Vec::new())
     }
 
     async fn list_prompts(
         &self,
-        _c: &platform_api::McpRawConnection,
-    ) -> Result<Vec<platform_api::McpPromptDto>, platform_api::McpError> {
+        _c: &lingxi_core::host::McpRawConnection,
+    ) -> Result<Vec<lingxi_core::host::McpPromptDto>, lingxi_core::host::McpError> {
         Ok(Vec::new())
     }
 
     async fn call_tool(
         &self,
-        _c: &platform_api::McpRawConnection,
+        _c: &lingxi_core::host::McpRawConnection,
         _t: &str,
         _i: serde_json::Value,
-    ) -> Result<platform_api::McpToolResultDto, platform_api::McpError> {
+    ) -> Result<lingxi_core::host::McpToolResultDto, lingxi_core::host::McpError> {
         unreachable!("unused in reload test")
     }
 
     async fn read_resource(
         &self,
-        _c: &platform_api::McpRawConnection,
+        _c: &lingxi_core::host::McpRawConnection,
         _u: &str,
-    ) -> Result<platform_api::McpResourceContentDto, platform_api::McpError> {
+    ) -> Result<lingxi_core::host::McpResourceContentDto, lingxi_core::host::McpError> {
         unreachable!("unused in reload test")
     }
 
-    async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), platform_api::McpError> {
+    async fn ping(
+        &self,
+        _id: lingxi_core::types::McpConnectionId,
+    ) -> Result<(), lingxi_core::host::McpError> {
         Ok(())
     }
 
     async fn notifications(
         &self,
-        _c: &platform_api::McpRawConnection,
-    ) -> Result<platform_api::McpNotificationStream, platform_api::McpError> {
+        _c: &lingxi_core::host::McpRawConnection,
+    ) -> Result<lingxi_core::host::McpNotificationStream, lingxi_core::host::McpError> {
         unreachable!("unused in reload test")
     }
 
     async fn handle_elicitation(
         &self,
-        _c: &platform_api::McpRawConnection,
-        _r: platform_api::ElicitRequestDto,
-    ) -> Result<platform_api::ElicitResultDto, platform_api::McpError> {
+        _c: &lingxi_core::host::McpRawConnection,
+        _r: lingxi_core::host::ElicitRequestDto,
+    ) -> Result<lingxi_core::host::ElicitResultDto, lingxi_core::host::McpError> {
         unreachable!("unused in reload test")
     }
 
     async fn disconnect(
         &self,
-        _id: protocol::McpConnectionId,
-    ) -> Result<(), platform_api::McpError> {
+        _id: lingxi_core::types::McpConnectionId,
+    ) -> Result<(), lingxi_core::host::McpError> {
         if self
             .disconnect_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             == 0
         {
-            Err(platform_api::McpError::Internal("disconnect failed".into()))
+            Err(lingxi_core::host::McpError::Internal(
+                "disconnect failed".into(),
+            ))
         } else {
             Ok(())
         }
     }
 
-    fn supported_transports(&self) -> Vec<platform_api::McpTransportKind> {
-        vec![platform_api::McpTransportKind::Stdio]
+    fn supported_transports(&self) -> Vec<lingxi_core::host::McpTransportKind> {
+        vec![lingxi_core::host::McpTransportKind::Stdio]
     }
 }
 
 #[async_trait::async_trait]
-impl platform_api::McpTransport for BlockingReloadPluginTransport {
+impl lingxi_core::host::McpTransport for BlockingReloadPluginTransport {
     async fn connect(
         &self,
-        _s: &platform_api::McpTransportSpec,
-    ) -> Result<platform_api::McpRawConnection, platform_api::McpError> {
+        _s: &lingxi_core::host::McpTransportSpec,
+    ) -> Result<lingxi_core::host::McpRawConnection, lingxi_core::host::McpError> {
         let call = self
             .connect_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -9884,16 +9902,16 @@ impl platform_api::McpTransport for BlockingReloadPluginTransport {
         {
             self.connect_release.notified().await;
         }
-        Ok(platform_api::McpRawConnection {
-            connection_id: protocol::McpConnectionId::new(),
+        Ok(lingxi_core::host::McpRawConnection {
+            connection_id: lingxi_core::types::McpConnectionId::new(),
         })
     }
 
     async fn initialize(
         &self,
-        _c: &platform_api::McpRawConnection,
-    ) -> Result<platform_api::ServerCapabilitiesDto, platform_api::McpError> {
-        Ok(platform_api::ServerCapabilitiesDto {
+        _c: &lingxi_core::host::McpRawConnection,
+    ) -> Result<lingxi_core::host::ServerCapabilitiesDto, lingxi_core::host::McpError> {
+        Ok(lingxi_core::host::ServerCapabilitiesDto {
             tools: false,
             resources: false,
             prompts: false,
@@ -9906,77 +9924,80 @@ impl platform_api::McpTransport for BlockingReloadPluginTransport {
 
     async fn list_tools(
         &self,
-        _c: &platform_api::McpRawConnection,
-    ) -> Result<Vec<platform_api::McpToolDto>, platform_api::McpError> {
+        _c: &lingxi_core::host::McpRawConnection,
+    ) -> Result<Vec<lingxi_core::host::McpToolDto>, lingxi_core::host::McpError> {
         Ok(Vec::new())
     }
 
     async fn list_resources(
         &self,
-        _c: &platform_api::McpRawConnection,
-    ) -> Result<Vec<platform_api::McpResourceDto>, platform_api::McpError> {
+        _c: &lingxi_core::host::McpRawConnection,
+    ) -> Result<Vec<lingxi_core::host::McpResourceDto>, lingxi_core::host::McpError> {
         Ok(Vec::new())
     }
 
     async fn list_resource_templates(
         &self,
-        _c: &platform_api::McpRawConnection,
-    ) -> Result<Vec<platform_api::McpResourceTemplateDto>, platform_api::McpError> {
+        _c: &lingxi_core::host::McpRawConnection,
+    ) -> Result<Vec<lingxi_core::host::McpResourceTemplateDto>, lingxi_core::host::McpError> {
         Ok(Vec::new())
     }
 
     async fn list_prompts(
         &self,
-        _c: &platform_api::McpRawConnection,
-    ) -> Result<Vec<platform_api::McpPromptDto>, platform_api::McpError> {
+        _c: &lingxi_core::host::McpRawConnection,
+    ) -> Result<Vec<lingxi_core::host::McpPromptDto>, lingxi_core::host::McpError> {
         Ok(Vec::new())
     }
 
     async fn call_tool(
         &self,
-        _c: &platform_api::McpRawConnection,
+        _c: &lingxi_core::host::McpRawConnection,
         _t: &str,
         _i: serde_json::Value,
-    ) -> Result<platform_api::McpToolResultDto, platform_api::McpError> {
+    ) -> Result<lingxi_core::host::McpToolResultDto, lingxi_core::host::McpError> {
         unreachable!("unused in concurrent refresh test")
     }
 
     async fn read_resource(
         &self,
-        _c: &platform_api::McpRawConnection,
+        _c: &lingxi_core::host::McpRawConnection,
         _u: &str,
-    ) -> Result<platform_api::McpResourceContentDto, platform_api::McpError> {
+    ) -> Result<lingxi_core::host::McpResourceContentDto, lingxi_core::host::McpError> {
         unreachable!("unused in concurrent refresh test")
     }
 
-    async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), platform_api::McpError> {
+    async fn ping(
+        &self,
+        _id: lingxi_core::types::McpConnectionId,
+    ) -> Result<(), lingxi_core::host::McpError> {
         Ok(())
     }
 
     async fn notifications(
         &self,
-        _c: &platform_api::McpRawConnection,
-    ) -> Result<platform_api::McpNotificationStream, platform_api::McpError> {
+        _c: &lingxi_core::host::McpRawConnection,
+    ) -> Result<lingxi_core::host::McpNotificationStream, lingxi_core::host::McpError> {
         unreachable!("unused in concurrent refresh test")
     }
 
     async fn handle_elicitation(
         &self,
-        _c: &platform_api::McpRawConnection,
-        _r: platform_api::ElicitRequestDto,
-    ) -> Result<platform_api::ElicitResultDto, platform_api::McpError> {
+        _c: &lingxi_core::host::McpRawConnection,
+        _r: lingxi_core::host::ElicitRequestDto,
+    ) -> Result<lingxi_core::host::ElicitResultDto, lingxi_core::host::McpError> {
         unreachable!("unused in concurrent refresh test")
     }
 
     async fn disconnect(
         &self,
-        _id: protocol::McpConnectionId,
-    ) -> Result<(), platform_api::McpError> {
+        _id: lingxi_core::types::McpConnectionId,
+    ) -> Result<(), lingxi_core::host::McpError> {
         Ok(())
     }
 
-    fn supported_transports(&self) -> Vec<platform_api::McpTransportKind> {
-        vec![platform_api::McpTransportKind::Stdio]
+    fn supported_transports(&self) -> Vec<lingxi_core::host::McpTransportKind> {
+        vec![lingxi_core::host::McpTransportKind::Stdio]
     }
 }
 
@@ -10049,7 +10070,7 @@ async fn plugin_runtime_refresh_strips_agent_escalation_from_live_catalog() {
     // the absence assertions further down prove nothing about the loader.
     let control = agent::parse_agent_markdown(
         ROGUE_AGENT_MD,
-        agent::AgentSource::Settings(protocol::SettingsScope::User),
+        agent::AgentSource::Settings(lingxi_core::types::SettingsScope::User),
         std::path::PathBuf::from("/agents"),
         std::path::Path::new("/agents/rogue.md"),
     )

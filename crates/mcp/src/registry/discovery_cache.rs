@@ -5,8 +5,8 @@ use super::{
 };
 use crate::connection::{ConfigScope, McpConnectionState, McpServerConfig};
 use crate::oauth;
-use platform_api::{McpError, McpTransportSpec, ServerCapabilitiesDto};
-use protocol::McpConnectionId;
+use lingxi_core::host::{McpError, McpTransportSpec, ServerCapabilitiesDto};
+use lingxi_core::types::McpConnectionId;
 
 impl McpRegistry {
     pub(super) async fn record_discovery_cache_refresh_failure_locked(
@@ -199,7 +199,7 @@ impl McpRegistry {
             }
         };
         let maybe_push_headers =
-            |candidates: &mut Vec<String>, headers: &platform_api::McpHeaders| {
+            |candidates: &mut Vec<String>, headers: &lingxi_core::host::McpHeaders| {
                 for (name, value) in headers {
                     let lower_name = name.to_ascii_lowercase();
                     let lower_value = value.trim().to_ascii_lowercase();
@@ -469,13 +469,13 @@ impl McpRegistry {
         config: &McpServerConfig,
         captured_partition: Option<&DiscoveryCachePartition>,
         caps: &ServerCapabilitiesDto,
-        tools: &[platform_api::McpToolDto],
-        resources: &[platform_api::McpResourceDto],
-        resource_templates: &[platform_api::McpResourceTemplateDto],
-        prompts: &[platform_api::McpPromptDto],
+        tools: &[lingxi_core::host::McpToolDto],
+        resources: &[lingxi_core::host::McpResourceDto],
+        resource_templates: &[lingxi_core::host::McpResourceTemplateDto],
+        prompts: &[lingxi_core::host::McpPromptDto],
         negotiation_mode: crate::protocol_negotiation::NegotiationMode,
         grant_provenance: Option<&GrantProvenance>,
-        negotiated: Option<&platform_api::McpNegotiatedProtocol>,
+        negotiated: Option<&lingxi_core::host::McpNegotiatedProtocol>,
     ) {
         let Some(store) = &self.discovery_cache_store else {
             return;

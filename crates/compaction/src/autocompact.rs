@@ -18,7 +18,7 @@
 //! the divergence note on [`Autocompactor::compact`].
 
 use cost::Usage;
-use protocol::ConversationMessage;
+use lingxi_core::types::ConversationMessage;
 use sidequery::{CacheSafeParamsSlot, ForkedAgentRequest, ForkedAgentRunner, QuerySource};
 use std::sync::Arc;
 use thiserror::Error;
@@ -362,11 +362,13 @@ impl Autocompactor {
             };
             // Ejt reuses its prompt, while each PCo attempt creates a new row.
             let mut summary_request =
-                ConversationMessage::user(protocol::MessageId::new(), prompt.clone());
+                ConversationMessage::user(lingxi_core::types::MessageId::new(), prompt.clone());
             let result = loop {
                 if preserve_tail {
-                    summary_request =
-                        ConversationMessage::user(protocol::MessageId::new(), prompt.clone());
+                    summary_request = ConversationMessage::user(
+                        lingxi_core::types::MessageId::new(),
+                        prompt.clone(),
+                    );
                 }
                 cache_params.fork_context_messages = if stripped_media {
                     crate::strip_media::strip_images_from_messages(summarize.clone())
@@ -466,7 +468,7 @@ impl Autocompactor {
                 head_truncations > 0,
             );
             let summary_messages = vec![ConversationMessage::compact_summary(
-                protocol::MessageId::new(),
+                lingxi_core::types::MessageId::new(),
                 summary_text,
             )];
             return Ok(CompactionResult {
@@ -493,7 +495,7 @@ impl Autocompactor {
         let summary_text =
             crate::prompt::get_compact_user_summary_message(&raw_summary_text, true, None, false);
         let summary_messages = vec![ConversationMessage::compact_summary(
-            protocol::MessageId::new(),
+            lingxi_core::types::MessageId::new(),
             summary_text,
         )];
         let post = crate::grouping::estimate_tokens_for_range(&summary_messages);
@@ -576,7 +578,7 @@ fn is_media_compaction_error(error: &llm_runtime::LlmError) -> bool {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use protocol::{ContentBlock, MessageId, ToolUseId};
+    use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
     use serde_json::json;
     use sidequery::{
         CacheSafeParams, SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
@@ -1283,7 +1285,7 @@ mod tests {
         let image = ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ContentBlock::Image {
-                source: protocol::ImageSource::Url {
+                source: lingxi_core::types::ImageSource::Url {
                     url: "https://example.invalid/image.png".into(),
                 },
             }],

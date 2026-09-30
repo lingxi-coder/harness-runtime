@@ -46,6 +46,9 @@ pub mod fork_resume;
 mod fusion_attempt_composition_test;
 mod fusion_attempts;
 mod fusion_command;
+mod fusion_implement;
+#[cfg(test)]
+mod fusion_implement_e2e_test;
 #[cfg(test)]
 mod fusion_pool_admission_test;
 pub mod fusion_recorder;
@@ -71,9 +74,11 @@ use command_api::builtins::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
 };
+
+use lingxi_core::host::{AuthHandle, OrchestratorHandle, OutputStream};
 use orchestrator::{ConversationOrchestrator, ProviderApiAdapter};
 use permission::gate::PermissionGate;
-use platform_api::{AuthHandle, OrchestratorHandle, OutputStream};
+
 use skill_api::SkillRegistry;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -149,7 +154,7 @@ fn mcp_hook_text_content(value: &serde_json::Value) -> Vec<String> {
 }
 
 fn map_hook_mcp_tool_result(
-    result: platform_api::McpToolResultDto,
+    result: lingxi_core::host::McpToolResultDto,
 ) -> hooks::HookMcpInvocationResult {
     let text_content = mcp_hook_text_content(&result.content);
     if result.is_error {
@@ -219,8 +224,8 @@ struct DesktopWebSearchConfigProvider {
 }
 
 #[async_trait::async_trait]
-impl platform_api::WebSearchConfigProvider for DesktopWebSearchConfigProvider {
-    async fn load_web_search_config(&self) -> platform_api::WebSearchRuntimeConfig {
+impl lingxi_core::host::WebSearchConfigProvider for DesktopWebSearchConfigProvider {
+    async fn load_web_search_config(&self) -> lingxi_core::host::WebSearchRuntimeConfig {
         let settings_path = self.lingxi_home.join("settings.json");
         let parsed = std::fs::read_to_string(&settings_path)
             .ok()
@@ -241,7 +246,7 @@ impl platform_api::WebSearchConfigProvider for DesktopWebSearchConfigProvider {
             .ok()
             .flatten()
             .map(|s| s.expose_secret().clone());
-        platform_api::WebSearchRuntimeConfig {
+        lingxi_core::host::WebSearchRuntimeConfig {
             provider: Some(parsed.provider.as_str().to_string()),
             searxng_url: parsed.searxng_url,
             tavily_key,
@@ -302,7 +307,10 @@ fn utf16_code_units_len(value: &str) -> u32 {
 }
 
 fn registered_mcp_tool_count(
-    tools: &[(protocol::McpConnectionId, Vec<Arc<dyn tool_api::Tool>>)],
+    tools: &[(
+        lingxi_core::types::McpConnectionId,
+        Vec<Arc<dyn tool_api::Tool>>,
+    )],
 ) -> u32 {
     tools.iter().fold(0u32, |total, (_, tools)| {
         total.saturating_add(u32::try_from(tools.len()).unwrap_or(u32::MAX))
@@ -319,10 +327,12 @@ fn mcp_servers_inventory_payload(
             // enterprise-managed settings tier. The 2.1.252 oracle has no
             // separate `managed` inventory bucket.
             mcp::ConfigScope::Enterprise
-            | mcp::ConfigScope::Settings(protocol::SettingsScope::Managed) => "enterprise",
-            mcp::ConfigScope::Settings(protocol::SettingsScope::User) => "global",
-            mcp::ConfigScope::Settings(protocol::SettingsScope::Project) => "project",
-            mcp::ConfigScope::Settings(protocol::SettingsScope::Local) => "user",
+            | mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed) => {
+                "enterprise"
+            }
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User) => "global",
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project) => "project",
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Local) => "user",
             mcp::ConfigScope::Dynamic => "plugin",
             mcp::ConfigScope::Agent => "agent",
             mcp::ConfigScope::ClaudeAi => "claudeai",
@@ -404,10 +414,10 @@ fn ephemeral_session_home() -> Result<std::path::PathBuf, BuildError> {
     let name = format!(
         "lingxi-ephemeral-{}-{}",
         std::process::id(),
-        protocol::SessionId::new().as_uuid().simple()
+        lingxi_core::types::SessionId::new().as_uuid().simple()
     );
     let root = std::env::temp_dir();
-    platform_api::rooted_fs::ensure_private_directory(
+    lingxi_core::host::rooted_fs::ensure_private_directory(
         &root,
         std::path::Path::new(&name),
         session::jsonl::journal::SESSION_STATE_DIR_MODE,
@@ -420,7 +430,7 @@ fn ephemeral_session_home() -> Result<std::path::PathBuf, BuildError> {
 #[path = "tests/managed_otel_env_tests.rs"]
 mod managed_otel_env_tests;
 
-/// M10 (T13): a late-bound [`platform_api::tool_invoker::ToolInvoker`] resolving the
+/// M10 (T13): a late-bound [`lingxi_core::host::tool_invoker::ToolInvoker`] resolving the
 /// composition-root construction cycle.
 ///
 /// The teammate handler is registered into the `TaskRegistry` (which needs
@@ -438,7 +448,7 @@ mod managed_otel_env_tests;
 /// a tool before `build()` returns, so the cell is always filled before first
 /// use.
 struct DeferredToolInvoker {
-    inner: std::sync::OnceLock<Arc<dyn platform_api::tool_invoker::ToolInvoker>>,
+    inner: std::sync::OnceLock<Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>>,
 }
 
 impl DeferredToolInvoker {
@@ -450,22 +460,22 @@ impl DeferredToolInvoker {
 
     /// Fill the cell with the real invoker. Idempotent-safe: a second call is a
     /// no-op (the first binding wins), matching the build-once semantics.
-    fn set(&self, invoker: Arc<dyn platform_api::tool_invoker::ToolInvoker>) {
+    fn set(&self, invoker: Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>) {
         let _ = self.inner.set(invoker);
     }
 }
 
 #[async_trait::async_trait]
-impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
+impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
     async fn invoke_detailed(
         &self,
         name: &str,
         input: serde_json::Value,
-        ctx: platform_api::tool_invoker::SubagentInvocationContext,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
     ) -> Result<
-        platform_api::tool_invoker::ToolInvocationResult,
-        platform_api::tool_invoker::ToolInvokerError,
+        lingxi_core::host::tool_invoker::ToolInvocationResult,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
     > {
         match self.inner.get() {
             Some(invoker) => {
@@ -473,7 +483,7 @@ impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
                     .invoke_detailed(name, input, ctx, workspace_lease_token)
                     .await
             }
-            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
+            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
             )),
@@ -484,11 +494,11 @@ impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
         &self,
         name: &str,
         input: serde_json::Value,
-        ctx: platform_api::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => invoker.invoke(name, input, ctx).await,
-            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
+            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
             )),
@@ -507,16 +517,16 @@ impl platform_api::tool_invoker::ToolInvoker for DeferredToolInvoker {
         &self,
         name: &str,
         input: serde_json::Value,
-        ctx: platform_api::tool_invoker::SubagentInvocationContext,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => {
                 invoker
                     .invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
                     .await
             }
-            None => Err(platform_api::tool_invoker::ToolInvokerError::Internal(
+            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
             )),
@@ -549,7 +559,7 @@ struct CoordinatorTeammateDefinitionResolver {
 impl tasks::handlers::TeammateDefinitionResolver for CoordinatorTeammateDefinitionResolver {
     async fn resolve(
         &self,
-        agent_id: &protocol::AgentId,
+        agent_id: &lingxi_core::types::AgentId,
         display_name: &str,
     ) -> Option<agent::AgentDefinition> {
         let agent_type = self
@@ -672,8 +682,8 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
         &self,
         task_id: &str,
         result: Option<String>,
-        usage: Option<platform_api::task_registry::AgentRunUsage>,
-        agent_id: Option<protocol::AgentId>,
+        usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
+        agent_id: Option<lingxi_core::types::AgentId>,
         agent_name: Option<String>,
         team_name: Option<String>,
     ) {
@@ -702,7 +712,7 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
     async fn set_agent_outcome(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::AgentTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::AgentTerminalOutcome,
     ) {
         tasks::handlers::TaskStatusSink::set_agent_outcome(
             self.task_registry.as_ref(),
@@ -750,7 +760,7 @@ pub struct CoordinatorWiring {
     /// Shared per-session member registry.
     pub team: Arc<coordinator::TeamRegistry>,
     /// Backing task cancellation and message delivery.
-    pub spawn_seam: Arc<dyn platform_api::team_spawn::TeamSpawnSeam>,
+    pub spawn_seam: Arc<dyn lingxi_core::host::team_spawn::TeamSpawnSeam>,
 }
 
 fn teammate_backend_selector(
@@ -763,7 +773,7 @@ fn teammate_backend_selector(
     };
     let backends = std::sync::Mutex::new(std::collections::HashMap::<
         &'static str,
-        Arc<dyn platform_api::SwarmBackend>,
+        Arc<dyn lingxi_core::host::SwarmBackend>,
     >::new());
     Arc::new(move || {
         let mode = match flag_mode
@@ -775,7 +785,7 @@ fn teammate_backend_selector(
             _ => TeammateMode::Auto,
         };
         let terminal = detect_terminal_env();
-        let interactive = is_tty && !platform_api::session_flags::is_non_interactive_session();
+        let interactive = is_tty && !lingxi_core::host::session_flags::is_non_interactive_session();
         let selection = select_backend(&terminal, mode, interactive, false);
         let acquisition_error = if mode == TeammateMode::Auto
             && interactive
@@ -906,7 +916,8 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 // the latter, so normalize once at this trusted host
                 // boundary rather than splitting a resumed workflow across
                 // two session directories.
-                protocol::SessionId::parse_prefixed(&raw).map_or(raw, |id| id.as_uuid().to_string())
+                lingxi_core::types::SessionId::parse_prefixed(&raw)
+                    .map_or(raw, |id| id.as_uuid().to_string())
             })
             .unwrap_or_else(|| self.session_uuid.clone());
         let cwd = self
@@ -1011,6 +1022,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 )));
             }
         }
+
         // Mint the run id at launch (fresh) or reuse the resume id — so it can be
         // returned in the tool result (claude-code `runId`) for `resumeFromRunId`.
         // A clock-nanos × per-process sequence gives a unique id (host clock use
@@ -1033,10 +1045,6 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             .await
             .map_err(|error| tool_workflow::WorkflowLaunchError(error.to_string()))?;
         let launch_result = async {
-            let default_selection = self
-                .default_model_selection_provider
-                .get()
-                .and_then(|provider| provider());
             // Persist the script so it is editable + re-runnable via `scriptPath`
             // (claude-code persists every invocation's script "under the session
             // directory"). A `scriptPath` input is already on disk → return it as-is;
@@ -1160,12 +1168,6 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                             .as_ref()
                             .map(|v| serde_json::to_string(v).unwrap_or_default()),
                         run_id: Some(run_id.clone()),
-                        parent_model: default_selection
-                            .as_ref()
-                            .map(|selection| selection.model.clone()),
-                        parent_model_profile: default_selection
-                            .as_ref()
-                            .and_then(|selection| selection.model_profile.clone()),
                         invocation_mode: Some(invocation_mode),
                         workflow_source: Some(workflow_source),
                         script_is_verbatim_builtin: Some(named_builtin),
@@ -1179,7 +1181,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                         creator_agent_id: spec
                             .creator_agent_id
                             .as_deref()
-                            .and_then(protocol::AgentId::parse_prefixed),
+                            .and_then(lingxi_core::types::AgentId::parse_prefixed),
                         // Desktop hosts no Local Apps: no app store and no
                         // delete guard, so there is nothing for a scope to
                         // authorize. `None` rather than a purpose invented at
@@ -1234,7 +1236,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
 /// holds, plus the shared `current_cwd` cell, and maps both sources through the
 /// orchestrator's pure `build_background_tasks` / `build_session_crons` builders.
 struct RegistryStopHookSnapshot {
-    registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     /// Cron storage is anchored to the session's project root. A Bash `cd`
     /// changes hook payload cwd, but must not silently switch which project's
     /// durable schedules appear in Stop hooks.
@@ -1250,7 +1252,7 @@ impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
         // turn.
         let records = self
             .registry
-            .list(platform_api::task_registry::TaskListFilter::default())
+            .list(lingxi_core::host::task_registry::TaskListFilter::default())
             .await
             .unwrap_or_default();
         orchestrator::build_background_tasks(&records)
@@ -1264,7 +1266,7 @@ impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
     ) {
         let records = self
             .registry
-            .list(platform_api::task_registry::TaskListFilter::default())
+            .list(lingxi_core::host::task_registry::TaskListFilter::default())
             .await
             .unwrap_or_default();
         let start_times = records
@@ -1352,7 +1354,7 @@ mod desktop_fusion_price_book_test;
 mod desktop_fusion_catalog_row_test;
 
 fn desktop_fusion_executor(
-    spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner>,
+    spawner: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner>,
     side_query: Arc<dyn sidequery::SideQueryClient>,
     cfg: &DesktopConfig,
     attempts: Arc<fusion_attempts::DesktopFusionAttempts>,
@@ -1364,7 +1366,8 @@ fn desktop_fusion_executor(
     catalog: Arc<dyn fusion::ModelSource>,
     bus: Arc<telemetry::AnalyticsBus>,
     pricing: Arc<cost::PricingCatalog>,
-) -> Arc<dyn platform_api::FusionExecutor> {
+    implement_host: Option<Arc<dyn lingxi_core::host::FusionImplementHost>>,
+) -> Arc<dyn lingxi_core::host::FusionExecutor> {
     // Boot-time validation: surface the FIRST invalid `fusion.*` value
     // through a log line, but always build the live orchestrator below —
     // its `config_source` (and `DesktopFusionExecutor::preflight_error`)
@@ -1380,11 +1383,14 @@ fn desktop_fusion_executor(
     }
     let config_source: Arc<dyn fusion::FusionConfigSource> =
         Arc::new(DesktopFusionConfigSource { cfg: cfg.clone() });
-    let inner = fusion::FusionOrchestrator::new(spawner, side_query, config_source, catalog)
+    let mut inner = fusion::FusionOrchestrator::new(spawner, side_query, config_source, catalog)
         .with_bus(bus)
         .with_price_book(Arc::new(DesktopFusionPriceBook::new(pricing)))
         .with_panel_admission()
         .with_attempt_registrar(attempts);
+    if let Some(host) = implement_host {
+        inner = inner.with_implement_host(host);
+    }
     Arc::new(DesktopFusionExecutor {
         inner: Arc::new(inner),
         cfg: cfg.clone(),
@@ -1416,7 +1422,7 @@ pub fn register_desktop_tools(
     web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
     live_cwd: Option<tool_api::LiveCwdCell>,
     worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
-    fusion: Option<Arc<dyn platform_api::FusionExecutor>>,
+    fusion: Option<Arc<dyn lingxi_core::host::FusionExecutor>>,
 ) -> (
     tool_cron::WakeupSchedulerCell,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1457,9 +1463,9 @@ pub fn register_desktop_tools_with_fusion_recorder(
     web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
     live_cwd: Option<tool_api::LiveCwdCell>,
     worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
-    fusion: Option<Arc<dyn platform_api::FusionExecutor>>,
-    fusion_recorder: Option<Arc<dyn platform_api::FusionRunRecorder>>,
-    fusion_recorder_factory: Option<Arc<dyn platform_api::FusionRunRecorderFactory>>,
+    fusion: Option<Arc<dyn lingxi_core::host::FusionExecutor>>,
+    fusion_recorder: Option<Arc<dyn lingxi_core::host::FusionRunRecorder>>,
+    fusion_recorder_factory: Option<Arc<dyn lingxi_core::host::FusionRunRecorderFactory>>,
 ) -> (
     tool_cron::WakeupSchedulerCell,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1621,7 +1627,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 #[derive(Clone)]
 pub struct DesktopAudio {
     /// App-scoped device audio service.
-    pub service: Arc<dyn platform_api::audio::AudioService>,
+    pub service: Arc<dyn lingxi_core::host::audio::AudioService>,
 }
 
 impl DesktopAudio {
@@ -1629,7 +1635,7 @@ impl DesktopAudio {
     #[must_use]
     pub fn from_single<T>(implementation: Arc<T>) -> Self
     where
-        T: platform_api::audio::AudioService + 'static,
+        T: lingxi_core::host::audio::AudioService + 'static,
     {
         Self {
             service: implementation,
@@ -2163,7 +2169,7 @@ pub struct DesktopRuntime {
     /// home rather than no ledger at all.
     pub session_state: Arc<session_state::SessionStateCoordinator>,
     /// Common Fusion recorder pinned to the boot session's coordinator.
-    pub fusion_recorder: Arc<dyn platform_api::FusionRunRecorder>,
+    pub fusion_recorder: Arc<dyn lingxi_core::host::FusionRunRecorder>,
     /// Per-session Fusion recorder factory retained for host shutdown/remount
     /// draining. It owns recorders for every mounted session, not just boot A.
     pub fusion_recorder_factory: Arc<fusion_recorder::DesktopFusionRecorderFactory>,
@@ -2239,14 +2245,14 @@ pub struct DesktopRuntime {
     /// Bridge-server uses this handle for source-scoped atomic hot reloads.
     pub hook_registry: Arc<RwLock<hooks::HookRegistry>>,
     /// Live skill/plugin catalog refresher shared with runtime root reloads.
-    pub repo_root_reloader: Arc<dyn platform_api::RepoRootReloader>,
+    pub repo_root_reloader: Arc<dyn lingxi_core::host::RepoRootReloader>,
     /// Shared Claude.ai subscription snapshot (Task 4). Seeded at build time
     /// with the scope-derived `is_subscriber` flag; for subscribers a
     /// background OAuth profile + roles fetch overwrites it with the full
     /// tier/billing/role snapshot once the endpoints respond. UI layers read
     /// it at compose time and treat `None` / a poisoned lock as the
     /// conservative default snapshot.
-    pub subscription: platform_api::subscription::SharedSubscription,
+    pub subscription: lingxi_core::host::subscription::SharedSubscription,
     /// (`/sandbox`) The shared fast-toggle cell for bash-command sandboxing.
     /// The SAME `Arc<AtomicBool>` the bash tool reads via
     /// `BuiltinToolContext::sandbox_enabled_override`; the TUI mount threads a
@@ -2283,7 +2289,7 @@ pub struct DesktopRuntime {
     /// Provenance of the model that the engine selected for the session's
     /// initial/default row. Provider-neutral so managed policy is not inferred
     /// from an Anthropic-specific auth or profile name.
-    pub model_provenance: platform_api::ModelProvenance,
+    pub model_provenance: lingxi_core::host::ModelProvenance,
     /// (T2a) Per-provider login method tag, keyed by profile_name, derived from
     /// the real catalog auth strategy: "api_key" | "copilot_device" | "oauth".
     /// Threaded into the TUI so the /connect picker shows the real method.
@@ -2306,7 +2312,7 @@ pub struct DesktopRuntime {
     /// `Arc` the orchestrator already holds — no second store is constructed.
     pub credentials: Arc<secret::CredentialManager>,
     /// Shared HTTP transport for TUI-owned client-side WebSearch test runs.
-    pub http: Arc<dyn platform_api::HttpTransport>,
+    pub http: Arc<dyn lingxi_core::host::HttpTransport>,
     /// Structured-output capture slot — `Some` only when `--json-schema` is set
     /// (`DesktopConfig.json_schema`). The forced `StructuredOutput` tool writes
     /// the model's result here; the print path reads it after each turn to
@@ -2324,7 +2330,7 @@ pub struct DesktopRuntime {
     /// enqueues a `/loop` self-wakeup). A fresh stateless `PosixRuntime` — the
     /// same seam every in-`build` spawner uses (D17: never a direct
     /// `tokio::spawn`).
-    pub runtime_spawner: Arc<dyn platform_api::RuntimeSpawner>,
+    pub runtime_spawner: Arc<dyn lingxi_core::host::RuntimeSpawner>,
     /// (`!` bash mode) The sandboxed Bash runner for the TUI's `!command` path,
     /// built over the SAME `BuiltinToolContext` (sandbox runner + runtime config)
     /// the model's `Bash` tool uses. The CLI threads it into the TUI `Runtime`
@@ -2361,7 +2367,7 @@ pub struct DesktopRuntime {
     /// Provider-neutral local IDE endpoint lifecycle. The handle owns secure
     /// lockfile discovery and local auth tokens; callers only see redacted
     /// status and action results.
-    pub ide_handle: Arc<dyn platform_api::IdeHandle>,
+    pub ide_handle: Arc<dyn lingxi_core::host::IdeHandle>,
     /// The assembled tool registry — the SAME `Arc` the orchestrator dispatches
     /// through.
     ///
@@ -2378,6 +2384,7 @@ pub struct DesktopRuntime {
     /// `Arc`s placed in the tool context, not a second read of the config.
     /// `None` unless the host filled [`DesktopConfig::audio`].
     ///
+
     /// PRIVATE: nothing outside needs the trait objects (the tools hold their
     /// own clones through the context). It is kept because
     /// [`DesktopRuntime::has_audio`] must answer from the config→build path
@@ -2391,6 +2398,7 @@ pub struct DesktopRuntime {
 impl DesktopRuntime {
     /// The names of every tool this build registered, by value.
     ///
+
     /// The honest observation point for a capability-gated tool: the tool
     /// context itself is consumed by [`build`], so "did the capability reach
     /// the engine" can only be asked of what the registry ended up holding.
@@ -2404,6 +2412,7 @@ impl DesktopRuntime {
     /// Whether this runtime was built with a device-audio capability
     /// ([`DesktopConfig::audio`]).
     ///
+
     /// Read from the capability itself, not from the tool list, so the two
     /// together distinguish "the config never reached the runtime" from "it
     /// reached the runtime but not the tool context".
@@ -2528,7 +2537,7 @@ fn sandbox_network_ask_callback(permission_gate: Arc<dyn PermissionGate>) -> san
             });
             let allow = matches!(
                 permission_gate.check(SANDBOX_NETWORK_TOOL, &input).await,
-                platform_api::PermissionDecision::Allow
+                lingxi_core::host::PermissionDecision::Allow
             );
             if !allow {
                 blocked
@@ -2626,7 +2635,7 @@ pub enum BuildError {
 /// moved from env/argv to `cfg`, and the output/permission sinks become
 /// connection-scoped parameters:
 ///
-/// - `output` is the [`platform_api::OutputStream`] the orchestrator pushes turn
+/// - `output` is the [`lingxi_core::host::OutputStream`] the orchestrator pushes turn
 ///   events to. The CLI supplies its NDJSON/plain/TUI sink; the bridge-server
 ///   supplies a `client::adapter::AdapterOutputStream`. The SAME `build` serves
 ///   both.
@@ -2641,13 +2650,13 @@ pub enum BuildError {
 /// `isClaudeAISubscriber()` is `isAnthropicAuthEnabled() && shouldUseClaudeAIAuth(scopes)`.
 /// `isAnthropicAuthEnabled()` reduces to "the auth resolver picks the stored
 /// OAuth session" — `resolve` is driven with the FULL
-/// [`llm_runtime::oauth::anthropic::resolver::ResolverContext`] (M13), so every
+/// [`llm_runtime::auth::anthropic::resolver::ResolverContext`] (M13), so every
 /// documented ranking applies: managed OAuth forcing outranks env keys, env
 /// `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` and an FD-inherited key outrank
 /// stored OAuth, and stored OAuth outranks the stored/settings/helper/Bedrock
 /// keys. When OAuth is the effective source, `shouldUseClaudeAIAuth(scopes)`
 /// (== presence of the `user:inference` scope, via
-/// `llm_runtime::oauth::anthropic::subscription_from_scopes`) decides.
+/// `llm_runtime::auth::anthropic::subscription_from_scopes`) decides.
 ///
 /// KNOWN RESIDUAL DIVERGENCE (`zb()` @228933355). The oracle suppresses on
 /// TWO arms with TWO DIFFERENT host predicates:
@@ -2665,13 +2674,13 @@ pub enum BuildError {
 /// fixed) is correct. Closing this needs the resolver to carry the `YIt()`
 /// reading alongside `managed_oauth_only`.
 fn oauth_subscriber_flag(
-    source: &llm_runtime::oauth::anthropic::resolver::AuthSource,
+    source: &llm_runtime::auth::anthropic::resolver::AuthSource,
     scopes: &[String],
 ) -> bool {
     matches!(
         source,
-        llm_runtime::oauth::anthropic::resolver::AuthSource::OAuthClaudeAi
-    ) && llm_runtime::oauth::anthropic::subscription_from_scopes(scopes)
+        llm_runtime::auth::anthropic::resolver::AuthSource::OAuthClaudeAi
+    ) && lingxi_llm_client::auth::oauth::anthropic::subscription_from_scopes(scopes)
 }
 
 /// Seed of the shared subscription slot for a session that holds a stored
@@ -2687,16 +2696,16 @@ fn oauth_subscriber_flag(
 /// [`oauth_subscriber_flag`], so an inference-less OAuth session still reports
 /// its tier while `is_subscriber` is false.
 fn subscription_seed(
-    source: &llm_runtime::oauth::anthropic::resolver::AuthSource,
+    source: &llm_runtime::auth::anthropic::resolver::AuthSource,
     scopes: &[String],
     subscription_type: Option<&String>,
     rate_limit_tier: Option<&String>,
-) -> platform_api::subscription::SubscriptionSnapshot {
+) -> lingxi_core::host::subscription::SubscriptionSnapshot {
     let oauth_effective = matches!(
         source,
-        llm_runtime::oauth::anthropic::resolver::AuthSource::OAuthClaudeAi
+        llm_runtime::auth::anthropic::resolver::AuthSource::OAuthClaudeAi
     );
-    platform_api::subscription::SubscriptionSnapshot {
+    lingxi_core::host::subscription::SubscriptionSnapshot {
         is_subscriber: oauth_subscriber_flag(source, scopes),
         subscription_type: oauth_effective
             .then(|| subscription_type.cloned())
@@ -2714,21 +2723,14 @@ fn subscription_seed(
 /// that arm is purely defensive).
 fn subscription_snapshot_from(
     is_subscriber: bool,
-    profile: Option<&llm_runtime::oauth::anthropic::OAuthProfileResponse>,
-    roles: Option<&llm_runtime::oauth::anthropic::UserRolesResponse>,
-) -> platform_api::subscription::SubscriptionSnapshot {
-    use llm_runtime::oauth::anthropic::SubscriptionType;
+    profile: Option<&lingxi_llm_client::auth::oauth::anthropic::OAuthProfileResponse>,
+    roles: Option<&lingxi_llm_client::auth::oauth::anthropic::UserRolesResponse>,
+) -> lingxi_core::host::subscription::SubscriptionSnapshot {
     let org = profile.and_then(|p| p.organization.as_ref());
     let subscription_type = profile
-        .and_then(llm_runtime::oauth::anthropic::OAuthProfileResponse::subscription_type)
-        .and_then(|t| match t {
-            SubscriptionType::Pro => Some("pro"),
-            SubscriptionType::Max => Some("max"),
-            SubscriptionType::Team => Some("team"),
-            SubscriptionType::Enterprise => Some("enterprise"),
-            SubscriptionType::Free | SubscriptionType::Unknown => None,
-        });
-    platform_api::subscription::SubscriptionSnapshot {
+        .and_then(lingxi_llm_client::auth::oauth::anthropic::subscription_type)
+        .and_then(lingxi_llm_client::auth::oauth::anthropic::paid_subscription_type);
+    lingxi_core::host::subscription::SubscriptionSnapshot {
         is_subscriber,
         subscription_type: subscription_type.map(str::to_owned),
         rate_limit_tier: org.and_then(|o| o.rate_limit_tier.clone()),
@@ -2758,7 +2760,7 @@ fn provider_profile_label(profile_name: &str) -> String {
     // `<group>:<connection>` (+ `#<n>` per extra key slot). Label it after its
     // VENDOR plus the connection, so the `/model` header reads "DeepSeek · cn"
     // rather than the title-cased id "Deepseek:cn".
-    let (group, connection, slot) = platform_api::split_connection_profile(profile_name);
+    let (group, connection, slot) = lingxi_core::host::split_connection_profile(profile_name);
     if connection.is_some() || slot.is_some() {
         let base = provider_profile_label(group);
         return match (connection, slot) {
@@ -2945,8 +2947,8 @@ struct DefaultModelFallback {
 ///
 /// Preference: (1) the most recent `/model` pick (`settings.recentModels`) on
 /// a connected provider whose model still exists in the catalog; (2) the first
-/// connected provider in [`platform_api::provider_fallback_order`], on its
-/// [`platform_api::provider_default_model`]; (3) any remaining connected provider
+/// connected provider in [`lingxi_core::host::provider_fallback_order`], on its
+/// [`lingxi_core::host::provider_default_model`]; (3) any remaining connected provider
 /// (user-defined — no curated default), on its first listed model. Every
 /// candidate is validated against the live `listings` so the reroute can never
 /// select an id `switch_model`/the wire would reject.
@@ -2963,7 +2965,7 @@ fn connected_provider_fallback(
     anthropic_probe_definitive: bool,
     model_providers: &std::collections::BTreeMap<String, (String, String)>,
     availability: &std::collections::BTreeMap<String, bool>,
-    listings: &[platform_api::ModelListing],
+    listings: &[lingxi_core::host::ModelListing],
     recents: &[RecentModelRef],
 ) -> Option<DefaultModelFallback> {
     // Effective provider of the configured default — the same resolution the
@@ -3000,11 +3002,11 @@ fn connected_provider_fallback(
         }
     }
     // (2) Deterministic provider order, each on its curated boot default.
-    for p in platform_api::provider_fallback_order() {
+    for p in lingxi_core::host::provider_fallback_order() {
         if !connected(p) {
             continue;
         }
-        if let Some(m) = platform_api::provider_default_model(p) {
+        if let Some(m) = lingxi_core::host::provider_default_model(p) {
             if in_listings(p, m) {
                 return Some(route(m.to_string(), p));
             }
@@ -3345,7 +3347,7 @@ fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
 /// fork/subtask surface is disabled exactly like `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`
 /// (binary `I2i()` — `settings.disableAgentView === true`), threaded into
 /// [`command_api::builtins::register_core_batch_8`] via
-/// [`platform_api::agent_view::is_enabled_with_setting`] (M-03). Returns `false` on any
+/// [`lingxi_core::host::agent_view::is_enabled_with_setting`] (M-03). Returns `false` on any
 /// load failure or when the key is unset — the frozen default (agent view
 /// enabled; the env half still applies independently).
 fn load_merged_disable_agent_view(project_dir: &std::path::Path) -> bool {
@@ -3481,7 +3483,7 @@ fn agent_source_is_trusted(source: agent::AgentSource) -> bool {
         source,
         agent::AgentSource::BuiltIn
             | agent::AgentSource::Plugin
-            | agent::AgentSource::Settings(protocol::SettingsScope::Managed)
+            | agent::AgentSource::Settings(lingxi_core::types::SettingsScope::Managed)
     )
 }
 
@@ -3557,7 +3559,7 @@ struct AgentMcpMergeGates {
 ///    server BEATS a same-named discovered `.mcp.json`/user/local server and
 ///    loses only to a `--mcp-config` one. `dynamic_names` is that bucket's key
 ///    set, which this port cannot recover from the flattened list (CLI servers
-///    are parsed at `ConfigScope::Settings(protocol::SettingsScope::Project)`).
+///    are parsed at `ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)`).
 fn merge_agent_frontmatter_mcp_servers(
     existing: &mut Vec<mcp::McpServerConfig>,
     dynamic_names: &[String],
@@ -3691,7 +3693,7 @@ async fn build_agent_mcp_tool_set(
     mcp_tool_ctx: tool_api::BuiltinToolContext,
     strict_plugin_only_mcp: bool,
     strict_mcp_config: bool,
-    agent_id: protocol::AgentId,
+    agent_id: lingxi_core::types::AgentId,
     def: agent::AgentDefinition,
     lease: Option<agent::agent_mcp_tools::AgentMcpConstructionLease>,
 ) -> agent::agent_mcp_tools::AgentMcpToolSet {
@@ -3768,7 +3770,7 @@ async fn build_agent_mcp_tool_set(
                 }),
             });
         }
-        let dtos: Vec<platform_api::McpToolDto> = {
+        let dtos: Vec<lingxi_core::host::McpToolDto> = {
             let conns = mcp_registry.connections.read().await;
             match conns.get(&table_key) {
                 // §11 Stage 2: `connect`/`connect_agent_scoped` above may have
@@ -3879,6 +3881,7 @@ async fn load_enabled_plugins(
             }
         }
     }
+
     // Managed policy is always eligible, including when restricted mode has
     // disabled all ambient file settings.
     for raw in crate::desktop::settings_watch::managed_settings_raw_tiers().await {
@@ -4004,7 +4007,7 @@ async fn discover_plugin_set(
     flag_settings: Option<&lingxi_core::settings::SettingsJson>,
     analytics_bus: &Arc<telemetry::AnalyticsBus>,
 ) -> Vec<(
-    protocol::PluginId,
+    lingxi_core::types::PluginId,
     plugin::PluginManifest,
     std::path::PathBuf,
 )> {
@@ -4111,11 +4114,11 @@ impl DesktopRepoRootReloader {
 }
 
 #[async_trait::async_trait]
-impl platform_api::RepoRootReloader for DesktopRepoRootReloader {
+impl lingxi_core::host::RepoRootReloader for DesktopRepoRootReloader {
     async fn reload(
         &self,
-        request: platform_api::RepoRootReloadRequest,
-    ) -> platform_api::RepoRootReloadOutcome {
+        request: lingxi_core::host::RepoRootReloadRequest,
+    ) -> lingxi_core::host::RepoRootReloadOutcome {
         {
             let mut roots = self.registered_roots.write().await;
             if !roots.contains(&request.root) {
@@ -4123,7 +4126,7 @@ impl platform_api::RepoRootReloader for DesktopRepoRootReloader {
             }
         }
 
-        let mut outcome = platform_api::RepoRootReloadOutcome::default();
+        let mut outcome = lingxi_core::host::RepoRootReloadOutcome::default();
         if request.reload_skills {
             let roots = self.registered_roots.read().await.clone();
             let additional_skill_dirs = roots
@@ -4479,6 +4482,7 @@ fn mcp_on_authorization_url() -> mcp::oauth::OnAuthorizationUrl {
             target: "lingxi::mcp::oauth",
             authorization_url = %url,
             "MCP OAuth: open this URL in a browser to authorize the server:\n  {url}",
+
         );
         // Best-effort detached browser open; failures are intentionally ignored.
         #[cfg(target_os = "macos")]
@@ -4547,7 +4551,7 @@ fn sanitize_path_component(name: &str) -> String {
 /// `checkReadableInternalPath`.
 #[must_use]
 pub fn session_task_output_dir(cwd: &std::path::Path, session_id: &str) -> std::path::PathBuf {
-    platform_api::task_output::session_output_dir(&lingxi_temp_dir_path(), cwd, session_id)
+    lingxi_core::host::task_output::session_output_dir(&lingxi_temp_dir_path(), cwd, session_id)
 }
 
 fn session_kind_for_job_tmp() -> Option<String> {

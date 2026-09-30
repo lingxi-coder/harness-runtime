@@ -1,8 +1,8 @@
 //! `speech` exposes live recognition and completed speech playback.
 
+use lingxi_core::host::audio::{AudioOperation, AudioOperationKind, AudioOperationSuccess};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::audio::{AudioOperation, AudioOperationKind, AudioOperationSuccess};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -327,11 +327,11 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::audio::{
+    use lingxi_core::host::audio::{
         AudioCapabilitySnapshot, AudioError, AudioOperationContext, AudioOperationId,
         AudioOperationReadiness, AudioReadinessState, AudioService,
     };
-    use platform_api::{SttTranscript, TtsAudio, VoiceRecording};
+    use lingxi_core::host::{SttTranscript, TtsAudio, VoiceRecording};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
@@ -389,7 +389,7 @@ mod tests {
                 }),
                 AudioOperation::StartRecording { .. } => {
                     Ok(AudioOperationSuccess::RecordingStarted {
-                        handle: platform_api::audio::AudioRecordingHandle("unused".into()),
+                        handle: lingxi_core::host::audio::AudioRecordingHandle("unused".into()),
                     })
                 }
                 AudioOperation::StopRecording { .. } => Ok(AudioOperationSuccess::Recording {
@@ -433,7 +433,7 @@ mod tests {
 
     fn use_context() -> ToolUseContext {
         let mut context = tool_api::test_support::fresh_ctx();
-        context.origin_session_id = Some(protocol::SessionId::new());
+        context.origin_session_id = Some(lingxi_core::types::SessionId::new());
         context
     }
 

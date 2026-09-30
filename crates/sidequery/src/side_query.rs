@@ -11,7 +11,7 @@
 
 use crate::purposes::QuerySource;
 use async_trait::async_trait;
-use protocol::ConversationMessage;
+use lingxi_core::types::ConversationMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
@@ -23,7 +23,7 @@ use thiserror::Error;
 pub struct SideQueryRequest {
     /// Host-owned registered logical call; request JSON cannot supply it.
     #[serde(skip)]
-    pub model_attempt: Option<platform_api::ModelAttemptContext>,
+    pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
     /// Model id (e.g. `claude-haiku-4-5`).
     pub model: String,
     /// Optional provider profile that owns `model`.
@@ -123,7 +123,7 @@ pub enum SideQueryError {
 pub struct StrictStructuredQueryRequest {
     /// Host-owned registered logical call; request JSON cannot supply it.
     #[serde(skip)]
-    pub model_attempt: Option<platform_api::ModelAttemptContext>,
+    pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
     /// Model id.
     pub model: String,
     /// Optional provider profile.

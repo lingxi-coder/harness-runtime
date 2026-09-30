@@ -169,17 +169,17 @@ pub fn agent_mcp_specs_to_scoped_configs(
             let mut cfg = cfg;
             cfg.metadata.agent_source = Some(match def.source {
                 AgentSource::BuiltIn => mcp::McpAgentSource::BuiltIn,
-                AgentSource::Settings(protocol::SettingsScope::User) => {
+                AgentSource::Settings(lingxi_core::types::SettingsScope::User) => {
                     mcp::McpAgentSource::UserSettings
                 }
-                AgentSource::Settings(protocol::SettingsScope::Project) => {
+                AgentSource::Settings(lingxi_core::types::SettingsScope::Project) => {
                     mcp::McpAgentSource::ProjectSettings
                 }
-                AgentSource::Settings(protocol::SettingsScope::Local) => {
+                AgentSource::Settings(lingxi_core::types::SettingsScope::Local) => {
                     mcp::McpAgentSource::LocalSettings
                 }
                 AgentSource::Plugin => mcp::McpAgentSource::Plugin,
-                AgentSource::Settings(protocol::SettingsScope::Managed) => {
+                AgentSource::Settings(lingxi_core::types::SettingsScope::Managed) => {
                     mcp::McpAgentSource::PolicySettings
                 }
                 AgentSource::Flag => mcp::McpAgentSource::FlagSettings,
@@ -197,7 +197,7 @@ pub(crate) fn plugin_trusted_source(source: AgentSource) -> bool {
     matches!(
         source,
         AgentSource::Plugin
-            | AgentSource::Settings(protocol::SettingsScope::Managed)
+            | AgentSource::Settings(lingxi_core::types::SettingsScope::Managed)
             | AgentSource::BuiltIn
     )
 }
@@ -244,7 +244,7 @@ mod tests {
         mcp::build_server_from_json_entry(
             name,
             &serde_json::json!({"command": command}),
-            mcp::ConfigScope::Settings(protocol::SettingsScope::User),
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         )
         .expect("well-formed stdio entry builds")
     }
@@ -253,7 +253,7 @@ mod tests {
     fn empty_specs_yield_no_configs() {
         let def = def_with_specs(
             vec![],
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert!(convert(&def, false).is_empty());
     }
@@ -265,7 +265,7 @@ mod tests {
         // siblings.
         let def = def_with_specs(
             vec![AgentMcpServerSpec::ByName("slack".into())],
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert!(agent_mcp_specs_to_scoped_configs(&def, false, false, &[]).is_empty());
     }
@@ -279,7 +279,7 @@ mod tests {
         let existing = vec![existing_stdio("slack", "slack-mcp")];
         let def = def_with_specs(
             vec![AgentMcpServerSpec::ByName("slack".into())],
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         let cfgs = agent_mcp_specs_to_scoped_configs(&def, false, false, &existing);
         assert_eq!(cfgs.len(), 1);
@@ -290,7 +290,7 @@ mod tests {
         );
         assert_eq!(
             cfgs[0].config.scope,
-            mcp::ConfigScope::Settings(protocol::SettingsScope::User),
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             "the EXISTING config's scope is preserved verbatim, not overwritten to Agent"
         );
     }
@@ -311,7 +311,7 @@ mod tests {
         let existing = existing_stdio("shared", "shared-mcp");
         let by_name = def_with_specs(
             vec![AgentMcpServerSpec::ByName("shared".into())],
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         let converted = agent_mcp_specs_to_scoped_configs(&by_name, false, false, &[existing]);
         assert_eq!(converted.len(), 1);
@@ -325,7 +325,7 @@ mod tests {
         let existing = vec![existing_stdio("slack", "slack-mcp")];
         let def = def_with_specs(
             vec![AgentMcpServerSpec::ByName("slack".into())],
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert!(agent_mcp_specs_to_scoped_configs(&def, false, true, &existing).is_empty());
     }
@@ -337,7 +337,7 @@ mod tests {
                 "docs",
                 serde_json::json!({"command": "npx", "args": ["-y", "docs-mcp"]}),
             )],
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         let cfgs = convert(&def, false);
         assert_eq!(cfgs.len(), 1);
@@ -349,7 +349,7 @@ mod tests {
         );
         assert!(matches!(
             &cfgs[0].config.spec,
-            platform_api::McpTransportSpec::Stdio { command, .. } if command == "npx"
+            lingxi_core::host::McpTransportSpec::Stdio { command, .. } if command == "npx"
         ));
     }
 
@@ -360,13 +360,13 @@ mod tests {
                 "remote",
                 serde_json::json!({"type": "http", "url": "https://mcp.example/api"}),
             )],
-            AgentSource::Settings(protocol::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
         );
         let cfgs = convert(&def, false);
         assert_eq!(cfgs.len(), 1);
         assert!(matches!(
             &cfgs[0].config.spec,
-            platform_api::McpTransportSpec::Http { url, .. } if url == "https://mcp.example/api"
+            lingxi_core::host::McpTransportSpec::Http { url, .. } if url == "https://mcp.example/api"
         ));
     }
 
@@ -379,7 +379,7 @@ mod tests {
         map.insert("b".into(), serde_json::json!({"command": "y"}));
         let def = def_with_specs(
             vec![AgentMcpServerSpec::Record(map)],
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert!(convert(&def, false).is_empty());
     }
@@ -389,7 +389,7 @@ mod tests {
         for reserved in ["computer-use", "workspace", "claude-in-chrome"] {
             let def = def_with_specs(
                 vec![record(reserved, serde_json::json!({"command": "x"}))],
-                AgentSource::Settings(protocol::SettingsScope::Project),
+                AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
             );
             assert!(
                 convert(&def, false).is_empty(),
@@ -406,7 +406,7 @@ mod tests {
                     "ide",
                     serde_json::json!({"type": ty, "url": "http://127.0.0.1:1"}),
                 )],
-                AgentSource::Settings(protocol::SettingsScope::Project),
+                AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
             );
             assert!(
                 convert(&def, false).is_empty(),
@@ -422,7 +422,7 @@ mod tests {
                 record("broken", serde_json::json!({"nope": true})),
                 record("ok", serde_json::json!({"command": "x"})),
             ],
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         let cfgs = convert(&def, false);
         assert_eq!(cfgs.len(), 1);
@@ -440,14 +440,14 @@ mod tests {
                 record("other", serde_json::json!({"command": "x"})),
                 record("docs", serde_json::json!({"command": "second"})),
             ],
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         let cfgs = convert(&def, false);
         assert_eq!(cfgs.len(), 2, "one config per name");
         assert_eq!(cfgs[0].config.name, "docs");
         assert_eq!(cfgs[1].config.name, "other");
         assert!(
-            matches!(&cfgs[0].config.spec, platform_api::McpTransportSpec::Stdio { command, .. } if command == "second"),
+            matches!(&cfgs[0].config.spec, lingxi_core::host::McpTransportSpec::Stdio { command, .. } if command == "second"),
             "the LAST entry for a name wins"
         );
     }
@@ -457,8 +457,8 @@ mod tests {
         let specs = || vec![record("docs", serde_json::json!({"command": "x"}))];
         // Untrusted (user/project/flag) sources: locked out.
         for src in [
-            AgentSource::Settings(protocol::SettingsScope::User),
-            AgentSource::Settings(protocol::SettingsScope::Project),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::User),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
             AgentSource::Flag,
         ] {
             let def = def_with_specs(specs(), src);
@@ -470,7 +470,7 @@ mod tests {
         // wke-trusted sources pass the lock.
         for src in [
             AgentSource::Plugin,
-            AgentSource::Settings(protocol::SettingsScope::Managed),
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Managed),
             AgentSource::BuiltIn,
         ] {
             let def = def_with_specs(specs(), src);

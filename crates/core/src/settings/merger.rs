@@ -767,22 +767,6 @@ mod tests {
     }
 
     #[test]
-    fn fusion_workflow_concurrency_rollback_overrides_only_its_field() {
-        let lower = serde_json::from_value(serde_json::json!({
-            "fusion": {"enabled": true, "workflowConcurrency": 2}
-        }))
-        .unwrap();
-        let upper = serde_json::from_value(serde_json::json!({
-            "fusion": {"workflowConcurrency": 1}
-        }))
-        .unwrap();
-        let settings = merge(lower, upper).fusion.unwrap();
-        assert_eq!(settings.enabled, Some(true));
-        assert_eq!(settings.workflow_concurrency, Some(1));
-        settings.validate().unwrap();
-    }
-
-    #[test]
     fn fusion_deep_merge_overrides_scalars_and_replaces_arrays() {
         let prev = SettingsJson {
             fusion: Some(crate::settings::schema::FusionSettingsJson {
@@ -1227,6 +1211,7 @@ mod tests {
             // field for which every shape above already failed — which is the
             // case that used to panic.
             (json!("auto"), json!("tmux")),
+            (json!("china_mainland"), json!("international")),
         ];
 
         // Whether `{field: value}` survives a `SettingsJson` round trip

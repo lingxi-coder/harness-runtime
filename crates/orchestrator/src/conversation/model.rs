@@ -437,7 +437,7 @@ impl ConversationOrchestrator {
     /// already recorded a kind at dispatch, the recorded kind must either be
     /// rewritten to the synthetic's own kind or dropped, or it would both stamp
     /// the wrong provenance and leak an entry for the rest of the session.
-    pub(crate) async fn remove_tool_denial_kind(&self, id: &protocol::ToolUseId) {
+    pub(crate) async fn remove_tool_denial_kind(&self, id: &lingxi_core::types::ToolUseId) {
         self.transcript
             .tool_denial_kinds
             .lock()
@@ -449,7 +449,7 @@ impl ConversationOrchestrator {
     /// claude's `sourceToolAssistantUUID`.
     pub(crate) async fn record_source_tool_assistant_uuid(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         assistant_line_uuid: String,
     ) {
         self.transcript
@@ -462,7 +462,7 @@ impl ConversationOrchestrator {
     /// Remove and return the payloads queued for `id`, in production order.
     pub(crate) async fn take_queued_hook_attachments(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
     ) -> Vec<serde_json::Value> {
         self.transcript
             .pending_hook_attachments
@@ -512,7 +512,7 @@ impl ConversationOrchestrator {
     /// [`Self::retarget_transcript_for_cwd`], which performs a relocation.
     pub async fn retarget_transcript_for_session(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
     ) -> Result<Option<std::path::PathBuf>, String> {
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             return Ok(None);
@@ -552,11 +552,11 @@ impl ConversationOrchestrator {
     /// session while the newly active session does not accidentally inherit it.
     pub async fn record_persisted_fusion_meta(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         message_uuid: &str,
         text: String,
     ) -> Result<(), String> {
-        let message_id = protocol::MessageId::parse_prefixed(message_uuid)
+        let message_id = lingxi_core::types::MessageId::parse_prefixed(message_uuid)
             .ok_or_else(|| format!("invalid persisted Fusion message uuid {message_uuid:?}"))?;
         let _turn_guard = self.turn_gate.lock().await;
         let mut session = self.session.lock().await;
@@ -570,7 +570,7 @@ impl ConversationOrchestrator {
         {
             return Ok(());
         }
-        let message = protocol::ConversationMessage::user_meta(message_id, text);
+        let message = lingxi_core::types::ConversationMessage::user_meta(message_id, text);
         session.model_context_excluded_messages.insert(message_id);
         session.history.push(message);
         Ok(())
@@ -585,7 +585,7 @@ impl ConversationOrchestrator {
     pub async fn append_fusion_transcript(
         &self,
         writer: &session::jsonl::JsonlWriter,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         delivery_id: &str,
         payload: serde_json::Value,
     ) -> Result<session::jsonl::TranscriptAppendOutcome, session::jsonl::TranscriptWriterError>
@@ -609,7 +609,7 @@ impl ConversationOrchestrator {
     /// a foreground turn can run, even while publication remains unacknowledged.
     pub(super) async fn reconcile_fusion_transcript_append(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         uuid: String,
         result: Result<
             (session::jsonl::TranscriptAppendOutcome, bool),
@@ -745,29 +745,28 @@ impl ConversationOrchestrator {
     pub(crate) async fn generate_recap_query(
         &self,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<platform_api::RecapOutcome, platform_api::HandleError> {
-        let runner = self
-            .recap_runner
-            .clone()
-            .ok_or_else(|| platform_api::HandleError::ActionFailed("recap unavailable".into()))?;
+    ) -> Result<lingxi_core::host::RecapOutcome, lingxi_core::host::HandleError> {
+        let runner = self.recap_runner.clone().ok_or_else(|| {
+            lingxi_core::host::HandleError::ActionFailed("recap unavailable".into())
+        })?;
         let params = self
             .model_runtime
             .cache_safe_slot
             .as_ref()
             .ok_or_else(|| {
-                platform_api::HandleError::ActionFailed("recap: no cache-safe slot".into())
+                lingxi_core::host::HandleError::ActionFailed("recap: no cache-safe slot".into())
             })?
             .get_last()
             .await
             .ok_or_else(|| {
-                platform_api::HandleError::ActionFailed("recap: no cache-safe params".into())
+                lingxi_core::host::HandleError::ActionFailed("recap: no cache-safe params".into())
             })?;
 
         // Fast-path cancel (deterministic even when the runner completes
         // synchronously, e.g. the stub side-query path), mirroring
         // `force_compact_with_cancel`.
         if cancel.is_cancelled() {
-            return Ok(platform_api::RecapOutcome::Cancelled);
+            return Ok(lingxi_core::host::RecapOutcome::Cancelled);
         }
 
         let req = sidequery::ForkedAgentRequest {
@@ -783,10 +782,10 @@ impl ConversationOrchestrator {
 
         tokio::select! {
             biased;
-            () = cancel.cancelled() => Ok(platform_api::RecapOutcome::Cancelled),
+            () = cancel.cancelled() => Ok(lingxi_core::host::RecapOutcome::Cancelled),
             r = runner.run(req) => match r {
-                Ok(res) => Ok(platform_api::RecapOutcome::Text(res.final_text.trim().to_string())),
-                Err(e) => Err(platform_api::HandleError::ActionFailed(e.to_string())),
+                Ok(res) => Ok(lingxi_core::host::RecapOutcome::Text(res.final_text.trim().to_string())),
+                Err(e) => Err(lingxi_core::host::HandleError::ActionFailed(e.to_string())),
             }
         }
     }
@@ -831,16 +830,18 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
     pub(crate) async fn generate_session_name_query(
         &self,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<Option<String>, platform_api::HandleError> {
+    ) -> Result<Option<String>, lingxi_core::host::HandleError> {
         let runner = self.recap_runner.clone().ok_or_else(|| {
-            platform_api::HandleError::ActionFailed("session name generation unavailable".into())
+            lingxi_core::host::HandleError::ActionFailed(
+                "session name generation unavailable".into(),
+            )
         })?;
         let Some(params) = self
             .model_runtime
             .cache_safe_slot
             .as_ref()
             .ok_or_else(|| {
-                platform_api::HandleError::ActionFailed(
+                lingxi_core::host::HandleError::ActionFailed(
                     "session name generation unavailable".into(),
                 )
             })?
@@ -869,10 +870,10 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             result = runner.run(req) => match result {
                 Ok(result) => parse_generated_session_name(&result.final_text)
                     .map(Some)
-                    .ok_or_else(|| platform_api::HandleError::ActionFailed(
+                    .ok_or_else(|| lingxi_core::host::HandleError::ActionFailed(
                         "session name response did not contain a non-empty name".into()
                     )),
-                Err(error) => Err(platform_api::HandleError::ActionFailed(error.to_string())),
+                Err(error) => Err(lingxi_core::host::HandleError::ActionFailed(error.to_string())),
             }
         }
     }
@@ -881,9 +882,9 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
     pub async fn generate_prompt_suggestion_query(
         &self,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<Option<String>, platform_api::HandleError> {
+    ) -> Result<Option<String>, lingxi_core::host::HandleError> {
         let runner = self.recap_runner.clone().ok_or_else(|| {
-            platform_api::HandleError::ActionFailed(
+            lingxi_core::host::HandleError::ActionFailed(
                 "prompt suggestion generation unavailable".into(),
             )
         })?;
@@ -892,7 +893,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             .cache_safe_slot
             .as_ref()
             .ok_or_else(|| {
-                platform_api::HandleError::ActionFailed(
+                lingxi_core::host::HandleError::ActionFailed(
                     "prompt suggestion generation unavailable".into(),
                 )
             })?
@@ -957,7 +958,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             () = cancel.cancelled() => Ok(None),
             result = runner.run(req) => match result {
                 Ok(result) => Ok(parse_prompt_suggestion_response(&result.final_text)),
-                Err(error) => Err(platform_api::HandleError::ActionFailed(error.to_string())),
+                Err(error) => Err(lingxi_core::host::HandleError::ActionFailed(error.to_string())),
             }
         }
     }
@@ -981,12 +982,12 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         &self,
         question: &str,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<platform_api::RecapOutcome, platform_api::HandleError> {
+    ) -> Result<lingxi_core::host::RecapOutcome, lingxi_core::host::HandleError> {
         let runner = self.recap_runner.clone().ok_or_else(|| {
-            platform_api::HandleError::ActionFailed("side question unavailable".into())
+            lingxi_core::host::HandleError::ActionFailed("side question unavailable".into())
         })?;
         if cancel.is_cancelled() {
-            return Ok(platform_api::RecapOutcome::Cancelled);
+            return Ok(lingxi_core::host::RecapOutcome::Cancelled);
         }
         let saved = match self.model_runtime.cache_safe_slot.as_ref() {
             Some(slot) => slot.get_last().await,
@@ -1036,7 +1037,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
 
         tokio::select! {
             biased;
-            () = cancel.cancelled() => Ok(platform_api::RecapOutcome::Cancelled),
+            () = cancel.cancelled() => Ok(lingxi_core::host::RecapOutcome::Cancelled),
             r = runner.run(req) => match r {
                 Ok(res) => {
                     // Claude's extractor prefers any non-empty text block and
@@ -1051,17 +1052,17 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
                             .and_then(|call| call.get("name"))
                             .and_then(serde_json::Value::as_str)
                         {
-                            return Ok(platform_api::RecapOutcome::Text(format!(
+                            return Ok(lingxi_core::host::RecapOutcome::Text(format!(
                                 "(The model tried to call {tool} instead of answering directly. Try rephrasing or ask in the main conversation.)"
                             )));
                         }
                     }
-                    Ok(platform_api::RecapOutcome::Text(text))
+                    Ok(lingxi_core::host::RecapOutcome::Text(text))
                 }
-                Err(sidequery::ForkError::Api(error)) => Ok(platform_api::RecapOutcome::Text(
+                Err(sidequery::ForkError::Api(error)) => Ok(lingxi_core::host::RecapOutcome::Text(
                     format!("(API error: {error})"),
                 )),
-                Err(e) => Err(platform_api::HandleError::ActionFailed(e.to_string())),
+                Err(e) => Err(lingxi_core::host::HandleError::ActionFailed(e.to_string())),
             }
         }
     }
@@ -1182,7 +1183,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
 
     /// Task 8 (llm-runtime future-work batch 3): forward the API client's
     /// latest unified rate-limit header snapshot to
-    /// [`platform_api::OutputStream::emit_rate_limit`], emitting ONLY when it
+    /// [`lingxi_core::host::OutputStream::emit_rate_limit`], emitting ONLY when it
     /// differs from the last emitted value (emit-on-change dedup against
     /// [`Self::last_emitted_rate_limit`]).
     ///
@@ -1226,7 +1227,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
 
     /// Task 2 (llm-runtime future-work batch 5): forward the API client's
     /// latest RAW per-window utilization snapshot to
-    /// [`platform_api::OutputStream::emit_raw_utilization`] when it CHANGED since
+    /// [`lingxi_core::host::OutputStream::emit_raw_utilization`] when it CHANGED since
     /// the last emit. The empty snapshot is significant: it clears a
     /// previously-rendered utilization window in downstream clients.
     ///
@@ -1269,7 +1270,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
     /// Returns `None` if no tracker was attached. Exposed so future M7
     /// renderers (per-model breakdown view) can access
     /// `CostState.per_model_usage` without going through the leaf-friendly
-    /// [`platform_api::CostSnapshot`] projection. (M6-06)
+    /// [`lingxi_core::host::CostSnapshot`] projection. (M6-06)
     pub async fn cost_state(&self) -> Option<cost::CostState> {
         let t = self.model_runtime.cost_tracker.as_ref()?;
         Some(t.snapshot().await)
@@ -1295,23 +1296,23 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
     }
 
     /// Project the wired [`cost::CostTracker`] state onto the
-    /// leaf-friendly [`platform_api::CostSnapshot`]. Used by both the
+    /// leaf-friendly [`lingxi_core::host::CostSnapshot`]. Used by both the
     /// trait method `snapshot_cost` and the per-turn end-of-turn emitter
     /// (`OutputStream::emit_end_turn`). (M6-06)
     ///
     /// If no tracker is wired, returns a zero-valued snapshot keyed to
     /// the current session id (backward-compat shape).
-    pub async fn snapshot_cost_real(&self) -> platform_api::CostSnapshot {
+    pub async fn snapshot_cost_real(&self) -> lingxi_core::host::CostSnapshot {
         let session_id = self.session.lock().await.session_id;
         let loops = match &self.model_runtime.loop_usage {
             Some(provider) => provider.usage_rows().await,
             None => Vec::new(),
         };
         let Some(tracker) = self.model_runtime.cost_tracker.as_ref() else {
-            return platform_api::CostSnapshot {
+            return lingxi_core::host::CostSnapshot {
                 session_id,
                 loops,
-                ..platform_api::CostSnapshot::default()
+                ..lingxi_core::host::CostSnapshot::default()
             };
         };
         // Pin the tracker view to the session id captured above. Clear/resume
@@ -1354,7 +1355,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
                 now_ms,
             )
         };
-        platform_api::CostSnapshot {
+        lingxi_core::host::CostSnapshot {
             session_id,
             prompt_cache_line,
             total_nano_usd: state.total_nano_usd,
@@ -1372,7 +1373,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             by_model: state
                 .per_model_usage
                 .values()
-                .map(|mu| platform_api::orchestrator::ModelUsageRow {
+                .map(|mu| lingxi_core::host::orchestrator::ModelUsageRow {
                     model: mu.model_ref.model.clone(),
                     // (cc 2.1.218) `n.provider=n_(r)` — the serving provider,
                     // pre-stringified so the transport row stays cost-free.
@@ -1387,7 +1388,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             unknown_models: !state.unpriced_models.is_empty(),
             current_usage: state
                 .last_usage
-                .map(|usage| platform_api::CurrentUsageSnapshot {
+                .map(|usage| lingxi_core::host::CurrentUsageSnapshot {
                     input_tokens: usage.tokens.input,
                     output_tokens: usage.tokens.output,
                     cache_read_input_tokens: state.last_cache_read_input_tokens,
@@ -1497,7 +1498,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let current_model = { self.session.lock().await.model.clone() };
         let notice_uuid = uuid::Uuid::new_v4().to_string();
         // Routing, the once-per-session latch, the tried set and the notice
-        // accumulate/collapse pair all live in `platform_api::refusal_driver`,
+        // accumulate/collapse pair all live in `lingxi_core::host::refusal_driver`,
         // because the subagent runner needs to behave identically and cannot
         // depend on this crate.
         let hop = {
@@ -1554,12 +1555,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // `convert_messages` drops every `System` before the wire
             // (`llm-runtime/src/convert.rs`), so this is transcript + TUI only
             // and never becomes model context.
-            let notice_msg = protocol::ConversationMessage::System {
-                id: protocol::MessageId::new(),
+            let notice_msg = lingxi_core::types::ConversationMessage::System {
+                id: lingxi_core::types::MessageId::new(),
                 content,
                 subtype: Some("model_refusal_fallback".to_string()),
                 compact_metadata: None,
-                refusal_fallback: Some(protocol::RefusalFallbackMetadata {
+                refusal_fallback: Some(lingxi_core::types::RefusalFallbackMetadata {
                     trigger: "refusal".to_string(),
                     direction: "retry".to_string(),
                     // This port's cascade persistently swaps the SESSION model
@@ -2011,7 +2012,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// capability table for ⇒ **default OFF**.
     pub(crate) async fn bash_output_audience_note_message(
         &self,
-        tool_use_id: &protocol::ToolUseId,
+        tool_use_id: &lingxi_core::types::ToolUseId,
     ) -> Option<ConversationMessage> {
         if !crate::prompt::bash_output_note::is_enabled() {
             return None;
@@ -2086,7 +2087,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             }
             llm_runtime::thinking_scope::scope_thinking_recovery(
                 scope,
-                platform_api::session_flags::scope_non_interactive_session(non_interactive, future),
+                lingxi_core::host::session_flags::scope_non_interactive_session(
+                    non_interactive,
+                    future,
+                ),
             )
             .await
         }
@@ -2166,8 +2170,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = effort
             .clone()
-            .map(|id| platform_api::ReasoningSelection::Level { id })
-            .unwrap_or(platform_api::ReasoningSelection::Automatic);
+            .map(|id| lingxi_core::host::ReasoningSelection::Level { id })
+            .unwrap_or(lingxi_core::host::ReasoningSelection::Automatic);
         self.apply_effort(effort);
     }
 
@@ -2194,8 +2198,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .store(true, std::sync::atomic::Ordering::Release);
         let selection = effort
             .clone()
-            .map(|id| platform_api::ReasoningSelection::Level { id })
-            .unwrap_or(platform_api::ReasoningSelection::Automatic);
+            .map(|id| lingxi_core::host::ReasoningSelection::Level { id })
+            .unwrap_or(lingxi_core::host::ReasoningSelection::Automatic);
         let (validated, thinking, provider_effort, legacy_effort) =
             self.reasoning_request_state(model, provider_id, &selection);
         *self
@@ -2219,7 +2223,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         model: &str,
         provider_id: Option<&str>,
-        selection: platform_api::ReasoningSelection,
+        selection: lingxi_core::host::ReasoningSelection,
     ) {
         if self
             .model_runtime
@@ -2259,7 +2263,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     }
 
     #[must_use]
-    pub fn current_reasoning_selection(&self) -> platform_api::ReasoningSelection {
+    pub fn current_reasoning_selection(&self) -> lingxi_core::host::ReasoningSelection {
         if let Some(settings) = crate::scheduled_turn::current() {
             return settings.reasoning;
         }
@@ -2279,7 +2283,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         model: &str,
         provider_id: Option<&str>,
-    ) -> platform_api::ReasoningControlSpec {
+    ) -> lingxi_core::host::ReasoningControlSpec {
         let mut matches = self
             .api
             .list_model_listings()
@@ -2298,9 +2302,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // arbitrary or custom ids remain Auto-only instead of inheriting
         // Anthropic controls by name.
         let inferred_provider = provider_id.or_else(|| {
-            platform_api::model_capabilities::has_capability(
+            lingxi_core::host::model_capabilities::has_capability(
                 model,
-                platform_api::model_capabilities::ModelCapability::Effort,
+                lingxi_core::host::model_capabilities::ModelCapability::Effort,
             )
             .then_some("builtin")
         });
@@ -2337,7 +2341,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 llm_runtime::ProtocolFamily::OpenAiChat,
                 "https://openrouter.ai/api/v1",
             ),
-            _ => return platform_api::reasoning_control_spec_for_model(model, inferred_provider),
+            _ => {
+                return lingxi_core::host::reasoning_control_spec_for_model(
+                    model,
+                    inferred_provider,
+                )
+            }
         };
 
         let raw = llm_runtime::reasoning_controls::reasoning_control_spec(
@@ -2353,19 +2362,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .as_ref()
             .map(|selection| match selection {
                 llm_runtime::reasoning_controls::ReasoningSelection::Automatic => {
-                    platform_api::ReasoningSelection::Automatic
+                    lingxi_core::host::ReasoningSelection::Automatic
                 }
                 llm_runtime::reasoning_controls::ReasoningSelection::Disabled => {
-                    platform_api::ReasoningSelection::Disabled
+                    lingxi_core::host::ReasoningSelection::Disabled
                 }
                 llm_runtime::reasoning_controls::ReasoningSelection::Enabled => {
-                    platform_api::ReasoningSelection::Enabled
+                    lingxi_core::host::ReasoningSelection::Enabled
                 }
                 llm_runtime::reasoning_controls::ReasoningSelection::Level(id) => {
-                    platform_api::ReasoningSelection::Level { id: id.clone() }
+                    lingxi_core::host::ReasoningSelection::Level { id: id.clone() }
                 }
                 llm_runtime::reasoning_controls::ReasoningSelection::TokenBudget(tokens) => {
-                    platform_api::ReasoningSelection::TokenBudget {
+                    lingxi_core::host::ReasoningSelection::TokenBudget {
                         tokens: u64::from(*tokens),
                     }
                 }
@@ -2375,39 +2384,39 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         if let Some(mandatory) = &mandatory {
             available.push(mandatory.clone());
         } else {
-            available.push(platform_api::ReasoningSelection::Automatic);
+            available.push(lingxi_core::host::ReasoningSelection::Automatic);
             if raw.can_disable {
-                available.push(platform_api::ReasoningSelection::Disabled);
+                available.push(lingxi_core::host::ReasoningSelection::Disabled);
             }
             if raw.can_enable {
-                available.push(platform_api::ReasoningSelection::Enabled);
+                available.push(lingxi_core::host::ReasoningSelection::Enabled);
             }
             available.extend(
                 raw.levels
                     .iter()
                     .cloned()
-                    .map(|id| platform_api::ReasoningSelection::Level { id }),
+                    .map(|id| lingxi_core::host::ReasoningSelection::Level { id }),
             );
         }
 
         let auto_only = available.len() == 1
             && matches!(
                 available.first(),
-                Some(platform_api::ReasoningSelection::Automatic)
+                Some(lingxi_core::host::ReasoningSelection::Automatic)
             )
             && raw.token_budget.is_none();
-        platform_api::ReasoningControlSpec {
+        lingxi_core::host::ReasoningControlSpec {
             available,
             selections_persistable: mandatory.is_none(),
             budget_range: raw
                 .token_budget
-                .map(|range| platform_api::ReasoningBudgetRange {
+                .map(|range| lingxi_core::host::ReasoningBudgetRange {
                     min_tokens: range.min,
                     max_tokens: range.max,
                     supports_dynamic: false,
                     supports_disabled: raw.can_disable,
                 }),
-            provider_default: mandatory.unwrap_or(platform_api::ReasoningSelection::Automatic),
+            provider_default: mandatory.unwrap_or(lingxi_core::host::ReasoningSelection::Automatic),
             forced: raw.mandatory_selection.is_some(),
             modifiable: raw.mandatory_selection.is_none() && !auto_only,
             disabled_reason: if raw.mandatory_selection.is_some() {
@@ -2422,14 +2431,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
     fn validate_reasoning_selection(
         &self,
-        selection: &platform_api::ReasoningSelection,
+        selection: &lingxi_core::host::ReasoningSelection,
         model: &str,
         provider_id: Option<&str>,
-    ) -> platform_api::ReasoningSelection {
+    ) -> lingxi_core::host::ReasoningSelection {
         let spec = self.reasoning_spec_for_model(model, provider_id);
         let supported = match selection {
-            platform_api::ReasoningSelection::Automatic => true,
-            platform_api::ReasoningSelection::TokenBudget { tokens } => {
+            lingxi_core::host::ReasoningSelection::Automatic => true,
+            lingxi_core::host::ReasoningSelection::TokenBudget { tokens } => {
                 spec.budget_range.as_ref().is_some_and(|range| {
                     (*tokens >= u64::from(range.min_tokens)
                         && *tokens <= u64::from(range.max_tokens))
@@ -2443,7 +2452,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         } else if supported {
             selection.clone()
         } else {
-            platform_api::ReasoningSelection::Automatic
+            lingxi_core::host::ReasoningSelection::Automatic
         }
     }
 
@@ -2451,9 +2460,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         model: &str,
         provider_id: Option<&str>,
-        selection: &platform_api::ReasoningSelection,
+        selection: &lingxi_core::host::ReasoningSelection,
     ) -> (
-        platform_api::ReasoningSelection,
+        lingxi_core::host::ReasoningSelection,
         llm_runtime::model::thinking::ThinkingConfig,
         Option<serde_json::Value>,
         Option<String>,
@@ -2463,9 +2472,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let effort_level = |id: &str| Some(serde_json::Value::String(id.to_string()));
         let legacy = |id: &str| Some(id.to_string());
         let provider_id = provider_id.or_else(|| {
-            platform_api::model_capabilities::has_capability(
+            lingxi_core::host::model_capabilities::has_capability(
                 model,
-                platform_api::model_capabilities::ModelCapability::Effort,
+                lingxi_core::host::model_capabilities::ModelCapability::Effort,
             )
             .then_some("builtin")
         });
@@ -2474,13 +2483,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
         match provider_id {
             "anthropic" | "builtin" => match &validated {
-                platform_api::ReasoningSelection::Automatic => {
+                lingxi_core::host::ReasoningSelection::Automatic => {
                     (validated, ThinkingConfig::Automatic, None, None)
                 }
-                platform_api::ReasoningSelection::Disabled => {
+                lingxi_core::host::ReasoningSelection::Disabled => {
                     (validated, ThinkingConfig::Disabled, None, None)
                 }
-                platform_api::ReasoningSelection::TokenBudget { tokens } => (
+                lingxi_core::host::ReasoningSelection::TokenBudget { tokens } => (
                     validated.clone(),
                     ThinkingConfig::Enabled {
                         budget_tokens: (*tokens).try_into().unwrap_or(u32::MAX),
@@ -2488,27 +2497,27 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     None,
                     None,
                 ),
-                platform_api::ReasoningSelection::Level { id } => (
+                lingxi_core::host::ReasoningSelection::Level { id } => (
                     validated.clone(),
                     ThinkingConfig::Adaptive,
                     effort_level(id.as_str()),
                     legacy(id.as_str()),
                 ),
-                platform_api::ReasoningSelection::Enabled => {
+                lingxi_core::host::ReasoningSelection::Enabled => {
                     (validated, ThinkingConfig::Adaptive, None, None)
                 }
             },
             "openai" | "openai-chatgpt" => match &validated {
-                platform_api::ReasoningSelection::Automatic => {
+                lingxi_core::host::ReasoningSelection::Automatic => {
                     (validated, ThinkingConfig::Automatic, None, None)
                 }
-                platform_api::ReasoningSelection::Level { id } => (
+                lingxi_core::host::ReasoningSelection::Level { id } => (
                     validated.clone(),
                     ThinkingConfig::Adaptive,
                     effort_level(id.as_str()),
                     legacy(id.as_str()),
                 ),
-                platform_api::ReasoningSelection::Disabled => {
+                lingxi_core::host::ReasoningSelection::Disabled => {
                     // Responses API uses the explicit `none` effort value to
                     // distinguish a user-off override from provider Auto.
                     (
@@ -2518,41 +2527,41 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         None,
                     )
                 }
-                platform_api::ReasoningSelection::Enabled => {
+                lingxi_core::host::ReasoningSelection::Enabled => {
                     (validated, ThinkingConfig::Adaptive, None, None)
                 }
-                platform_api::ReasoningSelection::TokenBudget { .. } => {
+                lingxi_core::host::ReasoningSelection::TokenBudget { .. } => {
                     (validated, ThinkingConfig::Adaptive, None, None)
                 }
             },
             "gemini" => {
                 if model_lc.starts_with("gemini-3.") {
                     match &validated {
-                        platform_api::ReasoningSelection::Automatic => {
+                        lingxi_core::host::ReasoningSelection::Automatic => {
                             (validated, ThinkingConfig::Automatic, None, None)
                         }
-                        platform_api::ReasoningSelection::Level { id } => (
+                        lingxi_core::host::ReasoningSelection::Level { id } => (
                             validated.clone(),
                             ThinkingConfig::Adaptive,
                             effort_level(id.as_str()),
                             legacy(id.as_str()),
                         ),
-                        platform_api::ReasoningSelection::Disabled => {
+                        lingxi_core::host::ReasoningSelection::Disabled => {
                             (validated, ThinkingConfig::Disabled, None, None)
                         }
-                        platform_api::ReasoningSelection::Enabled => {
+                        lingxi_core::host::ReasoningSelection::Enabled => {
                             (validated, ThinkingConfig::Adaptive, None, None)
                         }
-                        platform_api::ReasoningSelection::TokenBudget { .. } => {
+                        lingxi_core::host::ReasoningSelection::TokenBudget { .. } => {
                             (validated, ThinkingConfig::Adaptive, None, None)
                         }
                     }
                 } else {
                     match &validated {
-                        platform_api::ReasoningSelection::Automatic => {
+                        lingxi_core::host::ReasoningSelection::Automatic => {
                             (validated, ThinkingConfig::Automatic, None, None)
                         }
-                        platform_api::ReasoningSelection::TokenBudget { tokens } => (
+                        lingxi_core::host::ReasoningSelection::TokenBudget { tokens } => (
                             validated.clone(),
                             ThinkingConfig::Enabled {
                                 budget_tokens: (*tokens).try_into().unwrap_or(u32::MAX),
@@ -2560,87 +2569,87 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             None,
                             None,
                         ),
-                        platform_api::ReasoningSelection::Disabled => {
+                        lingxi_core::host::ReasoningSelection::Disabled => {
                             (validated, ThinkingConfig::Disabled, None, None)
                         }
-                        platform_api::ReasoningSelection::Enabled => {
+                        lingxi_core::host::ReasoningSelection::Enabled => {
                             (validated, ThinkingConfig::Adaptive, None, None)
                         }
-                        platform_api::ReasoningSelection::Level { .. } => {
+                        lingxi_core::host::ReasoningSelection::Level { .. } => {
                             (validated, ThinkingConfig::Adaptive, None, None)
                         }
                     }
                 }
             }
             "deepseek" => match &validated {
-                platform_api::ReasoningSelection::Automatic => {
+                lingxi_core::host::ReasoningSelection::Automatic => {
                     (validated, ThinkingConfig::Automatic, None, None)
                 }
-                platform_api::ReasoningSelection::Disabled => (
+                lingxi_core::host::ReasoningSelection::Disabled => (
                     validated,
                     ThinkingConfig::Disabled,
                     effort_level("off"),
                     None,
                 ),
-                platform_api::ReasoningSelection::Level { id } => (
+                lingxi_core::host::ReasoningSelection::Level { id } => (
                     validated.clone(),
                     ThinkingConfig::Adaptive,
                     effort_level(id.as_str()),
                     legacy(id.as_str()),
                 ),
-                platform_api::ReasoningSelection::Enabled => {
+                lingxi_core::host::ReasoningSelection::Enabled => {
                     (validated, ThinkingConfig::Adaptive, None, None)
                 }
-                platform_api::ReasoningSelection::TokenBudget { .. } => {
+                lingxi_core::host::ReasoningSelection::TokenBudget { .. } => {
                     (validated, ThinkingConfig::Adaptive, None, None)
                 }
             },
             "kimi" | "kimi-code" => {
                 if matches!(model_lc.as_str(), "kimi-k3" | "k3" | "k3-256k") {
                     match &validated {
-                        platform_api::ReasoningSelection::Automatic => {
+                        lingxi_core::host::ReasoningSelection::Automatic => {
                             (validated, ThinkingConfig::Automatic, None, None)
                         }
-                        platform_api::ReasoningSelection::Level { id } => (
+                        lingxi_core::host::ReasoningSelection::Level { id } => (
                             validated.clone(),
                             ThinkingConfig::Adaptive,
                             effort_level(id.as_str()),
                             legacy(id.as_str()),
                         ),
-                        platform_api::ReasoningSelection::Disabled => {
+                        lingxi_core::host::ReasoningSelection::Disabled => {
                             (validated, ThinkingConfig::Disabled, None, None)
                         }
-                        platform_api::ReasoningSelection::Enabled => {
+                        lingxi_core::host::ReasoningSelection::Enabled => {
                             (validated, ThinkingConfig::Adaptive, None, None)
                         }
-                        platform_api::ReasoningSelection::TokenBudget { .. } => {
+                        lingxi_core::host::ReasoningSelection::TokenBudget { .. } => {
                             (validated, ThinkingConfig::Adaptive, None, None)
                         }
                     }
                 } else {
                     match &validated {
-                        platform_api::ReasoningSelection::Automatic => {
+                        lingxi_core::host::ReasoningSelection::Automatic => {
                             (validated, ThinkingConfig::Automatic, None, None)
                         }
-                        platform_api::ReasoningSelection::Disabled => (
+                        lingxi_core::host::ReasoningSelection::Disabled => (
                             validated,
                             ThinkingConfig::Disabled,
                             effort_level("off"),
                             None,
                         ),
-                        platform_api::ReasoningSelection::Enabled => (
+                        lingxi_core::host::ReasoningSelection::Enabled => (
                             validated,
                             ThinkingConfig::Adaptive,
                             effort_level("on"),
                             None,
                         ),
-                        platform_api::ReasoningSelection::Level { id } => (
+                        lingxi_core::host::ReasoningSelection::Level { id } => (
                             validated.clone(),
                             ThinkingConfig::Adaptive,
                             effort_level(id.as_str()),
                             legacy(id.as_str()),
                         ),
-                        platform_api::ReasoningSelection::TokenBudget { tokens } => (
+                        lingxi_core::host::ReasoningSelection::TokenBudget { tokens } => (
                             validated.clone(),
                             ThinkingConfig::Enabled {
                                 budget_tokens: (*tokens).try_into().unwrap_or(u32::MAX),
@@ -2652,7 +2661,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 }
             }
             _ => match &validated {
-                platform_api::ReasoningSelection::Automatic => {
+                lingxi_core::host::ReasoningSelection::Automatic => {
                     (validated, ThinkingConfig::Automatic, None, None)
                 }
                 _ => (validated, ThinkingConfig::Adaptive, None, None),
@@ -2664,8 +2673,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         model: &str,
         provider_id: Option<&str>,
-        selection: platform_api::ReasoningSelection,
-    ) -> platform_api::ReasoningSelection {
+        selection: lingxi_core::host::ReasoningSelection,
+    ) -> lingxi_core::host::ReasoningSelection {
         self.model_runtime
             .current_effort_explicit
             .store(true, std::sync::atomic::Ordering::Release);
@@ -2698,8 +2707,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         model: &str,
         provider_id: Option<&str>,
-        selection: platform_api::ReasoningSelection,
-    ) -> platform_api::ReasoningSelection {
+        selection: lingxi_core::host::ReasoningSelection,
+    ) -> lingxi_core::host::ReasoningSelection {
         let (validated, thinking, effort, legacy_effort) =
             self.reasoning_request_state(model, provider_id, &selection);
         self.model_runtime
@@ -2731,7 +2740,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         model: &str,
         provider_id: Option<&str>,
-    ) -> platform_api::ConversationControls {
+    ) -> lingxi_core::host::ConversationControls {
         let reasoning_spec = self.reasoning_spec_for_model(model, provider_id);
         let requested_reasoning = self.current_reasoning_selection();
         let effective_reasoning =
@@ -2752,16 +2761,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         .map(|mode| {
             let unavailable =
                 mode == "bypassPermissions" && !self.perms.can_request_bypass_permissions();
-            platform_api::PermissionModeAvailability {
+            lingxi_core::host::PermissionModeAvailability {
                 mode: mode.to_string(),
                 available: !unavailable,
                 disabled_reason: unavailable.then(|| "not_yet_available".to_string()),
             }
         })
         .collect();
-        platform_api::ConversationControls {
-            model_reference: platform_api::qualified_model_ref(model, provider_id),
-            permission: platform_api::PermissionControlState {
+        lingxi_core::host::ConversationControls {
+            model_reference: lingxi_core::host::qualified_model_ref(model, provider_id),
+            permission: lingxi_core::host::PermissionControlState {
                 requested: requested_permission,
                 effective: effective_permission,
                 modes: permission_modes,
@@ -2778,7 +2787,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         &self,
         prompt: &str,
         model: &str,
-        reasoning: platform_api::ReasoningSelection,
+        reasoning: lingxi_core::host::ReasoningSelection,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, String> {
         let turn_guard = self
@@ -2794,13 +2803,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// target validation, the host's durable binding, execution and result capture.
     pub async fn run_scheduled_turn_in_session<F>(
         &self,
-        expected_session: protocol::SessionId,
+        expected_session: lingxi_core::types::SessionId,
         prompt: &str,
         model: &str,
-        reasoning: platform_api::ReasoningSelection,
+        reasoning: lingxi_core::host::ReasoningSelection,
         cancel: CancellationToken,
         before_start: F,
-    ) -> Result<(TurnOutcome, protocol::SessionId, String), String>
+    ) -> Result<(TurnOutcome, lingxi_core::types::SessionId, String), String>
     where
         F: std::future::Future<Output = Result<(), String>> + Send,
     {
@@ -2821,8 +2830,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .history
             .iter()
             .rev()
-            .find(|message| matches!(message, protocol::ConversationMessage::Assistant { .. }))
-            .map(protocol::ConversationMessage::text_content)
+            .find(|message| {
+                matches!(
+                    message,
+                    lingxi_core::types::ConversationMessage::Assistant { .. }
+                )
+            })
+            .map(lingxi_core::types::ConversationMessage::text_content)
             .unwrap_or_default();
         Ok((outcome, session.session_id, summary))
     }
@@ -2830,14 +2844,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     fn scheduled_turn_settings(
         &self,
         model: &str,
-        reasoning: platform_api::ReasoningSelection,
+        reasoning: lingxi_core::host::ReasoningSelection,
     ) -> Result<crate::scheduled_turn::ScheduledSettings, String> {
         let listing = self
             .api
             .list_model_listings()
             .into_iter()
             .find(|row| {
-                platform_api::qualified_model_ref(&row.request_model, Some(&row.provider_id))
+                lingxi_core::host::qualified_model_ref(&row.request_model, Some(&row.provider_id))
                     == model
             })
             .ok_or_else(|| "paused:Scheduled model is unavailable; choose a model".to_string())?;
@@ -2888,7 +2902,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
     /// Apply a LIVE session permission-mode change (stream-json
     /// `set_permission_mode` control_request). Delegates to the gate's
-    /// [`platform_api::PermissionGate::set_permission_mode`]; only the enforcing
+    /// [`lingxi_core::host::PermissionGate::set_permission_mode`]; only the enforcing
     /// `PolicyPermissionGate` actually mutates (other gates no-op). Returns the
     /// gate's validation error string on an invalid / disallowed mode.
     pub async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
@@ -2942,7 +2956,7 @@ mod session_sidecar_tests {
         copy_then_cleanup_with, last_response_is_api_error, move_session_sidecar_best_effort,
         parse_prompt_suggestion_response, SidecarCopyError,
     };
-    use protocol::{ContentBlock, ConversationMessage, MessageId};
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
     #[test]
     fn occupied_sidecar_destination_is_quarantined_while_source_moves_as_a_unit() {

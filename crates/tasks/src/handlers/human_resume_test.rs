@@ -1,5 +1,5 @@
 use super::*;
-use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
+use lingxi_core::host::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
 
 #[derive(Default)]
 struct RestoreGate {
@@ -18,7 +18,7 @@ impl SubagentSpawnObserver for RestoreGate {
     async fn before_start(
         &self,
         _: &SubagentObservation,
-    ) -> Result<(), platform_api::SubagentSpawnError> {
+    ) -> Result<(), lingxi_core::host::SubagentSpawnError> {
         if self.block.load(std::sync::atomic::Ordering::SeqCst) {
             self.entered.notify_one();
             self.release.notified().await;
@@ -42,9 +42,9 @@ impl agent::SubagentApiClient for HumanApi {
         &self,
         _: &str,
         _: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         _: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         let history = serde_json::to_string(&messages).unwrap();
         let index = {
             let mut calls = self.calls.lock().unwrap();
@@ -96,7 +96,7 @@ impl agent::SubagentApiClient for HumanApi {
             self.call_release.notified().await;
             in_flight.finished = true;
         }
-        Ok(llm_runtime::LlmResponse {
+        Ok(llm_runtime::HistoryResponse {
             id: "human-response".into(),
             model: "mock".into(),
             content: vec![llm_runtime::ContentBlock::Text {
@@ -110,7 +110,7 @@ impl agent::SubagentApiClient for HumanApi {
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
-            usage: llm_runtime::Usage::default(),
+            usage: llm_runtime::ExecutionUsage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
         })
@@ -129,7 +129,7 @@ async fn fixture() -> Fixture {
     fixture_with_worktree(None).await
 }
 async fn fixture_with_worktree(
-    manager: Option<Arc<dyn platform_api::worktree::WorktreeManager>>,
+    manager: Option<Arc<dyn lingxi_core::host::worktree::WorktreeManager>>,
 ) -> Fixture {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (dir, output) = make_output_manager(fs.clone());
@@ -150,7 +150,7 @@ async fn fixture_with_worktree(
             .with_api_client(api.clone())
             .with_spawn_observer(gate.clone())
             .with_hook_context(
-                protocol::SessionId::new(),
+                lingxi_core::types::SessionId::new(),
                 dir.path().to_owned(),
                 Some(dir.path().join("transcripts")),
             )
@@ -215,7 +215,7 @@ async fn wait_parked(registry: &crate::registry::TaskRegistry, id: &str) {
 #[tokio::test]
 async fn human_message_restores_stopped_real_pool_with_history_and_original_alias() {
     let f = fixture().await;
-    use platform_api::task_registry::TaskRegistryHandle;
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
     TaskRegistryHandle::send_human_task_message(
         f.registry.as_ref(),
         "ahumanalias",
@@ -384,13 +384,13 @@ struct WorktreeGate {
     path: StdMutex<PathBuf>,
 }
 #[async_trait]
-impl platform_api::worktree::WorktreeManager for WorktreeGate {
+impl lingxi_core::host::worktree::WorktreeManager for WorktreeGate {
     async fn create_worktree(
         &self,
         _: &str,
         base: Option<&str>,
         _: &[PathBuf],
-    ) -> Result<platform_api::worktree::WorktreeHandle, platform_api::worktree::WorktreeError> {
+    ) -> Result<lingxi_core::host::worktree::WorktreeHandle, lingxi_core::host::worktree::WorktreeError> {
         assert_eq!(base, Some("pinned-base"));
         self.creating.notify_one();
         if self.block_create.load(std::sync::atomic::Ordering::SeqCst) {
@@ -398,7 +398,7 @@ impl platform_api::worktree::WorktreeManager for WorktreeGate {
         }
         let path = self.path.lock().unwrap().clone();
         std::fs::create_dir_all(&path).unwrap();
-        Ok(platform_api::worktree::WorktreeHandle {
+        Ok(lingxi_core::host::worktree::WorktreeHandle {
             path,
             branch_name: "restored".into(),
             base_commit: Some("pinned-base".into()),
@@ -406,8 +406,8 @@ impl platform_api::worktree::WorktreeManager for WorktreeGate {
     }
     async fn remove_worktree(
         &self,
-        handle: &platform_api::worktree::WorktreeHandle,
-    ) -> Result<(), platform_api::worktree::WorktreeError> {
+        handle: &lingxi_core::host::worktree::WorktreeHandle,
+    ) -> Result<(), lingxi_core::host::worktree::WorktreeError> {
         self.removing.notify_one();
         if self.block_remove.load(std::sync::atomic::Ordering::SeqCst) {
             self.release_remove.notified().await;
@@ -418,14 +418,14 @@ impl platform_api::worktree::WorktreeManager for WorktreeGate {
     }
     async fn list_worktrees(
         &self,
-    ) -> Result<Vec<platform_api::worktree::WorktreeInfo>, platform_api::worktree::WorktreeError>
+    ) -> Result<Vec<lingxi_core::host::worktree::WorktreeInfo>, lingxi_core::host::worktree::WorktreeError>
     {
         Ok(vec![])
     }
     async fn cleanup_stale(
         &self,
         _: std::time::Duration,
-    ) -> Result<Vec<PathBuf>, platform_api::worktree::WorktreeError> {
+    ) -> Result<Vec<PathBuf>, lingxi_core::host::worktree::WorktreeError> {
         Ok(vec![])
     }
     fn is_supported(&self) -> bool {
@@ -433,12 +433,12 @@ impl platform_api::worktree::WorktreeManager for WorktreeGate {
     }
     async fn worktree_change_summary(
         &self,
-        _: &platform_api::worktree::WorktreeHandle,
+        _: &lingxi_core::host::worktree::WorktreeHandle,
     ) -> Result<
-        Option<platform_api::worktree::WorktreeChangeSummary>,
-        platform_api::worktree::WorktreeError,
+        Option<lingxi_core::host::worktree::WorktreeChangeSummary>,
+        lingxi_core::host::worktree::WorktreeError,
     > {
-        Ok(Some(platform_api::worktree::WorktreeChangeSummary {
+        Ok(Some(lingxi_core::host::worktree::WorktreeChangeSummary {
             changed_files: 0,
             commits: 0,
         }))
@@ -446,8 +446,8 @@ impl platform_api::worktree::WorktreeManager for WorktreeGate {
     async fn enter_existing(
         &self,
         path: &std::path::Path,
-    ) -> Result<platform_api::worktree::WorktreeHandle, platform_api::worktree::WorktreeError> {
-        Ok(platform_api::worktree::WorktreeHandle {
+    ) -> Result<lingxi_core::host::worktree::WorktreeHandle, lingxi_core::host::worktree::WorktreeError> {
+        Ok(lingxi_core::host::worktree::WorktreeHandle {
             path: path.to_owned(),
             branch_name: "restored".into(),
             base_commit: Some("pinned-base".into()),
@@ -457,10 +457,10 @@ impl platform_api::worktree::WorktreeManager for WorktreeGate {
 fn install_worktree_recipe(
     f: &Fixture,
     manager: &WorktreeGate,
-) -> platform_api::worktree::WorktreeHandle {
+) -> lingxi_core::host::worktree::WorktreeHandle {
     let path = f._dir.path().join("isolated");
     *manager.path.lock().unwrap() = path.clone();
-    let handle = platform_api::worktree::WorktreeHandle {
+    let handle = lingxi_core::host::worktree::WorktreeHandle {
         path: path.clone(),
         branch_name: "original".into(),
         base_commit: Some("pinned-base".into()),

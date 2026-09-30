@@ -3,7 +3,7 @@
 //! The `tasks` crate is a LEAF with no access to a live hook executor: it owns
 //! the task lifecycle ([`TaskRegistry::set_status`](../../tasks/src/registry.rs))
 //! but cannot reach `orch.hooks` without a dependency cycle. This trait closes
-//! that seam the same way `platform_api::team_spawn::TeamSpawnSeam` does for the
+//! that seam the same way `lingxi_core::host::team_spawn::TeamSpawnSeam` does for the
 //! coordinator → tasks edge: the registry holds an
 //! `Option<Arc<dyn TaskCompletedFirer>>` (default `None` => strict no-op) and
 //! calls [`fire`](TaskCompletedFirer::fire) best-effort when a task transitions

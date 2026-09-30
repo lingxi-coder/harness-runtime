@@ -6,12 +6,12 @@
 
 use crate::content_replacement::ContentReplacementState;
 use crate::registry::ToolRegistry;
-use lingxi_core::SessionState;
-use platform_api::audio::{
+use lingxi_core::host::audio::{
     AudioError, AudioErrorKind, AudioInitiator, AudioOperationContext, AudioOperationId, AudioOwner,
 };
-use platform_api::tool_invoker::ToolExecutionPolicy;
-use protocol::{AgentId, McpConnectionId, MessageId, SessionId, ToolUseId};
+use lingxi_core::host::tool_invoker::ToolExecutionPolicy;
+use lingxi_core::types::{AgentId, McpConnectionId, MessageId, SessionId, ToolUseId};
+use lingxi_core::SessionState;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -25,7 +25,7 @@ pub struct ToolUseContext {
     /// Static per-call options (debug flags, budget, system-prompt overrides).
     pub options: ToolUseOptions,
     /// Conversation history up to (but not including) the current call.
-    pub messages: Vec<protocol::ConversationMessage>,
+    pub messages: Vec<lingxi_core::types::ConversationMessage>,
     /// The tool-use id assigned by the model, if this call is bound to one.
     pub tool_use_id: Option<ToolUseId>,
     /// The current assistant message that owns this tool-use batch, if known.
@@ -105,7 +105,7 @@ pub struct ToolUseContext {
     pub depth: u32,
     /// Effective observer inherited from a parent subagent. The Agent tool
     /// copies this to a child only when the child has no direct observer.
-    pub observer: Option<platform_api::subagent_spawn::ObserverSpec>,
+    pub observer: Option<lingxi_core::host::subagent_spawn::ObserverSpec>,
     /// The session's observer PAIRINGS (oracle `toolUseContext.session
     /// .observers`). Distinct from [`Self::observer`], which is the
     /// declaration propagated to children; this is the live observed↔observer
@@ -113,12 +113,12 @@ pub struct ToolUseContext {
     /// `SendMessage` consults to refuse an observer. `None` for hosts that
     /// have not wired observers — the tool then refuses with the oracle's
     /// "not armed" wording rather than pretending a pairing exists.
-    pub observer_pairings: Option<Arc<platform_api::observer_pairing::ObserverPairings>>,
+    pub observer_pairings: Option<Arc<lingxi_core::host::observer_pairing::ObserverPairings>>,
     /// (`/rewind`) Pre-edit file-history backup hook. The `Edit`/`Write`/
     /// `NotebookEdit` tools call `track_edit(path)` through this BEFORE writing,
     /// so `/rewind` can restore the pre-edit content. `None` (tests / no
     /// checkpointing) makes every write untracked (no behavior change).
-    pub file_history: Option<Arc<dyn platform_api::FileHistorySink>>,
+    pub file_history: Option<Arc<dyn lingxi_core::host::FileHistorySink>>,
     // File state cache wired in Plan 10.
 }
 

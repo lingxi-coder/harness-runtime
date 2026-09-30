@@ -20,11 +20,11 @@ pub use loader::{LoadedFile, LoaderError};
 /// 1:1 with claude-code `MemoryType` (`utils/memory/types.ts`) restricted to
 /// the four instruction tiers this port loads — the separate memdir tiers
 /// (`AutoMem` / `TeamMem`) are out of scope, and are spelled
-/// [`protocol::MemoryEntryTier`].
+/// [`lingxi_core::types::MemoryEntryTier`].
 ///
 /// The splice / discovery order the tiers drive is NOT a property of this type
 /// — see [`hierarchy::walk`], which encodes it. The injection description
 /// (`getLingxiMds`, claudemd.ts:1168-1186) is likewise a function, in
 /// [`loader`]: Managed and User share the "private global instructions"
 /// wording; Project and Local each have their own.
-pub use protocol::SettingsScope as LingxiMdTier;
+pub use lingxi_core::types::SettingsScope as LingxiMdTier;

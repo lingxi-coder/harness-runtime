@@ -12,12 +12,12 @@
 use llm_runtime::ContentBlock as LlmContentBlock;
 
 use compaction::CompactionOrchestrator;
+use lingxi_core::host::OrchestratorHandle;
+use lingxi_core::types::{ConversationMessage, MessageId};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use platform_api::OrchestratorHandle;
-use protocol::{ConversationMessage, MessageId};
 use std::sync::Arc;
 
 struct CaptureCompactClient {
@@ -98,7 +98,7 @@ async fn seed_history(orch: &ConversationOrchestrator, n: usize) {
         } else {
             s.history.push(ConversationMessage::Assistant {
                 id: MessageId::new(),
-                content: vec![protocol::ContentBlock::Text {
+                content: vec![lingxi_core::types::ContentBlock::Text {
                     text: format!("reply-{i} padded with enough detail for compaction"),
                 }],
                 stop_reason: Some("end_turn".into()),
@@ -371,7 +371,7 @@ async fn failure_leaves_history_unchanged() {
             } else {
                 s.history.push(ConversationMessage::Assistant {
                     id: MessageId::new(),
-                    content: vec![protocol::ContentBlock::Text {
+                    content: vec![lingxi_core::types::ContentBlock::Text {
                         text: format!("reply-{i}"),
                     }],
                     stop_reason: Some("end_turn".into()),
@@ -446,7 +446,7 @@ async fn five_consecutive_force_compact_calls_do_not_explode() {
 /// every assistant `ToolUse` block has a matching `ToolResult` in a later
 /// user message, and no orphan `ToolResult` precedes its `ToolUse`.
 fn history_is_valid(history: &[ConversationMessage]) -> bool {
-    use protocol::{ContentBlock, ToolUseId};
+    use lingxi_core::types::{ContentBlock, ToolUseId};
     use std::collections::HashSet;
 
     let mut open_tool_uses: HashSet<ToolUseId> = HashSet::new();
@@ -481,10 +481,10 @@ fn history_is_valid(history: &[ConversationMessage]) -> bool {
 
 #[tokio::test]
 async fn compaction_safety_gate() {
-    use llm_runtime::{LlmResponse, Usage};
+    use llm_runtime::{ExecutionUsage as Usage, HistoryResponse};
 
     // Scripted end_turn response so the post-compaction turn can run.
-    let response = LlmResponse {
+    let response = HistoryResponse {
         id: "msg_gate".into(),
         model: "claude-opus-4-7".into(),
         content: vec![LlmContentBlock::Text {
@@ -571,24 +571,24 @@ async fn compaction_safety_gate() {
 struct CompactLifecycleOutput(std::sync::Mutex<Vec<String>>);
 
 #[async_trait::async_trait]
-impl platform_api::OutputStream for CompactLifecycleOutput {
+impl lingxi_core::host::OutputStream for CompactLifecycleOutput {
     async fn emit_text(&self, _text: &str) {}
     async fn emit_tool_call(
         &self,
-        _id: &protocol::ToolUseId,
+        _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
         _input: &serde_json::Value,
     ) {
     }
     async fn emit_tool_result(
         &self,
-        _id: &protocol::ToolUseId,
+        _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
         _model_text: &str,
         _result: &serde_json::Value,
     ) {
     }
-    async fn emit_end_turn(&self, _reason: &str, _cost: &platform_api::CostSnapshot) {}
+    async fn emit_end_turn(&self, _reason: &str, _cost: &lingxi_core::host::CostSnapshot) {}
     async fn emit_compaction_started(&self) {
         self.0.lock().unwrap().push("started".into());
     }
@@ -604,7 +604,7 @@ impl platform_api::OutputStream for CompactLifecycleOutput {
     async fn emit_compact_boundary(
         &self,
         _uuid: &str,
-        _metadata: &protocol::CompactBoundaryMetadata,
+        _metadata: &lingxi_core::types::CompactBoundaryMetadata,
     ) {
         self.0.lock().unwrap().push("boundary".into());
     }
@@ -717,7 +717,7 @@ async fn history_texts(orch: &ConversationOrchestrator) -> Vec<String> {
     let s = session.lock().await;
     s.history
         .iter()
-        .map(protocol::ConversationMessage::text_content)
+        .map(lingxi_core::types::ConversationMessage::text_content)
         .collect()
 }
 
@@ -732,7 +732,7 @@ async fn seed_marked(orch: &ConversationOrchestrator, n: usize, at: usize) -> St
         } else {
             ConversationMessage::Assistant {
                 id: MessageId::new(),
-                content: vec![protocol::ContentBlock::Text {
+                content: vec![lingxi_core::types::ContentBlock::Text {
                     text: format!("ASSISTANT-{i}"),
                 }],
                 stop_reason: Some("end_turn".into()),
@@ -759,7 +759,7 @@ async fn summarize_up_to_replaces_the_past_and_keeps_the_present() {
     orch.summarize_at(
         &chosen,
         None,
-        platform_api::SummarizeDirection::UpTo,
+        lingxi_core::host::SummarizeDirection::UpTo,
         tokio_util::sync::CancellationToken::new(),
     )
     .await
@@ -798,7 +798,7 @@ async fn summarize_from_keeps_the_past_and_replaces_the_present() {
     orch.summarize_at(
         &chosen,
         None,
-        platform_api::SummarizeDirection::From,
+        lingxi_core::host::SummarizeDirection::From,
         tokio_util::sync::CancellationToken::new(),
     )
     .await
@@ -838,7 +838,7 @@ async fn an_edge_selection_reports_the_oracles_sentence() {
         .summarize_at(
             &first,
             None,
-            platform_api::SummarizeDirection::UpTo,
+            lingxi_core::host::SummarizeDirection::UpTo,
             tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -853,7 +853,7 @@ async fn an_edge_selection_reports_the_oracles_sentence() {
     orch.summarize_at(
         &first,
         None,
-        platform_api::SummarizeDirection::From,
+        lingxi_core::host::SummarizeDirection::From,
         tokio_util::sync::CancellationToken::new(),
     )
     .await
@@ -868,7 +868,7 @@ async fn an_unknown_message_uuid_is_reported_not_guessed() {
         .summarize_at(
             "not-a-message-in-this-conversation",
             None,
-            platform_api::SummarizeDirection::From,
+            lingxi_core::host::SummarizeDirection::From,
             tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -886,7 +886,7 @@ async fn the_boundary_records_the_user_context_and_the_count() {
     orch.summarize_at(
         &chosen,
         Some("  keep the parser notes  "),
-        platform_api::SummarizeDirection::UpTo,
+        lingxi_core::host::SummarizeDirection::UpTo,
         tokio_util::sync::CancellationToken::new(),
     )
     .await

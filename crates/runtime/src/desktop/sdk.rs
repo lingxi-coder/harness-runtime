@@ -6,8 +6,8 @@ use crate::api::{
     LifecycleService, OutputStream, RunInput, SessionId, SessionService, ShutdownReport,
     TurnOutcome,
 };
+use lingxi_core::host::OrchestratorHandle;
 use permission::gate::PermissionGate;
-use platform_api::OrchestratorHandle;
 use std::sync::Arc;
 
 /// Assemble the existing product capabilities for an embedded Rust host.

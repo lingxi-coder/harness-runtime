@@ -29,7 +29,7 @@ pub(super) fn captured_prices(
             || name == &route.pricing_model.billing_model
     });
     let explicit = declared.is_some();
-    if configured.billing_mode == platform_api::ModelBillingMode::Subscription && !explicit {
+    if configured.billing_mode == lingxi_core::host::ModelBillingMode::Subscription && !explicit {
         return Err("subscription requires explicit attempt pricing".into());
     }
     let (mut price, resolution) = catalog
@@ -110,7 +110,7 @@ fn integer_rate(value: f64) -> Result<u64, String> {
 
 fn validate_override(
     price: &cost::ModelPricing,
-    declared: &llm_runtime::TokenPricing,
+    declared: &llm_runtime::PricingOverride,
 ) -> Result<(), String> {
     use cost::TokenClass as T;
     for (class, value) in [

@@ -92,10 +92,10 @@ mod tests {
     use crate::source::PluginSource;
     use crate::trust::PluginTrustLevel;
     use async_trait::async_trait;
-    use platform_api::{
+    use lingxi_core::host::{
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
-    use protocol::{PluginId, SecureStorageData};
+    use lingxi_core::types::{PluginId, SecureStorageData};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::SystemTime;
@@ -168,14 +168,14 @@ mod tests {
     impl HttpTransport for NoHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
             panic!("no http");
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
             panic!("no http");
         }
     }

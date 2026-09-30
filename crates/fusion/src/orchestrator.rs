@@ -1,22 +1,23 @@
-//! Fusion state machine. Implements [`platform_api::FusionExecutor`].
+//! Fusion state machine. Implements [`lingxi_core::host::FusionExecutor`].
 
 use crate::analyst::{AnalystError, AnalystUsage};
 use crate::budget::{self, FusionPriceBook, FusionQuote, ReservationLease};
 use crate::config::{FusionConfigSource, FusionRuntimeConfig};
-use crate::decision::{interpret, panel_by_id, successful, HostDecision};
+use crate::evidence::{self, EvidenceSource};
+use crate::implement::Workspaces;
 use crate::model_resolver::{self, ModelSource, ResolvedPanel, ResolvedSet};
-use crate::panel::{self, PanelInternal};
+use crate::panel::{self, successful, PanelInternal};
 use crate::progress;
 use crate::snapshot::{CatalogSnapshot, FusionRuntimeSnapshot};
-use crate::synthesizer::SynthError;
 use async_trait::async_trait;
-use platform_api::subagent_spawn::SubagentSpawner;
-use platform_api::{
-    normalize_dimensions, FusionActivation, FusionAgentSurface, FusionAnalysis, FusionDecision,
-    FusionError, FusionExecutor, FusionInheritance, FusionNeedsParentReason, FusionOrigin,
-    FusionPreparedSummary, FusionPreset, FusionProgress, FusionRequest, FusionResult,
-    FusionRunControl, FusionRunFactsRecorder, FusionRunIdentity, FusionRunOutcome, FusionStage,
-    FusionStatus, FusionSubmission, FusionTiming, FusionUsage, PanelOutcome, PanelRunStatus,
+use lingxi_core::host::subagent_spawn::SubagentSpawner;
+use lingxi_core::host::{
+    normalize_dimensions_for, validate_verify_commands, EvidenceCheckCounts, EvidenceCheckStatus,
+    FusionActivation, FusionAgentSurface, FusionAnalysis, FusionError, FusionExecutor,
+    FusionInheritance, FusionOrigin, FusionPanelMode, FusionPreparedSummary, FusionPreset,
+    FusionProgress, FusionRequest, FusionResult, FusionRunControl, FusionRunFactsRecorder,
+    FusionRunIdentity, FusionRunOutcome, FusionStage, FusionStatus, FusionSubmission, FusionTiming,
+    FusionUsage, ImplementConfirmation, PanelMaterial, PanelOutcome, PanelRunStatus,
     PreparedFusionRun, FUSION_MIN_PANEL,
 };
 use sidequery::SideQueryClient;
@@ -24,7 +25,7 @@ use sidequery::SideQueryClient;
 // lib target carries no unused import (which `clippy --fix` deletes) while the
 // test module still reaches it through `use super::*`.
 #[cfg(test)]
-use platform_api::FusionRunId;
+use lingxi_core::host::FusionRunId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -75,7 +76,7 @@ where
 /// of the two fires first is effectively a coin flip on that fraction, so the OUTER
 /// wrapper can (rarely) win the race and degrade the whole run to
 /// `Err(TimedOutEmpty)` even though an inner stage was about to hand back a
-/// legitimate `Ok(NeedsParent)` with real panel material.
+/// legitimate `Ok` result with real panel material.
 ///
 /// Giving the outer wrapper a fixed grace past `total_timeout_ms` makes it a
 /// strict backstop that can never fire before every inner per-stage deadline has
@@ -106,34 +107,23 @@ pub struct FusionOrchestrator {
     prices: Arc<dyn FusionPriceBook>,
     bus: Arc<AnalyticsBus>,
     attempt_registrar: Option<Arc<dyn crate::FusionAttemptRegistrar>>,
-    attempt_run: Option<Arc<platform_api::ModelAttemptRun>>,
+    attempt_run: Option<Arc<lingxi_core::host::ModelAttemptRun>>,
     panel_admission: bool,
     panel_fence: Option<Arc<dyn crate::FusionPanelAttemptFence>>,
+    implement_host: Option<Arc<dyn lingxi_core::host::FusionImplementHost>>,
 }
 
-/// Return value of [`FusionOrchestrator::analyze_and_decide`]: the resolved
-/// decision plus everything `run_inner`'s finalize step needs afterward
-/// (timing for [`FusionTiming`], the running [`FusionUsage`], and the priced
-/// analyst/synth call usage `price_realized_usage` needs).
+/// Return value of [`FusionOrchestrator::run_analysis`]: the analysis (or
+/// why it is missing) plus everything `run_inner`'s finalize step needs
+/// afterward (timing for [`FusionTiming`], the running [`FusionUsage`], and
+/// the priced analyst usage `price_realized_usage` needs).
 struct AnalysisOutcome {
-    decision: FusionDecision,
-    final_text: String,
     analysis: Option<FusionAnalysis>,
+    /// Sanitized category naming why the analyst failed; `None` on success.
+    analysis_failure: Option<String>,
     analyst_ms: u64,
-    synthesizer_ms: u64,
     usage: FusionUsage,
     priced_analyst: Option<(cost::Usage, u32)>,
-    priced_synth: Option<cost::Usage>,
-    /// T1 item 1 (analyst/synth half): `true` once the synthesizer was
-    /// actually CALLED (`run_synthesis` sets this unconditionally at its own
-    /// start, before racing its timeout), `false` when the `Merge` branch was
-    /// never reached (a `Pick`/`NeedsParent` analyst decision). Distinguishes
-    /// "the synthesizer never ran — $0 is the exact truth" from "the
-    /// synthesizer ran and lost its usage to a failure/timeout — real,
-    /// already-billed spend the settlement fallback must estimate" at
-    /// `price_realized_usage`, which otherwise cannot tell the two apart from
-    /// `priced_synth: None` alone.
-    synth_attempted: bool,
     /// Round-3 review finding 10: `true` when at least one analyst attempt
     /// is known to have been billed by the provider without a usage figure
     /// this crate could capture for it (an `AnalystUsage::incomplete` from
@@ -154,8 +144,7 @@ impl FusionOrchestrator {
     /// Build an orchestrator from composition-root handles.
     ///
     /// `config_source` is consulted fresh on every [`Self::run`] and every
-    /// `agent_surface()`/`resolve_parent_profile()`/`workflow_fusion_call_cap()`
-    /// call (F007) — pass a bare [`FusionRuntimeConfig`] (which implements
+    /// `agent_surface()`/`resolve_parent_profile()` call (F007) — pass a bare [`FusionRuntimeConfig`] (which implements
     /// [`FusionConfigSource`] as a fixed value) for a config that never
     /// reloads, or a closure/struct backed by a live settings loader.
     #[must_use]
@@ -176,7 +165,19 @@ impl FusionOrchestrator {
             attempt_run: None,
             panel_admission: false,
             panel_fence: None,
+            implement_host: None,
         }
+    }
+
+    /// Attach the host services implement mode needs (worktrees, sandbox
+    /// preflight, verification). Without them implement runs are refused.
+    #[must_use]
+    pub fn with_implement_host(
+        mut self,
+        host: Arc<dyn lingxi_core::host::FusionImplementHost>,
+    ) -> Self {
+        self.implement_host = Some(host);
+        self
     }
 
     /// Require atomic whole-panel admission from the host. Legacy standalone
@@ -234,9 +235,10 @@ impl FusionOrchestrator {
 
     fn prepared_config(
         &self,
+        mode: lingxi_core::host::FusionPanelMode,
         effective_timeout_ms: Option<u64>,
     ) -> Result<FusionRuntimeConfig, FusionError> {
-        let mut config = self.config_source.load()?;
+        let mut config = self.config_source.load()?.for_mode(mode);
         if let Some(captured_total) =
             effective_timeout_ms.map(|timeout_ms| timeout_ms.saturating_sub(FINALIZE_GRACE_MS))
         {
@@ -257,12 +259,12 @@ impl FusionOrchestrator {
     ) -> Result<FusionRuntimeSnapshot, FusionError> {
         let extra_routes = [(request.parent_profile.clone(), request.parent_model.clone())];
         for _ in 0..SNAPSHOT_CAPTURE_ATTEMPTS {
-            let config_before = self.prepared_config(effective_timeout_ms)?;
+            let config_before = self.prepared_config(request.mode, effective_timeout_ms)?;
             let catalog_before = CatalogSnapshot::capture(self.catalog.as_ref())?;
             let prices_before = catalog_before.capture_prices(self.prices.as_ref(), &extra_routes);
 
             let catalog_after = CatalogSnapshot::capture(self.catalog.as_ref())?;
-            let config_after = self.prepared_config(effective_timeout_ms)?;
+            let config_after = self.prepared_config(request.mode, effective_timeout_ms)?;
             let prices_after = catalog_after.capture_prices(self.prices.as_ref(), &extra_routes);
 
             if config_before == config_after
@@ -337,11 +339,14 @@ impl FusionOrchestrator {
         routes: &[&ResolvedPanel],
         stage: &str,
     ) -> Result<(), FusionError> {
-        let current = source.load().map_err(|_| {
-            FusionError::InvalidConfiguration(format!(
-                "fusion {stage} settings could not be revalidated"
-            ))
-        })?;
+        let current = source
+            .load()
+            .map_err(|_| {
+                FusionError::InvalidConfiguration(format!(
+                    "fusion {stage} settings could not be revalidated"
+                ))
+            })?
+            .for_mode(request.mode);
         if captured.enabled && !current.enabled {
             return Err(FusionError::InvalidConfiguration(format!(
                 "fusion was disabled before the {stage} stage"
@@ -355,7 +360,6 @@ impl FusionOrchestrator {
             && match request.origin {
                 FusionOrigin::Slash => false,
                 FusionOrigin::Agent => !current.allow_cross_provider_for_agent,
-                FusionOrigin::Workflow => !current.allow_cross_provider_for_workflow,
             };
         if cross_provider_revoked {
             return Err(FusionError::CrossProviderDenied);
@@ -374,9 +378,6 @@ impl FusionOrchestrator {
                 current.panel_max_output_tokens_per_turn < captured.panel_max_output_tokens_per_turn
             }
             "analyst" => current.analyst_max_output_tokens < captured.analyst_max_output_tokens,
-            "synthesizer" => {
-                current.synthesizer_max_output_tokens < captured.synthesizer_max_output_tokens
-            }
             _ => false,
         };
         if output_narrowed {
@@ -409,7 +410,6 @@ impl FusionOrchestrator {
                     || current.min_successful_panels > captured.min_successful_panels
             }
             "analyst" => current.analysis_protocol_retries < captured.analysis_protocol_retries,
-            "synthesizer" => false,
             _ => false,
         };
         if stage_policy_narrowed {
@@ -589,7 +589,7 @@ impl FusionOrchestrator {
         operational_deadline: Instant,
         facts: &FusionRunFactsRecorder,
         panel_tasks: &panel::PanelTaskBarrier,
-        admission: Option<platform_api::PanelPoolLease>,
+        admission: Option<lingxi_core::host::PanelPoolLease>,
         // [Round-4 rework, item 2] The three survives-a-drop cells, threaded
         // all the way down into `panel::run_panels` so a cancel landing
         // mid-fan-out — after some panels have already finished with real,
@@ -599,6 +599,7 @@ impl FusionOrchestrator {
         realized_tokens: &Arc<Mutex<Option<u64>>>,
         resolved_egress: &Arc<Mutex<Option<Vec<String>>>>,
         settlement: &Arc<Mutex<Option<(u64, bool)>>>,
+        workspaces: Option<&Workspaces>,
     ) -> Result<(Vec<PanelInternal>, u64), FusionError> {
         let panel_started = Instant::now();
         let panel_total = u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX);
@@ -649,8 +650,6 @@ impl FusionOrchestrator {
             catalog: self.catalog.as_ref(),
             prices: self.prices.as_ref(),
             analyst: &resolved.analyst,
-            synth_profile: &resolved.synthesizer.profile,
-            synth_model: &resolved.synthesizer.model,
             request_prompt: &request.prompt,
             catalog_snapshot: Some(catalog_snapshot),
             reserved_max_nano_usd: facts
@@ -663,7 +662,7 @@ impl FusionOrchestrator {
         let (admission, producer_drain) = match admission {
             Some(lease) => {
                 let (permits, drain) = lease.into_parts();
-                (Some(platform_api::PanelPoolLease::new(permits)), drain)
+                (Some(lingxi_core::host::PanelPoolLease::new(permits)), drain)
             }
             None => (None, None),
         };
@@ -686,6 +685,7 @@ impl FusionOrchestrator {
             Some(&sink),
             panel_tasks,
             admission,
+            workspaces,
         )
         .await;
         if let Some(fence) = &self.panel_fence {
@@ -699,9 +699,11 @@ impl FusionOrchestrator {
         }
         if let Some(fence) = &self.panel_fence {
             if let Err(error) = fence.wait().await {
-                facts.set_attempt_settlement(platform_api::FusionAttemptSettlementStatus::Failed {
-                    reason: error.to_string(),
-                });
+                facts.set_attempt_settlement(
+                    lingxi_core::host::FusionAttemptSettlementStatus::Failed {
+                        reason: error.to_string(),
+                    },
+                );
                 // Panels have already executed. A host diagnostic such as
                 // InvalidConfiguration must not regain a preflight/zero-call
                 // meaning and refund their lifetime spawn quota.
@@ -830,6 +832,16 @@ impl FusionOrchestrator {
             return Err(FusionError::Cancelled);
         }
         Self::ensure_operational_time(operational_deadline)?;
+        // Implement mode: worktrees exist before anything is admitted or
+        // reserved, so every refusal here costs nothing. Dropping them on any
+        // later error or cancel discards them (see `Workspaces`).
+        let workspaces = match request.mode {
+            FusionPanelMode::Analysis => None,
+            FusionPanelMode::Implement => Some(
+                self.prepare_workspaces(config, &resolved, &inherit, &progress, &run_id)
+                    .await?,
+            ),
+        };
         // Queue before any profile permit or monetary/output hold. A lease
         // remains local until every original panel consumes exactly one slot.
         let admission = if self.panel_admission {
@@ -887,7 +899,7 @@ impl FusionOrchestrator {
             "panel",
         )?;
 
-        let (panels, panels_ms) = self
+        let (mut panels, panels_ms) = self
             .run_panel_stage(
                 config,
                 &request,
@@ -904,55 +916,61 @@ impl FusionOrchestrator {
                 &realized_tokens,
                 &resolved_egress,
                 &settlement,
+                workspaces.as_ref(),
             )
             .await?;
-        // [Round-5 review items 1/2/4] Every stage from here to
-        // `finalize_result` refreshes both survives-a-drop money cells
-        // through this one borrow — see `StageSettlement`'s stage table for
-        // what each boundary is required to leave behind.
-        let stage_settlement = StageSettlement {
-            realized_tokens: &realized_tokens,
-            settlement: &settlement,
-            catalog: self.catalog.as_ref(),
-            live_catalog: live_catalog.as_ref(),
-            catalog_snapshot: &runtime_snapshot.catalog,
-            prices: self.prices.as_ref(),
-            analyst: &resolved.analyst,
-            synthesizer: &resolved.synthesizer,
-            request_prompt: &request.prompt,
-            request: Some(&request),
-            config: Some(config),
-            side_query: Some(self.side_query.as_ref()),
-            synth_estimate: Arc::new(Mutex::new(None)),
-            panels: &panels,
-            operational_deadline,
-            cancel: inherit.cancel.clone(),
-            reserved_max_nano_usd: facts
-                .snapshot()
-                .usage
-                .map_or(0, |usage| usage.reserved_max_nano_usd),
-            facts: facts.clone(),
-            started,
-        };
+        if let Some(workspaces) = &workspaces {
+            progress::emit(
+                &progress,
+                FusionStage::CollectingPatches,
+                None,
+                FusionStage::CollectingPatches.label(),
+            );
+            tokio::select! {
+                biased;
+                () = inherit.cancel.cancelled() => return Err(FusionError::Cancelled),
+                () = workspaces.collect_patches(&mut panels) => {}
+            }
+        }
         // Panels are the earliest point in `run_inner` where real,
         // already-billed provider spend exists. Record it now so a cancel
         // or outer-timeout that later drops this future's own stack still
         // leaves `run()` able to report it — see the field doc above and
         // `run()`'s outer `Err` arm. The analyst has not run yet, so its
         // contribution here is exactly $0 — not an estimate.
-        stage_settlement.refresh(None, false, None, false, false);
+        self.stage_settlement(
+            &realized_tokens,
+            &settlement,
+            live_catalog.as_ref(),
+            &runtime_snapshot,
+            &resolved,
+            &request,
+            config,
+            &panels,
+            operational_deadline,
+            &inherit.cancel,
+            &facts,
+            started,
+        )
+        .refresh(None, false, false);
         // [Round-3 review B2, reworked] Latch the DISPATCHED egress set
         // (panels that made a real provider call — see
         // `dispatched_egress_profiles`) now, right after dispatch is known,
         // so an outer cancel/timeout that drops this future's own stack
-        // during the analyst/synthesizer stage still reports it. A panel
+        // during the analyst stage still reports it. A panel
         // set where nothing dispatched (every panel rejected pre-allocation)
         // latches `None`, matching the contract that this field discloses
         // only real egress.
         if let Ok(mut guard) = resolved_egress.lock() {
             *guard = dispatched_egress_profiles(&panels);
         }
-        if let Err(error) = check_panel_bar(&panels, &request, config) {
+        let bar = check_panel_bar(&panels, &request, config);
+        // Implement mode keeps a failed bar's work when some panel left
+        // changes: the parent gets them unanalyzed rather than nothing.
+        let bar_not_met_with_changes = bar.is_err()
+            && workspaces.is_some()
+            && panels.iter().any(|panel| panel.implement.has_changes());
+        if let (Err(error), false) = (bar, bar_not_met_with_changes) {
             // Settling real panel spend is irreversible even when the
             // computation result is an error. Take the same finalization
             // claim as the success path before committing so a concurrent
@@ -980,14 +998,9 @@ impl FusionOrchestrator {
                 &panels,
                 &resolved.analyst,
                 None,
-                // The panel bar failed before `analyze_and_decide` ever ran
-                // — the analyst and synthesizer are both genuinely un-called
-                // here, so their missing usage must stay exact $0, never a
-                // fabricated estimate.
-                false,
-                &resolved.synthesizer.profile,
-                &resolved.synthesizer.model,
-                None,
+                // The panel bar failed before `run_analysis` ever ran —
+                // the analyst is genuinely un-called here, so its missing
+                // usage must stay exact $0, never a fabricated estimate.
                 false,
                 &request.prompt,
             );
@@ -999,9 +1012,7 @@ impl FusionOrchestrator {
             }
 
             // [Finding 12] The dollar side is now accounted for (the commit
-            // above), but a caller tracking a SEPARATE token budget (e.g.
-            // `local_workflow`'s `fusion()` bridge arm, whose shared `spent`
-            // pool only advances on `Ok`) has no way to learn what this
+            // above), but a caller tracking a SEPARATE token budget has no way to learn what this
             // errored run already billed — emit it on the progress channel
             // so such a caller can charge it before propagating the error.
             //
@@ -1009,7 +1020,7 @@ impl FusionOrchestrator {
             // from `panels` directly (not read back from the `resolved_egress`
             // latch, though the two agree at this point) and deliberately
             // does NOT add `resolved.analyst.profile`: the panel bar failing
-            // means `analyze_and_decide` never ran, so the analyst is
+            // means `run_analysis` never ran, so the analyst is
             // provably un-called on this arm — see the comment a few lines
             // above on the sibling `price_realized_usage` call. An
             // all-`"spawn"` panel set (nothing ever dispatched, e.g.
@@ -1028,10 +1039,113 @@ impl FusionOrchestrator {
             return Err(error);
         }
 
+        let verification_started = Instant::now();
+        if let Some(workspaces) = &workspaces {
+            let commands = if request.verify_commands.is_empty() {
+                &config.implement.verify_commands
+            } else {
+                &request.verify_commands
+            };
+            // Verification may not eat into the analyst's time unless the
+            // analyst will not run.
+            let deadline = if bar_not_met_with_changes {
+                operational_deadline
+            } else {
+                operational_deadline
+                    .checked_sub(Self::analyst_reserve(config))
+                    .unwrap_or_else(Instant::now)
+            };
+            if panels.iter().any(|panel| panel.implement.has_changes()) && !commands.is_empty() {
+                progress::emit(
+                    &progress,
+                    FusionStage::Verifying,
+                    None,
+                    FusionStage::Verifying.label(),
+                );
+            }
+            tokio::select! {
+                biased;
+                () = inherit.cancel.cancelled() => return Err(FusionError::Cancelled),
+                () = workspaces.verify(
+                    &mut panels,
+                    commands,
+                    Duration::from_millis(config.implement.verify_timeout_ms),
+                    config.implement.verify_concurrency,
+                    deadline,
+                    &inherit.cancel,
+                ) => {}
+            }
+        }
+        let verification_ms = if workspaces.is_some() {
+            millis_since(verification_started)
+        } else {
+            0
+        };
+        if bar_not_met_with_changes {
+            let outcome = AnalysisOutcome {
+                analysis: None,
+                analysis_failure: Some("panel_bar_not_met".into()),
+                analyst_ms: 0,
+                usage: aggregate_panel_usage(&panels),
+                priced_analyst: None,
+                analyst_usage_incomplete: false,
+                analyst_attempted: false,
+            };
+            let result = self
+                .finalize_result(
+                    outcome,
+                    &resolved,
+                    &request,
+                    &panels,
+                    (panels_ms, verification_ms),
+                    &lease_cell,
+                    &progress,
+                    run_id,
+                    started,
+                    &control,
+                )
+                .await?;
+            if let Some(workspaces) = workspaces {
+                workspaces.finish(&panels).await;
+            }
+            return Ok(result);
+        }
+
+        tokio::select! {
+            biased;
+            () = inherit.cancel.cancelled() => return Err(FusionError::Cancelled),
+            () = self.check_evidence(
+                config,
+                &mut panels,
+                &inherit,
+                workspaces.as_ref(),
+                &progress,
+                operational_deadline,
+            ) => {}
+        }
+
+        // [Round-5 review items 1/2/4] Every stage from here to
+        // `finalize_result` refreshes both survives-a-drop money cells
+        // through this one borrow — see `StageSettlement`'s stage table for
+        // what each boundary is required to leave behind.
+        let stage_settlement = self.stage_settlement(
+            &realized_tokens,
+            &settlement,
+            live_catalog.as_ref(),
+            &runtime_snapshot,
+            &resolved,
+            &request,
+            config,
+            &panels,
+            operational_deadline,
+            &inherit.cancel,
+            &facts,
+            started,
+        );
         let outcome = tokio::select! {
             biased;
             () = inherit.cancel.cancelled() => return Err(FusionError::Cancelled),
-            outcome = self.analyze_and_decide(
+            outcome = self.run_analysis(
                 config,
                 &request,
                 &resolved,
@@ -1041,22 +1155,170 @@ impl FusionOrchestrator {
                 started,
                 &resolved_egress,
                 &stage_settlement,
+                &inherit,
             ) => outcome,
         };
 
-        self.finalize_result(
-            outcome,
-            &resolved,
-            &request,
-            &panels,
-            panels_ms,
-            &lease_cell,
-            &progress,
+        let result = self
+            .finalize_result(
+                outcome,
+                &resolved,
+                &request,
+                &panels,
+                (panels_ms, verification_ms),
+                &lease_cell,
+                &progress,
+                run_id,
+                started,
+                &control,
+            )
+            .await?;
+        if let Some(workspaces) = workspaces {
+            workspaces.finish(&panels).await;
+        }
+        Ok(result)
+    }
+
+    /// Implement mode's preparation: the host, the workspace snapshot and
+    /// one worktree per panel. See [`Workspaces::prepare`].
+    async fn prepare_workspaces(
+        &self,
+        config: &FusionRuntimeConfig,
+        resolved: &ResolvedSet,
+        inherit: &FusionInheritance,
+        progress: &Option<Sender<FusionProgress>>,
+        run_id: &str,
+    ) -> Result<Workspaces, FusionError> {
+        let host = self.implement_host.clone().ok_or_else(|| {
+            FusionError::ImplementUnavailable("this host does not support implement mode".into())
+        })?;
+        progress::emit(
+            progress,
+            FusionStage::PreparingWorktrees,
+            None,
+            FusionStage::PreparingWorktrees.label(),
+        );
+        let anon_rank = panel::anon_rank_by_spawn_index(run_id, resolved.panels.len());
+        let prepare = Workspaces::prepare(
+            host,
+            config,
             run_id,
-            started,
-            &control,
+            &anon_rank,
+            &inherit.subagent.tool_invoker,
+        );
+        tokio::select! {
+            biased;
+            () = inherit.cancel.cancelled() => Err(FusionError::Cancelled),
+            prepared = prepare => prepared,
+        }
+    }
+
+    /// Time the analyst stage may need: every attempt at its full timeout.
+    fn analyst_reserve(config: &FusionRuntimeConfig) -> Duration {
+        Duration::from_millis(
+            config
+                .analyst_timeout_ms
+                .saturating_mul(1 + u64::from(config.analysis_protocol_retries)),
         )
-        .await
+    }
+
+    /// The settlement borrow every stage after the panels refreshes through.
+    /// Built once for the post-panel refresh and again once the evidence
+    /// stage has written its checks into `panels`.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_settlement<'a>(
+        &'a self,
+        realized_tokens: &'a Arc<Mutex<Option<u64>>>,
+        settlement: &'a Arc<Mutex<Option<(u64, bool)>>>,
+        live_catalog: &'a dyn ModelSource,
+        runtime_snapshot: &'a FusionRuntimeSnapshot,
+        resolved: &'a ResolvedSet,
+        request: &'a FusionRequest,
+        config: &'a FusionRuntimeConfig,
+        panels: &'a [PanelInternal],
+        operational_deadline: Instant,
+        cancel: &CancellationToken,
+        facts: &FusionRunFactsRecorder,
+        started: Instant,
+    ) -> StageSettlement<'a> {
+        StageSettlement {
+            realized_tokens,
+            settlement,
+            catalog: self.catalog.as_ref(),
+            live_catalog,
+            catalog_snapshot: &runtime_snapshot.catalog,
+            prices: self.prices.as_ref(),
+            analyst: &resolved.analyst,
+            request_prompt: &request.prompt,
+            request: Some(request),
+            config: Some(config),
+            side_query: Some(self.side_query.as_ref()),
+            panels,
+            operational_deadline,
+            cancel: cancel.clone(),
+            reserved_max_nano_usd: facts
+                .snapshot()
+                .usage
+                .map_or(0, |usage| usage.reserved_max_nano_usd),
+            facts: facts.clone(),
+            started,
+        }
+    }
+
+    /// Check the workspace evidence panels cite (see [`crate::evidence`])
+    /// through the parent's `Grep` — in implement mode through the invoker
+    /// confined to each panel's own worktree. Capped at
+    /// [`evidence::CHECK_TIME_CAP`] and never allowed into the time the
+    /// analyst still needs: with no time to spare, every item stays
+    /// `unverifiable`.
+    async fn check_evidence(
+        &self,
+        config: &FusionRuntimeConfig,
+        panels: &mut [PanelInternal],
+        inherit: &FusionInheritance,
+        workspaces: Option<&Workspaces>,
+        progress: &Option<Sender<FusionProgress>>,
+        operational_deadline: Instant,
+    ) {
+        let analyst_reserve = Self::analyst_reserve(config);
+        let now = Instant::now();
+        let deadline = operational_deadline
+            .checked_sub(analyst_reserve)
+            .map_or(now, |latest| latest.min(now + evidence::CHECK_TIME_CAP));
+        let has_evidence = panels.iter().any(|panel| {
+            panel
+                .report
+                .as_ref()
+                .is_some_and(|report| !report.evidence.is_empty())
+        });
+        if has_evidence && deadline > now {
+            progress::emit(
+                progress,
+                FusionStage::CheckingEvidence,
+                None,
+                FusionStage::CheckingEvidence.label(),
+            );
+        }
+        let sources: Vec<Option<EvidenceSource>> = match workspaces {
+            None => vec![
+                Some(EvidenceSource::workspace(Arc::clone(
+                    &inherit.subagent.tool_invoker,
+                )));
+                panels.len()
+            ],
+            Some(workspaces) => panels
+                .iter()
+                .map(|panel| {
+                    workspaces.panel(panel.index).map(|workspace| {
+                        EvidenceSource::worktree(
+                            Arc::clone(&workspace.invoker),
+                            workspace.handle.path.clone(),
+                        )
+                    })
+                })
+                .collect(),
+        };
+        evidence::check_panels(panels, &sources, deadline).await;
     }
 
     /// `run_inner`'s tail: emit the terminal progress stage, compute the
@@ -1072,7 +1334,7 @@ impl FusionOrchestrator {
         resolved: &ResolvedSet,
         request: &FusionRequest,
         panels: &[PanelInternal],
-        panels_ms: u64,
+        (panels_ms, verification_ms): (u64, u64),
         // [Round-4 review findings 1/2/3/19] Taken back out of the cell
         // below rather than owned outright — see `resolve_and_reserve`'s
         // parameter doc for why the lease lives in a shared cell instead of
@@ -1089,29 +1351,27 @@ impl FusionOrchestrator {
             return Err(FusionError::Cancelled);
         }
         let AnalysisOutcome {
-            decision,
-            final_text,
             analysis,
+            analysis_failure,
             analyst_ms,
-            synthesizer_ms,
             mut usage,
             priced_analyst,
-            priced_synth,
-            synth_attempted,
             analyst_usage_incomplete,
             analyst_attempted,
         } = outcome;
 
-        let status = match &decision {
-            FusionDecision::NeedsParent { .. } => FusionStatus::NeedsParent,
-            FusionDecision::Picked { .. } | FusionDecision::Merged => FusionStatus::Completed,
-        };
-        let stage = match status {
-            FusionStatus::Completed => FusionStage::Completed,
-            FusionStatus::NeedsParent => FusionStage::NeedsParent,
+        let status = if analysis.is_some() {
+            FusionStatus::Analyzed
+        } else {
+            FusionStatus::Unanalyzed
         };
         if self.attempt_run.is_none() {
-            progress::emit(progress, stage.clone(), None, stage.label());
+            progress::emit(
+                progress,
+                FusionStage::Completed,
+                None,
+                FusionStage::Completed.label(),
+            );
         }
 
         // [Round-4 review finding 14] Built from the panels that were
@@ -1126,18 +1386,6 @@ impl FusionOrchestrator {
         let mut egress: Vec<String> = dispatched_egress_profiles(panels).unwrap_or_default();
         if analyst_attempted {
             egress.push(resolved.analyst.profile.clone());
-        }
-        // `Merged` is only the SUCCESS outcome of the synthesizer stage —
-        // `synthesize` issues its side query to `request.parent_profile`
-        // (carrying the prompt, the full analysis, and every panel's
-        // candidate answer/summary) on every attempt, including the two
-        // failure arms below. The parent profile received that data whether
-        // or not the call then succeeded, so it belongs in `egress_profiles`
-        // on those arms too — otherwise a run whose synthesizer call failed
-        // or timed out under-reports a provider that demonstrably received
-        // every panel's answer.
-        if synth_attempted {
-            egress.push(resolved.synthesizer.profile.clone());
         }
         egress.sort();
         egress.dedup();
@@ -1163,10 +1411,6 @@ impl FusionOrchestrator {
                 &resolved.analyst,
                 priced_analyst.as_ref().map(|(u, calls)| (u, *calls)),
                 analyst_attempted,
-                &resolved.synthesizer.profile,
-                &resolved.synthesizer.model,
-                priced_synth.as_ref(),
-                synth_attempted,
                 &request.prompt,
             );
             usage.realized_nano_usd = priced_nano_usd;
@@ -1200,16 +1444,17 @@ impl FusionOrchestrator {
             total_ms: millis_since(started),
             panels_ms,
             analyst_ms,
-            synthesizer_ms,
+            verification_ms,
         };
         facts.set_timing(timing.clone());
         let result = FusionResult {
-            schema_version: platform_api::FUSION_SCHEMA_VERSION,
+            schema_version: lingxi_core::host::FUSION_SCHEMA_VERSION,
             run_id,
+            mode: request.mode,
             status,
-            decision,
-            final_text,
+            analysis_failure,
             analysis,
+            responses: panels.iter().filter_map(panel_material).collect(),
             panels: panels.iter().map(panel_outcome).collect(),
             usage,
             timing,
@@ -1226,10 +1471,11 @@ impl FusionOrchestrator {
                         .filter(|panel| panel.status != PanelRunStatus::Completed)
                         .count(),
                 ),
+                &result.responses,
                 &result.run_id,
                 &result.usage,
                 &result.egress_profiles,
-                &result.decision,
+                result.status,
                 &result.timing,
                 control.deadline(),
             )
@@ -1247,17 +1493,17 @@ impl FusionOrchestrator {
         &self,
         request: &FusionRequest,
         panel_counts: (usize, usize, usize),
+        responses: &[PanelMaterial],
         run_id: &str,
         usage: &FusionUsage,
         egress: &[String],
-        decision: &FusionDecision,
+        status: FusionStatus,
         timing: &FusionTiming,
         outer_deadline: Option<Instant>,
     ) {
-        let decision_label = match decision {
-            FusionDecision::Picked { .. } => "picked",
-            FusionDecision::Merged => "merged",
-            FusionDecision::NeedsParent { .. } => "needs_parent",
+        let status_label = match status {
+            FusionStatus::Analyzed => "analyzed",
+            FusionStatus::Unanalyzed => "unanalyzed",
         };
         let mut completion_md = fusion_event_metadata(request);
         completion_md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
@@ -1268,11 +1514,21 @@ impl FusionOrchestrator {
         ] {
             completion_md.insert(key.into(), AnalyticsValue::Int(saturating_i64(count)));
         }
+        let mut evidence_checks = EvidenceCheckCounts::default();
+        for material in responses {
+            evidence_checks.merge(&material.evidence_checks);
+        }
+        for status in EvidenceCheckStatus::ALL {
+            completion_md.insert(
+                format!("evidence_{}_count", status.label()),
+                AnalyticsValue::Int(i64::from(evidence_checks.get(status))),
+            );
+        }
         add_usage_metadata(&mut completion_md, usage);
         add_egress_metadata(&mut completion_md, egress);
         completion_md.insert(
-            "decision".into(),
-            AnalyticsValue::String(decision_label.to_string()),
+            "status".into(),
+            AnalyticsValue::String(status_label.to_string()),
         );
         completion_md.insert(
             "duration_ms".into(),
@@ -1286,10 +1542,6 @@ impl FusionOrchestrator {
             "analysis_duration_ms".into(),
             AnalyticsValue::Int(saturating_i64(timing.analyst_ms)),
         );
-        completion_md.insert(
-            "synthesis_duration_ms".into(),
-            AnalyticsValue::Int(saturating_i64(timing.synthesizer_ms)),
-        );
         self.log_terminal_event(
             telemetry::tengu::fusion::COMPLETED,
             completion_md,
@@ -1298,15 +1550,14 @@ impl FusionOrchestrator {
         .await;
     }
 
-    /// `run_inner` stage 3/3: run the analyst, `interpret` its verdict, and
-    /// (on `Merge`) run the synthesizer — all the telemetry and `NeedsParent`
-    /// degradation paths for each. Split out of `run_inner` purely to keep
-    /// that function under the line-count lint; unlike stages 1/2 this one
-    /// never fails the run outright (every branch produces a decision, even
-    /// if it is `NeedsParent`), so it returns a plain [`AnalysisOutcome`]
-    /// rather than a `Result`.
+    /// `run_inner` stage 3/3: run the analyst and record its usage and
+    /// telemetry. There is no decision here: the result always carries every
+    /// successful panel's material, and the parent model writes the final
+    /// answer. An analyst failure degrades to material without analysis
+    /// instead of failing the run, so already-paid panel work is never
+    /// thrown away.
     #[allow(clippy::too_many_arguments)]
-    async fn analyze_and_decide(
+    async fn run_analysis(
         &self,
         config: &FusionRuntimeConfig,
         request: &FusionRequest,
@@ -1317,8 +1568,9 @@ impl FusionOrchestrator {
         started: Instant,
         resolved_egress: &Arc<Mutex<Option<Vec<String>>>>,
         // [Round-5 review items 1/2/4] Refreshed at every boundary of this
-        // stage and the synthesizer stage below it — see `StageSettlement`.
+        // stage — see `StageSettlement`.
         stage_settlement: &StageSettlement<'_>,
+        inherit: &FusionInheritance,
     ) -> AnalysisOutcome {
         progress::emit(
             progress,
@@ -1335,137 +1587,83 @@ impl FusionOrchestrator {
                 started,
                 resolved_egress,
                 stage_settlement,
+                inherit,
+                run_id,
             )
             .await;
 
         let mut usage = aggregate_panel_usage(panels);
-        // Captured inside the match arms below so `price_realized_usage` (run
-        // after the decision is known) can price the analyst/synth calls
-        // against their OWN model/profile — a session-wide CostTracker delta
-        // cannot tell Fusion's spend apart from a concurrent parent turn's.
         let mut priced_analyst: Option<(cost::Usage, u32)> = None;
-        let mut priced_synth: Option<cost::Usage> = None;
-        let mut synth_attempted = false;
         // Round-3 review findings 8/10: `true` once ANY analyst usage is
         // known-incomplete — set by `record_failed_analyst_usage` on every
         // error exit, or copied from `AnalystUsage::incomplete` on success
         // (an `InvalidResponse` attempt that was retried into a decode).
         let mut analyst_usage_incomplete = false;
-        let (decision, final_text, analysis, synthesizer_ms) = match analysis_outcome {
-            Err((AnalystError::ParseFailed, acc)) => {
-                Self::record_failed_analyst_usage(
-                    acc,
-                    &mut usage,
-                    &mut priced_analyst,
-                    &mut analyst_usage_incomplete,
-                    analyst_attempted,
-                    stage_settlement,
-                );
-                self.analysis_failed_outcome(
-                    request,
-                    panels,
-                    run_id,
-                    analyst_ms,
-                    FusionNeedsParentReason::AnalysisParseFailed,
-                    "analysis_parse_failed",
-                    "analyst JSON could not be parsed",
-                    stage_settlement,
-                )
-                .await
-            }
-            // F004: previously a hard `Err` after every panel had already been
-            // paid for. Reachable only when the catalog's `judge_eligible`
-            // hint was wrong for the model `model_resolver::resolve` picked
-            // (the preflight check there is the normal gate) — degrade to
-            // NeedsParent like every other post-panel analyst failure instead
-            // of throwing the panel material away.
-            Err((AnalystError::Unsupported, acc)) => {
-                Self::record_failed_analyst_usage(
-                    acc,
-                    &mut usage,
-                    &mut priced_analyst,
-                    &mut analyst_usage_incomplete,
-                    analyst_attempted,
-                    stage_settlement,
-                );
-                self.analysis_failed_outcome(
-                    request,
-                    panels,
-                    run_id,
-                    analyst_ms,
-                    FusionNeedsParentReason::AnalysisFailed {
-                        category: "structured_output_unsupported".into(),
-                    },
-                    "structured_output_unsupported",
-                    "analyst structured output is unsupported",
-                    stage_settlement,
-                )
-                .await
-            }
-            Err((AnalystError::Failed(category), acc)) => {
-                Self::record_failed_analyst_usage(
-                    acc,
-                    &mut usage,
-                    &mut priced_analyst,
-                    &mut analyst_usage_incomplete,
-                    analyst_attempted,
-                    stage_settlement,
-                );
-                self.analysis_failed_outcome(
-                    request,
-                    panels,
-                    run_id,
-                    analyst_ms,
-                    FusionNeedsParentReason::AnalysisFailed {
-                        category: category.clone(),
-                    },
-                    "analysis_failed",
-                    &format!("analyst call failed: {category}"),
-                    stage_settlement,
-                )
-                .await
-            }
+        let (analysis, analysis_failure) = match analysis_outcome {
             Ok((analysis, acc)) => {
                 analyst_usage_incomplete = acc.incomplete || acc.unreported_calls > 0;
                 let analyst_usage = stage_settlement.analyst_usage_with_missing_estimates(&acc);
                 self.handle_analyst_success(
-                    config,
                     request,
                     panels,
-                    progress,
                     run_id,
-                    started,
                     analyst_ms,
-                    analysis,
                     analyst_usage,
                     acc.calls,
                     &mut usage,
                     &mut priced_analyst,
-                    &mut priced_synth,
-                    &mut synth_attempted,
                     analyst_usage_incomplete,
                     stage_settlement,
                 )
-                .await
+                .await;
+                (Some(analysis), None)
+            }
+            Err((error, acc)) => {
+                // F004: an analyst failure after every panel was paid for
+                // degrades to material without analysis, never a hard error.
+                let (category, error_label) = match &error {
+                    AnalystError::ParseFailed => {
+                        ("analysis_parse_failed".to_string(), "analysis_parse_failed")
+                    }
+                    AnalystError::Unsupported => (
+                        "structured_output_unsupported".to_string(),
+                        "structured_output_unsupported",
+                    ),
+                    AnalystError::Failed(category) => (category.clone(), "analysis_failed"),
+                };
+                Self::record_failed_analyst_usage(
+                    acc,
+                    &mut usage,
+                    &mut priced_analyst,
+                    &mut analyst_usage_incomplete,
+                    analyst_attempted,
+                    stage_settlement,
+                );
+                self.analysis_failed_outcome(
+                    request,
+                    panels,
+                    run_id,
+                    analyst_ms,
+                    error_label,
+                    stage_settlement,
+                )
+                .await;
+                (None, Some(category))
             }
         };
 
         AnalysisOutcome {
-            decision,
-            final_text,
             analysis,
+            analysis_failure,
             analyst_ms,
-            synthesizer_ms,
             usage,
             priced_analyst,
-            priced_synth,
-            synth_attempted,
             analyst_usage_incomplete,
             analyst_attempted,
         }
     }
 
-    /// `analyze_and_decide` helper (round-3 review finding 8): when the
+    /// `run_analysis` helper (round-3 review finding 8): when the
     /// analyst call ultimately failed, price whatever REAL usage `acc`
     /// accumulated before the error — an earlier attempt in the same retry
     /// loop can have billed the provider and decoded valid JSON before a
@@ -1498,8 +1696,8 @@ impl FusionOrchestrator {
         // [Round-5 review items 1/2/4] A failed analyst call still ran:
         // whatever real usage `acc` recovered must reach the
         // survives-a-drop cells too, or a cancel/timeout landing in the
-        // NeedsParent degradation below (which still emits telemetry and
-        // builds a summary) would settle the panel-only figure.
+        // unanalyzed degradation below (which still emits telemetry) would
+        // settle the panel-only figure.
         stage_settlement: &StageSettlement<'_>,
     ) {
         *analyst_usage_incomplete = analyst_attempted;
@@ -1513,52 +1711,35 @@ impl FusionOrchestrator {
                 .as_ref()
                 .map(|(usage, calls)| (usage, *calls)),
             analyst_attempted,
-            None,
-            false,
             analyst_attempted,
         );
     }
 
-    /// `analyze_and_decide` helper: the `Ok` arm of the analyst-call match —
-    /// price the analyst usage, emit `ANALYSIS_COMPLETED`, `interpret` the
-    /// verdict, and dispatch `Pick`/`NeedsParent`/`Merge`. Split out purely
-    /// to keep the caller under the line-count lint — same telemetry, same
-    /// ordering.
+    /// `run_analysis` helper: the `Ok` arm of the analyst-call match — price
+    /// the analyst usage and emit `ANALYSIS_COMPLETED`.
     #[allow(clippy::too_many_arguments)]
     async fn handle_analyst_success(
         &self,
-        config: &FusionRuntimeConfig,
         request: &FusionRequest,
         panels: &[PanelInternal],
-        progress: &Option<Sender<FusionProgress>>,
         run_id: &str,
-        started: Instant,
         analyst_ms: u64,
-        analysis: FusionAnalysis,
         analyst_usage: cost::Usage,
         analyst_calls: u32,
         usage: &mut FusionUsage,
         priced_analyst: &mut Option<(cost::Usage, u32)>,
-        priced_synth: &mut Option<cost::Usage>,
-        synth_attempted: &mut bool,
         analyst_usage_incomplete: bool,
         stage_settlement: &StageSettlement<'_>,
-    ) -> (FusionDecision, String, Option<FusionAnalysis>, u64) {
+    ) {
         add_cost_usage(usage, &analyst_usage, analyst_calls);
         *priced_analyst = Some((analyst_usage, analyst_calls));
         // [Round-5 review items 1/2/4] The analyst's EXACT, provider-
         // reported usage is known right here. Publish it to the
-        // survives-a-drop cells before the verdict is even interpreted —
-        // everything below this line (the `interpret` match, the whole
-        // synthesizer stage) is a window in which an outer cancel drops
-        // `run_inner`'s stack, and until this refresh existed that window
-        // committed the panel-only figure and billed these tokens to
-        // nobody.
+        // survives-a-drop cells before the telemetry await below, a window
+        // in which an outer cancel drops `run_inner`'s stack.
         stage_settlement.refresh(
             Some((&analyst_usage, analyst_calls)),
             true,
-            None,
-            false,
             analyst_usage_incomplete,
         );
 
@@ -1577,63 +1758,9 @@ impl FusionOrchestrator {
             stage_settlement.operational_deadline,
         )
         .await;
-        match interpret(&analysis, panels) {
-            HostDecision::Pick { panel_id } => {
-                progress::emit(
-                    progress,
-                    FusionStage::Selecting,
-                    Some(panel_id.clone()),
-                    FusionStage::Selecting.label(),
-                );
-                let text = panel_by_id(panels, &panel_id)
-                    .and_then(|panel| panel.report.as_ref())
-                    .map_or_else(
-                        || {
-                            needs_parent_text(
-                                panels,
-                                "picked panel had no candidate",
-                                Some(&analysis),
-                            )
-                        },
-                        |report| report.candidate_answer.clone(),
-                    );
-                (FusionDecision::Picked { panel_id }, text, Some(analysis), 0)
-            }
-            HostDecision::NeedsParent { reason } => {
-                let summary = needs_parent_text(panels, &reason_line(&reason), Some(&analysis));
-                (
-                    FusionDecision::NeedsParent { reason },
-                    summary,
-                    Some(analysis),
-                    0,
-                )
-            }
-            HostDecision::Merge => {
-                self.run_synthesis(
-                    config,
-                    request,
-                    analysis,
-                    panels,
-                    progress,
-                    run_id,
-                    started,
-                    usage,
-                    priced_synth,
-                    synth_attempted,
-                    stage_settlement,
-                    // `cost::Usage` is `Copy`; the synthesizer stage needs
-                    // the analyst's figure so its own refreshes keep
-                    // reporting it rather than dropping back to the
-                    // panel-only total.
-                    Some((analyst_usage, analyst_calls)),
-                    analyst_usage_incomplete,
-                )
-                .await
-            }
-        }
     }
 
-    /// `analyze_and_decide` helper: the timeout-bounded analyst call itself.
+    /// `run_analysis` helper: the timeout-bounded analyst call itself.
     /// Split out purely to keep the caller under the line-count lint.
     #[allow(clippy::too_many_arguments)]
     async fn run_analyst_call(
@@ -1645,6 +1772,8 @@ impl FusionOrchestrator {
         _started: Instant,
         resolved_egress: &Arc<Mutex<Option<Vec<String>>>>,
         stage_settlement: &StageSettlement<'_>,
+        inherit: &FusionInheritance,
+        run_id: &str,
     ) -> (
         Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)>,
         u64,
@@ -1750,7 +1879,7 @@ impl FusionOrchestrator {
         // was demonstrably made. `analyst_attempted: true` with no usage yet
         // is precisely `price_realized_usage`'s "attempted, usage unknown"
         // case: it prices `judge_input_token_estimate` and flags `estimated`.
-        stage_settlement.refresh(None, true, None, false, true);
+        stage_settlement.refresh(None, true, true);
         let analyst_started = Instant::now();
         // F004: bound the analyst stage by what actually remains of the
         // end-to-end deadline, not just its own `analystTimeoutMs` budget —
@@ -1759,7 +1888,7 @@ impl FusionOrchestrator {
         // `tokio::time::timeout`s always poll their inner future first, so
         // this always resolves before — never after — that outer wrapper).
         // Reusing `AnalystError::Failed("timeout")` here folds this into the
-        // SAME NeedsParent handling as `analyze`'s own per-attempt timeout,
+        // SAME unanalyzed degradation as `analyze`'s own per-attempt timeout,
         // below. This outer timeout races the WHOLE `analyze` call, so on
         // expiry there is no accumulator to recover — `analyze` itself is
         // cancelled mid-flight and `AnalystUsage::default()` (empty) is the
@@ -1776,8 +1905,6 @@ impl FusionOrchestrator {
             stage_settlement.refresh(
                 analyst_usage,
                 true,
-                None,
-                false,
                 incomplete || snapshot.incomplete || snapshot.unreported_calls > 0,
             );
         };
@@ -1789,15 +1916,15 @@ impl FusionOrchestrator {
                     .map_or_else(|poisoned| poisoned.into_inner().clone(), |latest| latest.clone());
                 Err((AnalystError::Failed("timeout".into()), latest))
             }
-            outcome = crate::analyst::analyze_registered(
-                Arc::clone(&self.side_query),
+            outcome = self.analyze(
                 config,
                 request,
-                &resolved.analyst,
+                resolved,
                 panels,
                 analyst_limits,
                 &mut observe,
-                self.attempt_run.as_deref(),
+                inherit,
+                run_id,
             ) => outcome,
         };
         let attempted = latest
@@ -1807,94 +1934,64 @@ impl FusionOrchestrator {
         (analysis_outcome, millis_since(analyst_started), attempted)
     }
 
-    /// `run_synthesis` helper: the `SYNTHESIS_FAILED` telemetry both
-    /// failure arms emit — identical metadata, only `error` differs. Split
-    /// out to keep `run_synthesis` under the line-count lint.
-    async fn emit_synthesis_failed(
-        &self,
-        request: &FusionRequest,
-        panels: &[PanelInternal],
-        run_id: &str,
-        synthesizer_ms: u64,
-        error_label: &str,
-        stage_settlement: &StageSettlement<'_>,
-    ) {
-        let mut md = fusion_event_metadata(request);
-        md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
-        add_panel_counts(&mut md, panels);
-        md.insert(
-            "duration_ms".into(),
-            AnalyticsValue::Int(saturating_i64(synthesizer_ms)),
-        );
-        md.insert(
-            "error".into(),
-            AnalyticsValue::String(error_label.to_string()),
-        );
-        self.log_running_event(
-            telemetry::tengu::fusion::SYNTHESIS_FAILED,
-            md,
-            &stage_settlement.cancel,
-            stage_settlement.operational_deadline,
-        )
-        .await;
-    }
-
-    /// `run_synthesis` helper [Round-5 review item 9]: a synthesizer call
-    /// that FAILED can still have been billed — an empty-text completion
-    /// (all reasoning, or a refusal) and a `SideQueryError::Partial` both
-    /// arrive carrying the provider's own `cost::Usage`. Roll it into the
-    /// run's token/request totals and into the survives-a-drop settlement
-    /// cell exactly the way `record_failed_analyst_usage` does for the
-    /// analyst, instead of leaving `priced_synth` at `None` and letting
-    /// `price_realized_usage` re-price a known call as an input-only
-    /// estimate with output/cache/reasoning hard-coded to 0.
-    ///
-    /// `usage.estimated` is forced regardless: a failed call's figure is
-    /// never claimed as this run's exact total (a `Partial` is short by
-    /// construction, and a timeout/transport arm hands back an empty usage
-    /// that `price_realized_usage`'s `synth_attempted` fallback then has to
-    /// estimate).
-    fn record_failed_synth_usage(
-        lost_usage: cost::Usage,
-        usage: &mut FusionUsage,
-        priced_synth: &mut Option<cost::Usage>,
-        stage_settlement: &StageSettlement<'_>,
-        analyst_for_refresh: Option<(&cost::Usage, u32)>,
-        analyst_usage_incomplete: bool,
-    ) {
-        usage.estimated = true;
-        if lost_usage.total_tokens() == 0 {
-            return;
-        }
-        add_cost_usage(usage, &lost_usage, 1);
-        *priced_synth = Some(lost_usage);
-        stage_settlement.refresh(
-            analyst_for_refresh,
-            true,
-            Some(&lost_usage),
-            true,
-            analyst_usage_incomplete,
-        );
-    }
-
-    /// `analyze_and_decide` helper: the shared `NeedsParent` degrade+telemetry
-    /// path for the three `AnalystError` arms (parse failure, structured
-    /// output unsupported, and any other analyst call failure). Split out
-    /// purely to keep the caller under the line-count lint — same telemetry,
-    /// same event name, same `(decision, text, analysis, synthesizer_ms)`
-    /// shape every other `analyze_and_decide` arm returns.
+    /// The analyst call itself: a read-only subagent when this run's analyst
+    /// checks claims with tools, otherwise the single structured query.
     #[allow(clippy::too_many_arguments)]
+    async fn analyze<F>(
+        &self,
+        config: &FusionRuntimeConfig,
+        request: &FusionRequest,
+        resolved: &ResolvedSet,
+        panels: &[PanelInternal],
+        limits: crate::model_resolver::ModelLimits,
+        observe: &mut F,
+        inherit: &FusionInheritance,
+        run_id: &str,
+    ) -> Result<(FusionAnalysis, AnalystUsage), (AnalystError, AnalystUsage)>
+    where
+        F: FnMut(&AnalystUsage, bool),
+    {
+        if config.analyst_uses_tools(request) {
+            return crate::analyst::analyze_with_tools(
+                &self.spawner,
+                inherit,
+                self.side_query.as_ref(),
+                config,
+                request,
+                &resolved.analyst,
+                panels,
+                limits,
+                run_id,
+                observe,
+                self.attempt_run.as_deref(),
+            )
+            .await;
+        }
+        crate::analyst::analyze_registered(
+            Arc::clone(&self.side_query),
+            config,
+            request,
+            &resolved.analyst,
+            panels,
+            limits,
+            observe,
+            self.attempt_run.as_deref(),
+        )
+        .await
+    }
+
+    /// `run_analysis` helper: the `ANALYSIS_FAILED` telemetry shared by the
+    /// three `AnalystError` arms (parse failure, structured output
+    /// unsupported, and any other analyst call failure).
     async fn analysis_failed_outcome(
         &self,
         request: &FusionRequest,
         panels: &[PanelInternal],
         run_id: &str,
         analyst_ms: u64,
-        reason: FusionNeedsParentReason,
         error_label: &str,
-        message: &str,
         stage_settlement: &StageSettlement<'_>,
-    ) -> (FusionDecision, String, Option<FusionAnalysis>, u64) {
+    ) {
         let mut md = fusion_event_metadata(request);
         md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
         add_panel_counts(&mut md, panels);
@@ -1913,309 +2010,6 @@ impl FusionOrchestrator {
             stage_settlement.operational_deadline,
         )
         .await;
-        (
-            FusionDecision::NeedsParent { reason },
-            needs_parent_text(panels, message, None),
-            None,
-            0,
-        )
-    }
-
-    /// `analyze_and_decide` helper: the `HostDecision::Merge` branch — run
-    /// the synthesizer (timeout-bounded the same way the analyst call is)
-    /// and its `NeedsParent` degradation paths. Split out purely to keep the
-    /// caller under the line-count lint — same telemetry, same ordering.
-    #[allow(clippy::too_many_arguments)]
-    async fn run_synthesis(
-        &self,
-        config: &FusionRuntimeConfig,
-        request: &FusionRequest,
-        analysis: FusionAnalysis,
-        panels: &[PanelInternal],
-        progress: &Option<Sender<FusionProgress>>,
-        run_id: &str,
-        _started: Instant,
-        usage: &mut FusionUsage,
-        priced_synth: &mut Option<cost::Usage>,
-        synth_attempted: &mut bool,
-        stage_settlement: &StageSettlement<'_>,
-        // The analyst's already-known usage, so every refresh below keeps
-        // reporting it instead of regressing to the panel-only total.
-        priced_analyst: Option<(cost::Usage, u32)>,
-        analyst_usage_incomplete: bool,
-    ) -> (FusionDecision, String, Option<FusionAnalysis>, u64) {
-        let operational_deadline = stage_settlement.operational_deadline;
-        if operational_deadline <= Instant::now() {
-            self.emit_synthesis_failed(
-                request,
-                panels,
-                run_id,
-                0,
-                "synthesis_timed_out",
-                stage_settlement,
-            )
-            .await;
-            return (
-                FusionDecision::NeedsParent {
-                    reason: FusionNeedsParentReason::SynthesisTimedOut,
-                },
-                needs_parent_text(panels, "synthesizer timed out", Some(&analysis)),
-                Some(analysis),
-                0,
-            );
-        }
-        let synth_route_refs = [stage_settlement.synthesizer];
-        if Self::ensure_live_config(
-            self.config_source.as_ref(),
-            config,
-            request,
-            &synth_route_refs,
-            "synthesizer",
-        )
-        .is_err()
-        {
-            self.emit_synthesis_failed(
-                request,
-                panels,
-                run_id,
-                0,
-                "settings_restricted",
-                stage_settlement,
-            )
-            .await;
-            return (
-                FusionDecision::NeedsParent {
-                    reason: FusionNeedsParentReason::SynthesisFailed,
-                },
-                needs_parent_text(
-                    panels,
-                    "synthesizer settings were restricted after preparation",
-                    Some(&analysis),
-                ),
-                Some(analysis),
-                0,
-            );
-        }
-        if Self::ensure_live_routes(
-            stage_settlement.live_catalog,
-            stage_settlement.catalog_snapshot,
-            &[(
-                stage_settlement.synthesizer.profile.as_str(),
-                stage_settlement.synthesizer.model.as_str(),
-                false,
-            )],
-            config.synthesizer_max_output_tokens,
-            "synthesizer",
-        )
-        .is_err()
-        {
-            self.emit_synthesis_failed(
-                request,
-                panels,
-                run_id,
-                0,
-                "route_restricted",
-                stage_settlement,
-            )
-            .await;
-            return (
-                FusionDecision::NeedsParent {
-                    reason: FusionNeedsParentReason::SynthesisFailed,
-                },
-                needs_parent_text(
-                    panels,
-                    "synthesizer route was restricted after preparation",
-                    Some(&analysis),
-                ),
-                Some(analysis),
-                0,
-            );
-        }
-        let synth_limits = stage_settlement
-            .catalog_snapshot
-            .limits_for(
-                &stage_settlement.synthesizer.profile,
-                &stage_settlement.synthesizer.model,
-            )
-            .unwrap_or_else(crate::model_resolver::ModelLimits::unknown);
-        if crate::synthesizer::preflight_request(
-            self.side_query.as_ref(),
-            config,
-            request,
-            stage_settlement.synthesizer,
-            &analysis,
-            panels,
-            synth_limits,
-        )
-        .is_err()
-        {
-            self.emit_synthesis_failed(
-                request,
-                panels,
-                run_id,
-                0,
-                "synthesis_input_too_large",
-                stage_settlement,
-            )
-            .await;
-            return (
-                FusionDecision::NeedsParent {
-                    reason: FusionNeedsParentReason::SynthesisFailed,
-                },
-                needs_parent_text(
-                    panels,
-                    "synthesizer input does not fit the prepared parent route",
-                    Some(&analysis),
-                ),
-                Some(analysis),
-                0,
-            );
-        }
-        stage_settlement.capture_synth_estimate(&analysis);
-        // T1 item 1: set unconditionally, before the call and its own
-        // timeout race — every path below (success, timeout, failure) is a
-        // genuine ATTEMPT that may have reached and been billed by the
-        // parent provider, unlike the `Pick`/`NeedsParent` analyst branches
-        // that never call this function at all. This is the only signal
-        // `price_realized_usage` has to tell "never ran, $0 is exact" apart
-        // from "ran and lost its usage, needs the settlement estimate".
-        *synth_attempted = true;
-        // [Round-5 review items 1/2/4] The synthesizer's payload (the
-        // prompt, the whole analysis and every panel's candidate answer)
-        // reaches the parent provider on every path below, so publish the
-        // attempt to the survives-a-drop cells BEFORE the call: a cancel
-        // landing mid-synthesis then settles panels + analyst + the
-        // synthesizer's estimated input rather than the panel-only figure.
-        let analyst_for_refresh = priced_analyst
-            .as_ref()
-            .map(|(usage, calls)| (usage, *calls));
-        stage_settlement.refresh(
-            analyst_for_refresh,
-            true,
-            None,
-            true,
-            analyst_usage_incomplete,
-        );
-        progress::emit(
-            progress,
-            FusionStage::Synthesizing,
-            None,
-            FusionStage::Synthesizing.label(),
-        );
-        let synth_started = Instant::now();
-        // F004: same remaining-budget bound as the analyst stage above, so a
-        // hanging synthesizer degrades to NeedsParent (SynthesisTimedOut,
-        // which already exists) rather than letting the run blow past
-        // `total_timeout_ms` and lose everything to the outer
-        // `TimedOutEmpty`.
-        let synth = tokio::select! {
-            biased;
-            () = tokio::time::sleep_until(operational_deadline) => {
-                Err((SynthError::TimedOut, cost::Usage::default()))
-            }
-            outcome = crate::synthesizer::synthesize_registered(
-                Arc::clone(&self.side_query),
-                config,
-                request,
-                stage_settlement.synthesizer,
-                &analysis,
-                panels,
-                synth_limits,
-                self.attempt_run.as_deref(),
-            ) => outcome,
-        };
-        let synthesizer_ms = millis_since(synth_started);
-        match synth {
-            Ok((text, synth_usage)) => {
-                add_cost_usage(usage, &synth_usage, 1);
-                *priced_synth = Some(synth_usage);
-                // [Round-5 review items 1/2/4] The synthesizer's exact usage
-                // is known here; publish it before the telemetry below, so
-                // a cancel racing `finalize_result` settles the real figure.
-                stage_settlement.refresh(
-                    analyst_for_refresh,
-                    true,
-                    Some(&synth_usage),
-                    true,
-                    analyst_usage_incomplete,
-                );
-                let mut md = fusion_event_metadata(request);
-                md.insert("run_id".into(), AnalyticsValue::String(run_id.to_string()));
-                add_panel_counts(&mut md, panels);
-                md.insert(
-                    "duration_ms".into(),
-                    AnalyticsValue::Int(saturating_i64(synthesizer_ms)),
-                );
-                add_usage_metadata(&mut md, usage);
-                self.log_running_event(
-                    telemetry::tengu::fusion::SYNTHESIS_COMPLETED,
-                    md,
-                    &stage_settlement.cancel,
-                    stage_settlement.operational_deadline,
-                )
-                .await;
-                (FusionDecision::Merged, text, Some(analysis), synthesizer_ms)
-            }
-            Err((error, lost_usage)) => {
-                let mut lost_usage = lost_usage;
-                if error != SynthError::InvalidCitations
-                    && lost_usage.total_tokens() == 0
-                    && self.side_query.has_canonical_estimator()
-                {
-                    if let Ok(input_tokens) = crate::synthesizer::estimate_input_tokens(
-                        self.side_query.as_ref(),
-                        config,
-                        request,
-                        stage_settlement.synthesizer,
-                        &analysis,
-                        panels,
-                        synth_limits,
-                    ) {
-                        lost_usage.tokens.input = input_tokens;
-                    }
-                }
-                Self::record_failed_synth_usage(
-                    lost_usage,
-                    usage,
-                    priced_synth,
-                    stage_settlement,
-                    analyst_for_refresh,
-                    analyst_usage_incomplete,
-                );
-                let (reason, error_label, message) = match error {
-                    SynthError::InvalidCitations => (
-                        FusionNeedsParentReason::SynthesisFailed,
-                        "citation_integrity",
-                        "synthesizer cited evidence not authorized by the final request",
-                    ),
-                    SynthError::TimedOut => (
-                        FusionNeedsParentReason::SynthesisTimedOut,
-                        "synthesis_timed_out",
-                        "synthesizer timed out",
-                    ),
-                    SynthError::Failed => (
-                        FusionNeedsParentReason::SynthesisFailed,
-                        "synthesis_failed",
-                        "synthesizer failed",
-                    ),
-                };
-                self.emit_synthesis_failed(
-                    request,
-                    panels,
-                    run_id,
-                    synthesizer_ms,
-                    error_label,
-                    stage_settlement,
-                )
-                .await;
-                (
-                    FusionDecision::NeedsParent { reason },
-                    needs_parent_text(panels, message, Some(&analysis)),
-                    Some(analysis),
-                    synthesizer_ms,
-                )
-            }
-        }
     }
 
     /// Settle registered accounting without replacing the computation outcome.
@@ -2233,18 +2027,20 @@ impl FusionOrchestrator {
         let (summary, status) = match settled {
             Ok(Ok(summary)) => (
                 summary,
-                platform_api::FusionAttemptSettlementStatus::Settled,
+                lingxi_core::host::FusionAttemptSettlementStatus::Settled,
             ),
             Ok(Err(failure)) => (
                 failure.summary,
-                platform_api::FusionAttemptSettlementStatus::Failed {
+                lingxi_core::host::FusionAttemptSettlementStatus::Failed {
                     reason: failure.error.to_string(),
                 },
             ),
             Err(()) => {
-                facts.set_attempt_settlement(platform_api::FusionAttemptSettlementStatus::Failed {
-                    reason: "attempt settlement owner panicked".into(),
-                });
+                facts.set_attempt_settlement(
+                    lingxi_core::host::FusionAttemptSettlementStatus::Failed {
+                        reason: "attempt settlement owner panicked".into(),
+                    },
+                );
                 return None;
             }
         };
@@ -2377,11 +2173,12 @@ impl FusionOrchestrator {
                     result.egress_profiles.extend(summary.possible_egress);
                     result.egress_profiles.sort();
                     result.egress_profiles.dedup();
-                    let stage = match result.status {
-                        FusionStatus::Completed => FusionStage::Completed,
-                        FusionStatus::NeedsParent => FusionStage::NeedsParent,
-                    };
-                    progress::emit(&progress, stage.clone(), None, stage.label());
+                    progress::emit(
+                        &progress,
+                        FusionStage::Completed,
+                        None,
+                        FusionStage::Completed.label(),
+                    );
                     let completed = result
                         .panels
                         .iter()
@@ -2394,10 +2191,11 @@ impl FusionOrchestrator {
                             completed,
                             result.panels.len() - completed,
                         ),
+                        &result.responses,
                         &result.run_id,
                         &result.usage,
                         &result.egress_profiles,
-                        &result.decision,
+                        result.status,
                         &result.timing,
                         Some(deadline),
                     )
@@ -2497,12 +2295,13 @@ impl FusionExecutor for FusionOrchestrator {
         // Quote during preparation so an invalid price/configuration fails
         // before TaskCreated. The actual reservation remains activation-only.
         let quote = if self.attempt_registrar.is_none() {
-            Some(budget::quote(
+            Some(budget::quote_for(
                 &config,
                 &resolved,
                 &catalog_snapshot,
                 &captured_prices,
                 inherit.budget().max_session_nano_usd().is_some(),
+                config.analyst_uses_tools(&request),
             )?)
         } else {
             None
@@ -2522,9 +2321,9 @@ impl FusionExecutor for FusionOrchestrator {
             inherit.cancel.clone(),
             FusionRunFactsRecorder::default(),
             if self.attempt_registrar.is_some() {
-                platform_api::ModelAttemptBillingMode::MeteredAttempts
+                lingxi_core::host::ModelAttemptBillingMode::MeteredAttempts
             } else {
-                platform_api::ModelAttemptBillingMode::LegacyAggregate
+                lingxi_core::host::ModelAttemptBillingMode::LegacyAggregate
             },
         );
         let facts = control.facts();
@@ -2635,6 +2434,49 @@ impl FusionExecutor for FusionOrchestrator {
             fast_panel_count: config.fast_panel_count,
             max_panel: config.max_panel,
             slash_cross_provider_default: config.slash_cross_provider_default,
+            implement_available: self.implement_host.is_some(),
+            proactive: config.proactive,
+        }
+    }
+
+    fn implement_confirmation(&self, request: &FusionRequest) -> ImplementConfirmation {
+        // The same snapshot, resolution and quote `prepare` makes, without
+        // registering, reserving or spending anything.
+        let Ok(request) = validate_request(request.clone()) else {
+            return ImplementConfirmation::ask();
+        };
+        let Ok(snapshot) = self.capture_runtime_snapshot(&request, None) else {
+            return ImplementConfirmation::ask();
+        };
+        let Ok(resolved) = model_resolver::resolve(&request, &snapshot.config, &snapshot.catalog)
+        else {
+            return ImplementConfirmation::ask();
+        };
+        let panels = Some(u8::try_from(resolved.panels.len()).unwrap_or(u8::MAX));
+        // `session_has_max: true` makes a model with no known price an error
+        // instead of a $0 quote: a run that cannot be priced always asks.
+        let Ok(quote) = budget::quote(
+            &snapshot.config,
+            &resolved,
+            &snapshot.catalog,
+            &snapshot.prices,
+            true,
+        ) else {
+            return ImplementConfirmation {
+                required: true,
+                quote_nano_usd: None,
+                panels,
+            };
+        };
+        let within_limit = snapshot
+            .config
+            .implement
+            .auto_approve_max_nano_usd
+            .is_some_and(|limit| quote.reserved_nano_usd <= limit);
+        ImplementConfirmation {
+            required: !within_limit,
+            quote_nano_usd: Some(quote.reserved_nano_usd),
+            panels,
         }
     }
 
@@ -2660,29 +2502,6 @@ impl FusionExecutor for FusionOrchestrator {
                 profiles.next().is_none().then_some(profile)
             })
     }
-
-    fn workflow_fusion_call_cap(&self) -> u32 {
-        // F007: reload per call; fail closed to the trait default (20, the
-        // global hard ceiling — see the trait doc) on a reload error.
-        self.config_source
-            .load()
-            .map_or(20, |config| config.workflow_fusion_call_cap)
-    }
-
-    fn workflow_batch_concurrency(&self) -> usize {
-        let Some(registrar) = &self.attempt_registrar else {
-            return 1;
-        };
-        let Ok(config) = self.config_source.load() else {
-            return 1;
-        };
-        if !config.enabled {
-            return 1;
-        }
-        usize::from(config.workflow_concurrency)
-            .min(registrar.workflow_batch_concurrency())
-            .clamp(1, 2)
-    }
 }
 
 /// One-shot entrypoint retained for the crate's own tests.
@@ -2707,18 +2526,14 @@ impl FusionOrchestrator {
     pub(crate) async fn run_scoped(
         &self,
         request: FusionRequest,
-        session_id: Option<protocol::SessionId>,
+        session_id: Option<lingxi_core::types::SessionId>,
         inherit: FusionInheritance,
         progress: Option<Sender<FusionProgress>>,
     ) -> Result<FusionResult, FusionError> {
         // Routed through the same immutable preparation snapshot and owned
         // supervisor every host uses.
         let request_for_failure = request.clone();
-        let parent_operation_id = if request.origin == FusionOrigin::Workflow {
-            request.workflow_run_id.clone()
-        } else {
-            None
-        };
+        let parent_operation_id = None;
         let identity = FusionRunIdentity::new(
             FusionRunId::generated(),
             session_id,
@@ -2755,7 +2570,8 @@ fn validate_request(mut request: FusionRequest) -> Result<FusionRequest, FusionE
             "prompt must be non-empty".into(),
         ));
     }
-    request.dimensions = normalize_dimensions(request.dimensions)?;
+    request.dimensions = normalize_dimensions_for(request.mode, request.dimensions)?;
+    request.verify_commands = validate_verify_commands(request.mode, request.verify_commands)?;
     Ok(request)
 }
 
@@ -2923,10 +2739,10 @@ impl Drop for SettlementLease {
 /// is DROPPED (an outer cancel, or the outer total timeout): it commits
 /// whatever these cells last held. Round 4 taught `panel::RealizedSpendSink`
 /// to keep them fresh during the panel fan-out and `run_inner` to refresh
-/// them once the panel stage returned — and then stopped. The analyst's and
-/// the synthesizer's usage lived only on `run_inner`'s own stack, so a
-/// cancel during either stage committed the panel-only figure and charged
-/// real, already-billed judge tokens to nobody.
+/// them once the panel stage returned — and then stopped. The analyst's
+/// usage lived only on `run_inner`'s own stack, so a cancel during that
+/// stage committed the panel-only figure and charged real, already-billed
+/// judge tokens to nobody.
 ///
 /// The full stage table this type exists to keep honest — what the
 /// settlement cell holds at each boundary a run can be dropped on:
@@ -2936,11 +2752,9 @@ impl Drop for SettlementLease {
 /// | lease acquired, nothing dispatched | `(0, true)` | exact — no call yet (`resolve_and_reserve`) |
 /// | a panel task reaches the spawner | one priced `panel_prompt` turn per DISPATCHED panel | estimate (`panel::PanelDispatch` + `RealizedSpendSink`) |
 /// | a panel finishes | that panel's real usage + the floor for the ones still in flight | provider usage where known |
-/// | panel stage returns | every panel's real usage, analyst/synth exactly $0 | provider usage (`refresh(None, false, None, false)`) |
+/// | panel stage returns | every panel's real usage, analyst exactly $0 | provider usage (`refresh(None, false, false)`) |
 /// | analyst call dispatched | panels + canonical analyst request estimate | estimate (`refresh(None, true, ..)`) |
 /// | analyst returned | panels + the analyst's REAL usage | provider usage (`refresh(Some(..), true, ..)`) |
-/// | synthesizer dispatched | + canonical synthesizer request estimate | estimate (`refresh(.., None, true)`) |
-/// | synthesizer returned | + the synthesizer's REAL usage | provider usage (`refresh(.., Some(..), true)`) |
 /// | `finalize_result` | the same figure, committed against the lease | `price_realized_usage` |
 ///
 /// Provider-reported usage always wins; an estimate is only ever
@@ -2954,15 +2768,10 @@ struct StageSettlement<'a> {
     catalog_snapshot: &'a CatalogSnapshot,
     prices: &'a dyn FusionPriceBook,
     analyst: &'a ResolvedPanel,
-    /// The configured synthesizer route (`fusion.synthesizerModel`) — the one
-    /// the merge side query actually targets, which is NOT necessarily the
-    /// session's own model.
-    synthesizer: &'a ResolvedPanel,
     request_prompt: &'a str,
     request: Option<&'a FusionRequest>,
     config: Option<&'a FusionRuntimeConfig>,
     side_query: Option<&'a dyn SideQueryClient>,
-    synth_estimate: Arc<Mutex<Option<cost::Usage>>>,
     /// The finished, anonymized panel set — fixed for the whole life of
     /// this borrow (every stage below only reads it).
     panels: &'a [PanelInternal],
@@ -3026,49 +2835,14 @@ impl StageSettlement<'_> {
         Some(usage)
     }
 
-    fn canonical_synth_estimate(&self) -> Option<cost::Usage> {
-        self.synth_estimate.lock().ok().and_then(|guard| *guard)
-    }
-
-    fn capture_synth_estimate(&self, analysis: &FusionAnalysis) {
-        let (request, config, client) = match (self.request, self.config, self.side_query) {
-            (Some(request), Some(config), Some(client)) if client.has_canonical_estimator() => {
-                (request, config, client)
-            }
-            _ => return,
-        };
-        let limits = self
-            .catalog_snapshot
-            .limits_for(&self.synthesizer.profile, &self.synthesizer.model)
-            .unwrap_or_else(crate::model_resolver::ModelLimits::unknown);
-        let Ok(input) = crate::synthesizer::estimate_input_tokens(
-            client,
-            config,
-            request,
-            self.synthesizer,
-            analysis,
-            self.panels,
-            limits,
-        ) else {
-            return;
-        };
-        let mut usage = cost::Usage::default();
-        usage.tokens.input = input;
-        if let Ok(mut guard) = self.synth_estimate.lock() {
-            *guard = Some(usage);
-        }
-    }
-
     /// Rewrite both cells for the stage boundary just reached. Arguments
-    /// mirror `price_realized_usage`'s own analyst/synth parameters exactly,
+    /// mirror `price_realized_usage`'s own analyst parameters exactly,
     /// so "what does this stage know" is the only decision at each call
     /// site.
     fn refresh(
         &self,
         analyst_usage: Option<(&cost::Usage, u32)>,
         analyst_attempted: bool,
-        synth_usage: Option<&cost::Usage>,
-        synth_attempted: bool,
         analyst_usage_incomplete: bool,
     ) {
         if self.facts.snapshot().attempt_settlement.is_some() {
@@ -3076,9 +2850,6 @@ impl StageSettlement<'_> {
         }
         let mut output_tokens = aggregate_panel_usage(self.panels).output_tokens;
         if let Some((usage, _)) = analyst_usage {
-            output_tokens = output_tokens.saturating_add(usage.tokens.output);
-        }
-        if let Some(usage) = synth_usage {
             output_tokens = output_tokens.saturating_add(usage.tokens.output);
         }
         if let Ok(mut guard) = self.realized_tokens.lock() {
@@ -3095,19 +2866,10 @@ impl StageSettlement<'_> {
         if let Some((analyst, calls)) = analyst_usage {
             add_cost_usage(&mut usage, analyst, calls);
         }
-        if let Some(synth) = synth_usage {
-            add_cost_usage(&mut usage, synth, 1);
-        }
         let estimated_analyst = (analyst_attempted && analyst_usage.is_none())
             .then(|| self.canonical_analyst_estimate())
             .flatten();
         if let Some(estimate) = &estimated_analyst {
-            add_cost_usage(&mut usage, estimate, 1);
-        }
-        let estimated_synth = (synth_attempted && synth_usage.is_none())
-            .then(|| self.canonical_synth_estimate())
-            .flatten();
-        if let Some(estimate) = &estimated_synth {
             add_cost_usage(&mut usage, estimate, 1);
         }
         let usage_was_estimated = usage.estimated;
@@ -3123,9 +2885,8 @@ impl StageSettlement<'_> {
             !panel::is_never_dispatched_category(panel.error_category.as_deref())
                 && panel.usage.as_ref().is_none_or(|usage| usage.estimated)
         });
-        let attempts_incomplete = panels_incomplete
-            || (analyst_attempted && analyst_usage.is_none())
-            || (synth_attempted && synth_usage.is_none());
+        let attempts_incomplete =
+            panels_incomplete || (analyst_attempted && analyst_usage.is_none());
         if attempts_incomplete {
             self.facts.mark_attempts_unknown();
         } else {
@@ -3151,14 +2912,6 @@ impl StageSettlement<'_> {
                     .add_confirmed_egress(self.analyst.profile.clone());
             }
         }
-        if synth_attempted {
-            self.facts
-                .add_possible_egress(self.synthesizer.profile.clone());
-            if synth_usage.is_some() {
-                self.facts
-                    .add_confirmed_egress(self.synthesizer.profile.clone());
-            }
-        }
         self.facts.set_timing(FusionTiming {
             total_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
             ..Default::default()
@@ -3166,7 +2919,6 @@ impl StageSettlement<'_> {
 
         let analyst_for_pricing =
             analyst_usage.or_else(|| estimated_analyst.as_ref().map(|estimate| (estimate, 1)));
-        let synth_for_pricing = synth_usage.or(estimated_synth.as_ref());
         let (priced_nano_usd, mut priced_estimated) = price_realized_usage(
             self.catalog,
             self.prices,
@@ -3174,13 +2926,9 @@ impl StageSettlement<'_> {
             self.analyst,
             analyst_for_pricing,
             analyst_attempted,
-            self.synthesizer.profile.as_str(),
-            self.synthesizer.model.as_str(),
-            synth_for_pricing,
-            synth_attempted,
             self.request_prompt,
         );
-        priced_estimated |= estimated_analyst.is_some() || estimated_synth.is_some();
+        priced_estimated |= estimated_analyst.is_some();
         if let Ok(mut guard) = self.settlement.lock() {
             *guard = Some((
                 priced_nano_usd,
@@ -3194,6 +2942,27 @@ impl StageSettlement<'_> {
             priced_estimated || analyst_usage_incomplete || attempts_incomplete,
         );
     }
+}
+
+/// The material a panel hands the parent: its report when it completed, or
+/// in implement mode an `incomplete` entry when it failed but left changes;
+/// plus, in implement mode, its patch and verification.
+fn panel_material(panel: &PanelInternal) -> Option<PanelMaterial> {
+    let mut material = match (&panel.report, panel.status) {
+        (Some(report), PanelRunStatus::Completed) => {
+            PanelMaterial::from_report(&panel.anonymous_id, report, &panel.evidence_checks)
+        }
+        _ if panel.implement.has_changes() => PanelMaterial::incomplete(&panel.anonymous_id),
+        _ => return None,
+    };
+    material.patch.clone_from(&panel.implement.patch);
+    material
+        .patch_error
+        .clone_from(&panel.implement.patch_error);
+    material
+        .verification
+        .clone_from(&panel.implement.verification);
+    Some(material)
 }
 
 /// [Round-3 review B2, reworked] The provider profiles this panel set was
@@ -3279,25 +3048,14 @@ pub(crate) fn price_realized_usage(
     analyst: &ResolvedPanel,
     analyst_usage: Option<(&cost::Usage, u32)>,
     // T1 item 1 (user-directed policy): `true` when the analyst was actually
-    // CALLED (every path through `analyze_and_decide` attempts it), `false`
+    // CALLED (every path through `run_analysis` attempts it), `false`
     // at the `check_panel_bar`-failure call site in `run_inner`, where the
     // analyst never runs at all. Required to tell "attempted, usage lost"
     // (estimate + price it) apart from "never ran" (real, exact $0) — the
     // two collapse to the same `analyst_usage: None` otherwise.
     analyst_attempted: bool,
-    // The configured synthesizer route — what the merge call was billed on.
-    // NOT necessarily the session's own model any more: `fusion.synthesizerModel`
-    // names it explicitly.
-    synth_profile: &str,
-    synth_model: &str,
-    synth_usage: Option<&cost::Usage>,
-    // Same distinction as `analyst_attempted`, for the synthesizer — which,
-    // unlike the analyst, legitimately has NO attempt on most decisions (it
-    // only runs on the `Merge` branch). See `AnalysisOutcome::synth_attempted`.
-    synth_attempted: bool,
-    // The original task prompt, shared by both the analyst's and the
-    // synthesizer's real request payloads (`analyst_user_message` /
-    // `synthesize`'s `user` JSON) — the basis for the missing-usage estimate
+    // The original task prompt, part of the analyst's real request payload
+    // (`analyst_user_message`) — the basis for the missing-usage estimate
     // below, alongside each successful panel's own report.
     request_prompt: &str,
 ) -> (u64, bool) {
@@ -3345,7 +3103,7 @@ pub(crate) fn price_realized_usage(
             None => estimated = true,
         }
         // Round-7 finding [1] residual, applied at EVERY priced component
-        // (panel / analyst / synthesizer), not just this one: when the price
+        // (panel / analyst), not just this one: when the price
         // book had to guess which prompt-cache TTL this flattened
         // `cache_write_tokens` bucket was written with, a run that actually
         // spent cache-write tokens cannot claim an exact total.
@@ -3420,62 +3178,11 @@ pub(crate) fn price_realized_usage(
             }
         }
     }
-    if let Some(usage) = synth_usage {
-        match budget::price_component(
-            synth_profile,
-            synth_model,
-            catalog,
-            prices,
-            usage.tokens.input,
-            usage.tokens.output,
-            usage.tokens.cache_read,
-            usage.tokens.cache_write,
-            usage.tokens.reasoning_output,
-            1,
-        ) {
-            Some(nano_usd) => total_nano_usd = total_nano_usd.saturating_add(nano_usd),
-            None => estimated = true,
-        }
-        // Same TTL-approximation rule as the panel loop and the analyst arm.
-        if usage.tokens.cache_write > 0
-            && budget::cache_write_rate_is_ttl_approximated(
-                synth_profile,
-                synth_model,
-                catalog,
-                prices,
-            )
-        {
-            estimated = true;
-        }
-    } else if synth_attempted {
-        // T1 item 1: previously a synthesizer call that was attempted and
-        // lost its usage to a failure/timeout (`SynthError::Failed` /
-        // `TimedOut`) was treated exactly like "never ran" — real,
-        // already-billed spend silently reported as exact $0, without even
-        // flagging `estimated`. Same estimate-and-flag policy as the
-        // analyst branch above.
-        estimated = true;
-        let estimated_input = judge_input_token_estimate(request_prompt, panels);
-        if let Some(nano_usd) = budget::price_component(
-            synth_profile,
-            synth_model,
-            catalog,
-            prices,
-            estimated_input,
-            0,
-            0,
-            0,
-            0,
-            1,
-        ) {
-            total_nano_usd = total_nano_usd.saturating_add(nano_usd);
-        }
-    }
     (total_nano_usd, estimated)
 }
 
 /// Conservative fallback used only by isolated test fixtures or when a
-/// provider estimator is unavailable. Real Session-backed analyst/synth
+/// provider estimator is unavailable. Real Session-backed analyst
 /// paths use the canonical request builders in `packing` and the
 /// `SideQueryClient::estimate_request` hook, including system/schema/framing.
 /// `pub(crate)` remains for tests that exercise the no-client fallback.
@@ -3529,247 +3236,6 @@ fn capacity_narrowed(
     }
 }
 
-/// Byte cap on each panel's rendered `candidate_answer` inside
-/// [`needs_parent_text`], keeping the `NeedsParent` summary bounded when
-/// panels wrote long patches.
-///
-/// [Round 12 finding 1] This cap's earlier doc claimed "the full text is
-/// still in `FusionResult.panels`" — that is FALSE and the correction is
-/// load-bearing for the budget split below: `PanelOutcome`
-/// (platform-api/src/fusion.rs:471-490) carries only `panel_id` / `status` /
-/// `duration_ms` / `error_category` / `error_detail` / `usage`, no report
-/// text at all. Whatever this renderer drops is gone for good, which is why
-/// the budgets below are split per-section instead of letting one tail cut
-/// decide who survives.
-const NEEDS_PARENT_CANDIDATE_BYTE_CAP: usize = 4096;
-
-/// [Finding 10] Same bound as [`NEEDS_PARENT_CANDIDATE_BYTE_CAP`], applied to
-/// `report.summary` — the schema places no `maxLength` on `summary`
-/// (`panel_report_json_schema`) and the only ceiling upstream is the
-/// panel's whole-turn output budget (tens of KB), so leaving this field
-/// unbounded let a verbose or injection-steered panel bypass the adjacent
-/// cap entirely and push unbounded panel-authored text into the parent's
-/// context via `final_text`.
-const NEEDS_PARENT_SUMMARY_BYTE_CAP: usize = 4096;
-
-/// [Finding 10, rework round 2] The per-field caps above bound `summary` and
-/// `candidate_answer`, but `needs_parent_text` also renders the
-/// analyst-authored `analysis.consensus`, `contradictions[].topic`/
-/// `positions[].position` and `coverage_gaps` with no cap of their own —
-/// none of those pass through `truncate_bytes`, so a verbose or
-/// injection-steered analyst call could still push the assembled string
-/// arbitrarily large even with every panel field capped. This is the final
-/// backstop on the whole assembled body, so no sink inside it (present or
-/// added later) can bypass it.
-///
-/// [Round 12 finding 1] It is no longer the ONLY bound, because as a lone
-/// bound it was a tail cut over one concatenation: the sections are rendered
-/// header → analyst → panels → closing directive, so overflow was paid for
-/// entirely by whoever came last. That made the always-dropped casualty the
-/// `"Next: ..."` directive, and the next-dropped the PAID panel material —
-/// exactly inverting what this renderer exists to hand over (and see
-/// [`NEEDS_PARENT_CANDIDATE_BYTE_CAP`]: dropped panel material has no other
-/// route to the parent). Two shapes the config supports reached it:
-/// `FUSION_MAX_PANEL = 8` panels at the per-field caps render ~66 KB, so
-/// half the panels were cut outright; and one large analyst section, rendered
-/// AHEAD of the panel loop with no cap of its own, could consume the entire
-/// budget and evict 100% of the panel rows. So now
-/// [`NEEDS_PARENT_ANALYST_BYTE_CAP`] bounds the analyst block on its own, the
-/// panel block gets the remainder divided evenly per panel (so every panel
-/// keeps its row), this backstop guards the assembled body, and the closing
-/// directive is appended AFTER truncation so it can never be cut.
-const NEEDS_PARENT_TEXT_BYTE_CAP: usize = 32 * 1024;
-
-/// [Round 12 finding 1] The analyst block's own share of
-/// [`NEEDS_PARENT_TEXT_BYTE_CAP`]. The analyst-authored sections are rendered
-/// before the panel block and have no per-item cap, so without an independent
-/// budget one verbose or injection-steered `consensus` item evicts every
-/// paid panel report. 8 KiB holds a realistic consensus / contradictions /
-/// coverage-gaps set while leaving 24 KiB for the panels.
-const NEEDS_PARENT_ANALYST_BYTE_CAP: usize = 8 * 1024;
-
-/// [Round 12 finding 1] Byte cap on the `reason` interpolated into
-/// [`needs_parent_text`]'s header — the THIRD uncapped model-authored sink in
-/// this renderer, and the one rendered FIRST, so an oversized one starves
-/// every section after it. `FusionNeedsParentReason::AnalystRequested`'s
-/// `reason` is the analyst's own prose (see `reason_line`), which
-/// `analyst::sanitize_analysis` guards for control tags but never
-/// length-caps. Every host-authored reason this renderer is called with is a
-/// short one-liner, so 1 KiB is far above any legitimate value.
-const NEEDS_PARENT_REASON_BYTE_CAP: usize = 1024;
-
-/// [Round 12 finding 1] Per-panel fixed overhead charged against a panel's
-/// share of the panel budget: the two field labels (`"  summary: "` = 11,
-/// `"  candidate: "` = 13), the three joining newlines, and the two `…`
-/// markers `truncate_bytes` may append (3 bytes each), rounded up.
-const NEEDS_PARENT_PANEL_ROW_OVERHEAD: usize = 40;
-
-/// [Round 12 finding 1] The closing directive, appended AFTER every
-/// truncation so no budget overrun can drop it. It is the one line that tells
-/// the parent what to DO with the material above, and under the old
-/// single-tail-cut backstop it was the first thing lost.
-const NEEDS_PARENT_CLOSING_LINE: &str =
-    "Next: review the panel material above and provide the final answer yourself.";
-
-/// Render the `NeedsParent` summary (F004): unlike a bare status list, this
-/// carries the actual paid deliberation material — consensus, contradictions,
-/// coverage gaps, per-panel scores, and each successful panel's (already
-/// sanitized, see `panel::sanitize_report` / `analyst::sanitize_analysis`)
-/// summary and candidate answer — so the parent does not have to redo the
-/// work from a bare "Fusion failed" line. `analysis` is `None` when the
-/// analyst never returned a usable payload (parse failure, transport
-/// failure, or a pre-analysis abort).
-///
-/// `pub(crate)` so `orchestrator_test` can exercise [Finding 10]'s
-/// bounded-size regression directly instead of driving a full `run()`.
-pub(crate) fn needs_parent_text(
-    panels: &[PanelInternal],
-    reason: &str,
-    analysis: Option<&FusionAnalysis>,
-) -> String {
-    // [Round 12 finding 1] Three independently budgeted sections, assembled
-    // in this order so that overflow is paid for by the section that caused
-    // it rather than by whatever happens to be rendered last:
-    //   1. the header, whose only variable part (`reason`) is capped at
-    //      NEEDS_PARENT_REASON_BYTE_CAP,
-    //   2. the analyst block, capped at NEEDS_PARENT_ANALYST_BYTE_CAP,
-    //   3. the panel block, given the remainder of NEEDS_PARENT_TEXT_BYTE_CAP
-    //      divided EVENLY per panel so every panel keeps its `anonymous_id`
-    //      row even at FUSION_MAX_PANEL with both fields at their caps,
-    // and then NEEDS_PARENT_CLOSING_LINE appended after the final backstop.
-    let header = format!(
-        "Fusion did not produce a conclusive answer ({}).",
-        truncate_bytes(reason, NEEDS_PARENT_REASON_BYTE_CAP)
-    );
-
-    let mut analyst_lines: Vec<String> = Vec::new();
-    if let Some(analysis) = analysis {
-        if !analysis.consensus.is_empty() {
-            analyst_lines.push(String::new());
-            analyst_lines.push("Consensus:".into());
-            for item in &analysis.consensus {
-                analyst_lines.push(format!("- {item}"));
-            }
-        }
-        if !analysis.contradictions.is_empty() {
-            analyst_lines.push(String::new());
-            analyst_lines.push("Contradictions:".into());
-            for contradiction in &analysis.contradictions {
-                analyst_lines.push(format!(
-                    "- [{:?}] {}",
-                    contradiction.severity, contradiction.topic
-                ));
-                for position in &contradiction.positions {
-                    analyst_lines.push(format!("  - {}: {}", position.panel_id, position.position));
-                }
-            }
-        }
-        if !analysis.coverage_gaps.is_empty() {
-            analyst_lines.push(String::new());
-            analyst_lines.push("Coverage gaps:".into());
-            for gap in &analysis.coverage_gaps {
-                analyst_lines.push(format!("- {gap}"));
-            }
-        }
-    }
-
-    let mut head = header;
-    if !analyst_lines.is_empty() {
-        head.push('\n');
-        // The analyst sections have no per-item cap of their own, so this is
-        // the bound that stops one verbose item from evicting the panels.
-        head.push_str(&truncate_bytes(
-            &analyst_lines.join("\n"),
-            NEEDS_PARENT_ANALYST_BYTE_CAP,
-        ));
-    }
-
-    let mut lines = vec![head, String::new(), "Panels:".into()];
-    // Whatever the header + analyst block did not use is the panel block's,
-    // split evenly so a late panel is never starved by an early one.
-    let panel_budget = NEEDS_PARENT_TEXT_BYTE_CAP
-        .saturating_sub(lines.iter().map(|line| line.len() + 1).sum::<usize>());
-    let per_panel = panel_budget / panels.len().max(1);
-    let mut ordered = panels.to_vec();
-    ordered.sort_by(|a, b| a.anonymous_id.cmp(&b.anonymous_id));
-    for panel in &ordered {
-        let mut row = format!("- {}: {:?}", panel.anonymous_id, panel.status);
-        if let Some(scores) = analysis.and_then(|a| a.scores.get(&panel.anonymous_id)) {
-            let mut dims: Vec<(&String, &u8)> = scores.iter().collect();
-            dims.sort_by(|a, b| a.0.cmp(b.0));
-            if !dims.is_empty() {
-                let rendered = dims
-                    .iter()
-                    .map(|(dim, score)| format!("{dim}={score}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                row.push_str(&format!(" ({rendered})"));
-            }
-        }
-        // The row goes in unconditionally: it is the identity of a panel the
-        // run already paid for, and it is what the parent needs to reason
-        // about coverage even when this panel's fields had to be trimmed.
-        let field_budget = per_panel
-            .saturating_sub(row.len())
-            .saturating_sub(NEEDS_PARENT_PANEL_ROW_OVERHEAD);
-        lines.push(row);
-        if let Some(report) = &panel.report {
-            // Never ABOVE the per-field caps; only further down when the
-            // panel count makes this panel's share the tighter constraint.
-            let summary_cap = NEEDS_PARENT_SUMMARY_BYTE_CAP.min(field_budget / 2);
-            let candidate_cap =
-                NEEDS_PARENT_CANDIDATE_BYTE_CAP.min(field_budget.saturating_sub(summary_cap));
-            lines.push(format!(
-                "  summary: {}",
-                truncate_bytes(&report.summary, summary_cap)
-            ));
-            lines.push(format!(
-                "  candidate: {}",
-                truncate_bytes(&report.candidate_answer, candidate_cap)
-            ));
-        }
-    }
-
-    // Final backstop on the whole assembled BODY — see
-    // NEEDS_PARENT_TEXT_BYTE_CAP's doc comment. It runs before the closing
-    // directive is appended, so no sink inside the body (present or added
-    // later) can bypass the bound AND the directive can never be the casualty
-    // of one.
-    let mut text = truncate_bytes(&lines.join("\n"), NEEDS_PARENT_TEXT_BYTE_CAP);
-    text.push_str("\n\n");
-    text.push_str(NEEDS_PARENT_CLOSING_LINE);
-    text
-}
-
-/// Truncate `s` to at most `cap` bytes on a UTF-8 char boundary, marking a cut
-/// with a trailing `…`.
-fn truncate_bytes(s: &str, cap: usize) -> String {
-    if s.len() <= cap {
-        return s.to_string();
-    }
-    let mut end = cap;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
-}
-
-fn reason_line(reason: &FusionNeedsParentReason) -> String {
-    match reason {
-        FusionNeedsParentReason::AnalystRequested { reason } => reason.clone(),
-        FusionNeedsParentReason::AnalysisParseFailed => "analyst JSON could not be parsed".into(),
-        FusionNeedsParentReason::AnalysisFailed { category } => {
-            format!("analyst call failed: {category}")
-        }
-        FusionNeedsParentReason::CriticalContradiction => {
-            "unresolved critical contradiction".into()
-        }
-        FusionNeedsParentReason::LowConfidence => "analyst confidence below merge threshold".into(),
-        FusionNeedsParentReason::SynthesisFailed => "synthesizer failed".into(),
-        FusionNeedsParentReason::SynthesisTimedOut => "synthesizer timed out".into(),
-    }
-}
-
 fn millis_since(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -3787,7 +3253,6 @@ fn fusion_origin_label(origin: FusionOrigin) -> &'static str {
     match origin {
         FusionOrigin::Agent => "agent",
         FusionOrigin::Slash => "slash",
-        FusionOrigin::Workflow => "workflow",
     }
 }
 
@@ -3820,6 +3285,7 @@ fn fusion_error_label(error: &FusionError) -> &'static str {
         FusionError::PanelSetIncomplete => "panel_set_incomplete",
         FusionError::TimedOutEmpty => "timed_out_empty",
         FusionError::Cancelled => "cancelled",
+        FusionError::ImplementUnavailable(_) => "implement_unavailable",
         FusionError::Internal => "internal",
     }
 }
@@ -3958,7 +3424,6 @@ mod record_failed_analyst_usage_tests {
         snapshot: CatalogSnapshot,
         prices: (),
         analyst: ResolvedPanel,
-        synthesizer: ResolvedPanel,
         facts: FusionRunFactsRecorder,
     }
 
@@ -3976,10 +3441,6 @@ mod record_failed_analyst_usage_tests {
                     profile: "profile".into(),
                     model: "model".into(),
                 },
-                synthesizer: ResolvedPanel {
-                    profile: "profile".into(),
-                    model: "model".into(),
-                },
                 facts: FusionRunFactsRecorder::default(),
             }
         }
@@ -3993,12 +3454,10 @@ mod record_failed_analyst_usage_tests {
                 catalog_snapshot: &self.snapshot,
                 prices: &self.prices,
                 analyst: &self.analyst,
-                synthesizer: &self.synthesizer,
                 request_prompt: "task",
                 request: None,
                 config: None,
                 side_query: None,
-                synth_estimate: Arc::new(Mutex::new(None)),
                 panels: &[],
                 operational_deadline: Instant::now() + Duration::from_secs(60),
                 cancel: CancellationToken::new(),
@@ -4032,27 +3491,18 @@ mod record_failed_analyst_usage_tests {
             },
             ..cost::Usage::default()
         };
-        let synth = cost::Usage {
-            tokens: cost::TokenUsage {
-                input: 17,
-                output: 19,
-                ..cost::TokenUsage::default()
-            },
-            ..cost::Usage::default()
-        };
-
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            stage.refresh(Some((&analyst, 1)), true, Some(&synth), true, false);
+            stage.refresh(Some((&analyst, 1)), true, false);
         }));
         assert!(panic.is_err());
 
         let facts = fixture.facts.snapshot();
         let usage = facts
             .usage
-            .expect("provider-returned analyst and synth usage must be latched first");
-        assert_eq!(usage.input_tokens, 22);
-        assert_eq!(usage.output_tokens, 22);
-        assert_eq!(usage.provider_requests, 2);
+            .expect("provider-returned analyst usage must be latched first");
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 3);
+        assert_eq!(usage.provider_requests, 1);
         assert_eq!(usage.realized_nano_usd, 17);
         assert!(facts.usage_incomplete);
         assert_eq!(facts.confirmed_egress, vec!["profile"]);
@@ -4177,6 +3627,8 @@ mod check_panel_bar_preflight_tests {
             error_detail: None,
             usage: None,
             spawn_prompt: String::new(),
+            evidence_checks: Vec::new(),
+            implement: Default::default(),
         }
     }
 
@@ -4185,6 +3637,7 @@ mod check_panel_bar_preflight_tests {
     /// `ok == 0` branch, so the exact field values here are irrelevant.
     fn minimal_request() -> FusionRequest {
         FusionRequest {
+            verify_claims: false,
             schema_version: 1,
             origin: FusionOrigin::Agent,
             prompt: "task".into(),
@@ -4196,7 +3649,8 @@ mod check_panel_bar_preflight_tests {
             cross_provider: false,
             parent_profile: "p".into(),
             parent_model: "m".into(),
-            workflow_run_id: None,
+            mode: Default::default(),
+            verify_commands: Vec::new(),
         }
     }
 
@@ -4346,8 +3800,8 @@ classified as preflight"
         let mut panels = vec![panel_with_category(None), panel_with_category(None)];
         for panel in &mut panels {
             panel.status = PanelRunStatus::Completed;
-            panel.report = Some(platform_api::PanelReport {
-                schema_version: platform_api::FUSION_SCHEMA_VERSION,
+            panel.report = Some(lingxi_core::host::PanelReport {
+                schema_version: lingxi_core::host::FUSION_SCHEMA_VERSION,
                 summary: "ok".into(),
                 candidate_answer: "answer".into(),
                 claims: Vec::new(),
@@ -4374,8 +3828,7 @@ classified as preflight"
 /// not silently emit `realized_output_tokens: None` when the run's own
 /// panels already made real, billed provider calls before the outer
 /// cancel/timeout race decided the run — that number is what lets a caller
-/// tracking a SEPARATE token budget (`local_workflow`'s `fusion()` bridge
-/// arm) charge already-spent tokens instead of leaving its budget ceiling
+/// tracking a SEPARATE token budget charge already-spent tokens instead of leaving its budget ceiling
 /// stuck at whatever it was before the call. Kept inline rather than in
 /// `orchestrator_test.rs` so this fixer's changes stay isolated to files it
 /// owns (same rationale as `record_failed_analyst_usage_tests` above) — the
@@ -4385,13 +3838,15 @@ classified as preflight"
 mod outer_err_arm_realized_tokens_tests {
     use super::*;
     use crate::model_resolver::CatalogModel;
-    use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-    use platform_api::subagent_spawn::{
+    use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+    use lingxi_core::host::subagent_spawn::{
         SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest,
         SubagentUsage,
     };
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use platform_api::{
+    use lingxi_core::host::tool_invoker::{
+        SubagentInvocationContext, ToolInvoker, ToolInvokerError,
+    };
+    use lingxi_core::host::{
         EvidenceKind, FusionModelHints, FusionModelRef, FusionOrigin, FusionPreset, PanelClaim,
         PanelEvidence, PanelReport, DEFAULT_FUSION_DIMENSIONS,
     };
@@ -4459,7 +3914,7 @@ mod outer_err_arm_realized_tokens_tests {
                 unresolved_questions: vec![],
             };
             Ok(SubagentResult::Completed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 content: serde_json::to_value(&report).unwrap(),
                 usage: SubagentUsage {
                     total_tokens: 12,
@@ -4534,6 +3989,7 @@ mod outer_err_arm_realized_tokens_tests {
 
     fn request() -> FusionRequest {
         FusionRequest {
+            verify_claims: false,
             schema_version: 1,
             origin: FusionOrigin::Slash,
             prompt: "task".into(),
@@ -4561,7 +4017,8 @@ mod outer_err_arm_realized_tokens_tests {
             cross_provider: true,
             parent_profile: "anthropic".into(),
             parent_model: "claude-sonnet-5".into(),
-            workflow_run_id: None,
+            mode: Default::default(),
+            verify_commands: Vec::new(),
         }
     }
 
@@ -4569,17 +4026,12 @@ mod outer_err_arm_realized_tokens_tests {
         let mut cfg = FusionRuntimeConfig::defaults();
         cfg.panel_total_timeout_ms = 5_000;
         cfg.analyst_timeout_ms = 5_000;
-        cfg.synthesizer_timeout_ms = 5_000;
         cfg.total_timeout_ms = 5_000;
         cfg.min_successful_panels = 2;
         // The panels come from this fixture's explicit `models` list; the
-        // analyst and synthesizer roles are configuration and have no
+        // analyst role is configuration and have no
         // automatic fallback.
-        cfg.analyst_model = Some(platform_api::FusionModelChoice::new(
-            "anthropic",
-            "claude-sonnet-5",
-        ));
-        cfg.synthesizer_model = Some(platform_api::FusionModelChoice::new(
+        cfg.analyst_model = Some(lingxi_core::host::FusionModelChoice::new(
             "anthropic",
             "claude-sonnet-5",
         ));
@@ -4702,7 +4154,7 @@ were genuinely dispatched before cancellation, not None or a subset — got \
                 unresolved_questions: vec![],
             };
             Ok(SubagentResult::Completed {
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 content: serde_json::to_value(&report).unwrap(),
                 usage: SubagentUsage {
                     total_tokens: 12,
@@ -4774,7 +4226,7 @@ were genuinely dispatched before cancellation, not None or a subset — got \
             "must disclose exactly the 2 panels that genuinely dispatched \
 (anthropic, openai) — never the rejected `deepseek` panel (error_category \
 \"spawn\", zero provider calls) and never the analyst profile (the panel \
-bar failed before `analyze_and_decide` ever ran, so the analyst was \
+bar failed before `run_analysis` ever ran, so the analyst was \
 provably never called) — got {:?} (all events: {:?})",
             failed_event.egress_profiles,
             events

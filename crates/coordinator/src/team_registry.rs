@@ -5,7 +5,7 @@
 //! teammates.
 
 use crate::mailbox::{MailboxRouter, TeammateMailbox};
-use protocol::AgentId;
+use lingxi_core::types::AgentId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -62,8 +62,9 @@ pub enum WorkerStatus {
 /// Registry of teammate workers owned by a coordinator session.
 pub struct TeamRegistry {
     workers: RwLock<HashMap<AgentId, WorkerAgent>>,
-    permission_gate: RwLock<Option<Arc<dyn platform_api::PermissionGate>>>,
-    message_forwarder: RwLock<Option<Arc<dyn platform_api::teammate_worker::PaneMessageForwarder>>>,
+    permission_gate: RwLock<Option<Arc<dyn lingxi_core::host::PermissionGate>>>,
+    message_forwarder:
+        RwLock<Option<Arc<dyn lingxi_core::host::teammate_worker::PaneMessageForwarder>>>,
     /// Handler transitions that arrived after activation but before the teammate spawner
     /// linked the handler-generated task id to its worker. Access always follows
     /// the `workers` lock so linking and replay cannot miss each other.
@@ -176,7 +177,7 @@ impl PendingApprovedDeparture {
 }
 
 #[async_trait::async_trait]
-impl platform_api::team_spawn::TeammateDepartureCleanup for TeamRegistry {
+impl lingxi_core::host::team_spawn::TeammateDepartureCleanup for TeamRegistry {
     async fn has_pending_departure(&self, task_id: &str) -> bool {
         let entry = self.approved_departures.read().await.get(task_id).cloned();
         match entry {
@@ -247,10 +248,10 @@ impl TeamRegistry {
     }
 
     /// Live leader gate used to derive a teammate's approved permission mode.
-    pub async fn set_permission_gate(&self, gate: Arc<dyn platform_api::PermissionGate>) {
+    pub async fn set_permission_gate(&self, gate: Arc<dyn lingxi_core::host::PermissionGate>) {
         *self.permission_gate.write().await = Some(gate);
     }
-    pub async fn permission_gate(&self) -> Option<Arc<dyn platform_api::PermissionGate>> {
+    pub async fn permission_gate(&self) -> Option<Arc<dyn lingxi_core::host::PermissionGate>> {
         self.permission_gate.read().await.clone()
     }
 
@@ -301,14 +302,14 @@ impl TeamRegistry {
     /// Install the parent-process message bridge for a pane worker.
     pub async fn set_message_forwarder(
         &self,
-        forwarder: Arc<dyn platform_api::teammate_worker::PaneMessageForwarder>,
+        forwarder: Arc<dyn lingxi_core::host::teammate_worker::PaneMessageForwarder>,
     ) {
         *self.message_forwarder.write().await = Some(forwarder);
     }
 
     pub async fn message_forwarder(
         &self,
-    ) -> Option<Arc<dyn platform_api::teammate_worker::PaneMessageForwarder>> {
+    ) -> Option<Arc<dyn lingxi_core::host::teammate_worker::PaneMessageForwarder>> {
         self.message_forwarder.read().await.clone()
     }
 

@@ -46,7 +46,7 @@ impl ConversationOrchestrator {
         condition: &str,
     ) {
         let hook = hooks::HookDefinition {
-            id: protocol::HookId::new(),
+            id: lingxi_core::types::HookId::new(),
             name: GOAL_STOP_HOOK_NAME.to_string(),
             events: vec![hooks::HookEventType::Stop],
             if_condition: None,
@@ -108,28 +108,33 @@ impl ConversationOrchestrator {
     /// the metric from somebody typing `/goal clear`.
     pub(crate) async fn clear_active_goal_state_and_hook(
         &self,
-        reason: platform_api::GoalClearedReason,
-    ) -> Option<platform_api::ActiveGoalSnapshot> {
-        self.finish_active_goal_state_and_hook(platform_api::GoalStatusKind::Cleared, Some(reason))
-            .await
+        reason: lingxi_core::host::GoalClearedReason,
+    ) -> Option<lingxi_core::host::ActiveGoalSnapshot> {
+        self.finish_active_goal_state_and_hook(
+            lingxi_core::host::GoalStatusKind::Cleared,
+            Some(reason),
+        )
+        .await
     }
 
     async fn finish_active_goal_state_and_hook(
         &self,
-        status: platform_api::GoalStatusKind,
-        cleared_reason: Option<platform_api::GoalClearedReason>,
-    ) -> Option<platform_api::ActiveGoalSnapshot> {
+        status: lingxi_core::host::GoalStatusKind,
+        cleared_reason: Option<lingxi_core::host::GoalClearedReason>,
+    ) -> Option<lingxi_core::host::ActiveGoalSnapshot> {
         self.reset_goal_interruption();
         let (session_id, goal, cleared) = {
             let mut s = self.session.lock().await;
             let goal = s.active_goal.take();
-            let cleared = goal.as_ref().map(|goal| platform_api::ActiveGoalSnapshot {
-                condition: goal.condition.clone(),
-                set_at: goal.set_at,
-                last_reason: goal.last_reason.clone(),
-                iterations: goal.iterations,
-                tokens_at_start: goal.tokens_at_start,
-            });
+            let cleared = goal
+                .as_ref()
+                .map(|goal| lingxi_core::host::ActiveGoalSnapshot {
+                    condition: goal.condition.clone(),
+                    set_at: goal.set_at,
+                    last_reason: goal.last_reason.clone(),
+                    iterations: goal.iterations,
+                    tokens_at_start: goal.tokens_at_start,
+                });
             (s.session_id, goal, cleared)
         };
         if let Some(goal) = goal.as_ref() {
@@ -238,16 +243,16 @@ impl ConversationOrchestrator {
     }
 
     fn last_assistant_message_for_hooks(
-        history: &[protocol::ConversationMessage],
+        history: &[lingxi_core::types::ConversationMessage],
     ) -> Option<String> {
         let assistant = history.iter().rev().find_map(|message| match message {
-            protocol::ConversationMessage::Assistant { content, .. } => Some(content),
+            lingxi_core::types::ConversationMessage::Assistant { content, .. } => Some(content),
             _ => None,
         })?;
         let joined = assistant
             .iter()
             .filter_map(|block| match block {
-                protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -745,29 +750,31 @@ impl ConversationOrchestrator {
     /// not: `mon` stamps it on every goal recovered by a resume.
     pub(crate) async fn fire_goal_terminal_event(
         &self,
-        status: platform_api::GoalStatusKind,
+        status: lingxi_core::host::GoalStatusKind,
         goal: &lingxi_core::session::ActiveGoalState,
-        cleared_reason: Option<platform_api::GoalClearedReason>,
+        cleared_reason: Option<lingxi_core::host::GoalClearedReason>,
     ) {
         let Some(bus) = self.model_runtime.analytics_bus.as_ref() else {
             return;
         };
         let (event, reason) = match status {
-            platform_api::GoalStatusKind::Achieved => ("tengu_goal_achieved", None),
-            platform_api::GoalStatusKind::Failed => ("tengu_goal_failed", None),
-            platform_api::GoalStatusKind::Cleared => (
+            lingxi_core::host::GoalStatusKind::Achieved => ("tengu_goal_achieved", None),
+            lingxi_core::host::GoalStatusKind::Failed => ("tengu_goal_failed", None),
+            lingxi_core::host::GoalStatusKind::Cleared => (
                 "tengu_goal_cleared",
                 // `kB`'s second argument. A `Cleared` teardown always carries
                 // one; the fallback keeps this total rather than silently
                 // dropping `reason` from the event.
                 Some(
                     cleared_reason
-                        .unwrap_or(platform_api::GoalClearedReason::UserClear)
+                        .unwrap_or(lingxi_core::host::GoalClearedReason::UserClear)
                         .as_str(),
                 ),
             ),
             // `Set` never tears a goal down, and `NotMet` leaves it running.
-            platform_api::GoalStatusKind::Set | platform_api::GoalStatusKind::NotMet => return,
+            lingxi_core::host::GoalStatusKind::Set | lingxi_core::host::GoalStatusKind::NotMet => {
+                return
+            }
         };
         let duration_ms = std::time::SystemTime::now()
             .duration_since(goal.set_at)
@@ -1254,7 +1261,7 @@ impl ConversationOrchestrator {
                         .await;
                     let _ = self
                         .finish_active_goal_state_and_hook(
-                            platform_api::GoalStatusKind::Failed,
+                            lingxi_core::host::GoalStatusKind::Failed,
                             None,
                         )
                         .await;
@@ -1275,7 +1282,10 @@ impl ConversationOrchestrator {
                     });
                 self.record_goal_evaluation(reason, false).await;
                 let _ = self
-                    .finish_active_goal_state_and_hook(platform_api::GoalStatusKind::Achieved, None)
+                    .finish_active_goal_state_and_hook(
+                        lingxi_core::host::GoalStatusKind::Achieved,
+                        None,
+                    )
                     .await;
                 (None, GoalEvalOutcome::Met)
             }
@@ -1320,7 +1330,7 @@ impl ConversationOrchestrator {
             // iteration count and reason refreshed, so this is NOT the `Set`
             // sentinel the port used to write here.
             self.persist_goal_status_attachment(
-                platform_api::GoalStatusKind::NotMet,
+                lingxi_core::host::GoalStatusKind::NotMet,
                 Some(&snapshot),
             )
             .await;
@@ -1597,7 +1607,7 @@ impl ConversationOrchestrator {
                     .last_response_output_tokens
                     .load(std::sync::atomic::Ordering::Relaxed),
             );
-        let ttl_1h = platform_api::env::is_env_truthy(
+        let ttl_1h = lingxi_core::host::env::is_env_truthy(
             std::env::var("ENABLE_PROMPT_CACHING_1H").ok().as_deref(),
         );
         let cache_ttl = if ttl_1h { "1h" } else { "5m" };
@@ -1663,7 +1673,8 @@ impl ConversationOrchestrator {
         if display_pricing.is_some_and(|pricing| {
             matches!(
                 pricing.billing_mode,
-                platform_api::ModelBillingMode::Subscription | platform_api::ModelBillingMode::Free
+                lingxi_core::host::ModelBillingMode::Subscription
+                    | lingxi_core::host::ModelBillingMode::Free
             )
         }) {
             return (0.0, "catalog".to_string());
@@ -1819,7 +1830,7 @@ impl ConversationOrchestrator {
             .await;
 
         if !aggregate.additional_contexts.is_empty() {
-            let tool_use_id = format!("hook-{}", protocol::HookId::new().as_uuid());
+            let tool_use_id = format!("hook-{}", lingxi_core::types::HookId::new().as_uuid());
             self.persist_hook_attachment_to_jsonl(hooks::additional_context_attachment(
                 "PostModelSwitch",
                 &tool_use_id,
@@ -2136,7 +2147,7 @@ impl ConversationOrchestrator {
         &self,
         directory: &str,
         source: &str,
-    ) -> platform_api::DirectoryAddedHookSummary {
+    ) -> lingxi_core::host::DirectoryAddedHookSummary {
         let ctx = self.lifecycle_hook_ctx(false).await;
         let aggregate = self
             .hooks
@@ -2214,7 +2225,7 @@ impl ConversationOrchestrator {
             self.persist_message_to_jsonl(&message).await;
         }
 
-        platform_api::DirectoryAddedHookSummary {
+        lingxi_core::host::DirectoryAddedHookSummary {
             failure_count,
             context_messages,
         }
@@ -2227,8 +2238,8 @@ impl ConversationOrchestrator {
     /// permission boundary it was told had changed.
     pub async fn register_repo_root(
         &self,
-        request: platform_api::RegisterRepoRootRequest,
-    ) -> Result<platform_api::RegisterRepoRootOutcome, platform_api::HandleError> {
+        request: lingxi_core::host::RegisterRepoRootRequest,
+    ) -> Result<lingxi_core::host::RegisterRepoRootOutcome, lingxi_core::host::HandleError> {
         let current = self.session_cwd.cwd();
         let raw = std::path::PathBuf::from(request.path.trim());
         let candidate = if raw.is_absolute() {
@@ -2237,12 +2248,12 @@ impl ConversationOrchestrator {
             current.join(raw)
         };
         let canonical = std::fs::canonicalize(&candidate).map_err(|_| {
-            platform_api::HandleError::ActionFailed(
+            lingxi_core::host::HandleError::ActionFailed(
                 "register_repo_root: target is not a directory".into(),
             )
         })?;
         if !canonical.is_dir() {
-            return Err(platform_api::HandleError::ActionFailed(
+            return Err(lingxi_core::host::HandleError::ActionFailed(
                 "register_repo_root: target is not a directory".into(),
             ));
         }
@@ -2257,14 +2268,14 @@ impl ConversationOrchestrator {
                 .as_ref()
                 .is_some_and(|home| canonical.starts_with(home))
         {
-            return Err(platform_api::HandleError::ActionFailed(
+            return Err(lingxi_core::host::HandleError::ActionFailed(
                 "register_repo_root: target is outside the allowed registration scope".into(),
             ));
         }
 
         // Sandbox/file permission refresh FIRST.
         if !self.session_cwd.add_trusted_dir(canonical.clone()) {
-            return Err(platform_api::HandleError::ActionFailed(
+            return Err(lingxi_core::host::HandleError::ActionFailed(
                 "register_repo_root: target is already a registered working directory".into(),
             ));
         }
@@ -2289,29 +2300,29 @@ impl ConversationOrchestrator {
         let reload = if request.reload_skills || request.reload_plugins {
             if let Some(reloader) = &self.repo_root_reloader {
                 reloader
-                    .reload(platform_api::RepoRootReloadRequest {
+                    .reload(lingxi_core::host::RepoRootReloadRequest {
                         root: canonical.clone(),
                         reload_skills: request.reload_skills,
                         reload_plugins: request.reload_plugins,
                     })
                     .await
             } else {
-                platform_api::RepoRootReloadOutcome {
+                lingxi_core::host::RepoRootReloadOutcome {
                     errors: vec![
                         "catalog reload unavailable in this runtime; repository root was registered"
                             .to_string(),
                     ],
-                    ..platform_api::RepoRootReloadOutcome::default()
+                    ..lingxi_core::host::RepoRootReloadOutcome::default()
                 }
             }
         } else {
-            platform_api::RepoRootReloadOutcome::default()
+            lingxi_core::host::RepoRootReloadOutcome::default()
         };
         for error in &reload.errors {
             tracing::warn!(%error, root = %canonical.display(), "register_repo_root reload failed");
         }
 
-        Ok(platform_api::RegisterRepoRootOutcome {
+        Ok(lingxi_core::host::RegisterRepoRootOutcome {
             directory: canonical,
             added: true,
             hooks,
@@ -2361,7 +2372,7 @@ impl ConversationOrchestrator {
             &hooks::HookAttachmentIdentity {
                 hook_name: "Stop".to_string(),
                 hook_event: "Stop".to_string(),
-                tool_use_id: format!("hook-{}", protocol::HookId::new().as_uuid()),
+                tool_use_id: format!("hook-{}", lingxi_core::types::HookId::new().as_uuid()),
             },
             reason,
         ))
@@ -2388,14 +2399,14 @@ mod model_switch_metadata_tests {
     #[tokio::test]
     async fn metadata_counts_output_and_uses_target_profile_pricing() {
         let api = Arc::new(MockApiClient::new(Vec::new()));
-        api.set_model_listings(vec![platform_api::ModelListing {
+        api.set_model_listings(vec![lingxi_core::host::ModelListing {
             display_model: "Example".to_string(),
             request_model: "shared-model".to_string(),
             provider_id: "example".to_string(),
             provider_label: "Example".to_string(),
-            metadata: platform_api::ModelMetadata {
-                pricing: Some(platform_api::ModelPricing {
-                    billing_mode: platform_api::ModelBillingMode::PerToken,
+            metadata: lingxi_core::host::ModelMetadata {
+                pricing: Some(lingxi_core::host::ModelPricing {
+                    billing_mode: lingxi_core::host::ModelBillingMode::PerToken,
                     cache_write_per_million: Some(2.5),
                     source: Some("userOverride".to_string()),
                     ..Default::default()

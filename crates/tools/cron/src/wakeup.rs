@@ -1457,7 +1457,7 @@ mod tests {
 
     #[tokio::test]
     async fn actual_cron_tools_and_nested_dispatch_match_native_zod_corpus() {
-        use platform_api::tool_invoker::{
+        use lingxi_core::host::tool_invoker::{
             SubagentInvocationContext, ToolExecutionPolicy, ToolInvoker,
         };
         fn invocation_context() -> SubagentInvocationContext {

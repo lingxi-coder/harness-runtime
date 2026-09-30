@@ -27,6 +27,13 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
+use lingxi_core::host::permission_gate::{
+    PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
+};
+use lingxi_core::host::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
+use lingxi_core::types::{
+    ContentBlock, ConversationMessage, HookId, HttpRequest, HttpResponse, ImageSource, ToolUseId,
+};
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -34,13 +41,6 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::permission_gate::{
-    PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
-};
-use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
-use protocol::{
-    ContentBlock, ConversationMessage, HookId, HttpRequest, HttpResponse, ImageSource, ToolUseId,
-};
 use serde_json::json;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -63,7 +63,7 @@ impl HttpTransport for UnusedHttp {
     async fn stream_sse(
         &self,
         _req: HttpRequest,
-    ) -> Result<platform_api::http::SseStream, HttpError> {
+    ) -> Result<lingxi_core::host::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -74,11 +74,14 @@ impl RuntimeSpawner for UnusedRuntime {
         &self,
         _name: &str,
         _task: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, RuntimeError> {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _d: Duration) {}
-    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+    async fn cancel(
+        &self,
+        _h: &lingxi_core::host::BackgroundTaskHandle,
+    ) -> Result<(), RuntimeError> {
         Ok(())
     }
 }
@@ -391,7 +394,7 @@ fn builtin_hook(name: &str, handler_id: &str, event_type: HookEventType) -> Hook
         executor: DefHookExecutor::Builtin {
             handler_id: handler_id.into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,

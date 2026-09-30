@@ -27,7 +27,7 @@
 //! and a JSONL loader patch that are out of this crate's surface.
 
 use crate::grouping::group_messages_by_api_round;
-use protocol::ConversationMessage;
+use lingxi_core::types::ConversationMessage;
 
 /// The result of a suffix-preserving split: the prefix to summarize and the
 /// verbatim tail to preserve.
@@ -116,9 +116,9 @@ pub fn select_preserved_tail(messages: &[ConversationMessage]) -> Option<Preserv
 /// **Structural note (faithful no-op for the usage zeroing).** TS messages carry
 /// a per-message `message.usage` object; `k4e` blanks its four token counts so
 /// the replayed assistant turn is not re-billed. The Rust
-/// [`protocol::ConversationMessage::Assistant`] variant carries
+/// [`lingxi_core::types::ConversationMessage::Assistant`] variant carries
 /// `{ id, content, stop_reason }` and has **no** per-message `usage` field — token
-/// usage lives on `llm_runtime::Usage`, accumulated outside the in-history message,
+/// usage lives on `llm_runtime::ExecutionUsage`, accumulated outside the in-history message,
 /// never stored on the `ConversationMessage`. So there is no token field to zero:
 /// preserving the message verbatim already cannot double-count (the counts the TS
 /// version zeroes simply do not exist on the Rust message). This function is
@@ -147,7 +147,7 @@ pub fn zero_preserved_tail_usage(tail: Vec<ConversationMessage>) -> Vec<Conversa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{ContentBlock, MessageId, ToolUseId};
+    use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
     use serde_json::json;
 
     fn user(text: &str) -> ConversationMessage {

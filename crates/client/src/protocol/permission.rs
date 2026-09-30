@@ -1,5 +1,5 @@
 //! Permission DTOs — the request/response shape sourced from
-//! `platform_api::PermissionGate::check` (plan F1-04).
+//! `lingxi_core::host::PermissionGate::check` (plan F1-04).
 //!
 //! The orchestrator binds `Arc<dyn PermissionGate>` and calls
 //! `check(name, &Value) -> PermissionDecision` (governing decision §0.6,
@@ -16,7 +16,7 @@
 //!   [`PermissionKindDto::BypassPermissionsMode`] are RESERVED / feed-deferred:
 //!   defined here so the contract freezes now, but they MUST NOT be wired to a
 //!   live source in the foundation. They mirror the engine-side
-//!   `platform_api::PermissionRequest` (`prompting_gate.rs:32`) three-variant shape.
+//!   `lingxi_core::host::PermissionRequest` (`prompting_gate.rs:32`) three-variant shape.
 //!
 //! Frozen serde conventions (decision §0.1):
 //! - internally tagged: `#[serde(tag = "type", rename_all = "snake_case")]`,
@@ -26,7 +26,7 @@
 //!
 //! Tool payloads are JSON **Strings** (`tool_input_json`); `serde_json::Value`
 //! never enters the contract crate (decision §0.4). The engine-side
-//! `PromptDefault` (`platform-api/src/prompting_gate.rs:18`) is collapsed to
+//! `PromptDefault` (`crates/core/src/host/prompting_gate.rs:18`) is collapsed to
 //! `default_allow: bool` (`AllowByDefault` ⇒ `true`).
 
 use serde::{Deserialize, Serialize};
@@ -94,7 +94,7 @@ pub struct PermissionOwnerDto {
 
 /// What the user is being asked to approve. Internally tagged on `type`,
 /// `snake_case`. `#[non_exhaustive]` so a future kind is additive (no major
-/// bump). Mirrors the engine-side `platform_api::PermissionRequest` three-variant
+/// bump). Mirrors the engine-side `lingxi_core::host::PermissionRequest` three-variant
 /// shape (`prompting_gate.rs:32`), but only `ToolUseConfirm` is live-sourced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]

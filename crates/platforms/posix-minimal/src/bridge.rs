@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use futures_core::stream::Stream;
 use futures_util::stream::empty;
-use platform_api::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
+use lingxi_core::host::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 use std::pin::Pin;
 
 /// Stub bridge transport — every method returns `BridgeError::Unsupported`

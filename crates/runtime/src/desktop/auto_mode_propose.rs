@@ -15,7 +15,7 @@
 //! behaviour — accumulating text and mapping the stop reason — is tested
 //! without a network, and the part that needs credentials stays at the edge.
 
-use llm_runtime::{ContentDelta, LlmError, LlmEvent};
+use llm_runtime::{HistoryContentDelta, HistoryEvent, LlmError};
 use permission::auto_mode_pregather::{build_recon_block, GatherOptions};
 use permission::auto_mode_propose::{ProposeAnswers, ProposeGather, QueryOutcome};
 
@@ -35,18 +35,18 @@ const OK_STOP_REASON: &str = "end_turn";
 /// proposal, it is an unusable one, and handing its prefix to the parser would
 /// turn a clear failure into a confusing parse error.
 #[must_use]
-pub fn collect_propose_reply(events: Vec<Result<LlmEvent, LlmError>>) -> QueryOutcome {
+pub fn collect_propose_reply(events: Vec<Result<HistoryEvent, LlmError>>) -> QueryOutcome {
     let mut text = String::new();
     let mut stop_reason: Option<String> = None;
 
     for event in events {
         match event {
             Err(_) => return QueryOutcome::Failed("stream error".to_string()),
-            Ok(LlmEvent::ContentBlockDelta {
-                delta: ContentDelta::TextDelta { text: chunk },
+            Ok(HistoryEvent::ContentBlockDelta {
+                delta: HistoryContentDelta::TextDelta { text: chunk },
                 ..
             }) => text.push_str(&chunk),
-            Ok(LlmEvent::MessageDelta { delta, .. }) => {
+            Ok(HistoryEvent::MessageDelta { delta, .. }) => {
                 if let Some(reason) = delta.stop_reason {
                     stop_reason = Some(reason);
                 }
@@ -120,8 +120,8 @@ pub fn gather_reach(answers: &ProposeAnswers) -> GatherOptions {
 #[must_use]
 pub fn propose_messages_to_conversation(
     messages: &[permission::auto_mode_propose::ProposeMessage],
-) -> Vec<protocol::ConversationMessage> {
-    use protocol::{ContentBlock, ConversationMessage, MessageId};
+) -> Vec<lingxi_core::types::ConversationMessage> {
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
     messages
         .iter()
         .filter_map(|m| match m.role {
@@ -273,19 +273,19 @@ pub async fn run_propose_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_runtime::MessageDeltaPayload;
+    use llm_runtime::HistoryMessageDelta;
 
-    fn text_delta(s: &str) -> Result<LlmEvent, LlmError> {
-        Ok(LlmEvent::ContentBlockDelta {
+    fn text_delta(s: &str) -> Result<HistoryEvent, LlmError> {
+        Ok(HistoryEvent::ContentBlockDelta {
             index: 0,
-            delta: ContentDelta::TextDelta {
+            delta: HistoryContentDelta::TextDelta {
                 text: s.to_string(),
             },
         })
     }
-    fn stop(reason: &str) -> Result<LlmEvent, LlmError> {
-        Ok(LlmEvent::MessageDelta {
-            delta: MessageDeltaPayload {
+    fn stop(reason: &str) -> Result<HistoryEvent, LlmError> {
+        Ok(HistoryEvent::MessageDelta {
+            delta: HistoryMessageDelta {
                 stop_reason: Some(reason.to_string()),
                 stop_details: None,
             },
@@ -355,9 +355,9 @@ mod tests {
     fn non_text_deltas_do_not_contaminate_the_document() {
         // Thinking blocks must not end up inside the JSON handed to the parser.
         let outcome = collect_propose_reply(vec![
-            Ok(LlmEvent::ContentBlockDelta {
+            Ok(HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::ThinkingDelta {
+                delta: HistoryContentDelta::ThinkingDelta {
                     thinking: "let me consider".to_string(),
                 },
             }),
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn roles_map_to_their_own_turns() {
-        use protocol::ConversationMessage;
+        use lingxi_core::types::ConversationMessage;
         let out = propose_messages_to_conversation(&[
             msg("user", "recon"),
             msg("assistant", "draft"),
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn message_text_survives_the_mapping() {
-        use protocol::{ContentBlock, ConversationMessage};
+        use lingxi_core::types::{ContentBlock, ConversationMessage};
         let out = propose_messages_to_conversation(&[msg("user", "hello recon")]);
         match &out[0] {
             ConversationMessage::User {
@@ -465,8 +465,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn task_stop_cancels_a_scan_while_provider_stream_is_establishing() {
         use llm_runtime::{
-            AuthStrategy, Capabilities, ClientConfig, CredentialConfig, DefaultLlmClient,
-            ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
+            AuthStrategy, Capabilities, ClientConfig, CredentialConfig, ModelProfile, ModelRuntime,
+            PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
         };
         use permission::auto_mode_propose::ProposeQuery;
         use std::sync::{
@@ -509,7 +509,7 @@ mod tests {
             dropped: Arc::new(AtomicBool::new(false)),
         });
         let client = Arc::new(
-            DefaultLlmClient::from_config(ClientConfig {
+            ModelRuntime::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
                     wire_profile: None,
                     regions: llm_runtime::Region::all(),

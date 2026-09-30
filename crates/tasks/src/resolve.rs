@@ -1,7 +1,7 @@
 //! TaskStop target resolution (Claude Code 2.1.263 `XFe`, `_jn`, `Szo`).
 use agent::catalog::normalize_teammate_recipient as normalize;
-use platform_api::display::sanitize_display;
-use platform_api::task_registry::{TaskRecord, TaskStopResolution};
+use lingxi_core::host::display::sanitize_display;
+use lingxi_core::host::task_registry::{TaskRecord, TaskStopResolution};
 
 /// Resolve a task id, teammate identity/name, or registered background name.
 /// Exact spelling wins over normalized spelling; ambiguity never silently

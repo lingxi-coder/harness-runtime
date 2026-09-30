@@ -11,8 +11,8 @@ license.workspace = true
 # root wires a ComputerControl handle.
 
 [dependencies]
+core = { path = "../../core" }
 tool-api = { path = "../../tool-api" }
-platform-api = { path = "../../platform-api" }
 permission = { path = "../../permission" }
 # `request_access`'s interactive resolver (mirrors `tool-ui`'s
 # `AskUserQuestionResolver`, which depends on `tui-core` the same way).

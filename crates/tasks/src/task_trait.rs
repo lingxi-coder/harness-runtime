@@ -1,7 +1,7 @@
 //! Generic `Task` trait — implemented per [`TaskType`](crate::id::TaskType).
 
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     FileSystem, FusionActivation, FusionPreparedSummary, RuntimeSpawner, SubagentInheritance,
     SubagentSpawnRequest,
 };
@@ -12,9 +12,9 @@ use thiserror::Error;
 #[derive(Clone)]
 pub struct WebSocketMonitorInput {
     /// Source and common task metadata.
-    pub registration: platform_api::task_registry::WebSocketMonitorRegistration,
+    pub registration: lingxi_core::host::task_registry::WebSocketMonitorRegistration,
     /// Native network transport.
-    pub http: Arc<dyn platform_api::HttpTransport>,
+    pub http: Arc<dyn lingxi_core::host::HttpTransport>,
 }
 impl std::fmt::Debug for WebSocketMonitorInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -49,7 +49,7 @@ pub trait Task: Send + Sync {
         false
     }
     /// Real child agent identities whose processes belong to this task.
-    async fn process_owner_ids(&self, _task_id: &str) -> Vec<protocol::AgentId> {
+    async fn process_owner_ids(&self, _task_id: &str) -> Vec<lingxi_core::types::AgentId> {
         Vec::new()
     }
 
@@ -65,7 +65,7 @@ pub trait Task: Send + Sync {
     async fn prepare_human_resume(
         &self,
         _task_id: &str,
-        _agent_id: protocol::AgentId,
+        _agent_id: lingxi_core::types::AgentId,
         _epoch: u64,
         _ctx: TaskContext,
     ) -> Result<HumanResumePrepared, TaskError> {
@@ -80,7 +80,7 @@ pub trait Task: Send + Sync {
     async fn apply_plan_approval(
         &self,
         _task_id: &str,
-        _response: platform_api::teammate_plan::PlanApprovalResponse,
+        _response: lingxi_core::host::teammate_plan::PlanApprovalResponse,
         _ctx: TaskContext,
     ) -> Result<(), TaskError> {
         Err(TaskError::Unsupported)
@@ -114,7 +114,7 @@ pub enum TaskSpawnInput {
     /// Spawn an in-process agent.
     LocalAgent {
         /// Agent target (per-instance identity UUID).
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         /// Resolved subagent-type name (TS `agentType`; the caller applies the
         /// `'general-purpose'` fallback when the `AgentDefinition` has none).
         subagent_type: String,
@@ -135,7 +135,7 @@ pub enum TaskSpawnInput {
         creator_team_name: Option<String>,
         /// Persistent agent id of the teammate / subagent that created this
         /// background task. Distinct from the TARGET child identity.
-        creator_agent_id: Option<protocol::AgentId>,
+        creator_agent_id: Option<lingxi_core::types::AgentId>,
         /// Complete spawn request for a background Agent invocation. The
         /// duplicated state fields above remain the compact task-index surface;
         /// this preserves model/cwd/context/isolation/schema/depth overrides for
@@ -157,11 +157,11 @@ pub enum TaskSpawnInput {
     /// Spawn an in-process teammate.
     InProcessTeammate {
         /// Resolved Agent request and parent execution context.
-        spawn_request: Option<platform_api::subagent_spawn::SubagentSpawnRequest>,
+        spawn_request: Option<lingxi_core::host::subagent_spawn::SubagentSpawnRequest>,
         /// Tool and budget handles inherited from the invoking session.
-        inheritance: Option<platform_api::subagent_spawn::SubagentInheritance>,
+        inheritance: Option<lingxi_core::host::subagent_spawn::SubagentInheritance>,
         /// Agent target.
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         /// Display name (claude-code `TeammateContext.agentName`).
         name: String,
         /// Team name this teammate belongs to (claude-code
@@ -199,10 +199,6 @@ pub enum TaskSpawnInput {
         /// `None` ⇒ the worker mints one. Ignored when `resume_from_run_id` is
         /// set (the resume id wins).
         run_id: Option<String>,
-        /// Parent session model inherited by workflow-global `fusion()`.
-        parent_model: Option<String>,
-        /// Parent session model profile inherited by workflow-global `fusion()`.
-        parent_model_profile: Option<String>,
         // ── Telemetry fields (oracle §7 `tengu_workflow_launched` payload) ──
         /// How the workflow was invoked: `"scriptPath"` | `"named"` | `"inline"`.
         /// Derived from the original `WorkflowLaunchSpec` by the launcher.
@@ -229,7 +225,7 @@ pub enum TaskSpawnInput {
         /// Team containing the creator, when it belongs to one.
         creator_team_name: Option<String>,
         /// Persistent identity of the creator agent, when available.
-        creator_agent_id: Option<protocol::AgentId>,
+        creator_agent_id: Option<lingxi_core::types::AgentId>,
         /// Host-minted Local App authority for this run: which app this
         /// workflow may touch, and why (design §18 Phase -1 step 8 / §8.1).
         ///
@@ -279,7 +275,7 @@ pub enum TaskSpawnInput {
         /// Team containing the creator, when it belongs to one.
         creator_team_name: Option<String>,
         /// Persistent identity of the creator agent, when available.
-        creator_agent_id: Option<protocol::AgentId>,
+        creator_agent_id: Option<lingxi_core::types::AgentId>,
     },
     /// Spawn a backgrounded MCP tool call (claude-code 2.1.212 `mcp_task`).
     /// Created when a single `tools/call` exceeds `getMcpAutoBackgroundMs` and
@@ -296,7 +292,7 @@ pub enum TaskSpawnInput {
         /// Team containing the creator, when it belongs to one.
         creator_team_name: Option<String>,
         /// Persistent identity of the creator agent, when available.
-        creator_agent_id: Option<protocol::AgentId>,
+        creator_agent_id: Option<lingxi_core::types::AgentId>,
     },
     /// Environment scan; its owning command drives execution.
     AutoModeScan,
@@ -309,8 +305,8 @@ pub enum TaskSpawnInput {
     },
     /// Spawn a Fusion deliberation (`/fusion`).
     LocalFusion {
-        /// Validated Fusion request. Origin is [`platform_api::FusionOrigin::Slash`].
-        request: platform_api::FusionRequest,
+        /// Validated Fusion request. Origin is [`lingxi_core::host::FusionOrigin::Slash`].
+        request: lingxi_core::host::FusionRequest,
         /// Parent conversation id for the completion sink.
         conversation_id: String,
     },

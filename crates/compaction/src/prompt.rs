@@ -181,7 +181,7 @@ pub fn get_compact_prompt(custom_instructions: Option<&str>) -> String {
 /// Defined in `platform_api` so the TUI picker, the `OrchestratorHandle` and
 /// this crate all name one type; re-exported here because the prompt bodies
 /// are what give it meaning.
-pub use platform_api::SummarizeDirection;
+pub use lingxi_core::host::SummarizeDirection;
 
 /// `sys` — the [`SummarizeDirection::UpTo`] body (`src_169588164.js`).
 ///

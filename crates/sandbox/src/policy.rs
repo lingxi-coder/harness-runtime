@@ -6,8 +6,8 @@
 //!
 //! See spec §24.2 (`SandboxPolicy`).
 
-use mobile_linux_api::{NetworkPolicy, ResourceLimits};
-pub use platform_api::SandboxPolicy;
+use lingxi_core::host::SandboxPolicy;
+pub use mobile_linux_api::{NetworkPolicy, ResourceLimits};
 
 /// Conservative default: no network, project workspace writable,
 /// system paths denied, subprocess allowed, modest resource ceilings.

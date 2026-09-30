@@ -7,7 +7,7 @@
 //! `appNames.ts` uses to decide what counts as "user-facing" (`/Applications/`,
 //! `/System/Applications/`, `~/Applications/`).
 
-use platform_api::computer_control::AppInfo;
+use lingxi_core::host::computer_control::AppInfo;
 use std::path::{Path, PathBuf};
 
 fn roots() -> Vec<PathBuf> {

@@ -37,7 +37,7 @@ use command_api::builtin_support::names::{
 use command_api::builtin_support::unimplemented::UnimplementedCommandHandler;
 use command_api::builtins::register_all_builtin_commands;
 use command_api::{CommandRegistry, RegistrySlashDispatcher};
-use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
+use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
 use tokio::sync::RwLock;
 
 fn names_of(table: &[(&'static str, &'static str)]) -> HashSet<&'static str> {

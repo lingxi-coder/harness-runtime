@@ -1,6 +1,6 @@
 use super::{DefaultModelSelection, PoolSubagentSpawner};
 use crate::definition::AgentModel;
-use platform_api::subagent_spawn::{SubagentSpawnError, SubagentSpawnRequest};
+use lingxi_core::host::subagent_spawn::{SubagentSpawnError, SubagentSpawnRequest};
 
 impl PoolSubagentSpawner {
     pub(super) fn resolve_provider_first_party(&self, profile: Option<&str>) -> Option<bool> {

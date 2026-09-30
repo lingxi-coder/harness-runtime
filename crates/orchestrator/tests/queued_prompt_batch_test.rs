@@ -1,4 +1,6 @@
 //! A queue batch keeps per-message origin metadata and runs one model turn.
+use lingxi_core::host::FileSystem;
+use lingxi_core::types::{ConversationMessage, MessageId};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -9,9 +11,7 @@ use orchestrator::test_support_stream::{
 use orchestrator::{
     scripted, ConversationOrchestrator, OrchestratorConfig, QueuedPromptInput, TurnOutcome,
 };
-use platform_api::FileSystem;
 use platform_posix::fs::PosixFileSystem;
-use protocol::{ConversationMessage, MessageId};
 use session::jsonl::{reader::JsonlReader, writer::JsonlWriter};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;

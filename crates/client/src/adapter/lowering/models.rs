@@ -4,21 +4,23 @@ use crate::protocol::listings::{
     ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
     ModelPricingTierDto, ProviderModelCatalogEntryDto,
 };
-use platform_api::orchestrator::ProviderModelCatalogEntry;
+use lingxi_core::host::orchestrator::ProviderModelCatalogEntry;
 
 /// Lower one provider-qualified model listing without inventing missing facts.
 #[must_use]
-pub fn lower_model_details(listing: &platform_api::ModelListing) -> ModelDetailsDto {
+pub fn lower_model_details(listing: &lingxi_core::host::ModelListing) -> ModelDetailsDto {
     let pricing = listing
         .metadata
         .pricing
         .as_ref()
         .map(|pricing| ModelPricingDto {
             billing_mode: match pricing.billing_mode {
-                platform_api::ModelBillingMode::PerToken => ModelBillingModeDto::PerToken,
-                platform_api::ModelBillingMode::Subscription => ModelBillingModeDto::Subscription,
-                platform_api::ModelBillingMode::Free => ModelBillingModeDto::Free,
-                platform_api::ModelBillingMode::Unknown => ModelBillingModeDto::Unknown,
+                lingxi_core::host::ModelBillingMode::PerToken => ModelBillingModeDto::PerToken,
+                lingxi_core::host::ModelBillingMode::Subscription => {
+                    ModelBillingModeDto::Subscription
+                }
+                lingxi_core::host::ModelBillingMode::Free => ModelBillingModeDto::Free,
+                lingxi_core::host::ModelBillingMode::Unknown => ModelBillingModeDto::Unknown,
             },
             input_per_million: pricing.input_per_million,
             output_per_million: pricing.output_per_million,
@@ -40,7 +42,7 @@ pub fn lower_model_details(listing: &platform_api::ModelListing) -> ModelDetails
             source: pricing.source.clone(),
         });
     ModelDetailsDto {
-        reference: platform_api::qualified_model_ref(
+        reference: lingxi_core::host::qualified_model_ref(
             &listing.request_model,
             Some(&listing.provider_id),
         ),
@@ -73,9 +75,9 @@ pub fn lower_model_details(listing: &platform_api::ModelListing) -> ModelDetails
         },
         reasoning: lower_reasoning_control_spec(&listing.reasoning),
         supports_fast_mode: listing.provider_id == "anthropic"
-            && platform_api::model_capabilities::has_capability(
+            && lingxi_core::host::model_capabilities::has_capability(
                 &listing.request_model,
-                platform_api::model_capabilities::ModelCapability::FastMode,
+                lingxi_core::host::model_capabilities::ModelCapability::FastMode,
             ),
         fusion_analyst_capable: listing.fusion_analyst_capable,
     }

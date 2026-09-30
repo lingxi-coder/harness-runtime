@@ -8,15 +8,15 @@
 #![allow(missing_docs)]
 
 use async_trait::async_trait;
-use once_cell::sync::Lazy;
-use permission::result::PermissionMetadata;
-use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::{
+use lingxi_core::host::{
     AndroidAccessRequest, AndroidAccessTier, AndroidAction, AndroidAudioListenRequest,
     AndroidAudioSpeakRequest, AndroidAutomationError, AndroidGlobalAction, AndroidNodeQuery,
     AndroidUiAutomation, AndroidWaitCondition, MAX_ANDROID_AUDIO_LISTEN_MS,
     MAX_ANDROID_AUDIO_SPEAK_CHARS, MAX_ANDROID_UI_BATCH, MAX_ANDROID_UI_WAIT_MS,
 };
+use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -247,7 +247,7 @@ fn ephemeral_audio_result(mut data: Value) -> ToolCallResult {
 }
 
 fn screenshot_result(
-    screenshot: platform_api::AndroidScreenshot,
+    screenshot: lingxi_core::host::AndroidScreenshot,
 ) -> Result<ToolCallResult, ToolError> {
     let original_size = u64::try_from(screenshot.png_bytes.len()).unwrap_or(u64::MAX);
     let processed = tool_api::util::image_budget::process_image(screenshot.png_bytes)

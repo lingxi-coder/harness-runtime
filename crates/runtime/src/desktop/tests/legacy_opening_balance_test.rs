@@ -23,7 +23,7 @@ fn imports_the_cli_written_pair_for_a_matching_session() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join(branding::GLOBAL_CONFIG_FILE);
     let cwd = Path::new("/proj/alpha");
-    let session = protocol::SessionId::new();
+    let session = lingxi_core::types::SessionId::new();
     // Exactly what `save_session_cost` writes: `session_id.to_string()`.
     write(
         &config,
@@ -42,7 +42,7 @@ fn refuses_another_session_another_project_and_a_missing_file() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join(branding::GLOBAL_CONFIG_FILE);
     let cwd = Path::new("/proj/alpha");
-    let session = protocol::SessionId::new();
+    let session = lingxi_core::types::SessionId::new();
     write(
         &config,
         cwd,
@@ -65,7 +65,7 @@ fn refuses_another_session_another_project_and_a_missing_file() {
 fn rejects_values_that_are_not_a_positive_finite_amount() {
     let directory = tempfile::tempdir().unwrap();
     let cwd = Path::new("/proj/alpha");
-    let session = protocol::SessionId::new().to_string();
+    let session = lingxi_core::types::SessionId::new().to_string();
     for cost in [
         serde_json::json!(0.0),
         serde_json::json!(-1.0),
@@ -107,7 +107,7 @@ fn saturates_instead_of_wrapping_on_an_absurd_amount() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join(branding::GLOBAL_CONFIG_FILE);
     let cwd = Path::new("/proj/alpha");
-    let session = protocol::SessionId::new();
+    let session = lingxi_core::types::SessionId::new();
     write(
         &config,
         cwd,

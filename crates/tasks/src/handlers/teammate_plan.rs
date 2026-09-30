@@ -1,9 +1,9 @@
 //! Teammate-owned permission state and lead review requests.
 use async_trait::async_trait;
-use platform_api::mailbox::{MailboxMessage, MailboxRouterHandle};
-use platform_api::teammate_plan::{PlanApprovalResponse, TeammatePlanRequester};
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
-use platform_api::{FileSystem, ToolInvoker};
+use lingxi_core::host::mailbox::{MailboxMessage, MailboxRouterHandle};
+use lingxi_core::host::teammate_plan::{PlanApprovalResponse, TeammatePlanRequester};
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
+use lingxi_core::host::{FileSystem, ToolInvoker};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
@@ -15,7 +15,7 @@ pub(super) struct PlanAwareInvoker {
     team_name: String,
     plan_path: String,
     state: Mutex<PlanState>,
-    permission_gate: Option<Arc<dyn platform_api::PermissionGate>>,
+    permission_gate: Option<Arc<dyn lingxi_core::host::PermissionGate>>,
     status_sink: Option<(Arc<dyn super::TaskStatusSink>, String)>,
 }
 struct PlanState {
@@ -50,7 +50,7 @@ impl PlanAwareInvoker {
     }
     pub(super) fn with_permission_gate(
         mut self,
-        gate: Option<Arc<dyn platform_api::PermissionGate>>,
+        gate: Option<Arc<dyn lingxi_core::host::PermissionGate>>,
     ) -> Self {
         self.permission_gate = gate;
         self
@@ -174,7 +174,7 @@ impl ToolInvoker for PlanAwareInvoker {
         input: Value,
         context: SubagentInvocationContext,
         lease: Option<u64>,
-    ) -> Result<platform_api::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         self.inner
             .invoke_detailed(name, input, self.context(context), lease)
             .await
@@ -223,7 +223,7 @@ impl TeammatePlanRequester for PlanAwareInvoker {
             let id = format!("plan_approval-{millis}@{}@{}", self.name, self.team_name);
             id
         };
-        let payload = json!({"type":"plan_approval_request","from":self.name,"timestamp":protocol::iso8601::iso8601_utc(now),"planFilePath":self.plan_path,"planContent":plan,"requestId":request_id});
+        let payload = json!({"type":"plan_approval_request","from":self.name,"timestamp":lingxi_core::types::iso8601::iso8601_utc(now),"planFilePath":self.plan_path,"planContent":plan,"requestId":request_id});
         if self
             .mailbox
             .route(

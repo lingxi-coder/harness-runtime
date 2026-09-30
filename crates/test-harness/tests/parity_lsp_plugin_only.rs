@@ -12,10 +12,10 @@
 //! future change to the registry signature trips an alarm even if the
 //! per-crate test were accidentally moved.
 
-use lsp::LspRegistry;
-use platform_api::{
+use lingxi_core::host::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
 };
+use lsp::LspRegistry;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,7 +58,7 @@ impl LspTransport for DummyTransport {
     ) -> Result<(), LspError> {
         Err(LspError::Unavailable)
     }
-    async fn shutdown(&self, _: protocol::McpConnectionId) -> Result<(), LspError> {
+    async fn shutdown(&self, _: lingxi_core::types::McpConnectionId) -> Result<(), LspError> {
         Err(LspError::Unavailable)
     }
     fn is_available(&self) -> bool {
@@ -114,6 +114,6 @@ async fn lsp_plugin_only_public_path_works_from_external_crate() {
     // Only public registration entry point: register_plugin_servers.
     // Calling `registry.register_config(...)` here would not compile.
     registry
-        .register_plugin_servers(protocol::PluginId::new(), vec![config])
+        .register_plugin_servers(lingxi_core::types::PluginId::new(), vec![config])
         .await;
 }

@@ -15,8 +15,8 @@ use super::{
     LISTEN_REOPEN_CAUSE,
 };
 use crate::connection::McpConnectionState;
-use platform_api::{McpError, ServerCapabilitiesDto};
-use protocol::McpConnectionId;
+use lingxi_core::host::{McpError, ServerCapabilitiesDto};
+use lingxi_core::types::McpConnectionId;
 use rand::Rng as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -226,9 +226,9 @@ impl McpRegistry {
         };
 
         enum Refreshed {
-            Tools(Vec<platform_api::McpToolDto>),
-            Prompts(Vec<platform_api::McpPromptDto>),
-            Resources(Vec<platform_api::McpResourceDto>),
+            Tools(Vec<lingxi_core::host::McpToolDto>),
+            Prompts(Vec<lingxi_core::host::McpPromptDto>),
+            Resources(Vec<lingxi_core::host::McpResourceDto>),
         }
         let refreshed = match change.kind {
             McpCatalogKind::Tools => client
@@ -295,7 +295,7 @@ impl McpRegistry {
         server_name: String,
         connection_id: McpConnectionId,
         connection: Arc<jsonrpc::Connection>,
-        negotiated: platform_api::McpNegotiatedProtocol,
+        negotiated: lingxi_core::host::McpNegotiatedProtocol,
         capabilities: ServerCapabilitiesDto,
         open_telemetry: Option<ModernListenOpenTelemetry>,
     ) {
@@ -304,7 +304,7 @@ impl McpRegistry {
         tokio::spawn(async move {
             #[cfg(test)]
             maybe_pause_catalog_change_listener_for_test().await;
-            if negotiated.era == platform_api::McpProtocolEra::Modern {
+            if negotiated.era == lingxi_core::host::McpProtocolEra::Modern {
                 registry
                     .run_modern_catalog_change_listener(
                         server_name,
@@ -357,7 +357,7 @@ impl McpRegistry {
         connection: Arc<jsonrpc::Connection>,
         mut notifications: broadcast::Receiver<jsonrpc::Notification>,
         capabilities: ServerCapabilitiesDto,
-        negotiated: platform_api::McpNegotiatedProtocol,
+        negotiated: lingxi_core::host::McpNegotiatedProtocol,
         open_telemetry: ModernListenOpenTelemetry,
     ) {
         let Some(filter) = modern_listen_notifications_filter(&capabilities) else {

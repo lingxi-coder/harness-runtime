@@ -13,9 +13,9 @@ use crate::sse::accumulator::BlockAccumulator;
 use crate::sse::event_router::{dispatch_event, RouterAction};
 use crate::streaming_executor::StreamingToolExecutor;
 use futures::stream::{BoxStream, StreamExt};
-use llm_runtime::{LlmError, LlmEvent, TokenUsage, Usage as LlmUsage};
-use platform_api::OutputStream;
-use protocol::{ContentBlock, MessageId, ToolUseId};
+use lingxi_core::host::OutputStream;
+use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
+use llm_runtime::{ExecutionUsage as LlmUsage, HistoryEvent, LlmError};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -69,62 +69,13 @@ pub struct PumpedTurn {
     /// Refusal `stop_details` (`{category, explanation}`) from the final
     /// `message_delta` — drives the terminal refusal message's cyber/bio
     /// variant. `None` for non-refusal turns.
-    pub stop_details: Option<llm_runtime::StopDetails>,
+    pub stop_details: Option<llm_runtime::HistoryStopDetails>,
 }
 
-/// Merge a `MessageDelta` usage snapshot into the `MessageStart` seed.
-///
-/// On the real Anthropic wire, `message_start.usage` carries `input_tokens`
-/// plus cache counts; `message_delta.usage` carries the final `output_tokens`
-/// only (input/cache arrive as `0` in the delta). A naïve `or_else` replaces
-/// the whole seed with the delta, zeroing input + cache in the recorded billing.
-///
-/// Per-field merge semantics (mirrors `agent::accumulator::merge_usage`):
-///
-/// - `output` always takes the delta value (authoritative).
-/// - `input` / `cache_write` / `cache_read` / `reasoning_output` take the
-///   delta value only when it is non-zero; otherwise keep the seed.
-/// - `server_tool_use` / `speed` / context fields: delta wins when present,
-///   otherwise keep seed.
+/// Merge host presentation snapshots while keeping complete SDK measurements
+/// authoritative, including explicit zero counts.
 fn merge_usage(seed: &LlmUsage, delta: &LlmUsage) -> LlmUsage {
-    let bs = &seed.billable_tokens;
-    let bd = &delta.billable_tokens;
-    LlmUsage {
-        billable_tokens: TokenUsage {
-            input: if bd.input > 0 { bd.input } else { bs.input },
-            output: bd.output,
-            cache_write: if bd.cache_write > 0 {
-                bd.cache_write
-            } else {
-                bs.cache_write
-            },
-            cache_read: if bd.cache_read > 0 {
-                bd.cache_read
-            } else {
-                bs.cache_read
-            },
-            reasoning_output: if bd.reasoning_output > 0 {
-                bd.reasoning_output
-            } else {
-                bs.reasoning_output
-            },
-        },
-        server_tool_use: delta.server_tool_use.or(seed.server_tool_use),
-        speed: delta.speed.clone().or_else(|| seed.speed.clone()),
-        context_tokens: delta.context_tokens.or(seed.context_tokens),
-        provider_reported_total_tokens: delta
-            .provider_reported_total_tokens
-            .or(seed.provider_reported_total_tokens),
-        provider_metadata: if delta.provider_metadata.is_null() {
-            seed.provider_metadata.clone()
-        } else {
-            delta.provider_metadata.clone()
-        },
-        cost_estimate: delta
-            .cost_estimate
-            .clone()
-            .or_else(|| seed.cost_estimate.clone()),
-    }
+    seed.merge_snapshot(delta)
 }
 
 /// Consume the given stream to completion, routing events through the
@@ -349,7 +300,7 @@ pub(crate) fn mid_stream_retry_cap(error: &OrchestratorError) -> u32 {
 }
 
 pub async fn pump_stream(
-    stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
+    stream: BoxStream<'static, Result<HistoryEvent, LlmError>>,
     output: &Arc<dyn OutputStream>,
 ) -> Result<PumpedTurn, OrchestratorError> {
     pump_stream_inner(stream, output, None)
@@ -412,7 +363,7 @@ pub(crate) struct ExecutorPump<'a, 'e> {
 /// retry). On success the outcome is byte-identical to
 /// [`pump_stream_with_executor_tracked`].
 pub(crate) async fn pump_stream_with_executor_tracked(
-    stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
+    stream: BoxStream<'static, Result<HistoryEvent, LlmError>>,
     output: &Arc<dyn OutputStream>,
     pump: ExecutorPump<'_, '_>,
 ) -> Result<PumpedTurn, PumpFailure> {
@@ -420,7 +371,7 @@ pub(crate) async fn pump_stream_with_executor_tracked(
 }
 
 async fn pump_stream_inner(
-    mut stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
+    mut stream: BoxStream<'static, Result<HistoryEvent, LlmError>>,
     output: &Arc<dyn OutputStream>,
     mut pump: Option<ExecutorPump<'_, '_>>,
 ) -> Result<PumpedTurn, PumpFailure> {
@@ -474,7 +425,7 @@ async fn pump_stream_inner(
                 ));
             }
         };
-        if let LlmEvent::MessageDelta {
+        if let HistoryEvent::MessageDelta {
             usage: Some(usage), ..
         } = &mut event
         {
@@ -483,12 +434,12 @@ async fn pump_stream_inner(
             }
         }
         // Capture MessageStart usage before dispatching (dispatch consumes the event).
-        if let LlmEvent::MessageStart { ref response } = event {
+        if let HistoryEvent::MessageStart { ref response } = event {
             message_start_usage = Some(response.usage.clone());
         }
         // `Hr` (binary @219640711): a non-thinking `content_block_start` flips
         // `real_content_started`, disqualifying the mid-stream transient retry.
-        if let LlmEvent::ContentBlockStart {
+        if let HistoryEvent::ContentBlockStart {
             ref content_block, ..
         } = event
         {
@@ -501,7 +452,7 @@ async fn pump_stream_inner(
             }
         }
         let completed_block_index = match &event {
-            LlmEvent::ContentBlockStop { index } => Some(*index),
+            HistoryEvent::ContentBlockStop { index } => Some(*index),
             _ => None,
         };
         let action = match dispatch_event(event, &mut acc, output, suppress_live_text).await {
@@ -622,10 +573,9 @@ mod tests {
         message_start, message_start_with_usage, message_stop, text_delta, thinking_delta,
     };
     use futures::stream;
-    use llm_runtime::TokenUsage;
-    use protocol::ToolUseId;
+    use lingxi_core::types::ToolUseId;
 
-    fn boxed(events: Vec<LlmEvent>) -> BoxStream<'static, Result<LlmEvent, LlmError>> {
+    fn boxed(events: Vec<HistoryEvent>) -> BoxStream<'static, Result<HistoryEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
     }
 
@@ -642,8 +592,8 @@ mod tests {
         });
         estimate.estimated = true;
         estimate.total_cost_usd = Some(0.00075);
-        let mut usage = llm_runtime::Usage::default();
-        usage.billable_tokens.input = 1_000;
+        let mut usage = llm_runtime::ExecutionUsage::default();
+        usage.counts_mut().input_tokens = 1_000;
         usage.cost_estimate = Some(estimate);
         let turn = pump_stream(
             boxed(vec![
@@ -721,7 +671,7 @@ mod tests {
             content_block_start_text(1),
             text_delta(1, "answer"),
             content_block_stop(1),
-            LlmEvent::ContentBlockStart {
+            HistoryEvent::ContentBlockStart {
                 index: 0x8000_0000,
                 content_block: llm_runtime::ContentBlock::ProviderContent {
                     protocol: "open_ai_responses".into(),
@@ -824,8 +774,8 @@ mod tests {
     #[tokio::test]
     async fn thinking_and_usage_deltas_emit_to_output() {
         use crate::test_support::MockOutputStream;
-        use llm_runtime::Usage;
-        use platform_api::OutputEvent;
+        use lingxi_core::host::OutputEvent;
+        use llm_runtime::ExecutionUsage as Usage;
 
         let mock = Arc::new(MockOutputStream::new());
         let out: Arc<dyn OutputStream> = mock.clone();
@@ -843,13 +793,17 @@ mod tests {
             message_delta_stop_with_usage(
                 "end_turn",
                 Usage {
-                    billable_tokens: llm_runtime::TokenUsage {
-                        input: 120,
-                        output: 35,
-                        cache_write: 10,
-                        cache_read: 5,
-                        reasoning_output: 0,
-                    },
+                    report: llm_runtime::UsageReport::measured(
+                        llm_runtime::Usage {
+                            input_tokens: 120,
+                            output_tokens: 35,
+                            cache_write_tokens: 10,
+                            cache_read_tokens: 5,
+                            reasoning_tokens: 0,
+                            ..Default::default()
+                        },
+                        llm_runtime::services::sdk::protocol::UsageState::Complete,
+                    ),
                     ..Usage::default()
                 },
             ),
@@ -911,7 +865,7 @@ mod tests {
     #[tokio::test]
     async fn underlying_stream_error_surfaces_as_streaming_variant() {
         let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
-        let s: BoxStream<'static, Result<LlmEvent, LlmError>> = stream::iter(vec![
+        let s: BoxStream<'static, Result<HistoryEvent, LlmError>> = stream::iter(vec![
             Ok(message_start("m1", "claude-opus-4-7")),
             Err(LlmError::Transport {
                 message: "dropped".into(),
@@ -922,36 +876,39 @@ mod tests {
         assert!(matches!(err, OrchestratorError::Streaming(_)));
     }
 
-    /// Wire-shape per-field merge: `message_start` carries input+cache_read;
-    /// `message_delta` carries output only (real Anthropic wire shape).
-    /// After merge the recorded `usage` must have all three fields non-zero.
-    ///
-    /// RED on the old `or_else` (MessageDelta replaces the whole seed);
-    /// GREEN after per-field merge mirrors `agent::accumulator::merge_usage`.
+    /// Final SDK measurements include the accumulated input and cache counts.
     #[tokio::test]
-    async fn per_field_usage_merge_preserves_input_and_cache_from_message_start() {
+    async fn canonical_final_usage_preserves_sdk_input_and_cache_measurement() {
         let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
 
         // Real wire: MessageStart carries input=1000, cache_read=200, output=0.
         let start_usage = LlmUsage {
-            billable_tokens: TokenUsage {
-                input: 1_000,
-                output: 0,
-                cache_write: 0,
-                cache_read: 200,
-                reasoning_output: 0,
-            },
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: 1_000,
+                    output_tokens: 0,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 200,
+                    reasoning_tokens: 0,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
             ..LlmUsage::default()
         };
-        // Real wire: MessageDelta carries output=500 only (input/cache absent = 0).
+        // SDK final measurements already include input/cache from earlier frames.
         let delta_usage = LlmUsage {
-            billable_tokens: TokenUsage {
-                input: 0,
-                output: 500,
-                cache_write: 0,
-                cache_read: 0,
-                reasoning_output: 0,
-            },
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: 1_000,
+                    output_tokens: 500,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 200,
+                    reasoning_tokens: 0,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
             ..LlmUsage::default()
         };
 
@@ -967,21 +924,21 @@ mod tests {
         let turn = pump_stream(boxed(evs), &out).await.expect("pump");
 
         let usage = turn.usage.expect("usage must be recorded");
-        let bt = usage.billable_tokens;
+        let bt = usage.counts();
         assert_eq!(
-            bt.input, 1_000,
+            bt.input_tokens, 1_000,
             "input tokens must come from MessageStart; got {}",
-            bt.input
+            bt.input_tokens
         );
         assert_eq!(
-            bt.cache_read, 200,
+            bt.cache_read_tokens, 200,
             "cache_read tokens must come from MessageStart; got {}",
-            bt.cache_read
+            bt.cache_read_tokens
         );
         assert_eq!(
-            bt.output, 500,
+            bt.output_tokens, 500,
             "output tokens must come from MessageDelta; got {}",
-            bt.output
+            bt.output_tokens
         );
     }
 }

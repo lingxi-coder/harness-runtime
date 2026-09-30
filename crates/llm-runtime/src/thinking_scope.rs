@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 struct State {
-    marked: HashMap<protocol::MessageId, usize>,
+    marked: HashMap<lingxi_core::types::MessageId, usize>,
     pending_snapshot: bool,
     stripped: bool,
     recorder: Option<Arc<RecoveryRecorder>>,
@@ -16,8 +16,9 @@ struct State {
 pub struct ThinkingRecoveryScope(Arc<Mutex<State>>);
 
 /// Durable recorder invoked before retrying a rejected history snapshot.
-pub type RecoveryRecorder =
-    dyn Fn(HashMap<protocol::MessageId, usize>) -> crate::BoxFuture<'static, ()> + Send + Sync;
+pub type RecoveryRecorder = dyn Fn(HashMap<lingxi_core::types::MessageId, usize>) -> crate::BoxFuture<'static, ()>
+    + Send
+    + Sync;
 
 impl std::fmt::Debug for ThinkingRecoveryScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -35,7 +36,7 @@ impl PartialEq for ThinkingRecoveryScope {
 
 impl ThinkingRecoveryScope {
     /// Snapshot of rejected historical block ranges.
-    pub fn messages(&self) -> HashMap<protocol::MessageId, usize> {
+    pub fn messages(&self) -> HashMap<lingxi_core::types::MessageId, usize> {
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -44,7 +45,7 @@ impl ThinkingRecoveryScope {
     }
 
     /// Merge restored or newly rejected ranges, preserving the earliest index.
-    pub fn merge(&self, messages: HashMap<protocol::MessageId, usize>) {
+    pub fn merge(&self, messages: HashMap<lingxi_core::types::MessageId, usize>) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         for (id, from) in messages {
             state
@@ -57,7 +58,7 @@ impl ThinkingRecoveryScope {
         state.pending_snapshot = false;
     }
 
-    pub(crate) fn rejected(&self, messages: HashMap<protocol::MessageId, usize>) {
+    pub(crate) fn rejected(&self, messages: HashMap<lingxi_core::types::MessageId, usize>) {
         self.merge(messages);
         self.0.lock().unwrap_or_else(|e| e.into_inner()).stripped = true;
     }
@@ -90,7 +91,7 @@ impl ThinkingRecoveryScope {
         }
     }
 
-    pub(crate) fn capture(&self, ids: &[protocol::MessageId]) {
+    pub(crate) fn capture(&self, ids: &[lingxi_core::types::MessageId]) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if state.pending_snapshot {
             state.pending_snapshot = false;

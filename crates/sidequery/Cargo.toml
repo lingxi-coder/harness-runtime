@@ -6,8 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
 core = { path = "../core" }
 llm-runtime = { path = "../llm-runtime" }
 platform-common = { path = "../platforms/common" }

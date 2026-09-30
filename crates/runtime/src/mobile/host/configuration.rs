@@ -88,7 +88,7 @@ pub struct MobileConfig {
     /// Stable native host facts used to render the fixed mobile runtime
     /// reminder. `None` keeps desktop-style prompt assembly semantics for host
     /// tests and non-mobile embedder scenarios.
-    pub host_environment: Option<platform_api::MobileHostEnvironment>,
+    pub host_environment: Option<lingxi_core::host::MobileHostEnvironment>,
     /// Whether non-vision primary models may delegate image analysis to an
     /// internal vision model. Defaults to `true` across mobile hosts.
     pub vision_delegation_enabled: bool,

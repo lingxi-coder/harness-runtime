@@ -67,7 +67,7 @@
 //! at each emission instead and [`scan_silent_stretch`] splices those marks
 //! back into the walk at the boundary where the oracle's attachment row sat.
 
-use protocol::{ContentBlock, ConversationMessage, MessageId};
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
 /// `a3m` @ 296477528 — the reminder body, byte-exact (U+2014 EM DASH).
 pub const SILENT_TURN_REMINDER_TEXT: &str = "The user hasn't heard from you in a while. As you continue, keep them updated when there's something to tell \u{2014} a finding, a change of plan.";
@@ -100,9 +100,9 @@ pub fn is_enabled(model: &str) -> bool {
 
 fn enabled_with_override(model: &str, raw: Option<&str>) -> bool {
     if raw.is_some() {
-        return platform_api::env::is_env_truthy(raw);
+        return lingxi_core::host::env::is_env_truthy(raw);
     }
-    let capabilities = platform_api::model_capabilities::capabilities_for_loose(model);
+    let capabilities = lingxi_core::host::model_capabilities::capabilities_for_loose(model);
     capabilities.contains(&"fable_5_1_prompt_bundle")
         || capabilities.contains(&"silent_turn_reminder")
 }
@@ -291,7 +291,7 @@ pub fn should_emit(stretch: SilentStretch, turns_required: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::ToolUseId;
+    use lingxi_core::types::ToolUseId;
     use serde_json::json;
 
     fn silent_assistant() -> ConversationMessage {

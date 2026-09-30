@@ -15,9 +15,11 @@ use local_apps::{
     AppRuntimeProfileBinding,
 };
 use lsp_types::{DiagnosticSeverity, NumberOrString};
+
 use mobile_linux_api::{
     LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
 };
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -667,7 +669,9 @@ fn fixed_vite_build_args(build_memory_mb: u32, executable: String, out_dir: Stri
 fn local_app_build_mount(app_id: &str, channel: &str, build_root: &Path) -> MountSpec {
     MountSpec {
         host_path: build_root.to_path_buf(),
-        guest_path: platform_api::local_app_paths::local_app_build_project(app_id, channel),
+
+        guest_path: lingxi_core::host::local_app_paths::local_app_build_project(app_id, channel),
+
         read_only: false,
         purpose: MountPurpose::LocalAppBuild,
     }
@@ -2980,6 +2984,7 @@ mod tests {
         );
     }
     use async_trait::async_trait;
+
     use mobile_linux_api::{guest_paths, map_guest_path_to_host};
     use mobile_linux_api::{
         LinuxCommandResult, MobileLinuxCapability, MobileLinuxError, MobileLinuxRuntimeMode,
@@ -3094,6 +3099,7 @@ mod tests {
                 exit_code: 0,
                 timed_out: false,
                 cancelled: false,
+
                 enforcement: mobile_linux_api::LinuxEnforcementReceipt {
                     network_policy_enforced: true,
                     memory_limit_enforced: true,
@@ -3110,6 +3116,7 @@ mod tests {
 
         async fn kill(
             &self,
+
             _handle: &mobile_linux_api::LinuxProcessHandle,
         ) -> Result<(), MobileLinuxError> {
             Err(MobileLinuxError::Unsupported)
@@ -3177,6 +3184,7 @@ mod tests {
 
         async fn configure_mounts(
             &self,
+
             _mounts: Vec<mobile_linux_api::MountSpec>,
         ) -> Result<(), MobileLinuxError> {
             Ok(())
@@ -4829,7 +4837,7 @@ mod tests {
             assert_eq!(request.mounts[0].host_path, workspace);
             assert_eq!(
                 request.mounts[0].guest_path,
-                platform_api::local_app_paths::local_app_build_project("aaaa1111", "store")
+                lingxi_core::host::local_app_paths::local_app_build_project("aaaa1111", "store")
             );
             assert_eq!(
                 request.cwd.as_deref(),

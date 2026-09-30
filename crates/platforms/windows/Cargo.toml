@@ -7,9 +7,8 @@ license.workspace = true
 
 [dependencies]
 mobile-linux-api.workspace = true
+core = { path = "../../core" }
 branding = { workspace = true }
-protocol = { path = "../../protocol" }
-platform-api = { path = "../../platform-api" }
 jsonrpc = { path = "../../jsonrpc" }
 # Bridge the transport-owned JSON-RPC connections into `McpRegistry`'s live
 # client path, matching the POSIX platform implementation.

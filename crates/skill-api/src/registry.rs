@@ -3,7 +3,7 @@
 //! See spec §18.2.
 
 use crate::model::Skill;
-use protocol::{McpConnectionId, PluginId};
+use lingxi_core::types::{McpConnectionId, PluginId};
 use std::collections::HashMap;
 
 /// Stores all registered skills keyed by name and supports trigger-based

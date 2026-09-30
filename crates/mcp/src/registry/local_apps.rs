@@ -5,8 +5,8 @@ use super::{
     LOCAL_APP_MAX_IN_FLIGHT_PER_APP, LOCAL_APP_MAX_IN_FLIGHT_PER_CONVERSATION,
 };
 use crate::connection::McpConnectionState;
-use platform_api::McpError;
-use protocol::McpConnectionId;
+use lingxi_core::host::McpError;
+use lingxi_core::types::McpConnectionId;
 
 impl McpRegistry {
     pub(super) async fn managed_local_app_connection_id(

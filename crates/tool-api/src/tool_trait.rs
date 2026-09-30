@@ -138,7 +138,7 @@ pub trait Tool: Send + Sync {
         &self,
         _input: &Value,
         _tool_use_id: Option<&str>,
-        _assistant_message_id: Option<&protocol::MessageId>,
+        _assistant_message_id: Option<&lingxi_core::types::MessageId>,
     ) {
     }
 
@@ -537,7 +537,7 @@ pub struct ToolCallResult {
     /// the dispatch falls back to deriving the model text out of `data`.
     pub model_content: Option<String>,
     /// Extra conversation messages to inject after this call.
-    pub new_messages: Vec<protocol::ConversationMessage>,
+    pub new_messages: Vec<lingxi_core::types::ConversationMessage>,
     /// Optional one-shot mutator for the [`ToolUseContext`].
     pub context_modifier: Option<ContextModifier>,
     /// Opaque per-call metadata (used by MCP tools).

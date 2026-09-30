@@ -108,11 +108,11 @@
 
 use crate::shared::strip_ansi_count;
 use async_trait::async_trait;
+use lingxi_core::host::process::ProcessOutputFile;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::result::{PermissionPrompt, SandboxOverrideReason};
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::process::ProcessOutputFile;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -345,8 +345,8 @@ pub fn resolve_timeout_ms(input: &Value) -> u64 {
 
 // Shared with Monitor; reexport preserves the established shell-tool API.
 #[cfg(test)]
-use platform_api::shell_support::git_bash_beside_git;
-pub use platform_api::shell_support::{
+use lingxi_core::host::shell_support::git_bash_beside_git;
+pub use lingxi_core::host::shell_support::{
     classify_git_bash_override, format_duration_ms, git_bash_override_warning, git_bash_path,
     resolve_git_bash_path_with, resolve_shell_path, GitBashOverride, BASH_SHELL_LINUX,
     BASH_SHELL_MACOS,
@@ -418,7 +418,7 @@ pub fn resolve_max_output_length(raw: Option<&str>) -> usize {
 /// the same rule `taskOutputMaxChars` uses, and what makes the setting safe to
 /// honour ahead of the env var.
 fn settings_bash_output_cap() -> Option<usize> {
-    platform_api::session_flags::bash_output_max_chars()
+    lingxi_core::host::session_flags::bash_output_max_chars()
         .map(|v| (v as usize).clamp(BASH_OUTPUT_SETTING_MIN, BASH_OUTPUT_SETTING_MAX))
 }
 
@@ -447,10 +447,10 @@ pub fn bash_max_output_length() -> usize {
 /// st(process.env.LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR)}`): when truthy, the
 /// shell cwd is ALWAYS reset to the original (workspace) after a command, even
 /// for an in-workspace `cd`. `st` is the strict env-truthy allowlist
-/// (`1`/`true`/`yes`/`on`) — delegated to the canonical [`platform_api::env::is_env_truthy`]
+/// (`1`/`true`/`yes`/`on`) — delegated to the canonical [`lingxi_core::host::env::is_env_truthy`]
 /// so it cannot drift. DEFAULT FALSE (unset/empty ⇒ false).
 fn tfo_maintain_cwd() -> bool {
-    platform_api::env::is_env_truthy(
+    lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_BASH_MAINTAIN_PROJECT_WORKING_DIR")
             .ok()
             .as_deref(),
@@ -727,7 +727,7 @@ fn background_note_for_reason(
     reaped_at_final_response: bool,
     reason: u8,
 ) -> String {
-    use platform_api::task_registry::TaskBackgroundReason;
+    use lingxi_core::host::task_registry::TaskBackgroundReason;
     let head = if reason == TaskBackgroundReason::User as u8 {
         format!("Command was manually backgrounded by user with ID: {background_task_id}. Output is being written to: {output_path}.")
     } else if reason == TaskBackgroundReason::DeliverMessage as u8 {
@@ -1380,7 +1380,7 @@ fn is_image_output(content: &str) -> bool {
 /// `/^data:([^;]+);base64,(.+)$/`. Input is trimmed before matching. Returns
 /// `None` when it doesn't match (so callers fall through to text handling).
 /// The returned payload is already valid base64 of the image bytes, so it can
-/// be handed straight to [`protocol::ImageSource::Base64`] with no re-encode.
+/// be handed straight to [`lingxi_core::types::ImageSource::Base64`] with no re-encode.
 #[must_use]
 fn parse_data_uri(s: &str) -> Option<(String, String)> {
     let s = s.trim();
@@ -1580,14 +1580,14 @@ impl Drop for BackgroundRequestSettled {
 }
 
 #[async_trait::async_trait]
-impl platform_api::task_registry::TaskBackgrounder for BackgroundBashRequester {
+impl lingxi_core::host::task_registry::TaskBackgrounder for BackgroundBashRequester {
     async fn background(&self) {
-        self.background_with_reason(platform_api::task_registry::TaskBackgroundReason::User)
+        self.background_with_reason(lingxi_core::host::task_registry::TaskBackgroundReason::User)
             .await;
     }
     async fn background_with_reason(
         &self,
-        reason: platform_api::task_registry::TaskBackgroundReason,
+        reason: lingxi_core::host::task_registry::TaskBackgroundReason,
     ) {
         // First trigger wins, so an arriving message cannot relabel Ctrl+B.
         let _ = self.reason.compare_exchange(
@@ -1613,7 +1613,7 @@ struct ForegroundArming {
     timer: Option<tokio::task::JoinHandle<()>>,
     withdraw_on_drop: bool,
     task_id: String,
-    registry: std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    registry: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
 }
 
 impl ForegroundArming {
@@ -1675,11 +1675,11 @@ impl Drop for ForegroundArming {
 /// result promise drives the record to its terminal status, which is what makes
 /// the completion `<task-notification>` fire.
 struct BackgroundBashExitSink {
-    registry: std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    registry: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
 }
 
 #[async_trait::async_trait]
-impl platform_api::BackgroundExitSink for BackgroundBashExitSink {
+impl lingxi_core::host::BackgroundExitSink for BackgroundBashExitSink {
     async fn on_supervised_start(&self, task_id: &str) {
         self.registry.mark_shell_supervised(task_id).await;
     }
@@ -1741,12 +1741,12 @@ impl platform_api::BackgroundExitSink for BackgroundBashExitSink {
 
 /// Terminates a backgrounded shell's OS process on `TaskStop` or teardown.
 struct BackgroundBashKiller {
-    process: std::sync::Arc<dyn platform_api::ProcessRunner>,
-    handle: platform_api::ProcessHandle,
+    process: std::sync::Arc<dyn lingxi_core::host::ProcessRunner>,
+    handle: lingxi_core::host::ProcessHandle,
 }
 
 #[async_trait::async_trait]
-impl platform_api::task_registry::TaskKiller for BackgroundBashKiller {
+impl lingxi_core::host::task_registry::TaskKiller for BackgroundBashKiller {
     async fn kill(&self) {
         let _ = self.process.kill(&self.handle).await;
     }
@@ -1759,7 +1759,7 @@ impl platform_api::task_registry::TaskKiller for BackgroundBashKiller {
 /// lingxi-tools → lingxi-platform-posix → lingxi-lsp → lingxi-tools).
 #[must_use]
 pub fn task_output_path(task_id: &str) -> PathBuf {
-    platform_api::task_output::legacy_output_path(task_id)
+    lingxi_core::host::task_output::legacy_output_path(task_id)
 }
 
 /// A per-call id, unique within the process AND across processes.
@@ -1909,22 +1909,22 @@ impl BashTool {
     /// Bind the [`BackgroundTaskBinding`] for an allocated identity onto the
     /// command, so the runner writes to that file and reports that id.
     ///
-    /// [`BackgroundTaskBinding`]: platform_api::BackgroundTaskBinding
+    /// [`BackgroundTaskBinding`]: lingxi_core::host::BackgroundTaskBinding
     fn bind_identity(
         &self,
-        sandboxed: platform_api::SandboxedCommand,
+        sandboxed: lingxi_core::host::SandboxedCommand,
         bound: Option<&(String, String)>,
         on_demand: Option<std::sync::Arc<tokio::sync::Notify>>,
-    ) -> platform_api::SandboxedCommand {
+    ) -> lingxi_core::host::SandboxedCommand {
         let Some((task_id, output_path)) = bound else {
             return sandboxed;
         };
-        sandboxed.with_background_task(platform_api::BackgroundTaskBinding {
+        sandboxed.with_background_task(lingxi_core::host::BackgroundTaskBinding {
             task_id: task_id.clone(),
             output_path: std::path::PathBuf::from(output_path),
             on_exit: self.ctx.task_registry.clone().map(|registry| {
                 std::sync::Arc::new(BackgroundBashExitSink { registry })
-                    as std::sync::Arc<dyn platform_api::BackgroundExitSink>
+                    as std::sync::Arc<dyn lingxi_core::host::BackgroundExitSink>
             }),
             on_demand,
         })
@@ -1943,7 +1943,7 @@ impl BashTool {
         let (Some((task_id, _)), Some(registry)) = (bound, self.ctx.task_registry.as_ref()) else {
             return Ok(());
         };
-        let registration = platform_api::task_registry::BackgroundBashRegistration {
+        let registration = lingxi_core::host::task_registry::BackgroundBashRegistration {
             command: command.to_string(),
             // claude-code stores `description || command` on the record
             // (`Xne`'s `description: Me || ve`); the completion summary renders
@@ -1987,7 +1987,7 @@ impl BashTool {
         progress: ToolProgressSender,
     ) -> Option<ForegroundArming> {
         let registry = self.ctx.task_registry.clone()?;
-        let registration = platform_api::task_registry::BackgroundBashRegistration {
+        let registration = lingxi_core::host::task_registry::BackgroundBashRegistration {
             command: command.to_string(),
             description: description
                 .filter(|d| !d.is_empty())
@@ -2054,7 +2054,7 @@ impl BashTool {
     async fn take_honoured_identity(
         &self,
         bound: Option<(String, String)>,
-        handle: &platform_api::ProcessHandle,
+        handle: &lingxi_core::host::ProcessHandle,
     ) -> Option<(String, String)> {
         let (task_id, output_path) = bound?;
         if handle.task_id == task_id {
@@ -2081,7 +2081,7 @@ impl BashTool {
     async fn bind_background_task(
         &self,
         task_id: &str,
-        handle: &platform_api::ProcessHandle,
+        handle: &lingxi_core::host::ProcessHandle,
     ) -> Result<(), ToolError> {
         let Some(registry) = self.ctx.task_registry.as_ref() else {
             return Ok(());
@@ -2089,7 +2089,7 @@ impl BashTool {
         let killer = std::sync::Arc::new(BackgroundBashKiller {
             process: self.ctx.process.clone(),
             handle: handle.clone(),
-        }) as std::sync::Arc<dyn platform_api::task_registry::TaskKiller>;
+        }) as std::sync::Arc<dyn lingxi_core::host::task_registry::TaskKiller>;
         registry
             .bind_background_process(task_id, handle.pid, killer)
             .await
@@ -2105,7 +2105,7 @@ impl BashTool {
         command: &str,
         description: Option<&str>,
         cwd: &std::path::Path,
-        handle: &platform_api::ProcessHandle,
+        handle: &lingxi_core::host::ProcessHandle,
     ) -> Result<String, ToolError> {
         let task_id = bound.map_or_else(|| handle.task_id.clone(), |(id, _)| id.clone());
         let result = async {
@@ -2399,7 +2399,7 @@ impl Tool for BashTool {
     /// ENV NOTE: the oracle reads `V.CLAUDE_CODE_BASH_SANDBOX_SHOW_INDICATOR`
     /// with plain JS truthiness (`V.X && BY(e)`), NOT its `isEnvTruthy`
     /// allowlist — so any non-empty value enables it, `"0"` and `"false"`
-    /// included. Reproduced exactly here (a `platform_api::env::is_env_truthy` call
+    /// included. Reproduced exactly here (a `lingxi_core::host::env::is_env_truthy` call
     /// would be the wrong predicate). Under LingXi branding the name is
     /// `LINGXI_BASH_SANDBOX_SHOW_INDICATOR`.
     ///
@@ -2638,7 +2638,7 @@ impl Tool for BashTool {
         ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        use platform_api::sandbox::ProcessCommand as SbxCommand;
+        use lingxi_core::host::sandbox::ProcessCommand as SbxCommand;
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
 
         // PHASE-2: tool-abort `CancellationToken` threaded in by the streaming
@@ -2700,7 +2700,7 @@ impl Tool for BashTool {
         // shape that exists nowhere else here, and would report a refusal as a
         // command that ran and failed.
         if let Some(agent_id) = ctx.agent_id {
-            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+            if lingxi_core::host::agent_processes::is_stop_pending(&agent_id.to_string()) {
                 tracing::debug!(
                     "Shell exec refused: agent {agent_id} has a kill pending loop settlement"
                 );
@@ -2891,20 +2891,25 @@ impl Tool for BashTool {
                 spawn_cmd
             ),
             SandboxDecision::Sandbox { policy: _ } => {
-                // Wrap through the injected async `SandboxRunner`. The default
-                // `LegacyWrapRunner` forwards straight to the sync
-                // `wrap_with_sandbox` (ignoring `bin_shell`/`cwd`), so this is
-                // byte-identical to the previous direct call; a live runner uses
-                // the shell + workspace cwd to scope the sandbox.
+                // The sandbox is rooted at the agent's own directory (a
+                // worktree-isolated or explicit-`cwd` agent) or else the session
+                // workspace — never the shell's current `cd`, which the model
+                // controls, and never the host process's cwd. A confined agent
+                // can then write only inside its own directory.
+                let (sandbox_root, scope) = match &agent_cwd {
+                    Some(dir) => (dir.clone(), sandbox::root::SandboxRootScope::Agent),
+                    None => (workspace.clone(), sandbox::root::SandboxRootScope::Session),
+                };
+                let rooted_runtime = self.ctx.sandbox_runtime_at(&sandbox_root, scope);
                 match self
                     .ctx
                     .sandbox_runner
                     .wrap(
                         &spawn_cmd,
-                        &sandbox_runtime,
+                        &rooted_runtime,
                         self.ctx.platform,
                         Some(&shell),
-                        Some(workspace.as_path()),
+                        Some(sandbox_root.as_path()),
                     )
                     .await
                 {
@@ -3148,7 +3153,7 @@ impl Tool for BashTool {
                         // detachment does not drop (and kill) its OS child.
                         if !crate::prompt::background_tasks_disabled() {
                             if let Some(notify) = &on_demand {
-                                let _ = background_reason.compare_exchange(0, platform_api::task_registry::TaskBackgroundReason::TurnAbort as u8, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
+                                let _ = background_reason.compare_exchange(0, lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort as u8, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
                                 notify.notify_one();
                                 run_fut.await
                             } else { return Err(ToolError::Aborted); }
@@ -3181,8 +3186,8 @@ impl Tool for BashTool {
         // (claude-code `deleteOutputFile` under `outputFileRedundant`).
         let moved_to_background = matches!(
             &run_result,
-            Ok(platform_api::ForegroundRunResult {
-                outcome: platform_api::ForegroundOutcome::MovedToBackground(_),
+            Ok(lingxi_core::host::ForegroundRunResult {
+                outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(_),
                 ..
             })
         );
@@ -3212,8 +3217,8 @@ impl Tool for BashTool {
             // the background" note + `backgroundTaskId`/`timedOutAfterMs` (the
             // binary's `l !== void 0` mapper branch), exactly like an explicit
             // background launch except for the message and the extra field.
-            Ok(platform_api::ForegroundRunResult {
-                outcome: platform_api::ForegroundOutcome::MovedToBackground(handle),
+            Ok(lingxi_core::host::ForegroundRunResult {
+                outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(handle),
                 ..
             }) => {
                 let reason = background_reason.load(std::sync::atomic::Ordering::SeqCst);
@@ -3241,7 +3246,7 @@ impl Tool for BashTool {
                         .log_event(BASH_TIMEOUT_BACKGROUNDED, bg_meta)
                         .await;
                 } else if reason
-                    == platform_api::task_registry::TaskBackgroundReason::TurnAbort as u8
+                    == lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort as u8
                 {
                     self.ctx
                         .bus
@@ -3307,17 +3312,20 @@ impl Tool for BashTool {
                             timed_out,
                             reaped,
                         );
-                        if reason == platform_api::task_registry::TaskBackgroundReason::User as u8 {
+                        if reason
+                            == lingxi_core::host::task_registry::TaskBackgroundReason::User as u8
+                        {
                             data["backgroundedByUser"] = json!(true);
                         }
                         if reason
-                            == platform_api::task_registry::TaskBackgroundReason::DeliverMessage
+                            == lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage
                                 as u8
                         {
                             data["backgroundedToDeliverMessage"] = json!(true);
                         }
                         if reason
-                            == platform_api::task_registry::TaskBackgroundReason::TurnAbort as u8
+                            == lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort
+                                as u8
                         {
                             data["backgroundedByTurnAbort"] = json!(true);
                         }
@@ -3330,8 +3338,8 @@ impl Tool for BashTool {
                     mcp_meta: None,
                 })
             }
-            Ok(platform_api::ForegroundRunResult {
-                outcome: platform_api::ForegroundOutcome::Completed(out),
+            Ok(lingxi_core::host::ForegroundRunResult {
+                outcome: lingxi_core::host::ForegroundOutcome::Completed(out),
                 ..
             }) if out.timed_out => {
                 let mut meta: LogEventMetadata = HashMap::new();
@@ -3352,8 +3360,8 @@ impl Tool for BashTool {
                     &sandbox_violation_lines,
                 ))
             }
-            Ok(platform_api::ForegroundRunResult {
-                outcome: platform_api::ForegroundOutcome::Completed(out),
+            Ok(lingxi_core::host::ForegroundRunResult {
+                outcome: lingxi_core::host::ForegroundOutcome::Completed(out),
                 output_file,
             }) => {
                 // BASH.4 cwd readback (Shell.ts:395-419). Subagents must NOT
@@ -4280,7 +4288,7 @@ mod tests {
     }
 
     /// A `ProcessRunner` stub that records the `cwd` field of every spawned
-    /// [`ProcessCommand`](platform_api::sandbox::ProcessCommand), so a test can
+    /// [`ProcessCommand`](lingxi_core::host::sandbox::ProcessCommand), so a test can
     /// assert which directory the (possibly sandbox-wrapped) foreground
     /// command was actually spawned in.
     struct CwdCapturingRunner {
@@ -4288,23 +4296,24 @@ mod tests {
         last_cwd: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     }
     #[async_trait]
-    impl platform_api::process::ProcessRunner for CwdCapturingRunner {
+    impl lingxi_core::host::process::ProcessRunner for CwdCapturingRunner {
         async fn run(
             &self,
-            cmd: &platform_api::sandbox::SandboxedCommand,
+            cmd: &lingxi_core::host::sandbox::SandboxedCommand,
         ) -> Result<ProcessOutput, mobile_linux_api::ProcessError> {
             *self.last_cwd.lock().unwrap() = cmd.inner().cwd.clone();
             Ok(self.out.clone())
         }
         async fn spawn_background(
             &self,
-            _: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessHandle, mobile_linux_api::ProcessError> {
+            _: &lingxi_core::host::sandbox::SandboxedCommand,
+        ) -> Result<lingxi_core::host::process::ProcessHandle, mobile_linux_api::ProcessError>
+        {
             unreachable!()
         }
         async fn kill(
             &self,
-            _: &platform_api::process::ProcessHandle,
+            _: &lingxi_core::host::process::ProcessHandle,
         ) -> Result<(), mobile_linux_api::ProcessError> {
             Ok(())
         }
@@ -4464,9 +4473,10 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let mut ctx = use_ctx();
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         ctx.agent_id = Some(agent_id);
-        let _stopping = platform_api::agent_processes::mark_stop_pending(&agent_id.to_string());
+        let _stopping =
+            lingxi_core::host::agent_processes::mark_stop_pending(&agent_id.to_string());
 
         let err = tool
             .call(json!({"command": "echo hi"}), ctx, fresh_tx())
@@ -4490,7 +4500,7 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let mut ctx = use_ctx();
-        ctx.agent_id = Some(protocol::AgentId::new());
+        ctx.agent_id = Some(lingxi_core::types::AgentId::new());
         tool.call(json!({"command": "echo hi"}), ctx, fresh_tx())
             .await
             .expect("no stop pending ⇒ the command runs");
@@ -4608,23 +4618,23 @@ mod tests {
         // and drops captured bytes — still an Ok(interrupted) shape, empty stdout.
         struct TimeoutStub;
         #[async_trait]
-        impl platform_api::process::ProcessRunner for TimeoutStub {
+        impl lingxi_core::host::process::ProcessRunner for TimeoutStub {
             async fn run(
                 &self,
-                _: &platform_api::sandbox::SandboxedCommand,
+                _: &lingxi_core::host::sandbox::SandboxedCommand,
             ) -> Result<ProcessOutput, mobile_linux_api::ProcessError> {
                 Err(mobile_linux_api::ProcessError::Timeout)
             }
             async fn spawn_background(
                 &self,
-                _: &platform_api::sandbox::SandboxedCommand,
-            ) -> Result<platform_api::process::ProcessHandle, mobile_linux_api::ProcessError>
+                _: &lingxi_core::host::sandbox::SandboxedCommand,
+            ) -> Result<lingxi_core::host::process::ProcessHandle, mobile_linux_api::ProcessError>
             {
                 unreachable!()
             }
             async fn kill(
                 &self,
-                _: &platform_api::process::ProcessHandle,
+                _: &lingxi_core::host::process::ProcessHandle,
             ) -> Result<(), mobile_linux_api::ProcessError> {
                 Ok(())
             }
@@ -4663,20 +4673,20 @@ mod tests {
         // `timedOutAfterMs` — NOT the interrupted/abort shape.
         struct MovedStub;
         #[async_trait]
-        impl platform_api::process::ProcessRunner for MovedStub {
+        impl lingxi_core::host::process::ProcessRunner for MovedStub {
             async fn run(
                 &self,
-                _: &platform_api::sandbox::SandboxedCommand,
+                _: &lingxi_core::host::sandbox::SandboxedCommand,
             ) -> Result<ProcessOutput, mobile_linux_api::ProcessError> {
                 unreachable!("bash foreground uses run_foreground")
             }
             async fn run_foreground(
                 &self,
-                _: &platform_api::sandbox::SandboxedCommand,
-            ) -> Result<platform_api::ForegroundOutcome, mobile_linux_api::ProcessError>
+                _: &lingxi_core::host::sandbox::SandboxedCommand,
+            ) -> Result<lingxi_core::host::ForegroundOutcome, mobile_linux_api::ProcessError>
             {
-                Ok(platform_api::ForegroundOutcome::MovedToBackground(
-                    platform_api::process::ProcessHandle {
+                Ok(lingxi_core::host::ForegroundOutcome::MovedToBackground(
+                    lingxi_core::host::process::ProcessHandle {
                         task_id: "local_bash_dead".into(),
                         pid: 4242,
                     },
@@ -4684,14 +4694,14 @@ mod tests {
             }
             async fn spawn_background(
                 &self,
-                _: &platform_api::sandbox::SandboxedCommand,
-            ) -> Result<platform_api::process::ProcessHandle, mobile_linux_api::ProcessError>
+                _: &lingxi_core::host::sandbox::SandboxedCommand,
+            ) -> Result<lingxi_core::host::process::ProcessHandle, mobile_linux_api::ProcessError>
             {
                 unreachable!()
             }
             async fn kill(
                 &self,
-                _: &platform_api::process::ProcessHandle,
+                _: &lingxi_core::host::process::ProcessHandle,
             ) -> Result<(), mobile_linux_api::ProcessError> {
                 Ok(())
             }
@@ -5165,7 +5175,7 @@ mod tests {
         let mut ctx = use_ctx();
         // Main loop (no agent id) — the command survives the turn.
         assert!(!background_ends_with_final_response(&ctx));
-        ctx.agent_id = Some(protocol::AgentId::new());
+        ctx.agent_id = Some(lingxi_core::types::AgentId::new());
         assert!(background_ends_with_final_response(&ctx));
         // Async / headless subagent: `is_non_interactive_session` is set by the
         // dispatch invoker from `is_async || effective_non_interactive_session()`.
@@ -5570,7 +5580,7 @@ mod tests {
                 _: Option<usize>,
             ) -> Result<ForegroundRunResult, ProcessError> {
                 Ok(ForegroundRunResult {
-                    outcome: platform_api::ForegroundOutcome::Completed(ProcessOutput {
+                    outcome: lingxi_core::host::ForegroundOutcome::Completed(ProcessOutput {
                         stdout: "inline preview".into(),
                         stderr: String::new(),
                         exit_code: 0,
@@ -5659,11 +5669,11 @@ mod tests {
 
     // ----- Background path: bespoke stub that returns a fake ProcessHandle. -----
 
-    use mobile_linux_api::ProcessError;
-    use platform_api::process::{
+    use lingxi_core::host::process::{
         ForegroundRunResult, ProcessHandle, ProcessOutputFile, ProcessRunner,
     };
-    use platform_api::sandbox::SandboxedCommand;
+    use lingxi_core::host::sandbox::SandboxedCommand;
+    use mobile_linux_api::ProcessError;
     use std::sync::Arc;
 
     struct BgStub;
@@ -5783,7 +5793,7 @@ mod tests {
         registered: std::sync::Mutex<
             Vec<(
                 String,
-                platform_api::task_registry::BackgroundBashRegistration,
+                lingxi_core::host::task_registry::BackgroundBashRegistration,
             )>,
         >,
         bound: std::sync::Mutex<Vec<String>>,
@@ -5795,7 +5805,7 @@ mod tests {
 
     #[tokio::test]
     async fn background_bash_sink_routes_output_and_flush_to_registry_writer() {
-        use platform_api::BackgroundExitSink as _;
+        use lingxi_core::host::BackgroundExitSink as _;
         let registry = std::sync::Arc::new(RecordingRegistry::default());
         let sink = BackgroundBashExitSink {
             registry: registry.clone(),
@@ -5816,12 +5826,12 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl platform_api::task_registry::TaskRegistryHandle for RecordingRegistry {
+    impl lingxi_core::host::task_registry::TaskRegistryHandle for RecordingRegistry {
         async fn append_bash_output(
             &self,
             task_id: &str,
             content: &str,
-        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+        ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
             self.output_chunks
                 .lock()
                 .unwrap()
@@ -5831,7 +5841,7 @@ mod tests {
         async fn flush_bash_output(
             &self,
             task_id: &str,
-        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+        ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
             self.output_flushes.lock().unwrap().push(task_id.into());
             Ok(())
         }
@@ -5839,9 +5849,9 @@ mod tests {
         async fn register_foreground_bash(
             &self,
             task_id: &str,
-            _r: platform_api::task_registry::BackgroundBashRegistration,
+            _r: lingxi_core::host::task_registry::BackgroundBashRegistration,
             _armed: bool,
-        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+        ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
             self.armed.lock().unwrap().push(task_id.to_string());
             Ok(())
         }
@@ -5851,17 +5861,17 @@ mod tests {
         async fn bind_background_requester(
             &self,
             task_id: &str,
-            _r: std::sync::Arc<dyn platform_api::task_registry::TaskBackgrounder>,
-        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            _r: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>,
+        ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
             self.requesters.lock().unwrap().push(task_id.to_string());
             Ok(())
         }
         async fn create(
             &self,
-            _i: platform_api::task_registry::TaskCreateInput,
+            _i: lingxi_core::host::task_registry::TaskCreateInput,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -5869,27 +5879,27 @@ mod tests {
             &self,
             _id: &str,
         ) -> Result<
-            Option<platform_api::task_registry::TaskRecord>,
-            platform_api::task_registry::TaskRegistryError,
+            Option<lingxi_core::host::task_registry::TaskRecord>,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
         async fn list(
             &self,
-            _f: platform_api::task_registry::TaskListFilter,
+            _f: lingxi_core::host::task_registry::TaskListFilter,
         ) -> Result<
-            Vec<platform_api::task_registry::TaskRecord>,
-            platform_api::task_registry::TaskRegistryError,
+            Vec<lingxi_core::host::task_registry::TaskRecord>,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
         async fn update(
             &self,
             _id: &str,
-            _p: platform_api::task_registry::TaskUpdatePatch,
+            _p: lingxi_core::host::task_registry::TaskUpdatePatch,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -5898,8 +5908,8 @@ mod tests {
             _id: &str,
             _s: &str,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -5907,8 +5917,8 @@ mod tests {
             &self,
             _id: &str,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -5917,20 +5927,20 @@ mod tests {
             _id: &str,
             _o: Option<u64>,
         ) -> Result<
-            platform_api::task_registry::TaskOutputChunk,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskOutputChunk,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
         async fn allocate_bash_output(
             &self,
         ) -> Result<
-            platform_api::task_registry::BackgroundBashHandle,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::BackgroundBashHandle,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             let id = "b1a2b3c4d".to_string();
             self.allocated.lock().unwrap().push(id.clone());
-            Ok(platform_api::task_registry::BackgroundBashHandle {
+            Ok(lingxi_core::host::task_registry::BackgroundBashHandle {
                 task_id: id,
                 output_path: "/session/tasks/b1a2b3c4d.output".to_string(),
             })
@@ -5938,12 +5948,14 @@ mod tests {
         async fn register_background_bash(
             &self,
             task_id: &str,
-            registration: platform_api::task_registry::BackgroundBashRegistration,
-        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            registration: lingxi_core::host::task_registry::BackgroundBashRegistration,
+        ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
             if self.fail_register {
-                return Err(platform_api::task_registry::TaskRegistryError::Internal(
-                    "registration failed".into(),
-                ));
+                return Err(
+                    lingxi_core::host::task_registry::TaskRegistryError::Internal(
+                        "registration failed".into(),
+                    ),
+                );
             }
             self.registered
                 .lock()
@@ -5958,12 +5970,14 @@ mod tests {
             &self,
             id: &str,
             pid: u32,
-            killer: std::sync::Arc<dyn platform_api::task_registry::TaskKiller>,
-        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            killer: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskKiller>,
+        ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
             if self.fail_bind {
-                return Err(platform_api::task_registry::TaskRegistryError::Internal(
-                    "binding failed".into(),
-                ));
+                return Err(
+                    lingxi_core::host::task_registry::TaskRegistryError::Internal(
+                        "binding failed".into(),
+                    ),
+                );
             }
             self.bound_pids.lock().unwrap().push(pid);
             self.bind_background_killer(id, killer).await
@@ -5972,8 +5986,8 @@ mod tests {
         async fn bind_background_killer(
             &self,
             id: &str,
-            _killer: std::sync::Arc<dyn platform_api::task_registry::TaskKiller>,
-        ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+            _killer: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskKiller>,
+        ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
             self.bound.lock().unwrap().push(id.to_string());
             Ok(())
         }
@@ -6056,7 +6070,7 @@ mod tests {
                 &self,
                 _: &SandboxedCommand,
                 _: Option<usize>,
-            ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+            ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
                 self.entered.notify_one();
                 std::future::pending().await
             }
@@ -6331,11 +6345,11 @@ mod tests {
                 &self,
                 _cmd: &SandboxedCommand,
                 _max: Option<usize>,
-            ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+            ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
                 // Past `cnr`, then a normal foreground finish.
                 tokio::time::sleep(std::time::Duration::from_millis(2400)).await;
-                Ok(platform_api::ForegroundRunResult {
-                    outcome: platform_api::ForegroundOutcome::Completed(ProcessOutput {
+                Ok(lingxi_core::host::ForegroundRunResult {
+                    outcome: lingxi_core::host::ForegroundOutcome::Completed(ProcessOutput {
                         stdout: "done\n".into(),
                         stderr: String::new(),
                         exit_code: 0,
@@ -6370,7 +6384,7 @@ mod tests {
         let tool = BashTool::new(ctx);
         let (progress, mut progress_rx) = tool_api::progress::progress_channel();
         let mut use_context = use_ctx();
-        use_context.tool_use_id = Some(protocol::ToolUseId::new());
+        use_context.tool_use_id = Some(lingxi_core::types::ToolUseId::new());
         tool.call(json!({"command": "sleep 3"}), use_context, progress)
             .await
             .expect("ok");
@@ -6443,13 +6457,13 @@ mod tests {
                 &self,
                 cmd: &SandboxedCommand,
                 _max: Option<usize>,
-            ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+            ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
                 self.seen
                     .lock()
                     .unwrap()
                     .push(cmd.auto_background_on_timeout());
-                Ok(platform_api::ForegroundRunResult {
-                    outcome: platform_api::ForegroundOutcome::Completed(ProcessOutput {
+                Ok(lingxi_core::host::ForegroundRunResult {
+                    outcome: lingxi_core::host::ForegroundOutcome::Completed(ProcessOutput {
                         stdout: String::new(),
                         stderr: String::new(),
                         exit_code: 0,
@@ -6609,25 +6623,25 @@ mod tests {
     fn the_bash_output_setting_is_clamped_and_beats_the_env_var() {
         let _guard = bash_output_setting_lock();
         // Unset ⇒ the env/default path is untouched.
-        platform_api::session_flags::set_bash_output_max_chars(None);
+        lingxi_core::host::session_flags::set_bash_output_max_chars(None);
         if std::env::var_os("BASH_MAX_OUTPUT_LENGTH").is_none() {
             assert_eq!(bash_max_output_length(), BASH_MAX_OUTPUT_DEFAULT);
         }
 
         // In range: used verbatim, and it beats the env default.
-        platform_api::session_flags::set_bash_output_max_chars(Some(50_000));
+        lingxi_core::host::session_flags::set_bash_output_max_chars(Some(50_000));
         assert_eq!(bash_max_output_length(), 50_000);
 
         // Out of range: PULLED to the nearest bound, never rejected.
-        platform_api::session_flags::set_bash_output_max_chars(Some(1));
+        lingxi_core::host::session_flags::set_bash_output_max_chars(Some(1));
         assert_eq!(bash_max_output_length(), BASH_OUTPUT_SETTING_MIN);
-        platform_api::session_flags::set_bash_output_max_chars(Some(10_000_000));
+        lingxi_core::host::session_flags::set_bash_output_max_chars(Some(10_000_000));
         assert_eq!(bash_max_output_length(), BASH_OUTPUT_SETTING_MAX);
 
         // The CHANGELOG's "up to 128K characters".
         assert_eq!(BASH_OUTPUT_SETTING_MAX, 128_000);
 
-        platform_api::session_flags::set_bash_output_max_chars(None);
+        lingxi_core::host::session_flags::set_bash_output_max_chars(None);
     }
 
     /// The publisher is a process global, so the test above must not run
@@ -6941,6 +6955,7 @@ mod tests {
         command: String,
         bin_shell: Option<String>,
         cwd: Option<std::path::PathBuf>,
+        allow_write: Vec<String>,
     }
 
     #[derive(Default)]
@@ -6955,7 +6970,7 @@ mod tests {
         async fn wrap(
             &self,
             command: &str,
-            _cfg: &sandbox::runtime_config::SandboxRuntimeConfig,
+            cfg: &sandbox::runtime_config::SandboxRuntimeConfig,
             _platform: sandbox::runtime_config::Platform,
             bin_shell: Option<&str>,
             cwd: Option<&std::path::Path>,
@@ -6964,6 +6979,7 @@ mod tests {
                 command: command.to_string(),
                 bin_shell: bin_shell.map(ToString::to_string),
                 cwd: cwd.map(std::path::Path::to_path_buf),
+                allow_write: cfg.filesystem.allow_write.clone(),
             });
             Ok(format!("WRAPPED::{command}"))
         }
@@ -7029,6 +7045,44 @@ mod tests {
             1,
             "cleanup_after_command must be invoked once"
         );
+    }
+
+    /// The sandbox is rooted at the directory the command belongs to: the
+    /// session workspace for the main loop, the agent's own directory for a
+    /// worktree-isolated agent — never the host process's cwd.
+    #[tokio::test]
+    async fn sandbox_is_rooted_at_the_agent_dir_or_the_session_workspace() {
+        let agent_dir = tempfile::tempdir().unwrap();
+        let agent_dir = std::fs::canonicalize(agent_dir.path()).unwrap();
+        for (agent_cwd, expected_root) in [
+            (None, std::path::PathBuf::from("/tmp")),
+            (Some(agent_dir.clone()), agent_dir.clone()),
+        ] {
+            let runner = Arc::new(RecordingSandboxRunner::default());
+            let mut ctx = shell_test_ctx(ok_output());
+            ctx.sandbox_available = true;
+            ctx.sandbox_runtime.excluded_commands = vec![];
+            ctx.sandbox_runtime.filesystem.allow_write = vec![".".into(), "./build".into()];
+            ctx.session_cwd
+                .swap(std::path::PathBuf::from("/tmp"), ctx.trusted_dirs());
+            ctx.sandbox_runner = runner.clone();
+            let tool = BashTool::new(ctx);
+            let mut call_ctx = use_ctx();
+            call_ctx.cwd = agent_cwd.clone();
+            tool.call(json!({"command": "echo hi"}), call_ctx, fresh_tx())
+                .await
+                .expect("ok");
+
+            let calls = runner.wrap_calls.lock().unwrap();
+            assert_eq!(calls[0].cwd.as_deref(), Some(expected_root.as_path()));
+            let root = expected_root.to_string_lossy().into_owned();
+            assert_eq!(
+                &calls[0].allow_write[..2],
+                &[root.clone(), format!("{root}/build")],
+                "agent_cwd={agent_cwd:?}"
+            );
+            assert!(!calls[0].allow_write.iter().any(|p| p == "."));
+        }
     }
 
     #[tokio::test]
@@ -7399,7 +7453,7 @@ mod tests {
     }
     #[tokio::test]
     async fn background_request_waits_for_process_detachment_before_host_cancel() {
-        use platform_api::task_registry::{TaskBackgroundReason, TaskBackgrounder};
+        use lingxi_core::host::task_registry::{TaskBackgroundReason, TaskBackgrounder};
         let notify = Arc::new(tokio::sync::Notify::new());
         let reason = Arc::new(std::sync::atomic::AtomicU8::new(0));
         let settled = Arc::new(tokio::sync::watch::channel(false).0);
@@ -7431,7 +7485,7 @@ mod tests {
 
     #[test]
     fn background_heads_preserve_manual_and_message_triggers() {
-        use platform_api::task_registry::TaskBackgroundReason;
+        use lingxi_core::host::task_registry::TaskBackgroundReason;
         let manual = background_note_for_reason(
             "b1",
             "/tmp/b1.output",
@@ -7466,7 +7520,7 @@ mod tests {
                 &self,
                 cmd: &SandboxedCommand,
                 _: Option<usize>,
-            ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+            ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
                 let binding = cmd.background_task().expect("bound identity");
                 self.0.notify_one();
                 if let Some(notify) = binding.on_demand.as_ref() {
@@ -7474,11 +7528,13 @@ mod tests {
                 } else {
                     std::future::pending::<()>().await;
                 }
-                Ok(platform_api::ForegroundRunResult {
-                    outcome: platform_api::ForegroundOutcome::MovedToBackground(ProcessHandle {
-                        task_id: binding.task_id.clone(),
-                        pid: 4242,
-                    }),
+                Ok(lingxi_core::host::ForegroundRunResult {
+                    outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(
+                        ProcessHandle {
+                            task_id: binding.task_id.clone(),
+                            pid: 4242,
+                        },
+                    ),
                     output_file: None,
                 })
             }
@@ -7548,10 +7604,10 @@ mod tests {
     }
 
     #[async_trait]
-    impl platform_api::process::ProcessRunner for EditingProcess {
+    impl lingxi_core::host::process::ProcessRunner for EditingProcess {
         async fn run(
             &self,
-            _cmd: &platform_api::sandbox::SandboxedCommand,
+            _cmd: &lingxi_core::host::sandbox::SandboxedCommand,
         ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
             std::fs::write(&self.write, "written by the command\n").unwrap();
             Ok(mobile_linux_api::ProcessOutput {
@@ -7564,14 +7620,15 @@ mod tests {
 
         async fn spawn_background(
             &self,
-            _cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessHandle, mobile_linux_api::ProcessError> {
+            _cmd: &lingxi_core::host::sandbox::SandboxedCommand,
+        ) -> Result<lingxi_core::host::process::ProcessHandle, mobile_linux_api::ProcessError>
+        {
             Err(mobile_linux_api::ProcessError::Unsupported)
         }
 
         async fn kill(
             &self,
-            _handle: &platform_api::process::ProcessHandle,
+            _handle: &lingxi_core::host::process::ProcessHandle,
         ) -> Result<(), mobile_linux_api::ProcessError> {
             Ok(())
         }
@@ -7682,10 +7739,10 @@ mod tests {
     }
 
     #[async_trait]
-    impl platform_api::process::ProcessRunner for RecordingProcess {
+    impl lingxi_core::host::process::ProcessRunner for RecordingProcess {
         async fn run(
             &self,
-            cmd: &platform_api::sandbox::SandboxedCommand,
+            cmd: &lingxi_core::host::sandbox::SandboxedCommand,
         ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
             self.commands.lock().unwrap().push(format!("{cmd:?}"));
             Ok(mobile_linux_api::ProcessOutput {
@@ -7698,14 +7755,15 @@ mod tests {
 
         async fn spawn_background(
             &self,
-            _cmd: &platform_api::sandbox::SandboxedCommand,
-        ) -> Result<platform_api::process::ProcessHandle, mobile_linux_api::ProcessError> {
+            _cmd: &lingxi_core::host::sandbox::SandboxedCommand,
+        ) -> Result<lingxi_core::host::process::ProcessHandle, mobile_linux_api::ProcessError>
+        {
             Err(mobile_linux_api::ProcessError::Unsupported)
         }
 
         async fn kill(
             &self,
-            _handle: &platform_api::process::ProcessHandle,
+            _handle: &lingxi_core::host::process::ProcessHandle,
         ) -> Result<(), mobile_linux_api::ProcessError> {
             Ok(())
         }

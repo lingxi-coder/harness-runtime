@@ -13,11 +13,11 @@ use async_trait::async_trait;
 use bytes::BytesMut;
 use futures_core::stream::Stream;
 use futures_util::stream::StreamExt;
-use platform_api::http::{
+use lingxi_core::host::http::{
     RawByteStream, RawByteStreamWithMeta, ResolvedAddressOverride, SseStream, SseStreamWithMeta,
 };
-use platform_api::{HttpError, HttpTransport};
-use protocol::{HttpRequest, HttpResponse, SseEvent};
+use lingxi_core::host::{HttpError, HttpTransport};
+use lingxi_core::types::{HttpRequest, HttpResponse, SseEvent};
 use std::error::Error as StdError;
 use std::sync::Arc;
 
@@ -53,7 +53,7 @@ pub struct ReqwestHttp {
     /// identity as `tls`. Configuration errors are deferred until a WebSocket
     /// is actually opened so ordinary HTTP remains available for diagnostics.
     websocket_tls: Result<Arc<rustls::ClientConfig>, String>,
-    monitor_proxy: Option<Arc<dyn platform_api::http::MonitorWebSocketProxy>>,
+    monitor_proxy: Option<Arc<dyn lingxi_core::host::http::MonitorWebSocketProxy>>,
 }
 
 impl ReqwestHttp {
@@ -110,7 +110,7 @@ impl ReqwestHttp {
     #[must_use]
     pub fn with_monitor_proxy(
         mut self,
-        proxy: Arc<dyn platform_api::http::MonitorWebSocketProxy>,
+        proxy: Arc<dyn lingxi_core::host::http::MonitorWebSocketProxy>,
     ) -> Self {
         self.monitor_proxy = Some(proxy);
         self
@@ -148,7 +148,7 @@ impl ReqwestHttp {
             _ if no_redirect => self.no_redirect_client.clone(),
             _ => self.client.clone(),
         };
-        let is_head = matches!(req.method, protocol::HttpMethod::Head);
+        let is_head = matches!(req.method, lingxi_core::types::HttpMethod::Head);
         let resp = build_reqwest(&client, req)
             .send()
             .await
@@ -195,15 +195,15 @@ impl Default for ReqwestHttp {
     }
 }
 
-fn to_reqwest_method(method: protocol::HttpMethod) -> reqwest::Method {
+fn to_reqwest_method(method: lingxi_core::types::HttpMethod) -> reqwest::Method {
     match method {
-        protocol::HttpMethod::Get => reqwest::Method::GET,
-        protocol::HttpMethod::Post => reqwest::Method::POST,
-        protocol::HttpMethod::Put => reqwest::Method::PUT,
-        protocol::HttpMethod::Patch => reqwest::Method::PATCH,
-        protocol::HttpMethod::Delete => reqwest::Method::DELETE,
-        protocol::HttpMethod::Head => reqwest::Method::HEAD,
-        protocol::HttpMethod::Options => reqwest::Method::OPTIONS,
+        lingxi_core::types::HttpMethod::Get => reqwest::Method::GET,
+        lingxi_core::types::HttpMethod::Post => reqwest::Method::POST,
+        lingxi_core::types::HttpMethod::Put => reqwest::Method::PUT,
+        lingxi_core::types::HttpMethod::Patch => reqwest::Method::PATCH,
+        lingxi_core::types::HttpMethod::Delete => reqwest::Method::DELETE,
+        lingxi_core::types::HttpMethod::Head => reqwest::Method::HEAD,
+        lingxi_core::types::HttpMethod::Options => reqwest::Method::OPTIONS,
     }
 }
 
@@ -522,7 +522,7 @@ impl HttpTransport for ReqwestHttp {
         &self,
         url: String,
         protocols: Vec<String>,
-    ) -> Result<platform_api::http::MonitorWebSocketReceiver, HttpError> {
+    ) -> Result<lingxi_core::host::http::MonitorWebSocketReceiver, HttpError> {
         let tls = self
             .websocket_tls
             .as_ref()
@@ -673,7 +673,7 @@ pub(crate) fn find_event_boundary(buf: &BytesMut) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::http::SseStreamWithMeta;
+    use lingxi_core::host::http::SseStreamWithMeta;
     use std::fmt;
     use std::sync::Mutex;
 
@@ -733,7 +733,7 @@ mod tests {
     /// succeeds and both `request` / `request_no_follow` are callable.
     #[tokio::test]
     async fn new_builds_both_clients_and_no_follow_is_callable() {
-        use protocol::HttpMethod;
+        use lingxi_core::types::HttpMethod;
         let transport = ReqwestHttp::new();
         // A connection failure (unroutable host) is fine — we only need the
         // no-follow client to exist and the method to dispatch through it. The
@@ -758,7 +758,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_resolved_address_override_fails_closed() {
-        use protocol::HttpMethod;
+        use lingxi_core::types::HttpMethod;
 
         let request = HttpRequest {
             method: HttpMethod::Get,
@@ -802,7 +802,7 @@ mod tests {
         use axum::response::{IntoResponse, Response};
         use axum::routing::get;
         use axum::Router;
-        use protocol::HttpMethod;
+        use lingxi_core::types::HttpMethod;
         use tokio::net::TcpListener;
 
         async fn redirector() -> Response {
@@ -862,8 +862,8 @@ mod tests {
         use axum::http::HeaderMap;
         use axum::routing::get;
         use axum::Router;
-        use platform_api::ResolvedAddressOverride;
-        use protocol::HttpMethod;
+        use lingxi_core::host::ResolvedAddressOverride;
+        use lingxi_core::types::HttpMethod;
         use std::net::SocketAddr;
         use std::sync::Arc;
         use tokio::net::TcpListener;
@@ -931,7 +931,7 @@ mod tests {
         use axum::routing::post;
         use axum::Router;
         use futures_util::StreamExt as _;
-        use protocol::HttpMethod;
+        use lingxi_core::types::HttpMethod;
         use tokio::net::TcpListener;
 
         async fn handler() -> Response {
@@ -995,7 +995,7 @@ mod tests {
         use axum::routing::post;
         use axum::Router;
         use futures_util::StreamExt as _;
-        use protocol::HttpMethod;
+        use lingxi_core::types::HttpMethod;
         use tokio::net::TcpListener;
 
         async fn handler_429() -> Response {
@@ -1071,7 +1071,7 @@ mod tests {
         use axum::extract::State;
         use axum::routing::post;
         use axum::Router;
-        use protocol::HttpMethod;
+        use lingxi_core::types::HttpMethod;
         use std::sync::Arc;
         use tokio::net::TcpListener;
 
@@ -1117,7 +1117,7 @@ mod tests {
         use axum::extract::State;
         use axum::routing::post;
         use axum::Router;
-        use protocol::HttpMethod;
+        use lingxi_core::types::HttpMethod;
         use std::sync::Arc;
         use tokio::net::TcpListener;
 
@@ -1209,7 +1209,7 @@ mod tests {
         use axum::routing::post;
         use axum::Router;
         use futures_util::StreamExt as _;
-        use protocol::HttpMethod;
+        use lingxi_core::types::HttpMethod;
         use tokio::net::TcpListener;
 
         async fn binary_handler() -> Response {
@@ -1280,7 +1280,7 @@ mod tests {
         use axum::routing::post;
         use axum::Router;
         use futures_util::StreamExt as _;
-        use protocol::HttpMethod;
+        use lingxi_core::types::HttpMethod;
         use tokio::net::TcpListener;
 
         async fn error_handler() -> Response {

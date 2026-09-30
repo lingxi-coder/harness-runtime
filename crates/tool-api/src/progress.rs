@@ -1,6 +1,6 @@
 //! Tool progress channel — mpsc channel for streaming progress updates.
 
-use protocol::ToolUseId;
+use lingxi_core::types::ToolUseId;
 use tokio::sync::mpsc;
 
 /// One progress event from a running tool.

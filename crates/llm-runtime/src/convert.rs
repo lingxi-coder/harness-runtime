@@ -28,7 +28,7 @@
 
 use crate::{ContentBlock as LlmBlock, LlmError, Message, ToolDeclaration};
 use base64::Engine as _;
-use protocol::{
+use lingxi_core::types::{
     ContentBlock as ProtoBlock, ConversationMessage, DocumentSource, ImageSource, MediaAnalysis,
 };
 use serde_json::Value;
@@ -351,7 +351,7 @@ fn hoist_tool_results(content: &mut [ProtoBlock]) {
 ///   `tool_result` is stripped.
 #[must_use]
 pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
-    use protocol::ContentBlock as B;
+    use lingxi_core::types::ContentBlock as B;
     use std::collections::HashSet;
     const SYNTH: &str = "[Tool result missing due to internal error]";
     const NO_CONTENT: &str = "(no content)";
@@ -476,7 +476,7 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
         let synth: Vec<B> = missing
             .iter()
             .map(|mid| B::ToolResult {
-                tool_use_id: protocol::ToolUseId::from(mid.clone()),
+                tool_use_id: lingxi_core::types::ToolUseId::from(mid.clone()),
                 content: SYNTH.to_string(),
                 is_error: true,
                 provider_tool_use_id: None,
@@ -520,7 +520,7 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
                 // Role-alternation placeholder (claude-code `NO_CONTENT_MESSAGE`,
                 // isMeta: true).
                 result.push(ConversationMessage::User {
-                    id: protocol::MessageId::new(),
+                    id: lingxi_core::types::MessageId::new(),
                     content: vec![B::Text {
                         text: NO_CONTENT.to_string(),
                     }],
@@ -535,7 +535,7 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
             // isMeta: true).
             if !synth.is_empty() {
                 result.push(ConversationMessage::User {
-                    id: protocol::MessageId::new(),
+                    id: lingxi_core::types::MessageId::new(),
                     content: synth,
                     is_meta: true,
                     is_compact_summary: false,
@@ -799,3 +799,9 @@ fn convert_tool_declaration(value: Value) -> Result<ToolDeclaration, LlmError> {
 #[cfg(test)]
 #[path = "convert_test.rs"]
 mod convert_test;
+
+/// Consume normalized durable history once into canonical SDK model input.
+/// Exact JavaScript UTF-16 strings are retained outside model input for sealing.
+pub use input_projection::history_input;
+#[path = "history_input.rs"]
+pub(crate) mod input_projection;

@@ -101,7 +101,7 @@
 //!
 //! **Serving from cache.** `mcp::connection::McpConnectionState` gained a
 //! `Cached` variant carrying the entry's full catalog plus a freshly
-//! allocated [`platform_api::McpTransportSpec`]-agnostic connection id with NO live
+//! allocated [`lingxi_core::host::McpTransportSpec`]-agnostic connection id with NO live
 //! transport behind it. `McpRegistry::connect_locked_inner` consults
 //! [`decide`] BEFORE dialing (unless the call is itself the lazy-dial
 //! upgrade of an already-`Cached` entry — see below): on `Fresh`/`Stale` it
@@ -153,7 +153,7 @@
 //! `InProcess` MCP transports, which are cache-ineligible, so it deliberately
 //! leaves the optional store unwired.
 
-use platform_api::{
+use lingxi_core::host::{
     McpPromptDto, McpResourceDto, McpResourceTemplateDto, McpToolDto, McpTransportSpec,
     ServerCapabilitiesDto,
 };
@@ -184,7 +184,7 @@ pub(crate) fn partition_key_for_era(
 ) -> String {
     let material = format!(
         "{logical_cache_key}\0{fingerprint}\0era:{era}\0{}",
-        platform_api::CLAUDE_CODE_VERSION
+        lingxi_core::host::CLAUDE_CODE_VERSION
     );
     sha256_hex(material.as_bytes())[..32].to_string()
 }
@@ -216,7 +216,7 @@ fn canonicalize_logical_key_value(value: serde_json::Value) -> serde_json::Value
     }
 }
 
-fn oauth_logical_key_config(oauth: &platform_api::McpOAuthConfigDto) -> serde_json::Value {
+fn oauth_logical_key_config(oauth: &lingxi_core::host::McpOAuthConfigDto) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     if let Some(client_id) = &oauth.client_id {
         map.insert("clientId".into(), client_id.clone().into());
@@ -457,7 +457,7 @@ pub const CACHE_SCHEMA_VERSION: u32 = 2;
 
 /// The feature opt-in env var (oracle `MCP_DISCOVERY_CACHE`, read through a
 /// boolean-coerced env schema — `a.MCP_DISCOVERY_CACHE===true`/`===false`).
-/// Reused here via [`platform_api::env::is_env_truthy`]/[`platform_api::env::is_env_defined_falsy`],
+/// Reused here via [`lingxi_core::host::env::is_env_truthy`]/[`lingxi_core::host::env::is_env_defined_falsy`],
 /// this port's established idiom for a coerced-boolean env var.
 pub const ENV_ENABLED: &str = "MCP_DISCOVERY_CACHE";
 
@@ -611,7 +611,7 @@ const DEFAULT_STRIKES: u32 = 1;
 /// disable reason at [`cache_gate`], matching `cot`'s own collapse.
 #[must_use]
 pub fn feature_enabled() -> bool {
-    platform_api::env::is_env_truthy(std::env::var(ENV_ENABLED).ok().as_deref())
+    lingxi_core::host::env::is_env_truthy(std::env::var(ENV_ENABLED).ok().as_deref())
 }
 
 /// Whether the MCP skills capability gate is enabled. This reads the
@@ -910,7 +910,7 @@ pub fn now_ms() -> u64 {
 /// `serverInfo` sub-object — spread onto the served "cached" client only
 /// when present: `...v.serverInfo && {serverInfo:{name:...,version:...}}`).
 ///
-/// This port's [`platform_api::McpTransport::initialize`] returns only
+/// This port's [`lingxi_core::host::McpTransport::initialize`] returns only
 /// [`ServerCapabilitiesDto`] — the wire `serverInfo` block is discarded
 /// before it reaches `mcp::registry`, so nothing populates this field today.
 /// Kept as a real (rather than omitted) field so schema v2 is
@@ -1576,7 +1576,7 @@ mod tests {
     fn http_spec(url: &str, headers_helper: Option<&str>) -> McpTransportSpec {
         McpTransportSpec::Http {
             url: url.to_string(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: headers_helper.map(str::to_string),
             oauth: None,
         }
@@ -2161,7 +2161,7 @@ mod tests {
             "856f0d2375be22a510e79662f22d30c51c14dc3394b9d610af33a7116d81cda6"
         );
         // The partition vector is intentionally version-bound through
-        // `platform_api::CLAUDE_CODE_VERSION`, so these two literals move with
+        // `lingxi_core::host::CLAUDE_CODE_VERSION`, so these two literals move with
         // every raise of it and with nothing else. Last moved 2026-09-10 for
         // 2.1.252 -> 2.1.267; if they move without the constant moving, the
         // partition scheme itself changed and that is the bug to look for.
@@ -2290,14 +2290,14 @@ mod tests {
             42,
             caps_tools(true),
             sample_tools(5),
-            vec![platform_api::McpResourceDto {
+            vec![lingxi_core::host::McpResourceDto {
                 uri: "file:///a".into(),
                 name: "a".into(),
                 description: None,
                 mime_type: None,
                 meta: None,
             }],
-            vec![platform_api::McpResourceTemplateDto {
+            vec![lingxi_core::host::McpResourceTemplateDto {
                 uri_template: "file:///{path}".into(),
                 name: "tmpl".into(),
                 description: None,
@@ -2305,7 +2305,7 @@ mod tests {
                 annotations: Some(serde_json::json!({"vendor/rank": 7})),
                 meta: Some(serde_json::json!({"vendor/template": "opaque"})),
             }],
-            vec![platform_api::McpPromptDto {
+            vec![lingxi_core::host::McpPromptDto {
                 name: "p".into(),
                 description: None,
                 arguments: vec![],
@@ -2698,7 +2698,9 @@ mod tests {
         let mut base = crate::connection::McpServerConfig {
             name: "srv".into(),
             spec: http_spec("https://a.example", None),
-            scope: crate::connection::ConfigScope::Settings(protocol::SettingsScope::User),
+            scope: crate::connection::ConfigScope::Settings(
+                lingxi_core::types::SettingsScope::User,
+            ),
             disabled: false,
             timeout_ms: Some(10),
             discovery_cache: None,
@@ -2709,7 +2711,9 @@ mod tests {
             metadata: crate::connection::McpServerMetadata::default(),
         };
         let same = crate::connection::McpServerConfig {
-            scope: crate::connection::ConfigScope::Settings(protocol::SettingsScope::Managed),
+            scope: crate::connection::ConfigScope::Settings(
+                lingxi_core::types::SettingsScope::Managed,
+            ),
             config_error: Some("ignored".into()),
             ..base.clone()
         };
@@ -2745,7 +2749,9 @@ mod tests {
         let mut empty_oauth = crate::connection::McpServerConfig {
             name: "srv".into(),
             spec: http_spec("https://a.example", None),
-            scope: crate::connection::ConfigScope::Settings(protocol::SettingsScope::User),
+            scope: crate::connection::ConfigScope::Settings(
+                lingxi_core::types::SettingsScope::User,
+            ),
             disabled: false,
             timeout_ms: Some(10),
             discovery_cache: None,
@@ -2758,7 +2764,7 @@ mod tests {
         let McpTransportSpec::Http { oauth, .. } = &mut empty_oauth.spec else {
             unreachable!()
         };
-        *oauth = Some(platform_api::McpOAuthConfigDto {
+        *oauth = Some(lingxi_core::host::McpOAuthConfigDto {
             client_id: None,
             callback_port: None,
             auth_server_metadata_url: None,

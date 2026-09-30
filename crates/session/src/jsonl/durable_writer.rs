@@ -7,11 +7,11 @@
 //! fsyncs before acknowledging success.
 
 use crate::jsonl::journal::{SESSION_STATE_DIR_MODE, SESSION_STATE_FILE_MODE};
-use platform_api::rooted_fs::{
+use lingxi_core::host::rooted_fs::{
     lock_exclusive_pinned, open_append_file_pinned, open_read_file_pinned, root_identity,
     sync_parent_pinned, RootIdentity,
 };
-use platform_api::FsError;
+use lingxi_core::host::FsError;
 use serde_json::{Map, Value};
 use std::cell::Cell;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -95,7 +95,7 @@ pub struct DurableTranscriptWriter {
 /// without attempting to acquire the same lock recursively.
 pub struct DurableTranscriptTransaction<'a> {
     writer: &'a DurableTranscriptWriter,
-    _lock: platform_api::RootedFileLock,
+    _lock: lingxi_core::host::RootedFileLock,
 }
 
 #[derive(Default)]
@@ -824,7 +824,7 @@ impl DurableTranscriptTransaction<'_> {
         // The directory entry is a different matter: creating the file is
         // worth one parent sync, so a crash cannot lose the transcript itself.
         let file_present =
-            platform_api::rooted_fs::checked_join(transcript_root, transcript_relative)
+            lingxi_core::host::rooted_fs::checked_join(transcript_root, transcript_relative)
                 .map(|path| path.exists())
                 .unwrap_or(false);
         let mut file = open_append_file_pinned(
@@ -927,7 +927,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
         let path = Path::new("transcript.jsonl");
-        let identity = platform_api::rooted_fs::root_identity(dir.path()).unwrap();
+        let identity = lingxi_core::host::rooted_fs::root_identity(dir.path()).unwrap();
 
         writer
             .with_transaction(|transaction| {

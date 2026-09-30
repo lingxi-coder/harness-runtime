@@ -65,7 +65,7 @@ mod tests {
         parse_skill_markdown(
             raw.as_str(),
             "/tmp/x.md".into(),
-            SkillSource::Settings(protocol::SettingsScope::User),
+            SkillSource::Settings(lingxi_core::types::SettingsScope::User),
             LoadedFrom::Skills,
         )
         .expect("parse ok")
@@ -298,7 +298,7 @@ mod tests {
         let s = parse_skill_markdown(
             raw,
             "/tmp/x.md".into(),
-            SkillSource::Settings(protocol::SettingsScope::User),
+            SkillSource::Settings(lingxi_core::types::SettingsScope::User),
             LoadedFrom::Skills,
         )
         .expect("ok");
@@ -315,7 +315,7 @@ mod tests {
         let s = parse_skill_markdown(
             raw,
             "/tmp/x.md".into(),
-            SkillSource::Settings(protocol::SettingsScope::User),
+            SkillSource::Settings(lingxi_core::types::SettingsScope::User),
             LoadedFrom::Skills,
         )
         .expect("ok");

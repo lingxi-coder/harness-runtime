@@ -4,8 +4,8 @@
 //! call surfaces loudly during the demo.
 
 use async_trait::async_trait;
+use lingxi_core::host::{ProcessHandle, ProcessRunner, SandboxedCommand};
 use mobile_linux_api::{ProcessError, ProcessOutput};
-use platform_api::{ProcessHandle, ProcessRunner, SandboxedCommand};
 
 /// Stub process runner.
 #[derive(Default)]

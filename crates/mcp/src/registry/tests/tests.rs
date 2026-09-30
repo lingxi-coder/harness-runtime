@@ -8,12 +8,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use jsonrpc::{Connection, Mode};
-use platform_api::{
+use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
-use protocol::McpConnectionId as ConnId;
+use lingxi_core::types::McpConnectionId as ConnId;
 use serde_json::Value;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -64,7 +64,7 @@ struct BridgeMock {
     // §26a — canned `resources/templates/list` rows and the capability
     // presence bit that gates whether `connect` fetches them at all
     // (`initialize` reports `resources: true` only when this is set).
-    resource_templates: Vec<platform_api::McpResourceTemplateDto>,
+    resource_templates: Vec<lingxi_core::host::McpResourceTemplateDto>,
     resources_capability: AtomicBool,
     prompts_capability: AtomicBool,
     list_resource_templates_fails: AtomicBool,
@@ -194,7 +194,7 @@ impl BridgeMock {
 
     /// A mock whose server advertises the `resources` capability and
     /// answers `resources/templates/list` with `templates` (§26a).
-    fn with_resource_templates(templates: Vec<platform_api::McpResourceTemplateDto>) -> Self {
+    fn with_resource_templates(templates: Vec<lingxi_core::host::McpResourceTemplateDto>) -> Self {
         let mock = Self::new(&[]);
         mock.resources_capability.store(true, Ordering::SeqCst);
         Self {
@@ -298,8 +298,8 @@ impl McpTransport for BridgeMock {
     async fn connect_and_initialize(
         &self,
         spec: &McpTransportSpec,
-        _options: platform_api::McpConnectOptions,
-    ) -> Result<platform_api::McpConnectResult, McpError> {
+        _options: lingxi_core::host::McpConnectOptions,
+    ) -> Result<lingxi_core::host::McpConnectResult, McpError> {
         let connection = self.connect(spec).await?;
         let capabilities = match std::panic::AssertUnwindSafe(self.initialize(&connection))
             .catch_unwind()
@@ -316,17 +316,17 @@ impl McpTransport for BridgeMock {
             }
         };
         let negotiated = if self.modern_connect {
-            platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Modern,
+            lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Modern,
                 version: "2026-07-28".into(),
             }
         } else {
-            platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             }
         };
-        Ok(platform_api::McpConnectResult {
+        Ok(lingxi_core::host::McpConnectResult {
             connection,
             capabilities,
             negotiated,
@@ -350,7 +350,7 @@ impl McpTransport for BridgeMock {
     async fn list_resource_templates(
         &self,
         _c: &McpRawConnection,
-    ) -> Result<Vec<platform_api::McpResourceTemplateDto>, McpError> {
+    ) -> Result<Vec<lingxi_core::host::McpResourceTemplateDto>, McpError> {
         self.templates_calls.fetch_add(1, Ordering::SeqCst);
         self.resource_templates_started.notify_one();
         if self.block_resource_templates.load(Ordering::SeqCst) {
@@ -965,7 +965,7 @@ fn cfg(name: &str) -> McpServerConfig {
             args: vec![],
             env: HashMap::new(),
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::Project),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -1009,16 +1009,16 @@ fn prompt(name: &str) -> McpPromptDto {
     }
 }
 
-fn legacy_negotiated() -> platform_api::McpNegotiatedProtocol {
-    platform_api::McpNegotiatedProtocol {
-        era: platform_api::McpProtocolEra::Legacy,
+fn legacy_negotiated() -> lingxi_core::host::McpNegotiatedProtocol {
+    lingxi_core::host::McpNegotiatedProtocol {
+        era: lingxi_core::host::McpProtocolEra::Legacy,
         version: "2025-11-25".into(),
     }
 }
 
-fn modern_negotiated() -> platform_api::McpNegotiatedProtocol {
-    platform_api::McpNegotiatedProtocol {
-        era: platform_api::McpProtocolEra::Modern,
+fn modern_negotiated() -> lingxi_core::host::McpNegotiatedProtocol {
+    lingxi_core::host::McpNegotiatedProtocol {
+        era: lingxi_core::host::McpProtocolEra::Modern,
         version: "2026-07-28".into(),
     }
 }
@@ -1308,7 +1308,7 @@ async fn inprocess_server_dispatches_directly_without_jsonrpc_client() {
             spec: McpTransportSpec::InProcess {
                 registry_key: "local_apps".into(),
             },
-            scope: ConfigScope::Settings(protocol::SettingsScope::Managed),
+            scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
             disabled: false,
             timeout_ms: None,
             always_load: true,
@@ -2149,24 +2149,30 @@ async fn live_disable_retires_connection_without_revoking_reconnect_config() {
 
     assert_eq!(
         registry.set_disabled("mock", true).await.unwrap(),
-        Some(platform_api::McpActionState::Disabled)
+        Some(lingxi_core::host::McpActionState::Disabled)
     );
     assert!(registry.get_client("mock").await.is_none());
     assert_eq!(
         registry.action_states().await,
-        vec![("mock".to_string(), platform_api::McpActionState::Disabled)]
+        vec![(
+            "mock".to_string(),
+            lingxi_core::host::McpActionState::Disabled
+        )]
     );
     let retired = changes.recv().await.unwrap();
     assert_eq!(retired.retired_connection_id, Some(connection_id));
 
     assert_eq!(
         registry.set_disabled("mock", false).await.unwrap(),
-        Some(platform_api::McpActionState::Connected)
+        Some(lingxi_core::host::McpActionState::Connected)
     );
     assert!(registry.get_client("mock").await.is_some());
     assert_eq!(
         registry.action_states().await,
-        vec![("mock".to_string(), platform_api::McpActionState::Connected)]
+        vec![(
+            "mock".to_string(),
+            lingxi_core::host::McpActionState::Connected
+        )]
     );
 }
 
@@ -2199,7 +2205,7 @@ async fn cached_disable_retires_connection_without_touching_transport() {
 
     assert_eq!(
         registry.set_disabled("srv", true).await.unwrap(),
-        Some(platform_api::McpActionState::Disabled)
+        Some(lingxi_core::host::McpActionState::Disabled)
     );
     assert_eq!(
         mock.disconnect_calls.load(Ordering::SeqCst),
@@ -2437,7 +2443,7 @@ async fn disabling_a_foreground_lazy_upgrade_invalidates_the_slot_and_prevents_r
 
     assert_eq!(
         registry.set_disabled("srv", true).await.unwrap(),
-        Some(platform_api::McpActionState::Disabled)
+        Some(lingxi_core::host::McpActionState::Disabled)
     );
     assert!(
         registry.lazy_upgrade_slots.read().await.is_empty(),
@@ -2480,7 +2486,7 @@ async fn enabling_a_server_that_with_a_catalog_failure_still_settles_connected()
     // Disabling settles as `Disabled`.
     assert_eq!(
         registry.set_disabled("mock", true).await.unwrap(),
-        Some(platform_api::McpActionState::Disabled)
+        Some(lingxi_core::host::McpActionState::Disabled)
     );
     // The next connect still succeeds: the transport/initialize path is
     // authoritative, while tools/list now degrades in place.
@@ -2489,11 +2495,14 @@ async fn enabling_a_server_that_with_a_catalog_failure_still_settles_connected()
     // catalog fetches it now settles `Connected` with an empty tools slice.
     assert_eq!(
         registry.set_disabled("mock", false).await.unwrap(),
-        Some(platform_api::McpActionState::Connected)
+        Some(lingxi_core::host::McpActionState::Connected)
     );
     assert_eq!(
         registry.action_states().await,
-        vec![("mock".to_string(), platform_api::McpActionState::Connected)]
+        vec![(
+            "mock".to_string(),
+            lingxi_core::host::McpActionState::Connected
+        )]
     );
     assert!(matches!(
         registry.connections.read().await.get("mock"),
@@ -2576,7 +2585,7 @@ async fn slow_disconnect_does_not_block_registry_snapshots() {
         .await
         .expect("transport teardown must not hold the connection-state lock");
     assert_eq!(snapshot.len(), 1);
-    assert_eq!(snapshot[0].status, platform_api::McpStatus::Connected);
+    assert_eq!(snapshot[0].status, lingxi_core::host::McpStatus::Connected);
 
     mock.disconnect_release.notify_one();
     disconnect.await.unwrap().unwrap();
@@ -2646,8 +2655,8 @@ async fn inbound_tools_list_changed_is_forwarded_with_connection_generation() {
         "srv".into(),
         connection_id,
         connection,
-        platform_api::McpNegotiatedProtocol {
-            era: platform_api::McpProtocolEra::Legacy,
+        lingxi_core::host::McpNegotiatedProtocol {
+            era: lingxi_core::host::McpProtocolEra::Legacy,
             version: "2025-11-25".into(),
         },
         ServerCapabilitiesDto {
@@ -2698,8 +2707,8 @@ async fn inbound_resources_list_changed_is_forwarded() {
         "srv".into(),
         connection_id,
         connection,
-        platform_api::McpNegotiatedProtocol {
-            era: platform_api::McpProtocolEra::Legacy,
+        lingxi_core::host::McpNegotiatedProtocol {
+            era: lingxi_core::host::McpProtocolEra::Legacy,
             version: "2025-11-25".into(),
         },
         ServerCapabilitiesDto {
@@ -2781,8 +2790,8 @@ async fn lagged_catalog_listener_recovers_all_supported_catalogs_for_current_gen
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: vec![McpToolDto {
@@ -2810,8 +2819,8 @@ async fn lagged_catalog_listener_recovers_all_supported_catalogs_for_current_gen
         "srv".into(),
         connection_id,
         connection,
-        platform_api::McpNegotiatedProtocol {
-            era: platform_api::McpProtocolEra::Legacy,
+        lingxi_core::host::McpNegotiatedProtocol {
+            era: lingxi_core::host::McpProtocolEra::Legacy,
             version: "2025-11-25".into(),
         },
         ServerCapabilitiesDto {
@@ -2955,8 +2964,8 @@ async fn lagged_catalog_listener_skips_recovery_for_a_replaced_generation() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: Vec::new(),
@@ -2971,8 +2980,8 @@ async fn lagged_catalog_listener_skips_recovery_for_a_replaced_generation() {
         "srv".into(),
         old_connection_id,
         connection,
-        platform_api::McpNegotiatedProtocol {
-            era: platform_api::McpProtocolEra::Legacy,
+        lingxi_core::host::McpNegotiatedProtocol {
+            era: lingxi_core::host::McpProtocolEra::Legacy,
             version: "2025-11-25".into(),
         },
         ServerCapabilitiesDto {
@@ -3011,8 +3020,8 @@ async fn lagged_catalog_listener_skips_recovery_for_a_replaced_generation() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: Vec::new(),
@@ -3527,8 +3536,8 @@ async fn refresh_tools_catalog_replaces_connected_snapshot_after_success() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: BridgeMock::new(&["old"]).tools,
@@ -3609,8 +3618,8 @@ async fn get_prompt_rejects_generation_swapped_client_after_validation() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: Vec::new(),
@@ -3656,8 +3665,8 @@ async fn get_prompt_rejects_generation_swapped_client_after_validation() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: Vec::new(),
@@ -3767,8 +3776,8 @@ async fn cached_prompt_rejects_generation_swapped_after_lazy_dial_upgrade() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: Vec::new(),
@@ -4268,7 +4277,7 @@ async fn connect_rewrites_fqn_with_normalized_server() {
 #[tokio::test]
 async fn connect_does_not_issue_the_templates_rpc_when_the_cache_is_ineligible() {
     let mock = Arc::new(BridgeMock::with_resource_templates(vec![
-        platform_api::McpResourceTemplateDto {
+        lingxi_core::host::McpResourceTemplateDto {
             uri_template: "file:///{path}".into(),
             name: "file-template".into(),
             description: Some("A file on disk".into()),
@@ -4311,7 +4320,7 @@ async fn connect_skips_resource_templates_fetch_without_resources_capability() {
     // `BridgeMock::new` reports `resources: false` from `initialize`, so
     // even a mock stocked with templates must yield none on connect.
     let mut mock = BridgeMock::new(&[]);
-    mock.resource_templates = vec![platform_api::McpResourceTemplateDto {
+    mock.resource_templates = vec![lingxi_core::host::McpResourceTemplateDto {
         uri_template: "file:///{path}".into(),
         name: "unreachable".into(),
         description: None,
@@ -4449,7 +4458,7 @@ async fn secret_refusal_checks_percent_encoded_stored_mcp_tokens() {
     let McpTransportSpec::Http { oauth, .. } = &mut cfg.spec else {
         unreachable!()
     };
-    *oauth = Some(platform_api::McpOAuthConfigDto {
+    *oauth = Some(lingxi_core::host::McpOAuthConfigDto {
         client_id: None,
         callback_port: None,
         auth_server_metadata_url: None,
@@ -4458,8 +4467,8 @@ async fn secret_refusal_checks_percent_encoded_stored_mcp_tokens() {
     });
 
     let storage = Arc::new(XaaMemStorage::default());
-    let storage_dyn = storage.clone() as Arc<dyn platform_api::SecureStorage>;
-    let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn platform_api::Clock>;
+    let storage_dyn = storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>;
+    let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn lingxi_core::host::Clock>;
     let server_key = oauth::server_key(&cfg.name, &cfg.spec);
     oauth::store_tokens(
         &storage_dyn,
@@ -4483,7 +4492,7 @@ async fn secret_refusal_checks_percent_encoded_stored_mcp_tokens() {
         mock.clone() as Arc<dyn RawConnectionProvider>,
     )
     .with_oauth(OAuthDeps {
-        http: GatedXaaHttp::new() as Arc<dyn platform_api::HttpTransport>,
+        http: GatedXaaHttp::new() as Arc<dyn lingxi_core::host::HttpTransport>,
         clock,
         storage: storage_dyn,
         on_authorization_url: Arc::new(|_| {}),
@@ -4514,7 +4523,7 @@ async fn oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_
     for (name, scope, source) in [
         (
             "shared-grant",
-            ConfigScope::Settings(protocol::SettingsScope::User),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             None,
         ),
         (
@@ -4535,7 +4544,7 @@ async fn oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_
         else {
             unreachable!()
         };
-        *oauth_config = Some(platform_api::McpOAuthConfigDto {
+        *oauth_config = Some(lingxi_core::host::McpOAuthConfigDto {
             client_id: None,
             callback_port: None,
             auth_server_metadata_url: None,
@@ -4544,8 +4553,9 @@ async fn oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_
         });
 
         let storage = Arc::new(XaaMemStorage::default());
-        let storage_dyn = storage.clone() as Arc<dyn platform_api::SecureStorage>;
-        let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn platform_api::Clock>;
+        let storage_dyn = storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>;
+        let clock =
+            Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn lingxi_core::host::Clock>;
         let server_key = oauth::server_key(&cfg.name, &cfg.spec);
         let store_token = |access: &str, refresh: &str| {
             let storage = storage_dyn.clone();
@@ -4579,7 +4589,7 @@ async fn oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_
             mock.clone() as Arc<dyn RawConnectionProvider>,
         )
         .with_oauth(OAuthDeps {
-            http: GatedXaaHttp::new() as Arc<dyn platform_api::HttpTransport>,
+            http: GatedXaaHttp::new() as Arc<dyn lingxi_core::host::HttpTransport>,
             clock: clock.clone(),
             storage: storage_dyn.clone(),
             on_authorization_url: Arc::new(|_| {}),
@@ -4603,8 +4613,8 @@ async fn oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_
             tools: true,
             ..ServerCapabilitiesDto::default()
         };
-        let protocol = platform_api::McpNegotiatedProtocol {
-            era: platform_api::McpProtocolEra::Legacy,
+        let protocol = lingxi_core::host::McpNegotiatedProtocol {
+            era: lingxi_core::host::McpProtocolEra::Legacy,
             version: "2025-11-25".into(),
         };
         let tool = |name: &str| McpToolDto {
@@ -4703,7 +4713,7 @@ async fn oauth_without_refresh_grant_is_not_partition_or_write_eligible() {
     else {
         unreachable!()
     };
-    *oauth_config = Some(platform_api::McpOAuthConfigDto {
+    *oauth_config = Some(lingxi_core::host::McpOAuthConfigDto {
         client_id: None,
         callback_port: None,
         auth_server_metadata_url: None,
@@ -4711,8 +4721,8 @@ async fn oauth_without_refresh_grant_is_not_partition_or_write_eligible() {
         xaa: None,
     });
     let storage = Arc::new(XaaMemStorage::default());
-    let storage_dyn = storage.clone() as Arc<dyn platform_api::SecureStorage>;
-    let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn platform_api::Clock>;
+    let storage_dyn = storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>;
+    let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn lingxi_core::host::Clock>;
     let key = oauth::server_key(&cfg.name, &cfg.spec);
     oauth::store_tokens(
         &storage_dyn,
@@ -4735,7 +4745,7 @@ async fn oauth_without_refresh_grant_is_not_partition_or_write_eligible() {
         mock.clone() as Arc<dyn RawConnectionProvider>,
     )
     .with_oauth(OAuthDeps {
-        http: GatedXaaHttp::new() as Arc<dyn platform_api::HttpTransport>,
+        http: GatedXaaHttp::new() as Arc<dyn lingxi_core::host::HttpTransport>,
         clock,
         storage: storage_dyn,
         on_authorization_url: Arc::new(|_| {}),
@@ -5274,8 +5284,8 @@ async fn stale_refresh_era_change_purges_hit_partition_without_replacement_or_st
         connection_duration_ms: 1,
         grant_provenance: Some(GrantProvenance::unbound()),
         negotiation_mode: crate::protocol_negotiation::NegotiationMode::Legacy,
-        negotiated: platform_api::McpNegotiatedProtocol {
-            era: platform_api::McpProtocolEra::Modern,
+        negotiated: lingxi_core::host::McpNegotiatedProtocol {
+            era: lingxi_core::host::McpProtocolEra::Modern,
             version: "2026-07-28".into(),
         },
         capabilities: ServerCapabilitiesDto::default(),
@@ -5373,8 +5383,8 @@ async fn stale_refresh_expected_mode_change_purges_without_publish_strike_or_wri
         negotiation_mode: crate::protocol_negotiation::NegotiationMode::Auto {
             probe_timeout_ms: 1_000,
         },
-        negotiated: platform_api::McpNegotiatedProtocol {
-            era: platform_api::McpProtocolEra::Legacy,
+        negotiated: lingxi_core::host::McpNegotiatedProtocol {
+            era: lingxi_core::host::McpProtocolEra::Legacy,
             version: "2025-11-25".into(),
         },
         capabilities: ServerCapabilitiesDto::default(),
@@ -6217,8 +6227,8 @@ async fn stale_background_failure_does_not_strike_a_replaced_cached_generation()
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: vec![McpToolDto {
@@ -6347,8 +6357,8 @@ async fn rejected_background_cleanup_does_not_hold_the_lifecycle_lock() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: vec![],
@@ -6522,8 +6532,8 @@ async fn catalog_refresh_snapshot_excludes_agent_scoped_entries() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: vec![McpToolDto {
@@ -6761,8 +6771,8 @@ async fn background_revalidation_cas_rejects_a_reconfigured_cached_state() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: vec![McpToolDto {
@@ -6880,8 +6890,8 @@ async fn background_cas_reject_disconnect_retries_until_success() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: vec![],
@@ -7002,8 +7012,8 @@ async fn background_cleanup_retries_stop_and_can_be_kicked_again() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: vec![],
@@ -7188,8 +7198,8 @@ async fn connect_all_disabled_seed_does_not_override_live_state() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: vec![],
@@ -7271,8 +7281,8 @@ async fn refresh_catalog_treats_resource_only_tools_change_as_rebuild_signal() {
                 experimental: HashMap::new(),
                 extensions: HashMap::new(),
             },
-            negotiated: platform_api::McpNegotiatedProtocol {
-                era: platform_api::McpProtocolEra::Legacy,
+            negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                era: lingxi_core::host::McpProtocolEra::Legacy,
                 version: "2025-11-25".into(),
             },
             tools: vec![],
@@ -7308,7 +7318,7 @@ async fn connected_generation_is_not_visible_without_matching_client() {
     env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
     let mock = Arc::new(BridgeMock::with_resource_templates(vec![
-        platform_api::McpResourceTemplateDto {
+        lingxi_core::host::McpResourceTemplateDto {
             uri_template: "file:///{path}".into(),
             name: "tmpl".into(),
             description: None,
@@ -7394,7 +7404,7 @@ async fn builders_reject_mutation_after_first_connect_attempt() {
         .await;
     assert_eq!(
         registry.set_disabled("srv", false).await.unwrap(),
-        Some(platform_api::McpActionState::Connected)
+        Some(lingxi_core::host::McpActionState::Connected)
     );
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         registry.with_headers_helper_cwd(std::path::PathBuf::from("/tmp/other"))
@@ -7886,19 +7896,23 @@ async fn http_tool_call_session_expired_reconnects_once_and_retries() {
 async fn stale_session_reconnect_preserves_oauth_grant() {
     struct UnusedHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for UnusedHttp {
+    impl lingxi_core::host::HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
 
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
@@ -7906,7 +7920,7 @@ async fn stale_session_reconnect_preserves_oauth_grant() {
     let McpTransportSpec::Http { oauth, .. } = &mut cfg.spec else {
         unreachable!()
     };
-    *oauth = Some(platform_api::McpOAuthConfigDto {
+    *oauth = Some(lingxi_core::host::McpOAuthConfigDto {
         client_id: Some("client-id".into()),
         callback_port: None,
         auth_server_metadata_url: None,
@@ -7917,11 +7931,11 @@ async fn stale_session_reconnect_preserves_oauth_grant() {
         std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
     ));
     let storage = Arc::new(XaaMemStorage::default());
-    let storage_dyn = storage.clone() as Arc<dyn platform_api::SecureStorage>;
+    let storage_dyn = storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>;
     let key = oauth::server_key(&cfg.name, &cfg.spec);
     oauth::store_tokens(
         &storage_dyn,
-        &(clock.clone() as Arc<dyn platform_api::Clock>),
+        &(clock.clone() as Arc<dyn lingxi_core::host::Clock>),
         &key,
         &oauth::StoredTokens {
             access_token: "still-valid".into(),
@@ -7942,7 +7956,7 @@ async fn stale_session_reconnect_preserves_oauth_grant() {
     )
     .with_oauth(OAuthDeps {
         http: Arc::new(UnusedHttp),
-        clock: clock as Arc<dyn platform_api::Clock>,
+        clock: clock as Arc<dyn lingxi_core::host::Clock>,
         storage: storage_dyn.clone(),
         on_authorization_url: Arc::new(|_| {}),
         xaa_config: None,
@@ -7966,11 +7980,11 @@ async fn connect_oauth_discovery_failure_emits_server_needs_auth_with_discovery_
     struct DiscoveryFailHttp;
 
     #[async_trait]
-    impl platform_api::HttpTransport for DiscoveryFailHttp {
+    impl lingxi_core::host::HttpTransport for DiscoveryFailHttp {
         async fn request(
             &self,
-            req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
             let status = if req.url.contains("oauth-protected-resource")
                 || req.url.contains("oauth-authorization-server")
             {
@@ -7978,7 +7992,7 @@ async fn connect_oauth_discovery_failure_emits_server_needs_auth_with_discovery_
             } else {
                 500
             };
-            Ok(protocol::HttpResponse {
+            Ok(lingxi_core::types::HttpResponse {
                 status,
                 headers: vec![],
                 body: String::new(),
@@ -7988,9 +8002,11 @@ async fn connect_oauth_discovery_failure_emits_server_needs_auth_with_discovery_
 
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
@@ -8000,7 +8016,7 @@ async fn connect_oauth_discovery_failure_emits_server_needs_auth_with_discovery_
     let McpTransportSpec::Http { oauth, .. } = &mut cfg.spec else {
         unreachable!()
     };
-    *oauth = Some(platform_api::McpOAuthConfigDto {
+    *oauth = Some(lingxi_core::host::McpOAuthConfigDto {
         client_id: Some("client-id".into()),
         callback_port: None,
         auth_server_metadata_url: None,
@@ -8009,8 +8025,8 @@ async fn connect_oauth_discovery_failure_emits_server_needs_auth_with_discovery_
     });
 
     let storage = Arc::new(XaaMemStorage::default());
-    let storage_dyn = storage.clone() as Arc<dyn platform_api::SecureStorage>;
-    let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn platform_api::Clock>;
+    let storage_dyn = storage.clone() as Arc<dyn lingxi_core::host::SecureStorage>;
+    let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn lingxi_core::host::Clock>;
     let server_key = oauth::server_key(&cfg.name, &cfg.spec);
     oauth::store_tokens(
         &storage_dyn,
@@ -9208,7 +9224,7 @@ async fn notify_roots_list_changed_all_on_empty_registry_notifies_none() {
 // -----------------------------------------------------------------
 
 struct FixedClock(std::time::SystemTime);
-impl platform_api::Clock for FixedClock {
+impl lingxi_core::host::Clock for FixedClock {
     fn now(&self) -> std::time::SystemTime {
         self.0
     }
@@ -9216,16 +9232,16 @@ impl platform_api::Clock for FixedClock {
 
 #[derive(Default)]
 struct XaaMemStorage {
-    map: TestMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+    map: TestMutex<HashMap<(String, String), lingxi_core::types::SecureStorageData>>,
 }
 #[async_trait]
-impl platform_api::SecureStorage for XaaMemStorage {
+impl lingxi_core::host::SecureStorage for XaaMemStorage {
     async fn store(
         &self,
         service: &str,
         account: &str,
-        data: protocol::SecureStorageData,
-    ) -> Result<(), platform_api::SecureStorageError> {
+        data: lingxi_core::types::SecureStorageData,
+    ) -> Result<(), lingxi_core::host::SecureStorageError> {
         self.map
             .lock()
             .unwrap()
@@ -9236,7 +9252,8 @@ impl platform_api::SecureStorage for XaaMemStorage {
         &self,
         service: &str,
         account: &str,
-    ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
+    ) -> Result<Option<lingxi_core::types::SecureStorageData>, lingxi_core::host::SecureStorageError>
+    {
         Ok(self
             .map
             .lock()
@@ -9248,14 +9265,17 @@ impl platform_api::SecureStorage for XaaMemStorage {
         &self,
         service: &str,
         account: &str,
-    ) -> Result<(), platform_api::SecureStorageError> {
+    ) -> Result<(), lingxi_core::host::SecureStorageError> {
         self.map
             .lock()
             .unwrap()
             .remove(&(service.into(), account.into()));
         Ok(())
     }
-    async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
+    async fn list(
+        &self,
+        service: &str,
+    ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
         Ok(self
             .map
             .lock()
@@ -9268,8 +9288,8 @@ impl platform_api::SecureStorage for XaaMemStorage {
     fn is_encrypted(&self) -> bool {
         false
     }
-    fn backend(&self) -> platform_api::SecureStorageBackend {
-        platform_api::SecureStorageBackend::PlainText
+    fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
+        lingxi_core::host::SecureStorageBackend::PlainText
     }
 }
 
@@ -9309,14 +9329,14 @@ impl GatedXaaHttp {
     }
 }
 #[async_trait]
-impl platform_api::HttpTransport for GatedXaaHttp {
+impl lingxi_core::host::HttpTransport for GatedXaaHttp {
     async fn request(
         &self,
-        req: protocol::HttpRequest,
-    ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+        req: lingxi_core::types::HttpRequest,
+    ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
         let url = req.url.clone();
         if url.contains("oauth-protected-resource") {
-            return Ok(protocol::HttpResponse {
+            return Ok(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![],
                 body: r#"{"resource":"https://mcp.example.com/v1","authorization_servers":["https://as.example.com"]}"#.into(),
@@ -9324,7 +9344,7 @@ impl platform_api::HttpTransport for GatedXaaHttp {
             });
         }
         if url.contains("oauth-authorization-server") {
-            return Ok(protocol::HttpResponse {
+            return Ok(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![],
                 body: r#"{"issuer":"https://as.example.com","token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.into(),
@@ -9332,7 +9352,7 @@ impl platform_api::HttpTransport for GatedXaaHttp {
             });
         }
         if url.contains("idp.example.com/token") {
-            return Ok(protocol::HttpResponse {
+            return Ok(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![],
                 body: r#"{"access_token":"id-jag","issued_token_type":"urn:ietf:params:oauth:token-type:id-jag"}"#.into(),
@@ -9343,7 +9363,7 @@ impl platform_api::HttpTransport for GatedXaaHttp {
             self.exchange_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(50)).await;
-            return Ok(protocol::HttpResponse {
+            return Ok(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![],
                 body: r#"{"access_token":"xaa-access","token_type":"Bearer","expires_in":3600}"#
@@ -9351,7 +9371,7 @@ impl platform_api::HttpTransport for GatedXaaHttp {
                 body_bytes: Vec::new(),
             });
         }
-        Ok(protocol::HttpResponse {
+        Ok(lingxi_core::types::HttpResponse {
             status: 404,
             headers: vec![],
             body: String::new(),
@@ -9360,9 +9380,11 @@ impl platform_api::HttpTransport for GatedXaaHttp {
     }
     async fn stream_sse(
         &self,
-        _req: protocol::HttpRequest,
-    ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-        Err(platform_api::HttpError::InvalidRequest("unused".into()))
+        _req: lingxi_core::types::HttpRequest,
+    ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+        Err(lingxi_core::host::HttpError::InvalidRequest(
+            "unused".into(),
+        ))
     }
 }
 
@@ -9371,9 +9393,9 @@ fn xaa_unit_test_config(name: &str) -> McpServerConfig {
         name: name.into(),
         spec: McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
-            oauth: Some(platform_api::McpOAuthConfigDto {
+            oauth: Some(lingxi_core::host::McpOAuthConfigDto {
                 client_id: Some("as-client".into()),
                 callback_port: None,
                 auth_server_metadata_url: None,
@@ -9381,7 +9403,7 @@ fn xaa_unit_test_config(name: &str) -> McpServerConfig {
                 xaa: Some(true),
             }),
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::Project),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -9410,11 +9432,12 @@ async fn xaa_concurrent_resolves_share_one_exchange() {
     let http = GatedXaaHttp::new();
     let registry = Arc::new(McpRegistry::new(Arc::new(BridgeMock::new(&[]))).with_oauth(
         OAuthDeps {
-            http: http.clone() as Arc<dyn platform_api::HttpTransport>,
+            http: http.clone() as Arc<dyn lingxi_core::host::HttpTransport>,
             clock: Arc::new(FixedClock(
                 std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
             )),
-            storage: Arc::new(XaaMemStorage::default()) as Arc<dyn platform_api::SecureStorage>,
+            storage: Arc::new(XaaMemStorage::default())
+                as Arc<dyn lingxi_core::host::SecureStorage>,
             on_authorization_url: Arc::new(|_url: &str| {}),
             xaa_config: Some(Arc::new(FixedXaaProvider)),
         },
@@ -9468,11 +9491,11 @@ async fn xaa_issuer_mismatch_is_reported_as_discovery_failure() {
 
     struct IssuerMismatchHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for IssuerMismatchHttp {
+    impl lingxi_core::host::HttpTransport for IssuerMismatchHttp {
         async fn request(
             &self,
-            req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
             let (status, body) = if req.url.contains("oauth-protected-resource") {
                 (
                     200,
@@ -9486,7 +9509,7 @@ async fn xaa_issuer_mismatch_is_reported_as_discovery_failure() {
             } else {
                 (404, String::new())
             };
-            Ok(protocol::HttpResponse {
+            Ok(lingxi_core::types::HttpResponse {
                 status,
                 headers: vec![],
                 body,
@@ -9495,9 +9518,11 @@ async fn xaa_issuer_mismatch_is_reported_as_discovery_failure() {
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
@@ -9506,7 +9531,7 @@ async fn xaa_issuer_mismatch_is_reported_as_discovery_failure() {
         clock: Arc::new(FixedClock(
             std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
         )),
-        storage: Arc::new(XaaMemStorage::default()) as Arc<dyn platform_api::SecureStorage>,
+        storage: Arc::new(XaaMemStorage::default()) as Arc<dyn lingxi_core::host::SecureStorage>,
         on_authorization_url: Arc::new(|_url: &str| {}),
         xaa_config: Some(Arc::new(FixedXaaProvider)),
     });
@@ -9584,11 +9609,11 @@ async fn xaa_jwt_bearer_failure_emits_oauth_flow_failure() {
 
     struct JwtBearerFailureHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for JwtBearerFailureHttp {
+    impl lingxi_core::host::HttpTransport for JwtBearerFailureHttp {
         async fn request(
             &self,
-            req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
             let (status, body) = if req.url.contains("oauth-protected-resource") {
                 (
                     200,
@@ -9609,7 +9634,7 @@ async fn xaa_jwt_bearer_failure_emits_oauth_flow_failure() {
             } else {
                 (404, String::new())
             };
-            Ok(protocol::HttpResponse {
+            Ok(lingxi_core::types::HttpResponse {
                 status,
                 headers: vec![],
                 body,
@@ -9619,9 +9644,11 @@ async fn xaa_jwt_bearer_failure_emits_oauth_flow_failure() {
 
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
@@ -9630,7 +9657,7 @@ async fn xaa_jwt_bearer_failure_emits_oauth_flow_failure() {
         clock: Arc::new(FixedClock(
             std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
         )),
-        storage: Arc::new(XaaMemStorage::default()) as Arc<dyn platform_api::SecureStorage>,
+        storage: Arc::new(XaaMemStorage::default()) as Arc<dyn lingxi_core::host::SecureStorage>,
         on_authorization_url: Arc::new(|_url: &str| {}),
         xaa_config: Some(Arc::new(CacheHitXaaProvider)),
     });
@@ -9690,19 +9717,23 @@ async fn xaa_provider_discovery_failure_emits_oauth_flow_failure() {
 
     struct UnusedHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for UnusedHttp {
+    impl lingxi_core::host::HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
 
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
@@ -9711,7 +9742,7 @@ async fn xaa_provider_discovery_failure_emits_oauth_flow_failure() {
         clock: Arc::new(FixedClock(
             std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
         )),
-        storage: Arc::new(XaaMemStorage::default()) as Arc<dyn platform_api::SecureStorage>,
+        storage: Arc::new(XaaMemStorage::default()) as Arc<dyn lingxi_core::host::SecureStorage>,
         on_authorization_url: Arc::new(|_url: &str| {}),
         xaa_config: Some(Arc::new(DiscoveryFailingXaaProvider)),
     });

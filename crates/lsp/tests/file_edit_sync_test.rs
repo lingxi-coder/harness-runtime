@@ -1,8 +1,8 @@
 use jsonrpc::Connection;
-use lsp::LspRegistry;
-use platform_api::{
+use lingxi_core::host::{
     LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
 };
+use lsp::LspRegistry;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
 struct CaptureTransport {
-    id: protocol::McpConnectionId,
+    id: lingxi_core::types::McpConnectionId,
     connection: Arc<Connection>,
 }
 
@@ -49,11 +49,14 @@ impl LspTransport for CaptureTransport {
         Err(LspError::Unavailable)
     }
 
-    async fn connection(&self, _: protocol::McpConnectionId) -> Result<Arc<Connection>, LspError> {
+    async fn connection(
+        &self,
+        _: lingxi_core::types::McpConnectionId,
+    ) -> Result<Arc<Connection>, LspError> {
         Ok(self.connection.clone())
     }
 
-    async fn shutdown(&self, _: protocol::McpConnectionId) -> Result<(), LspError> {
+    async fn shutdown(&self, _: lingxi_core::types::McpConnectionId) -> Result<(), LspError> {
         Ok(())
     }
 
@@ -99,12 +102,12 @@ async fn successful_file_edits_open_change_and_save_with_monotonic_versions() {
     let (client_io, mut peer_io) = duplex(64 * 1024);
     let (reader, writer) = tokio::io::split(client_io);
     let transport = Arc::new(CaptureTransport {
-        id: protocol::McpConnectionId::new(),
+        id: lingxi_core::types::McpConnectionId::new(),
         connection: Arc::new(Connection::new_lsp(reader, writer)),
     });
     let registry = LspRegistry::new(transport);
     registry
-        .register_plugin_servers(protocol::PluginId::new(), vec![rust_config()])
+        .register_plugin_servers(lingxi_core::types::PluginId::new(), vec![rust_config()])
         .await;
 
     let temp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();

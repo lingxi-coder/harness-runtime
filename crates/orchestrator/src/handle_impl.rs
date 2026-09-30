@@ -23,7 +23,7 @@
 
 use crate::ConversationOrchestrator;
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     ActiveGoalSnapshot, AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, ForkOutcome,
     HandleError, HookInfo, McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, RecapOutcome,
     SkillInfo, StatusSnapshot,
@@ -46,9 +46,9 @@ use tokio::process::Command;
 fn normalize_session_model_ref(
     model: &str,
     explicit_profile: Option<&str>,
-    listings: &[platform_api::ModelListing],
+    listings: &[lingxi_core::host::ModelListing],
 ) -> (String, Option<String>) {
-    let (parsed_model, parsed_profile) = platform_api::parse_model_ref(model, listings);
+    let (parsed_model, parsed_profile) = lingxi_core::host::parse_model_ref(model, listings);
     match explicit_profile {
         Some(profile) if parsed_profile.as_deref() == Some(profile) => {
             (parsed_model, Some(profile.to_string()))
@@ -171,11 +171,11 @@ impl ConversationOrchestrator {
 enum OwnedSessionSwitch {
     Clear,
     Resume {
-        session_id: protocol::SessionId,
-        history: Vec<protocol::ConversationMessage>,
+        session_id: lingxi_core::types::SessionId,
+        history: Vec<lingxi_core::types::ConversationMessage>,
         last_jsonl_uuid: Option<String>,
         active_goal: Option<ActiveGoalSnapshot>,
-        runtime: platform_api::ResumeRuntimeSnapshot,
+        runtime: lingxi_core::host::ResumeRuntimeSnapshot,
     },
 }
 
@@ -187,7 +187,7 @@ enum PreparedTranscriptSwitch {
     },
     Durable {
         writer: Arc<session::jsonl::writer::JsonlWriter>,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         path: std::path::PathBuf,
         cwd: std::path::PathBuf,
         durable_lock: Arc<session::jsonl::DurableTranscriptWriter>,
@@ -218,7 +218,7 @@ impl PreparedTranscriptSwitch {
 impl ConversationOrchestrator {
     fn prepare_transcript_switch(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         durable_lock: Option<Arc<session::jsonl::DurableTranscriptWriter>>,
     ) -> Result<PreparedTranscriptSwitch, HandleError> {
         let Some(writer) = self.transcript.jsonl_writer.as_ref().cloned() else {
@@ -341,7 +341,7 @@ impl ConversationOrchestrator {
         if let Err(err) = self.api.close_responses_websocket_session().await {
             tracing::warn!(error = %err, "failed to close responses websocket session during clear_session");
         }
-        let new_session_id_value = protocol::SessionId::new();
+        let new_session_id_value = lingxi_core::types::SessionId::new();
         let prepared = self
             .model_runtime
             .prepare_cost_session(new_session_id_value)
@@ -399,11 +399,11 @@ impl ConversationOrchestrator {
     async fn execute_resume_session(
         &self,
         _turn_guard: tokio::sync::OwnedMutexGuard<()>,
-        session_id: protocol::SessionId,
-        history: Vec<protocol::ConversationMessage>,
+        session_id: lingxi_core::types::SessionId,
+        history: Vec<lingxi_core::types::ConversationMessage>,
         last_jsonl_uuid: Option<String>,
         active_goal: Option<ActiveGoalSnapshot>,
-        runtime: platform_api::ResumeRuntimeSnapshot,
+        runtime: lingxi_core::host::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
         self.abort_startup_responses_websocket_prewarm();
         if let Err(err) = self.api.close_responses_websocket_session().await {
@@ -589,8 +589,8 @@ impl ConversationOrchestrator {
 
     async fn notify_session_activated(
         &self,
-        previous: protocol::SessionId,
-        current: protocol::SessionId,
+        previous: lingxi_core::types::SessionId,
+        current: lingxi_core::types::SessionId,
     ) {
         let Some(observer) = self.lifecycle_runtime.session_activation_observer.as_ref() else {
             return;
@@ -610,7 +610,7 @@ impl ConversationOrchestrator {
 
 #[async_trait]
 impl OrchestratorHandle for ConversationOrchestrator {
-    async fn current_session_id(&self) -> protocol::SessionId {
+    async fn current_session_id(&self) -> lingxi_core::types::SessionId {
         self.session.lock().await.session_id
     }
 
@@ -634,11 +634,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// unchanged by passing an empty model.
     async fn resume_session(
         &self,
-        session_id: protocol::SessionId,
-        history: Vec<protocol::ConversationMessage>,
+        session_id: lingxi_core::types::SessionId,
+        history: Vec<lingxi_core::types::ConversationMessage>,
         last_jsonl_uuid: Option<String>,
         active_goal: Option<ActiveGoalSnapshot>,
-        runtime: platform_api::ResumeRuntimeSnapshot,
+        runtime: lingxi_core::host::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
         self.run_owned_session_switch(OwnedSessionSwitch::Resume {
             session_id,
@@ -686,7 +686,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         &self,
         message_uuid: &str,
         user_context: Option<&str>,
-        direction: platform_api::SummarizeDirection,
+        direction: lingxi_core::host::SummarizeDirection,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<CompactionSummary, HandleError> {
         ConversationOrchestrator::summarize_at(self, message_uuid, user_context, direction, cancel)
@@ -719,9 +719,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
         };
         if let Some(superseded) = superseded.as_ref() {
             self.fire_goal_terminal_event(
-                platform_api::GoalStatusKind::Cleared,
+                lingxi_core::host::GoalStatusKind::Cleared,
                 superseded,
-                Some(platform_api::GoalClearedReason::Superseded),
+                Some(lingxi_core::host::GoalClearedReason::Superseded),
             )
             .await;
         }
@@ -764,7 +764,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn clear_active_goal(&self) -> Option<ActiveGoalSnapshot> {
         // The `/goal clear` arm — upstream's `kB(n,"user_clear")`.
-        self.clear_active_goal_state_and_hook(platform_api::GoalClearedReason::UserClear)
+        self.clear_active_goal_state_and_hook(lingxi_core::host::GoalClearedReason::UserClear)
             .await
     }
 
@@ -818,7 +818,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 s.history
                     .iter()
                     .rev()
-                    .find(|m| matches!(m, protocol::ConversationMessage::Assistant { .. }))
+                    .find(|m| {
+                        matches!(m, lingxi_core::types::ConversationMessage::Assistant { .. })
+                    })
                     .cloned(),
                 s.session_id,
             )
@@ -829,7 +831,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
             ));
         };
 
-        let fork_msgs = platform_api::fork_subagent::build_forked_messages(directive, &assistant);
+        let fork_msgs =
+            lingxi_core::host::fork_subagent::build_forked_messages(directive, &assistant);
         // The parent's rendered system-prompt bytes for a cache-identical child
         // prefix (`None` until the first successful turn).
         let parent_sys = self.current_turn_system_prompt().await;
@@ -840,9 +843,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // as "⑂ forked {name} ({id-tail})"). AsyncLaunch carries no name.
         let codename = format!("fork-{}", &uuid::Uuid::new_v4().simple().to_string()[..4]);
 
-        let request = platform_api::subagent_spawn::SubagentSpawnRequest {
+        let request = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
             teammate_color: None,
-            subagent_type: platform_api::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
+            subagent_type: lingxi_core::host::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
             origin_session_id: Some(origin_session_id),
             // NOTE (deliberate deviation from the plan's `String::new()`): the
             // ONLY wired async spawner — `BackgroundAgentSpawner::spawn_async` —
@@ -895,10 +898,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
             model_attempt: None,
         };
 
-        let invoker: Arc<dyn platform_api::tool_invoker::ToolInvoker> = Arc::new(
+        let invoker: Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker> = Arc::new(
             tool_api::tool_invoker_impl::RegistryToolInvoker::new(self.tools.clone()),
         );
-        let inherit = platform_api::subagent_spawn::SubagentInheritance {
+        let inherit = lingxi_core::host::subagent_spawn::SubagentInheritance {
             tool_invoker: invoker,
             budget,
         };
@@ -917,7 +920,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// `/fork` (2.1.212 `vAd`) — copy the CURRENT conversation into a NEW
     /// BACKGROUND session and keep the interactive session live. Reads the live
     /// history + the parent's rendered system prompt and hands them to the
-    /// injected [`platform_api::bg_session_forker::BgSessionForker`] seam (the CLI
+    /// injected [`lingxi_core::host::bg_session_forker::BgSessionForker`] seam (the CLI
     /// composition root's `CliBgSessionForker`), which snapshots the copy into
     /// the new session's transcript and dispatches a detached daemon worker that
     /// resumes it. Returns the system line for the live session (the seam owns
@@ -952,21 +955,23 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn can_background_conversation_on_exit(&self) -> bool {
         if self.bg_session_forker.is_none()
-            || !platform_api::agent_view::is_enabled()
+            || !lingxi_core::host::agent_view::is_enabled()
             || std::env::var("LINGXI_DISABLE_ADOPT").is_ok_and(|value| !value.is_empty())
         {
             return false;
         }
         self.session.lock().await.history.iter().any(|message| {
-            matches!(message, protocol::ConversationMessage::User { .. })
-                && !message.is_meta()
+            matches!(
+                message,
+                lingxi_core::types::ConversationMessage::User { .. }
+            ) && !message.is_meta()
                 && !message.text_content().trim().is_empty()
         })
     }
 
     async fn background_conversation(
         &self,
-        snapshot: platform_api::BackgroundingSnapshot,
+        snapshot: lingxi_core::host::BackgroundingSnapshot,
     ) -> Result<String, HandleError> {
         let forker = self.bg_session_forker.as_ref().ok_or_else(|| {
             HandleError::ActionFailed(
@@ -981,9 +986,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
         };
         let partial = snapshot.partial_text();
         if !partial.is_empty() {
-            history.push(protocol::ConversationMessage::Assistant {
-                id: protocol::MessageId::new(),
-                content: vec![protocol::ContentBlock::Text {
+            history.push(lingxi_core::types::ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
                     text: partial.to_string(),
                 }],
                 stop_reason: Some("background_requested".to_string()),
@@ -994,7 +999,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .current_turn_system_prompt()
             .await
             .map(|prompt| Arc::from(prompt.as_str()));
-        let continuation = if matches!(snapshot, platform_api::BackgroundingSnapshot::Idle { .. }) {
+        let continuation = if matches!(
+            snapshot,
+            lingxi_core::host::BackgroundingSnapshot::Idle { .. }
+        ) {
             ""
         } else {
             "Continue the interrupted turn from the backgrounding boundary. Preserve the user's intent and safely restart any interrupted work."
@@ -1036,7 +1044,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .await
     }
 
-    async fn rewind_rows(&self) -> Vec<platform_api::RewindRowData> {
+    async fn rewind_rows(&self) -> Vec<lingxi_core::host::RewindRowData> {
         let Some(fh) = self.file_history.as_ref() else {
             return Vec::new();
         };
@@ -1060,7 +1068,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 .take(80)
                 .collect();
             let has_code_changes = fh.has_any_changes(uuid).await;
-            rows.push(platform_api::RewindRowData {
+            rows.push(lingxi_core::host::RewindRowData {
                 message_uuid: uuid,
                 preview,
                 timestamp_label: format!("turn {turn}"),
@@ -1169,7 +1177,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
-    async fn current_plan(&self) -> Result<Option<platform_api::PlanSnapshot>, HandleError> {
+    async fn current_plan(&self) -> Result<Option<lingxi_core::host::PlanSnapshot>, HandleError> {
         let session_id = self.session.lock().await.session_id;
         let path = std::path::PathBuf::from(ConversationOrchestrator::plan_file_path(
             &session_id,
@@ -1177,7 +1185,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             self.config.plans_directory.as_deref(),
         ));
         match tokio::fs::read_to_string(&path).await {
-            Ok(content) => Ok(Some(platform_api::PlanSnapshot { path, content })),
+            Ok(content) => Ok(Some(lingxi_core::host::PlanSnapshot { path, content })),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(HandleError::ActionFailed(format!(
                 "could not read plan {}: {error}",
@@ -1222,7 +1230,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn workflow_size_guideline_state(
         &self,
-    ) -> platform_api::session_flags::WorkflowSizeGuidelineSnapshot {
+    ) -> lingxi_core::host::session_flags::WorkflowSizeGuidelineSnapshot {
         self.workflow_size_guideline.snapshot()
     }
 
@@ -1259,8 +1267,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
     async fn set_effort_level(&self, effort: Option<String>) -> Result<(), HandleError> {
         let state = self.session.lock().await;
         let selection = effort
-            .map(|id| platform_api::ReasoningSelection::Level { id })
-            .unwrap_or(platform_api::ReasoningSelection::Automatic);
+            .map(|id| lingxi_core::host::ReasoningSelection::Level { id })
+            .unwrap_or(lingxi_core::host::ReasoningSelection::Automatic);
         self.set_reasoning_selection_for_model(
             &state.model,
             state.model_profile.as_deref(),
@@ -1269,7 +1277,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
-    async fn output_styles(&self) -> Option<platform_api::OutputStyleListing> {
+    async fn output_styles(&self) -> Option<lingxi_core::host::OutputStyleListing> {
         let mut styles: Vec<(String, Option<String>)> = vec![(
             // Upstream's style table maps `default` to `null`, so the listing
             // renders it with no description. Keeping that shape here means the
@@ -1305,7 +1313,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .await
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| outputstyles::DEFAULT_OUTPUT_STYLE_NAME.to_string());
-        Some(platform_api::OutputStyleListing { current, styles })
+        Some(lingxi_core::host::OutputStyleListing { current, styles })
     }
 
     async fn set_output_style(&self, name: &str) -> Result<(), HandleError> {
@@ -1327,14 +1335,14 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
-    async fn conversation_controls(&self) -> Option<platform_api::ConversationControls> {
+    async fn conversation_controls(&self) -> Option<lingxi_core::host::ConversationControls> {
         let state = self.session.lock().await;
         Some(self.conversation_controls_for_model(&state.model, state.model_profile.as_deref()))
     }
 
     async fn set_reasoning_selection(
         &self,
-        selection: platform_api::ReasoningSelection,
+        selection: lingxi_core::host::ReasoningSelection,
     ) -> Result<(), HandleError> {
         let state = self.session.lock().await;
         self.set_reasoning_selection_for_model(
@@ -1384,14 +1392,17 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     // M5-11 additions:
 
-    async fn ide_status(&self) -> platform_api::IdeStatus {
+    async fn ide_status(&self) -> lingxi_core::host::IdeStatus {
         match self.ide_handle.as_ref() {
             Some(ide) => ide.status().await,
-            None => platform_api::IdeStatus::default(),
+            None => lingxi_core::host::IdeStatus::default(),
         }
     }
 
-    async fn ide_connect(&self, endpoint_id: &str) -> Result<platform_api::IdeStatus, HandleError> {
+    async fn ide_connect(
+        &self,
+        endpoint_id: &str,
+    ) -> Result<lingxi_core::host::IdeStatus, HandleError> {
         let Some(ide) = self.ide_handle.as_ref() else {
             return Err(HandleError::Unimplemented("ide_connect".into()));
         };
@@ -1400,7 +1411,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .map_err(HandleError::ActionFailed)
     }
 
-    async fn ide_disconnect(&self) -> Result<platform_api::IdeStatus, HandleError> {
+    async fn ide_disconnect(&self) -> Result<lingxi_core::host::IdeStatus, HandleError> {
         let Some(ide) = self.ide_handle.as_ref() else {
             return Err(HandleError::Unimplemented("ide_disconnect".into()));
         };
@@ -1447,7 +1458,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // `managed_dir` mirrors the composition root's
         // `SkillsHandler::with_all_roots(.., Some(managed_settings_dir()), ..)`
         // (`runtime/src/desktop/mod.rs:3351-3354`) exactly — it is the
-        // SAME pure, env/platform-derived function (`platform_api::live_sessions::
+        // SAME pure, env/platform-derived function (`lingxi_core::host::live_sessions::
         // managed_settings_dir`), not a second computation; the loader
         // treats a non-existent managed dir as an empty tier, so this is
         // harmless when no managed policy is installed.
@@ -1480,7 +1491,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let Some(config_home) = self.config_home.as_ref() else {
             return Vec::new();
         };
-        let managed_dir = platform_api::live_sessions::managed_settings_dir();
+        let managed_dir = lingxi_core::host::live_sessions::managed_settings_dir();
         skill_api::load_file_skill_sections_with_roots(
             &self.cwd,
             config_home,
@@ -1520,7 +1531,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         (ok, failed)
     }
 
-    async fn mcp_server_states(&self) -> Vec<(String, platform_api::McpActionState)> {
+    async fn mcp_server_states(&self) -> Vec<(String, lingxi_core::host::McpActionState)> {
         match self.mcp_registry.as_ref() {
             Some(reg) => reg.action_states().await,
             None => Vec::new(),
@@ -1531,7 +1542,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         &self,
         server: Option<&str>,
         disabled: bool,
-    ) -> Result<Vec<platform_api::McpToggleOutcome>, String> {
+    ) -> Result<Vec<lingxi_core::host::McpToggleOutcome>, String> {
         let Some(path) = migrations::global_config::global_config_path() else {
             return Err("global config path is unavailable".to_string());
         };
@@ -1580,15 +1591,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // is NOT an `Err` (see `McpRegistry::set_disabled`), so it lands here as
         // a settled `Failed`, letting the handler emit the "…but it isn't
         // connected yet." variant instead of a hard error.
-        let mut outcomes: Vec<platform_api::McpToggleOutcome> = Vec::new();
+        let mut outcomes: Vec<lingxi_core::host::McpToggleOutcome> = Vec::new();
         for name in &targets {
             let outcome = match registry.set_disabled(name, disabled).await {
                 Ok(None) => continue,
-                Ok(state @ Some(_)) => platform_api::McpToggleOutcome {
+                Ok(state @ Some(_)) => lingxi_core::host::McpToggleOutcome {
                     name: name.clone(),
                     state,
                 },
-                Err(_) => platform_api::McpToggleOutcome {
+                Err(_) => lingxi_core::host::McpToggleOutcome {
                     name: name.clone(),
                     state: None,
                 },
@@ -1602,14 +1613,14 @@ impl OrchestratorHandle for ConversationOrchestrator {
         &self,
         directory: &str,
         source: &str,
-    ) -> platform_api::DirectoryAddedHookSummary {
+    ) -> lingxi_core::host::DirectoryAddedHookSummary {
         ConversationOrchestrator::fire_directory_added(self, directory, source).await
     }
 
     async fn register_repo_root(
         &self,
-        request: platform_api::RegisterRepoRootRequest,
-    ) -> Result<platform_api::RegisterRepoRootOutcome, platform_api::HandleError> {
+        request: lingxi_core::host::RegisterRepoRootRequest,
+    ) -> Result<lingxi_core::host::RegisterRepoRootOutcome, lingxi_core::host::HandleError> {
         ConversationOrchestrator::register_repo_root(self, request).await
     }
 
@@ -1689,8 +1700,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn append_meta_user_message(&self, text: &str) -> Result<(), HandleError> {
-        let msg =
-            protocol::ConversationMessage::user_meta(protocol::MessageId::new(), text.to_string());
+        let msg = lingxi_core::types::ConversationMessage::user_meta(
+            lingxi_core::types::MessageId::new(),
+            text.to_string(),
+        );
         {
             let mut s = self.session.lock().await;
             s.history.push(msg.clone());
@@ -1709,9 +1722,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
             return Ok(());
         }
 
-        let mut messages = vec![protocol::ConversationMessage::User {
-            id: protocol::MessageId::new(),
-            content: vec![protocol::ContentBlock::Text {
+        let mut messages = vec![lingxi_core::types::ConversationMessage::User {
+            id: lingxi_core::types::MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::Text {
                 text: raw.to_string(),
             }],
             is_meta: false,
@@ -1719,9 +1732,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
             is_visible_in_transcript_only: false,
         }];
         if !display.trim().is_empty() {
-            messages.push(protocol::ConversationMessage::Assistant {
-                id: protocol::MessageId::new(),
-                content: vec![protocol::ContentBlock::Text {
+            messages.push(lingxi_core::types::ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
                     text: display.to_string(),
                 }],
                 stop_reason: None,
@@ -1752,16 +1765,20 @@ impl OrchestratorHandle for ConversationOrchestrator {
         text: &str,
         is_user: bool,
     ) -> Result<(), HandleError> {
-        let target = protocol::SessionId::parse_prefixed(session_id).ok_or_else(|| {
-            HandleError::ActionFailed(format!("invalid target session id {session_id:?}"))
-        })?;
+        let target =
+            lingxi_core::types::SessionId::parse_prefixed(session_id).ok_or_else(|| {
+                HandleError::ActionFailed(format!("invalid target session id {session_id:?}"))
+            })?;
         let _turn_guard = self.turn_gate.lock().await;
         let message = if is_user {
-            protocol::ConversationMessage::user(protocol::MessageId::new(), text.to_string())
+            lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                text.to_string(),
+            )
         } else {
-            protocol::ConversationMessage::Assistant {
-                id: protocol::MessageId::new(),
-                content: vec![protocol::ContentBlock::Text {
+            lingxi_core::types::ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
                     text: text.to_string(),
                 }],
                 stop_reason: None,
@@ -1787,16 +1804,19 @@ impl OrchestratorHandle for ConversationOrchestrator {
         session_id: &str,
         text: &str,
     ) -> Result<(), HandleError> {
-        let target = protocol::SessionId::parse_prefixed(session_id).ok_or_else(|| {
-            HandleError::ActionFailed(format!("invalid target session id {session_id:?}"))
-        })?;
+        let target =
+            lingxi_core::types::SessionId::parse_prefixed(session_id).ok_or_else(|| {
+                HandleError::ActionFailed(format!("invalid target session id {session_id:?}"))
+            })?;
         // Serialize with turns and hot-resume/clear so the target check,
         // transcript parent lookup, append, and live-history update all land on
         // one side of a session transition.
         let _turn_guard = self.turn_gate.lock().await;
         let current = self.session.lock().await.session_id;
-        let msg =
-            protocol::ConversationMessage::user_meta(protocol::MessageId::new(), text.to_string());
+        let msg = lingxi_core::types::ConversationMessage::user_meta(
+            lingxi_core::types::MessageId::new(),
+            text.to_string(),
+        );
         let persisted_uuid = self
             .persist_model_excluded_meta_to_session(target, &msg)
             .await?;
@@ -1899,7 +1919,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// Richer catalog listing for the grouped `/model` picker. Delegates to the
     /// api client's [`OrchestratorApiClient::list_model_listings`], which the
     /// production `ProviderApiAdapter` sources from the llm-runtime catalog.
-    async fn list_model_listings(&self) -> Vec<platform_api::orchestrator::ModelListing> {
+    async fn list_model_listings(&self) -> Vec<lingxi_core::host::orchestrator::ModelListing> {
         self.api.list_model_listings()
     }
 
@@ -1913,7 +1933,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// Wiring it into `RenderedMessage::RateLimit` requires a new protocol
     /// event or a dedicated status-poll channel — both outside this task's
     /// scope (frozen protocol guard).  See the trait doc for details.
-    async fn last_rate_limit_info(&self) -> Option<platform_api::RateLimitSnapshot> {
+    async fn last_rate_limit_info(&self) -> Option<lingxi_core::host::RateLimitSnapshot> {
         self.api.last_rate_limit_info()
     }
 
@@ -1921,19 +1941,21 @@ impl OrchestratorHandle for ConversationOrchestrator {
         &self,
         prompt: &str,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<platform_api::TurnOutcome, HandleError> {
+    ) -> Result<lingxi_core::host::TurnOutcome, HandleError> {
         // Delegate to the inherent method on `ConversationOrchestrator`
         // (M6-03 T1). Disambiguate via fully-qualified call syntax since
         // the trait method has the same name.
         match crate::ConversationOrchestrator::run_turn_streaming_with_cancel(self, prompt, cancel)
             .await
         {
-            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(platform_api::TurnOutcome::EndTurn),
+            Ok(crate::conversation::TurnOutcome::EndTurn) => {
+                Ok(lingxi_core::host::TurnOutcome::EndTurn)
+            }
             Ok(crate::conversation::TurnOutcome::MaxTurns) => {
-                Ok(platform_api::TurnOutcome::MaxTurns)
+                Ok(lingxi_core::host::TurnOutcome::MaxTurns)
             }
             Ok(crate::conversation::TurnOutcome::Cancelled) => {
-                Ok(platform_api::TurnOutcome::Cancelled)
+                Ok(lingxi_core::host::TurnOutcome::Cancelled)
             }
             Err(e) => Err(HandleError::ActionFailed(e.to_string())),
         }
@@ -1944,13 +1966,19 @@ impl OrchestratorHandle for ConversationOrchestrator {
         prompt: &str,
         cancel: tokio_util::sync::CancellationToken,
         in_human_turn: bool,
-    ) -> Result<platform_api::TurnOutcome, HandleError> {
+    ) -> Result<lingxi_core::host::TurnOutcome, HandleError> {
         self.run_turn_streaming_with_origin(prompt, Vec::new(), cancel, None, in_human_turn)
             .await
             .map(|outcome| match outcome {
-                crate::conversation::TurnOutcome::EndTurn => platform_api::TurnOutcome::EndTurn,
-                crate::conversation::TurnOutcome::Cancelled => platform_api::TurnOutcome::Cancelled,
-                crate::conversation::TurnOutcome::MaxTurns => platform_api::TurnOutcome::MaxTurns,
+                crate::conversation::TurnOutcome::EndTurn => {
+                    lingxi_core::host::TurnOutcome::EndTurn
+                }
+                crate::conversation::TurnOutcome::Cancelled => {
+                    lingxi_core::host::TurnOutcome::Cancelled
+                }
+                crate::conversation::TurnOutcome::MaxTurns => {
+                    lingxi_core::host::TurnOutcome::MaxTurns
+                }
             })
             .map_err(|error| HandleError::ActionFailed(error.to_string()))
     }
@@ -1960,7 +1988,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         prompt: &str,
         image_paths: &[std::path::PathBuf],
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<platform_api::TurnOutcome, HandleError> {
+    ) -> Result<lingxi_core::host::TurnOutcome, HandleError> {
         // Delegate to the inherent image-aware streaming entry point.
         match crate::ConversationOrchestrator::run_turn_streaming_with_cancel_images(
             self,
@@ -1970,25 +1998,29 @@ impl OrchestratorHandle for ConversationOrchestrator {
         )
         .await
         {
-            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(platform_api::TurnOutcome::EndTurn),
+            Ok(crate::conversation::TurnOutcome::EndTurn) => {
+                Ok(lingxi_core::host::TurnOutcome::EndTurn)
+            }
             Ok(crate::conversation::TurnOutcome::MaxTurns) => {
-                Ok(platform_api::TurnOutcome::MaxTurns)
+                Ok(lingxi_core::host::TurnOutcome::MaxTurns)
             }
             Ok(crate::conversation::TurnOutcome::Cancelled) => {
-                Ok(platform_api::TurnOutcome::Cancelled)
+                Ok(lingxi_core::host::TurnOutcome::Cancelled)
             }
             Err(e) => Err(HandleError::ActionFailed(e.to_string())),
         }
     }
 
-    async fn run_async_hook_rewake(&self) -> Result<platform_api::TurnOutcome, HandleError> {
+    async fn run_async_hook_rewake(&self) -> Result<lingxi_core::host::TurnOutcome, HandleError> {
         match crate::ConversationOrchestrator::run_async_hook_rewake(self).await {
-            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(platform_api::TurnOutcome::EndTurn),
+            Ok(crate::conversation::TurnOutcome::EndTurn) => {
+                Ok(lingxi_core::host::TurnOutcome::EndTurn)
+            }
             Ok(crate::conversation::TurnOutcome::MaxTurns) => {
-                Ok(platform_api::TurnOutcome::MaxTurns)
+                Ok(lingxi_core::host::TurnOutcome::MaxTurns)
             }
             Ok(crate::conversation::TurnOutcome::Cancelled) => {
-                Ok(platform_api::TurnOutcome::Cancelled)
+                Ok(lingxi_core::host::TurnOutcome::Cancelled)
             }
             Err(error) => Err(HandleError::ActionFailed(error.to_string())),
         }
@@ -1996,7 +2028,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     // engine-data-commands additions:
 
-    async fn conversation_transcript(&self) -> Vec<protocol::ConversationMessage> {
+    async fn conversation_transcript(&self) -> Vec<lingxi_core::types::ConversationMessage> {
         // Clone of the live, ordered session history. Backs `/export`
         // (transcript → file) and underpins `/summary` + `/diff`.
         self.session.lock().await.history.clone()
@@ -2021,8 +2053,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .model_context_keys()
     }
 
-    async fn context_usage_snapshot(&self) -> platform_api::ContextUsageSnapshot {
-        use platform_api::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
+    async fn context_usage_snapshot(&self) -> lingxi_core::host::ContextUsageSnapshot {
+        use lingxi_core::host::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
 
         // Snapshot the live model and history together. The history component
         // uses the exact estimator auto-compaction uses, so replacing history
@@ -2067,7 +2099,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .saturating_sub(live_context_tokens)
             .saturating_sub(autocompact_buffer);
 
-        platform_api::ContextUsageSnapshot {
+        lingxi_core::host::ContextUsageSnapshot {
             live_context_tokens,
             max_context_tokens,
             breakdown: vec![
@@ -2157,7 +2189,7 @@ fn is_mcp_wire_tool(value: &serde_json::Value) -> bool {
 }
 
 /// Stable string label for a `HookEventType`, used by [`list_hooks`] to
-/// populate [`platform_api::HookInfo::event`]. Avoids `Debug` derive
+/// populate [`lingxi_core::host::HookInfo::event`]. Avoids `Debug` derive
 /// drift — the locked names are part of the M6-07 surface and the
 /// claude-code parity. (M6-07)
 fn event_str(et: &hooks::events::HookEventType) -> &'static str {
@@ -2269,7 +2301,7 @@ fn apply_mcp_disabled(
 /// fallback (`source as string`, the bare enum name).
 fn hook_source_description(source: hooks::HookSource) -> String {
     use hooks::HookSource as S;
-    use protocol::SettingsScope as T;
+    use lingxi_core::types::SettingsScope as T;
     match source {
         S::Settings(T::User) => "User settings (~/.lingxi/settings.json)",
         S::Settings(T::Project) => "Project settings (.lingxi/settings.json)",
@@ -2293,7 +2325,7 @@ fn hook_source_description(source: hooks::HookSource) -> String {
 /// local agent, so it is named here rather than caught by `_`.
 fn agent_source_group_label(source: agent::AgentSource) -> &'static str {
     use agent::AgentSource as S;
-    use protocol::SettingsScope as T;
+    use lingxi_core::types::SettingsScope as T;
     match source {
         S::Settings(T::User) => "User agents",
         S::Settings(T::Project) => "Project agents",
@@ -2409,13 +2441,14 @@ mod tests {
     struct SessionMemoryTestRuntime;
 
     #[async_trait::async_trait]
-    impl platform_api::RuntimeSpawner for SessionMemoryTestRuntime {
+    impl lingxi_core::host::RuntimeSpawner for SessionMemoryTestRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-            Err(platform_api::RuntimeError::Internal(
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal(
                 "unused session-memory test runtime".to_string(),
             ))
         }
@@ -2424,8 +2457,8 @@ mod tests {
 
         async fn cancel(
             &self,
-            _handle: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
@@ -2435,17 +2468,20 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl platform_api::IdeHandle for RecordingIdeHandle {
-        async fn status(&self) -> platform_api::IdeStatus {
-            platform_api::IdeStatus::default()
+    impl lingxi_core::host::IdeHandle for RecordingIdeHandle {
+        async fn status(&self) -> lingxi_core::host::IdeStatus {
+            lingxi_core::host::IdeStatus::default()
         }
 
-        async fn connect(&self, _endpoint_id: &str) -> Result<platform_api::IdeStatus, String> {
-            Ok(platform_api::IdeStatus::default())
+        async fn connect(
+            &self,
+            _endpoint_id: &str,
+        ) -> Result<lingxi_core::host::IdeStatus, String> {
+            Ok(lingxi_core::host::IdeStatus::default())
         }
 
-        async fn disconnect(&self) -> Result<platform_api::IdeStatus, String> {
-            Ok(platform_api::IdeStatus::default())
+        async fn disconnect(&self) -> Result<lingxi_core::host::IdeStatus, String> {
+            Ok(lingxi_core::host::IdeStatus::default())
         }
 
         async fn open(&self, cwd: std::path::PathBuf) -> Result<String, String> {
@@ -2481,7 +2517,7 @@ mod tests {
 
         session_cwd.change_cwd(live_cwd.clone());
         assert_eq!(
-            platform_api::OrchestratorHandle::ide_open(&orch).await,
+            lingxi_core::host::OrchestratorHandle::ide_open(&orch).await,
             Ok("opened".into())
         );
         let opened = opened.lock().unwrap();
@@ -2513,8 +2549,8 @@ mod tests {
         });
         {
             let mut extractor = handle.extractor.lock().await;
-            extractor.mark_extracted_through(Some(protocol::MessageId::new()));
-            extractor.record_compaction_boundary(Some(protocol::MessageId::new()), 2);
+            extractor.mark_extracted_through(Some(lingxi_core::types::MessageId::new()));
+            extractor.record_compaction_boundary(Some(lingxi_core::types::MessageId::new()), 2);
         }
         let captured_generation = handle.generation.load(Ordering::Acquire);
         let orch = crate::ConversationOrchestrator::new(
@@ -2534,7 +2570,7 @@ mod tests {
             .await
             .insert(std::path::PathBuf::from("/old-session/nested.md"));
 
-        platform_api::OrchestratorHandle::clear_session(&orch)
+        lingxi_core::host::OrchestratorHandle::clear_session(&orch)
             .await
             .expect("clear session");
 
@@ -2575,7 +2611,7 @@ mod tests {
             std::env::temp_dir(),
         );
         let session_id = orch.session.lock().await.session_id.to_string();
-        let other_session_id = protocol::SessionId::new().to_string();
+        let other_session_id = lingxi_core::types::SessionId::new().to_string();
         let current_scope =
             compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
         let other_scope =
@@ -2593,7 +2629,7 @@ mod tests {
             other_scope,
         );
 
-        platform_api::OrchestratorHandle::request_exit(&orch).await;
+        lingxi_core::host::OrchestratorHandle::request_exit(&orch).await;
 
         assert!(compaction::invoked_skills::filter_for_scope(current_scope).is_empty());
         assert_eq!(
@@ -2685,7 +2721,7 @@ mod tests {
     async fn hot_resume_splits_a_qualified_model_ref_with_no_profile() {
         let tools = Arc::new(tool_api::registry::ToolRegistry::new());
         let api = Arc::new(MockApiClient::new(Vec::new()));
-        api.set_model_listings(vec![platform_api::ModelListing {
+        api.set_model_listings(vec![lingxi_core::host::ModelListing {
             display_model: "deepseek-flash".to_string(),
             request_model: "deepseek-flash".to_string(),
             provider_id: "deepseek".to_string(),
@@ -2709,13 +2745,13 @@ mod tests {
             std::env::temp_dir(),
         );
 
-        platform_api::OrchestratorHandle::resume_session(
+        lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
-            protocol::SessionId::new(),
+            lingxi_core::types::SessionId::new(),
             Vec::new(),
             None,
             None,
-            platform_api::ResumeRuntimeSnapshot {
+            lingxi_core::host::ResumeRuntimeSnapshot {
                 model: "deepseek/deepseek-flash".to_string(),
                 model_profile: None,
                 ..Default::default()
@@ -2742,7 +2778,7 @@ mod tests {
     #[tokio::test]
     async fn hot_resume_splits_a_qualified_model_ref_with_matching_profile() {
         let api = Arc::new(MockApiClient::new(Vec::new()));
-        api.set_model_listings(vec![platform_api::ModelListing {
+        api.set_model_listings(vec![lingxi_core::host::ModelListing {
             display_model: "deepseek-flash".to_string(),
             request_model: "deepseek-flash".to_string(),
             provider_id: "deepseek".to_string(),
@@ -2766,13 +2802,13 @@ mod tests {
             std::env::temp_dir(),
         );
 
-        platform_api::OrchestratorHandle::resume_session(
+        lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
-            protocol::SessionId::new(),
+            lingxi_core::types::SessionId::new(),
             Vec::new(),
             None,
             None,
-            platform_api::ResumeRuntimeSnapshot {
+            lingxi_core::host::ResumeRuntimeSnapshot {
                 model: "deepseek/deepseek-flash".to_string(),
                 model_profile: Some("deepseek".to_string()),
                 ..Default::default()
@@ -2789,7 +2825,7 @@ mod tests {
         // The lower-level switch seam is also used outside the mobile command
         // adapter. It must uphold the same invariant even if a caller passes
         // the UI reference and explicit profile together.
-        platform_api::OrchestratorHandle::switch_model(
+        lingxi_core::host::OrchestratorHandle::switch_model(
             &orch,
             "deepseek/deepseek-flash",
             Some("deepseek"),
@@ -2806,7 +2842,7 @@ mod tests {
     /// listing claims stays exactly as recorded.
     #[tokio::test]
     async fn hot_resume_leaves_unqualified_and_unknown_model_refs_alone() {
-        let listings = vec![platform_api::ModelListing {
+        let listings = vec![lingxi_core::host::ModelListing {
             display_model: "openrouter/auto".to_string(),
             request_model: "openrouter/auto".to_string(),
             provider_id: "openrouter".to_string(),
@@ -2843,13 +2879,13 @@ mod tests {
                 Arc::new(StaticMemoryProvider::empty()),
                 std::env::temp_dir(),
             );
-            platform_api::OrchestratorHandle::resume_session(
+            lingxi_core::host::OrchestratorHandle::resume_session(
                 &orch,
-                protocol::SessionId::new(),
+                lingxi_core::types::SessionId::new(),
                 Vec::new(),
                 None,
                 None,
-                platform_api::ResumeRuntimeSnapshot {
+                lingxi_core::host::ResumeRuntimeSnapshot {
                     model: recorded.to_string(),
                     model_profile: None,
                     ..Default::default()
@@ -2880,9 +2916,9 @@ mod tests {
             Arc::new(StaticMemoryProvider::empty()),
             std::env::temp_dir(),
         );
-        let transcript_only = protocol::MessageId::new();
-        let compact_summary = protocol::MessageId::new();
-        let skill_message = protocol::MessageId::new();
+        let transcript_only = lingxi_core::types::MessageId::new();
+        let compact_summary = lingxi_core::types::MessageId::new();
+        let skill_message = lingxi_core::types::MessageId::new();
         tools.deferral().mark_loaded(["StaleTool"]);
         orch.prompt_runtime
             .sent_skill_names
@@ -2896,14 +2932,14 @@ mod tests {
             .last_response_output_tokens
             .store(88, std::sync::atomic::Ordering::Relaxed);
 
-        platform_api::OrchestratorHandle::resume_session(
+        lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
-            protocol::SessionId::new(),
+            lingxi_core::types::SessionId::new(),
             Vec::new(),
             None,
             None,
-            platform_api::ResumeRuntimeSnapshot {
-                current_usage: Some(platform_api::CurrentUsageSnapshot {
+            lingxi_core::host::ResumeRuntimeSnapshot {
+                current_usage: Some(lingxi_core::host::CurrentUsageSnapshot {
                     input_tokens: 100,
                     output_tokens: 40,
                     cache_read_input_tokens: 200,
@@ -2990,13 +3026,13 @@ mod tests {
             "an unpinned runtime inherits transcript effort"
         );
 
-        platform_api::OrchestratorHandle::resume_session(
+        lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
-            protocol::SessionId::new(),
+            lingxi_core::types::SessionId::new(),
             Vec::new(),
             None,
             None,
-            platform_api::ResumeRuntimeSnapshot::default(),
+            lingxi_core::host::ResumeRuntimeSnapshot::default(),
         )
         .await
         .expect("second hot resume");
@@ -3054,7 +3090,7 @@ mod tests {
         );
 
         assert_eq!(
-            platform_api::OrchestratorHandle::files_in_context(&orch).await,
+            lingxi_core::host::OrchestratorHandle::files_in_context(&orch).await,
             vec![visible]
         );
     }
@@ -3075,15 +3111,15 @@ mod tests {
             std::env::temp_dir(),
         );
 
-        platform_api::OrchestratorHandle::resume_session(
+        lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
-            protocol::SessionId::new(),
+            lingxi_core::types::SessionId::new(),
             Vec::new(),
             None,
             None,
-            platform_api::ResumeRuntimeSnapshot {
+            lingxi_core::host::ResumeRuntimeSnapshot {
                 effort: Some("high".to_string()),
-                ..platform_api::ResumeRuntimeSnapshot::default()
+                ..lingxi_core::host::ResumeRuntimeSnapshot::default()
             },
         )
         .await
@@ -3127,12 +3163,12 @@ mod tests {
             max_turns: 4,
             model: agent::AgentModel::Inherit,
             permission_mode: agent::AgentPermissionMode::Bubble,
-            source: agent::AgentSource::Settings(protocol::SettingsScope::User),
+            source: agent::AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             base_dir: std::env::temp_dir(),
             system_prompt: Some("review carefully".to_string()),
             mcp_servers: Vec::new(),
             frontmatter_hooks: vec![hooks::HookDefinition {
-                id: protocol::HookId::new(),
+                id: lingxi_core::types::HookId::new(),
                 name: "resumed-agent-stop".to_string(),
                 events: vec![hooks::HookEventType::Stop],
                 if_condition: None,
@@ -3143,7 +3179,7 @@ mod tests {
                     cwd: None,
                     shell: None,
                 },
-                source: hooks::HookSource::Settings(protocol::SettingsScope::User),
+                source: hooks::HookSource::Settings(lingxi_core::types::SettingsScope::User),
                 blocking: true,
                 timeout: None,
                 priority: 0,
@@ -3168,18 +3204,18 @@ mod tests {
             observer: None,
         };
 
-        platform_api::OrchestratorHandle::resume_session(
+        lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
-            protocol::SessionId::new(),
+            lingxi_core::types::SessionId::new(),
             Vec::new(),
             None,
             None,
-            platform_api::ResumeRuntimeSnapshot {
+            lingxi_core::host::ResumeRuntimeSnapshot {
                 main_thread_agent_type: Some("reviewer".to_string()),
                 main_thread_agent_definition: Some(
                     serde_json::to_value(definition).expect("serialize agent snapshot"),
                 ),
-                ..platform_api::ResumeRuntimeSnapshot::default()
+                ..lingxi_core::host::ResumeRuntimeSnapshot::default()
             },
         )
         .await
@@ -3199,13 +3235,13 @@ mod tests {
             .is_some());
         assert!(orch.hooks.has_hooks_for(&hooks::HookEventType::Stop).await);
 
-        platform_api::OrchestratorHandle::resume_session(
+        lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
-            protocol::SessionId::new(),
+            lingxi_core::types::SessionId::new(),
             Vec::new(),
             None,
             None,
-            platform_api::ResumeRuntimeSnapshot::default(),
+            lingxi_core::host::ResumeRuntimeSnapshot::default(),
         )
         .await
         .expect("resume default-agent session");
@@ -3236,7 +3272,7 @@ mod tests {
             max_turns: 4,
             model,
             permission_mode: agent::AgentPermissionMode::Bubble,
-            source: agent::AgentSource::Settings(protocol::SettingsScope::User),
+            source: agent::AgentSource::Settings(lingxi_core::types::SettingsScope::User),
             base_dir: std::env::temp_dir(),
             system_prompt: Some("do it".to_string()),
             mcp_servers: Vec::new(),
@@ -3421,10 +3457,11 @@ mod tests {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             });
-            s.history.push(protocol::ConversationMessage::user(
-                protocol::MessageId::new(),
-                "live context after compact".repeat(100),
-            ));
+            s.history
+                .push(lingxi_core::types::ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "live context after compact".repeat(100),
+                ));
         }
         let expected_messages = {
             let s = orch.session.lock().await;
@@ -3436,7 +3473,7 @@ mod tests {
         let messages = snapshot
             .breakdown
             .iter()
-            .find(|row| row.kind == platform_api::ContextUsageCategoryKind::Messages)
+            .find(|row| row.kind == lingxi_core::host::ContextUsageCategoryKind::Messages)
             .map_or(0, |row| row.tokens);
         assert_eq!(messages, expected_messages, "history estimator must match");
         assert_ne!(used, 1_545, "cumulative provider usage must not leak in");
@@ -3459,7 +3496,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "lingxi-handle-plan-{}-{}",
             std::process::id(),
-            protocol::SessionId::new().as_uuid()
+            lingxi_core::types::SessionId::new().as_uuid()
         ));
         std::fs::create_dir_all(&root).expect("create plan root");
         let orch = crate::ConversationOrchestrator::new(
@@ -3476,7 +3513,7 @@ mod tests {
             std::env::temp_dir(),
         );
 
-        assert!(platform_api::OrchestratorHandle::current_plan(&orch)
+        assert!(lingxi_core::host::OrchestratorHandle::current_plan(&orch)
             .await
             .expect("read absent plan")
             .is_none());
@@ -3487,18 +3524,18 @@ mod tests {
             orch.config.plans_directory.as_deref(),
         );
         std::fs::write(&path, "# Plan\n\n- ship it\n").expect("write plan");
-        let plan = platform_api::OrchestratorHandle::current_plan(&orch)
+        let plan = lingxi_core::host::OrchestratorHandle::current_plan(&orch)
             .await
             .expect("read plan")
             .expect("plan exists");
         assert_eq!(plan.path, std::path::PathBuf::from(path));
         assert_eq!(plan.content, "# Plan\n\n- ship it\n");
 
-        platform_api::OrchestratorHandle::set_effort_level(&orch, Some("xhigh".to_string()))
+        lingxi_core::host::OrchestratorHandle::set_effort_level(&orch, Some("xhigh".to_string()))
             .await
             .expect("set effort");
         assert_eq!(
-            platform_api::OrchestratorHandle::current_effort(&orch)
+            lingxi_core::host::OrchestratorHandle::current_effort(&orch)
                 .await
                 .as_deref(),
             Some("xhigh")
@@ -3509,7 +3546,7 @@ mod tests {
     struct BlockingSessionPreparer {
         entered: tokio::sync::Notify,
         release: tokio::sync::Notify,
-        destination: std::sync::Mutex<Option<protocol::SessionId>>,
+        destination: std::sync::Mutex<Option<lingxi_core::types::SessionId>>,
         transcript_lock: Arc<session::jsonl::DurableTranscriptWriter>,
     }
 
@@ -3518,7 +3555,7 @@ mod tests {
         async fn prepare_session(
             &self,
             tracker: Arc<cost::CostTracker>,
-            session_id: protocol::SessionId,
+            session_id: lingxi_core::types::SessionId,
         ) -> Result<crate::conversation::PreparedSessionSwitch, cost::CostPersistError> {
             let cost = tracker.prepare_session(session_id).await?;
             *self
@@ -3536,7 +3573,8 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingSessionActivationObserver {
-        activations: std::sync::Mutex<Vec<(protocol::SessionId, protocol::SessionId)>>,
+        activations:
+            std::sync::Mutex<Vec<(lingxi_core::types::SessionId, lingxi_core::types::SessionId)>>,
         changed: tokio::sync::Notify,
     }
 
@@ -3544,8 +3582,8 @@ mod tests {
     impl crate::conversation::SessionActivationObserver for RecordingSessionActivationObserver {
         async fn session_activated(
             &self,
-            previous: protocol::SessionId,
-            current: protocol::SessionId,
+            previous: lingxi_core::types::SessionId,
+            current: lingxi_core::types::SessionId,
         ) -> Result<(), String> {
             self.activations
                 .lock()
@@ -3559,7 +3597,7 @@ mod tests {
     #[tokio::test]
     async fn dropped_hot_clear_keeps_a_coherent_until_owned_b_commit_finishes() {
         let temp = tempfile::tempdir().unwrap();
-        let session_a = protocol::SessionId::new();
+        let session_a = lingxi_core::types::SessionId::new();
         let (persist_tx, _persist_rx) = tokio::sync::mpsc::channel(8);
         let tracker = Arc::new(cost::CostTracker::new(
             session_a,
@@ -3579,7 +3617,7 @@ mod tests {
             &cwd.to_string_lossy(),
             &session_a.as_uuid().to_string(),
         );
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix::fs::PosixFileSystem::new(temp.path().to_path_buf()),
         );
         let writer = Arc::new(
@@ -3616,7 +3654,7 @@ mod tests {
         let clearing = {
             let orchestrator = orchestrator.clone();
             tokio::spawn(async move {
-                platform_api::OrchestratorHandle::clear_session(orchestrator.as_ref()).await
+                lingxi_core::host::OrchestratorHandle::clear_session(orchestrator.as_ref()).await
             })
         };
         preparer.entered.notified().await;
@@ -3651,8 +3689,8 @@ mod tests {
     #[tokio::test]
     async fn dropped_prepared_resume_is_owned_through_host_activation_and_shutdown() {
         let temp = tempfile::tempdir().unwrap();
-        let session_a = protocol::SessionId::new();
-        let session_b = protocol::SessionId::new();
+        let session_a = lingxi_core::types::SessionId::new();
+        let session_b = lingxi_core::types::SessionId::new();
         let (persist_tx, _persist_rx) = tokio::sync::mpsc::channel(8);
         let tracker = Arc::new(cost::CostTracker::new(
             session_a,
@@ -3672,7 +3710,7 @@ mod tests {
             &cwd.to_string_lossy(),
             &session_a.as_uuid().to_string(),
         );
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
             platform_posix::fs::PosixFileSystem::new(temp.path().to_path_buf()),
         );
         let writer = Arc::new(
@@ -3711,13 +3749,13 @@ mod tests {
         let resuming = {
             let orchestrator = orchestrator.clone();
             tokio::spawn(async move {
-                platform_api::OrchestratorHandle::resume_session(
+                lingxi_core::host::OrchestratorHandle::resume_session(
                     orchestrator.as_ref(),
                     session_b,
                     Vec::new(),
                     None,
                     None,
-                    platform_api::ResumeRuntimeSnapshot::default(),
+                    lingxi_core::host::ResumeRuntimeSnapshot::default(),
                 )
                 .await
             })

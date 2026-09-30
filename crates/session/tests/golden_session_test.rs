@@ -2,7 +2,7 @@
 //! The writer's output, given the same `JsonlMessage` sequence, MUST be
 //! byte-for-byte identical to the on-disk fixture after token substitution.
 
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use pretty_assertions::assert_eq;
 use serde_json::{json, Map, Value};

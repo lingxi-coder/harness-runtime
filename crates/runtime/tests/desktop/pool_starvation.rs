@@ -36,12 +36,12 @@ use agent::pool::StateMachinePool;
 use agent::PoolSubagentSpawner;
 use async_trait::async_trait;
 use harness_runtime::desktop::TEAMMATE_POOL_CAP;
-use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
-use platform_api::subagent_spawn::{
+use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+use lingxi_core::host::subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnRequest, SubagentSpawner,
 };
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-use protocol::AgentId;
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use lingxi_core::types::AgentId;
 use test_harness::mocks::MockRuntimeSpawner;
 
 /// Scripted `SubagentApiClient`: one non-streaming round-trip per call, returning
@@ -65,11 +65,11 @@ impl SubagentApiClient for ScriptedApiClient {
         &self,
         _model: &str,
         _system: Option<&str>,
-        _messages: Vec<protocol::ConversationMessage>,
+        _messages: Vec<lingxi_core::types::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         *self.calls.lock().unwrap() += 1;
-        Ok(llm_runtime::LlmResponse {
+        Ok(llm_runtime::HistoryResponse {
             id: "scripted".into(),
             model: "scripted".into(),
             content: vec![llm_runtime::ContentBlock::Text {
@@ -78,7 +78,7 @@ impl SubagentApiClient for ScriptedApiClient {
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
-            usage: llm_runtime::Usage::default(),
+            usage: llm_runtime::ExecutionUsage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
         })
@@ -194,7 +194,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         hook_executor: None,
         strict_plugin_only_hooks: false,
         skill_loader: None,
-        hook_session_id: protocol::SessionId::nil(),
+        hook_session_id: lingxi_core::types::SessionId::nil(),
         hook_cwd: std::path::PathBuf::new(),
         depth: 0,
         observer: None,
@@ -349,7 +349,7 @@ async fn pool_starvation_shared_pool_would_starve_agent_tool() {
     assert!(
         matches!(
             err,
-            platform_api::subagent_spawn::SubagentSpawnError::PoolFull
+            lingxi_core::host::subagent_spawn::SubagentSpawnError::PoolFull
         ),
         "shared-pool spawn fails pool-full; got {err:?}"
     );
@@ -389,7 +389,7 @@ async fn fusion_group_never_refuses_an_agent_tool_spawn() {
                 .reserve_fusion_panel_group(
                     4,
                     tokio::time::Instant::now() + std::time::Duration::from_secs(30),
-                    platform_api::panel_pool::PanelAdmissionCancellation::new(),
+                    lingxi_core::host::panel_pool::PanelAdmissionCancellation::new(),
                 )
                 .await
         })

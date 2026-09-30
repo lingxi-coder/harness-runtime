@@ -5,7 +5,7 @@
 //! preference, and worktree requirement that downstream subsystems consult
 //! when a new agent is spawned. See spec §10.2.
 
-pub use platform_api::subagent_spawn::ObserverSpec;
+pub use lingxi_core::host::subagent_spawn::ObserverSpec;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -83,7 +83,7 @@ pub struct AgentDefinition {
     /// pool, mirroring claude's `isAutoMemoryEnabled` → Write/Edit/Read
     /// injection (the scope selects only WHERE memory lives, not which tools).
     #[serde(default)]
-    pub memory: Option<protocol::WritableScope>,
+    pub memory: Option<lingxi_core::types::WritableScope>,
     /// Reasoning effort preference (claude `effort` = level OR integer).
     #[serde(default)]
     pub effort: Option<AgentEffort>,
@@ -199,7 +199,7 @@ pub enum AgentPermissionMode {
 
 /// Where an agent definition came from.
 ///
-/// The settings rungs are the shared [`protocol::SettingsScope`]; the rest are
+/// The settings rungs are the shared [`lingxi_core::types::SettingsScope`]; the rest are
 /// this subsystem's own producers.
 ///
 /// `AdditionalDirectory` stays a separate variant rather than collapsing into
@@ -212,7 +212,7 @@ pub enum AgentSource {
     /// Compiled into the binary.
     BuiltIn,
     /// Read from a settings tier's `agents/` directory.
-    Settings(protocol::SettingsScope),
+    Settings(lingxi_core::types::SettingsScope),
     /// Supplied by the `--agents` flag for this run.
     Flag,
     /// Loaded by an installed plugin.

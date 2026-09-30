@@ -1,11 +1,11 @@
 //! Foreground registration and the non-cancelling Ctrl+B handoff (`fln/s9/mln`).
 use async_trait::async_trait;
-use platform_api::subagent_spawn::{AsyncLaunch, SubagentObservation, SubagentSpawnObserver};
-use platform_api::task_registry::{
+use lingxi_core::host::subagent_spawn::{AsyncLaunch, SubagentObservation, SubagentSpawnObserver};
+use lingxi_core::host::task_registry::{
     AgentRunUsage, AgentTerminalOutcome, ForegroundAgentHandle, ForegroundAgentRegistration,
     TaskBackgrounder, TaskKiller, TaskRegistryHandle,
 };
-use platform_api::{
+use lingxi_core::host::{
     SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
 };
 use std::sync::{Arc, Mutex};
@@ -27,10 +27,10 @@ struct Control {
     handle: tokio::sync::Mutex<Option<ForegroundAgentHandle>>,
     abort: Mutex<Option<tokio::task::AbortHandle>>,
     stop_requested: Arc<std::sync::atomic::AtomicBool>,
-    allocated_agent_id: Mutex<Option<protocol::AgentId>>,
+    allocated_agent_id: Mutex<Option<lingxi_core::types::AgentId>>,
     signal: watch::Sender<bool>,
     hint_progress: tool_api::ToolProgressSender,
-    tool_use_id: Option<protocol::ToolUseId>,
+    tool_use_id: Option<lingxi_core::types::ToolUseId>,
 }
 
 struct TaskControl(std::sync::Weak<Control>);
@@ -56,16 +56,18 @@ impl TaskKiller for TaskControl {
     }
 }
 #[async_trait]
-impl platform_api::task_registry::TaskMessageReceiver for TaskControl {
+impl lingxi_core::host::task_registry::TaskMessageReceiver for TaskControl {
     async fn send(
         &self,
         message: String,
-    ) -> Result<(), platform_api::task_registry::TaskRegistryError> {
+    ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
         let control = self.0.upgrade().ok_or_else(|| {
-            platform_api::task_registry::TaskRegistryError::Internal("agent loop ended".into())
+            lingxi_core::host::task_registry::TaskRegistryError::Internal("agent loop ended".into())
         })?;
         let id = (*control.allocated_agent_id.lock().unwrap()).ok_or_else(|| {
-            platform_api::task_registry::TaskRegistryError::Internal("agent not allocated".into())
+            lingxi_core::host::task_registry::TaskRegistryError::Internal(
+                "agent not allocated".into(),
+            )
         })?;
         let task_id = control
             .handle
@@ -74,17 +76,15 @@ impl platform_api::task_registry::TaskMessageReceiver for TaskControl {
             .as_ref()
             .map(|handle| handle.task_id.clone())
             .ok_or_else(|| {
-                platform_api::task_registry::TaskRegistryError::Internal(
+                lingxi_core::host::task_registry::TaskRegistryError::Internal(
                     "agent task not registered".into(),
                 )
             })?;
         let record = control.registry.get(&task_id).await?.ok_or_else(|| {
-            platform_api::task_registry::TaskRegistryError::NotFound(task_id.clone())
+            lingxi_core::host::task_registry::TaskRegistryError::NotFound(task_id.clone())
         })?;
         if record.status != "running" && !record.is_parked {
-            return Err(platform_api::task_registry::TaskRegistryError::NotFound(
-                task_id,
-            ));
+            return Err(lingxi_core::host::task_registry::TaskRegistryError::NotFound(task_id));
         }
         if control
             .registry
@@ -93,16 +93,14 @@ impl platform_api::task_registry::TaskMessageReceiver for TaskControl {
             .status
             != "running"
         {
-            return Err(platform_api::task_registry::TaskRegistryError::NotFound(
-                task_id,
-            ));
+            return Err(lingxi_core::host::task_registry::TaskRegistryError::NotFound(task_id));
         }
         if let Err(error) = control.spawner.resume_foreground(&id, message).await {
             // A closed pool channel cannot leave a task advertising active work.
             let _ = control.registry.set_status(&task_id, "failed").await;
-            return Err(platform_api::task_registry::TaskRegistryError::Internal(
-                error.to_string(),
-            ));
+            return Err(
+                lingxi_core::host::task_registry::TaskRegistryError::Internal(error.to_string()),
+            );
         }
         Ok(())
     }
@@ -247,7 +245,7 @@ pub(super) async fn run(
     inherit: SubagentInheritance,
     progress: mpsc::Sender<String>,
     hint_progress: tool_api::ToolProgressSender,
-    tool_use_id: Option<protocol::ToolUseId>,
+    tool_use_id: Option<lingxi_core::types::ToolUseId>,
     registry: Arc<dyn TaskRegistryHandle>,
     ctx: tool_api::BuiltinToolContext,
 ) -> ForegroundResult {
@@ -297,7 +295,8 @@ pub(super) async fn run(
         });
         let worktree_result = match worktree {
             Some(handle) => {
-                platform_api::worktree::agent_worktree_result(ctx.worktree.as_ref(), &handle).await
+                lingxi_core::host::worktree::agent_worktree_result(ctx.worktree.as_ref(), &handle)
+                    .await
             }
             None => None,
         };
@@ -377,10 +376,10 @@ pub(super) async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::task_registry::TaskListFilter;
+    use lingxi_core::host::task_registry::TaskListFilter;
     struct ControlledSpawner {
         messages: Mutex<Vec<String>>,
-        id: protocol::AgentId,
+        id: lingxi_core::types::AgentId,
         ready: tokio::sync::Notify,
         release: tokio::sync::Notify,
     }
@@ -388,7 +387,7 @@ mod tests {
     impl SubagentSpawner for ControlledSpawner {
         async fn resume_foreground(
             &self,
-            id: &protocol::AgentId,
+            id: &lingxi_core::types::AgentId,
             message: String,
         ) -> Result<(), SubagentSpawnError> {
             assert_eq!(*id, self.id);
@@ -440,7 +439,7 @@ mod tests {
     ) {
         let spawner = Arc::new(ControlledSpawner {
             messages: Default::default(),
-            id: protocol::AgentId::new(),
+            id: lingxi_core::types::AgentId::new(),
             ready: Default::default(),
             release: Default::default(),
         });
@@ -471,7 +470,7 @@ mod tests {
             context_paths: vec![std::path::PathBuf::from("/tmp/original-context")],
             fork_context_messages: Some(vec![]),
             fork_parent_system_prompt: Some("original inherited system prompt".into()),
-            creator_agent_id: Some(protocol::AgentId::new()),
+            creator_agent_id: Some(lingxi_core::types::AgentId::new()),
             effort: Some(serde_json::json!("high")),
             ..Default::default()
         };

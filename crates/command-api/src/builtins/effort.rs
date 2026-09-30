@@ -40,7 +40,7 @@
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::OrchestratorHandle;
+use lingxi_core::host::OrchestratorHandle;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -233,7 +233,7 @@ fn persist_effort_level(level: Option<EffortLevel>) -> Result<(), String> {
         return Ok(());
     };
 
-    let selection = level.map(|level| platform_api::ReasoningSelection::Level {
+    let selection = level.map(|level| lingxi_core::host::ReasoningSelection::Level {
         id: level.as_str().to_string(),
     });
     persist_reasoning_default_selection_at(&path, selection.as_ref())
@@ -247,7 +247,7 @@ fn persist_effort_level(level: Option<EffortLevel>) -> Result<(), String> {
 /// intentionally clear that key so an older engine cannot apply a stale value.
 pub fn persist_reasoning_default_selection_at(
     path: &Path,
-    selection: Option<&platform_api::ReasoningSelection>,
+    selection: Option<&lingxi_core::host::ReasoningSelection>,
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -268,19 +268,19 @@ pub fn persist_reasoning_default_selection_at(
 
     let mut persisted = None;
     let default_selection = selection.and_then(|selection| match selection {
-        platform_api::ReasoningSelection::Level { id }
+        lingxi_core::host::ReasoningSelection::Level { id }
             if matches!(id.as_str(), "low" | "medium" | "high" | "xhigh") =>
         {
             persisted = Some(json!(id));
             Some(json!({ "type": "level", "id": id }))
         }
-        platform_api::ReasoningSelection::Disabled => Some(json!({ "type": "disabled" })),
-        platform_api::ReasoningSelection::Enabled => Some(json!({ "type": "enabled" })),
-        platform_api::ReasoningSelection::TokenBudget { tokens } => {
+        lingxi_core::host::ReasoningSelection::Disabled => Some(json!({ "type": "disabled" })),
+        lingxi_core::host::ReasoningSelection::Enabled => Some(json!({ "type": "enabled" })),
+        lingxi_core::host::ReasoningSelection::TokenBudget { tokens } => {
             Some(json!({ "type": "token_budget", "tokens": tokens }))
         }
-        platform_api::ReasoningSelection::Automatic
-        | platform_api::ReasoningSelection::Level { .. } => None,
+        lingxi_core::host::ReasoningSelection::Automatic
+        | lingxi_core::host::ReasoningSelection::Level { .. } => None,
     });
 
     if let Some(value) = persisted {
@@ -326,7 +326,7 @@ pub fn persist_reasoning_default_selection_at(
 /// (notably `max`) are ignored so they cannot become a new-session default.
 pub fn load_reasoning_default_selection_at(
     path: &Path,
-) -> Option<platform_api::ReasoningSelection> {
+) -> Option<lingxi_core::host::ReasoningSelection> {
     let content = std::fs::read_to_string(path).ok()?;
     let value: Value = serde_json::from_str(&content).ok()?;
     if let Some(default) = value
@@ -335,14 +335,14 @@ pub fn load_reasoning_default_selection_at(
         .and_then(|reasoning| reasoning.get("defaultSelection"))
     {
         if let Ok(selection) =
-            serde_json::from_value::<platform_api::ReasoningSelection>(default.clone())
+            serde_json::from_value::<lingxi_core::host::ReasoningSelection>(default.clone())
         {
             return Some(selection);
         }
     }
     match value.get("effortLevel").and_then(Value::as_str) {
         Some(id @ ("low" | "medium" | "high" | "xhigh")) => {
-            Some(platform_api::ReasoningSelection::Level { id: id.to_string() })
+            Some(lingxi_core::host::ReasoningSelection::Level { id: id.to_string() })
         }
         _ => None,
     }
@@ -578,7 +578,7 @@ impl EffortHandler {
             // legacy behavior; production orchestrators always return a spec.
             return true;
         };
-        let selection = platform_api::ReasoningSelection::Level {
+        let selection = lingxi_core::host::ReasoningSelection::Level {
             id: level.as_str().to_string(),
         };
         controls
@@ -1012,7 +1012,7 @@ Effort levels:\n\
         let env = TestEnv::new();
         env.write_settings(r#"{"maxEffortLevel":"high"}"#);
         let mock = Arc::new(MockOrchestratorHandle::new());
-        mock.set_status_snapshot(platform_api::StatusSnapshot {
+        mock.set_status_snapshot(lingxi_core::host::StatusSnapshot {
             model: "claude-opus-4-7".into(),
             ..Default::default()
         });
@@ -1062,7 +1062,7 @@ Effort levels:\n\
         let path = env.settings_path();
         persist_reasoning_default_selection_at(
             &path,
-            Some(&platform_api::ReasoningSelection::TokenBudget { tokens: 12_345 }),
+            Some(&lingxi_core::host::ReasoningSelection::TokenBudget { tokens: 12_345 }),
         )
         .unwrap();
         let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -1073,12 +1073,12 @@ Effort levels:\n\
         assert!(value.get("effortLevel").is_none());
         assert_eq!(
             load_reasoning_default_selection_at(&path),
-            Some(platform_api::ReasoningSelection::TokenBudget { tokens: 12_345 })
+            Some(lingxi_core::host::ReasoningSelection::TokenBudget { tokens: 12_345 })
         );
 
         persist_reasoning_default_selection_at(
             &path,
-            Some(&platform_api::ReasoningSelection::Automatic),
+            Some(&lingxi_core::host::ReasoningSelection::Automatic),
         )
         .unwrap();
         let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

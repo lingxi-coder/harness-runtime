@@ -7,9 +7,8 @@ license.workspace = true
 
 [dependencies]
 mobile-linux-api.workspace = true
-protocol = { path = "../protocol" }
+
 telemetry = { path = "../telemetry" }
-platform-api = { path = "../platform-api" }
 core = { path = "../core" }
 # Internal path dep (no new Cargo.lock package): the hook `if`-condition matcher
 # reuses the ported permission-rule parser + per-tool content matchers

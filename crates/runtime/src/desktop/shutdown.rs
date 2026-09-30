@@ -28,8 +28,8 @@ pub(super) struct ProcessSessionActivationObserver;
 impl orchestrator::conversation::SessionActivationObserver for ProcessSessionActivationObserver {
     async fn session_activated(
         &self,
-        previous: protocol::SessionId,
-        current: protocol::SessionId,
+        previous: lingxi_core::types::SessionId,
+        current: lingxi_core::types::SessionId,
     ) -> Result<(), String> {
         refresh_process_session_presence(previous, current).await
     }
@@ -40,20 +40,20 @@ impl orchestrator::conversation::SessionActivationObserver for ProcessSessionAct
 /// failures are returned as post-commit warnings and stale socket fields are
 /// removed rather than advertising an endpoint under the wrong session.
 pub async fn refresh_process_session_presence(
-    previous: protocol::SessionId,
-    current: protocol::SessionId,
+    previous: lingxi_core::types::SessionId,
+    current: lingxi_core::types::SessionId,
 ) -> Result<(), String> {
     if previous == current {
         return Ok(());
     }
-    let Some(dir) = platform_api::live_sessions::process_dir() else {
+    let Some(dir) = lingxi_core::host::live_sessions::process_dir() else {
         return Ok(());
     };
     let pid = std::process::id();
     let current_text = current.as_uuid().to_string();
-    let observed = platform_api::live_sessions::process_session_id()
+    let observed = lingxi_core::host::live_sessions::process_session_id()
         .as_deref()
-        .and_then(protocol::SessionId::parse_prefixed)
+        .and_then(lingxi_core::types::SessionId::parse_prefixed)
         .ok_or_else(|| "live process has no valid scoped session identity".to_string())?;
     if observed != previous && observed != current {
         return Err(format!(
@@ -62,38 +62,38 @@ pub async fn refresh_process_session_presence(
     }
     let already_current = observed == current;
     let socket = if already_current {
-        platform_api::uds_inbox::process_socket_path()
+        lingxi_core::host::uds_inbox::process_socket_path()
     } else {
         let inbox_session = current_text.clone();
         match tokio::task::spawn_blocking(move || {
-            platform_api::uds_inbox::retarget_process_inbox(&inbox_session)
+            lingxi_core::host::uds_inbox::retarget_process_inbox(&inbox_session)
         })
         .await
         {
             Ok(Ok(path)) => Some(path),
             Ok(Err(error)) => {
-                platform_api::live_sessions::set_process_session_id(&current_text);
+                lingxi_core::host::live_sessions::set_process_session_id(&current_text);
                 let _ = dir.upsert_identity(
                     pid,
                     &current_text,
-                    platform_api::live_sessions::process_name().as_deref(),
+                    lingxi_core::host::live_sessions::process_name().as_deref(),
                     None,
                     None,
-                    platform_api::live_sessions::process_permission_class().as_deref(),
+                    lingxi_core::host::live_sessions::process_permission_class().as_deref(),
                 );
                 let _ = dir.clear_messaging_socket_if_session(pid, &current_text);
                 let _ = dir.clear_messaging_socket_if_session(pid, &previous.to_string());
                 return Err(format!("cross-session inbox is unavailable: {error}"));
             }
             Err(error) => {
-                platform_api::live_sessions::set_process_session_id(&current_text);
+                lingxi_core::host::live_sessions::set_process_session_id(&current_text);
                 let _ = dir.upsert_identity(
                     pid,
                     &current_text,
-                    platform_api::live_sessions::process_name().as_deref(),
+                    lingxi_core::host::live_sessions::process_name().as_deref(),
                     None,
                     None,
-                    platform_api::live_sessions::process_permission_class().as_deref(),
+                    lingxi_core::host::live_sessions::process_permission_class().as_deref(),
                 );
                 let _ = dir.clear_messaging_socket_if_session(pid, &current_text);
                 let _ = dir.clear_messaging_socket_if_session(pid, &previous.to_string());
@@ -101,14 +101,14 @@ pub async fn refresh_process_session_presence(
             }
         }
     };
-    platform_api::live_sessions::set_process_session_id(&current_text);
+    lingxi_core::host::live_sessions::set_process_session_id(&current_text);
     if let Err(error) = dir.upsert_identity(
         pid,
         &current_text,
-        platform_api::live_sessions::process_name().as_deref(),
+        lingxi_core::host::live_sessions::process_name().as_deref(),
         None,
         socket.as_deref(),
-        platform_api::live_sessions::process_permission_class().as_deref(),
+        lingxi_core::host::live_sessions::process_permission_class().as_deref(),
     ) {
         let _ = dir.clear_messaging_socket_if_session(pid, &previous.to_string());
         return Err(format!(
@@ -153,7 +153,7 @@ pub struct DesktopSessionShutdownReport {
     /// Persistence/producer failures observed after all possible drains ran.
     pub errors: Vec<String>,
     /// Final durable publication states for every known Slash outbox.
-    pub publications: Vec<platform_api::FusionPublicationReceipt>,
+    pub publications: Vec<lingxi_core::host::FusionPublicationReceipt>,
 }
 
 impl DesktopSessionLifecycle {
@@ -292,8 +292,8 @@ impl DesktopSessionLifecycle {
         for receipt in &report.publications {
             if !matches!(
                 receipt.status,
-                platform_api::FusionPublicationStatus::Published
-                    | platform_api::FusionPublicationStatus::Queued
+                lingxi_core::host::FusionPublicationStatus::Published
+                    | lingxi_core::host::FusionPublicationStatus::Queued
             ) {
                 report.errors.push(
                     receipt
@@ -341,7 +341,7 @@ impl DesktopSessionLifecycle {
 #[cfg(any(unix, windows))]
 pub fn supervisor_exit_sink(
     path: &std::path::Path,
-) -> std::sync::Arc<dyn platform_api::BackgroundExitSink> {
+) -> std::sync::Arc<dyn lingxi_core::host::BackgroundExitSink> {
     let root = path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("/"))

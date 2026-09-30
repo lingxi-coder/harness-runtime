@@ -14,10 +14,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use lingxi_core::host::worktree::{WorktreeChangeSummary, WorktreeError, WorktreeHandle};
 use once_cell::sync::Lazy;
 use permission::result::{PermissionMetadata, PermissionPrompt};
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::worktree::{WorktreeChangeSummary, WorktreeError, WorktreeHandle};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -798,6 +798,12 @@ impl EnterWorktreeTool {
                     .await;
                 Err(ToolError::Internal(msg))
             }
+            // Creation never snapshots; kept for exhaustiveness.
+            WorktreeError::SnapshotRefused(msg) => {
+                self.emit_failed(invocation_id, "snapshot_refused", duration_ms)
+                    .await;
+                Err(ToolError::Internal(msg))
+            }
         }
     }
 }
@@ -1063,7 +1069,7 @@ fn build_worktree_tmux_kill_argv(session_name: &str) -> Vec<String> {
 }
 
 /// Run `tmux kill-session -t <session_name>` through the
-/// [`platform_api::ProcessRunner`]/[`platform_api::Sandbox`] seam (mirrors
+/// [`lingxi_core::host::ProcessRunner`]/[`lingxi_core::host::Sandbox`] seam (mirrors
 /// `platforms/posix::worktree_tmux::create_worktree_tmux_session`'s pattern
 /// for the kill side — see that module for why `bypass_with_audit` is used
 /// instead of the internal `SandboxedCommand::__new_sandboxed` constructor).
@@ -1073,11 +1079,11 @@ fn build_worktree_tmux_kill_argv(session_name: &str) -> Vec<String> {
 /// rPe(s)`) never inspects `rPe`'s return value before proceeding to remove
 /// the worktree, so a tmux hiccup must never block removal.
 async fn kill_worktree_tmux_session(
-    process: &dyn platform_api::ProcessRunner,
-    sandbox: &dyn platform_api::Sandbox,
+    process: &dyn lingxi_core::host::ProcessRunner,
+    sandbox: &dyn lingxi_core::host::Sandbox,
     session_name: &str,
 ) -> Result<(), String> {
-    let pcmd = platform_api::ProcessCommand {
+    let pcmd = lingxi_core::host::ProcessCommand {
         command: "tmux".to_string(),
         args: build_worktree_tmux_kill_argv(session_name),
         cwd: None,
@@ -1763,7 +1769,7 @@ impl Tool for ExitWorktreeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::worktree::WorktreeManager;
+    use lingxi_core::host::worktree::WorktreeManager;
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tool_api::test_support::{
@@ -2963,7 +2969,7 @@ mod tests {
 
     /// Records the `tmux` argv (if any) [`ExitWorktreeTool`] runs through
     /// `ctx.process`, and returns a canned exit code — a hermetic double for
-    /// the [`platform_api::ProcessRunner`] seam (mirrors the `MockRunner` pattern
+    /// the [`lingxi_core::host::ProcessRunner`] seam (mirrors the `MockRunner` pattern
     /// in `platforms/posix/src/worktree_tmux.rs`'s tests).
     struct RecordingProcess {
         exit_code: i32,
@@ -2986,10 +2992,10 @@ mod tests {
     }
 
     #[async_trait]
-    impl platform_api::ProcessRunner for RecordingProcess {
+    impl lingxi_core::host::ProcessRunner for RecordingProcess {
         async fn run(
             &self,
-            cmd: &platform_api::SandboxedCommand,
+            cmd: &lingxi_core::host::SandboxedCommand,
         ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
             self.recorded
                 .lock()
@@ -3005,14 +3011,14 @@ mod tests {
 
         async fn spawn_background(
             &self,
-            _cmd: &platform_api::SandboxedCommand,
-        ) -> Result<platform_api::ProcessHandle, mobile_linux_api::ProcessError> {
+            _cmd: &lingxi_core::host::SandboxedCommand,
+        ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError> {
             Err(mobile_linux_api::ProcessError::Unsupported)
         }
 
         async fn kill(
             &self,
-            _handle: &platform_api::ProcessHandle,
+            _handle: &lingxi_core::host::ProcessHandle,
         ) -> Result<(), mobile_linux_api::ProcessError> {
             Ok(())
         }

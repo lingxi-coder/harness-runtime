@@ -84,7 +84,7 @@ async fn supervisor_retries_transient_commit_io_without_reexecuting_turn() {
 #[tokio::test]
 async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_identity() {
     use crate::mobile::test_support::{test_config, FakeListener, HostFakePlatform};
-    use platform_api::PermissionGate as _;
+    use lingxi_core::host::PermissionGate as _;
     let temp = tempfile::tempdir().unwrap();
     let config = test_config(temp.path());
     let home = config.lingxi_home.clone();
@@ -99,7 +99,7 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
     .await
     .unwrap();
     let original = runtime.active_session_uuid.lock().unwrap().clone();
-    let target = protocol::SessionId::new();
+    let target = lingxi_core::types::SessionId::new();
     let target_uuid = target.as_uuid().to_string();
     for (task_id, session_uuid, run_id) in [
         ("wold00001", original, "wf_old"),
@@ -128,7 +128,7 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
             Vec::new(),
             None,
             None,
-            platform_api::ResumeRuntimeSnapshot::default(),
+            lingxi_core::host::ResumeRuntimeSnapshot::default(),
         )
         .await
         .unwrap();
@@ -138,7 +138,7 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
         runtime.session_writer.active_path(),
         orchestrator::transcript_paths::main_transcript_path(&home, &cwd, &target_uuid)
     );
-    let workflows = platform_api::task_registry::TaskRegistryHandle::list_workflows(
+    let workflows = lingxi_core::host::task_registry::TaskRegistryHandle::list_workflows(
         runtime.task_registry.as_ref(),
     )
     .await

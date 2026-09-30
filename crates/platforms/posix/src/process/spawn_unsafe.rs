@@ -60,7 +60,7 @@ pub(super) fn effective_uid() -> u32 {
 /// drops the parent socket; the child sees EOF and leaves without running it.
 pub(super) async fn spawn_with_capability(
     mut command: Command,
-    binding: Option<&platform_api::process::BackgroundTaskBinding>,
+    binding: Option<&lingxi_core::host::process::BackgroundTaskBinding>,
 ) -> Result<tokio::process::Child, mobile_linux_api::ProcessError> {
     use mobile_linux_api::ProcessError;
     use std::os::fd::AsRawFd;

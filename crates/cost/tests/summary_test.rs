@@ -2,7 +2,7 @@
 //! totals, per-model breakdown, and labeled day/month buckets.
 
 use cost::{CostSummary, CostTracker, ModelRef, PricingCatalog, ProviderId, TokenUsage, Usage};
-use protocol::SessionId;
+use lingxi_core::types::SessionId;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;

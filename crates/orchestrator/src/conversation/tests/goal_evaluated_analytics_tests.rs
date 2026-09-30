@@ -411,9 +411,9 @@ impl crate::OrchestratorApiClient for CancelsThenAnswers {
         _model: &str,
         _profile: Option<&str>,
         _system: Option<&str>,
-        _msgs: Vec<protocol::ConversationMessage>,
+        _msgs: Vec<lingxi_core::types::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         self.0.cancel();
         Ok(crate::test_support::mock_message_response(
             vec![llm_runtime::ContentBlock::Text {

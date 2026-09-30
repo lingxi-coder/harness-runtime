@@ -27,7 +27,7 @@
 //!   returns the model's native default. The `LINGXI_MAX_OUTPUT_TOKENS`
 //!   env override (a pure env read) IS honored, clamped to the upper limit.
 
-use platform_api::env::is_env_truthy;
+use lingxi_core::host::env::is_env_truthy;
 
 /// Default model context window (200k tokens for all models right now).
 /// Mirrors `MODEL_CONTEXT_WINDOW_DEFAULT` in `utils/context.ts`.
@@ -221,7 +221,7 @@ pub fn context_window_for_model(model: &str, betas: &[String]) -> u64 {
             // `Z.CLAUDE_CODE_MAX_CONTEXT_TOKENS` (coerced by the shared `hp`
             // helper) then `!== void 0 && > 0`; a `NaN`/non-positive value falls
             // through (unset/empty ⇒ `NaN` ⇒ skip).
-            let n = platform_api::env::parse_int_env(&raw);
+            let n = lingxi_core::host::env::parse_int_env(&raw);
             if !n.is_nan() && n > 0.0 {
                 return n as u64;
             }
@@ -348,7 +348,7 @@ pub fn default_output_tokens_for_model(model: &str) -> u64 {
 
 fn configured_output_tokens(default_tokens: u64, upper_limit: u64) -> u64 {
     if let Ok(raw) = std::env::var("LINGXI_MAX_OUTPUT_TOKENS") {
-        let value = platform_api::env::parse_int_env(&raw);
+        let value = lingxi_core::host::env::parse_int_env(&raw);
         if !value.is_nan() && value > 0.0 {
             return value.min(upper_limit as f64) as u64;
         }

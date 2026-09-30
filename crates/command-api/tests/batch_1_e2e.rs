@@ -9,8 +9,8 @@
 use command_api::builtins::{register_all_builtin_commands, register_core_batch_1};
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
+use lingxi_core::host::{CompactionSummary, SlashCommandDispatcher, SlashDispatchResult};
 use orchestrator::test_support::MockOrchestratorHandle;
-use platform_api::{CompactionSummary, SlashCommandDispatcher, SlashDispatchResult};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

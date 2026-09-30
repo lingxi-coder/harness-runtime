@@ -11,7 +11,7 @@
 //! - Slug validation: each `/`-separated segment matches
 //!   `[a-zA-Z0-9._-]+`, total length 1..=64.
 
-use platform_api::worktree::{WorktreeError, WorktreeManager};
+use lingxi_core::host::worktree::{WorktreeError, WorktreeManager};
 use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;

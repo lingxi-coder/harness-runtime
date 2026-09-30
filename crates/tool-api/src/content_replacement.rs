@@ -30,7 +30,7 @@
 //! ⇒ Populating this struct from the microcompact clear is the small end; the
 //! persist hook is the larger one. Neither is "add a row writer".
 
-use protocol::ToolUseId;
+use lingxi_core::types::ToolUseId;
 use std::collections::HashMap;
 
 /// Tracks replaced tool result content (large outputs cleared in older turns).

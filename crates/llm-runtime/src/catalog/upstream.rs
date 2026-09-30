@@ -2,8 +2,8 @@
 use crate::{
     Capabilities, CredentialConfig, ModelProfile, PricingCatalog, ProviderId, ProviderProfile,
 };
+use lingxi_core::host::{ModelMetadata, ModelPricing};
 use lingxi_llm_client::protocol as wire;
-use platform_api::{ModelMetadata, ModelPricing};
 
 #[derive(Debug, Clone)]
 pub struct BuiltinCatalog {
@@ -80,33 +80,11 @@ pub fn builtin_presets() -> BuiltinCatalog {
                         ..Default::default()
                     });
                     if let Some(rates) = rates.filter(|_| usd) {
-                        if let (Some(input), Some(output), Some(cache_read), Some(cache_write)) = (
-                            rates.input_per_million,
-                            rates.output_per_million,
-                            rates.cache_read_per_million,
-                            rates.cache_write_per_million.or_else(|| {
-                                matches!(
-                                    profile.protocol,
-                                    wire::ProtocolFamily::GeminiGenerateContent
-                                        | wire::ProtocolFamily::VertexGemini
-                                )
-                                .then_some(0.0)
-                            }),
-                        ) {
-                            pricing = std::mem::take(&mut pricing).with_price(
-                                provider_id.clone(),
-                                &model.billing_model,
-                                crate::TokenPricing {
-                                    input_per_million: input,
-                                    output_per_million: output,
-                                    cache_read_per_million: cache_read,
-                                    cache_write_per_million: cache_write,
-                                    reasoning_per_million: rates
-                                        .reasoning_per_million
-                                        .unwrap_or(output),
-                                },
-                            );
-                        }
+                        pricing = std::mem::take(&mut pricing).with_price(
+                            provider_id.clone(),
+                            &model.billing_model,
+                            rates.clone(),
+                        );
                     }
                     if let (Some(context_window), Some(max_output)) =
                         (metadata.context_window_tokens, metadata.max_output_tokens)
@@ -202,7 +180,7 @@ pub fn builtin_presets() -> BuiltinCatalog {
             id: chatgpt.profile_name.clone(),
         };
         chatgpt.supports_websockets = true;
-        chatgpt.pricing.billing_mode = platform_api::ModelBillingMode::Subscription;
+        chatgpt.pricing.billing_mode = lingxi_core::host::ModelBillingMode::Subscription;
         chatgpt.models.retain(|m| {
             matches!(
                 m.request_model.as_str(),
@@ -211,7 +189,7 @@ pub fn builtin_presets() -> BuiltinCatalog {
         });
         for model in &mut chatgpt.models {
             model.metadata.pricing = Some(ModelPricing {
-                billing_mode: platform_api::ModelBillingMode::Subscription,
+                billing_mode: lingxi_core::host::ModelBillingMode::Subscription,
                 ..Default::default()
             });
         }
@@ -227,11 +205,11 @@ pub fn builtin_presets() -> BuiltinCatalog {
     BuiltinCatalog { providers, pricing }
 }
 
-fn billing_mode(mode: wire::BillingMode) -> platform_api::ModelBillingMode {
+fn billing_mode(mode: wire::BillingMode) -> lingxi_core::host::ModelBillingMode {
     match mode {
-        wire::BillingMode::PerToken => platform_api::ModelBillingMode::PerToken,
-        wire::BillingMode::Subscription => platform_api::ModelBillingMode::Subscription,
-        wire::BillingMode::Free => platform_api::ModelBillingMode::Free,
-        wire::BillingMode::Unknown => platform_api::ModelBillingMode::Unknown,
+        wire::BillingMode::PerToken => lingxi_core::host::ModelBillingMode::PerToken,
+        wire::BillingMode::Subscription => lingxi_core::host::ModelBillingMode::Subscription,
+        wire::BillingMode::Free => lingxi_core::host::ModelBillingMode::Free,
+        wire::BillingMode::Unknown => lingxi_core::host::ModelBillingMode::Unknown,
     }
 }

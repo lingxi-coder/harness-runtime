@@ -303,8 +303,8 @@ async fn tool_result_continuations_do_not_advance_the_plan_cadence() {
         for _ in 0..10 {
             s.history.push(ConversationMessage::User {
                 id: MessageId::new(),
-                content: vec![protocol::ContentBlock::ToolResult {
-                    tool_use_id: protocol::ToolUseId::new(),
+                content: vec![lingxi_core::types::ContentBlock::ToolResult {
+                    tool_use_id: lingxi_core::types::ToolUseId::new(),
                     content: "ok".into(),
                     is_error: false,
                     provider_tool_use_id: None,
@@ -360,13 +360,15 @@ async fn the_plan_path_comes_from_the_shared_identity() {
         .session_plan_file_path(&sid)
         .ends_with(&format!("{}.md", sid.as_uuid())));
 
-    let matcher = Arc::new(platform_api::plan_files::PlanFileMatcher::with_identity(
-        platform_api::plan_files::PlanFileIdentity {
-            plans_dir: std::path::PathBuf::from("/tmp/lingxi-plans"),
-            slug: "brave-baking-otter".into(),
-            workshop_enabled: false,
-        },
-    ));
+    let matcher = Arc::new(
+        lingxi_core::host::plan_files::PlanFileMatcher::with_identity(
+            lingxi_core::host::plan_files::PlanFileIdentity {
+                plans_dir: std::path::PathBuf::from("/tmp/lingxi-plans"),
+                slug: "brave-baking-otter".into(),
+                workshop_enabled: false,
+            },
+        ),
+    );
     orch.config.plan_files = Some(matcher.clone());
 
     let from_identity = matcher
@@ -614,12 +616,14 @@ async fn populate_stop_hook_snapshot_noop_without_provider() {
 /// (the second drain returns empty), mirroring the registry's
 /// take-mark-evict semantics so the consume-once invariant is testable
 /// without a real registry.
-struct OnceTaskNotifications(std::sync::Mutex<Vec<platform_api::task_registry::TaskNotification>>);
+struct OnceTaskNotifications(
+    std::sync::Mutex<Vec<lingxi_core::host::task_registry::TaskNotification>>,
+);
 #[async_trait::async_trait]
 impl crate::prompt::task_notification::TaskNotificationProvider for OnceTaskNotifications {
     async fn take_pending_task_notifications(
         &self,
-    ) -> Vec<platform_api::task_registry::TaskNotification> {
+    ) -> Vec<lingxi_core::host::task_registry::TaskNotification> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
 }
@@ -628,7 +632,7 @@ impl crate::prompt::task_notification::TaskNotificationProvider for OnceTaskNoti
 async fn task_notification_reminder_folds_in_then_drains_once() {
     let reg = ToolRegistry::new();
     // One terminal `local_bash` task — the minimal faithful surface.
-    let bash = platform_api::task_registry::TaskNotification {
+    let bash = lingxi_core::host::task_registry::TaskNotification {
         task_id: "b12345678".into(),
         task_type: "local_bash".into(),
         status: "completed".into(),
@@ -688,7 +692,7 @@ async fn task_notification_reminder_folds_in_then_drains_once() {
 #[tokio::test]
 async fn two_completions_in_one_turn_are_two_messages() {
     let reg = ToolRegistry::new();
-    let bash = platform_api::task_registry::TaskNotification {
+    let bash = lingxi_core::host::task_registry::TaskNotification {
         task_id: "b11111111".into(),
         task_type: "local_bash".into(),
         status: "completed".into(),
@@ -697,7 +701,7 @@ async fn two_completions_in_one_turn_are_two_messages() {
         exit_code: Some(0),
         ..Default::default()
     };
-    let agent = platform_api::task_registry::TaskNotification {
+    let agent = lingxi_core::host::task_registry::TaskNotification {
         task_id: "a22222222".into(),
         task_type: "local_agent".into(),
         status: "completed".into(),
@@ -734,7 +738,7 @@ async fn two_completions_in_one_turn_are_two_messages() {
 #[tokio::test]
 async fn task_notification_is_durable_and_not_a_transient_reminder() {
     let reg = ToolRegistry::new();
-    let bash = platform_api::task_registry::TaskNotification {
+    let bash = lingxi_core::host::task_registry::TaskNotification {
         task_id: "b87654321".into(),
         task_type: "local_bash".into(),
         status: "completed".into(),
@@ -798,7 +802,7 @@ async fn task_notification_reminder_none_without_provider() {
 
 struct ReminderCoordinatorMode(std::sync::atomic::AtomicBool);
 
-impl platform_api::coordinator_mode::CoordinatorModeHandle for ReminderCoordinatorMode {
+impl lingxi_core::host::coordinator_mode::CoordinatorModeHandle for ReminderCoordinatorMode {
     fn is_enabled(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::SeqCst)
     }

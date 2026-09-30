@@ -3,7 +3,7 @@
 //! Stale locks (whose holder PID has exited) are silently overridden so that
 //! a crashed scheduler does not block future ticks indefinitely.
 
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
@@ -158,7 +158,7 @@ pub async fn acquire_scheduler_lease(
             replace_owned = previous.session_id == identity;
             if previous.session_id != identity && crate::scheduler::pid_alive_check(previous.pid) {
                 let alive = previous.proc_start.as_deref().is_none_or(|expected| {
-                    platform_api::live_sessions::process_start_identity(previous.pid)
+                    lingxi_core::host::live_sessions::process_start_identity(previous.pid)
                         .is_none_or(|actual| actual == expected)
                 });
                 if alive {
@@ -175,14 +175,14 @@ pub async fn acquire_scheduler_lease(
         }
         match fs.create_new_file_rooted_no_follow(root, &path).await {
             Ok(()) => {}
-            Err(platform_api::FsError::AlreadyExists(_)) => return Ok(false),
+            Err(lingxi_core::host::FsError::AlreadyExists(_)) => return Ok(false),
             Err(error) => return Err(CronLockError::Io(error.to_string())),
         }
     }
     let lease = SchedulerLease {
         session_id: identity.to_owned(),
         pid: std::process::id(),
-        proc_start: platform_api::live_sessions::process_start_identity(std::process::id()),
+        proc_start: lingxi_core::host::live_sessions::process_start_identity(std::process::id()),
         acquired_at: now_ms,
     };
     let body =

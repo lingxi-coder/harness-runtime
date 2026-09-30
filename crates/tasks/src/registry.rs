@@ -13,8 +13,8 @@ use crate::state::{TaskState, TaskStateBase, TaskStatus};
 use crate::task_trait::{Task, TaskContext, TaskError, TaskSpawnInput};
 use agent::{StateMachinePool, SubagentApiClient};
 use async_trait::async_trait;
-use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
-use platform_api::{
+use lingxi_core::host::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+use lingxi_core::host::{
     BackgroundTaskHandle, BudgetEnforcerHandle, FileSystem, FusionActivation, FusionCompletionSink,
     FusionExecutor, ProcessRunner, RuntimeSpawner, Sandbox, SubagentSpawner, ToolInvoker,
 };
@@ -42,7 +42,8 @@ pub struct TaskRegistry {
     /// Shared with `ToolUseContext::observer_pairings` so `ObserverReport` and
     /// the spawn site below agree on the same pairings — an observer spawned
     /// here must be resolvable by the tool it reports through.
-    observer_pairings: std::sync::OnceLock<Arc<platform_api::observer_pairing::ObserverPairings>>,
+    observer_pairings:
+        std::sync::OnceLock<Arc<lingxi_core::host::observer_pairing::ObserverPairings>>,
     human_messages: std::sync::Mutex<HashMap<String, human_messages::HumanInbox>>,
     shell_adoption_gate: Arc<tokio::sync::Mutex<()>>,
     shell_transfer_mutation: tokio::sync::Mutex<()>,
@@ -70,7 +71,7 @@ pub struct TaskRegistry {
     /// old session's cost and persistence authority across a remount.
     handlers: RwLock<HashMap<TaskType, Arc<dyn Task>>>,
     agent_message_receivers: tokio::sync::Mutex<
-        HashMap<String, Arc<dyn platform_api::task_registry::TaskMessageReceiver>>,
+        HashMap<String, Arc<dyn lingxi_core::host::task_registry::TaskMessageReceiver>>,
     >,
     handles: Arc<tokio::sync::Mutex<HashMap<String, BackgroundTaskHandle>>>,
     /// Handler-returned cleanup hooks keyed by task id. Handler-spawned tasks
@@ -83,7 +84,9 @@ pub struct TaskRegistry {
     /// `cleanups` because backgrounding is not teardown: the child keeps
     /// running, it just stops being awaited.
     backgrounders: Arc<
-        tokio::sync::Mutex<HashMap<String, Arc<dyn platform_api::task_registry::TaskBackgrounder>>>,
+        tokio::sync::Mutex<
+            HashMap<String, Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>>,
+        >,
     >,
     /// Handler-spawned task ids → their [`TaskType`], so [`Self::kill`] can
     /// dispatch teardown to the owning handler ([`Task::kill`]). Distinct from
@@ -94,8 +97,9 @@ pub struct TaskRegistry {
     /// `BackgroundTaskHandle` the registry never holds.
     spawned: Arc<RwLock<HashMap<String, TaskType>>>,
     /// Session-owned approved departure cleanup, weakly held to avoid cycles.
-    teammate_departure_cleanup:
-        RwLock<Option<std::sync::Weak<dyn platform_api::team_spawn::TeammateDepartureCleanup>>>,
+    teammate_departure_cleanup: RwLock<
+        Option<std::sync::Weak<dyn lingxi_core::host::team_spawn::TeammateDepartureCleanup>>,
+    >,
     /// External pane tasks must confirm process teardown before task tools
     /// publish a terminal status. Weak ownership avoids a registry/controller cycle.
     external_teammate_controller: RwLock<Option<std::sync::Weak<dyn TeamSpawnSeam>>>,
@@ -130,7 +134,9 @@ pub struct TaskRegistry {
     pending_rest: Arc<RwLock<std::collections::HashMap<String, RestPayload>>>,
     /// Bounded live `monitor_ws` stdout events waiting for the next turn.
     pending_monitor_events: Arc<
-        std::sync::Mutex<std::collections::VecDeque<platform_api::task_registry::TaskNotification>>,
+        std::sync::Mutex<
+            std::collections::VecDeque<lingxi_core::host::task_registry::TaskNotification>,
+        >,
     >,
     /// Per-session running total of subagents spawned through the `Agent` tool
     /// (claude 2.1.212 `taskRegistry` `getTotalAgentSpawns` /
@@ -194,10 +200,10 @@ struct RestPayload {
     /// The agent's final-text response → the `<result>` section.
     result: Option<String>,
     /// Run usage → the `<usage>` section.
-    usage: Option<platform_api::task_registry::AgentRunUsage>,
+    usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
     /// Persistent id of the resting agent. Used only for unnamed-owner
     /// fallback; never surfaced as a display name.
-    agent_id: Option<protocol::AgentId>,
+    agent_id: Option<lingxi_core::types::AgentId>,
     /// The resting agent's DISPLAY identity. A "came to rest" notification is
     /// deferred while this agent still owns live background children, and the
     /// owner match is by the same creator fields child task creation stamps.
@@ -343,7 +349,7 @@ impl TaskRegistry {
     /// is ignored, like the other `OnceLock` seams here.
     pub fn set_observer_pairings(
         &self,
-        table: Arc<platform_api::observer_pairing::ObserverPairings>,
+        table: Arc<lingxi_core::host::observer_pairing::ObserverPairings>,
     ) {
         let _ = self.observer_pairings.set(table);
     }
@@ -352,7 +358,7 @@ impl TaskRegistry {
     #[must_use]
     pub fn observer_pairings(
         &self,
-    ) -> Option<&Arc<platform_api::observer_pairing::ObserverPairings>> {
+    ) -> Option<&Arc<lingxi_core::host::observer_pairing::ObserverPairings>> {
         self.observer_pairings.get()
     }
 
@@ -366,7 +372,11 @@ impl TaskRegistry {
         self.self_ref.get().and_then(std::sync::Weak::upgrade)
     }
 
-    pub(crate) fn record_permission_pause(&self, agent_id: protocol::AgentId, milliseconds: u64) {
+    pub(crate) fn record_permission_pause(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        milliseconds: u64,
+    ) {
         if milliseconds == 0 {
             return;
         }
@@ -444,7 +454,7 @@ impl TaskRegistry {
     /// Bind the session's departure cleanup owner without retaining the session.
     pub async fn set_teammate_departure_cleanup(
         &self,
-        owner: std::sync::Weak<dyn platform_api::team_spawn::TeammateDepartureCleanup>,
+        owner: std::sync::Weak<dyn lingxi_core::host::team_spawn::TeammateDepartureCleanup>,
     ) {
         *self.teammate_departure_cleanup.write().await = Some(owner);
     }
@@ -767,7 +777,7 @@ impl TaskRegistry {
                         *is_backgrounded,
                     ),
                     _ => (
-                        protocol::AgentId::nil(),
+                        lingxi_core::types::AgentId::nil(),
                         String::new(),
                         String::new(),
                         false,
@@ -961,7 +971,7 @@ impl TaskRegistry {
         tool_use_id: Option<String>,
         creator_teammate_name: Option<String>,
         creator_team_name: Option<String>,
-        creator_agent_id: Option<protocol::AgentId>,
+        creator_agent_id: Option<lingxi_core::types::AgentId>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, TaskError> {
         let _admission = self.lifecycle_gate.read().await;
@@ -1095,7 +1105,7 @@ impl TaskRegistry {
         description: String,
         tool_use_id: Option<String>,
         cwd: Option<String>,
-        creator_agent_id: Option<protocol::AgentId>,
+        creator_agent_id: Option<lingxi_core::types::AgentId>,
     ) -> Result<(String, std::path::PathBuf), TaskError> {
         self.register_bash_row(
             id,
@@ -1121,7 +1131,7 @@ impl TaskRegistry {
         description: String,
         tool_use_id: Option<String>,
         cwd: Option<String>,
-        creator_agent_id: Option<protocol::AgentId>,
+        creator_agent_id: Option<lingxi_core::types::AgentId>,
         backgrounded: bool,
     ) -> Result<(String, std::path::PathBuf), TaskError> {
         let path = self
@@ -1333,7 +1343,7 @@ impl TaskRegistry {
     pub async fn bind_background_killer(
         &self,
         task_id: &str,
-        killer: Arc<dyn platform_api::task_registry::TaskKiller>,
+        killer: Arc<dyn lingxi_core::host::task_registry::TaskKiller>,
     ) -> Result<(), TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         let cleanup: TaskCleanup = Arc::new(move || {
@@ -1363,7 +1373,7 @@ impl TaskRegistry {
         &self,
         task_id: &str,
         pid: Option<u32>,
-        killer: Arc<dyn platform_api::task_registry::TaskKiller>,
+        killer: Arc<dyn lingxi_core::host::task_registry::TaskKiller>,
     ) -> Result<(), TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         let cleanup: TaskCleanup = Arc::new(move || {
@@ -1401,7 +1411,7 @@ impl TaskRegistry {
     pub async fn register_foreground_bash(
         &self,
         task_id: &str,
-        registration: platform_api::task_registry::BackgroundBashRegistration,
+        registration: lingxi_core::host::task_registry::BackgroundBashRegistration,
         auto_background_armed: bool,
     ) -> Result<(), TaskError> {
         // `autoBackgroundArmed` rides on the record in claude-code purely so the
@@ -1425,7 +1435,7 @@ impl TaskRegistry {
     pub async fn bind_agent_message_receiver(
         &self,
         task_id: &str,
-        receiver: Arc<dyn platform_api::task_registry::TaskMessageReceiver>,
+        receiver: Arc<dyn lingxi_core::host::task_registry::TaskMessageReceiver>,
     ) -> Result<(), TaskError> {
         let id = self.canonical_or_raw(task_id).await;
         if !self.tasks.read().await.contains_key(&id) {
@@ -1441,7 +1451,7 @@ impl TaskRegistry {
     /// `fln`: expose an allocated foreground agent to task controls.
     pub async fn register_foreground_agent(
         &self,
-        registration: platform_api::task_registry::ForegroundAgentRegistration,
+        registration: lingxi_core::host::task_registry::ForegroundAgentRegistration,
     ) -> Result<TaskState, TaskError> {
         let id = generate_task_id(TaskType::LocalAgent);
         let path = self
@@ -1497,8 +1507,8 @@ impl TaskRegistry {
     /// background work, or its own background tasks have not been consumed.
     pub async fn park_foreground_agent(
         &self,
-        agent_id: protocol::AgentId,
-        outcome: platform_api::task_registry::AgentTerminalOutcome,
+        agent_id: lingxi_core::types::AgentId,
+        outcome: lingxi_core::host::task_registry::AgentTerminalOutcome,
     ) -> bool {
         let Some((id, backgrounded)) = ({
             let map = self.tasks.read().await;
@@ -1605,7 +1615,7 @@ impl TaskRegistry {
     pub async fn bind_background_requester(
         &self,
         task_id: &str,
-        requester: Arc<dyn platform_api::task_registry::TaskBackgrounder>,
+        requester: Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>,
     ) -> Result<(), TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         if !self.tasks.read().await.contains_key(&task_id) {
@@ -1633,7 +1643,7 @@ impl TaskRegistry {
     /// claude-code `H_t` — whether anything can be backgrounded, i.e. whether
     /// the Ctrl+B affordance should be offered at all.
     pub async fn has_backgroundable_tasks(&self) -> bool {
-        if platform_api::env::background_tasks_disabled() {
+        if lingxi_core::host::env::background_tasks_disabled() {
             return false;
         }
         let map = self.tasks.read().await;
@@ -1652,7 +1662,7 @@ impl TaskRegistry {
     pub async fn background_task(&self, task_id: &str) -> bool {
         self.background_task_with_reason(
             task_id,
-            platform_api::task_registry::TaskBackgroundReason::User,
+            lingxi_core::host::task_registry::TaskBackgroundReason::User,
         )
         .await
     }
@@ -1660,9 +1670,9 @@ impl TaskRegistry {
     async fn background_task_with_reason(
         &self,
         task_id: &str,
-        reason: platform_api::task_registry::TaskBackgroundReason,
+        reason: lingxi_core::host::task_registry::TaskBackgroundReason,
     ) -> bool {
-        if platform_api::env::background_tasks_disabled() {
+        if lingxi_core::host::env::background_tasks_disabled() {
             return false;
         }
         let task_id = self.canonical_or_raw(task_id).await;
@@ -1705,7 +1715,7 @@ impl TaskRegistry {
         &self,
         caller_agent_id: Option<&str>,
         named_agent_ids: &[String],
-    ) -> platform_api::task_registry::TaskNotFoundRosters {
+    ) -> lingxi_core::host::task_registry::TaskNotFoundRosters {
         let map = self.tasks.read().await;
         let aliases = self.aliases.read().await;
         // task id → its most addressable alias (`name@team` beats a bare name
@@ -1750,7 +1760,7 @@ impl TaskRegistry {
                     } else {
                         format!(
                             "{id} ({})",
-                            platform_api::display::sanitize_display(&agent.base.description)
+                            lingxi_core::host::display::sanitize_display(&agent.base.description)
                         )
                     });
                 }
@@ -1759,7 +1769,7 @@ impl TaskRegistry {
         }
         running_teammates.sort();
         background_agents.sort();
-        platform_api::task_registry::TaskNotFoundRosters {
+        lingxi_core::host::task_registry::TaskNotFoundRosters {
             running_teammates,
             background_agents,
         }
@@ -1791,7 +1801,7 @@ impl TaskRegistry {
     /// The oracle runs two passes over one snapshot: shells first, agents second.
     pub async fn background_all_tasks(&self) -> usize {
         self.background_all_tasks_with_reason(
-            platform_api::task_registry::TaskBackgroundReason::User,
+            lingxi_core::host::task_registry::TaskBackgroundReason::User,
         )
         .await
     }
@@ -1799,7 +1809,7 @@ impl TaskRegistry {
     /// Background-all preserves its originating trigger for tool results.
     pub async fn background_all_tasks_with_reason(
         &self,
-        reason: platform_api::task_registry::TaskBackgroundReason,
+        reason: lingxi_core::host::task_registry::TaskBackgroundReason,
     ) -> usize {
         let mut targets = {
             let map = self.tasks.read().await;
@@ -1847,7 +1857,10 @@ impl TaskRegistry {
     /// Note this is the opposite of a user-initiated `TaskStop`, where the stop
     /// notification is the point; the oracle drops these because nothing is
     /// left to read them.
-    pub async fn kill_background_shells_for_agent(&self, agent_id: protocol::AgentId) -> usize {
+    pub async fn kill_background_shells_for_agent(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+    ) -> usize {
         // Two lists, because `nHn` is two halves over two different
         // populations. The kill loop is gated on `status==="running"`, but
         // `dG((r)=>r.agentId===e)` afterwards drops EVERY pending notification
@@ -1864,7 +1877,7 @@ impl TaskRegistry {
                 {
                     continue;
                 }
-                if !platform_api::task_activity::is_live_shell_task(
+                if !lingxi_core::host::task_activity::is_live_shell_task(
                     &crate::handle::state_to_record(state),
                 ) {
                     // Only rows that still owe a notification; a drained one has
@@ -1959,7 +1972,7 @@ impl TaskRegistry {
             if shell.base.status != TaskStatus::Running || shell.is_backgrounded == Some(false) {
                 return;
             }
-            let notification = platform_api::task_registry::TaskNotification {
+            let notification = lingxi_core::host::task_registry::TaskNotification {
                 task_id: task_id.to_string(),
                 task_type: "local_bash".into(),
                 recipient_agent_id: shell.base.creator_agent_id,
@@ -2003,7 +2016,7 @@ impl TaskRegistry {
                 return false;
             }
             if map.values().any(|state| {
-                platform_api::task_activity::is_active_delegated_task(
+                lingxi_core::host::task_activity::is_active_delegated_task(
                     &crate::handle::state_to_record(state),
                 )
             }) {
@@ -2027,7 +2040,7 @@ impl TaskRegistry {
             shell.base.notified = true;
             shell.base.end_time = Some(SystemTime::now());
             shell.base.evict_after = Some(SystemTime::now() + Duration::from_secs(30));
-            let notification = platform_api::task_registry::TaskNotification {
+            let notification = lingxi_core::host::task_registry::TaskNotification {
                 task_id: task_id.to_string(),
                 task_type: "local_bash".into(),
                 recipient_agent_id: shell.base.creator_agent_id,
@@ -2904,7 +2917,7 @@ impl TaskRegistry {
             if monitor.base.status.is_terminal() {
                 return Ok(());
             }
-            let notification = platform_api::task_registry::TaskNotification {
+            let notification = lingxi_core::host::task_registry::TaskNotification {
                 task_id: monitor.base.id.clone(),
                 recipient_agent_id: monitor.base.creator_agent_id,
                 task_type: "monitor_ws".to_string(),
@@ -3029,7 +3042,7 @@ impl TaskRegistry {
     pub async fn bind_agent_id(
         &self,
         task_id: &str,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
     ) -> Result<(), TaskError> {
         let canonical = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
@@ -3236,8 +3249,8 @@ impl TaskRegistry {
         &self,
         task_id: &str,
         result: Option<String>,
-        usage: Option<platform_api::task_registry::AgentRunUsage>,
-        agent_id: Option<protocol::AgentId>,
+        usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
+        agent_id: Option<lingxi_core::types::AgentId>,
         agent_name: Option<String>,
         team_name: Option<String>,
     ) {
@@ -3293,15 +3306,15 @@ impl TaskRegistry {
     fn has_live_background_children_locked(
         &self,
         map: &HashMap<String, TaskState>,
-        rested_agent_id: Option<protocol::AgentId>,
+        rested_agent_id: Option<lingxi_core::types::AgentId>,
         agent_name: Option<&str>,
         team_name: Option<&str>,
     ) -> bool {
         fn holds_work(
             map: &HashMap<String, TaskState>,
-            queued: &HashSet<protocol::AgentId>,
+            queued: &HashSet<lingxi_core::types::AgentId>,
             state: &TaskState,
-            visited: &mut HashSet<protocol::AgentId>,
+            visited: &mut HashSet<lingxi_core::types::AgentId>,
         ) -> bool {
             if matches!(state, TaskState::LocalAgent(agent) if agent.is_observer)
                 || matches!(state, TaskState::AutoModeScan(_))
@@ -3385,11 +3398,11 @@ impl TaskRegistry {
     /// failed background agent reported `Unknown error`.
     ///
     /// Callers must invoke this BEFORE the terminal `set_status`; see
-    /// [`platform_api::task_registry::TaskRegistryHandle::set_agent_outcome`].
+    /// [`lingxi_core::host::task_registry::TaskRegistryHandle::set_agent_outcome`].
     pub async fn set_agent_outcome(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::AgentTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::AgentTerminalOutcome,
     ) {
         let task_id = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
@@ -3406,7 +3419,7 @@ impl TaskRegistry {
     pub async fn set_workflow_outcome(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
     ) {
         let task_id = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
@@ -3458,7 +3471,7 @@ impl TaskRegistry {
     pub async fn set_fusion_publication(
         &self,
         task_id: &str,
-        receipt: platform_api::FusionPublicationReceipt,
+        receipt: lingxi_core::host::FusionPublicationReceipt,
     ) {
         let task_id = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
@@ -3475,7 +3488,7 @@ impl TaskRegistry {
         &self,
         task_id: &str,
         egress_profiles: Vec<String>,
-        usage: Option<platform_api::task_registry::AgentRunUsage>,
+        usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
     ) {
         let task_id = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
@@ -3511,6 +3524,11 @@ impl TaskRegistry {
             entry.clone()
         };
 
+        // The terminal flip is what makes the notification drainable, so it
+        // must move the revision like every other terminal path: an idle host
+        // waits on this to start the turn where the parent model synthesizes
+        // from the material.
+        self.bump_notification_revision();
         self.fire_task_completed_hook(&task_id, status, &updated)
             .await;
         Ok(updated)
@@ -3524,7 +3542,7 @@ impl TaskRegistry {
     pub async fn finish_workflow_terminal(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
         status: TaskStatus,
     ) -> Result<TaskState, TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
@@ -3574,7 +3592,7 @@ impl TaskRegistry {
     pub async fn commit_local_app_workflow_terminal<F, Fut>(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
         publish_prepared: F,
     ) -> Result<(TaskState, bool), TaskError>
     where
@@ -3681,7 +3699,7 @@ impl TaskRegistry {
                         "; terminal failure spool replacement failed: {error}"
                     ));
                 }
-                workflow.outcome = platform_api::task_registry::WorkflowTerminalOutcome {
+                workflow.outcome = lingxi_core::host::task_registry::WorkflowTerminalOutcome {
                     result: None,
                     error: Some(reason),
                     ..outcome
@@ -3726,7 +3744,7 @@ impl TaskRegistry {
     }
 
     /// Process ownership is captured from actual pool allocation receipts.
-    pub async fn process_owner_ids(&self, task_id: &str) -> Vec<protocol::AgentId> {
+    pub async fn process_owner_ids(&self, task_id: &str) -> Vec<lingxi_core::types::AgentId> {
         let canonical = self.canonical_or_raw(task_id).await;
         if let Some(TaskState::LocalAgent(agent)) = self.get(&canonical).await {
             return vec![agent.agent_id];
@@ -3828,7 +3846,10 @@ impl TaskRegistry {
     /// the children of an agent that is still actively working, which the oracle
     /// does not do; cascading on rest alone would fire for an agent with nothing
     /// left to hold open.
-    async fn resting_agent_holding_children(&self, canonical: &str) -> Option<protocol::AgentId> {
+    async fn resting_agent_holding_children(
+        &self,
+        canonical: &str,
+    ) -> Option<lingxi_core::types::AgentId> {
         // Lock order is tasks → pending_rest everywhere else in this file; keep
         // it.
         let map = self.tasks.read().await;
@@ -3866,10 +3887,14 @@ impl TaskRegistry {
     ///
     /// Children are stopped serially and their errors ignored, as the oracle
     /// does: one dead child must not abort the rest of the cascade.
-    async fn cascade_stop_descendants(&self, stopped_agent_id: protocol::AgentId, killed_by: &str) {
+    async fn cascade_stop_descendants(
+        &self,
+        stopped_agent_id: lingxi_core::types::AgentId,
+        killed_by: &str,
+    ) {
         let victims: Vec<String> = {
             let map = self.tasks.read().await;
-            let by_agent: HashMap<protocol::AgentId, &TaskState> = map
+            let by_agent: HashMap<lingxi_core::types::AgentId, &TaskState> = map
                 .values()
                 .filter_map(|state| match state {
                     TaskState::LocalAgent(agent) => Some((agent.agent_id, state)),
@@ -3911,7 +3936,7 @@ impl TaskRegistry {
     async fn activate_notification_recipient_locked(
         &self,
         map: &mut HashMap<String, TaskState>,
-        recipient: Option<protocol::AgentId>,
+        recipient: Option<lingxi_core::types::AgentId>,
         has_notifications: bool,
     ) -> bool {
         let mut activated = false;
@@ -3954,7 +3979,7 @@ impl TaskRegistry {
     fn notification_recipient(
         state: &TaskState,
         map: &HashMap<String, TaskState>,
-    ) -> Option<protocol::AgentId> {
+    ) -> Option<lingxi_core::types::AgentId> {
         let owner = state.base().creator_agent_id?;
         // lLe/IRe: an agent/workflow whose owner no longer has a live runner
         // reports to the main session instead of stranding the completion.
@@ -3992,7 +4017,7 @@ impl TaskRegistry {
     /// Test readiness without consuming any recipient’s notifications.
     pub async fn has_pending_task_notifications_for(
         &self,
-        recipient: Option<protocol::AgentId>,
+        recipient: Option<lingxi_core::types::AgentId>,
     ) -> bool {
         if self
             .pending_monitor_events
@@ -4047,7 +4072,7 @@ impl TaskRegistry {
     /// Drain main-session notifications only.
     /// `Kan`/`Dlo`: consume byte deltas for running output watermarks without
     /// attaching their text. Completion rendering reads the full output later.
-    async fn refresh_output_offsets(&self, recipient: Option<protocol::AgentId>) {
+    async fn refresh_output_offsets(&self, recipient: Option<lingxi_core::types::AgentId>) {
         if recipient.is_some() {
             return;
         }
@@ -4083,15 +4108,15 @@ impl TaskRegistry {
 
     pub async fn take_pending_task_notifications(
         &self,
-    ) -> Vec<platform_api::task_registry::TaskNotification> {
+    ) -> Vec<lingxi_core::host::task_registry::TaskNotification> {
         self.take_pending_task_notifications_for(None).await
     }
 
     /// Atomically select and consume notifications belonging to this recipient.
     pub async fn take_pending_task_notifications_for(
         &self,
-        recipient: Option<protocol::AgentId>,
-    ) -> Vec<platform_api::task_registry::TaskNotification> {
+        recipient: Option<lingxi_core::types::AgentId>,
+    ) -> Vec<lingxi_core::host::task_registry::TaskNotification> {
         self.refresh_output_offsets(recipient).await;
         use crate::handle::{status_to_wire, task_type_to_wire};
         let mut map = self.tasks.write().await;
@@ -4206,7 +4231,7 @@ impl TaskRegistry {
                 .physical_output_is_authoritative(&b.output_file)
                 .await
                 .then(|| b.output_file.to_string_lossy().into_owned());
-            out.push(platform_api::task_registry::TaskNotification {
+            out.push(lingxi_core::host::task_registry::TaskNotification {
                 task_id: b.id.clone(),
                 recipient_agent_id: Self::notification_recipient(state, &map),
                 task_type: task_type_to_wire(b.task_type).to_string(),
@@ -4247,7 +4272,7 @@ impl TaskRegistry {
                 // both the summary's trailing word and the `<status>` tag.
                 mcp: match state {
                     TaskState::McpTask(m) => {
-                        Some(platform_api::task_registry::McpTaskNotificationMeta {
+                        Some(lingxi_core::host::task_registry::McpTaskNotificationMeta {
                             server_name: m.server_name.clone(),
                             tool_name: m.tool_name.clone(),
                             mcp_status: m.mcp_status.clone(),
@@ -4369,7 +4394,7 @@ impl TaskRegistry {
                 deferred_rest.push((id, payload));
                 continue;
             }
-            out.push(platform_api::task_registry::TaskNotification {
+            out.push(lingxi_core::host::task_registry::TaskNotification {
                 task_id: b.id.clone(),
                 recipient_agent_id: Self::notification_recipient(state, &map),
                 task_type: task_type_to_wire(b.task_type).to_string(),
@@ -4882,12 +4907,12 @@ impl TaskRegistry {
 /// shell completion reminder. Command monitors use JF and never take this arm.
 fn monitor_stopped_note(
     state: &TaskState,
-) -> Option<platform_api::task_registry::TaskNotification> {
+) -> Option<lingxi_core::host::task_registry::TaskNotification> {
     if !matches!(state, TaskState::Monitor(_)) || state.base().task_type != TaskType::Monitor {
         return None;
     }
     let base = state.base();
-    Some(platform_api::task_registry::TaskNotification {
+    Some(lingxi_core::host::task_registry::TaskNotification {
         task_id: base.id.clone(),
         recipient_agent_id: base.creator_agent_id,
         task_type: "monitor_ws".into(),
@@ -5085,7 +5110,7 @@ fn stamp_terminal_clock(state: &mut TaskState, holds_live_children: bool) {
 /// `InProcessTeammate` task WITHOUT a `coordinator` → `lingxi-tasks` dependency
 /// cycle (the abstract trait lives in `traits`; this concrete impl lives here).
 ///
-/// Unlike [`TaskRegistryHandle::create`](platform_api::task_registry::TaskRegistryHandle::create)
+/// Unlike [`TaskRegistryHandle::create`](lingxi_core::host::task_registry::TaskRegistryHandle::create)
 /// — which builds a nil-`AgentId` / empty-name placeholder — `spawn_teammate`
 /// threads the worker `agent_id` + `name` straight through
 /// [`TaskRegistry::spawn`], so the started teammate is keyed on the real worker
@@ -5095,7 +5120,7 @@ fn stamp_terminal_clock(state: &mut TaskState, holds_live_children: bool) {
 impl TeamSpawnSeam for TaskRegistry {
     async fn spawn_teammate(
         &self,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         name: String,
         team_name: String,
         description: String,
@@ -5121,11 +5146,11 @@ impl TeamSpawnSeam for TaskRegistry {
 
     async fn spawn_teammate_request(
         &self,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         name: String,
         team_name: String,
-        request: platform_api::subagent_spawn::SubagentSpawnRequest,
-        inherit: platform_api::subagent_spawn::SubagentInheritance,
+        request: lingxi_core::host::subagent_spawn::SubagentSpawnRequest,
+        inherit: lingxi_core::host::subagent_spawn::SubagentInheritance,
     ) -> Result<String, TeamSpawnError> {
         let description = request.description.clone().unwrap_or_default();
         self.spawn(
@@ -5150,7 +5175,7 @@ impl TeamSpawnSeam for TaskRegistry {
     async fn apply_plan_approval(
         &self,
         task_id: &str,
-        response: platform_api::teammate_plan::PlanApprovalResponse,
+        response: lingxi_core::host::teammate_plan::PlanApprovalResponse,
     ) -> Result<(), TeamSpawnError> {
         let task_id = self.canonical_or_raw(task_id).await;
         let kind = self
@@ -5227,7 +5252,7 @@ impl TeamSpawnSeam for TaskRegistry {
                 if agent.outcome.killed_by.as_deref() == Some("user")
         ) {
             return Err(TeamSpawnError::StoppedByUser(
-                platform_api::task_registry::stopped_by_user_message(task_id),
+                lingxi_core::host::task_registry::stopped_by_user_message(task_id),
             ));
         }
         let external = self
@@ -5403,11 +5428,11 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             is_parked: false,
             is_observer: spawn_request.as_ref().is_some_and(|r| {
                 r.query_source_label.as_deref()
-                    == Some(platform_api::subagent_spawn::OBSERVER_QUERY_SOURCE)
+                    == Some(lingxi_core::host::subagent_spawn::OBSERVER_QUERY_SOURCE)
             }),
             observed_agent_id: if spawn_request.as_ref().is_some_and(|r| {
                 r.query_source_label.as_deref()
-                    == Some(platform_api::subagent_spawn::OBSERVER_QUERY_SOURCE)
+                    == Some(lingxi_core::host::subagent_spawn::OBSERVER_QUERY_SOURCE)
             }) {
                 base.creator_agent_id.take()
             } else {
@@ -5459,8 +5484,6 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             resume_from_run_id,
             args,
             run_id,
-            parent_model: _,
-            parent_model_profile: _,
             invocation_mode: _,
             workflow_source: _,
             script_is_verbatim_builtin: _,
@@ -5570,8 +5593,8 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             prompt: request.prompt.clone(),
             run_id: None,
             preset: match request.preset {
-                platform_api::FusionPreset::Quality => "quality".to_string(),
-                platform_api::FusionPreset::Fast => "fast".to_string(),
+                lingxi_core::host::FusionPreset::Quality => "quality".to_string(),
+                lingxi_core::host::FusionPreset::Fast => "fast".to_string(),
             },
             cross_provider: request.cross_provider,
             final_text: None,
@@ -5582,7 +5605,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             effective_timeout_ms: None,
             planned_panels: None,
             fusion_activation_deadline: None,
-            publication_status: platform_api::FusionPublicationStatus::Pending,
+            publication_status: lingxi_core::host::FusionPublicationStatus::Pending,
             publication_error: None,
         }),
     }
@@ -5814,7 +5837,7 @@ pub fn register_fusion_handler_with_recorder(
     tool_invoker: Arc<dyn ToolInvoker>,
     budget: Arc<dyn BudgetEnforcerHandle>,
     status_sink: Arc<dyn crate::handlers::TaskStatusSink>,
-    terminal_recorder: Option<Arc<dyn platform_api::FusionRunRecorder>>,
+    terminal_recorder: Option<Arc<dyn lingxi_core::host::FusionRunRecorder>>,
 ) {
     register_fusion_handler_with_recorder_factory(
         reg,
@@ -5838,8 +5861,8 @@ pub fn register_fusion_handler_with_recorder_factory(
     tool_invoker: Arc<dyn ToolInvoker>,
     budget: Arc<dyn BudgetEnforcerHandle>,
     status_sink: Arc<dyn crate::handlers::TaskStatusSink>,
-    terminal_recorder: Option<Arc<dyn platform_api::FusionRunRecorder>>,
-    terminal_recorder_factory: Option<Arc<dyn platform_api::FusionRunRecorderFactory>>,
+    terminal_recorder: Option<Arc<dyn lingxi_core::host::FusionRunRecorder>>,
+    terminal_recorder_factory: Option<Arc<dyn lingxi_core::host::FusionRunRecorderFactory>>,
 ) {
     let output_manager = reg.output_manager.clone();
     let handler = LocalFusionHandler::new(executor, sink, tool_invoker, budget, output_manager)
@@ -5878,7 +5901,7 @@ pub fn register_fusion_handler_with_recorder_factory(
 #[cfg(test)]
 mod adopted_workflow_scope_test {
     use super::*;
-    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 
     // ---- Minimal in-memory FileSystem, just enough for `output_manager` ----
     struct InMemoryFs {
@@ -5990,16 +6013,18 @@ mod adopted_workflow_scope_test {
     async fn foreground_agent_output_is_readable_before_transcript_link() {
         let (_dir, fs, registry) = make_registry();
         let state = registry
-            .register_foreground_agent(platform_api::task_registry::ForegroundAgentRegistration {
-                agent_id: protocol::AgentId::new(),
-                agent_type: "Plan".into(),
-                description: "plan the change".into(),
-                prompt: "design".into(),
-                tool_use_id: None,
-                creator_agent_id: None,
-                creator_teammate_name: None,
-                creator_team_name: None,
-            })
+            .register_foreground_agent(
+                lingxi_core::host::task_registry::ForegroundAgentRegistration {
+                    agent_id: lingxi_core::types::AgentId::new(),
+                    agent_type: "Plan".into(),
+                    description: "plan the change".into(),
+                    prompt: "design".into(),
+                    tool_use_id: None,
+                    creator_agent_id: None,
+                    creator_teammate_name: None,
+                    creator_team_name: None,
+                },
+            )
             .await
             .unwrap();
         assert!(
@@ -6009,7 +6034,7 @@ mod adopted_workflow_scope_test {
                 .contains_key(state.base().output_file.to_str().unwrap()),
             "foreground task must allocate its spool before the row is visible"
         );
-        let output = platform_api::task_registry::TaskRegistryHandle::output(
+        let output = lingxi_core::host::task_registry::TaskRegistryHandle::output(
             &registry,
             &state.base().id,
             Some(0),
@@ -6023,18 +6048,20 @@ mod adopted_workflow_scope_test {
     #[tokio::test]
     async fn completed_agent_dialog_visibility_requires_background_nonobserver_without_children() {
         let (_dir, _fs, registry) = make_registry();
-        let owner = protocol::AgentId::new();
+        let owner = lingxi_core::types::AgentId::new();
         let state = registry
-            .register_foreground_agent(platform_api::task_registry::ForegroundAgentRegistration {
-                agent_id: owner,
-                agent_type: "general-purpose".into(),
-                description: "ui".into(),
-                prompt: "".into(),
-                tool_use_id: None,
-                creator_agent_id: None,
-                creator_teammate_name: None,
-                creator_team_name: None,
-            })
+            .register_foreground_agent(
+                lingxi_core::host::task_registry::ForegroundAgentRegistration {
+                    agent_id: owner,
+                    agent_type: "general-purpose".into(),
+                    description: "ui".into(),
+                    prompt: "".into(),
+                    tool_use_id: None,
+                    creator_agent_id: None,
+                    creator_teammate_name: None,
+                    creator_team_name: None,
+                },
+            )
             .await
             .unwrap();
         let id = state.base().id.clone();
@@ -6061,7 +6088,7 @@ mod adopted_workflow_scope_test {
             agent.is_backgrounded = true;
         }
         assert!(registry.completed_agent_visible(&id).await);
-        let record = <TaskRegistry as platform_api::task_registry::TaskRegistryHandle>::list(
+        let record = <TaskRegistry as lingxi_core::host::task_registry::TaskRegistryHandle>::list(
             &registry,
             Default::default(),
         )
@@ -6099,14 +6126,14 @@ mod adopted_workflow_scope_test {
     async fn foreground_agent_killer_binding_reaches_real_registry_and_stops_runner() {
         struct Killer(Arc<tokio::sync::Notify>);
         #[async_trait::async_trait]
-        impl platform_api::task_registry::TaskKiller for Killer {
+        impl lingxi_core::host::task_registry::TaskKiller for Killer {
             async fn kill(&self) {
                 self.0.notify_one();
             }
         }
         let (_dir, _fs, registry) = make_registry();
-        let agent_id = protocol::AgentId::new();
-        let registration = platform_api::task_registry::ForegroundAgentRegistration {
+        let agent_id = lingxi_core::types::AgentId::new();
+        let registration = lingxi_core::host::task_registry::ForegroundAgentRegistration {
             agent_id,
             agent_type: "Plan".into(),
             description: "plan the change".into(),
@@ -6124,7 +6151,7 @@ mod adopted_workflow_scope_test {
         let killed = Arc::new(tokio::sync::Notify::new());
         // Exercise the public adapter used by Agent's before_start observer,
         // including alias resolution; a mock registry hid the shell-only bug.
-        platform_api::task_registry::TaskRegistryHandle::bind_background_killer(
+        lingxi_core::host::task_registry::TaskRegistryHandle::bind_background_killer(
             &registry,
             &agent_id.to_string(),
             Arc::new(Killer(killed.clone())),
@@ -6142,10 +6169,12 @@ mod adopted_workflow_scope_test {
 
         // The binding must not install stale cleanup after terminal publication.
         let terminal = registry
-            .register_foreground_agent(platform_api::task_registry::ForegroundAgentRegistration {
-                agent_id: protocol::AgentId::new(),
-                ..registration
-            })
+            .register_foreground_agent(
+                lingxi_core::host::task_registry::ForegroundAgentRegistration {
+                    agent_id: lingxi_core::types::AgentId::new(),
+                    ..registration
+                },
+            )
             .await
             .unwrap();
         let terminal_id = terminal.base().id.clone();
@@ -6153,7 +6182,7 @@ mod adopted_workflow_scope_test {
             .set_status(&terminal_id, TaskStatus::Completed)
             .await
             .unwrap();
-        platform_api::task_registry::TaskRegistryHandle::bind_background_killer(
+        lingxi_core::host::task_registry::TaskRegistryHandle::bind_background_killer(
             &registry,
             &terminal_id,
             Arc::new(Killer(killed)),
@@ -6177,14 +6206,14 @@ mod adopted_workflow_scope_test {
     async fn foreground_agent_controls_register_background_and_preserve_completed_row() {
         struct BackgroundSignal(std::sync::atomic::AtomicUsize);
         #[async_trait::async_trait]
-        impl platform_api::task_registry::TaskBackgrounder for BackgroundSignal {
+        impl lingxi_core::host::task_registry::TaskBackgrounder for BackgroundSignal {
             async fn background(&self) {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }
         let (_dir, _fs, registry) = make_registry();
-        let agent_id = protocol::AgentId::new();
-        let registration = platform_api::task_registry::ForegroundAgentRegistration {
+        let agent_id = lingxi_core::types::AgentId::new();
+        let registration = lingxi_core::host::task_registry::ForegroundAgentRegistration {
             agent_id,
             agent_type: "general-purpose".into(),
             description: "foreground".into(),
@@ -6225,10 +6254,12 @@ mod adopted_workflow_scope_test {
             matches!(registry.get(&id).await, Some(TaskState::LocalAgent(agent)) if agent.is_backgrounded)
         );
         let temporary = registry
-            .register_foreground_agent(platform_api::task_registry::ForegroundAgentRegistration {
-                agent_id: protocol::AgentId::new(),
-                ..registration
-            })
+            .register_foreground_agent(
+                lingxi_core::host::task_registry::ForegroundAgentRegistration {
+                    agent_id: lingxi_core::types::AgentId::new(),
+                    ..registration
+                },
+            )
             .await
             .unwrap();
         registry
@@ -6316,7 +6347,7 @@ mod adopted_workflow_scope_test {
         object.insert("task_type".into(), serde_json::json!("LocalAgent"));
         object.insert(
             "agent_id".into(),
-            serde_json::json!(protocol::AgentId::new()),
+            serde_json::json!(lingxi_core::types::AgentId::new()),
         );
         object.insert("is_observer".into(), serde_json::json!(true));
         object.insert(
@@ -6461,7 +6492,7 @@ mod adopted_workflow_scope_test {
     async fn pressure_stop_survives_cancellation_during_output_io() {
         struct Killer(Arc<tokio::sync::Notify>);
         #[async_trait]
-        impl platform_api::task_registry::TaskKiller for Killer {
+        impl lingxi_core::host::task_registry::TaskKiller for Killer {
             async fn kill(&self) {
                 self.0.notify_one();
             }
@@ -6646,8 +6677,8 @@ mod adopted_workflow_scope_test {
             .expect("activate workflow");
     }
 
-    fn checked_outcome() -> platform_api::task_registry::WorkflowTerminalOutcome {
-        platform_api::task_registry::WorkflowTerminalOutcome {
+    fn checked_outcome() -> lingxi_core::host::task_registry::WorkflowTerminalOutcome {
+        lingxi_core::host::task_registry::WorkflowTerminalOutcome {
             result: Some(r#"{"ok":true,"host_checked":true}"#.into()),
             agent_count: 3,
             ..Default::default()
@@ -6738,7 +6769,7 @@ mod adopted_workflow_scope_test {
         };
         assert_eq!(workflow.outcome, checked_outcome());
 
-        let handle: &dyn platform_api::task_registry::TaskRegistryHandle = &registry;
+        let handle: &dyn lingxi_core::host::task_registry::TaskRegistryHandle = &registry;
         let chunk = handle
             .output("wcommit08", None)
             .await
@@ -7004,7 +7035,7 @@ mod adopted_workflow_scope_test {
         // Exercise the public TaskOutput projection as well as the backing
         // manager: the failed registry row and the fail-closed payload must
         // agree even when the rewrite itself was rejected.
-        let handle: &dyn platform_api::task_registry::TaskRegistryHandle = &registry;
+        let handle: &dyn lingxi_core::host::task_registry::TaskRegistryHandle = &registry;
         let chunk = handle
             .output("wcommit07", None)
             .await

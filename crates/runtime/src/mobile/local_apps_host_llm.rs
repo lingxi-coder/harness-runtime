@@ -19,9 +19,9 @@ use base64::Engine as _;
 use client::protocol::events::ClientEvent;
 use client::protocol::local_apps::{AppCapabilityKindDto, AppEventDto};
 use futures_util::StreamExt;
-use llm_runtime::{ContentDelta, LlmEvent};
+use lingxi_core::host::OutputStream;
+use llm_runtime::{HistoryContentDelta, HistoryEvent};
 use local_apps::AppCapability;
-use platform_api::OutputStream;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -472,22 +472,22 @@ impl LocalAppsHostBroker {
             let mut stop_reason = None;
             while let Some(event) = events.next().await {
                 match event.map_err(|error| error.to_string())? {
-                    LlmEvent::ContentBlockDelta {
-                        delta: ContentDelta::TextDelta { text },
+                    HistoryEvent::ContentBlockDelta {
+                        delta: HistoryContentDelta::TextDelta { text },
                         ..
                     } => output.emit_text(&text).await,
-                    LlmEvent::MessageDelta { delta, .. } => {
+                    HistoryEvent::MessageDelta { delta, .. } => {
                         stop_reason = delta.stop_reason.or(stop_reason);
                     }
-                    LlmEvent::Completed { response } => {
+                    HistoryEvent::Completed { response } => {
                         stop_reason = response.stop_reason.clone().or(stop_reason);
                     }
-                    LlmEvent::WebSearch { .. }
-                    | LlmEvent::MessageStart { .. }
-                    | LlmEvent::ContentBlockStart { .. }
-                    | LlmEvent::ContentBlockDelta { .. }
-                    | LlmEvent::ContentBlockStop { .. }
-                    | LlmEvent::MessageStop => {}
+                    HistoryEvent::WebSearch { .. }
+                    | HistoryEvent::MessageStart { .. }
+                    | HistoryEvent::ContentBlockStart { .. }
+                    | HistoryEvent::ContentBlockDelta { .. }
+                    | HistoryEvent::ContentBlockStop { .. }
+                    | HistoryEvent::MessageStop => {}
                 }
             }
             Ok::<_, String>((output.text_snapshot().await, stop_reason))
@@ -536,7 +536,7 @@ mod tests {
         AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppEventDto,
     };
     use futures_util::stream;
-    use llm_runtime::{ContentDelta, LlmEvent, MessageDeltaPayload};
+    use llm_runtime::{HistoryContentDelta, HistoryEvent, HistoryMessageDelta};
     use local_apps::error::AppError;
     use local_apps::test_support::FixedClock;
     use local_apps::{
@@ -552,7 +552,7 @@ mod tests {
     /// A model whose `chat` answers from a script, recording what it saw.
     struct ChatModel {
         outcome: std::sync::Mutex<Vec<Result<ChatOutcome, AppError>>>,
-        stream_events: std::sync::Mutex<Option<Vec<Result<LlmEvent, AppError>>>>,
+        stream_events: std::sync::Mutex<Option<Vec<Result<HistoryEvent, AppError>>>>,
         seen: std::sync::Mutex<Vec<ChatRequest>>,
         /// When set, `chat` never returns — for the timeout test.
         hang: bool,
@@ -580,7 +580,7 @@ mod tests {
             })
         }
 
-        fn streaming(events: Vec<Result<LlmEvent, AppError>>) -> Arc<Self> {
+        fn streaming(events: Vec<Result<HistoryEvent, AppError>>) -> Arc<Self> {
             Arc::new(Self {
                 outcome: std::sync::Mutex::new(Vec::new()),
                 stream_events: std::sync::Mutex::new(Some(events)),
@@ -627,12 +627,12 @@ mod tests {
     struct StubCamera(Vec<u8>);
 
     #[async_trait]
-    impl platform_api::CameraControl for StubCamera {
+    impl lingxi_core::host::CameraControl for StubCamera {
         async fn capture_photo(
             &self,
-            _opts: platform_api::CapturePhotoOpts,
-        ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
-            Ok(platform_api::CapturedImage {
+            _opts: lingxi_core::host::CapturePhotoOpts,
+        ) -> Result<lingxi_core::host::CapturedImage, lingxi_core::host::CameraError> {
+            Ok(lingxi_core::host::CapturedImage {
                 jpeg_bytes: self.0.clone(),
                 width: 1280,
                 height: 960,
@@ -641,9 +641,9 @@ mod tests {
 
         async fn pick_from_library(
             &self,
-        ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
-            self.capture_photo(platform_api::CapturePhotoOpts {
-                position: platform_api::CameraPosition::Back,
+        ) -> Result<lingxi_core::host::CapturedImage, lingxi_core::host::CameraError> {
+            self.capture_photo(lingxi_core::host::CapturePhotoOpts {
+                position: lingxi_core::host::CameraPosition::Back,
                 allow_editing: false,
             })
             .await
@@ -990,26 +990,26 @@ mod tests {
     #[tokio::test]
     async fn llm_stream_emits_ordered_text_frames_and_final_response() {
         let model = ChatModel::streaming(vec![
-            Ok(LlmEvent::ContentBlockDelta {
+            Ok(HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::TextDelta {
+                delta: HistoryContentDelta::TextDelta {
                     text: "第一段".into(),
                 },
             }),
-            Ok(LlmEvent::ContentBlockDelta {
+            Ok(HistoryEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::TextDelta {
+                delta: HistoryContentDelta::TextDelta {
                     text: "第二段".into(),
                 },
             }),
-            Ok(LlmEvent::MessageDelta {
-                delta: MessageDeltaPayload {
+            Ok(HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
                 usage: None,
             }),
-            Ok(LlmEvent::MessageStop),
+            Ok(HistoryEvent::MessageStop),
         ]);
         let h = harness(model).await;
         declare_and_grant(&h);

@@ -3,13 +3,11 @@
 //! cancellable via `AuthState::shutdown` (Task 6).
 
 use async_trait::async_trait;
-use llm_runtime::oauth::anthropic::refresh::{AuthState, RefreshDriver};
-use llm_runtime::oauth::anthropic::ClaudeAiOAuthConfig;
-use platform_api::http::SseStream;
-use platform_api::{
-    BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner,
-};
-use protocol::{HttpRequest, HttpResponse, Secret};
+use lingxi_core::host::{BackgroundTaskHandle, Clock, RuntimeError, RuntimeSpawner};
+use lingxi_core::types::Secret;
+use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
+use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
+use llm_runtime::auth::anthropic::refresh::{AuthState, RefreshDriver};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -24,22 +22,23 @@ struct CountingTransport {
 }
 
 #[async_trait]
-impl HttpTransport for CountingTransport {
-    async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
+impl Transport for CountingTransport {
+    async fn send(
+        &self,
+        _req: HttpRequest,
+    ) -> Result<StreamResponse, lingxi_llm_client::protocol::LlmError> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         let body = format!(
             r#"{{"access_token":"REFRESHED_v{n}","refresh_token":"R_v{n}","expires_in":{}}}"#,
             self.expires_in_secs,
         );
-        Ok(HttpResponse {
+        Ok(StreamResponse {
             status: 200,
             headers: vec![],
-            body,
-            body_bytes: Vec::new(),
+            body: Box::pin(futures::stream::once(async move {
+                Ok(bytes::Bytes::from(body))
+            })),
         })
-    }
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
-        unimplemented!()
     }
 }
 
@@ -97,7 +96,7 @@ async fn short_ttl_token_refreshes_at_half_remaining() {
     let cfg = ClaudeAiOAuthConfig::default_with_port(0);
     let calls = Arc::new(AtomicU32::new(0));
     let elapsed = Arc::new(AtomicU64::new(0));
-    let transport: Arc<dyn HttpTransport> = Arc::new(CountingTransport {
+    let transport: Arc<dyn Transport> = Arc::new(CountingTransport {
         calls: calls.clone(),
         expires_in_secs: 60,
     });
@@ -169,7 +168,7 @@ async fn shutdown_cancels_handle_and_emits_event() {
     let cfg = ClaudeAiOAuthConfig::default_with_port(0);
     let calls = Arc::new(AtomicU32::new(0));
     let elapsed = Arc::new(AtomicU64::new(0));
-    let transport: Arc<dyn HttpTransport> = Arc::new(CountingTransport {
+    let transport: Arc<dyn Transport> = Arc::new(CountingTransport {
         calls: calls.clone(),
         expires_in_secs: 3600,
     });
@@ -225,7 +224,7 @@ async fn proactive_then_reactive_collapses_to_one_refresh() {
     let cfg = ClaudeAiOAuthConfig::default_with_port(0);
     let calls = Arc::new(AtomicU32::new(0));
     let elapsed = Arc::new(AtomicU64::new(0));
-    let transport: Arc<dyn HttpTransport> = Arc::new(CountingTransport {
+    let transport: Arc<dyn Transport> = Arc::new(CountingTransport {
         calls: calls.clone(),
         expires_in_secs: 3600,
     });
@@ -252,7 +251,7 @@ async fn proactive_then_reactive_collapses_to_one_refresh() {
         .expect("spawn ok");
 
     // Fire a reactive refresh BEFORE the proactive timer's 30s wake.
-    let driver = llm_runtime::oauth::anthropic::refresh::RefreshDriver::new(state.clone());
+    let driver = llm_runtime::auth::anthropic::refresh::RefreshDriver::new(state.clone());
     let prev = state.token.read().await.token_hash();
     let r = driver.refresh(prev).await;
     assert!(r.is_ok(), "reactive refresh ok: {r:?}");

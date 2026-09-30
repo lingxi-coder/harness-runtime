@@ -1,5 +1,5 @@
 //! Shared `.worktreeinclude` copy step for the desktop `git worktree`-backed
-//! [`WorktreeManager`](platform_api::WorktreeManager) impls (posix + windows).
+//! [`WorktreeManager`](lingxi_core::host::WorktreeManager) impls (posix + windows).
 //!
 //! Behavioral port of claude-code 2.1.207 `copyWorktreeIncludeFiles` (binary
 //! fn `TZc`, invoked as the last step of the post-create setup `H6i` for BOTH

@@ -6,19 +6,19 @@
 
 use cost::pricing::PricingCatalog;
 use cost::CostTracker;
-use llm_runtime::{ContentBlock, LlmResponse, TokenUsage, Usage};
+use lingxi_core::host::OrchestratorHandle;
+use lingxi_core::types::SessionId;
+use llm_runtime::{ContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use platform_api::OrchestratorHandle;
-use protocol::SessionId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tool_api::registry::ToolRegistry;
 
-fn end_turn_response_with_usage(input: u64, output: u64) -> LlmResponse {
-    LlmResponse {
+fn end_turn_response_with_usage(input: u64, output: u64) -> HistoryResponse {
+    HistoryResponse {
         id: "msg_mock".to_string(),
         model: "claude-opus-4-6".to_string(),
         // Visible text: an empty-content end_turn trips the #78 thinking-only
@@ -31,11 +31,17 @@ fn end_turn_response_with_usage(input: u64, output: u64) -> LlmResponse {
         stop_reason: Some("end_turn".to_string()),
         stop_details: None,
         usage: Usage {
-            billable_tokens: TokenUsage {
-                input,
-                output,
-                ..Default::default()
-            },
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    reasoning_tokens: 0,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
             ..Default::default()
         },
         cost: None,
@@ -196,7 +202,7 @@ async fn emit_end_turn_carries_real_cost() {
     let end_turn_cost = events
         .iter()
         .find_map(|e| match e {
-            platform_api::OutputEvent::EndTurn { cost, .. } => Some(cost.clone()),
+            lingxi_core::host::OutputEvent::EndTurn { cost, .. } => Some(cost.clone()),
             _ => None,
         })
         .expect("end_turn event present");

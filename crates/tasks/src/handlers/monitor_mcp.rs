@@ -44,7 +44,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use platform_api::{BackgroundTaskHandle, FileSystem};
+use lingxi_core::host::{BackgroundTaskHandle, FileSystem};
 use tokio::sync::{watch, Mutex};
 
 use crate::id::{generate_task_id, TaskType};
@@ -460,13 +460,13 @@ mod tests {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use tokio::sync::{Mutex as TokioMutex, Notify};
 
-    use platform_api::{
+    use lingxi_core::host::{
         ElicitRequestDto, ElicitResultDto, FileContent, FileEvent, FlockGuard, FsError, McpError,
         McpNotificationStream, McpPromptDto, McpRawConnection, McpResourceContentDto,
         McpResourceDto, McpToolDto, McpToolResultDto, McpTransport, McpTransportKind,
         McpTransportSpec, RuntimeError, RuntimeSpawner, ServerCapabilitiesDto,
     };
-    use protocol::McpConnectionId;
+    use lingxi_core::types::McpConnectionId;
     use test_harness::mocks::{MockMcpTransport, MockRuntimeSpawner};
 
     // ---- minimal in-memory FileSystem (mirrors handle.rs tests) ----------
@@ -718,13 +718,13 @@ mod tests {
             &self,
             name: &str,
             task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, RuntimeError> {
             let finished = self.finished.clone();
             tokio::spawn(async move {
                 task.await;
                 finished.notify_one();
             });
-            Ok(platform_api::BackgroundTaskHandle {
+            Ok(lingxi_core::host::BackgroundTaskHandle {
                 task_name: name.to_string(),
                 task_id: self.next_id.fetch_add(1, Ordering::SeqCst),
             })
@@ -737,7 +737,7 @@ mod tests {
 
         async fn cancel(
             &self,
-            _handle: &platform_api::BackgroundTaskHandle,
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
         ) -> Result<(), RuntimeError> {
             Ok(())
         }
@@ -752,7 +752,7 @@ mod tests {
             spec: McpTransportSpec::InProcess {
                 registry_key: "mock".into(),
             },
-            scope: mcp::ConfigScope::Settings(protocol::SettingsScope::User),
+            scope: mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             disabled: false,
             timeout_ms: None,
             discovery_cache: None,
@@ -776,8 +776,8 @@ mod tests {
                     experimental: StdHashMap::new(),
                     extensions: StdHashMap::new(),
                 },
-                negotiated: platform_api::McpNegotiatedProtocol {
-                    era: platform_api::McpProtocolEra::Legacy,
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
                     version: "2025-11-25".into(),
                 },
                 tools: Vec::new(),

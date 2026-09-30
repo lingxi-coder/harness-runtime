@@ -5,7 +5,7 @@
 //! reservation and no generation bookkeeping. Ordinary admission is fail-fast
 //! and a group waits on tokio's own FIFO-fair semaphore.
 
-use platform_api::panel_pool::PanelAdmissionCancellation as CancellationToken;
+use lingxi_core::host::panel_pool::PanelAdmissionCancellation as CancellationToken;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,7 +51,7 @@ impl PoolGroupDrain {
 }
 
 #[async_trait::async_trait]
-impl platform_api::panel_pool::PanelPoolDrain for PoolGroupDrain {
+impl lingxi_core::host::panel_pool::PanelPoolDrain for PoolGroupDrain {
     async fn wait(&self) {
         loop {
             let changed = self.changed.notified();

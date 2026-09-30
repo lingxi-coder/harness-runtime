@@ -6,8 +6,8 @@
 //! filesystem mtime drift can't affect the assertion. Drift in any factor
 //! manifests as an `expected_order` mismatch with the exact failing scenario.
 
+use lingxi_core::types::{MemoryEntry, MemoryEntryTier};
 use memory::memdir::find::{find_relevant, RelevanceInputs};
-use protocol::{MemoryEntry, MemoryEntryTier};
 use serde::Deserialize;
 use test_harness::parity::load_fixture;
 

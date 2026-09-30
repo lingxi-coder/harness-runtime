@@ -10,10 +10,10 @@
 #![allow(clippy::doc_markdown)] // dense OAuth/OIDC vocabulary
 
 use async_trait::async_trait;
+use lingxi_core::host::http::SseStream;
+use lingxi_core::host::{HttpError, HttpTransport};
+use lingxi_core::types::{HttpRequest, HttpResponse};
 use mcp::xaa::{self, XaaConfig};
-use platform_api::http::SseStream;
-use platform_api::{HttpError, HttpTransport};
-use protocol::{HttpRequest, HttpResponse};
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------

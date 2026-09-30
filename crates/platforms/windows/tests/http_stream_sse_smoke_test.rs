@@ -9,9 +9,9 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
 use futures_util::StreamExt;
-use platform_api::HttpTransport;
+use lingxi_core::host::HttpTransport;
+use lingxi_core::types::{HttpMethod, HttpRequest};
 use platform_windows::WindowsHttp;
-use protocol::{HttpMethod, HttpRequest};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -109,7 +109,7 @@ async fn stream_sse_surfaces_non_2xx_at_open_time() {
         panic!("stream should fail for 429");
     };
     match err {
-        platform_api::HttpError::Status { status, body } => {
+        lingxi_core::host::HttpError::Status { status, body } => {
             assert_eq!(status, 429);
             assert!(body.contains("rate limited"));
         }

@@ -39,7 +39,7 @@ pub const MEMORY_INDEX_NAME: &str = "MEMORY.md";
 
 /// The complete memory protocol used by standard Claude models in 2.1.220.
 /// LingXi also keeps this fuller form for non-Claude
-/// [`platform_api::model_capabilities::PromptProfile::FullHarness`] models; only
+/// [`lingxi_core::host::model_capabilities::PromptProfile::FullHarness`] models; only
 /// Claude's explicitly lean profiles receive the compact form.
 ///
 /// Product-owned names are intentionally rebranded (`CLAUDE.md` →
@@ -215,12 +215,12 @@ Before saving, check for an existing file that already covers it \u{2014} update
 #[must_use]
 pub fn render_for_profile(
     path: &str,
-    profile: platform_api::model_capabilities::PromptProfile,
+    profile: lingxi_core::host::model_capabilities::PromptProfile,
 ) -> String {
     match profile {
-        platform_api::model_capabilities::PromptProfile::ClaudeLean => render(path),
-        platform_api::model_capabilities::PromptProfile::ClaudeStandard
-        | platform_api::model_capabilities::PromptProfile::FullHarness => render_auto(path),
+        lingxi_core::host::model_capabilities::PromptProfile::ClaudeLean => render(path),
+        lingxi_core::host::model_capabilities::PromptProfile::ClaudeStandard
+        | lingxi_core::host::model_capabilities::PromptProfile::FullHarness => render_auto(path),
     }
 }
 
@@ -277,7 +277,7 @@ mod tests {
                 "full",
                 render_for_profile(
                     "/m",
-                    platform_api::model_capabilities::PromptProfile::FullHarness,
+                    lingxi_core::host::model_capabilities::PromptProfile::FullHarness,
                 ),
             ),
         ] {
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn profile_selects_compact_or_full_memory_without_shortening_full_harness() {
-        use platform_api::model_capabilities::PromptProfile;
+        use lingxi_core::host::model_capabilities::PromptProfile;
 
         assert!(render_for_profile("/m", PromptProfile::ClaudeLean).starts_with("# Memory\n"));
         for profile in [PromptProfile::ClaudeStandard, PromptProfile::FullHarness] {

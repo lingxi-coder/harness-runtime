@@ -18,16 +18,21 @@ use std::sync::Arc;
 pub struct PanickingFs;
 
 #[async_trait]
-impl platform_api::filesystem::FileSystem for PanickingFs {
+impl lingxi_core::host::filesystem::FileSystem for PanickingFs {
     async fn read_file(
         &self,
         _: &str,
         _: Option<u64>,
         _: Option<u64>,
-    ) -> Result<platform_api::filesystem::FileContent, platform_api::filesystem::FsError> {
+    ) -> Result<lingxi_core::host::filesystem::FileContent, lingxi_core::host::filesystem::FsError>
+    {
         panic!("M4-01 builtin tools do not call FileSystem::read_file");
     }
-    async fn write_file(&self, _: &str, _: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn write_file(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
         panic!("M4-01 builtin tools do not call FileSystem::write_file")
     }
     fn is_within_workspace(&self, _: &str) -> bool {
@@ -37,49 +42,66 @@ impl platform_api::filesystem::FileSystem for PanickingFs {
         &self,
         _: &str,
     ) -> Result<
-        std::pin::Pin<Box<dyn futures::Stream<Item = platform_api::filesystem::FileEvent> + Send>>,
-        platform_api::filesystem::FsError,
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = lingxi_core::host::filesystem::FileEvent> + Send>,
+        >,
+        lingxi_core::host::filesystem::FsError,
     > {
         panic!("not called")
     }
-    async fn append_file(&self, _: &str, _: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn append_file(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
-    async fn truncate(&self, _: &str, _: u64) -> Result<(), platform_api::filesystem::FsError> {
+    async fn truncate(
+        &self,
+        _: &str,
+        _: u64,
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
     async fn file_mtime(
         &self,
         _: &str,
-    ) -> Result<std::time::SystemTime, platform_api::filesystem::FsError> {
+    ) -> Result<std::time::SystemTime, lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
-    async fn file_size(&self, _: &str) -> Result<u64, platform_api::filesystem::FsError> {
+    async fn file_size(&self, _: &str) -> Result<u64, lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
-    async fn delete_file(&self, _: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn delete_file(&self, _: &str) -> Result<(), lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
-    async fn symlink(&self, _: &str, _: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn symlink(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
     async fn flock_exclusive(
         &self,
         _: &str,
-    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError>
-    {
+    ) -> Result<
+        Box<dyn lingxi_core::host::filesystem::FlockGuard>,
+        lingxi_core::host::filesystem::FsError,
+    > {
         panic!("not called")
     }
-    async fn fsync(&self, _: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn fsync(&self, _: &str) -> Result<(), lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
     async fn read_file_rooted_no_follow(
         &self,
         root: &std::path::Path,
         relative: &std::path::Path,
-    ) -> Result<platform_api::filesystem::FileContent, platform_api::filesystem::FsError> {
-        let content = platform_api::rooted_fs::read_to_string(root, relative)?;
-        Ok(platform_api::filesystem::FileContent {
+    ) -> Result<lingxi_core::host::filesystem::FileContent, lingxi_core::host::filesystem::FsError>
+    {
+        let content = lingxi_core::host::rooted_fs::read_to_string(root, relative)?;
+        Ok(lingxi_core::host::filesystem::FileContent {
             total_lines: content.lines().count() as u64,
             content,
             truncated: false,
@@ -90,40 +112,42 @@ impl platform_api::filesystem::FileSystem for PanickingFs {
         root: &std::path::Path,
         relative: &std::path::Path,
         content: &str,
-    ) -> Result<(), platform_api::filesystem::FsError> {
-        platform_api::rooted_fs::atomic_write(
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
+        lingxi_core::host::rooted_fs::atomic_write(
             root,
             relative,
             content.as_bytes(),
-            platform_api::AtomicWriteOptions::default(),
+            lingxi_core::host::AtomicWriteOptions::default(),
         )
     }
     async fn flock_exclusive_rooted(
         &self,
         root: &std::path::Path,
         relative: &std::path::Path,
-    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError>
-    {
-        platform_api::rooted_fs::lock_exclusive(
+    ) -> Result<
+        Box<dyn lingxi_core::host::filesystem::FlockGuard>,
+        lingxi_core::host::filesystem::FsError,
+    > {
+        lingxi_core::host::rooted_fs::lock_exclusive(
             root,
             relative,
-            platform_api::rooted_fs::PRIVATE_DIR_MODE,
-            platform_api::rooted_fs::PRIVATE_FILE_MODE,
+            lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
+            lingxi_core::host::rooted_fs::PRIVATE_FILE_MODE,
         )
-        .map(|guard| Box::new(guard) as Box<dyn platform_api::filesystem::FlockGuard>)
+        .map(|guard| Box::new(guard) as Box<dyn lingxi_core::host::filesystem::FlockGuard>)
     }
     async fn delete_file_rooted_no_follow(
         &self,
         root: &std::path::Path,
         relative: &std::path::Path,
-    ) -> Result<(), platform_api::filesystem::FsError> {
-        platform_api::rooted_fs::remove_file(root, relative)
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
+        lingxi_core::host::rooted_fs::remove_file(root, relative)
     }
 }
 
 /// Convenience: return a `PanickingFs` wrapped as `Arc<dyn FileSystem>`.
 #[must_use]
-pub fn make_dummy_fs() -> Arc<dyn platform_api::filesystem::FileSystem> {
+pub fn make_dummy_fs() -> Arc<dyn lingxi_core::host::filesystem::FileSystem> {
     Arc::new(PanickingFs) as _
 }
 
@@ -140,16 +164,21 @@ struct GuestAliasFs {
 }
 
 #[async_trait]
-impl platform_api::filesystem::FileSystem for GuestAliasFs {
+impl lingxi_core::host::filesystem::FileSystem for GuestAliasFs {
     async fn read_file(
         &self,
         _: &str,
         _: Option<u64>,
         _: Option<u64>,
-    ) -> Result<platform_api::filesystem::FileContent, platform_api::filesystem::FsError> {
+    ) -> Result<lingxi_core::host::filesystem::FileContent, lingxi_core::host::filesystem::FsError>
+    {
         panic!("file tools run on raw tokio::fs, not FileSystem::read_file")
     }
-    async fn write_file(&self, _: &str, _: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn write_file(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
         panic!("file tools run on raw tokio::fs, not FileSystem::write_file")
     }
     fn is_within_workspace(&self, _: &str) -> bool {
@@ -159,53 +188,69 @@ impl platform_api::filesystem::FileSystem for GuestAliasFs {
         &self,
         _: &str,
     ) -> Result<
-        std::pin::Pin<Box<dyn futures::Stream<Item = platform_api::filesystem::FileEvent> + Send>>,
-        platform_api::filesystem::FsError,
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = lingxi_core::host::filesystem::FileEvent> + Send>,
+        >,
+        lingxi_core::host::filesystem::FsError,
     > {
         panic!("not called")
     }
-    async fn append_file(&self, _: &str, _: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn append_file(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
-    async fn truncate(&self, _: &str, _: u64) -> Result<(), platform_api::filesystem::FsError> {
+    async fn truncate(
+        &self,
+        _: &str,
+        _: u64,
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
     async fn file_mtime(
         &self,
         _: &str,
-    ) -> Result<std::time::SystemTime, platform_api::filesystem::FsError> {
+    ) -> Result<std::time::SystemTime, lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
-    async fn file_size(&self, _: &str) -> Result<u64, platform_api::filesystem::FsError> {
+    async fn file_size(&self, _: &str) -> Result<u64, lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
-    async fn delete_file(&self, _: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn delete_file(&self, _: &str) -> Result<(), lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
-    async fn symlink(&self, _: &str, _: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn symlink(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<(), lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
     async fn flock_exclusive(
         &self,
         _: &str,
-    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError>
-    {
+    ) -> Result<
+        Box<dyn lingxi_core::host::filesystem::FlockGuard>,
+        lingxi_core::host::filesystem::FsError,
+    > {
         panic!("not called")
     }
-    async fn fsync(&self, _: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn fsync(&self, _: &str) -> Result<(), lingxi_core::host::filesystem::FsError> {
         panic!("not called")
     }
     fn translate_model_path(
         &self,
         path: &str,
         _write: bool,
-    ) -> Result<Option<String>, platform_api::filesystem::FsError> {
+    ) -> Result<Option<String>, lingxi_core::host::filesystem::FsError> {
         if path == self.fence_prefix
             || path
                 .strip_prefix(&self.fence_prefix)
                 .is_some_and(|rest| rest.starts_with('/'))
         {
-            return Err(platform_api::filesystem::FsError::PermissionDenied(
+            return Err(lingxi_core::host::filesystem::FsError::PermissionDenied(
                 format!("guest path is not host-backed: {path}"),
             ));
         }
@@ -227,7 +272,7 @@ pub fn make_guest_alias_fs(
     guest_prefix: &str,
     host_prefix: &std::path::Path,
     fence_prefix: &str,
-) -> Arc<dyn platform_api::filesystem::FileSystem> {
+) -> Arc<dyn lingxi_core::host::filesystem::FileSystem> {
     Arc::new(GuestAliasFs {
         guest_prefix: guest_prefix.to_string(),
         host_prefix: host_prefix.to_path_buf(),
@@ -268,7 +313,7 @@ pub fn fresh_ctx() -> ToolUseContext {
         agent_name: None,
         team_name: None,
         origin_session_id: None,
-        tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+        tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
         content_replacement_state: None,
         session: None,
         subagent_registry: None,
@@ -304,13 +349,13 @@ pub fn fresh_tx() -> ToolProgressSender {
 
 // ===== M4-02 shell-tool test stubs ==========================================
 
-use mobile_linux_api::SandboxBackend;
-use mobile_linux_api::{ProcessError, ProcessOutput};
-use platform_api::process::{ProcessHandle, ProcessRunner};
-use platform_api::sandbox::{
+use lingxi_core::host::process::{ProcessHandle, ProcessRunner};
+use lingxi_core::host::sandbox::{
     ProcessCommand as SbxCommand, Sandbox, SandboxCapability, SandboxError, SandboxFeatures,
     SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
+use mobile_linux_api::SandboxBackend;
+use mobile_linux_api::{ProcessError, ProcessOutput};
 use std::sync::Mutex;
 
 /// In-test `ProcessRunner` that returns a canned [`ProcessOutput`] for each
@@ -445,7 +490,7 @@ impl Default for StubClock {
     }
 }
 
-impl platform_api::Clock for StubClock {
+impl lingxi_core::host::Clock for StubClock {
     fn now(&self) -> std::time::SystemTime {
         *self.now.lock().unwrap()
     }
@@ -453,7 +498,7 @@ impl platform_api::Clock for StubClock {
 
 /// Convenience: wrap a fresh `StubClock` in `Arc<dyn Clock>`.
 #[must_use]
-pub fn make_stub_clock() -> Arc<dyn platform_api::Clock> {
+pub fn make_stub_clock() -> Arc<dyn lingxi_core::host::Clock> {
     Arc::new(StubClock::new())
 }
 
@@ -462,20 +507,20 @@ pub fn make_stub_clock() -> Arc<dyn platform_api::Clock> {
 pub struct PanickingHttp;
 
 #[async_trait]
-impl platform_api::http::HttpTransport for PanickingHttp {
+impl lingxi_core::host::http::HttpTransport for PanickingHttp {
     async fn request(
         &self,
-        _: protocol::HttpRequest,
-    ) -> Result<protocol::HttpResponse, platform_api::http::HttpError> {
-        Err(platform_api::http::HttpError::InvalidRequest(
+        _: lingxi_core::types::HttpRequest,
+    ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::http::HttpError> {
+        Err(lingxi_core::host::http::HttpError::InvalidRequest(
             "stub PanickingHttp: not configured for this test".into(),
         ))
     }
     async fn stream_sse(
         &self,
-        _: protocol::HttpRequest,
-    ) -> Result<platform_api::http::SseStream, platform_api::http::HttpError> {
-        Err(platform_api::http::HttpError::InvalidRequest(
+        _: lingxi_core::types::HttpRequest,
+    ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::http::HttpError> {
+        Err(lingxi_core::host::http::HttpError::InvalidRequest(
             "stub PanickingHttp: stream_sse not supported".into(),
         ))
     }
@@ -483,13 +528,13 @@ impl platform_api::http::HttpTransport for PanickingHttp {
 
 /// Convenience: wrap [`PanickingHttp`] in `Arc<dyn HttpTransport>`.
 #[must_use]
-pub fn make_stub_http() -> Arc<dyn platform_api::http::HttpTransport> {
+pub fn make_stub_http() -> Arc<dyn lingxi_core::host::http::HttpTransport> {
     Arc::new(PanickingHttp)
 }
 
 // ===== M4-04 workflow-tool test stubs =======================================
 
-use platform_api::worktree::{
+use lingxi_core::host::worktree::{
     WorktreeChangeSummary, WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager,
 };
 use std::path::PathBuf;
@@ -761,7 +806,7 @@ fn flatten_slug_inline(slug: &str) -> String {
 /// the struct shape without affecting file-tool behavior).
 #[must_use]
 pub fn ctx_for_file_tools(
-    fs: Arc<dyn platform_api::filesystem::FileSystem>,
+    fs: Arc<dyn lingxi_core::host::filesystem::FileSystem>,
     bus: Arc<telemetry::AnalyticsBus>,
     trusted_dirs: Vec<std::path::PathBuf>,
 ) -> super::BuiltinToolContext {

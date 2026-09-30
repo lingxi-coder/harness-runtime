@@ -18,9 +18,11 @@ use crate::process::wrap::{
     ENV_GIT_EDITOR, ENV_LINGXI_CHILD_SESSION, ENV_LINGXI_MARKER, ENV_LINGXI_SESSION_ID, ENV_SHELL,
 };
 use async_trait::async_trait;
+use lingxi_core::host::{
+    HookRunOutcome, ProcessHandle, ProcessRunner, SandboxedCommand, SandboxedTag,
+};
 use mobile_linux_api::ProcessStreamSink;
 use mobile_linux_api::{ProcessError, ProcessOutput};
-use platform_api::{HookRunOutcome, ProcessHandle, ProcessRunner, SandboxedCommand, SandboxedTag};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -59,7 +61,7 @@ const HOOK_COMMAND_AUDIT_REASON: &str = "hook_command";
 async fn drain_observed<R>(
     r: &mut R,
     buf: &mut Vec<u8>,
-    observer: Option<&std::sync::Arc<dyn platform_api::HookOutputObserver>>,
+    observer: Option<&std::sync::Arc<dyn lingxi_core::host::HookOutputObserver>>,
     is_stderr: bool,
 ) -> std::io::Result<()>
 where
@@ -241,7 +243,7 @@ const TASK_OUTPUT_COLLISION_RETRIES: usize = 16;
 /// while inline, then the first over-limit chunk converts the buffered prefix
 /// into `stdout + "[stderr] " + stderr`; later stderr chunks each carry their
 /// own marker in observed read order.
-use platform_api::task_output::Utf8StreamDecoder;
+use lingxi_core::host::task_output::Utf8StreamDecoder;
 
 #[derive(Default)]
 struct BackgroundOutput {
@@ -360,7 +362,7 @@ fn append_framed_chunk(output: &mut Vec<u8>, chunk: &[u8], stderr: bool) {
 
 async fn publish_background_output(
     file: &mut Option<tokio::fs::File>,
-    binding: Option<&platform_api::BackgroundTaskBinding>,
+    binding: Option<&lingxi_core::host::BackgroundTaskBinding>,
     content: &str,
 ) -> std::io::Result<()> {
     if content.is_empty() {
@@ -385,7 +387,7 @@ async fn drain_framed_output<SO, SE>(
     stderr: &mut SE,
     file: &mut Option<tokio::fs::File>,
     mut output: BackgroundOutput,
-    health: Option<(&platform_api::BackgroundTaskBinding, u32)>,
+    health: Option<(&lingxi_core::host::BackgroundTaskBinding, u32)>,
     child: &mut tokio::process::Child,
 ) -> std::io::Result<()>
 where
@@ -490,7 +492,7 @@ where
 /// Production [`ProcessRunner`] using `tokio::process`.
 pub struct PosixProcess {
     task_output_dir: PathBuf,
-    task_output_root_identity: Mutex<Option<platform_api::rooted_fs::RootIdentity>>,
+    task_output_root_identity: Mutex<Option<lingxi_core::host::rooted_fs::RootIdentity>>,
 }
 
 impl Default for PosixProcess {
@@ -530,7 +532,7 @@ impl PosixProcess {
     /// opens without following symlinks, exactly like the runner-owned path.
     fn open_bound_output_file(
         &self,
-        binding: &platform_api::BackgroundTaskBinding,
+        binding: &lingxi_core::host::BackgroundTaskBinding,
     ) -> Result<std::fs::File, ProcessError> {
         let path = &binding.output_path;
         let parent = path
@@ -547,13 +549,13 @@ impl PosixProcess {
             .file_name()
             .map(Path::new)
             .ok_or_else(|| self.task_output_pin_error("bound task output root has no name"))?;
-        let identity = platform_api::rooted_fs::ensure_private_directory(
+        let identity = lingxi_core::host::rooted_fs::ensure_private_directory(
             grandparent,
             dir_name,
-            platform_api::rooted_fs::PRIVATE_DIR_MODE,
+            lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
         )
         .map_err(|error| self.task_output_pin_error(error))?;
-        platform_api::rooted_fs::open_append_file_pinned(parent, name, Some(&identity))
+        lingxi_core::host::rooted_fs::open_append_file_pinned(parent, name, Some(&identity))
             .map_err(|error| self.task_output_pin_error(error))
     }
 
@@ -568,7 +570,7 @@ impl PosixProcess {
 
     fn pinned_task_output_root(
         &self,
-    ) -> Result<platform_api::rooted_fs::RootIdentity, ProcessError> {
+    ) -> Result<lingxi_core::host::rooted_fs::RootIdentity, ProcessError> {
         let parent = self
             .task_output_dir
             .parent()
@@ -578,10 +580,10 @@ impl PosixProcess {
             .file_name()
             .map(Path::new)
             .ok_or_else(|| self.task_output_pin_error("task output directory has no name"))?;
-        let observed = platform_api::rooted_fs::ensure_private_directory(
+        let observed = lingxi_core::host::rooted_fs::ensure_private_directory(
             parent,
             directory_name,
-            platform_api::rooted_fs::PRIVATE_DIR_MODE,
+            lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
         )
         .map_err(|error| self.task_output_pin_error(error))?;
         Ok({
@@ -605,10 +607,10 @@ impl PosixProcess {
     fn open_task_output_file_with_root(
         &self,
         task_id: &str,
-        expected: &platform_api::rooted_fs::RootIdentity,
-    ) -> Result<(PathBuf, std::fs::File), platform_api::FsError> {
+        expected: &lingxi_core::host::rooted_fs::RootIdentity,
+    ) -> Result<(PathBuf, std::fs::File), lingxi_core::host::FsError> {
         let relative = PathBuf::from(format!("{task_id}.out"));
-        let file = platform_api::rooted_fs::open_create_new_file_pinned(
+        let file = lingxi_core::host::rooted_fs::open_create_new_file_pinned(
             &self.task_output_dir,
             &relative,
             Some(expected),
@@ -642,7 +644,7 @@ impl PosixProcess {
             let task_id = next_task_id()?;
             match self.open_task_output_file_with_root(&task_id, &expected) {
                 Ok((path, file)) => return Ok((task_id, path, file)),
-                Err(platform_api::FsError::AlreadyExists(_)) => continue,
+                Err(lingxi_core::host::FsError::AlreadyExists(_)) => continue,
                 Err(error) => return Err(self.task_output_pin_error(error)),
             }
         }
@@ -654,19 +656,19 @@ impl PosixProcess {
     fn spill_completed_output(
         &self,
         framed_output: &[u8],
-    ) -> Result<platform_api::ProcessOutputFile, ProcessError> {
+    ) -> Result<lingxi_core::host::process::ProcessOutputFile, ProcessError> {
         use std::io::Write as _;
 
         let (task_id, path, mut file) = self.create_task_output_file()?;
         file.write_all(
             &framed_output[..framed_output
                 .len()
-                .min(platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES as usize)],
+                .min(lingxi_core::host::task_output::MAX_PERSISTED_OUTPUT_BYTES as usize)],
         )
         .and_then(|()| file.flush())
         .map_err(|error| ProcessError::Io(format!("write task output: {error}")))?;
         let size = u64::try_from(framed_output.len()).unwrap_or(u64::MAX);
-        Ok(platform_api::ProcessOutputFile {
+        Ok(lingxi_core::host::process::ProcessOutputFile {
             task_id,
             path: path.to_string_lossy().into_owned(),
             size,
@@ -679,7 +681,7 @@ impl PosixProcess {
         stderr: &[u8],
         status: std::process::ExitStatus,
         spilled_output: Option<Vec<u8>>,
-    ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+    ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
         let output = ProcessOutput {
             stdout: String::from_utf8_lossy(stdout).into_owned(),
             stderr: String::from_utf8_lossy(stderr).into_owned(),
@@ -690,8 +692,8 @@ impl PosixProcess {
             .as_deref()
             .map(|output| self.spill_completed_output(output))
             .transpose()?;
-        Ok(platform_api::ForegroundRunResult {
-            outcome: platform_api::ForegroundOutcome::Completed(output),
+        Ok(lingxi_core::host::ForegroundRunResult {
+            outcome: lingxi_core::host::ForegroundOutcome::Completed(output),
             output_file,
         })
     }
@@ -800,8 +802,9 @@ impl PosixProcess {
         //    Bash and the hook child (both spawn via `subprocessEnv()`), so a
         //    prompt-injected command can't read Anthropic/cloud/Actions creds in
         //    that CI mode. Inert (no-op) without the flag — the common case.
-        if platform_api::env::is_env_truthy(std::env::var(ENV_SUBPROCESS_ENV_SCRUB).ok().as_deref())
-        {
+        if lingxi_core::host::env::is_env_truthy(
+            std::env::var(ENV_SUBPROCESS_ENV_SCRUB).ok().as_deref(),
+        ) {
             for key in GHA_SUBPROCESS_SCRUB {
                 tcmd.env_remove(key);
                 tcmd.env_remove(format!("INPUT_{key}"));
@@ -818,12 +821,12 @@ impl ProcessRunner for PosixProcess {
     }
 
     async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
-        let owned = platform_api::agent_processes::snapshot_entries(owner);
+        let owned = lingxi_core::host::agent_processes::snapshot_entries(owner);
         for &entry in &owned {
-            if platform_api::shell_supervisor::kill_owned_registration(owner, entry)
+            if lingxi_core::host::shell_supervisor::kill_owned_registration(owner, entry)
                 .await
                 .is_none()
-                && platform_api::agent_processes::is_current(owner, entry)
+                && lingxi_core::host::agent_processes::is_current(owner, entry)
             {
                 let _ = kill_tree_force(entry.pid);
             }
@@ -1024,7 +1027,7 @@ impl ProcessRunner for PosixProcess {
         &self,
         cmd: &SandboxedCommand,
         max_output_bytes: Option<usize>,
-    ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+    ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
         if super::supervisor::enabled(cmd) {
             return super::supervisor::execute(cmd, max_output_bytes, false).await;
         }
@@ -1225,8 +1228,8 @@ impl ProcessRunner for PosixProcess {
         if matches!(backgrounding, ForegroundBreak::Deadline) && !cmd.auto_background_on_timeout() {
             let _ = kill_tree_force(spawned_pid);
             let _ = child.wait().await;
-            return Ok(platform_api::ForegroundRunResult {
-                outcome: platform_api::ForegroundOutcome::Completed(ProcessOutput {
+            return Ok(lingxi_core::host::ForegroundRunResult {
+                outcome: lingxi_core::host::ForegroundOutcome::Completed(ProcessOutput {
                     stdout: String::from_utf8_lossy(&out_buf).into_owned(),
                     stderr: String::from_utf8_lossy(&err_buf).into_owned(),
                     exit_code: TIMEOUT_KILL_EXIT_CODE,
@@ -1297,8 +1300,8 @@ impl ProcessRunner for PosixProcess {
             }
         });
 
-        Ok(platform_api::ForegroundRunResult {
-            outcome: platform_api::ForegroundOutcome::MovedToBackground(ProcessHandle {
+        Ok(lingxi_core::host::ForegroundRunResult {
+            outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(ProcessHandle {
                 task_id,
                 pid,
             }),
@@ -1309,7 +1312,7 @@ impl ProcessRunner for PosixProcess {
     async fn run_foreground(
         &self,
         cmd: &SandboxedCommand,
-    ) -> Result<platform_api::ForegroundOutcome, ProcessError> {
+    ) -> Result<lingxi_core::host::ForegroundOutcome, ProcessError> {
         Ok(self
             .run_foreground_with_output_limit(cmd, None)
             .await?
@@ -1338,7 +1341,7 @@ impl ProcessRunner for PosixProcess {
         &self,
         cmd: &SandboxedCommand,
         default_async_timeout: std::time::Duration,
-        observer: Option<std::sync::Arc<dyn platform_api::HookOutputObserver>>,
+        observer: Option<std::sync::Arc<dyn lingxi_core::host::HookOutputObserver>>,
     ) -> Result<HookRunOutcome, ProcessError> {
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
@@ -1489,7 +1492,7 @@ impl ProcessRunner for PosixProcess {
     ) -> Result<ProcessHandle, ProcessError> {
         if super::supervisor::enabled(cmd) {
             return match super::supervisor::execute(cmd, None, true).await?.outcome {
-                platform_api::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
+                lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
                 _ => Err(ProcessError::Io(
                     "supervisor returned foreground result".into(),
                 )),
@@ -1582,31 +1585,31 @@ impl ProcessRunner for PosixProcess {
     }
 
     async fn acknowledge_shell(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
-        platform_api::shell_supervisor::acknowledge(handle).await
+        lingxi_core::host::shell_supervisor::acknowledge(handle).await
     }
     async fn export_shell(
         &self,
         handle: &ProcessHandle,
-    ) -> Result<platform_api::process::ShellProcessHandoff, ProcessError> {
+    ) -> Result<lingxi_core::host::process::ShellProcessHandoff, ProcessError> {
         self.acknowledge_shell(handle).await?;
         super::supervisor::export(handle)
     }
     async fn validate_shell(
         &self,
-        handoff: &platform_api::process::ShellProcessHandoff,
+        handoff: &lingxi_core::host::process::ShellProcessHandoff,
     ) -> Result<(), ProcessError> {
         super::supervisor::validate(handoff).await
     }
     async fn adopt_shell(
         &self,
-        handoff: &platform_api::process::ShellProcessHandoff,
-        sink: std::sync::Arc<dyn platform_api::BackgroundExitSink>,
+        handoff: &lingxi_core::host::process::ShellProcessHandoff,
+        sink: std::sync::Arc<dyn lingxi_core::host::BackgroundExitSink>,
     ) -> Result<ProcessHandle, ProcessError> {
         super::supervisor::adopt(handoff, sink).await
     }
     async fn release_shell(
         &self,
-        handoff: &platform_api::process::ShellProcessHandoff,
+        handoff: &lingxi_core::host::process::ShellProcessHandoff,
     ) -> Result<(), ProcessError> {
         super::supervisor::release(handoff).await
     }
@@ -1678,7 +1681,7 @@ fn generate_task_id() -> Result<String, ProcessError> {
 #[cfg(test)]
 mod async_hook_tests {
     use super::*;
-    use platform_api::ProcessCommand;
+    use lingxi_core::host::ProcessCommand;
     use std::collections::{HashMap, HashSet};
     use std::io::Write as _;
     use std::sync::{Arc, Barrier};
@@ -1736,7 +1739,7 @@ mod async_hook_tests {
             done: tokio::sync::Notify,
         }
         #[async_trait]
-        impl platform_api::BackgroundExitSink for Sink {
+        impl lingxi_core::host::BackgroundExitSink for Sink {
             fn manages_output(&self) -> bool {
                 true
             }
@@ -1756,7 +1759,7 @@ mod async_hook_tests {
         let sink = Arc::new(Sink::default());
         let path = dir.path().join("no-direct-file/output");
         let command =
-            sh("printf routed").with_background_task(platform_api::BackgroundTaskBinding {
+            sh("printf routed").with_background_task(lingxi_core::host::BackgroundTaskBinding {
                 task_id: "bmanaged1".into(),
                 output_path: path.clone(),
                 on_exit: Some(sink.clone()),
@@ -1798,7 +1801,7 @@ mod async_hook_tests {
     fn completed_output_copy_caps_bytes_but_reports_original_size() {
         let dir = tempfile::tempdir().unwrap();
         let process = PosixProcess::with_task_output_dir(dir.path().join("tasks"));
-        let cap = platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES as usize;
+        let cap = lingxi_core::host::task_output::MAX_PERSISTED_OUTPUT_BYTES as usize;
         let bytes = vec![b'x'; cap + 3];
         let output = process.spill_completed_output(&bytes).unwrap();
         assert_eq!(output.size, cap as u64 + 3);
@@ -1823,7 +1826,7 @@ mod async_hook_tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            platform_api::rooted_fs::PRIVATE_DIR_MODE
+            lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE
         );
         assert_eq!(
             std::fs::symlink_metadata(&output_path)
@@ -1831,7 +1834,7 @@ mod async_hook_tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            platform_api::rooted_fs::PRIVATE_FILE_MODE
+            lingxi_core::host::rooted_fs::PRIVATE_FILE_MODE
         );
 
         std::fs::rename(&output_dir, parent.path().join("tasks-original")).unwrap();
@@ -1960,7 +1963,7 @@ mod async_hook_tests {
             .await
             .expect("foreground command");
         let output = match result.outcome {
-            platform_api::ForegroundOutcome::Completed(output) => output,
+            lingxi_core::host::ForegroundOutcome::Completed(output) => output,
             other => panic!("expected completed output, got {other:?}"),
         };
         assert_eq!(output.stdout, "out");
@@ -1982,7 +1985,7 @@ mod async_hook_tests {
         assert!(result.output_file.is_none());
         assert!(matches!(
             result.outcome,
-            platform_api::ForegroundOutcome::Completed(_)
+            lingxi_core::host::ForegroundOutcome::Completed(_)
         ));
         assert!(!parent.path().join("tasks").exists());
     }
@@ -2130,7 +2133,7 @@ mod async_hook_tests {
 #[cfg(test)]
 mod hook_env_tests {
     use super::*;
-    use platform_api::ProcessCommand;
+    use lingxi_core::host::ProcessCommand;
     use std::collections::HashMap;
 
     /// A sentinel pre-seeded into the caller env for `AI_AGENT` / `GIT_EDITOR`.
@@ -2213,7 +2216,7 @@ mod hook_env_tests {
 #[cfg(test)]
 mod streaming_tests {
     use super::*;
-    use platform_api::ProcessCommand;
+    use lingxi_core::host::ProcessCommand;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -2344,7 +2347,7 @@ mod streaming_tests {
         // A 60 s timeout that will NOT fire: only the request can end this wait,
         // so a pass cannot be the deadline in disguise.
         let command = stream_sh("echo started; sleep 60", Duration::from_secs(60))
-            .with_background_task(platform_api::BackgroundTaskBinding {
+            .with_background_task(lingxi_core::host::BackgroundTaskBinding {
                 task_id: "btestid01".to_string(),
                 output_path: output_path.clone(),
                 on_exit: None,
@@ -2366,7 +2369,7 @@ mod streaming_tests {
         .expect("the run itself must not error");
 
         let handle = match result.outcome {
-            platform_api::ForegroundOutcome::MovedToBackground(handle) => handle,
+            lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => handle,
             other => panic!("expected MovedToBackground, got {other:?}"),
         };
         // The BOUND identity is reported, not a runner-minted one: an on-demand

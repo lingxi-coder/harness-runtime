@@ -16,10 +16,10 @@
 //! See spec §24.3 (sandbox decision matrix).
 
 use crate::runtime_config::SandboxRuntimeConfig;
+use lingxi_core::host::SandboxPolicy;
 use permission::shell_command::{
     matches_excluded_pattern, split_command, strip_env_and_wrappers_fixedpoint,
 };
-use platform_api::SandboxPolicy;
 
 /// Outcome of [`should_use_sandbox`].
 #[derive(Debug, Clone)]
@@ -28,7 +28,7 @@ pub enum SandboxDecision {
     NoSandbox,
     /// Wrap the command using the supplied policy.
     Sandbox {
-        /// Policy to apply when calling [`platform_api::Sandbox::prepare`].
+        /// Policy to apply when calling [`lingxi_core::host::Sandbox::prepare`].
         policy: SandboxPolicy,
     },
 }

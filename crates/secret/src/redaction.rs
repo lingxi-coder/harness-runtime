@@ -6,7 +6,7 @@
 //! [`RedactionOutcome`] describing the action taken.
 
 use crate::scanner::{SecretDetection, SecretScanner};
-use protocol::RedactableContent;
+use lingxi_core::types::RedactableContent;
 use std::collections::HashMap;
 use std::sync::Arc;
 

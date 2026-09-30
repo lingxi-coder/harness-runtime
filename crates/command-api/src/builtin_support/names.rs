@@ -360,7 +360,7 @@ pub const HIDDEN_PALETTE_COMMANDS: &[&str] =
 /// the command is `$te(c)`-filtered out of the default surface — matching a
 /// fresh claude-code session. The DYNAMIC un-hide (when a subscription /
 /// rate-limit status arrives) is applied by the palette builder via
-/// `platform_api::subscription::SubscriptionSnapshot::is_usage_credits_command_enabled`;
+/// `lingxi_core::host::subscription::SubscriptionSnapshot::is_usage_credits_command_enabled`;
 /// only the default (off) state is modeled statically here.
 pub const USAGE_CREDITS_BNR_GATED: &[&str] = &["usage-credits"];
 

@@ -29,7 +29,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
-use platform_api::{McpTransport, McpTransportSpec};
+use lingxi_core::host::{McpTransport, McpTransportSpec};
 use platform_posix::mcp::PosixMcpTransport;
 
 #[derive(Clone)]
@@ -139,7 +139,7 @@ async fn spawn_mock() -> String {
 fn sse_spec(url: String) -> McpTransportSpec {
     McpTransportSpec::Sse {
         url,
-        headers: platform_api::McpHeaders::new(),
+        headers: lingxi_core::host::McpHeaders::new(),
         headers_helper: None,
         oauth: None,
     }
@@ -211,7 +211,7 @@ async fn full_mcp_surface_roundtrips_over_sse() {
     // ping must fail with a connection error rather than hang.
     let after = transport.ping(conn.connection_id).await;
     assert!(
-        matches!(after, Err(platform_api::McpError::Connection(_))),
+        matches!(after, Err(lingxi_core::host::McpError::Connection(_))),
         "ping after disconnect should report a connection error, got {after:?}"
     );
 }

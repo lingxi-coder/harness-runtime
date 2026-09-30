@@ -1,5 +1,5 @@
 use crate::conversation::ConversationOrchestrator;
-use protocol::{ConversationMessage, ToolUseId};
+use lingxi_core::types::{ConversationMessage, ToolUseId};
 
 /// HOOK.2 twin of [`dispatch_tool_uses`] that ALSO returns whether any
 /// `PreToolUse` hook in this batch requested `continue:false`
@@ -122,7 +122,7 @@ pub(super) struct PersistenceOutcome {
 /// layer cannot fall back to a path that cannot be tied to the spill.
 pub(super) fn process_output_file_from_data(
     data: &serde_json::Value,
-) -> Option<platform_api::ProcessOutputFile> {
+) -> Option<lingxi_core::host::process::ProcessOutputFile> {
     let object = data.as_object()?;
     let path = object
         .get("persistedOutputPath")
@@ -144,7 +144,7 @@ pub(super) fn process_output_file_from_data(
     if task_id.is_empty() || path.is_empty() {
         return None;
     }
-    Some(platform_api::ProcessOutputFile {
+    Some(lingxi_core::host::process::ProcessOutputFile {
         task_id,
         path: path.to_string(),
         size,
@@ -162,7 +162,7 @@ pub(super) async fn apply_tool_result_persistence_with_process_output(
     threshold: Option<usize>,
     content: String,
     content_blocks: Option<&[serde_json::Value]>,
-    output_file: Option<&platform_api::ProcessOutputFile>,
+    output_file: Option<&lingxi_core::host::process::ProcessOutputFile>,
 ) -> PersistenceOutcome {
     use crate::tool_result_persistence as trp;
 
@@ -184,9 +184,9 @@ pub(super) async fn apply_tool_result_persistence_with_process_output(
                 // truncated with `(size ?? 0) >= HY ? HY : undefined`, where
                 // `HY = 67108864`. The spool stops at the same 64 MiB, so a
                 // result that REACHED the cap is exactly the one that was cut.
-                (output_file.size >= platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES)
+                (output_file.size >= lingxi_core::host::task_output::MAX_PERSISTED_OUTPUT_BYTES)
                     .then_some(
-                        usize::try_from(platform_api::task_output::MAX_PERSISTED_OUTPUT_BYTES)
+                        usize::try_from(lingxi_core::host::task_output::MAX_PERSISTED_OUTPUT_BYTES)
                             .unwrap_or(usize::MAX),
                     ),
             );

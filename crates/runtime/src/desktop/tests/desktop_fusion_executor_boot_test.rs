@@ -30,7 +30,7 @@ fn unreachable_attempts() -> Arc<fusion_attempts::DesktopFusionAttempts> {
     let pricing = Arc::new(cost::PricingCatalog::builtin_reference());
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
     let tracker = Arc::new(cost::CostTracker::new(
-        protocol::SessionId::new(),
+        lingxi_core::types::SessionId::new(),
         pricing.clone(),
         tx,
     ));
@@ -47,7 +47,7 @@ fn unreachable_attempts() -> Arc<fusion_attempts::DesktopFusionAttempts> {
     let outputs = budget.workflow_output_scopes();
     desktop_fusion_attempts(
         Arc::new(llm_runtime::ApiService::new(
-            Arc::new(llm_runtime::DefaultLlmClient::from_config(Default::default()).unwrap()),
+            Arc::new(llm_runtime::ModelRuntime::from_config(Default::default()).unwrap()),
             Arc::new(UnreachableTransport),
             Default::default(),
             Default::default(),
@@ -66,14 +66,14 @@ fn unreachable_attempts() -> Arc<fusion_attempts::DesktopFusionAttempts> {
 /// directly and must not spawn a panel or issue a side query.
 struct UnreachableSpawner;
 #[async_trait::async_trait]
-impl platform_api::subagent_spawn::SubagentSpawner for UnreachableSpawner {
+impl lingxi_core::host::subagent_spawn::SubagentSpawner for UnreachableSpawner {
     async fn spawn(
         &self,
-        _request: platform_api::subagent_spawn::SubagentSpawnRequest,
-        _inherit: platform_api::subagent_spawn::SubagentInheritance,
+        _request: lingxi_core::host::subagent_spawn::SubagentSpawnRequest,
+        _inherit: lingxi_core::host::subagent_spawn::SubagentInheritance,
     ) -> Result<
-        platform_api::subagent_spawn::SubagentResult,
-        platform_api::subagent_spawn::SubagentSpawnError,
+        lingxi_core::host::subagent_spawn::SubagentResult,
+        lingxi_core::host::subagent_spawn::SubagentSpawnError,
     > {
         panic!("preflight_error() must not spawn a panel");
     }
@@ -138,12 +138,13 @@ fn preflight_error_recovers_after_a_fix_then_save_without_restart() {
         Arc::new(Vec::<fusion::CatalogModel>::new()),
         Arc::new(telemetry::AnalyticsBus::new()),
         Arc::new(cost::PricingCatalog::builtin_reference()),
+        None,
     );
 
     let boot_error = executor
         .preflight_error()
         .expect("the invalid merged config must surface as a preflight error");
-    let platform_api::FusionError::InvalidConfiguration(msg) = boot_error else {
+    let lingxi_core::host::FusionError::InvalidConfiguration(msg) = boot_error else {
         panic!("expected InvalidConfiguration, got {boot_error:?}");
     };
     assert!(
@@ -189,6 +190,7 @@ fn preflight_reads_the_latest_managed_policy_without_reconstruction() {
         Arc::new(Vec::<fusion::CatalogModel>::new()),
         Arc::new(telemetry::AnalyticsBus::new()),
         Arc::new(cost::PricingCatalog::builtin_reference()),
+        None,
     );
     assert!(executor.preflight_error().is_some());
 

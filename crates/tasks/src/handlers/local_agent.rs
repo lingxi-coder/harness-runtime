@@ -14,11 +14,11 @@
 //! ## Why kill rides on the runtime handle, not a process handle
 //!
 //! Unlike [`crate::handlers::local_bash::LocalBashHandler`] (which can recover
-//! a [`platform_api::ProcessHandle`] for a true OS kill), [`SubagentSpawner::spawn`]
+//! a [`lingxi_core::host::ProcessHandle`] for a true OS kill), [`SubagentSpawner::spawn`]
 //! is *await-to-completion*: it returns the terminal [`SubagentResult`] and
 //! hands back no live handle while the subagent runs. The only cancellation
 //! primitive available is therefore cooperative cancellation of the worker
-//! future via [`RuntimeSpawner::cancel`] on the [`platform_api::BackgroundTaskHandle`]
+//! future via [`RuntimeSpawner::cancel`] on the [`lingxi_core::host::BackgroundTaskHandle`]
 //! returned by [`RuntimeSpawner::spawn`]. The handler records that handle (plus
 //! the `runtime` Arc that minted it, since [`TaskContext`] is per-call and the
 //! synchronous cleanup path has no `ctx`) in a map keyed by `task_id`, so both
@@ -28,7 +28,7 @@
 //!
 //! ## `agent_id` and `subagent_type` are independent sibling fields
 //!
-//! [`TaskSpawnInput::LocalAgent`] carries BOTH an [`protocol::AgentId`] (a
+//! [`TaskSpawnInput::LocalAgent`] carries BOTH an [`lingxi_core::types::AgentId`] (a
 //! per-instance identity UUID) AND a resolved `subagent_type: String` (one of
 //! the built-in subagent-type *names*), exactly mirroring the TS
 //! `LocalAgentTaskState` shape (`agentId` + `agentType`). The caller that
@@ -44,11 +44,11 @@ use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use agent::{StreamingSubagentSpawner, SubagentEvent};
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnRequest, SubagentSpawner,
 };
-use protocol::AgentId;
+use lingxi_core::types::AgentId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
@@ -108,13 +108,15 @@ struct AgentIdentityObserver {
 }
 
 #[async_trait]
-impl platform_api::subagent_spawn::SubagentSpawnObserver for AgentIdentityObserver {
+impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for AgentIdentityObserver {
     async fn on_model_selected(
         &self,
-        event: &platform_api::subagent_spawn::SubagentObservation,
+        event: &lingxi_core::host::subagent_spawn::SubagentObservation,
         effort: Option<&str>,
     ) {
-        if let platform_api::subagent_spawn::SubagentObservation::Allocated { model, .. } = event {
+        if let lingxi_core::host::subagent_spawn::SubagentObservation::Allocated { model, .. } =
+            event
+        {
             self.sink
                 .set_agent_display(&self.task_id, model.clone(), effort.map(str::to_string))
                 .await;
@@ -123,9 +125,9 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for AgentIdentityObserv
 
     async fn before_start(
         &self,
-        event: &platform_api::subagent_spawn::SubagentObservation,
-    ) -> Result<(), platform_api::SubagentSpawnError> {
-        if let platform_api::subagent_spawn::SubagentObservation::Allocated {
+        event: &lingxi_core::host::subagent_spawn::SubagentObservation,
+    ) -> Result<(), lingxi_core::host::SubagentSpawnError> {
+        if let lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
             agent_id,
             model,
             ..
@@ -135,27 +137,27 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for AgentIdentityObserv
                 self.sink
                     .task_registry()
                     .ok_or_else(|| {
-                        platform_api::SubagentSpawnError::Runtime(
+                        lingxi_core::host::SubagentSpawnError::Runtime(
                             "human resume registry unavailable".into(),
                         )
                     })?
                     .begin_human_task_resume(&self.task_id, epoch)
                     .await
                     .map_err(|error| {
-                        platform_api::SubagentSpawnError::Runtime(error.to_string())
+                        lingxi_core::host::SubagentSpawnError::Runtime(error.to_string())
                     })?;
             }
             self.sink
                 .bind_agent_id(&self.task_id, *agent_id)
                 .await
-                .map_err(platform_api::SubagentSpawnError::Runtime)?;
+                .map_err(lingxi_core::host::SubagentSpawnError::Runtime)?;
             self.sink
                 .set_agent_display(&self.task_id, model.clone(), self.effort.clone())
                 .await;
         }
         Ok(())
     }
-    async fn on_event(&self, _: platform_api::subagent_spawn::SubagentObservation) {}
+    async fn on_event(&self, _: lingxi_core::host::subagent_spawn::SubagentObservation) {}
 }
 
 impl WorkerCancel {
@@ -191,7 +193,7 @@ pub struct LocalAgentHandler {
     /// `task_id` → the carried isolation worktree for a live PERSISTENT agent.
     /// A kill/cleanup that cancels the outer event-pump still must run the
     /// terminal keep/cleanup judgment before publishing `Killed`.
-    persistent_worktrees: Arc<Mutex<HashMap<String, platform_api::worktree::WorktreeHandle>>>,
+    persistent_worktrees: Arc<Mutex<HashMap<String, lingxi_core::host::worktree::WorktreeHandle>>>,
     /// `task_id` → the SKILL this agent is, when a `context: fork` skill
     /// launched it. The fork identity the resume gate corroborates against the
     /// on-disk scoping record. Kept beside [`Self::agent_ids`] and torn down
@@ -201,19 +203,19 @@ pub struct LocalAgentHandler {
     /// is killed after coming to rest, cancelling the outer worker still leaves
     /// enough terminal payload to match the normal completion path.
     persistent_outcomes:
-        Arc<Mutex<HashMap<String, platform_api::task_registry::AgentTerminalOutcome>>>,
+        Arc<Mutex<HashMap<String, lingxi_core::host::task_registry::AgentTerminalOutcome>>>,
     /// Consulted before a parked agent is resumed: a forked skill whose
     /// permission scoping cannot be re-established must NOT resume under the
     /// parent's (wider) permissions. `None` ⇒ no gate, which is correct for a
     /// host that also cannot launch a forked skill.
-    fork_resume_gate: Option<Arc<dyn platform_api::fork_resume_gate::ForkResumeGate>>,
+    fork_resume_gate: Option<Arc<dyn lingxi_core::host::fork_resume_gate::ForkResumeGate>>,
     /// Records a parked agent so a LATER process can restore it. Written each
     /// time the agent comes to rest, erased when it terminates. `None` ⇒ no
     /// durable record, which is correct for a host that also cannot restore.
-    parked_store: Option<Arc<dyn platform_api::parked_agent_store::ParkedAgentStore>>,
+    parked_store: Option<Arc<dyn lingxi_core::host::parked_agent_store::ParkedAgentStore>>,
     /// Parent's tool invoker — passed through *unchanged* in
     /// [`SubagentInheritance`] (the recursion lock relies on `Arc::ptr_eq`).
-    tool_invoker: Arc<dyn platform_api::ToolInvoker>,
+    tool_invoker: Arc<dyn lingxi_core::host::ToolInvoker>,
     /// Parent's budget enforcer — passed through *unchanged* so budget charges
     /// aggregate across the whole agent tree (`Arc::ptr_eq` invariant).
     budget: Arc<dyn BudgetEnforcerHandle>,
@@ -233,11 +235,11 @@ pub struct LocalAgentHandler {
     /// isolation worktree (`SubagentSpawnRequest::worktree`) — claude-code
     /// hands its `getWorktreeResult` closure to the detached async lifecycle,
     /// so the worker here judges via
-    /// [`platform_api::worktree::agent_worktree_result`] when the agent reaches a
+    /// [`lingxi_core::host::worktree::agent_worktree_result`] when the agent reaches a
     /// terminal state (keep when dirty/ahead, else auto-remove). `None`
     /// (default) ⇒ no worktree handling: a carried worktree is left in place,
     /// the conservative direction.
-    worktree_manager: Option<Arc<dyn platform_api::worktree::WorktreeManager>>,
+    worktree_manager: Option<Arc<dyn lingxi_core::host::worktree::WorktreeManager>>,
 }
 
 impl LocalAgentHandler {
@@ -253,7 +255,7 @@ impl LocalAgentHandler {
     #[must_use]
     pub fn new(
         spawner: Arc<dyn SubagentSpawner>,
-        tool_invoker: Arc<dyn platform_api::ToolInvoker>,
+        tool_invoker: Arc<dyn lingxi_core::host::ToolInvoker>,
         budget: Arc<dyn BudgetEnforcerHandle>,
         output_manager: Arc<TaskOutputManager>,
     ) -> Self {
@@ -286,7 +288,7 @@ impl LocalAgentHandler {
     #[must_use]
     pub fn with_worktree_manager(
         mut self,
-        manager: Arc<dyn platform_api::worktree::WorktreeManager>,
+        manager: Arc<dyn lingxi_core::host::worktree::WorktreeManager>,
     ) -> Self {
         self.worktree_manager = Some(manager);
         self
@@ -314,7 +316,7 @@ impl LocalAgentHandler {
     #[must_use]
     pub fn with_parked_agent_store(
         mut self,
-        store: Arc<dyn platform_api::parked_agent_store::ParkedAgentStore>,
+        store: Arc<dyn lingxi_core::host::parked_agent_store::ParkedAgentStore>,
     ) -> Self {
         self.parked_store = Some(store);
         self
@@ -326,7 +328,7 @@ impl LocalAgentHandler {
     #[must_use]
     pub fn with_fork_resume_gate(
         mut self,
-        gate: Arc<dyn platform_api::fork_resume_gate::ForkResumeGate>,
+        gate: Arc<dyn lingxi_core::host::fork_resume_gate::ForkResumeGate>,
     ) -> Self {
         self.fork_resume_gate = Some(gate);
         self
@@ -436,7 +438,7 @@ impl LocalAgentHandler {
 
         if let (Some(mgr), Some(handle)) = (&self.worktree_manager, worktree.as_ref()) {
             if let Some((path, branch)) =
-                platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle).await
+                lingxi_core::host::worktree::agent_worktree_result(mgr.as_ref(), handle).await
             {
                 outcome.worktree_path = Some(path);
                 outcome.worktree_branch = Some(branch);
@@ -575,7 +577,7 @@ impl Task for LocalAgentHandler {
         // is the same "stopped but not exited" state seen from the other side.
         // The port's loop entry is the live worker record.
         let target_still_stopping =
-            platform_api::agent_processes::is_stop_pending(&agent_id.to_string())
+            lingxi_core::host::agent_processes::is_stop_pending(&agent_id.to_string())
                 || (self.workers.lock().await.contains_key(task_id)
                     && self.status_sink.is_terminal(task_id).await);
         if target_still_stopping {
@@ -768,14 +770,14 @@ impl LocalAgentHandler {
         self.status_sink
             .set_agent_outcome(
                 &task_id,
-                platform_api::task_registry::AgentTerminalOutcome {
+                lingxi_core::host::task_registry::AgentTerminalOutcome {
                     agent_depth: Some(request.depth),
                     is_built_in: Some(
                         agent::builtins::builtin_agent_definitions()
                             .iter()
                             .any(|def| def.agent_type == request.subagent_type),
                     ),
-                    ..platform_api::task_registry::AgentTerminalOutcome::default()
+                    ..lingxi_core::host::task_registry::AgentTerminalOutcome::default()
                 },
             )
             .await;
@@ -814,7 +816,7 @@ impl LocalAgentHandler {
                         if activation_rx.await.is_err() {
                             if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
                             {
-                                let _ = platform_api::worktree::agent_worktree_result(
+                                let _ = lingxi_core::host::worktree::agent_worktree_result(
                                     mgr.as_ref(),
                                     handle,
                                 )
@@ -832,13 +834,14 @@ impl LocalAgentHandler {
                         .as_ref()
                         .and_then(|value| value.as_str())
                         .map(str::to_string);
-                    let observer: Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver> =
-                        Arc::new(AgentIdentityObserver {
-                            effort: display_effort,
-                            task_id: worker_task_id.clone(),
-                            sink: status_sink.clone(),
-                            human_epoch,
-                        });
+                    let observer: Arc<
+                        dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver,
+                    > = Arc::new(AgentIdentityObserver {
+                        effort: display_effort,
+                        task_id: worker_task_id.clone(),
+                        sink: status_sink.clone(),
+                        human_epoch,
+                    });
                     let started = if request.resumed_history.is_some() {
                         streaming
                             .restore_persistent_with_observer(
@@ -878,7 +881,7 @@ impl LocalAgentHandler {
                             // isolation worktree so it never leaks.
                             if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
                             {
-                                let _ = platform_api::worktree::agent_worktree_result(
+                                let _ = lingxi_core::host::worktree::agent_worktree_result(
                                     mgr.as_ref(),
                                     handle,
                                 )
@@ -924,7 +927,8 @@ impl LocalAgentHandler {
                     // lifecycle passes `finalMessage: Vpr(y)` — the accumulated
                     // messages' final text — on every terminal branch, not only
                     // the clean one).
-                    let mut outcome = platform_api::task_registry::AgentTerminalOutcome::default();
+                    let mut outcome =
+                        lingxi_core::host::task_registry::AgentTerminalOutcome::default();
                     // Published once, after the outcome, below. A channel close
                     // (the runner went away without a terminal event) IS the
                     // completed case, so that is the initial value; the
@@ -946,12 +950,8 @@ impl LocalAgentHandler {
                                 }
                                 let body = serde_json::to_string_pretty(&result)
                                     .unwrap_or_else(|_| result.to_string());
-                                let bt = usage.billable_tokens;
-                                let total = bt
-                                    .input
-                                    .saturating_add(bt.cache_write)
-                                    .saturating_add(bt.cache_read)
-                                    .saturating_add(bt.output);
+                                let counts = usage.counts();
+                                let total = counts.total().saturating_sub(counts.reasoning_tokens);
                                 let body = format!(
                                     "{body}\n<usage><total_tokens>{total}</total_tokens></usage>\n"
                                 );
@@ -964,11 +964,12 @@ impl LocalAgentHandler {
                                     .get("text")
                                     .and_then(serde_json::Value::as_str)
                                     .map(str::to_owned);
-                                let rest_usage = Some(platform_api::task_registry::AgentRunUsage {
-                                    subagent_tokens: total,
-                                    tool_uses: total_tool_use_count,
-                                    duration_ms: total_duration_ms,
-                                });
+                                let rest_usage =
+                                    Some(lingxi_core::host::task_registry::AgentRunUsage {
+                                        subagent_tokens: total,
+                                        tool_uses: total_tool_use_count,
+                                        duration_ms: total_duration_ms,
+                                    });
                                 // notify_rest atomically publishes Completed plus
                                 // a resumable park and the completion payload.
                                 // Retain the LAST non-empty answer and its
@@ -1057,7 +1058,7 @@ impl LocalAgentHandler {
                     // status publish.
                     if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
                         if let Some((path, branch)) =
-                            platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle)
+                            lingxi_core::host::worktree::agent_worktree_result(mgr.as_ref(), handle)
                                 .await
                         {
                             outcome.worktree_path = Some(path);
@@ -1090,7 +1091,7 @@ impl LocalAgentHandler {
                         if activation_rx.await.is_err() {
                             if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
                             {
-                                let _ = platform_api::worktree::agent_worktree_result(
+                                let _ = lingxi_core::host::worktree::agent_worktree_result(
                                     mgr.as_ref(),
                                     handle,
                                 )
@@ -1141,7 +1142,8 @@ impl LocalAgentHandler {
                     // nothing carried it into the notification, so the model was
                     // told a background agent finished without being told what
                     // it found.
-                    let mut outcome = platform_api::task_registry::AgentTerminalOutcome::default();
+                    let mut outcome =
+                        lingxi_core::host::task_registry::AgentTerminalOutcome::default();
                     match &result {
                         Ok(SubagentResult::Completed {
                             content,
@@ -1155,7 +1157,7 @@ impl LocalAgentHandler {
                             // (`s ? "<result>…" : ""`), so an empty answer omits
                             // `<result>` rather than rendering an empty one.
                             outcome.result = (!text.is_empty()).then_some(text);
-                            outcome.usage = Some(platform_api::task_registry::AgentRunUsage {
+                            outcome.usage = Some(lingxi_core::host::task_registry::AgentRunUsage {
                                 subagent_tokens: *total_tokens,
                                 tool_uses: *total_tool_use_count,
                                 duration_ms: *total_duration_ms,
@@ -1192,7 +1194,7 @@ impl LocalAgentHandler {
                     // after it as a fire-and-forget cleanup.
                     if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
                         if let Some((path, branch)) =
-                            platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle)
+                            lingxi_core::host::worktree::agent_worktree_result(mgr.as_ref(), handle)
                                 .await
                         {
                             outcome.worktree_path = Some(path);
@@ -1280,9 +1282,11 @@ mod tests {
     }
     use super::*;
     use crate::state::TaskStatus;
-    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use platform_api::{BudgetError, SubagentSpawnError, SubagentUsage};
+    use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use lingxi_core::host::tool_invoker::{
+        SubagentInvocationContext, ToolInvoker, ToolInvokerError,
+    };
+    use lingxi_core::host::{BudgetError, SubagentSpawnError, SubagentUsage};
     use serde_json::json;
     use std::any::Any;
     use std::collections::HashMap as StdHashMap;
@@ -1441,7 +1445,7 @@ mod tests {
             match canned {
                 Some(CannedResult::Completed(content, total_tokens)) => {
                     Ok(SubagentResult::Completed {
-                        agent_id: protocol::AgentId::new(),
+                        agent_id: lingxi_core::types::AgentId::new(),
                         content,
                         usage: SubagentUsage {
                             total_tokens,
@@ -1458,12 +1462,12 @@ mod tests {
                     })
                 }
                 Some(CannedResult::Failed(reason)) => Ok(SubagentResult::Failed {
-                    agent_id: protocol::AgentId::new(),
+                    agent_id: lingxi_core::types::AgentId::new(),
                     reason,
-                    usage: platform_api::subagent_spawn::SubagentUsage::default(),
+                    usage: lingxi_core::host::subagent_spawn::SubagentUsage::default(),
                 }),
                 Some(CannedResult::Killed) => Ok(SubagentResult::Killed {
-                    agent_id: protocol::AgentId::new(),
+                    agent_id: lingxi_core::types::AgentId::new(),
                 }),
                 Some(CannedResult::Err(msg)) => Err(SubagentSpawnError::Runtime(msg)),
                 Some(CannedResult::Pending) | None => {
@@ -1511,11 +1515,11 @@ mod tests {
     /// worktrees (AgentTool does, before dispatch); it only judges the one
     /// carried on `SubagentSpawnRequest::worktree`.
     struct RecordingWorktree {
-        summary: Option<platform_api::worktree::WorktreeChangeSummary>,
-        removed: StdMutex<Vec<platform_api::worktree::WorktreeHandle>>,
+        summary: Option<lingxi_core::host::worktree::WorktreeChangeSummary>,
+        removed: StdMutex<Vec<lingxi_core::host::worktree::WorktreeHandle>>,
     }
     impl RecordingWorktree {
-        fn new(summary: Option<platform_api::worktree::WorktreeChangeSummary>) -> Arc<Self> {
+        fn new(summary: Option<lingxi_core::host::worktree::WorktreeChangeSummary>) -> Arc<Self> {
             Arc::new(Self {
                 summary,
                 removed: StdMutex::new(Vec::new()),
@@ -1526,33 +1530,37 @@ mod tests {
         }
     }
     #[async_trait]
-    impl platform_api::worktree::WorktreeManager for RecordingWorktree {
+    impl lingxi_core::host::worktree::WorktreeManager for RecordingWorktree {
         async fn create_worktree(
             &self,
             _slug: &str,
             _base_branch: Option<&str>,
             _copy_includes: &[PathBuf],
-        ) -> Result<platform_api::worktree::WorktreeHandle, platform_api::worktree::WorktreeError>
-        {
-            Err(platform_api::worktree::WorktreeError::Unsupported)
+        ) -> Result<
+            lingxi_core::host::worktree::WorktreeHandle,
+            lingxi_core::host::worktree::WorktreeError,
+        > {
+            Err(lingxi_core::host::worktree::WorktreeError::Unsupported)
         }
         async fn remove_worktree(
             &self,
-            handle: &platform_api::worktree::WorktreeHandle,
-        ) -> Result<(), platform_api::worktree::WorktreeError> {
+            handle: &lingxi_core::host::worktree::WorktreeHandle,
+        ) -> Result<(), lingxi_core::host::worktree::WorktreeError> {
             self.removed.lock().unwrap().push(handle.clone());
             Ok(())
         }
         async fn list_worktrees(
             &self,
-        ) -> Result<Vec<platform_api::worktree::WorktreeInfo>, platform_api::worktree::WorktreeError>
-        {
+        ) -> Result<
+            Vec<lingxi_core::host::worktree::WorktreeInfo>,
+            lingxi_core::host::worktree::WorktreeError,
+        > {
             Ok(Vec::new())
         }
         async fn cleanup_stale(
             &self,
             _max_age: std::time::Duration,
-        ) -> Result<Vec<PathBuf>, platform_api::worktree::WorktreeError> {
+        ) -> Result<Vec<PathBuf>, lingxi_core::host::worktree::WorktreeError> {
             Ok(Vec::new())
         }
         fn is_supported(&self) -> bool {
@@ -1560,10 +1568,10 @@ mod tests {
         }
         async fn worktree_change_summary(
             &self,
-            _handle: &platform_api::worktree::WorktreeHandle,
+            _handle: &lingxi_core::host::worktree::WorktreeHandle,
         ) -> Result<
-            Option<platform_api::worktree::WorktreeChangeSummary>,
-            platform_api::worktree::WorktreeError,
+            Option<lingxi_core::host::worktree::WorktreeChangeSummary>,
+            lingxi_core::host::worktree::WorktreeError,
         > {
             Ok(self.summary)
         }
@@ -1575,7 +1583,7 @@ mod tests {
         unparked: StdMutex<Vec<AgentId>>,
     }
     #[async_trait]
-    impl platform_api::parked_agent_store::ParkedAgentStore for RecordingParkedStore {
+    impl lingxi_core::host::parked_agent_store::ParkedAgentStore for RecordingParkedStore {
         async fn park(
             &self,
             task_id: &str,
@@ -1595,8 +1603,8 @@ mod tests {
         }
     }
 
-    fn isolation_worktree_handle() -> platform_api::worktree::WorktreeHandle {
-        platform_api::worktree::WorktreeHandle {
+    fn isolation_worktree_handle() -> lingxi_core::host::worktree::WorktreeHandle {
+        lingxi_core::host::worktree::WorktreeHandle {
             path: PathBuf::from("/repo/.lingxi/worktrees/agent-1"),
             branch_name: "worktree-agent-1".into(),
             base_commit: None,
@@ -1654,7 +1662,7 @@ mod tests {
 
     fn input_with_worktree(prompt: &str) -> TaskSpawnInput {
         TaskSpawnInput::LocalAgent {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             subagent_type: "general-purpose".into(),
             prompt: prompt.into(),
             is_backgrounded: true,
@@ -1678,8 +1686,8 @@ mod tests {
         last_rest: StdMutex<
             Option<(
                 Option<String>,
-                Option<platform_api::task_registry::AgentRunUsage>,
-                Option<protocol::AgentId>,
+                Option<lingxi_core::host::task_registry::AgentRunUsage>,
+                Option<lingxi_core::types::AgentId>,
                 Option<String>,
                 Option<String>,
             )>,
@@ -1687,7 +1695,7 @@ mod tests {
         /// The terminal notification payload, and the call ORDER relative to the
         /// terminal `set_status` — the drain is terminal-gated, so the payload
         /// must land first.
-        outcome: StdMutex<Option<platform_api::task_registry::AgentTerminalOutcome>>,
+        outcome: StdMutex<Option<lingxi_core::host::task_registry::AgentTerminalOutcome>>,
         calls: StdMutex<Vec<&'static str>>,
     }
     #[async_trait]
@@ -1709,7 +1717,7 @@ mod tests {
         async fn set_agent_outcome(
             &self,
             _task_id: &str,
-            outcome: platform_api::task_registry::AgentTerminalOutcome,
+            outcome: lingxi_core::host::task_registry::AgentTerminalOutcome,
         ) {
             self.calls.lock().unwrap().push("outcome");
             *self.outcome.lock().unwrap() = Some(outcome);
@@ -1718,8 +1726,8 @@ mod tests {
             &self,
             task_id: &str,
             result: Option<String>,
-            usage: Option<platform_api::task_registry::AgentRunUsage>,
-            agent_id: Option<protocol::AgentId>,
+            usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
+            agent_id: Option<lingxi_core::types::AgentId>,
             agent_name: Option<String>,
             team_name: Option<String>,
         ) {
@@ -1751,7 +1759,7 @@ mod tests {
         fn rest_count(&self) -> usize {
             *self.rest_count.lock().unwrap()
         }
-        fn outcome(&self) -> platform_api::task_registry::AgentTerminalOutcome {
+        fn outcome(&self) -> lingxi_core::host::task_registry::AgentTerminalOutcome {
             self.outcome.lock().unwrap().clone().unwrap_or_default()
         }
         fn calls(&self) -> Vec<&'static str> {
@@ -1785,7 +1793,7 @@ mod tests {
 
     fn local_agent_input(prompt: &str) -> TaskSpawnInput {
         TaskSpawnInput::LocalAgent {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             subagent_type: "general-purpose".into(),
             prompt: prompt.into(),
             is_backgrounded: true,
@@ -1852,11 +1860,11 @@ mod tests {
             &self,
             request: SubagentSpawnRequest,
             _inherit: SubagentInheritance,
-            observer: Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>,
+            observer: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>,
         ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError>
         {
             let id = AgentId::new();
-            let event = platform_api::subagent_spawn::SubagentObservation::Allocated {
+            let event = lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
                 agent_id: id,
                 agent_type: request.subagent_type.clone(),
                 name: request.name.clone(),
@@ -1910,12 +1918,12 @@ mod tests {
         SubagentEvent::Completed {
             agent_id: AgentId::new(),
             result: json!({ "marker": marker }),
-            usage: llm_runtime::Usage::default(),
+            usage: llm_runtime::ExecutionUsage::default(),
             total_tool_use_count: 0,
             total_duration_ms: 0,
             assistant_message_count: 0,
             last_request_id: None,
-            cumulative_usage: llm_runtime::Usage::default(),
+            cumulative_usage: llm_runtime::ExecutionUsage::default(),
             usage_complete: true,
         }
     }
@@ -1952,7 +1960,7 @@ mod tests {
     }
 
     async fn real_background_identity_probe(restored: bool) {
-        use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
+        use lingxi_core::host::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
         #[derive(Default)]
         struct Allocations(StdMutex<HashMap<String, AgentId>>);
         #[async_trait]
@@ -2007,9 +2015,9 @@ mod tests {
                 &self,
                 _: &str,
                 _: Option<&str>,
-                messages: Vec<protocol::ConversationMessage>,
+                messages: Vec<lingxi_core::types::ConversationMessage>,
                 _: Vec<serde_json::Value>,
-            ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+            ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
                 let registry = self.registry.get().unwrap().upgrade().unwrap();
                 let history = serde_json::to_string(&messages).unwrap();
                 let child = history.contains("nested child prompt");
@@ -2072,7 +2080,7 @@ mod tests {
                     );
                     "parent folded child"
                 };
-                Ok(llm_runtime::LlmResponse {
+                Ok(llm_runtime::HistoryResponse {
                     id: "response".into(),
                     model: "mock".into(),
                     content: vec![llm_runtime::ContentBlock::Text {
@@ -2081,7 +2089,7 @@ mod tests {
                     }],
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
-                    usage: llm_runtime::Usage::default(),
+                    usage: llm_runtime::ExecutionUsage::default(),
                     cost: None,
                     provider_metadata: serde_json::Value::Null,
                 })
@@ -2149,10 +2157,11 @@ mod tests {
         api.registry.set(Arc::downgrade(&registry)).ok().unwrap();
         let mut parent_request = request("original prompt must not replay", "real parent");
         if restored {
-            parent_request.resumed_history = Some(vec![protocol::ConversationMessage::user(
-                protocol::MessageId::new(),
-                "recovered parent history".into(),
-            )]);
+            parent_request.resumed_history =
+                Some(vec![lingxi_core::types::ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "recovered parent history".into(),
+                )]);
         }
         let mut parent_input = input(parent_request, None);
         if let (Some(old), TaskSpawnInput::LocalAgent { agent_id, .. }) =
@@ -2190,8 +2199,8 @@ mod tests {
         );
         if let Some(old) = restored_id {
             let mut duplicate = request("", "duplicate restore");
-            duplicate.resumed_history = Some(vec![protocol::ConversationMessage::user(
-                protocol::MessageId::new(),
+            duplicate.resumed_history = Some(vec![lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
                 "duplicate history".into(),
             )]);
             let mut duplicate_input = input(duplicate, None);
@@ -2272,7 +2281,7 @@ mod tests {
 
     #[tokio::test]
     async fn observer_sidecar_queues_activity_until_rest_without_notifying_owner() {
-        use platform_api::task_registry::TaskRegistryHandle;
+        use lingxi_core::host::task_registry::TaskRegistryHandle;
         let memory_fs = Arc::new(InMemoryFs::new());
         let fs: Arc<dyn FileSystem> = memory_fs.clone();
         let (_dir, mgr) = make_output_manager(fs.clone());
@@ -2296,10 +2305,10 @@ mod tests {
         sink.bind(registry.clone());
         // The pairing table the composition root shares with the report tool.
         let coordinator = AgentId::new();
-        let pairings = Arc::new(platform_api::observer_pairing::ObserverPairings::new());
+        let pairings = Arc::new(lingxi_core::host::observer_pairing::ObserverPairings::new());
         registry.set_observer_pairings(pairings.clone());
-        let seed = platform_api::observer_pairing::ObserverPairingSeed {
-            spec: platform_api::subagent_spawn::ObserverSpec::new("reviewer"),
+        let seed = lingxi_core::host::observer_pairing::ObserverPairingSeed {
+            spec: lingxi_core::host::subagent_spawn::ObserverSpec::new("reviewer"),
             observed_name: "step two".into(),
             observed_creator: Some(coordinator),
             observed_creator_name: Some("coordinator".into()),
@@ -2308,7 +2317,9 @@ mod tests {
             subagent_type: "reviewer".into(),
             prompt: "Observe material issues".into(),
             name: Some("step two".into()),
-            observer: Some(platform_api::subagent_spawn::ObserverSpec::new("reviewer")),
+            observer: Some(lingxi_core::host::subagent_spawn::ObserverSpec::new(
+                "reviewer",
+            )),
             // A coordinator's worker: the report must go UP to the coordinator.
             // This also pins that arming happens BEFORE the request is stripped
             // — `creator_agent_id` is cleared a few lines later, so an arming
@@ -2669,7 +2680,8 @@ mod tests {
             .expect("a live agent accepts a message");
 
         // Now its stop is in flight.
-        let _stopping = platform_api::agent_processes::mark_stop_pending(&agent_id.to_string());
+        let _stopping =
+            lingxi_core::host::agent_processes::mark_stop_pending(&agent_id.to_string());
         let err = handler
             .send_message(&task_id, "again".into(), ctx)
             .await
@@ -2955,12 +2967,13 @@ mod tests {
         let spawner = MockSpawner::new(CannedResult::Completed(json!("ok"), 0));
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
-        let wt = RecordingWorktree::new(Some(platform_api::worktree::WorktreeChangeSummary {
+        let wt = RecordingWorktree::new(Some(lingxi_core::host::worktree::WorktreeChangeSummary {
             changed_files: 0,
             commits: 0,
         }));
-        let handler = make_handler(spawner, mgr, sink.clone())
-            .with_worktree_manager(wt.clone() as Arc<dyn platform_api::worktree::WorktreeManager>);
+        let handler = make_handler(spawner, mgr, sink.clone()).with_worktree_manager(
+            wt.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>
+        );
         let workers = handler.workers_map();
 
         handler
@@ -2985,12 +2998,13 @@ mod tests {
         let spawner = MockSpawner::new(CannedResult::Failed("model refused".into()));
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
-        let wt = RecordingWorktree::new(Some(platform_api::worktree::WorktreeChangeSummary {
+        let wt = RecordingWorktree::new(Some(lingxi_core::host::worktree::WorktreeChangeSummary {
             changed_files: 2,
             commits: 1,
         }));
-        let handler = make_handler(spawner, mgr, sink.clone())
-            .with_worktree_manager(wt.clone() as Arc<dyn platform_api::worktree::WorktreeManager>);
+        let handler = make_handler(spawner, mgr, sink.clone()).with_worktree_manager(
+            wt.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>
+        );
         let workers = handler.workers_map();
 
         handler
@@ -3201,12 +3215,13 @@ mod tests {
         let spawner = MockSpawner::new(CannedResult::Completed(json!([]), 0));
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
-        let wt = RecordingWorktree::new(Some(platform_api::worktree::WorktreeChangeSummary {
+        let wt = RecordingWorktree::new(Some(lingxi_core::host::worktree::WorktreeChangeSummary {
             changed_files: 2,
             commits: 1,
         }));
-        let handler = make_handler(spawner, mgr, sink.clone())
-            .with_worktree_manager(wt.clone() as Arc<dyn platform_api::worktree::WorktreeManager>);
+        let handler = make_handler(spawner, mgr, sink.clone()).with_worktree_manager(
+            wt.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>
+        );
         let workers = handler.workers_map();
 
         handler
@@ -3233,12 +3248,13 @@ mod tests {
         let spawner = MockSpawner::new(CannedResult::Completed(json!([]), 0));
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
-        let wt = RecordingWorktree::new(Some(platform_api::worktree::WorktreeChangeSummary {
+        let wt = RecordingWorktree::new(Some(lingxi_core::host::worktree::WorktreeChangeSummary {
             changed_files: 0,
             commits: 0,
         }));
-        let handler = make_handler(spawner, mgr, sink.clone())
-            .with_worktree_manager(wt.clone() as Arc<dyn platform_api::worktree::WorktreeManager>);
+        let handler = make_handler(spawner, mgr, sink.clone()).with_worktree_manager(
+            wt.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>
+        );
         let workers = handler.workers_map();
 
         handler
@@ -3268,13 +3284,15 @@ mod tests {
             tx_slot.clone(),
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
-        let wt = RecordingWorktree::new(Some(platform_api::worktree::WorktreeChangeSummary {
+        let wt = RecordingWorktree::new(Some(lingxi_core::host::worktree::WorktreeChangeSummary {
             changed_files: 0,
             commits: 0,
         }));
         let handler = make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink.clone())
             .with_streaming_spawner(streaming)
-            .with_worktree_manager(wt.clone() as Arc<dyn platform_api::worktree::WorktreeManager>);
+            .with_worktree_manager(
+                wt.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>
+            );
         let workers = handler.workers_map();
 
         handler
@@ -3506,16 +3524,18 @@ mod tests {
             tx_slot.clone(),
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
-        let wt = RecordingWorktree::new(Some(platform_api::worktree::WorktreeChangeSummary {
+        let wt = RecordingWorktree::new(Some(lingxi_core::host::worktree::WorktreeChangeSummary {
             changed_files: 0,
             commits: 0,
         }));
         let parked = Arc::new(RecordingParkedStore::default());
         let handler = make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink.clone())
             .with_streaming_spawner(streaming.clone())
-            .with_worktree_manager(wt.clone() as Arc<dyn platform_api::worktree::WorktreeManager>)
+            .with_worktree_manager(
+                wt.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>
+            )
             .with_parked_agent_store(
-                parked.clone() as Arc<dyn platform_api::parked_agent_store::ParkedAgentStore>
+                parked.clone() as Arc<dyn lingxi_core::host::parked_agent_store::ParkedAgentStore>
             );
         let ctx = make_ctx(fs);
 
@@ -3541,12 +3561,12 @@ mod tests {
         tx.send(SubagentEvent::Completed {
             agent_id: AgentId::new(),
             result: json!({ "text": "rest answer" }),
-            usage: llm_runtime::Usage::default(),
+            usage: llm_runtime::ExecutionUsage::default(),
             total_tool_use_count: 3,
             total_duration_ms: 1500,
             assistant_message_count: 0,
             last_request_id: None,
-            cumulative_usage: llm_runtime::Usage::default(),
+            cumulative_usage: llm_runtime::ExecutionUsage::default(),
             usage_complete: true,
         })
         .await
@@ -3841,7 +3861,7 @@ mod tests {
         // A non-default subagent_type on the variant must flow through verbatim
         // (parity with TS `agentType` — no AgentId-to-type derivation).
         let input = TaskSpawnInput::LocalAgent {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             subagent_type: "code-reviewer".into(),
             prompt: "p".into(),
             is_backgrounded: true,
@@ -3877,7 +3897,7 @@ mod tests {
 
         let inherited_invoker: Arc<dyn ToolInvoker> = Arc::new(MockInvoker);
         let inherited_budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(MockBudget);
-        let creator_agent_id = protocol::AgentId::new();
+        let creator_agent_id = lingxi_core::types::AgentId::new();
         let expected = SubagentSpawnRequest {
             teammate_color: None,
             subagent_type: "code-reviewer".into(),
@@ -3923,7 +3943,7 @@ mod tests {
             model_attempt: None,
         };
         let input = TaskSpawnInput::LocalAgent {
-            agent_id: protocol::AgentId::new(),
+            agent_id: lingxi_core::types::AgentId::new(),
             // These compact task-index fields deliberately disagree with the
             // full request so forwarding the stripped legacy reconstruction is
             // observable.
@@ -3983,8 +4003,6 @@ mod tests {
                     resume_from_run_id: None,
                     args: None,
                     run_id: None,
-                    parent_model: None,
-                    parent_model_profile: None,
                     invocation_mode: None,
                     workflow_source: None,
                     script_is_verbatim_builtin: None,
@@ -4024,10 +4042,10 @@ mod tests {
         seen: StdMutex<Vec<Option<String>>>,
     }
     #[async_trait]
-    impl platform_api::fork_resume_gate::ForkResumeGate for RefusingGate {
+    impl lingxi_core::host::fork_resume_gate::ForkResumeGate for RefusingGate {
         async fn check_resume(
             &self,
-            _agent_id: protocol::AgentId,
+            _agent_id: lingxi_core::types::AgentId,
             task_forked_skill_name: Option<&str>,
         ) -> Result<(), String> {
             self.seen
@@ -4042,10 +4060,10 @@ mod tests {
         seen: StdMutex<Vec<Option<String>>>,
     }
     #[async_trait]
-    impl platform_api::fork_resume_gate::ForkResumeGate for AllowingGate {
+    impl lingxi_core::host::fork_resume_gate::ForkResumeGate for AllowingGate {
         async fn check_resume(
             &self,
-            _agent_id: protocol::AgentId,
+            _agent_id: lingxi_core::types::AgentId,
             task_forked_skill_name: Option<&str>,
         ) -> Result<(), String> {
             self.seen
@@ -4061,7 +4079,7 @@ mod tests {
         fs: Arc<dyn FileSystem>,
         mgr: Arc<TaskOutputManager>,
         sink: Arc<RecordingSink>,
-        gate: Arc<dyn platform_api::fork_resume_gate::ForkResumeGate>,
+        gate: Arc<dyn lingxi_core::host::fork_resume_gate::ForkResumeGate>,
         fork_name: Option<&str>,
     ) -> (
         LocalAgentHandler,
@@ -4113,7 +4131,7 @@ mod tests {
             fs.clone(),
             mgr,
             sink,
-            gate.clone() as Arc<dyn platform_api::fork_resume_gate::ForkResumeGate>,
+            gate.clone() as Arc<dyn lingxi_core::host::fork_resume_gate::ForkResumeGate>,
             Some("review"),
         )
         .await;
@@ -4153,7 +4171,7 @@ mod tests {
             fs.clone(),
             mgr,
             sink,
-            gate.clone() as Arc<dyn platform_api::fork_resume_gate::ForkResumeGate>,
+            gate.clone() as Arc<dyn lingxi_core::host::fork_resume_gate::ForkResumeGate>,
             None,
         )
         .await;

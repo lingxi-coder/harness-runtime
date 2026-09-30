@@ -267,7 +267,7 @@ impl AgentToolResolver {
         // Applies to ALL subagents (ant + non-ant). The `use_exact_tools` fork
         // bypass (returned above) is exempt — fork recursion is governed by the
         // `is_in_fork_child` message guard in `AgentTool`.
-        if depth >= platform_api::subagent_spawn::max_subagent_spawn_depth() {
+        if depth >= lingxi_core::host::subagent_spawn::max_subagent_spawn_depth() {
             tools.retain(|t| t.name() != "Agent");
         }
 
@@ -1144,7 +1144,7 @@ mod tests {
     /// Set an agent's memory scope on top of the spawn-path defaults.
     fn agent_def_with_memory(
         tools: AgentToolPolicy,
-        memory: protocol::WritableScope,
+        memory: lingxi_core::types::WritableScope,
     ) -> AgentDefinition {
         AgentDefinition {
             memory: Some(memory),
@@ -1159,7 +1159,7 @@ mod tests {
         let parent = pool(&["Read", "Write", "Edit", "Bash", "Grep"]);
         let def = agent_def_with_memory(
             AgentToolPolicy::Explicit(vec!["Bash".to_string()]),
-            protocol::WritableScope::Project,
+            lingxi_core::types::WritableScope::Project,
         );
         let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         let got = names(&resolved);
@@ -1190,7 +1190,7 @@ mod tests {
         let parent = pool(&["Read", "Write", "Edit", "Bash"]);
         let def = agent_def_with_memory(
             AgentToolPolicy::Except(vec!["Write".to_string()]),
-            protocol::WritableScope::Project,
+            lingxi_core::types::WritableScope::Project,
         );
         let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         let got = names(&resolved);
@@ -1223,7 +1223,7 @@ mod tests {
                 "Write".to_string(),
                 "Edit".to_string(),
             ]),
-            protocol::WritableScope::User,
+            lingxi_core::types::WritableScope::User,
         );
         let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         assert_eq!(
@@ -1238,9 +1238,9 @@ mod tests {
         // scopes inject the identical Read/Write/Edit set.
         let parent = pool(&["Read", "Write", "Edit", "Bash"]);
         for scope in [
-            protocol::WritableScope::User,
-            protocol::WritableScope::Project,
-            protocol::WritableScope::Local,
+            lingxi_core::types::WritableScope::User,
+            lingxi_core::types::WritableScope::Project,
+            lingxi_core::types::WritableScope::Local,
         ] {
             let def =
                 agent_def_with_memory(AgentToolPolicy::Explicit(vec!["Bash".to_string()]), scope);
@@ -1261,7 +1261,7 @@ mod tests {
         let parent = pool(&["Read", "Bash"]); // no Write/Edit in parent
         let def = agent_def_with_memory(
             AgentToolPolicy::Explicit(vec!["Bash".to_string()]),
-            protocol::WritableScope::Local,
+            lingxi_core::types::WritableScope::Local,
         );
         let got = names(&AgentToolResolver::resolve(&def, &parent, &[], 0, false));
         assert!(got.contains(&"Read".to_string()));
@@ -1277,7 +1277,7 @@ mod tests {
         let parent = pool(&["Read", "Write", "Edit", "Bash"]);
         let mut def = agent_def_with_memory(
             AgentToolPolicy::Explicit(vec!["Bash".to_string()]),
-            protocol::WritableScope::Project,
+            lingxi_core::types::WritableScope::Project,
         );
         def.disallowed_tools = vec!["Write".to_string()];
         let got = names(&AgentToolResolver::resolve(&def, &parent, &[], 0, false));
@@ -1296,7 +1296,7 @@ mod tests {
         let parent = pool(&["Read", "Write", "Edit", "Bash"]);
         let def = AgentDefinition {
             permission_mode: AgentPermissionMode::Plan,
-            memory: Some(protocol::WritableScope::Project),
+            memory: Some(lingxi_core::types::WritableScope::Project),
             ..agent_def(AgentToolPolicy::Explicit(vec!["Bash".to_string()]))
         };
         let got = names(&AgentToolResolver::resolve(&def, &parent, &[], 0, false));

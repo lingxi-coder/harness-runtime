@@ -35,14 +35,51 @@ impl sdk::Transport for PreparationOnly {
     }
 }
 
+/// SDK clients are shared by effective immutable provider configuration and
+/// transport. Model selection is request-local, so changing models does not
+/// create another SDK client or connection pool.
 #[derive(Default)]
-pub(crate) struct ClientCache(
-    std::sync::Mutex<std::collections::BTreeMap<(String, String, String, usize), sdk::LlmClient>>,
-);
+pub(crate) struct ClientCache(std::sync::Mutex<Vec<CachedClient>>);
+struct CachedClient {
+    profile: wire::ProviderProfile,
+    transport: Arc<dyn sdk::Transport>,
+    client: sdk::LlmClient,
+}
 impl ClientCache {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.0.lock().unwrap().len()
+    }
+    fn get(
+        &self,
+        profile: &wire::ProviderProfile,
+        transport: Arc<dyn sdk::Transport>,
+    ) -> Result<sdk::LlmClient, LlmError> {
+        let mut entries = self.0.lock().expect("SDK client cache");
+        if let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.profile == *profile && Arc::ptr_eq(&entry.transport, &transport))
+        {
+            return Ok(entry.client.clone());
+        }
+        let region = profile
+            .regions
+            .first()
+            .copied()
+            .unwrap_or(wire::Region::International);
+        let client =
+            sdk::LlmClientBuilder::with_transport(transport.clone(), std::slice::from_ref(profile))
+                .with_region(region)
+                .build()
+                .map_err(|error| LlmError::InvalidRequest {
+                    message: error.to_string(),
+                })?;
+        entries.push(CachedClient {
+            profile: profile.clone(),
+            transport,
+            client: client.clone(),
+        });
+        Ok(client)
     }
 }
 impl std::fmt::Debug for ClientCache {
@@ -60,9 +97,6 @@ pub(crate) async fn prepare(
     authenticator: Arc<dyn sdk::Authenticator>,
     mode: sdk::RequestMode,
 ) -> Result<(sdk::RequestDraft, ProviderRequest), LlmError> {
-    profile.models.retain(|row| {
-        row.display_model == route.display_model && row.request_model == route.request_model
-    });
     // This exact connection was already selected by the application's policy.
     // Credentials are applied by the host after its final body/header policies.
     profile.auth = wire::AuthStrategy::Bearer;
@@ -73,32 +107,7 @@ pub(crate) async fn prepare(
             .get_or_init(|| Arc::new(PreparationOnly))
             .clone()
     });
-    let region = profile
-        .regions
-        .first()
-        .copied()
-        .unwrap_or(wire::Region::International);
-    let key = (
-        profile.profile_name.clone(),
-        route.request_model.clone(),
-        route.display_model.clone(),
-        Arc::as_ptr(&transport) as *const () as usize,
-    );
-    let client = {
-        let mut entries = cache.0.lock().expect("SDK client cache");
-        if let Some(client) = entries.get(&key) {
-            client.clone()
-        } else {
-            let client = sdk::LlmClientBuilder::with_transport(transport, &[profile.clone()])
-                .with_region(region)
-                .build()
-                .map_err(|e| LlmError::InvalidRequest {
-                    message: e.to_string(),
-                })?;
-            entries.insert(key, client.clone());
-            client
-        }
-    };
+    let client = cache.get(&profile, transport)?;
     let mut input = crate::upstream::request(request, profile.protocol)?;
     input.model.clone_from(&route.display_model);
     let draft = Box::pin(client.prepare_draft_on(
@@ -106,8 +115,8 @@ pub(crate) async fn prepare(
         &input,
         &sdk::RequestOptions {
             authenticator: Some(sdk::client::options::RequestAuthenticator(authenticator)),
-            account_scope: request.account_scope.clone(),
-            file_account_scope: request.file_account_scope.clone(),
+            account_scope: request.execution.account_scope.clone(),
+            file_account_scope: request.execution.file_account_scope.clone(),
             ..Default::default()
         },
         mode,
@@ -123,9 +132,6 @@ pub(crate) async fn prepare(
     );
     host.method.clone_from(&http.method);
     host.headers = http.headers.iter().cloned().collect();
-    if profile.protocol == wire::ProtocolFamily::BedrockClaude {
-        host.stream_framing = crate::StreamFraming::AwsEventStream;
-    }
     host.json_string_overrides =
         crate::upstream::message_string_overrides(request, profile.protocol)?;
     Ok((draft, host))
@@ -184,36 +190,11 @@ pub(crate) fn decode(collected: &sdk::CollectedResponse) -> Result<wire::ChatRes
         }
         other => crate::upstream::error(other),
     })?;
-    let body = serde_json::from_slice(&collected.response().body).unwrap_or_default();
-    validate_response_content(&decoded, &body, collected.profile().protocol)?;
     Ok(decoded)
 }
 
-/// Host turns must not silently settle a response whose malformed content was
-/// omitted by a permissive upstream decoder. Usage is observed before decoding.
-pub(crate) fn validate_response_content(
-    decoded: &wire::ChatResponse,
-    body: &serde_json::Value,
-    protocol: wire::ProtocolFamily,
-) -> Result<(), LlmError> {
-    if matches!(
-        protocol,
-        wire::ProtocolFamily::AnthropicMessages
-            | wire::ProtocolFamily::VertexClaude
-            | wire::ProtocolFamily::FoundryClaude
-            | wire::ProtocolFamily::BedrockClaude
-    ) && body["content"]
-        .as_array()
-        .is_some_and(|blocks| blocks.len() != decoded.message.content.len())
-    {
-        return Err(LlmError::InvalidRequest {
-            message: "provider response contains malformed content blocks".into(),
-        });
-    }
-    Ok(())
-}
 pub(crate) struct HostAuthenticator {
-    pub client: crate::DefaultLlmClient,
+    pub client: crate::ModelRuntime,
     pub now: Option<std::time::SystemTime>,
     pub failure: HostFailure,
 }
@@ -335,13 +316,51 @@ mod tests {
             })
         }
     }
+    #[test]
+    fn sdk_configuration_and_transport_snapshots_are_shared_and_isolated() {
+        let mut profile: wire::ProviderProfile = serde_json::from_value(serde_json::json!({
+            "provider_id":"test", "profile_name":"test", "protocol":"open_ai_chat", "auth":"none", "base_url":"https://old.example", "models":[
+                {"display_model":"one", "request_model":"model-one", "billing_model":"one"},
+                {"display_model":"two", "request_model":"model-two", "billing_model":"two"}
+            ]
+        })).unwrap();
+        let cache = ClientCache::default();
+        let transport: Arc<dyn sdk::Transport> = Arc::new(PreparationOnly);
+        let old = cache.get(&profile, transport.clone()).unwrap();
+        assert!(old.resolve("one").is_ok());
+        assert!(old.resolve("two").is_ok());
+        let _same = cache.get(&profile, transport.clone()).unwrap();
+        assert_eq!(
+            cache.len(),
+            1,
+            "model selection does not rebuild the SDK client"
+        );
+        profile.base_url = "https://new.example".into();
+        let new = cache.get(&profile, transport).unwrap();
+        assert_eq!(cache.len(), 2);
+        assert_eq!(
+            old.snapshot().profile("test").unwrap().base_url,
+            "https://old.example"
+        );
+        assert_eq!(
+            new.snapshot().profile("test").unwrap().base_url,
+            "https://new.example"
+        );
+        let _other_transport = cache.get(&profile, Arc::new(PreparationOnly)).unwrap();
+        assert_eq!(
+            cache.len(),
+            3,
+            "network snapshots must not share execution identity"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn transport_heartbeats_do_not_reset_the_provider_progress_watchdog() {
         let profile:crate::ProviderProfile=serde_json::from_value(serde_json::json!({
             "profile_name":"test","provider_id":{"custom":{"name":"test"}},"protocol":"open_ai_chat","auth":"none","credential":{"type":"none"},"base_url":"https://example.test",
             "models":[{"display_model":"model","request_model":"model","billing_model":"model","capabilities":{"streaming":true,"tools":false,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
         })).unwrap();
-        let client = crate::DefaultLlmClient::from_config(crate::ClientConfig {
+        let client = crate::ModelRuntime::from_config(crate::ClientConfig {
             providers: vec![profile],
         })
         .unwrap();
@@ -356,7 +375,7 @@ mod tests {
         )
         .with_stream_idle_timeout_override(Some(std::time::Duration::from_secs(5)));
         let mut request = crate::LlmRequest::new("model");
-        request.max_tokens = Some(100);
+        request.input.max_tokens = Some(100);
         let mut stream = service.stream_request(request).await.unwrap();
         let result = tokio::time::timeout(std::time::Duration::from_secs(6), stream.next())
             .await

@@ -1,6 +1,6 @@
 //! Tools exposed by implicit session teams.
 use crate::{SendMessageTool, TeamRegistry};
-use platform_api::team_spawn::TeamSpawnSeam;
+use lingxi_core::host::team_spawn::TeamSpawnSeam;
 use std::sync::Arc;
 use tool_api::Tool;
 

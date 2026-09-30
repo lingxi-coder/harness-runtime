@@ -768,7 +768,7 @@ impl WebSearchTool {
     /// `search-progress-N` id and the query in `data` (TS keeps it on the event's
     /// `toolUseID`/`data`); here the channel key is the model's tool-use id when
     /// present, falling back to a fresh id (the channel key must be a real
-    /// [`protocol::ToolUseId`], unlike TS's free-form string). Best-effort
+    /// [`lingxi_core::types::ToolUseId`], unlike TS's free-form string). Best-effort
     /// (`try_send`), matching TS's synchronous fire-and-forget `onProgress`.
     fn emit_progress(ctx: &ToolUseContext, tx: &ToolProgressSender, query: &str, counter: u64) {
         // `Default for ToolUseId` generates a fresh random id (same as `new()`),
@@ -847,7 +847,7 @@ impl WebSearchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::task_registry::{
+    use lingxi_core::host::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
     };

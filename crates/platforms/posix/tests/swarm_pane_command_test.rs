@@ -1,5 +1,5 @@
 //! The terminal command boundary rejects control frames and uses respawn-pane.
-use platform_api::{PaneId, SwarmBackend};
+use lingxi_core::host::{PaneId, SwarmBackend};
 use platform_posix::swarm::TmuxBackend;
 use std::os::unix::fs::PermissionsExt;
 

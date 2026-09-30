@@ -11,9 +11,9 @@
 use crate::mailbox::{MailboxRouter, MessageSender, TeammateMessage};
 use crate::team_registry::{TeamRegistry, WorkerStatus};
 use async_trait::async_trait;
-use platform_api::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
-use platform_api::team_registry::{TeamRegistryHandle, WorkerInfo};
-use protocol::AgentId;
+use lingxi_core::host::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
+use lingxi_core::host::team_registry::{TeamRegistryHandle, WorkerInfo};
+use lingxi_core::types::AgentId;
 use std::time::SystemTime;
 use uuid::Uuid;
 

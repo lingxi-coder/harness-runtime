@@ -18,24 +18,24 @@
 //! - [`SessionRowDto`] ← `session::jsonl::loader::SessionMetadata` (`.path` is
 //!   mapped DIRECTLY — it exists at `session/src/jsonl/loader.rs:33`, decision
 //!   per plan line 152 — do NOT synthesize).
-//! - [`McpServerDto`]/[`McpStatusDto`] ← `platform_api::orchestrator::{McpServerInfo,
+//! - [`McpServerDto`]/[`McpStatusDto`] ← `lingxi_core::host::orchestrator::{McpServerInfo,
 //!   McpStatus}` (`McpStatus::Error(String)` is lowered to the STRUCT variant
 //!   [`McpStatusDto::Error`] for `UniFFI` flatness, plan line 154).
-//! - [`HookDto`] ← `platform_api::orchestrator::HookInfo`.
-//! - [`AgentDto`] ← `platform_api::orchestrator::AgentInfo`.
+//! - [`HookDto`] ← `lingxi_core::host::orchestrator::HookInfo`.
+//! - [`AgentDto`] ← `lingxi_core::host::orchestrator::AgentInfo`.
 //! - [`SlashCommandDto`] ← `command_api::model::SlashCommand` (display fields).
-//! - [`MemoryEntryDto`]/[`MemoryTierDto`] ← `protocol::{MemoryEntry,
+//! - [`MemoryEntryDto`]/[`MemoryTierDto`] ← `lingxi_core::types::{MemoryEntry,
 //!   MemoryEntryTier}`.
-//! - [`StatusSnapshotDto`] ← `platform_api::orchestrator::StatusSnapshot` (traits
+//! - [`StatusSnapshotDto`] ← `lingxi_core::host::orchestrator::StatusSnapshot` (traits
 //!   shape canonical; status-line fields appended OPTIONAL, plan line 155).
-//! - [`AuthStateDto`] ← `Option<platform_api::auth::LoginInfo>`.
+//! - [`AuthStateDto`] ← `Option<lingxi_core::host::auth::LoginInfo>`.
 //! - [`DoctorReportDto`]/[`DoctorCheckDto`]/[`CheckStatusDto`]/[`DoctorSummaryDto`]
-//!   ← `platform_api::orchestrator::{DoctorReport, DoctorCheck, CheckStatus,
+//!   ← `lingxi_core::host::orchestrator::{DoctorReport, DoctorCheck, CheckStatus,
 //!   DoctorSummary}`.
-//! - [`TaskRowDto`]/[`TaskStatusDto`] ← `platform_api::task_registry::TaskRecord` +
+//! - [`TaskRowDto`]/[`TaskStatusDto`] ← `lingxi_core::host::task_registry::TaskRecord` +
 //!   `tasks::TaskStatus`. (`TaskOutputChunk` is carried inline by
 //!   [`crate::protocol::events::ClientEvent::TaskOutputChunk`], mirroring
-//!   `platform_api::task_registry::TaskOutputChunk`.)
+//!   `lingxi_core::host::task_registry::TaskOutputChunk`.)
 //!
 //! Frozen serde conventions (decision §0.1):
 //! - internally tagged: `#[serde(tag = "type", rename_all = "snake_case")]`,
@@ -236,7 +236,7 @@ pub struct ProviderModelCatalogEntryDto {
 // ── MCP ──────────────────────────────────────────────────────────────────────
 
 /// One MCP server entry — the lowered `McpServerInfo`
-/// (`platform-api/src/orchestrator.rs:122`). Carried by
+/// (`crates/core/src/host/orchestrator.rs:122`). Carried by
 /// [`crate::protocol::events::ClientEvent::McpServers`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -293,7 +293,7 @@ pub enum ConfigurationEffectDto {
 }
 
 /// Connection status for an MCP server — the lowered `McpStatus`
-/// (`platform-api/src/orchestrator.rs:133`).
+/// (`crates/core/src/host/orchestrator.rs:133`).
 ///
 /// The engine's `McpStatus::Error(String)` is a *tuple* variant; it is lowered
 /// here to the STRUCT variant [`McpStatusDto::Error`] for `UniFFI` flatness
@@ -319,7 +319,7 @@ pub enum McpStatusDto {
 // ── Skills ───────────────────────────────────────────────────────────────────
 
 /// One discovered skill — the lowered `SkillInfo`
-/// (`platform-api/src/orchestrator.rs`). Carried by
+/// (`crates/core/src/host/orchestrator.rs`). Carried by
 /// [`crate::protocol::events::ClientEvent::Skills`].
 ///
 /// Skills are directory-discovered, not configured key-by-key: there is no
@@ -340,7 +340,7 @@ pub struct SkillDto {
 
 // ── Hooks ────────────────────────────────────────────────────────────────────
 
-/// One hook entry — the lowered `HookInfo` (`platform-api/src/orchestrator.rs:144`).
+/// One hook entry — the lowered `HookInfo` (`crates/core/src/host/orchestrator.rs:144`).
 /// Carried by [`crate::protocol::events::ClientEvent::Hooks`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -389,7 +389,7 @@ pub struct HookDto {
 // ── Agents ───────────────────────────────────────────────────────────────────
 
 /// One subagent entry — the lowered `AgentInfo`
-/// (`platform-api/src/orchestrator.rs:157`). Carried by
+/// (`crates/core/src/host/orchestrator.rs:157`). Carried by
 /// [`crate::protocol::events::ClientEvent::Agents`] (WIRE name; reconciled from spec
 /// §4.1 `AgentList`, plan line 149).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -535,7 +535,7 @@ fn is_false(value: &bool) -> bool {
 
 // ── Memory ───────────────────────────────────────────────────────────────────
 
-/// One LINGXI.md memory entry — the lowered `protocol::MemoryEntry`
+/// One LINGXI.md memory entry — the lowered `lingxi_core::types::MemoryEntry`
 /// (`protocol/src/messages.rs:201`). Carried by
 /// [`crate::protocol::events::ClientEvent::MemoryEntries`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -553,7 +553,7 @@ pub struct MemoryEntryDto {
     pub size_bytes: u64,
 }
 
-/// Memory tier — the lowered `protocol::MemoryEntryTier`.
+/// Memory tier — the lowered `lingxi_core::types::MemoryEntryTier`.
 /// Internally tagged on `type`, `snake_case`. `#[non_exhaustive]` so a future
 /// tier is additive.
 ///
@@ -581,7 +581,7 @@ pub enum MemoryTierDto {
 // ── Status ───────────────────────────────────────────────────────────────────
 
 /// The `/status` panel snapshot — the lowered `StatusSnapshot`
-/// (`platform-api/src/orchestrator.rs:214`). The traits-shape fields are canonical;
+/// (`crates/core/src/host/orchestrator.rs:214`). The traits-shape fields are canonical;
 /// status-line fields are appended OPTIONAL (plan line 155). Carried by
 /// [`crate::protocol::events::ClientEvent::StatusSnapshot`].
 ///
@@ -630,8 +630,8 @@ pub struct StatusSnapshotDto {
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 
-/// Auth state — the lowered `Option<platform_api::auth::LoginInfo>`
-/// (`platform-api/src/auth.rs:13`). Carried by
+/// Auth state — the lowered `Option<lingxi_core::host::auth::LoginInfo>`
+/// (`crates/core/src/host/auth.rs:13`). Carried by
 /// [`crate::protocol::events::ClientEvent::AuthState`]. Internally tagged on `type`,
 /// `snake_case`. `#[non_exhaustive]` so a future state (e.g. `LoggingIn`) is
 /// additive.
@@ -654,7 +654,7 @@ pub enum AuthStateDto {
 // ── Doctor ───────────────────────────────────────────────────────────────────
 
 /// Aggregate diagnostic report — the lowered `DoctorReport`
-/// (`platform-api/src/orchestrator.rs:168`). Carried by
+/// (`crates/core/src/host/orchestrator.rs:168`). Carried by
 /// [`crate::protocol::events::ClientEvent::DoctorReport`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -666,7 +666,7 @@ pub struct DoctorReportDto {
 }
 
 /// One `/doctor` check result — the lowered `DoctorCheck`
-/// (`platform-api/src/orchestrator.rs:177`).
+/// (`crates/core/src/host/orchestrator.rs:177`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DoctorCheckDto {
@@ -680,7 +680,7 @@ pub struct DoctorCheckDto {
 }
 
 /// Outcome of a single [`DoctorCheckDto`] — the lowered `CheckStatus`
-/// (`platform-api/src/orchestrator.rs:188`). Internally tagged on `type`,
+/// (`crates/core/src/host/orchestrator.rs:188`). Internally tagged on `type`,
 /// `snake_case`. `#[non_exhaustive]` so a future outcome is additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
@@ -696,7 +696,7 @@ pub enum CheckStatusDto {
 }
 
 /// Pass/warn/fail tallies in a [`DoctorReportDto`] — the lowered
-/// `DoctorSummary` (`platform-api/src/orchestrator.rs:198`).
+/// `DoctorSummary` (`crates/core/src/host/orchestrator.rs:198`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DoctorSummaryDto {
@@ -710,7 +710,7 @@ pub struct DoctorSummaryDto {
 
 // ── Tasks ────────────────────────────────────────────────────────────────────
 
-/// One task row — the lowered `TaskRecord` (`platform-api/src/task_registry.rs:36`).
+/// One task row — the lowered `TaskRecord` (`crates/core/src/host/task_registry.rs:36`).
 /// The engine's `status` wire `String` is lowered to a [`TaskStatusDto`] enum.
 /// Carried by [`crate::protocol::events::ClientEvent::TaskRow`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -800,7 +800,7 @@ pub enum TaskStatusDto {
 
 // ── Coordinator (T18 — per-worker roster) ─────────────────────────────────────
 
-/// One coordinator-team worker row — the lowered `platform_api::team_registry::WorkerInfo`
+/// One coordinator-team worker row — the lowered `lingxi_core::host::team_registry::WorkerInfo`
 /// (itself the POD projection of the coordinator's `WorkerAgent`). Field-shaped
 /// to lower 1:1 onto the TUI `WorkerRow` (`tui/src/multiagent/state.rs:25`):
 /// `agent_id` / `name` / `agent_type` / `status`. Carried by

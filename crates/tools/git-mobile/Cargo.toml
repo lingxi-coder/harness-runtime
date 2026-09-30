@@ -14,8 +14,8 @@ license.workspace = true
 
 [dependencies]
 mobile-linux-api.workspace = true
+core = { path = "../../core" }
 tool-api = { path = "../../tool-api" }
-platform-api = { path = "../../platform-api" }
 permission = { path = "../../permission" }
 thiserror.workspace = true
 # Vendored git2 (T1). The `https` feature is REQUIRED — it enables the mbedTLS

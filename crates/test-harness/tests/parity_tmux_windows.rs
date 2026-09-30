@@ -25,7 +25,7 @@ struct Fixture {
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn windows_swarm_refuses_tmux_with_claude_code_message() {
-    use platform_api::swarm::{SwarmBackend, SwarmError, SwarmLayout};
+    use lingxi_core::host::swarm::{SwarmBackend, SwarmError, SwarmLayout};
 
     let fx: Fixture = load_fixture("tmux_windows_refusal");
     let s = platform_windows::WindowsSwarmBackend::new();
@@ -63,7 +63,7 @@ fn windows_swarm_fixture_loads_on_non_windows() {
     // on POSIX hosts (where the variant is identical — only the platform
     // gating of the test driver differs).
     let fx: Fixture = load_fixture("tmux_windows_refusal");
-    let err = platform_api::swarm::SwarmError::Unsupported;
+    let err = lingxi_core::host::swarm::SwarmError::Unsupported;
     let displayed = format!("{err}");
     assert!(!fx.expected_is_available, "Windows must report unavailable");
     assert_eq!(

@@ -143,10 +143,10 @@ impl BudgetEnforcer {
     pub async fn begin_model_attempt(
         &self,
         intent: AttemptIntent,
-        output: &platform_api::WorkflowOutputScope,
+        output: &lingxi_core::host::WorkflowOutputScope,
         max_reserved_nano_usd: u64,
         profile_permit: tokio::sync::OwnedSemaphorePermit,
-    ) -> Result<CostBudgetAttempt, platform_api::BudgetError> {
+    ) -> Result<CostBudgetAttempt, lingxi_core::host::BudgetError> {
         let publication = self.bind_attempt_budget(output).await?;
         let tracker = publication.tracker();
         let receiver = tracker
@@ -157,9 +157,9 @@ impl BudgetEnforcer {
                 self.config.max_session_nano_usd,
                 profile_permit,
             )
-            .map_err(|error| platform_api::BudgetError::Internal(error.to_string()))?;
+            .map_err(|error| lingxi_core::host::BudgetError::Internal(error.to_string()))?;
         receiver.await.map_err(|_| {
-            platform_api::BudgetError::Internal("attempt begin owner disappeared".into())
+            lingxi_core::host::BudgetError::Internal("attempt begin owner disappeared".into())
         })?
     }
 }

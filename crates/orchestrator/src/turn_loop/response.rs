@@ -6,8 +6,8 @@ use super::{
 };
 use crate::conversation::{ApiErrorEnvelope, ConversationOrchestrator};
 use crate::error::OrchestratorError;
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use llm_runtime::ContentBlock as LlmContentBlock;
-use protocol::{ContentBlock, ConversationMessage, MessageId};
 
 /// A1 `max_tokens` recovery decision (TS `query.ts:1223-1255`).
 ///
@@ -99,14 +99,14 @@ pub(super) fn has_visible_text(blocks: &[ContentBlock]) -> bool {
 pub(crate) fn prior_assistant_used_structured_output(history: &[ConversationMessage]) -> bool {
     for msg in history.iter().rev() {
         match msg.role() {
-            protocol::MessageRole::User => {
+            lingxi_core::types::MessageRole::User => {
                 // `if(Sn.isMeta||Jde(Sn))continue; return!1`
                 if msg.is_meta() || is_tool_result_carrier(msg) {
                     continue;
                 }
                 return false;
             }
-            protocol::MessageRole::Assistant => {
+            lingxi_core::types::MessageRole::Assistant => {
                 // `Sn.message.content.some(b=>b.type==="tool_use"&&b.name===bp)`
                 if msg.tool_calls().iter().any(|b| {
                     matches!(b, ContentBlock::ToolUse { name, .. } if name == STRUCTURED_OUTPUT_TOOL_NAME)
@@ -115,7 +115,7 @@ pub(crate) fn prior_assistant_used_structured_output(history: &[ConversationMess
                 }
             }
             // `if(Sn.type!=="assistant")continue` — system / other lines skipped.
-            protocol::MessageRole::System => continue,
+            lingxi_core::types::MessageRole::System => continue,
         }
     }
     false
@@ -221,7 +221,7 @@ pub(super) async fn handle_thinking_only(
 /// (`Image`/`ImageUrl`/`Document`/…) remain dropped on the response path.
 #[must_use]
 pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<ContentBlock> {
-    use protocol::ToolUseId;
+    use lingxi_core::types::ToolUseId;
     content
         .iter()
         .filter_map(|b| match b {

@@ -1,6 +1,6 @@
 use crate::pool::StateMachinePool;
-use platform_api::subagent_spawn::SubagentObservation;
-use protocol::AgentId;
+use lingxi_core::host::subagent_spawn::SubagentObservation;
+use lingxi_core::types::AgentId;
 use std::sync::Arc;
 
 /// Owns the MCP cleanup handles [`PoolSubagentSpawner::build_subagent_context`]
@@ -145,7 +145,7 @@ impl Drop for SpawnDeallocGuard {
                 // it cannot launch work that would outlive it. Held until after
                 // `deallocate` below, which is this port's settle point.
                 let _stop_pending =
-                    platform_api::agent_processes::mark_stop_pending(&id.to_string());
+                    lingxi_core::host::agent_processes::mark_stop_pending(&id.to_string());
                 // Best-effort: a slot that is already gone (naturally
                 // completed, or raced by another deallocate) makes this a
                 // no-op — `send_event` and `deallocate` are both graceful on

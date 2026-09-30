@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use serde_json::json;
 use uuid::Uuid;
 

@@ -56,8 +56,8 @@
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use platform_api::{OrchestratorHandle, RecapOutcome};
-use protocol::ConversationMessage;
+use lingxi_core::host::{OrchestratorHandle, RecapOutcome};
+use lingxi_core::types::ConversationMessage;
 use std::sync::Arc;
 
 /// Fixed no-arg-invocation display when the session has had zero qualifying
@@ -95,7 +95,7 @@ const COMPACT_SUMMARY_PREFIX: &str =
 ///
 /// Wires the real no-turn gate against the live transcript; the forked
 /// side-query itself is a documented GAP (see module docs) — no
-/// `platform_api::OrchestratorHandle` method exists yet to run it.
+/// `lingxi_core::host::OrchestratorHandle` method exists yet to run it.
 #[derive(Clone)]
 pub struct RecapHandler {
     handle: Arc<dyn OrchestratorHandle>,
@@ -179,8 +179,8 @@ impl BuiltinCommandHandler for RecapHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lingxi_core::types::{ContentBlock, MessageId};
     use orchestrator::test_support::MockOrchestratorHandle;
-    use protocol::{ContentBlock, MessageId};
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
@@ -213,7 +213,7 @@ mod tests {
     /// pre-seam fallback tests keep asserting that branch.
     struct TranscriptStub {
         history: Vec<ConversationMessage>,
-        recap: Option<Result<RecapOutcome, platform_api::HandleError>>,
+        recap: Option<Result<RecapOutcome, lingxi_core::host::HandleError>>,
     }
 
     impl TranscriptStub {
@@ -225,7 +225,7 @@ mod tests {
         }
         fn with_recap(
             history: Vec<ConversationMessage>,
-            recap: Result<RecapOutcome, platform_api::HandleError>,
+            recap: Result<RecapOutcome, lingxi_core::host::HandleError>,
         ) -> Self {
             Self {
                 history,
@@ -236,25 +236,25 @@ mod tests {
 
     #[async_trait]
     impl OrchestratorHandle for TranscriptStub {
-        async fn current_session_id(&self) -> protocol::SessionId {
-            protocol::SessionId::new()
+        async fn current_session_id(&self) -> lingxi_core::types::SessionId {
+            lingxi_core::types::SessionId::new()
         }
-        async fn clear_session(&self) -> Result<(), platform_api::HandleError> {
+        async fn clear_session(&self) -> Result<(), lingxi_core::host::HandleError> {
             Ok(())
         }
         async fn force_compact(
             &self,
-        ) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
-            Ok(platform_api::CompactionSummary::default())
+        ) -> Result<lingxi_core::host::CompactionSummary, lingxi_core::host::HandleError> {
+            Ok(lingxi_core::host::CompactionSummary::default())
         }
-        async fn snapshot_cost(&self) -> platform_api::CostSnapshot {
-            platform_api::CostSnapshot::default()
+        async fn snapshot_cost(&self) -> lingxi_core::host::CostSnapshot {
+            lingxi_core::host::CostSnapshot::default()
         }
         async fn switch_model(
             &self,
             _model: &str,
             _profile: Option<&str>,
-        ) -> Result<(), platform_api::HandleError> {
+        ) -> Result<(), lingxi_core::host::HandleError> {
             Ok(())
         }
         async fn request_exit(&self) {}
@@ -263,36 +263,39 @@ mod tests {
         }
         async fn open_memory_editor(
             &self,
-        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
-            Err(platform_api::HandleError::Unimplemented("stub".into()))
+        ) -> Result<lingxi_core::host::MemoryEditorOutcome, lingxi_core::host::HandleError>
+        {
+            Err(lingxi_core::host::HandleError::Unimplemented("stub".into()))
         }
-        async fn list_mcp_servers(&self) -> Vec<platform_api::McpServerInfo> {
+        async fn list_mcp_servers(&self) -> Vec<lingxi_core::host::McpServerInfo> {
             Vec::new()
         }
-        async fn list_skills(&self) -> Vec<platform_api::SkillInfo> {
+        async fn list_skills(&self) -> Vec<lingxi_core::host::SkillInfo> {
             Vec::new()
         }
-        async fn list_hooks(&self) -> Vec<platform_api::HookInfo> {
+        async fn list_hooks(&self) -> Vec<lingxi_core::host::HookInfo> {
             Vec::new()
         }
-        async fn list_agents(&self) -> Vec<platform_api::AgentInfo> {
+        async fn list_agents(&self) -> Vec<lingxi_core::host::AgentInfo> {
             Vec::new()
         }
-        async fn run_doctor_checks(&self) -> platform_api::DoctorReport {
-            platform_api::DoctorReport::default()
+        async fn run_doctor_checks(&self) -> lingxi_core::host::DoctorReport {
+            lingxi_core::host::DoctorReport::default()
         }
-        async fn get_status_snapshot(&self) -> platform_api::StatusSnapshot {
-            platform_api::StatusSnapshot::default()
+        async fn get_status_snapshot(&self) -> lingxi_core::host::StatusSnapshot {
+            lingxi_core::host::StatusSnapshot::default()
         }
         async fn edit_config_file(
             &self,
-        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
-            Err(platform_api::HandleError::Unimplemented("stub".into()))
+        ) -> Result<lingxi_core::host::MemoryEditorOutcome, lingxi_core::host::HandleError>
+        {
+            Err(lingxi_core::host::HandleError::Unimplemented("stub".into()))
         }
         async fn edit_permissions_file(
             &self,
-        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
-            Err(platform_api::HandleError::Unimplemented("stub".into()))
+        ) -> Result<lingxi_core::host::MemoryEditorOutcome, lingxi_core::host::HandleError>
+        {
+            Err(lingxi_core::host::HandleError::Unimplemented("stub".into()))
         }
         async fn list_available_models(&self) -> Vec<String> {
             Vec::new()
@@ -300,11 +303,11 @@ mod tests {
         async fn conversation_transcript(&self) -> Vec<ConversationMessage> {
             self.history.clone()
         }
-        async fn generate_recap(&self) -> Result<RecapOutcome, platform_api::HandleError> {
+        async fn generate_recap(&self) -> Result<RecapOutcome, lingxi_core::host::HandleError> {
             match &self.recap {
                 Some(Ok(outcome)) => Ok(outcome.clone()),
                 Some(Err(e)) => Err(e.clone()),
-                None => Err(platform_api::HandleError::Unimplemented("stub".into())),
+                None => Err(lingxi_core::host::HandleError::Unimplemented("stub".into())),
             }
         }
     }
@@ -420,7 +423,7 @@ mod tests {
         // The seam fails internally → the fixed generic-failure text (spec item 6).
         let handle = Arc::new(TranscriptStub::with_recap(
             vec![assistant_text("Done.")],
-            Err(platform_api::HandleError::ActionFailed("boom".into())),
+            Err(lingxi_core::host::HandleError::ActionFailed("boom".into())),
         ));
         let h = RecapHandler::new(handle);
         match h.handle(&args()).await {

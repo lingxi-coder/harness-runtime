@@ -7,9 +7,7 @@ license.workspace = true
 description = "Fusion multi-model deliberation orchestrator"
 
 [dependencies]
-platform-api = { path = "../platform-api" }
 sidequery = { path = "../sidequery" }
-protocol = { path = "../protocol" }
 cost = { path = "../cost" }
 core = { path = "../core" }
 telemetry = { path = "../telemetry" }
@@ -22,12 +20,13 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "macros", "rt", "sync", "time"] }
 tokio-util.workspace = true
 tracing.workspace = true
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+tempfile = "3.13"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
 
 [lints]

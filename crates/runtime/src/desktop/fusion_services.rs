@@ -1,4 +1,4 @@
-use platform_api::AuthHandle;
+use lingxi_core::host::AuthHandle;
 #[cfg(windows)]
 use platform_windows::process::supervisor as shell_supervisor;
 #[cfg(windows)]
@@ -33,12 +33,12 @@ use super::{
 pub(super) fn desktop_fusion_catalog_row(
     profile: &str,
     model: &llm_runtime::ModelProfile,
-    billing_mode: platform_api::ModelBillingMode,
+    billing_mode: lingxi_core::host::ModelBillingMode,
     protocol: &llm_runtime::ProtocolFamily,
 ) -> fusion::CatalogModel {
     let mut hints = llm_runtime::hints_for(profile, &model.request_model).unwrap_or_default();
-    if billing_mode == platform_api::ModelBillingMode::Subscription {
-        hints.cost_class = platform_api::FusionCostClass::Subscription;
+    if billing_mode == lingxi_core::host::ModelBillingMode::Subscription {
+        hints.cost_class = lingxi_core::host::FusionCostClass::Subscription;
     }
     fusion::CatalogModel {
         profile: profile.to_string(),
@@ -373,7 +373,7 @@ impl FusionCatalogRefresher {
         match credential_id {
             // API-key routes resolve CredentialManager on every request, so a
             // cold API-key profile can adopt its first key without rebuilding
-            // DefaultLlmClient. The assembled source is the proof that this
+            // ModelRuntime. The assembled source is the proof that this
             // runtime actually chose that auth strategy.
             "anthropic" | "anthropic-api-key" => self
                 .credential_sources
@@ -1132,7 +1132,7 @@ impl command_api::builtins::CopilotConnectDriver for FusionCatalogRefreshingCopi
 
 /// See [`FusionCatalogRefreshingCredentialWriter`] — the same wrapping for
 /// the ChatGPT-subscription OAuth seam (`/connect chatgpt`), which persists
-/// its credential inside `llm_runtime::oauth::openai`'s handle rather than
+/// its credential inside `llm_runtime::auth::openai`'s handle rather than
 /// through `ConnectCredentialWriter`. Round-5 review finding [15] class
 /// sweep: this was the one harness-runtime::desktop `/connect` driver round 4 left
 /// unwrapped, so a ChatGPT sign-in stayed invisible to Fusion for the rest of
@@ -1190,24 +1190,26 @@ pub(super) struct FusionCatalogClearingAuth {
 
 #[async_trait::async_trait]
 impl AuthHandle for FusionCatalogClearingAuth {
-    async fn login(&self) -> Result<platform_api::auth::LoginInfo, platform_api::auth::AuthError> {
+    async fn login(
+        &self,
+    ) -> Result<lingxi_core::host::auth::LoginInfo, lingxi_core::host::auth::AuthError> {
         let info = self.inner.login().await?;
         if !note_fusion_catalog_credential_route(&self.catalog_registry, "anthropic-oauth").await {
-            return Err(platform_api::auth::AuthError::ServerError(
+            return Err(lingxi_core::host::auth::AuthError::ServerError(
                 fusion_credential_restart_required_message("anthropic-oauth"),
             ));
         }
         Ok(info)
     }
 
-    async fn logout(&self) -> Result<(), platform_api::auth::AuthError> {
+    async fn logout(&self) -> Result<(), lingxi_core::host::auth::AuthError> {
         self.inner.logout().await?;
         refresh_fusion_catalog_after_credential_delete(&self.catalog_registry, "anthropic-oauth")
             .await;
         Ok(())
     }
 
-    async fn current_user(&self) -> Option<platform_api::auth::LoginInfo> {
+    async fn current_user(&self) -> Option<lingxi_core::host::auth::LoginInfo> {
         self.inner.current_user().await
     }
 }
@@ -1298,7 +1300,7 @@ pub(super) struct DesktopFusionPriceBook {
 /// cache-write token count it likewise has no 1h/5m split for — this mirrors
 /// that precedent rather than inventing a second rule.
 pub(super) fn prompt_cache_write_ttl_1h_enabled() -> bool {
-    platform_api::env::is_env_truthy(std::env::var("ENABLE_PROMPT_CACHING_1H").ok().as_deref())
+    lingxi_core::host::env::is_env_truthy(std::env::var("ENABLE_PROMPT_CACHING_1H").ok().as_deref())
 }
 
 impl DesktopFusionPriceBook {
@@ -1449,14 +1451,14 @@ impl fusion::FusionPriceBook for DesktopFusionPriceBook {
 /// F007 finding).
 pub(super) fn desktop_fusion_runtime_config(
     cfg: &DesktopConfig,
-) -> Result<fusion::FusionRuntimeConfig, platform_api::FusionError> {
+) -> Result<fusion::FusionRuntimeConfig, lingxi_core::host::FusionError> {
     // Managed policy is intentionally read at the call boundary.  Keeping a
     // boot-time `Vec<String>` here makes `FusionConfigSource::load()` and the
     // executor's preflight disagree with the next on-disk policy edit.
     let managed_raw_tiers = managed_settings_raw_tiers_sync();
     let effective =
         load_effective_settings_for_config(cfg, &managed_raw_tiers).ok_or_else(|| {
-            platform_api::FusionError::InvalidConfiguration("settings failed to load".into())
+            lingxi_core::host::FusionError::InvalidConfiguration("settings failed to load".into())
         })?;
     match effective.settings.fusion {
         Some(settings) => fusion::FusionRuntimeConfig::from_settings(&settings),
@@ -1474,7 +1476,7 @@ pub(super) struct DesktopFusionConfigSource {
 }
 
 impl fusion::FusionConfigSource for DesktopFusionConfigSource {
-    fn load(&self) -> Result<fusion::FusionRuntimeConfig, platform_api::FusionError> {
+    fn load(&self) -> Result<fusion::FusionRuntimeConfig, lingxi_core::host::FusionError> {
         desktop_fusion_runtime_config(&self.cfg)
     }
 }
@@ -1494,11 +1496,11 @@ pub(super) struct DesktopFusionExecutor {
 }
 
 #[async_trait::async_trait]
-impl platform_api::FusionExecutor for DesktopFusionExecutor {
+impl lingxi_core::host::FusionExecutor for DesktopFusionExecutor {
     fn prepare(
         self: Arc<Self>,
-        submission: platform_api::FusionSubmission,
-    ) -> Result<platform_api::PreparedFusionRun, platform_api::FusionError> {
+        submission: lingxi_core::host::FusionSubmission,
+    ) -> Result<lingxi_core::host::PreparedFusionRun, lingxi_core::host::FusionError> {
         Arc::clone(&self.inner).prepare(submission)
     }
 
@@ -1506,11 +1508,11 @@ impl platform_api::FusionExecutor for DesktopFusionExecutor {
         self.inner.effective_timeout_ms()
     }
 
-    fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+    fn agent_surface(&self) -> lingxi_core::host::FusionAgentSurface {
         self.inner.agent_surface()
     }
 
-    fn preflight_error(&self) -> Option<platform_api::FusionError> {
+    fn preflight_error(&self) -> Option<lingxi_core::host::FusionError> {
         desktop_fusion_runtime_config(&self.cfg).err()
     }
 
@@ -1522,14 +1524,6 @@ impl platform_api::FusionExecutor for DesktopFusionExecutor {
         self.inner
             .resolve_parent_profile(parent_model, explicit_profile)
     }
-
-    fn workflow_fusion_call_cap(&self) -> u32 {
-        self.inner.workflow_fusion_call_cap()
-    }
-
-    fn workflow_batch_concurrency(&self) -> usize {
-        self.inner.workflow_batch_concurrency()
-    }
 }
 
 /// Install one shared physical-attempt host only after durable boot has
@@ -1540,7 +1534,7 @@ pub(super) fn desktop_fusion_attempts(
     budget: Arc<cost::BudgetEnforcer>,
     tracker: Arc<cost::CostTracker>,
     pricing: Arc<cost::PricingCatalog>,
-    outputs: Arc<dyn platform_api::WorkflowOutputScopes>,
+    outputs: Arc<dyn lingxi_core::host::WorkflowOutputScopes>,
 ) -> Arc<fusion_attempts::DesktopFusionAttempts> {
     let attempts = fusion_attempts::DesktopFusionAttempts::new(
         service.clone(),

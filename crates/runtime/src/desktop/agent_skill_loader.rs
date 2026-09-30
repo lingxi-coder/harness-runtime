@@ -1,4 +1,4 @@
-//! `AgentSkillLoader` — the [`platform_api::skill_loader::SkillLoader`] impl that backs
+//! `AgentSkillLoader` — the [`lingxi_core::host::skill_loader::SkillLoader`] impl that backs
 //! G5 subagent skill preloading (claude `runAgent.ts:577-646`).
 //!
 //! claude's `runAgent` resolves each frontmatter `skills:` entry to a registered
@@ -8,7 +8,7 @@
 //! This adapter ports that over the shared desktop [`CommandRegistry`] (the same
 //! registry the slash dispatcher + `Skill` tool read), so a child agent runner
 //! can preload skills WITHOUT the `agent` crate depending on `commands-core`
-//! (the leaf [`platform_api::skill_loader`] seam breaks that cycle).
+//! (the leaf [`lingxi_core::host::skill_loader`] seam breaks that cycle).
 //!
 //! The production composition root injects the same prompt-shell provider used
 //! by the Skill tool and slash dispatcher, so preloads run the complete empty-
@@ -18,8 +18,8 @@
 use std::sync::Arc;
 
 use command_api::{CommandRegistry, SlashCommand, SlashCommandKind};
-use platform_api::skill_loader::{SkillLoad, SkillLoader};
-use protocol::ContentBlock;
+use lingxi_core::host::skill_loader::{SkillLoad, SkillLoader};
+use lingxi_core::types::ContentBlock;
 use tokio::sync::RwLock;
 
 /// [`SkillLoader`] backed by the shared desktop [`CommandRegistry`].
@@ -239,7 +239,7 @@ mod tests {
         SlashCommand {
             name: name.to_string(),
             description: format!("{name} desc"),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from(format!("/x/{name}.md")),
                 frontmatter: CommandFrontmatter::default(),

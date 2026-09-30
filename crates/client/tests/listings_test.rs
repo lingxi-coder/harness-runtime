@@ -452,7 +452,7 @@ fn slash_command_catalog_round_trips() {
 
 // ── Memory ───────────────────────────────────────────────────────────────────
 
-/// `MemoryEntries { entries }` — mirrors `protocol::MemoryEntry`
+/// `MemoryEntries { entries }` — mirrors `lingxi_core::types::MemoryEntry`
 /// (`protocol/src/messages.rs:201`), tier lowered to a `snake_case` enum.
 #[test]
 fn memory_entries_round_trips() {
@@ -483,7 +483,7 @@ fn memory_entries_round_trips() {
 }
 
 /// All four memory tiers round-trip with `snake_case` tags (mirrors
-/// `protocol::MemoryEntryTier`).
+/// `lingxi_core::types::MemoryEntryTier`).
 #[test]
 fn memory_tier_variants_round_trip() {
     for (tier, tag) in [

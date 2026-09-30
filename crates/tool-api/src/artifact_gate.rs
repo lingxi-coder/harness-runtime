@@ -40,7 +40,7 @@
 //! via `lingxi_core::settings::SettingsJson`; wiring their live values into this gate
 //! lands with the Stage-2 publish/list pipeline.
 
-use platform_api::env::{is_env_defined_falsy, is_env_truthy};
+use lingxi_core::host::env::{is_env_defined_falsy, is_env_truthy};
 
 /// Binary `dw` — the Artifact tool's wire name.
 pub const ARTIFACT_TOOL_NAME: &str = "Artifact";

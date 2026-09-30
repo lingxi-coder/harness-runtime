@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 /// BEFORE the `session_cwd.swap(..)` that actually moves the session into it.
 ///
 /// `ExitWorktree` reads this to restore [`Self::original_cwd`] and to
-/// reconstruct the [`platform_api::worktree::WorktreeHandle`] it needs for
+/// reconstruct the [`lingxi_core::host::worktree::WorktreeHandle`] it needs for
 /// `worktree_change_summary`/`remove_worktree`, then clears the cell back to
 /// `None` on completion.
 #[derive(Debug, Clone)]

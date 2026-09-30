@@ -432,23 +432,10 @@ pub fn apply_beta_header(
     endpoint: Endpoint,
     ctx: &BetaContext,
 ) {
-    let assembled = assemble_beta_header(provider, endpoint, ctx);
-
-    let merged = match request.headers.get("anthropic-beta") {
-        None => assembled,
-        Some(existing) => {
-            let mut parts: Vec<&str> = existing.split(',').map(str::trim).collect();
-            for entry in assembled.split(',') {
-                let entry = entry.trim();
-                if !entry.is_empty() && !parts.contains(&entry) {
-                    parts.push(entry);
-                }
-            }
-            parts.join(",")
-        }
-    };
-
-    request.headers.insert("anthropic-beta".to_string(), merged);
+    lingxi_llm_client::providers::anthropic::request_policy::merge_beta_header(
+        &mut request.headers,
+        &[assemble_beta_header(provider, endpoint, ctx)],
+    );
 }
 
 /// Variant of [`apply_beta_header`] that also appends `oauth-2025-04-20` when
@@ -500,38 +487,17 @@ pub fn apply_beta_header_with_auth_and_custom(
         )
         && !custom_betas.is_empty()
     {
-        let mut parts: Vec<String> = request
-            .headers
-            .get("anthropic-beta")
-            .into_iter()
-            .flat_map(|v| v.split(','))
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string)
-            .collect();
-        for beta in custom_betas.iter().map(String::as_str) {
-            if !parts.iter().any(|existing| existing == beta) {
-                parts.push(beta.to_string());
-            }
-        }
-        request
-            .headers
-            .insert("anthropic-beta".to_string(), parts.join(","));
+        lingxi_llm_client::providers::anthropic::request_policy::merge_beta_header(
+            &mut request.headers,
+            custom_betas,
+        );
     }
 
     if is_oauth_subscriber {
-        let existing = request.headers.get("anthropic-beta").map(String::as_str);
-        let merged = match existing {
-            None => OAUTH.to_string(),
-            Some(current) => {
-                if current.split(',').any(|seg| seg.trim() == OAUTH) {
-                    current.to_string()
-                } else {
-                    format!("{current},{OAUTH}")
-                }
-            }
-        };
-        request.headers.insert("anthropic-beta".to_string(), merged);
+        lingxi_llm_client::providers::anthropic::request_policy::merge_beta_header(
+            &mut request.headers,
+            &[OAUTH.to_string()],
+        );
     }
 }
 

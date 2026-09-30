@@ -17,13 +17,13 @@
 use crate::client::LspClient;
 use crate::open_file_tracker::{DocumentSync, OpenFileTracker};
 use crate::path_mapper::LspDocumentPath;
+use lingxi_core::host::LspServerConfig;
 use lsp_types::{
     CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCallsParams,
     CallHierarchyPrepareParams, DocumentSymbolParams, Position, ReferenceContext, ReferenceParams,
     TextDocumentIdentifier, TextDocumentPositionParams, Url, WorkDoneProgressParams,
     WorkspaceSymbolParams,
 };
-use platform_api::LspServerConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::borrow::Cow;
@@ -106,7 +106,7 @@ pub enum LspOperationError {
     NotUtf8(String),
     /// Underlying LSP transport / server error.
     #[error("{0}")]
-    Lsp(#[from] platform_api::LspError),
+    Lsp(#[from] lingxi_core::host::LspError),
 }
 
 /// Convert a 1-based UI position to the 0-based LSP wire position.
@@ -230,7 +230,9 @@ pub(crate) async fn sync_document_text(
         .is_active_connection(client.name(), &connection)
         .await
     {
-        return Err(LspOperationError::Lsp(platform_api::LspError::Unavailable));
+        return Err(LspOperationError::Lsp(
+            lingxi_core::host::LspError::Unavailable,
+        ));
     }
 
     let sync = tracker

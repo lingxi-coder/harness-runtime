@@ -1,12 +1,12 @@
 use super::*;
 use crate::connection::{ConfigScope, McpServerConfig};
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpServerInfo, McpStatus, McpToolDto,
     McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
-use protocol::McpConnectionId as ConnId;
+use lingxi_core::types::McpConnectionId as ConnId;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -78,7 +78,7 @@ fn stdio_cfg(name: &str) -> McpServerConfig {
             args: vec![],
             env: std::collections::HashMap::new(),
         },
-        scope: ConfigScope::Settings(protocol::SettingsScope::Project),
+        scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         disabled: false,
         timeout_ms: None,
         always_load: false,
@@ -99,8 +99,8 @@ fn server_connection_payloads_only_mark_plugin_agent_source_as_plugin() {
         &plugin_cfg,
         12,
         crate::protocol_negotiation::NegotiationMode::Legacy,
-        &platform_api::McpNegotiatedProtocol {
-            era: platform_api::McpProtocolEra::Legacy,
+        &lingxi_core::host::McpNegotiatedProtocol {
+            era: lingxi_core::host::McpProtocolEra::Legacy,
             version: "2025-11-25".into(),
         },
     );
@@ -121,8 +121,8 @@ fn server_connection_payloads_only_mark_plugin_agent_source_as_plugin() {
         &dynamic_cfg,
         8,
         crate::protocol_negotiation::NegotiationMode::Legacy,
-        &platform_api::McpNegotiatedProtocol {
-            era: platform_api::McpProtocolEra::Legacy,
+        &lingxi_core::host::McpNegotiatedProtocol {
+            era: lingxi_core::host::McpProtocolEra::Legacy,
             version: "2025-11-25".into(),
         },
     );
@@ -153,7 +153,7 @@ async fn unconfigured_and_invalid_config_short_circuit_before_dialing() {
     let mut blank = stdio_cfg("blank");
     blank.spec = McpTransportSpec::Http {
         url: "   ".into(),
-        headers: platform_api::McpHeaders::default(),
+        headers: lingxi_core::host::McpHeaders::default(),
         headers_helper: None,
         oauth: None,
     };
@@ -169,7 +169,7 @@ async fn unconfigured_and_invalid_config_short_circuit_before_dialing() {
     let mut broken = stdio_cfg("broken");
     broken.spec = McpTransportSpec::Http {
         url: "${MISSING:-}".into(),
-        headers: platform_api::McpHeaders::default(),
+        headers: lingxi_core::host::McpHeaders::default(),
         headers_helper: None,
         oauth: None,
     };
@@ -193,7 +193,7 @@ async fn unconfigured_and_invalid_config_short_circuit_before_dialing() {
     let mut malformed = stdio_cfg("malformed");
     malformed.spec = McpTransportSpec::Http {
         url: "api.example.com/mcp".into(),
-        headers: platform_api::McpHeaders::default(),
+        headers: lingxi_core::host::McpHeaders::default(),
         headers_helper: None,
         oauth: None,
     };

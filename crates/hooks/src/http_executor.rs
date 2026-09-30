@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use platform_api::{HttpError, HttpTransport};
-use protocol::{HttpMethod, HttpRequest};
+use lingxi_core::host::{HttpError, HttpTransport};
+use lingxi_core::types::{HttpMethod, HttpRequest};
 use regex::Regex;
 
 use crate::definition::{HookDefinition, HookExecutor};
@@ -477,8 +477,8 @@ mod tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::HookEventType;
     use async_trait::async_trait;
-    use platform_api::ResolvedAddressOverride;
-    use protocol::{HookId, HttpResponse};
+    use lingxi_core::host::ResolvedAddressOverride;
+    use lingxi_core::types::{HookId, HttpResponse};
     use std::sync::Mutex;
 
     struct MockHttp {
@@ -525,7 +525,7 @@ mod tests {
         async fn stream_sse(
             &self,
             _req: HttpRequest,
-        ) -> Result<platform_api::http::SseStream, HttpError> {
+        ) -> Result<lingxi_core::host::http::SseStream, HttpError> {
             Err(HttpError::InvalidRequest("not implemented".into()))
         }
     }
@@ -543,7 +543,7 @@ mod tests {
                 allowed_env_vars: Vec::new(),
                 timeout: Duration::from_secs(5),
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -1024,7 +1024,7 @@ mod tests {
                 allowed_env_vars: vec!["LX_HBIN12_A".into(), "LX_HBIN12_B".into()],
                 timeout: Duration::from_secs(5),
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,

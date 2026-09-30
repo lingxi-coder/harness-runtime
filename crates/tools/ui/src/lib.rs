@@ -27,7 +27,7 @@ pub mod send_message;
 pub mod sleep;
 pub mod synthetic_output;
 
-/// ONE lock for every test that mutates `platform_api::live_sessions`'s process
+/// ONE lock for every test that mutates `lingxi_core::host::live_sessions`'s process
 /// globals (`set_process_dir` / `set_process_session_id` / `set_process_name`).
 ///
 /// It lives at crate level because those globals are per-PROCESS and the whole
@@ -281,7 +281,7 @@ mod ask_timeout_wiring_tests {
 
 #[cfg(test)]
 mod process_globals_lock_gate {
-    /// Both files that mutate `platform_api::live_sessions`'s per-process globals must
+    /// Both files that mutate `lingxi_core::host::live_sessions`'s per-process globals must
     /// route through ONE lock. They previously each declared a `process_lock()`
     /// backed by its own `static LOCK`, so each serialized against itself and
     /// against nothing else, and the suite went red only under load.
@@ -314,7 +314,7 @@ mod process_globals_lock_gate {
             assert!(
                 body.contains(SHARED),
                 "{file}'s `process_lock()` does not delegate to `{SHARED}`. Its body is:\n{body}\n\n                 A file-local `static LOCK` here guards only this file. `list_agents.rs` and \
-                 `send_message.rs` both call `platform_api::live_sessions::set_process_dir` / \
+                 `send_message.rs` both call `lingxi_core::host::live_sessions::set_process_dir` / \
                  `set_process_session_id` / `set_process_name`, which are PER-PROCESS, so two \
                  mutexes let a `send_message` test repoint the process dir while a `list_agents` \
                  test is reading it — the listing then loses the peer entry it just wrote."

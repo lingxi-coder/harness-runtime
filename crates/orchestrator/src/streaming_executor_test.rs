@@ -44,7 +44,7 @@ mod tests {
     };
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
-    use protocol::MessageId;
+    use lingxi_core::types::MessageId;
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -422,7 +422,7 @@ mod tests {
         enabled: bool,
     }
 
-    impl platform_api::coordinator_mode::CoordinatorModeHandle for StubCoordinatorMode {
+    impl lingxi_core::host::coordinator_mode::CoordinatorModeHandle for StubCoordinatorMode {
         fn is_enabled(&self) -> bool {
             self.enabled
         }

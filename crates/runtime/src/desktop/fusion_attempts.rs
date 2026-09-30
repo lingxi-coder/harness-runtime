@@ -6,11 +6,11 @@ mod tests;
 
 use async_trait::async_trait;
 use futures::FutureExt;
-use llm_runtime::{LlmError, ModelAttemptUsageCompleteness};
-use platform_api::{
+use lingxi_core::host::{
     ModelAttemptContext, ModelAttemptRegistrationId, ModelAttemptRun, ModelAttemptStage,
     WorkflowOutputScope, WorkflowOutputScopes,
 };
+use llm_runtime::{LlmError, ModelAttemptUsageCompleteness};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
@@ -68,7 +68,7 @@ struct Entry {
     intent: cost::AttemptIntent,
     contribution: Option<cost::AttemptContribution>,
     dispatched: bool,
-    last_raw: Option<llm_runtime::Usage>,
+    last_raw: Option<llm_runtime::ExecutionUsage>,
     last_known: Option<cost::Usage>,
 }
 
@@ -106,8 +106,8 @@ fn unavailable(error: impl ToString) -> LlmError {
         message: error.to_string(),
     }
 }
-fn fusion_error(error: impl ToString) -> platform_api::FusionError {
-    platform_api::FusionError::InvalidConfiguration(error.to_string())
+fn fusion_error(error: impl ToString) -> lingxi_core::host::FusionError {
+    lingxi_core::host::FusionError::InvalidConfiguration(error.to_string())
 }
 
 impl DesktopFusionAttempts {
@@ -131,16 +131,10 @@ impl DesktopFusionAttempts {
 }
 
 impl fusion::FusionAttemptRegistrar for DesktopFusionAttempts {
-    fn workflow_batch_concurrency(&self) -> usize {
-        // Registration requires the originating durable scope; begin() binds
-        // its exact account and atomically reserves money/output before wire.
-        2
-    }
-
     fn register(
         &self,
         captured: fusion::FusionAttemptRegistration,
-    ) -> Result<fusion::RegisteredFusionAttempts, platform_api::FusionError> {
+    ) -> Result<fusion::RegisteredFusionAttempts, lingxi_core::host::FusionError> {
         self.register_routes(captured, true)
     }
 }
@@ -150,13 +144,14 @@ impl DesktopFusionAttempts {
         &self,
         captured: fusion::FusionAttemptRegistration,
         include_judges: bool,
-    ) -> Result<fusion::RegisteredFusionAttempts, platform_api::FusionError> {
+    ) -> Result<fusion::RegisteredFusionAttempts, lingxi_core::host::FusionError> {
         let session = captured
             .control
             .identity()
             .session_id
             .ok_or_else(|| fusion_error("attempt registration requires canonical session"))?;
-        if captured.control.billing_mode() != platform_api::ModelAttemptBillingMode::MeteredAttempts
+        if captured.control.billing_mode()
+            != lingxi_core::host::ModelAttemptBillingMode::MeteredAttempts
         {
             return Err(fusion_error(
                 "attempt registration requires metered control",
@@ -164,11 +159,6 @@ impl DesktopFusionAttempts {
         }
         let output = match captured.inherit.output_scope.as_ref() {
             Some(scope) => scope.clone(),
-            None if captured.control.identity().origin == platform_api::FusionOrigin::Workflow => {
-                return Err(fusion_error(
-                    "workflow attempt requires its original output scope",
-                ));
-            }
             None => self.outputs.capture(session).map_err(fusion_error)?,
         };
         if output.session_id() != session {
@@ -201,25 +191,17 @@ impl DesktopFusionAttempts {
                     config.panel_max_output_tokens_per_turn,
                 ))
             })
-            .collect::<Result<Vec<_>, platform_api::FusionError>>()?;
+            .collect::<Result<Vec<_>, lingxi_core::host::FusionError>>()?;
         if include_judges {
             selected.push((
                 (ModelAttemptStage::Analyst, None),
                 captured.resolved.analyst.clone(),
                 config.analyst_max_output_tokens,
             ));
-            selected.push((
-                (ModelAttemptStage::Synthesis, None),
-                fusion::ResolvedPanel {
-                    profile: captured.request.parent_profile.clone(),
-                    model: captured.request.parent_model.clone(),
-                },
-                config.synthesizer_max_output_tokens,
-            ));
         }
         let mut routes = HashMap::new();
         for (key, panel, configured_output) in selected {
-            let pinned = (|| -> Result<PinnedRoute, platform_api::FusionError> {
+            let pinned = (|| -> Result<PinnedRoute, lingxi_core::host::FusionError> {
                 let resolved = service
                     .resolve_media_route(&panel.model, Some(&panel.profile))
                     .map_err(fusion_error)?
@@ -275,9 +257,6 @@ impl DesktopFusionAttempts {
                 Ok(route) => {
                     routes.insert(key, route);
                 }
-                // Synthesis is optional. Missing authority for it must not
-                // prevent a panel pick; an actual synth begin still rejects.
-                Err(_) if key.0 == ModelAttemptStage::Synthesis => {}
                 Err(error) => return Err(error),
             }
         }
@@ -319,7 +298,7 @@ impl fusion::FusionPanelAttemptFence for RunAuthority {
         self.changed.notify_waiters();
     }
 
-    async fn wait(&self) -> Result<(), platform_api::FusionError> {
+    async fn wait(&self) -> Result<(), lingxi_core::host::FusionError> {
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
@@ -330,13 +309,13 @@ impl fusion::FusionPanelAttemptFence for RunAuthority {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if !state.panel_closed {
-                    return Err(platform_api::FusionError::InvalidConfiguration(
+                    return Err(lingxi_core::host::FusionError::InvalidConfiguration(
                         "panel fence is not closed".into(),
                     ));
                 }
                 if state.panel_pending == 0 {
                     return state.error.as_ref().map_or(Ok(()), |reason| {
-                        Err(platform_api::FusionError::InvalidConfiguration(
+                        Err(lingxi_core::host::FusionError::InvalidConfiguration(
                             reason.clone(),
                         ))
                     });
@@ -457,6 +436,7 @@ impl llm_runtime::ModelAttemptHooks for DesktopFusionAttempts {
         prepared: &llm_runtime::PreparedLlmCall,
     ) -> Result<Box<dyn llm_runtime::ModelAttemptLease>, LlmError> {
         let attached = request
+            .execution
             .model_attempt
             .as_ref()
             .ok_or_else(|| unavailable("registered request lacks its context"))?;
@@ -491,7 +471,7 @@ impl llm_runtime::ModelAttemptHooks for DesktopFusionAttempts {
         let (pricing, usage_contract, input, output, money) =
             pricing::quote(route, prepared).map_err(unavailable)?;
         let profile = route.resolved.profile_name.clone();
-        let id = protocol::MessageId::new().to_string();
+        let id = lingxi_core::types::MessageId::new().to_string();
         let intent = {
             let mut state = authority
                 .state
@@ -689,7 +669,7 @@ impl llm_runtime::ModelAttemptLease for HostLease {
     }
     fn observe_usage(
         &mut self,
-        usage: &llm_runtime::Usage,
+        usage: &llm_runtime::ExecutionUsage,
         completeness: ModelAttemptUsageCompleteness,
     ) {
         if let Some(entry) = self
@@ -751,8 +731,8 @@ impl llm_runtime::ModelAttemptLease for HostLease {
                     },
                     usage: converted,
                     token_quote_nano_usd: if exact { token_quote_nano_usd } else { None },
-                    cache_read_input_tokens: usage.billable_tokens.cache_read,
-                    cache_creation_input_tokens: usage.billable_tokens.cache_write,
+                    cache_read_input_tokens: usage.counts().cache_read_tokens,
+                    cache_creation_input_tokens: usage.counts().cache_write_tokens,
                     api_duration_ms: duration,
                     api_duration_without_retries_ms: duration,
                 });
@@ -770,16 +750,19 @@ impl llm_runtime::ModelAttemptLease for HostLease {
                     token_quote_nano_usd: None,
                     usage: cost::Usage {
                         tokens: cost::TokenUsage {
-                            input: usage.billable_tokens.input,
-                            output: usage.billable_tokens.output,
-                            reasoning_output: usage.billable_tokens.reasoning_output,
-                            cache_read: usage.billable_tokens.cache_read,
+                            input: usage.counts().input_tokens,
+                            output: usage
+                                .counts()
+                                .output_tokens
+                                .saturating_sub(usage.counts().reasoning_tokens),
+                            reasoning_output: usage.counts().reasoning_tokens,
+                            cache_read: usage.counts().cache_read_tokens,
                             ..Default::default()
                         },
                         ..Default::default()
                     },
-                    cache_read_input_tokens: usage.billable_tokens.cache_read,
-                    cache_creation_input_tokens: usage.billable_tokens.cache_write,
+                    cache_read_input_tokens: usage.counts().cache_read_tokens,
+                    cache_creation_input_tokens: usage.counts().cache_write_tokens,
                     api_duration_ms: 0,
                     api_duration_without_retries_ms: 0,
                 });
@@ -899,7 +882,7 @@ impl RunAuthority {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut usage = platform_api::FusionUsage::default();
+        let mut usage = lingxi_core::host::FusionUsage::default();
         let mut possible = Vec::new();
         let mut confirmed = Vec::new();
         let mut overflow = false;
@@ -942,16 +925,18 @@ impl RunAuthority {
                 }
             } else {
                 if let Some(raw) = &entry.last_raw {
-                    add(&mut usage.input_tokens, raw.billable_tokens.input);
-                    add(&mut usage.output_tokens, raw.billable_tokens.output);
+                    add(&mut usage.input_tokens, raw.counts().input_tokens);
                     add(
-                        &mut usage.reasoning_tokens,
-                        raw.billable_tokens.reasoning_output,
+                        &mut usage.output_tokens,
+                        raw.counts()
+                            .output_tokens
+                            .saturating_sub(raw.counts().reasoning_tokens),
                     );
-                    add(&mut usage.cache_read_tokens, raw.billable_tokens.cache_read);
+                    add(&mut usage.reasoning_tokens, raw.counts().reasoning_tokens);
+                    add(&mut usage.cache_read_tokens, raw.counts().cache_read_tokens);
                     add(
                         &mut usage.cache_write_tokens,
-                        raw.billable_tokens.cache_write,
+                        raw.counts().cache_write_tokens,
                     );
                 }
                 let known_money =

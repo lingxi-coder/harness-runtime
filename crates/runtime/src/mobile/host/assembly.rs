@@ -15,12 +15,12 @@ use client::protocol::events::ClientEvent;
 use command_api::model::BuiltinCommandHandler;
 use command_api::parse_slash_command;
 use command_api::RegistrySlashDispatcher;
-use llm_runtime::oauth::anthropic::client::ClaudeAiOAuthClient;
-use llm_runtime::oauth::anthropic::config::ClaudeAiOAuthConfig;
-use llm_runtime::oauth::anthropic::handle::OAuthHandle;
-use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
-use llm_runtime::oauth::openai as openai_oauth;
-use llm_runtime::{CredentialProvider, DefaultLlmClient, Transport};
+use lingxi_core::host::{AuthHandle, OrchestratorHandle, OutputStream, Platform};
+use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
+use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
+use llm_runtime::auth::anthropic::{OAuthCredentialProvider, OAuthHandle, RefreshDriver};
+use llm_runtime::auth::openai as openai_oauth;
+use llm_runtime::{CredentialProvider, ModelRuntime, Transport};
 use mcp::registry::OAuthDeps;
 use mcp::{ConfigScope as McpConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 use orchestrator::model::user_agent::UserAgentEnv;
@@ -32,7 +32,6 @@ use orchestrator::{
 };
 use permission::gate::PermissionGate;
 use permission::PermissionMode;
-use platform_api::{AuthHandle, OrchestratorHandle, OutputStream, Platform};
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
 use std::collections::HashMap;
@@ -141,10 +140,10 @@ pub(super) async fn build_mobile_inner_with_ask(
     let http = platform.http();
     let clock = platform.clock();
     let fs = platform.filesystem();
-    let storage: Arc<dyn platform_api::SecureStorage> = platform
+    let storage: Arc<dyn lingxi_core::host::SecureStorage> = platform
         .secure_storage()
         .unwrap_or_else(|| Arc::new(platform_posix_minimal::PlainTextSecureStorage::new()));
-    let oauth_supported = platform_api::SecureStorage::is_encrypted(storage.as_ref());
+    let oauth_supported = lingxi_core::host::SecureStorage::is_encrypted(storage.as_ref());
 
     let local_apps_mcp = Arc::new(LocalAppsMcpTransport::new(mobile_apps_data_root(&cfg)));
     let _ = local_apps_mcp.attach_lingxi_home(cfg.lingxi_home.clone());
@@ -154,7 +153,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     let mcp_auth_callback =
         mobile_mcp_oauth_authorization_callback(mcp_auth_url.clone(), platform.deep_link());
     let mut mcp_registry = McpRegistry::with_raw_conn(
-        mobile_mcp.clone() as Arc<dyn platform_api::McpTransport>,
+        mobile_mcp.clone() as Arc<dyn lingxi_core::host::McpTransport>,
         mobile_mcp.clone() as Arc<dyn RawConnectionProvider>,
     )
     .with_headers_helper_cwd(cwd.clone())
@@ -184,10 +183,10 @@ pub(super) async fn build_mobile_inner_with_ask(
     mcp_registry
         .connect(McpServerConfig {
             name: LOCAL_APPS_REGISTRY_KEY.into(),
-            spec: platform_api::McpTransportSpec::InProcess {
+            spec: lingxi_core::host::McpTransportSpec::InProcess {
                 registry_key: LOCAL_APPS_REGISTRY_KEY.into(),
             },
-            scope: McpConfigScope::Settings(protocol::SettingsScope::Managed),
+            scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
             disabled: false,
             timeout_ms: Some(LOCAL_APPS_MCP_TIMEOUT_MS),
             always_load: true,
@@ -255,7 +254,7 @@ pub(super) async fn build_mobile_inner_with_ask(
 
     // (1) OS handles from the aggregate `Platform` (NOT a concrete posix type —
     //     the device supplies these; the host test supplies a portable shim).
-    let main_session_id = protocol::SessionId::new();
+    let main_session_id = lingxi_core::types::SessionId::new();
     let main_session_uuid = main_session_id.as_uuid().to_string();
     // v3 Phase 3 (MCP create 收权): the LIVE current-session uuid, updated on
     // every New/Resume/Clear retarget. The local-apps MCP `create` stamps an
@@ -274,8 +273,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     let plans_dir = orchestrator::ConversationOrchestrator::plans_dir(&cwd, None);
     let plan_files = Arc::new(permission::plan_files::PlanFileMatcher::with_identity(
         permission::plan_files::PlanFileIdentity {
-            slug: platform_api::plan_slug::generate_slug(None, &|candidate| {
-                platform_api::plan_slug::slug_taken_in(&plans_dir, candidate)
+            slug: lingxi_core::host::plan_slug::generate_slug(None, &|candidate| {
+                lingxi_core::host::plan_slug::slug_taken_in(&plans_dir, candidate)
             }),
             plans_dir: plans_dir.clone(),
             // `ZUe()` — LingXi ships no workshop skill.
@@ -345,35 +344,39 @@ pub(super) async fn build_mobile_inner_with_ask(
     // before assembling the client. This lets a native Keychain session restore
     // into the live provider graph on every engine boot.
     let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
+    let llm_transport: Arc<dyn Transport> = Arc::new(
+        platform_common::provider_transport()
+            .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
+    );
     let anthropic_oauth_config = ClaudeAiOAuthConfig::default_with_port(0);
-    let anthropic_oauth_client = Arc::new(ClaudeAiOAuthClient::new(
+    let anthropic_oauth_handle = Arc::new(OAuthHandle::new(
         anthropic_oauth_config.clone(),
-        http.clone(),
+        llm_transport.clone(),
         credentials.clone(),
+        clock.clone(),
     ));
-    let anthropic_oauth_handle = Arc::new(OAuthHandle::new(anthropic_oauth_client));
-    let openai_oauth_config = openai_oauth::OpenAiOAuthConfig::default();
-    let openai_oauth_client = Arc::new(openai_oauth::OpenAiOAuthClient::new(
-        openai_oauth_config.clone(),
-        http.clone(),
-    ));
-    let openai_oauth_handle = Arc::new(openai_oauth::OpenAiOAuthHandle::new(
-        openai_oauth_client,
-        credentials.clone(),
-    ));
-    let anthropic_refresh_spawner: Arc<dyn platform_api::RuntimeSpawner> =
+    let openai_oauth_config = OpenAiOAuthConfig::default();
+    let openai_oauth_handle = Arc::new(
+        openai_oauth::OpenAiOAuthHandle::new(
+            openai_oauth_config.clone(),
+            llm_transport.clone(),
+            credentials.clone(),
+        )
+        .with_clock(clock.clone()),
+    );
+    let anthropic_refresh_spawner: Arc<dyn lingxi_core::host::RuntimeSpawner> =
         Arc::new(platform_posix_minimal::PosixRuntime::new());
-    let openai_refresh_spawner: Arc<dyn platform_api::RuntimeSpawner> =
+    let openai_refresh_spawner: Arc<dyn lingxi_core::host::RuntimeSpawner> =
         Arc::new(platform_posix_minimal::PosixRuntime::new());
 
     let anthropic_oauth_state = match credentials.get_oauth_tokens().await {
         Ok(Some(tokens)) => {
-            match llm_runtime::oauth::anthropic::client::init_refresh_driver(
+            match llm_runtime::auth::anthropic::login::init_refresh_driver(
                 anthropic_oauth_config,
                 tokens.access_token,
                 tokens.refresh_token,
                 tokens.expires_at,
-                http.clone(),
+                llm_transport.clone(),
                 clock.clone(),
                 None,
                 Some(credentials.clone()),
@@ -395,7 +398,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         }
     };
     let openai_oauth_state = match credentials.get_openai_oauth_tokens().await {
-        Ok(Some(tokens)) => match openai_oauth::client::init_refresh_driver(
+        Ok(Some(tokens)) => match openai_oauth::login::init_refresh_driver(
             openai_oauth_config,
             tokens.access_token,
             tokens.refresh_token,
@@ -403,7 +406,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             tokens.account_id,
             tokens.fedramp,
             tokens.email,
-            http.clone(),
+            llm_transport.clone(),
             clock.clone(),
             None,
             Some(credentials.clone()),
@@ -439,10 +442,6 @@ pub(super) async fn build_mobile_inner_with_ask(
     //      through the provider credential ids below. Anthropic's API-key flag
     //      intentionally remains true when both credentials exist because the
     //      shared assembler gives API Key precedence over OAuth.
-    let llm_transport: Arc<dyn Transport> = Arc::new(
-        platform_common::provider_transport()
-            .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
-    );
     let stored_anthropic_key = credentials.get_anthropic_api_key().await.ok().flatten();
     let has_api_key = !cfg.api_key.trim().is_empty() || stored_anthropic_key.is_some();
     let has_anthropic_oauth = anthropic_oauth_state.is_some();
@@ -525,7 +524,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         .cloned()
         .unwrap_or_else(|| "firstParty".to_string());
 
-    let mut client = DefaultLlmClient::from_config(assembled.client_config)
+    let mut client = ModelRuntime::from_config(assembled.client_config)
         .map_err(|e| MobileBuildError::ApiBase(format!("llm-runtime config: {e}")))?;
     // §6.1: ONE composite credential slot for ALL providers. OAuth delegates
     // serve `anthropic-oauth` and `openai-chatgpt` without exposing tokens to
@@ -705,14 +704,18 @@ pub(super) async fn build_mobile_inner_with_ask(
         cfg.lingxi_home.join("output-styles"),
         cfg.cwd.join(branding::DOT_DIR).join("output-styles"),
     ];
-    platform_api::session_flags::set_show_thinking_summaries(
+    lingxi_core::host::session_flags::set_show_thinking_summaries(
         provider_settings.show_thinking_summaries.unwrap_or(false),
     );
-    platform_api::session_flags::set_task_output_max_chars(provider_settings.task_output_max_chars);
-    platform_api::session_flags::set_bash_output_max_chars(provider_settings.bash_output_max_chars);
+    lingxi_core::host::session_flags::set_task_output_max_chars(
+        provider_settings.task_output_max_chars,
+    );
+    lingxi_core::host::session_flags::set_bash_output_max_chars(
+        provider_settings.bash_output_max_chars,
+    );
     // `settings.attribution` / `settings.includeCoAuthoredBy` — the git
     // attribution trailers, published at boot beside the output caps.
-    platform_api::session_flags::set_attribution(
+    lingxi_core::host::session_flags::set_attribution(
         provider_settings
             .attribution
             .as_ref()
@@ -722,10 +725,10 @@ pub(super) async fn build_mobile_inner_with_ask(
             .as_ref()
             .and_then(|a| a.pr.clone()),
     );
-    platform_api::session_flags::set_include_co_authored_by(
+    lingxi_core::host::session_flags::set_include_co_authored_by(
         provider_settings.include_co_authored_by,
     );
-    platform_api::session_flags::set_include_git_instructions(
+    lingxi_core::host::session_flags::set_include_git_instructions(
         provider_settings.include_git_instructions,
     );
     // Mobile is a transport host, not the CLI REPL. Keep main-query telemetry
@@ -803,7 +806,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Read from the SAME settings.json tiers as the perms loop below,
     // scalar-override (later tier wins). `false` by default (agent view enabled;
     // the env half still applies independently). Threaded into
-    // `register_core_batch_8` via `platform_api::agent_view::is_enabled_with_setting`.
+    // `register_core_batch_8` via `lingxi_core::host::agent_view::is_enabled_with_setting`.
     let mut disable_agent_view = false;
     // `agentPushNotifEnabled` scalar override (user → project → local). The
     // feature flag is checked independently by the cron/tool consumers.
@@ -842,7 +845,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // `confined` is read ONCE here rather than inside the clamp — a gate that
     // reads `CLAUDE_CODE_EVAL_CONFINED` itself makes a parallel suite flaky.
     let mut subagent_bypass_gates = agent::permission_mode::SpawnBypassGates {
-        confined: platform_api::env::is_eval_confined_session(),
+        confined: lingxi_core::host::env::is_eval_confined_session(),
         bypass_disabled: false,
         restricted: false,
     };
@@ -965,18 +968,18 @@ pub(super) async fn build_mobile_inner_with_ask(
         if user != proj {
             sources.push((
                 user,
-                permission::PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ));
         }
         sources.push((
             proj,
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         ));
         // `settings.local.json` is a distinct filename from both `settings.json`
         // paths, so it never collides with the dedup above — always read it last.
         sources.push((
             local,
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         ));
         for (path, source) in sources {
             if let Ok(raw) = tokio::fs::read_to_string(&path).await {
@@ -996,7 +999,7 @@ pub(super) async fn build_mobile_inner_with_ask(
                     if m != PermissionMode::Auto
                         || source
                             == permission::PermissionRuleSource::Settings(
-                                protocol::SettingsScope::User,
+                                lingxi_core::types::SettingsScope::User,
                             )
                     {
                         mode = m; // local settings read last → scalar modes win
@@ -1077,8 +1080,8 @@ pub(super) async fn build_mobile_inner_with_ask(
                 }
             }
         }
-        platform_api::session_flags::set_agent_push_notif_enabled(agent_push_notif_enabled);
-        platform_api::session_flags::set_task_output_max_chars(task_output_max_chars);
+        lingxi_core::host::session_flags::set_agent_push_notif_enabled(agent_push_notif_enabled);
+        lingxi_core::host::session_flags::set_task_output_max_chars(task_output_max_chars);
         // Filesystem roots so file-path CONTENT rules (`Edit(src/**)`,
         // `Read(./secrets/**)`) match the call's path. `dirs` is not a mobile dep,
         // so HOME comes from the env (absent on a sandboxed device ⇒ `None`).
@@ -1178,12 +1181,12 @@ pub(super) async fn build_mobile_inner_with_ask(
     if user_settings_path != project_settings_path {
         settings_sources.push((
             user_settings_path,
-            hooks::definition::HookSource::Settings(protocol::SettingsScope::User),
+            hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::User),
         ));
     }
     settings_sources.push((
         project_settings_path,
-        hooks::definition::HookSource::Settings(protocol::SettingsScope::Project),
+        hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::Project),
     ));
     // (H-BIN-12) Accumulate the CC 2.1.207 HTTP-hook security allowlists across
     // the SAME settings tiers, concat-deduped (CC merges these arrays across
@@ -1249,7 +1252,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     //        child processes through the SAME platform-sourced runner + sandbox
     //        the tools use (a device-jailed runner on Android, the host runner on
     //        iOS/CI). Both are required — the runner only accepts a
-    //        `platform_api::SandboxedCommand`, which only the sandbox can mint.
+    //        `lingxi_core::host::SandboxedCommand`, which only the sandbox can mint.
     //      - `with_prompt_runner(ApiClientHookPromptRunner)` evaluates inline
     //        single-turn `prompt` hooks over the SAME `api_client` the
     //        orchestrator drives (shared provider routing / auth / telemetry).
@@ -1276,7 +1279,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             hook_registry.clone(),
             http.clone(),
             Arc::new(platform_posix_minimal::PosixRuntime::new())
-                as Arc<dyn platform_api::RuntimeSpawner>,
+                as Arc<dyn lingxi_core::host::RuntimeSpawner>,
         )
         .with_policy_disable_all_hooks(disable_all_hooks)
         .with_process_runner(process.clone(), sandbox.clone())
@@ -1390,7 +1393,7 @@ pub(super) async fn build_mobile_inner_with_ask(
                 .is_some_and(|environment| {
                     matches!(
                         environment.tool_runtime,
-                        platform_api::MobileToolRuntime::MobileLinuxGuest
+                        lingxi_core::host::MobileToolRuntime::MobileLinuxGuest
                     )
                 });
         Arc::new(move |override_cwd: Option<&std::path::Path>| {
@@ -1534,8 +1537,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     // session.
     let subagent_pool = Arc::new(agent::StateMachinePool::new(
         Arc::new(platform_posix_minimal::PosixRuntime::new())
-            as Arc<dyn platform_api::RuntimeSpawner>,
-        platform_api::subagent_spawn::max_concurrent_subagents(),
+            as Arc<dyn lingxi_core::host::RuntimeSpawner>,
+        lingxi_core::host::subagent_spawn::max_concurrent_subagents(),
     ));
     // Use the owning boot session for hook/checkpoint identity. Hot-resume
     // rebinding still requires the deferred dynamic session-context substrate,
@@ -1616,13 +1619,13 @@ pub(super) async fn build_mobile_inner_with_ask(
     let subagent_provider_first_party_resolver_cell =
         subagent_spawner_concrete.provider_first_party_resolver_handle();
     let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
-    let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
+    let subagent_spawner: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
 
     // (c) Budget enforcer over the session CostTracker (desktop parity —
     // background subagents halt at the same session ceiling as the main loop;
     // with no configured ceiling this stays unlimited).
-    let budget_enforcer: Arc<dyn platform_api::budget::BudgetEnforcerHandle> =
+    let budget_enforcer: Arc<dyn lingxi_core::host::budget::BudgetEnforcerHandle> =
         Arc::new(cost::BudgetEnforcer::new(
             cost::BudgetConfig {
                 max_session_nano_usd: orch_cfg.max_budget_nano_usd,
@@ -1663,7 +1666,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     let local_workflow_handler = Arc::new(
         tasks::handlers::LocalWorkflowHandler::new(
             subagent_spawner.clone(),
-            local_workflow_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+            local_workflow_invoker.clone() as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
             budget_enforcer.clone(),
             task_registry_inner.output_manager.clone(),
         )
@@ -1692,7 +1695,8 @@ pub(super) async fn build_mobile_inner_with_ask(
         Arc::new(
             tasks::handlers::LocalAgentHandler::new(
                 subagent_spawner.clone(),
-                local_workflow_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+                local_workflow_invoker.clone()
+                    as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
                 budget_enforcer.clone(),
                 task_registry_inner.output_manager.clone(),
             )
@@ -1708,7 +1712,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // observer; `ObserverReport` resolves against this same `Arc`. A second
     // `ObserverPairings::new()` anywhere would compile, look wired, and answer
     // "not armed" forever.
-    let observer_pairings = Arc::new(platform_api::observer_pairing::ObserverPairings::new());
+    let observer_pairings = Arc::new(lingxi_core::host::observer_pairing::ObserverPairings::new());
     task_registry.set_observer_pairings(observer_pairings.clone());
     subagent_spawner_arc.set_task_registry(task_registry.clone());
     local_agent_status_sink.bind(task_registry.clone());
@@ -1787,7 +1791,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         subagent_spawner: Some(subagent_spawner.clone()),
         agent_name_registry: None,
         task_registry: Some(
-            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>
         ),
         mailbox_router: None,
         budget_enforcer: Some(budget_enforcer.clone()),
@@ -1906,7 +1910,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             fs.clone(),
             http.clone(),
             Arc::new(platform_posix_minimal::PosixRuntime::new())
-                as Arc<dyn platform_api::RuntimeSpawner>,
+                as Arc<dyn lingxi_core::host::RuntimeSpawner>,
             credentials.clone(),
             Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
             shared_command_registry.clone(),
@@ -1927,7 +1931,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         )
         .with_project_dir(cwd.clone())
         .with_task_registry(
-            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>
         )
         .with_plugin_workflows(plugin_workflow_registry.clone()),
     );
@@ -1943,7 +1947,8 @@ pub(super) async fn build_mobile_inner_with_ask(
         .with_prompt_cwd(session_cwd.clone()),
     );
     let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = live_skill_loader.clone();
-    let agent_skill_loader: Arc<dyn platform_api::skill_loader::SkillLoader> = live_skill_loader;
+    let agent_skill_loader: Arc<dyn lingxi_core::host::skill_loader::SkillLoader> =
+        live_skill_loader;
     // D1 (P-1.5 review): bind the per-turn skill-listing provider HERE, in the
     // same breath as the Skill loader above, and retain both handles on the
     // returned `MobileRuntime`. There is then exactly ONE construction site per
@@ -2012,13 +2017,13 @@ pub(super) async fn build_mobile_inner_with_ask(
     });
     let workflow_policy_enabled = tool_workflow::workflows_enabled(false);
     let workflow_size_guideline_state =
-        platform_api::session_flags::WorkflowSizeGuidelineState::new(
+        lingxi_core::host::session_flags::WorkflowSizeGuidelineState::new(
             workflow_size_guideline.as_wire(),
             false,
             workflow_size_guideline_is_default,
         )
         .expect("mobile workflowSizeGuideline must be valid");
-    let dynamic_workflows_gate = platform_api::session_flags::DynamicWorkflowsGate::new(
+    let dynamic_workflows_gate = lingxi_core::host::session_flags::DynamicWorkflowsGate::new(
         workflow_policy_enabled && workflow_session_enabled,
         !workflow_policy_enabled,
     );
@@ -2074,7 +2079,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // the probe stays unpublished and `read_auto_allowed` keeps answering
     // `false` — the fail-safe answer.
     if let Some(policy) = boot_permission_policy.clone() {
-        platform_api::read_auto_allow::set_read_auto_allow_probe(Arc::new(
+        lingxi_core::host::read_auto_allow::set_read_auto_allow_probe(Arc::new(
             permission::read_auto_allow::PolicyReadAutoAllow::new(policy, tools.all_names()),
         ));
     }
@@ -2218,7 +2223,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             Some(cfg.api_base.clone()),
             api_service.transport(),
             Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
-                as Arc<dyn platform_api::RuntimeSpawner>,
+                as Arc<dyn lingxi_core::host::RuntimeSpawner>,
             &home,
             &cwd,
         ))
@@ -2323,7 +2328,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // into the per-turn `<task-notification>` reminder — the model learns a
     // launched workflow finished on the next turn (desktop mirror).
     .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
-        task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     )))
     // SKILLLIST.1: enumerate model-invocable skills each turn so the model
     // can discover bundled and user skills. Reads the shared registry lazily;
@@ -2370,7 +2375,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         let runtime = mobile_linux.clone();
         let has_mobile_linux_guest = matches!(
             environment.tool_runtime,
-            platform_api::MobileToolRuntime::MobileLinuxGuest
+            lingxi_core::host::MobileToolRuntime::MobileLinuxGuest
         );
         let resolver = Arc::new(move |path: &std::path::Path| {
             let mounts = runtime
@@ -2506,7 +2511,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // return the picker's snapshot as a structured command-output result.
     reg.register_builtin_handler(Arc::new(
         command_api::builtins::WorkflowsHandler::with_registry(
-            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>
         ),
     ));
     // Batch 8 (`/fork`, `/goal`, `/recap`, `/reload-skills`, `/skill-doctor`,
@@ -2680,7 +2685,7 @@ pub(super) async fn build_mobile_inner_with_ask(
                 .await
             {
                 Ok(()) => {
-                    let _ = platform_api::OrchestratorHandle::set_plan_mode(
+                    let _ = lingxi_core::host::OrchestratorHandle::set_plan_mode(
                         orch.as_ref(),
                         preference == PermissionMode::Plan,
                     )
@@ -3173,11 +3178,11 @@ pub fn build_mobile_engine_inner(
                             })
                             .await
                             .is_empty()
-                        && !platform_api::env::background_tasks_disabled()
+                        && !lingxi_core::host::env::background_tasks_disabled()
                     {
                         registry
                             .background_all_tasks_with_reason(
-                                platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                                lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
                             )
                             .await;
                         continue;

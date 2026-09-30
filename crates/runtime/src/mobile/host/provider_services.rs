@@ -1,10 +1,9 @@
 use client::protocol::listings::{ModelDetailsDto, ProviderModelCatalogEntryDto};
-use llm_runtime::oauth::anthropic::handle::OAuthHandle;
-use llm_runtime::oauth::anthropic::{OAuthCredentialProvider, RefreshDriver};
-use llm_runtime::oauth::openai as openai_oauth;
+use lingxi_core::host::http::HttpError;
+use lingxi_core::host::{AuthHandle, HttpTransport};
+use llm_runtime::auth::anthropic::{OAuthCredentialProvider, OAuthHandle, RefreshDriver};
+use llm_runtime::auth::openai as openai_oauth;
 use llm_runtime::{Credential, CredentialConfig, CredentialProvider, CredentialScope, ProviderId};
-use platform_api::http::HttpError;
-use platform_api::{AuthHandle, HttpTransport};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -94,8 +93,8 @@ pub(super) fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
         let curated = listings
             .into_iter()
             .filter(|listing| {
-                platform_api::is_curated_model(&listing.provider_id, &listing.request_model)
-                    || !platform_api::provider_has_curated_list(&listing.provider_id)
+                lingxi_core::host::is_curated_model(&listing.provider_id, &listing.request_model)
+                    || !lingxi_core::host::provider_has_curated_list(&listing.provider_id)
             })
             .collect::<Vec<_>>();
         ProviderCatalogEntryDto {
@@ -131,9 +130,9 @@ pub(super) fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
 }
 
 pub(super) fn provider_model_catalog_from_listings(
-    listings: &[platform_api::ModelListing],
+    listings: &[lingxi_core::host::ModelListing],
 ) -> Vec<ProviderModelCatalogEntryDto> {
-    platform_api::provider_model_catalog(listings)
+    lingxi_core::host::provider_model_catalog(listings)
         .iter()
         .map(client::adapter::lowering::lower_provider_model_catalog_entry)
         .collect()
@@ -304,8 +303,8 @@ pub struct MobileOAuthManager {
     pub(super) openai: Arc<openai_oauth::OpenAiOAuthHandle>,
     pub(super) anthropic_refresh: Option<Arc<RefreshDriver>>,
     pub(super) openai_refresh: Option<Arc<openai_oauth::RefreshDriver>>,
-    pub(super) anthropic_refresh_spawner: Option<Arc<dyn platform_api::RuntimeSpawner>>,
-    pub(super) openai_refresh_spawner: Option<Arc<dyn platform_api::RuntimeSpawner>>,
+    pub(super) anthropic_refresh_spawner: Option<Arc<dyn lingxi_core::host::RuntimeSpawner>>,
+    pub(super) openai_refresh_spawner: Option<Arc<dyn lingxi_core::host::RuntimeSpawner>>,
     pub(super) http: Arc<dyn HttpTransport>,
     pub(super) pending: Mutex<Option<PendingMobileOAuthSession>>,
 }
@@ -316,8 +315,8 @@ impl MobileOAuthManager {
         openai: Arc<openai_oauth::OpenAiOAuthHandle>,
         anthropic_refresh: Option<Arc<RefreshDriver>>,
         openai_refresh: Option<Arc<openai_oauth::RefreshDriver>>,
-        anthropic_refresh_spawner: Option<Arc<dyn platform_api::RuntimeSpawner>>,
-        openai_refresh_spawner: Option<Arc<dyn platform_api::RuntimeSpawner>>,
+        anthropic_refresh_spawner: Option<Arc<dyn lingxi_core::host::RuntimeSpawner>>,
+        openai_refresh_spawner: Option<Arc<dyn lingxi_core::host::RuntimeSpawner>>,
         http: Arc<dyn HttpTransport>,
     ) -> Self {
         Self {
@@ -680,7 +679,7 @@ pub(super) fn anthropic_models(default_model: &str) -> Vec<llm_runtime::ModelPro
         reasoning: true,
         structured_output: true,
     };
-    // Every id `platform_api::is_curated_model` lists under the "anthropic" arm must
+    // Every id `lingxi_core::host::is_curated_model` lists under the "anthropic" arm must
     // appear here, otherwise the client picker's ANTHROPIC section renders only
     // the subset this registry happens to route (the section used to show just
     // Sonnet 4.6 + Haiku 4.5 while Sonnet 5 / Opus 4.8 / Fable 5 were curated
@@ -745,8 +744,8 @@ pub(super) fn anthropic_route_id(model_ref: &str) -> Option<String> {
     (profile == "anthropic" && !bare.is_empty() && !bare.contains('/')).then_some(bare)
 }
 
-/// The assembled provider profiles flattened into the [`platform_api::ModelListing`]s
-/// that [`resolve_default_model_ref`] and [`platform_api::parse_model_ref`] resolve
+/// The assembled provider profiles flattened into the [`lingxi_core::host::ModelListing`]s
+/// that [`resolve_default_model_ref`] and [`lingxi_core::host::parse_model_ref`] resolve
 /// against.
 ///
 /// `display_model` / `provider_label` are immaterial to parsing, so
@@ -754,7 +753,7 @@ pub(super) fn anthropic_route_id(model_ref: &str) -> Option<String> {
 /// tests so they cannot drift from the shape production actually feeds in.
 pub(super) fn model_listings(
     providers: &[llm_runtime::ProviderProfile],
-) -> Vec<platform_api::ModelListing> {
+) -> Vec<lingxi_core::host::ModelListing> {
     llm_runtime::ModelRegistry::from_config(llm_runtime::ClientConfig {
         providers: providers.to_vec(),
     })
@@ -774,7 +773,7 @@ pub(super) fn model_listings(
 /// A client persists its last-picked model and hands it back on the next
 /// launch, so a client-side bug can hand us a reference no profile serves (iOS
 /// re-qualified an already-qualified id into `anthropic/deepseek/deepseek-v4-
-/// flash`). [`platform_api::parse_model_ref`] then returns the whole string as a bare
+/// flash`). [`lingxi_core::host::parse_model_ref`] then returns the whole string as a bare
 /// id, which boots the session onto an unroutable model: the picker shows a
 /// junk row and the first turn fails `ModelUnavailable`. Rewriting it to a
 /// model that IS registered keeps the session usable and lets the user re-pick.
@@ -788,13 +787,13 @@ pub(super) fn model_listings(
 /// there would swap one unroutable ref for another while the log claimed the
 /// session was repaired. The chosen profile is returned too — a bare
 /// `ClientEvent::ModelList { current }` matches none of the provider-qualified
-/// rows `platform_api::curated_model_refs` emits, so the client's picker would render
+/// rows `lingxi_core::host::curated_model_refs` emits, so the client's picker would render
 /// with nothing selected.
 pub(super) fn resolve_default_model_ref(
     default_model: &str,
-    listings: &[platform_api::ModelListing],
+    listings: &[lingxi_core::host::ModelListing],
 ) -> (String, Option<String>) {
-    let (model, profile) = platform_api::parse_model_ref(default_model, listings);
+    let (model, profile) = lingxi_core::host::parse_model_ref(default_model, listings);
     // `parse_model_ref` returns `Some(profile)` only after matching a listing on
     // that exact `(provider_id, request_model)` pair, so a qualified ref is
     // already proven routable and keeps its profile as-is.
@@ -948,7 +947,7 @@ pub(super) fn apply_mobile_profile_allowlist(
 /// bridge-server router's helper — kept private to the shared host so iOS /
 /// Android cannot drift).
 pub(super) fn lower_auth_state(
-    info: Option<platform_api::auth::LoginInfo>,
+    info: Option<lingxi_core::host::auth::LoginInfo>,
 ) -> client::protocol::listings::AuthStateDto {
     match info {
         Some(li) => client::protocol::listings::AuthStateDto::SignedIn {

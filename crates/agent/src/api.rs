@@ -17,9 +17,9 @@
 
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
-use llm_runtime::{LlmError, LlmEvent, LlmResponse};
-use platform_api::{SubagentObservation, SubagentSpawnObserver, WorkflowQueryWatchdog};
-use protocol::{AgentId, SessionId};
+use lingxi_core::host::{SubagentObservation, SubagentSpawnObserver, WorkflowQueryWatchdog};
+use lingxi_core::types::{AgentId, SessionId};
+use llm_runtime::{HistoryEvent, HistoryResponse, LlmError};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -85,20 +85,20 @@ impl ObserverEventSink {
             // their pump. Their rest marker is lifecycle, not lossy telemetry.
             SubagentObservation::Message {
                 message:
-                    protocol::ConversationMessage::System {
+                    lingxi_core::types::ConversationMessage::System {
                         subtype: Some(subtype),
                         ..
                     },
                 ..
             } if subtype == "agent_idle" => true,
             SubagentObservation::Message {
-                message: protocol::ConversationMessage::User { content, .. },
+                message: lingxi_core::types::ConversationMessage::User { content, .. },
                 ..
             } => !content.iter().any(|block| {
                 matches!(
                     block,
-                    protocol::ContentBlock::ToolResult { .. }
-                        | protocol::ContentBlock::AdvisorToolResult { .. }
+                    lingxi_core::types::ContentBlock::ToolResult { .. }
+                        | lingxi_core::types::ContentBlock::AdvisorToolResult { .. }
                 )
             }),
             _ => false,
@@ -191,15 +191,15 @@ pub trait SubagentApiClient: Send + Sync {
         &self,
         model: &str,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError>;
+    ) -> Result<HistoryResponse, LlmError>;
 
     /// Issue one model round-trip over the streaming SSE transport, returning
-    /// the wire-decoded [`LlmEvent`] stream (yielding until `message_stop` or
+    /// the wire-decoded [`HistoryEvent`] stream (yielding until `message_stop` or
     /// `completed`). The [`crate::runner::run_subagent`] loop drains this
     /// through `crate::accumulator::accumulate_stream` into the same
-    /// `LlmResponse` the non-streaming path returns, so the turn loop is
+    /// `HistoryResponse` the non-streaming path returns, so the turn loop is
     /// transport-agnostic.
     ///
     /// The default wraps [`SubagentApiClient::messages_create`] in a synthetic,
@@ -216,10 +216,10 @@ pub trait SubagentApiClient: Send + Sync {
         &self,
         model: &str,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = effort;
         let resp = self.messages_create(model, system, messages, tools).await?;
         let events = crate::accumulator::response_to_stream_events(resp);
@@ -236,11 +236,11 @@ pub trait SubagentApiClient: Send + Sync {
         &self,
         model: &str,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = forced_tool;
         self.messages_create_stream(model, system, messages, tools, effort)
             .await
@@ -253,15 +253,15 @@ pub trait SubagentApiClient: Send + Sync {
     /// test mocks that only implement the profile-less method keep their legacy
     /// (default-provider) behavior unchanged (frozen-trait rule). The production
     /// orchestrator adapter OVERRIDES this to forward `profile` to
-    /// `DefaultLlmClient::messages_create(model, profile, …)`.
+    /// `ModelRuntime::messages_create(model, profile, …)`.
     async fn messages_create_in(
         &self,
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         let _ = profile;
         self.messages_create(model, system, messages, tools).await
     }
@@ -277,10 +277,10 @@ pub trait SubagentApiClient: Send + Sync {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = profile;
         self.messages_create_stream(model, system, messages, tools, effort)
             .await
@@ -296,11 +296,11 @@ pub trait SubagentApiClient: Send + Sync {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = profile;
         self.messages_create_stream_forced(model, system, messages, tools, forced_tool, effort)
             .await
@@ -313,11 +313,11 @@ pub trait SubagentApiClient: Send + Sync {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
         opts: SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         if opts.model_attempt.is_some() {
             return Err(LlmError::InvalidRequest {
                 message: "registered model attempt requires an opts-aware host adapter".into(),
@@ -334,12 +334,12 @@ pub trait SubagentApiClient: Send + Sync {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
         opts: SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         if opts.model_attempt.is_some() {
             return Err(LlmError::InvalidRequest {
                 message: "registered model attempt requires an opts-aware host adapter".into(),
@@ -362,7 +362,7 @@ pub trait SubagentApiClient: Send + Sync {
 #[derive(Debug, Clone, Default)]
 pub struct SubagentApiCallOpts {
     /// Trusted per-logical-call capability; retries retain this exact context.
-    pub model_attempt: Option<platform_api::ModelAttemptContext>,
+    pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
     /// Output token cap for this turn.
     pub max_output_tokens: Option<u32>,
     /// COGS query-source label.
@@ -431,9 +431,9 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         &self,
         model: &str,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.inner
             .messages_create(model, system, messages, tools)
             .await
@@ -443,10 +443,10 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         &self,
         model: &str,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.inner
             .messages_create_stream(model, system, messages, tools, effort)
             .await
@@ -456,11 +456,11 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         &self,
         model: &str,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.inner
             .messages_create_stream_forced(model, system, messages, tools, forced_tool, effort)
             .await
@@ -471,9 +471,9 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<HistoryResponse, LlmError> {
         self.inner
             .messages_create_in(model, profile, system, messages, tools)
             .await
@@ -484,10 +484,10 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.inner
             .messages_create_stream_in(model, profile, system, messages, tools, effort)
             .await
@@ -498,11 +498,11 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.inner
             .messages_create_stream_forced_in(
                 model,
@@ -529,11 +529,11 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
         opts: SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.inner
             .messages_create_stream_in_opts(model, profile, system, messages, tools, effort, opts)
             .await
@@ -544,12 +544,12 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         model: &str,
         profile: Option<&str>,
         system: Option<&str>,
-        messages: Vec<protocol::ConversationMessage>,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
         tools: Vec<serde_json::Value>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
         opts: SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.inner
             .messages_create_stream_forced_in_opts(
                 model,
@@ -621,11 +621,13 @@ mod tests {
         for _ in 0..OBSERVER_EVENT_BUFFER + 10 {
             sink.try_emit(progress());
         }
-        let mut tool_result =
-            protocol::ConversationMessage::user(protocol::MessageId::new(), String::new());
-        if let protocol::ConversationMessage::User { content, .. } = &mut tool_result {
-            *content = vec![protocol::ContentBlock::ToolResult {
-                tool_use_id: protocol::ToolUseId::new(),
+        let mut tool_result = lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            String::new(),
+        );
+        if let lingxi_core::types::ConversationMessage::User { content, .. } = &mut tool_result {
+            *content = vec![lingxi_core::types::ContentBlock::ToolResult {
+                tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "ordinary tool output".into(),
                 is_error: false,
                 provider_tool_use_id: None,
@@ -649,8 +651,8 @@ mod tests {
         sink.emit_terminal(completed());
         sink.try_emit(SubagentObservation::Message {
             agent_id,
-            message: protocol::ConversationMessage::System {
-                id: protocol::MessageId::new(),
+            message: lingxi_core::types::ConversationMessage::System {
+                id: lingxi_core::types::MessageId::new(),
                 content: "idle".into(),
                 subtype: Some("agent_idle".into()),
                 compact_metadata: None,
@@ -659,15 +661,15 @@ mod tests {
         });
         sink.try_emit(SubagentObservation::Message {
             agent_id,
-            message: protocol::ConversationMessage::user(
-                protocol::MessageId::new(),
+            message: lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
                 "resume".into(),
             ),
         });
         sink.try_emit(SubagentObservation::Message {
             agent_id,
-            message: protocol::ConversationMessage::user_meta(
-                protocol::MessageId::new(),
+            message: lingxi_core::types::ConversationMessage::user_meta(
+                lingxi_core::types::MessageId::new(),
                 "wake".into(),
             ),
         });
@@ -703,14 +705,14 @@ mod tests {
                 SubagentObservation::Completed { .. } => Some("completed"),
                 SubagentObservation::Message {
                     message:
-                        protocol::ConversationMessage::System {
+                        lingxi_core::types::ConversationMessage::System {
                             subtype: Some(subtype),
                             ..
                         },
                     ..
                 } if subtype == "agent_idle" => Some("idle"),
                 SubagentObservation::Message {
-                    message: protocol::ConversationMessage::User { is_meta, .. },
+                    message: lingxi_core::types::ConversationMessage::User { is_meta, .. },
                     ..
                 } => Some(if *is_meta { "wake" } else { "resume" }),
                 SubagentObservation::Failed { .. } => Some("failed"),
@@ -747,17 +749,17 @@ mod tests {
             &self,
             _model: &str,
             _system: Option<&str>,
-            _messages: Vec<protocol::ConversationMessage>,
+            _messages: Vec<lingxi_core::types::ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<LlmResponse, LlmError> {
+        ) -> Result<HistoryResponse, LlmError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(LlmResponse {
+            Ok(HistoryResponse {
                 id: "mock".into(),
                 model: "mock".into(),
                 content: Vec::new(),
                 stop_reason: Some("end_turn".into()),
                 stop_details: None,
-                usage: llm_runtime::Usage::default(),
+                usage: llm_runtime::ExecutionUsage::default(),
                 cost: None,
                 provider_metadata: serde_json::Value::Null,
             })

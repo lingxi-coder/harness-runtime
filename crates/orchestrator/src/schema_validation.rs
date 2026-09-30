@@ -669,7 +669,7 @@ mod tests {
             .enumerate()
             .filter(|(_, case)| case["success"] == false)
         {
-            let id = protocol::ToolUseId::new();
+            let id = lingxi_core::types::ToolUseId::new();
             let uses = vec![(
                 id.clone(),
                 case["tool"].as_str().unwrap().into(),
@@ -680,7 +680,7 @@ mod tests {
                 crate::turn_loop::dispatch_tool_uses_tracked(&orch, &uses, None)
                     .await
                     .unwrap();
-            let protocol::ContentBlock::ToolResult {
+            let lingxi_core::types::ContentBlock::ToolResult {
                 content, is_error, ..
             } = &blocks[0]
             else {
@@ -728,6 +728,7 @@ mod tests {
             exit_code: 0,
             timed_out: false,
         });
+
         let tool: Arc<dyn tool_api::Tool> = Arc::new(tool_task::monitor::MonitorTool::new(context));
         let mut registry = tool_api::ToolRegistry::new();
         registry.register_builtin(tool.clone());
@@ -754,13 +755,13 @@ mod tests {
                 );
                 continue;
             }
-            let id = protocol::ToolUseId::new();
+            let id = lingxi_core::types::ToolUseId::new();
             let uses = vec![(id.clone(), "Monitor".into(), case["input"].clone(), None)];
             let (blocks, _, _, _) =
                 crate::turn_loop::dispatch_tool_uses_tracked(&orch, &uses, None)
                     .await
                     .unwrap();
-            let protocol::ContentBlock::ToolResult {
+            let lingxi_core::types::ContentBlock::ToolResult {
                 content, is_error, ..
             } = &blocks[0]
             else {

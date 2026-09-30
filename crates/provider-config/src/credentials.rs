@@ -8,7 +8,7 @@
 //! - any other id → keychain[id] → env[recorded var] → `Err(Authentication)`
 //!   (matching `EnvCredentialProvider`; spec §6.1/§6.6).
 //!
-//! Secrets are returned as `Credential::ApiKey`; `DefaultLlmClient::load_secret`
+//! Secrets are returned as `Credential::ApiKey`; `ModelRuntime::load_secret`
 //! extracts `ApiKey | BearerToken` uniformly and the profile's `AuthStrategy`
 //! picks the header (so Copilot's `CopilotBearer` rides this path).
 
@@ -25,7 +25,7 @@ pub struct MultiCredentialProvider {
     sources: BTreeMap<String, CredentialSource>,
     anthropic_api_key: Option<String>,
     anthropic_api_key_helper: Option<String>,
-    anthropic_api_key_helper_cache: llm_runtime::oauth::anthropic::ApiKeyHelperCache,
+    anthropic_api_key_helper_cache: llm_runtime::auth::anthropic::ApiKeyHelperCache,
     oauth_delegates: BTreeMap<String, Arc<dyn CredentialProvider>>,
 }
 
@@ -71,7 +71,7 @@ impl MultiCredentialProvider {
             sources,
             anthropic_api_key,
             anthropic_api_key_helper,
-            anthropic_api_key_helper_cache: llm_runtime::oauth::anthropic::ApiKeyHelperCache::new(),
+            anthropic_api_key_helper_cache: llm_runtime::auth::anthropic::ApiKeyHelperCache::new(),
             oauth_delegates,
         }
     }
@@ -99,8 +99,8 @@ impl MultiCredentialProvider {
         // through to the store; only when the store is ALSO empty does a helper
         // failure surface, preserving its diagnostic message.
         let helper_error = if let Some(helper) = self.anthropic_api_key_helper.as_deref() {
-            let ttl_ms = llm_runtime::oauth::anthropic::api_key_helper_ttl_ms();
-            match llm_runtime::oauth::anthropic::fetch_api_key_result(
+            let ttl_ms = llm_runtime::auth::anthropic::api_key_helper_ttl_ms();
+            match llm_runtime::auth::anthropic::fetch_api_key_result(
                 helper,
                 &self.anthropic_api_key_helper_cache,
                 ttl_ms,
@@ -179,8 +179,8 @@ impl CredentialProvider for MultiCredentialProvider {
 mod tests {
     use super::*;
     use llm_runtime::{
-        Capabilities, Credential, CredentialProvider, CredentialScope, DefaultLlmClient, LlmError,
-        LlmRequest, ModelProfile, ProviderId,
+        Capabilities, Credential, CredentialProvider, CredentialScope, LlmError, LlmRequest,
+        ModelProfile, ModelRuntime, ProviderId,
     };
     use std::sync::Arc;
 
@@ -188,17 +188,17 @@ mod tests {
     #[derive(Default)]
     struct MemStorage {
         map: std::sync::Mutex<
-            std::collections::HashMap<(String, String), protocol::SecureStorageData>,
+            std::collections::HashMap<(String, String), lingxi_core::types::SecureStorageData>,
         >,
     }
     #[async_trait::async_trait]
-    impl platform_api::SecureStorage for MemStorage {
+    impl lingxi_core::host::SecureStorage for MemStorage {
         async fn store(
             &self,
             service: &str,
             account: &str,
-            data: protocol::SecureStorageData,
-        ) -> Result<(), platform_api::SecureStorageError> {
+            data: lingxi_core::types::SecureStorageData,
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
             self.map
                 .lock()
                 .unwrap()
@@ -209,7 +209,10 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
+        ) -> Result<
+            Option<lingxi_core::types::SecureStorageData>,
+            lingxi_core::host::SecureStorageError,
+        > {
             Ok(self
                 .map
                 .lock()
@@ -221,7 +224,7 @@ mod tests {
             &self,
             service: &str,
             account: &str,
-        ) -> Result<(), platform_api::SecureStorageError> {
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
             self.map
                 .lock()
                 .unwrap()
@@ -231,7 +234,7 @@ mod tests {
         async fn list(
             &self,
             service: &str,
-        ) -> Result<Vec<String>, platform_api::SecureStorageError> {
+        ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -244,29 +247,29 @@ mod tests {
         fn is_encrypted(&self) -> bool {
             false
         }
-        fn backend(&self) -> platform_api::SecureStorageBackend {
-            platform_api::SecureStorageBackend::PlainText
+        fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
+            lingxi_core::host::SecureStorageBackend::PlainText
         }
     }
     struct FixedClock;
-    impl platform_api::Clock for FixedClock {
+    impl lingxi_core::host::Clock for FixedClock {
         fn now(&self) -> std::time::SystemTime {
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000)
         }
     }
     struct NoHttp;
     #[async_trait::async_trait]
-    impl platform_api::HttpTransport for NoHttp {
+    impl lingxi_core::host::HttpTransport for NoHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
             panic!("credential tests must not perform HTTP");
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
             panic!("credential tests must not perform HTTP");
         }
     }
@@ -444,7 +447,7 @@ mod tests {
             user_providers: Default::default(),
             routing: None,
         });
-        let mut client = DefaultLlmClient::from_config(assembled.client_config)
+        let mut client = ModelRuntime::from_config(assembled.client_config)
             .expect("cold-start route config must be valid");
         client = client.with_credential_provider(Arc::new(MultiCredentialProvider::new(
             credentials.clone(),

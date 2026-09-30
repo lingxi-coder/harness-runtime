@@ -237,7 +237,7 @@ impl LspDiagnosticRegistry {
         &self,
         host_root: Option<PathBuf>,
         settle_timeout: Option<Duration>,
-    ) -> Arc<dyn platform_api::NewDiagnosticsSource> {
+    ) -> Arc<dyn lingxi_core::host::NewDiagnosticsSource> {
         Arc::new(LspDiagnosticsSource {
             registry: self.clone(),
             cursor: Mutex::new(self.consumer_cursor()),
@@ -426,14 +426,14 @@ impl LspDiagnosticRegistry {
 }
 
 #[async_trait::async_trait]
-impl platform_api::NewDiagnosticsSource for LspDiagnosticRegistry {
+impl lingxi_core::host::NewDiagnosticsSource for LspDiagnosticRegistry {
     async fn take_new_diagnostics_block(&self) -> Option<String> {
         LspDiagnosticRegistry::take_new_diagnostics_block(self).await
     }
 }
 
 #[async_trait::async_trait]
-impl platform_api::NewDiagnosticsSource for LspDiagnosticsSource {
+impl lingxi_core::host::NewDiagnosticsSource for LspDiagnosticsSource {
     async fn take_new_diagnostics_block(&self) -> Option<String> {
         if let (Some(root), Some(timeout)) = (&self.host_root, self.settle_timeout) {
             let _ = self.registry.settle_under_host_root(root, timeout).await;

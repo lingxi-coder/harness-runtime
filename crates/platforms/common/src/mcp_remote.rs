@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 use jsonrpc::{Connection, ConnectionError, InboundHandler, Request, Response, RouterError};
-use platform_api::{
+use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError, McpIconDto,
     McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream, McpPromptDto, McpProtocolEra,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto,
@@ -41,8 +41,8 @@ fn bounded_probe_timeout_ms(requested: Option<u64>) -> u64 {
 /// Shared remote HTTP/SSE MCP transport.
 #[derive(Default)]
 pub struct RemoteMcpTransport {
-    connections: Arc<Mutex<HashMap<protocol::McpConnectionId, Arc<Connection>>>>,
-    negotiated: Arc<Mutex<HashMap<protocol::McpConnectionId, McpNegotiatedProtocol>>>,
+    connections: Arc<Mutex<HashMap<lingxi_core::types::McpConnectionId, Arc<Connection>>>>,
+    negotiated: Arc<Mutex<HashMap<lingxi_core::types::McpConnectionId, McpNegotiatedProtocol>>>,
 }
 
 /// Synchronous cleanup for a cancelled connect/initialize future. The registry
@@ -50,7 +50,7 @@ pub struct RemoteMcpTransport {
 /// an HTTP broker (or an SSE GET) retained in the connection map.
 struct RemoteConnectionCleanupGuard<'a> {
     transport: &'a RemoteMcpTransport,
-    id: protocol::McpConnectionId,
+    id: lingxi_core::types::McpConnectionId,
     armed: bool,
 }
 
@@ -77,15 +77,21 @@ impl RemoteMcpTransport {
 
     /// Return the live JSON-RPC connection owned by this transport.
     #[must_use]
-    pub fn connection_for(&self, id: protocol::McpConnectionId) -> Option<Arc<Connection>> {
+    pub fn connection_for(
+        &self,
+        id: lingxi_core::types::McpConnectionId,
+    ) -> Option<Arc<Connection>> {
         self.connections.lock().ok()?.get(&id).cloned()
     }
 
-    fn negotiated_for(&self, id: protocol::McpConnectionId) -> Option<McpNegotiatedProtocol> {
+    fn negotiated_for(
+        &self,
+        id: lingxi_core::types::McpConnectionId,
+    ) -> Option<McpNegotiatedProtocol> {
         self.negotiated.lock().ok()?.get(&id).cloned()
     }
 
-    fn remove(&self, id: protocol::McpConnectionId) {
+    fn remove(&self, id: lingxi_core::types::McpConnectionId) {
         if let Ok(mut connections) = self.connections.lock() {
             if let Some(connection) = connections.remove(&id) {
                 connection.close();
@@ -100,7 +106,12 @@ impl RemoteMcpTransport {
         deadline.checked_duration_since(tokio::time::Instant::now())
     }
 
-    fn decorate_params(&self, id: protocol::McpConnectionId, method: &str, params: Value) -> Value {
+    fn decorate_params(
+        &self,
+        id: lingxi_core::types::McpConnectionId,
+        method: &str,
+        params: Value,
+    ) -> Value {
         let Some(protocol) = self.negotiated_for(id) else {
             return params;
         };
@@ -326,13 +337,13 @@ impl RemoteMcpTransport {
         &self,
         connection: Connection,
     ) -> Result<McpRawConnection, McpError> {
-        self.register_connection_with_id(protocol::McpConnectionId::new(), connection)
+        self.register_connection_with_id(lingxi_core::types::McpConnectionId::new(), connection)
             .await
     }
 
     async fn register_connection_with_id(
         &self,
-        id: protocol::McpConnectionId,
+        id: lingxi_core::types::McpConnectionId,
         connection: Connection,
     ) -> Result<McpRawConnection, McpError> {
         let connection = Arc::new(connection);
@@ -487,7 +498,7 @@ impl RemoteMcpTransport {
 #[async_trait]
 impl McpTransport for RemoteMcpTransport {
     async fn connect(&self, spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
-        let id = protocol::McpConnectionId::new();
+        let id = lingxi_core::types::McpConnectionId::new();
         let connection = match spec {
             // A configured `type: "sse"` server speaks the legacy HTTP+SSE
             // contract: it names its POST url in an `endpoint` event.
@@ -502,7 +513,7 @@ impl McpTransport for RemoteMcpTransport {
             McpTransportSpec::SseIde {
                 url, auth_token, ..
             } => {
-                let headers = platform_api::McpHeaders::default();
+                let headers = lingxi_core::host::McpHeaders::default();
                 // The IDE serves both directions on one url and sends no
                 // `endpoint` event.
                 crate::connect_sse(
@@ -679,7 +690,7 @@ impl McpTransport for RemoteMcpTransport {
                 arguments: prompt
                     .arguments
                     .into_iter()
-                    .map(|argument| platform_api::McpPromptArgumentDto {
+                    .map(|argument| lingxi_core::host::McpPromptArgumentDto {
                         name: argument.name,
                         description: argument.description,
                         required: argument.required,
@@ -762,7 +773,7 @@ impl McpTransport for RemoteMcpTransport {
         })
     }
 
-    async fn ping(&self, conn_id: protocol::McpConnectionId) -> Result<(), McpError> {
+    async fn ping(&self, conn_id: lingxi_core::types::McpConnectionId) -> Result<(), McpError> {
         let _: Value = self
             .call_rpc(
                 &McpRawConnection {
@@ -813,12 +824,15 @@ impl McpTransport for RemoteMcpTransport {
         ))
     }
 
-    async fn disconnect(&self, conn_id: protocol::McpConnectionId) -> Result<(), McpError> {
+    async fn disconnect(
+        &self,
+        conn_id: lingxi_core::types::McpConnectionId,
+    ) -> Result<(), McpError> {
         self.remove(conn_id);
         Ok(())
     }
 
-    fn disconnect_sync(&self, conn_id: protocol::McpConnectionId) {
+    fn disconnect_sync(&self, conn_id: lingxi_core::types::McpConnectionId) {
         self.remove(conn_id);
     }
 

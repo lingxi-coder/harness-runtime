@@ -1,11 +1,11 @@
 //! `voice` exposes raw recording with host-managed session handles.
 
-use permission::result::PermissionMetadata;
-use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::audio::{
+use lingxi_core::host::audio::{
     AudioErrorKind, AudioOperation, AudioOperationContext, AudioOperationId, AudioOperationKind,
     AudioOperationSuccess, AudioOwner, AudioRecordingHandle, AudioService,
 };
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -457,18 +457,23 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::audio::{
+    use lingxi_core::host::audio::{
         AudioCapabilitySnapshot, AudioError, AudioOperationId, AudioOperationReadiness,
         AudioReadinessState, AudioRecordingHandle, AudioService, AudioStatus,
     };
-    use platform_api::VoiceRecording;
+    use lingxi_core::host::VoiceRecording;
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
 
     struct FakeAudio {
-        active: Mutex<HashMap<platform_api::audio::AudioOwner, AudioRecordingHandle>>,
-        operations: Mutex<Vec<(platform_api::audio::AudioOperationContext, AudioOperation)>>,
+        active: Mutex<HashMap<lingxi_core::host::audio::AudioOwner, AudioRecordingHandle>>,
+        operations: Mutex<
+            Vec<(
+                lingxi_core::host::audio::AudioOperationContext,
+                AudioOperation,
+            )>,
+        >,
         cancelled: Mutex<Vec<AudioOperationId>>,
         fail_status: bool,
     }
@@ -490,7 +495,7 @@ mod tests {
 
         async fn execute(
             &self,
-            context: platform_api::audio::AudioOperationContext,
+            context: lingxi_core::host::audio::AudioOperationContext,
             operation: AudioOperation,
         ) -> Result<AudioOperationSuccess, AudioError> {
             self.operations
@@ -576,7 +581,7 @@ mod tests {
         context
     }
 
-    fn use_context(session_id: protocol::SessionId) -> ToolUseContext {
+    fn use_context(session_id: lingxi_core::types::SessionId) -> ToolUseContext {
         let mut context = tool_api::test_support::fresh_ctx();
         context.origin_session_id = Some(session_id);
         context
@@ -591,7 +596,7 @@ mod tests {
             fail_status: false,
         });
         let service: Arc<dyn AudioService> = audio.clone();
-        let use_context = use_context(protocol::SessionId::new());
+        let use_context = use_context(lingxi_core::types::SessionId::new());
         let context = operation_context(&service, &use_context, Duration::from_secs(5))
             .await
             .unwrap();
@@ -642,7 +647,7 @@ mod tests {
         let builtin = context(audio.clone());
         let handle_registry = builtin.audio_recording_handles.clone();
         let tool = VoiceTool::new(builtin);
-        let session = protocol::SessionId::new();
+        let session = lingxi_core::types::SessionId::new();
         let started = tool
             .call(
                 json!({ "action": "start_recording" }),
@@ -722,8 +727,8 @@ mod tests {
         second_entered: tokio::sync::Notify,
         release_first: tokio::sync::Notify,
         calls: std::sync::atomic::AtomicUsize,
-        active: Mutex<HashMap<platform_api::audio::AudioOwner, AudioRecordingHandle>>,
-        starts: Mutex<HashMap<AudioOperationId, platform_api::audio::AudioOwner>>,
+        active: Mutex<HashMap<lingxi_core::host::audio::AudioOwner, AudioRecordingHandle>>,
+        starts: Mutex<HashMap<AudioOperationId, lingxi_core::host::audio::AudioOwner>>,
         start_ids: Mutex<Vec<AudioOperationId>>,
         cancelled: Mutex<Vec<AudioOperationId>>,
     }
@@ -745,7 +750,7 @@ mod tests {
 
         async fn execute(
             &self,
-            context: platform_api::audio::AudioOperationContext,
+            context: lingxi_core::host::audio::AudioOperationContext,
             operation: AudioOperation,
         ) -> Result<AudioOperationSuccess, AudioError> {
             let AudioOperation::StartRecording { .. } = operation else {
@@ -808,8 +813,8 @@ mod tests {
         let builtin_context = context(audio.clone());
         let handle_registry = builtin_context.audio_recording_handles.clone();
         let tool = Arc::new(VoiceTool::new(builtin_context));
-        let first_session = protocol::SessionId::new();
-        let second_session = protocol::SessionId::new();
+        let first_session = lingxi_core::types::SessionId::new();
+        let second_session = lingxi_core::types::SessionId::new();
         let first = tokio::spawn({
             let tool = tool.clone();
             async move {
@@ -870,8 +875,8 @@ mod tests {
             fail_status: false,
         });
         let tool = VoiceTool::new(context(audio.clone()));
-        let first_session = protocol::SessionId::new();
-        let second_session = protocol::SessionId::new();
+        let first_session = lingxi_core::types::SessionId::new();
+        let second_session = lingxi_core::types::SessionId::new();
         tool.call(
             json!({ "action": "start_recording" }),
             use_context(first_session),
@@ -911,7 +916,7 @@ mod tests {
         let builtin = context(audio.clone());
         let registry = builtin.audio_recording_handles.clone();
         let tool = VoiceTool::new(builtin);
-        let session = protocol::SessionId::new();
+        let session = lingxi_core::types::SessionId::new();
         tool.call(
             json!({ "action": "start_recording" }),
             use_context(session),
@@ -953,7 +958,7 @@ mod tests {
         let result = tool
             .call(
                 json!({ "action": "is_recording" }),
-                use_context(protocol::SessionId::new()),
+                use_context(lingxi_core::types::SessionId::new()),
                 tool_api::test_support::fresh_tx(),
             )
             .await;
@@ -973,11 +978,11 @@ mod tests {
         let tool = VoiceTool::new(context(audio.clone()));
         let input = json!({ "action": "start_recording", "sample_rate_hz": -1 });
         assert!(tool
-            .validate_input(&input, &use_context(protocol::SessionId::new()))
+            .validate_input(&input, &use_context(lingxi_core::types::SessionId::new()))
             .await
             .is_err());
         assert!(matches!(
-            tool.call(input, use_context(protocol::SessionId::new()), tool_api::test_support::fresh_tx()).await,
+            tool.call(input, use_context(lingxi_core::types::SessionId::new()), tool_api::test_support::fresh_tx()).await,
             Err(ToolError::InvalidInput(message)) if message.contains("sample_rate_hz")
         ));
         assert!(audio.operations.lock().unwrap().is_empty());

@@ -529,7 +529,7 @@ impl SandboxManager {
     ) -> Result<(String, Vec<PathBuf>), ManagerError> {
         match host_os() {
             HostOs::Linux => self.wrap_linux(command, bin_shell, custom_config, cwd),
-            HostOs::Macos => self.wrap_macos(command, bin_shell, custom_config),
+            HostOs::Macos => self.wrap_macos(command, bin_shell, custom_config, cwd),
             HostOs::Windows => Err(ManagerError::Unsupported(
                 "wrap_with_sandbox: Windows requires wrap_with_sandbox_argv".to_string(),
             )),
@@ -694,6 +694,7 @@ impl SandboxManager {
         command: &str,
         bin_shell: Option<&str>,
         custom_config: Option<&SandboxRuntimeConfig>,
+        cwd: &str,
     ) -> Result<(String, Vec<PathBuf>), ManagerError> {
         let active = self.config.as_ref();
         let ca_cert_path = self
@@ -761,6 +762,7 @@ impl SandboxManager {
             bin_shell,
             tmpdir: &tmpdir,
             proxy_auth_token,
+            cwd: Some(cwd),
         };
         let wrapped = wrap_command_with_sandbox_macos(&params)
             .map_err(|e| ManagerError::Io(e.to_string()))?;

@@ -1,5 +1,7 @@
 use super::count_document_and_image_blocks;
-use protocol::{ContentBlock, ConversationMessage, DocumentSource, ImageSource, MessageId};
+use lingxi_core::types::{
+    ContentBlock, ConversationMessage, DocumentSource, ImageSource, MessageId,
+};
 
 fn image_block() -> ContentBlock {
     ContentBlock::Image {

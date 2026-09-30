@@ -28,7 +28,7 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use jsonrpc::messages::Message as JsonRpcMessage;
 use jsonrpc::{BrokerError, Connection, ConnectionError};
-use platform_api::mcp::McpError;
+use lingxi_core::host::mcp::McpError;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -187,7 +187,7 @@ where
 /// `auth_token`, if `Some`, becomes the `X-LingXi-Ide-Authorization`
 /// header on BOTH the GET and the POST. `extra_headers` are applied to both
 /// directions verbatim. It is generic over the map type so both an unordered
-/// `HashMap` and the insertion-ordered [`platform_api::McpHeaders`] (`IndexMap`)
+/// `HashMap` and the insertion-ordered [`lingxi_core::host::McpHeaders`] (`IndexMap`)
 /// the MCP transport specs now carry are accepted (header order is irrelevant
 /// to the emitted HTTP request).
 ///

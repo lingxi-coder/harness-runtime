@@ -1,4 +1,4 @@
-//! Implementation of [`platform_api::SlashCommandDispatcher`] that routes
+//! Implementation of [`lingxi_core::host::SlashCommandDispatcher`] that routes
 //! `/<name> <args>` into the in-crate [`CommandRegistry`].
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md` Task 5.
@@ -15,9 +15,9 @@ use async_trait::async_trait;
 use hooks::events::{HookEvent, PromptExpansionType};
 use hooks::registry::HookContext;
 use hooks::HookExecutorImpl;
-use platform_api::permission_gate::PermissionGate;
-use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
-use protocol::McpConnectionId;
+use lingxi_core::host::permission_gate::PermissionGate;
+use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
+use lingxi_core::types::McpConnectionId;
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -87,11 +87,11 @@ struct ExpansionHooks {
 fn command_source_str(source: CommandSource) -> &'static str {
     match source {
         CommandSource::Builtin => "builtin",
-        CommandSource::Settings(protocol::SettingsScope::User) => "user",
-        CommandSource::Settings(protocol::SettingsScope::Project) => "project",
-        CommandSource::Settings(protocol::SettingsScope::Local) => "local",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::User) => "user",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Project) => "project",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Local) => "local",
         CommandSource::Plugin => "plugin",
-        CommandSource::Settings(protocol::SettingsScope::Managed) => "managed",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Managed) => "managed",
         CommandSource::Mcp => "mcp",
         // Programmatic bundled skills (TS `source: 'bundled'`).
         CommandSource::Bundled => "bundled",
@@ -780,7 +780,7 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
 }
 
 fn bind_mcp_prompt_arguments(
-    declarations: &[platform_api::McpPromptArgumentDto],
+    declarations: &[lingxi_core::host::McpPromptArgumentDto],
     positional: &[String],
 ) -> Result<Map<String, Value>, String> {
     if positional.len() > declarations.len() {
@@ -890,20 +890,20 @@ mod tests {
         for (source, expected) in [
             (CommandSource::Builtin, "builtin"),
             (
-                CommandSource::Settings(protocol::SettingsScope::User),
+                CommandSource::Settings(lingxi_core::types::SettingsScope::User),
                 "user",
             ),
             (
-                CommandSource::Settings(protocol::SettingsScope::Project),
+                CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
                 "project",
             ),
             (
-                CommandSource::Settings(protocol::SettingsScope::Local),
+                CommandSource::Settings(lingxi_core::types::SettingsScope::Local),
                 "local",
             ),
             (CommandSource::Plugin, "plugin"),
             (
-                CommandSource::Settings(protocol::SettingsScope::Managed),
+                CommandSource::Settings(lingxi_core::types::SettingsScope::Managed),
                 "managed",
             ),
             (CommandSource::Mcp, "mcp"),
@@ -971,7 +971,7 @@ mod tests {
         reg.register_command(SlashCommand {
             name: "demo".to_string(),
             description: "Demo".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/demo.md"),
                 frontmatter: CommandFrontmatter::default(),
@@ -1122,7 +1122,7 @@ mod tests {
         reg.register_command(SlashCommand {
             name: "commit".to_string(),
             description: "Custom commit".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/commit.md"),
                 frontmatter: CommandFrontmatter::default(),
@@ -1254,7 +1254,7 @@ mod tests {
         shared.write().await.register_command(SlashCommand {
             name: "deploy".to_string(),
             description: "Deploy".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: std::path::PathBuf::from("/x/deploy.md"),
                 frontmatter: crate::model::CommandFrontmatter::default(),
@@ -1385,40 +1385,45 @@ mod tests {
     use hooks::executor::BuiltinHookHandler;
     use hooks::response::{HookOutcome, HookResult};
     use hooks::HookRegistry;
-    use protocol::{HookId, HttpRequest, HttpResponse};
+    use lingxi_core::types::{HookId, HttpRequest, HttpResponse};
     use std::time::Duration;
 
     struct UnusedHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for UnusedHttp {
+    impl lingxi_core::host::HttpTransport for UnusedHttp {
         async fn request(
             &self,
             _req: HttpRequest,
-        ) -> Result<HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
         async fn stream_sse(
             &self,
             _req: HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
     struct UnusedRuntime;
     #[async_trait]
-    impl platform_api::RuntimeSpawner for UnusedRuntime {
+    impl lingxi_core::host::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-            Err(platform_api::RuntimeError::Internal("unused".into()))
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _d: Duration) {}
         async fn cancel(
             &self,
-            _h: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _h: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
@@ -1479,7 +1484,7 @@ mod tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: "record-user-prompt-expansion".into(),
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -1535,7 +1540,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let dispatcher = RegistrySlashDispatcher::new(registry_with_demo_markdown(
-            CommandSource::Settings(protocol::SettingsScope::User),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::User),
         ))
         .with_skill_usage_home(root.clone());
 
@@ -1557,7 +1562,7 @@ mod tests {
     #[tokio::test]
     async fn expanding_a_markdown_command_fires_user_prompt_expansion() {
         let (exec, log) = recording_expansion_executor().await;
-        let ctx_session = protocol::SessionId::new();
+        let ctx_session = lingxi_core::types::SessionId::new();
         let provider: ExpansionHookContextProvider = Arc::new(move || {
             Box::pin(async move {
                 HookContext {
@@ -1567,7 +1572,7 @@ mod tests {
             })
         });
         let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(
-            protocol::SettingsScope::Project,
+            lingxi_core::types::SettingsScope::Project,
         )))
         .with_expansion_hooks(exec, provider);
 
@@ -1624,12 +1629,12 @@ mod tests {
                 connection_id,
                 prompt_name: "review".to_string(),
                 arguments: vec![
-                    platform_api::McpPromptArgumentDto {
+                    lingxi_core::host::McpPromptArgumentDto {
                         name: "repository".to_string(),
                         description: None,
                         required: true,
                     },
-                    platform_api::McpPromptArgumentDto {
+                    lingxi_core::host::McpPromptArgumentDto {
                         name: "focus".to_string(),
                         description: None,
                         required: false,
@@ -1708,7 +1713,7 @@ mod tests {
         let provider: ExpansionHookContextProvider =
             Arc::new(|| Box::pin(async { HookContext::default() }));
         let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(
-            protocol::SettingsScope::User,
+            lingxi_core::types::SettingsScope::User,
         )))
         .with_expansion_hooks(exec, provider);
 
@@ -1730,7 +1735,7 @@ mod tests {
         // Note: executor exists but is NOT wired into the dispatcher.
         let _ = exec;
         let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(
-            protocol::SettingsScope::Project,
+            lingxi_core::types::SettingsScope::Project,
         )));
 
         match d.dispatch("/demo x").await {
@@ -1886,7 +1891,7 @@ mod tests {
     #[tokio::test]
     async fn wired_provider_expands_markdown_embedded_shell() {
         let reg = markdown_with(
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             "before !`echo hi` after",
             Some(vec!["Bash(echo:*)".to_string()]),
         );
@@ -1914,7 +1919,7 @@ mod tests {
     #[tokio::test]
     async fn wired_deny_provider_aborts_markdown_expansion() {
         let reg = markdown_with(
-            CommandSource::Settings(protocol::SettingsScope::Project),
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             "before !`echo hi` after",
             None,
         );
@@ -2066,8 +2071,8 @@ mod tests {
             &self,
             _name: &str,
             _input: &Value,
-        ) -> platform_api::permission_gate::PermissionDecision {
-            platform_api::permission_gate::PermissionDecision::Allow
+        ) -> lingxi_core::host::permission_gate::PermissionDecision {
+            lingxi_core::host::permission_gate::PermissionDecision::Allow
         }
         fn set_command_input_denies(&self, specs: &[String], union: bool) {
             self.calls
@@ -2082,7 +2087,7 @@ mod tests {
         reg.register_command(SlashCommand {
             name: "tight".to_string(),
             description: "A skill that narrows its own tools".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/tight.md"),
                 frontmatter: CommandFrontmatter {
@@ -2096,7 +2101,7 @@ mod tests {
         reg.register_command(SlashCommand {
             name: "open".to_string(),
             description: "A skill that narrows nothing".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/open.md"),
                 frontmatter: CommandFrontmatter::default(),
@@ -2155,7 +2160,7 @@ mod tests {
         reg.register_command(SlashCommand {
             name: "tight".to_string(),
             description: "d".to_string(),
-            source: CommandSource::Settings(protocol::SettingsScope::Project),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/tight.md"),
                 frontmatter: CommandFrontmatter {

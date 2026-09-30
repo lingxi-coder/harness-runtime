@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::message::{MessageBlockDto, MessageDto, MessageImageDto};
-use protocol::ConversationMessage;
+use lingxi_core::types::ConversationMessage;
 
 #[cfg(test)]
 mod tests {
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn lower_transcript_preserves_order_role_and_blocks() {
-        use protocol::{ContentBlock, MessageId, ToolUseId};
+        use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
 
         let tu = ToolUseId::new();
         let history = vec![
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn lower_transcript_restores_the_original_cron_slash_line_from_legacy_history() {
-        use protocol::{ContentBlock, MessageId};
+        use lingxi_core::types::{ContentBlock, MessageId};
 
         let legacy_prompt = concat!(
             "The user explicitly invoked `/cron` to manage scheduled prompts. ",
@@ -512,7 +512,7 @@ mod tests {
     /// message N+1, so nothing short of a transcript-wide index can pair them.
     #[test]
     fn lower_transcript_pairs_a_tool_result_with_its_call_across_messages() {
-        use protocol::{ContentBlock, MessageId, ToolUseId};
+        use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
         let tu = ToolUseId::new();
         let input = serde_json::json!({
             "file_path": "/tmp/x.rs",
@@ -584,7 +584,7 @@ mod tests {
     /// payload all along as `toolUseResult`; the post-pass puts it back.
     #[test]
     fn a_replayed_spawn_result_carries_the_structured_payload_the_jsonl_kept() {
-        use protocol::{ContentBlock, MessageId, ToolUseId};
+        use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
         let spawn = ToolUseId::new();
         let read = ToolUseId::new();
         let text = "Async agent launched successfully.";
@@ -690,7 +690,7 @@ mod tests {
     /// a restart. Read lost its content the same way.
     #[test]
     fn a_resumed_bash_or_read_result_keeps_its_output() {
-        use protocol::{ContentBlock, MessageId, ToolUseId};
+        use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
 
         let call =
             |tu: &ToolUseId, tool: &str, input: serde_json::Value| ConversationMessage::Assistant {
@@ -758,7 +758,7 @@ mod tests {
     /// on correlating by `id`.
     #[test]
     fn lower_transcript_tolerates_a_tool_result_with_no_paired_call() {
-        use protocol::{ContentBlock, MessageId, ToolUseId};
+        use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
         let history = vec![ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
@@ -789,7 +789,7 @@ mod tests {
 
     #[test]
     fn lower_transcript_hides_internal_meta_body_but_preserves_tool_results() {
-        use protocol::{ContentBlock, MessageId, ToolUseId};
+        use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
         let tick = "Internal scheduled tick".to_string();
         let tool_id = ToolUseId::new();
         let meta = |content| ConversationMessage::User {
@@ -844,7 +844,7 @@ mod tests {
 
     #[test]
     fn lower_transcript_pairs_compact_boundary_with_hidden_summary() {
-        use protocol::{CompactBoundaryMetadata, CompactTrigger, MessageId};
+        use lingxi_core::types::{CompactBoundaryMetadata, CompactTrigger, MessageId};
 
         let history = vec![
             ConversationMessage::compact_boundary(
@@ -874,7 +874,7 @@ mod tests {
 
     #[test]
     fn lower_conversation_message_system_lowers_to_single_text_block() {
-        use protocol::MessageId;
+        use lingxi_core::types::MessageId;
         let msg = ConversationMessage::System {
             id: MessageId::new(),
             content: "you are a helpful assistant".to_string(),
@@ -894,7 +894,7 @@ mod tests {
 
     #[test]
     fn lower_conversation_message_projects_image_blocks_to_message_media() {
-        use protocol::{ContentBlock, ImageSource, MessageId};
+        use lingxi_core::types::{ContentBlock, ImageSource, MessageId};
         // An image block has no MessageBlockDto analog, so it is projected to a
         // durable URL-shaped message media entry while text stays in blocks.
         let msg = ConversationMessage::User {
@@ -934,7 +934,7 @@ mod tests {
 #[test]
 fn loop_wakeup_lowering_preserves_structured_metadata_without_text_matching() {
     let message = ConversationMessage::System {
-        id: protocol::MessageId::new(),
+        id: lingxi_core::types::MessageId::new(),
         content: serde_json::json!({"message":"任意文案", "companion":"healthy", "streak":2, "since_ms":123}).to_string(),
         subtype: Some("scheduled_task_fire".into()), compact_metadata: None, refusal_fallback: None,
     };
@@ -945,7 +945,7 @@ fn loop_wakeup_lowering_preserves_structured_metadata_without_text_matching() {
     assert_eq!(fire.streak, 2);
     assert_eq!(fire.since_ms, 123);
     let companion =
-        ConversationMessage::user_meta(protocol::MessageId::new(), "healthy".to_string());
+        ConversationMessage::user_meta(lingxi_core::types::MessageId::new(), "healthy".to_string());
     assert_eq!(
         lower_transcript(&[message, companion]).len(),
         1,
@@ -958,7 +958,7 @@ mod current_usage_tests {
     #[test]
     fn restored_zero_counters_are_explicit_snapshots() {
         assert!(matches!(
-            super::lower_current_usage(platform_api::CurrentUsageSnapshot::default()),
+            super::lower_current_usage(lingxi_core::host::CurrentUsageSnapshot::default()),
             crate::protocol::events::ClientEvent::UsageUpdate {
                 is_snapshot: Some(true),
                 input_tokens: 0,

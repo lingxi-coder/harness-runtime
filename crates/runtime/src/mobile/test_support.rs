@@ -30,11 +30,11 @@ use async_trait::async_trait;
 use client::adapter::{ClientEventListener, PermissionRequestSink};
 use client::protocol::events::ClientEvent;
 use client::protocol::permission::PermissionRequest as PermissionRequestDto;
-use orchestrator::StreamingApiClient;
-use platform_api::{
+use lingxi_core::host::{
     CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
     SecureStorage, SharingService, WorktreeManager,
 };
+use orchestrator::StreamingApiClient;
 use tokio::sync::Mutex;
 
 pub use crate::mobile::host::{

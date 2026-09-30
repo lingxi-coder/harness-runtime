@@ -65,7 +65,7 @@ impl TaskStatusSink for RegistryStatusSink {
     async fn bind_agent_id(
         &self,
         task_id: &str,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
     ) -> Result<(), String> {
         if let Some(registry) = self.registry() {
             registry
@@ -75,9 +75,11 @@ impl TaskStatusSink for RegistryStatusSink {
         }
         Ok(())
     }
-    fn task_registry(&self) -> Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>> {
+    fn task_registry(
+        &self,
+    ) -> Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>> {
         self.registry().map(|registry| {
-            registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+            registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>
         })
     }
     fn requires_explicit_activation(&self) -> bool {
@@ -126,8 +128,8 @@ impl TaskStatusSink for RegistryStatusSink {
         &self,
         task_id: &str,
         result: Option<String>,
-        usage: Option<platform_api::task_registry::AgentRunUsage>,
-        agent_id: Option<protocol::AgentId>,
+        usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
+        agent_id: Option<lingxi_core::types::AgentId>,
         agent_name: Option<String>,
         team_name: Option<String>,
     ) {
@@ -140,7 +142,7 @@ impl TaskStatusSink for RegistryStatusSink {
     async fn set_agent_outcome(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::AgentTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::AgentTerminalOutcome,
     ) {
         if let Some(reg) = self.registry() {
             reg.set_agent_outcome(task_id, outcome).await;
@@ -150,7 +152,7 @@ impl TaskStatusSink for RegistryStatusSink {
     async fn set_workflow_outcome(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
     ) {
         if let Some(reg) = self.registry() {
             reg.set_workflow_outcome(task_id, outcome).await;
@@ -173,7 +175,7 @@ impl TaskStatusSink for RegistryStatusSink {
         &self,
         task_id: &str,
         egress_profiles: Vec<String>,
-        usage: Option<platform_api::task_registry::AgentRunUsage>,
+        usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
     ) {
         if let Some(reg) = self.registry() {
             reg.set_fusion_egress_and_usage(task_id, egress_profiles, usage)
@@ -190,7 +192,7 @@ impl TaskStatusSink for RegistryStatusSink {
     async fn set_fusion_publication(
         &self,
         task_id: &str,
-        receipt: platform_api::FusionPublicationReceipt,
+        receipt: lingxi_core::host::FusionPublicationReceipt,
     ) {
         if let Some(reg) = self.registry() {
             reg.set_fusion_publication(task_id, receipt).await;
@@ -217,7 +219,7 @@ impl TaskStatusSink for RegistryStatusSink {
     async fn finish_workflow_terminal(
         &self,
         task_id: &str,
-        outcome: platform_api::task_registry::WorkflowTerminalOutcome,
+        outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
         status: TaskStatus,
     ) {
         if let Some(reg) = self.registry() {

@@ -45,9 +45,9 @@ fn agent_permission_requests_are_never_automatically_allowed_by_local_classifier
 struct RejectPrompt;
 
 #[async_trait::async_trait]
-impl platform_api::PermissionGate for RejectPrompt {
-    async fn check(&self, _: &str, _: &serde_json::Value) -> platform_api::PermissionDecision {
-        platform_api::PermissionDecision::Deny {
+impl lingxi_core::host::PermissionGate for RejectPrompt {
+    async fn check(&self, _: &str, _: &serde_json::Value) -> lingxi_core::host::PermissionDecision {
+        lingxi_core::host::PermissionDecision::Deny {
             reason: "user declined confirmation".into(),
         }
     }
@@ -55,8 +55,8 @@ impl platform_api::PermissionGate for RejectPrompt {
 
 #[tokio::test]
 async fn agent_audit_without_contextual_classifier_requires_user_confirmation() {
+    use lingxi_core::host::{PermissionDecision, PermissionGate};
     use permission::{policy::PermissionPolicy, policy_gate::PolicyPermissionGate, PermissionMode};
-    use platform_api::{PermissionDecision, PermissionGate};
     use std::sync::Arc;
 
     for tool in ["Agent", "Task"] {
@@ -92,8 +92,8 @@ impl permission::classifier::LoopPermissionClassifier for ContextualClassifier {
 
 #[tokio::test]
 async fn agent_contextual_verdict_is_preserved_and_pass_still_prompts() {
+    use lingxi_core::host::{PermissionDecision, PermissionGate};
     use permission::{policy::PermissionPolicy, policy_gate::PolicyPermissionGate, PermissionMode};
-    use platform_api::{PermissionDecision, PermissionGate};
     use std::sync::Arc;
 
     for tool in ["Agent", "Task"] {

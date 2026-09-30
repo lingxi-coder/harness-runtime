@@ -2,6 +2,7 @@
 use futures::StreamExt;
 use lingxi_llm_client as sdk;
 use llm_runtime::*;
+use sdk::auth::sigv4;
 use std::sync::{Arc, Mutex};
 
 struct RawOnly {
@@ -36,8 +37,8 @@ impl llm_runtime::test_support::FixtureTransport for RawOnly {
     }
 }
 llm_runtime::impl_fixture_transport!(RawOnly);
-fn client() -> DefaultLlmClient {
-    DefaultLlmClient::from_config(ClientConfig {
+fn client() -> ModelRuntime {
+    ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             profile_name: "signed".into(),
             provider_id: ProviderId::BedrockClaude,
@@ -98,19 +99,22 @@ async fn shared_execution_sends_exact_tool_result_string_without_internal_sideca
         None,
     );
     let mut request = LlmRequest::new("display");
-    request.max_tokens = Some(100);
-    request.messages.push(Message {
-        role: "user".into(),
-        content: vec![ContentBlock::ToolResult {
-            tool_call_id: "call-1".into(),
-            output: serde_json::Value::Array(::protocol::js_utf16::tool_result_sidecar(vec![
-                65, 0xd83d, 10,
-            ])),
-            is_error: false,
-            cache_control: Some(CacheControl::Ephemeral),
-            cache_reference: None,
+    request.input.max_tokens = Some(100);
+    assign_history(
+        &mut request,
+        &[Message {
+            role: "user".into(),
+            content: vec![ContentBlock::ToolResult {
+                tool_call_id: "call-1".into(),
+                output: serde_json::Value::Array(
+                    ::lingxi_core::types::js_utf16::tool_result_sidecar(vec![65, 0xd83d, 10]),
+                ),
+                is_error: false,
+                cache_control: Some(CacheControl::Ephemeral),
+                cache_reference: None,
+            }],
         }],
-    });
+    );
     service.execute_side_query_request(request).await.unwrap();
     let requests = transport.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
@@ -133,9 +137,9 @@ async fn service_signs_the_final_policy_request_and_uses_only_shared_raw_executi
         None,
     );
     let mut request = LlmRequest::new("display").with_user_text("hello");
-    request.max_tokens = Some(100);
+    request.input.max_tokens = Some(100);
     let response = service.execute_side_query_request(request).await.unwrap();
-    assert_eq!(response.usage.billable_tokens.input, 2);
+    assert_eq!(response.usage.counts().input_tokens, 2);
     let requests = transport.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     let sent = &requests[0];
@@ -163,4 +167,18 @@ async fn service_signs_the_final_policy_request_and_uses_only_shared_raw_executi
         actual, signed.authorization,
         "signature must include final host headers and exact sent bytes"
     );
+}
+
+fn assign_history(request: &mut llm_runtime::LlmRequest, messages: &[llm_runtime::Message]) {
+    let (input, exact_strings) = llm_runtime::convert::history_input(
+        &request.input.model,
+        messages,
+        &[],
+        &[],
+        lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+    )
+    .unwrap();
+    request.input.messages = input.messages;
+    request.input.prompt_cache = input.prompt_cache;
+    request.execution.message_json_string_overrides = exact_strings;
 }

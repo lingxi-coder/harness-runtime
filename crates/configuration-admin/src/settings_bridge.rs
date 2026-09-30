@@ -29,7 +29,7 @@ use serde_json::Value;
 /// this type — it is one of several conflicting orders over the same rungs, and
 /// it lives in `core::settings`'s fold. The file-layer subset this module reads
 /// is ordered by [`FILE_LAYERS`] below.
-pub use protocol::Scope as SettingsLayer;
+pub use lingxi_core::types::Scope as SettingsLayer;
 
 /// One settings file's on-disk state, as surfaced to the UI.
 pub struct SettingsFile {
@@ -134,7 +134,7 @@ pub struct SettingsPaths {
 /// `managed`, `env` and `defaults` are not file layers this module reads.)
 /// Answers: which settings files the admin panel reads, and in what order.
 ///
-/// One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
+/// One of several orderings over these rungs; `lingxi_core::types::scope`'s module docs index them all and say which question each answers.
 const FILE_LAYERS: [WritableScope; 3] = [
     WritableScope::User,
     WritableScope::Project,
@@ -396,13 +396,13 @@ pub fn permission_destination(
 fn permission_rule_source(destination: WritableScopeDto) -> permission::PermissionRuleSource {
     match destination {
         WritableScopeDto::User => {
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::User)
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User)
         }
         WritableScopeDto::Project => {
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project)
         }
         WritableScopeDto::Local => {
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local)
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local)
         }
     }
 }
@@ -1988,7 +1988,7 @@ mod tests {
         assert_eq!(rule.behavior, permission::PermissionBehavior::Allow);
         assert_eq!(
             rule.source,
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project)
         );
     }
 

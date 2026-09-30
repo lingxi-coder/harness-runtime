@@ -9,7 +9,7 @@
 use crate::tracker::{CostState, ModelUsage};
 use crate::ModelRef;
 use async_trait::async_trait;
-use protocol::SessionId;
+use lingxi_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -396,7 +396,7 @@ pub struct CostDurabilityGate {
 }
 
 struct CostDurabilityGateInner {
-    retention: platform_api::SessionRetentionGate,
+    retention: lingxi_core::host::SessionRetentionGate,
     state: std::sync::Mutex<CostDurabilityGateState>,
     changed: tokio::sync::Notify,
 }
@@ -417,7 +417,7 @@ struct CostDurabilityGateState {
 /// One FIFO position in a session's durability authority. Mutation turns
 /// freeze on unexpected drop; preflight turns simply yield their position.
 pub(crate) struct CostDurabilityTurn {
-    _retention_pin: Option<platform_api::SessionRetentionPin>,
+    _retention_pin: Option<lingxi_core::host::SessionRetentionPin>,
     inner: Arc<CostDurabilityGateInner>,
     ticket: u64,
     freeze_on_drop: bool,
@@ -428,7 +428,7 @@ impl Default for CostDurabilityGate {
     fn default() -> Self {
         Self {
             inner: Arc::new(CostDurabilityGateInner {
-                retention: platform_api::SessionRetentionGate::default(),
+                retention: lingxi_core::host::SessionRetentionGate::default(),
                 state: std::sync::Mutex::new(CostDurabilityGateState::default()),
                 changed: tokio::sync::Notify::new(),
             }),
@@ -439,7 +439,7 @@ impl Default for CostDurabilityGate {
 impl CostDurabilityGate {
     /// Shared lifetime authority, identical for tracker, output and Desktop
     /// coordinator views. This is not a separate accounting ledger.
-    pub fn retention_gate(&self) -> platform_api::SessionRetentionGate {
+    pub fn retention_gate(&self) -> lingxi_core::host::SessionRetentionGate {
         self.inner.retention.clone()
     }
 

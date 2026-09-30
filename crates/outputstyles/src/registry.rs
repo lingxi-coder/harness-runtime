@@ -12,7 +12,7 @@ use crate::builtin::{
 };
 use crate::disk::ResolvedOutputStyle;
 use crate::model::{OutputFormat, OutputStyle, OutputStyleFrontmatter, OutputStyleSource};
-use protocol::PluginId;
+use lingxi_core::types::PluginId;
 use std::collections::HashMap;
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -63,7 +63,7 @@ pub struct BuiltinOutputStyle {
     /// non-ambient `monitor_ws`) or — interactive sessions only — a
     /// backgrounded `local_bash`. The orchestrator holds no task-registry
     /// handle, so that decision needs a session-scoped probe published at the
-    /// composition roots (the shape `platform_api::read_auto_allow` uses).
+    /// composition roots (the shape `lingxi_core::host::read_auto_allow` uses).
     /// Until then every turn renders [`Self::turn_reminder`], which is the
     /// same text minus the "don't poll" clause — a weaker hint, never a wrong
     /// one. This field is a recorded contract, not a trap: wiring it is more

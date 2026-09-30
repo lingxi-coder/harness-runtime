@@ -229,10 +229,10 @@ impl Tool for PowerShellTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        use platform_api::sandbox::ProcessCommand as SbxCommand;
+        use lingxi_core::host::sandbox::ProcessCommand as SbxCommand;
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
 
         let cmd_str = input
@@ -307,6 +307,12 @@ impl Tool for PowerShellTool {
         // plan, Task 2) — reused below for the sandbox wrap and the spawned
         // process's `cwd`, so both read the same swap generation.
         let workspace = self.ctx.cwd();
+        // A worktree-isolated or explicit-`cwd` agent runs in, and is
+        // sandboxed to, its own directory — the same contract as Bash.
+        let (run_dir, sandbox_scope) = match &ctx.cwd {
+            Some(dir) => (dir.clone(), sandbox::root::SandboxRootScope::Agent),
+            None => (workspace.clone(), sandbox::root::SandboxRootScope::Session),
+        };
         let decision = should_use_sandbox(
             &cmd_str,
             self.ctx.sandbox_available && cfg!(not(target_os = "windows")),
@@ -328,20 +334,18 @@ impl Tool for PowerShellTool {
                 cmd_str
             ),
             SandboxDecision::Sandbox { policy: _ } => {
-                // Wrap through the injected async `SandboxRunner`. The default
-                // `LegacyWrapRunner` forwards to the sync `wrap_with_sandbox`
-                // (ignoring `bin_shell`/`cwd`), so this is byte-identical to the
-                // previous direct call.
+                // Rooted at the directory the command runs in, like Bash.
                 let bin_shell = bin.display().to_string();
+                let rooted_runtime = self.ctx.sandbox_runtime_at(&run_dir, sandbox_scope);
                 match self
                     .ctx
                     .sandbox_runner
                     .wrap(
                         &cmd_str,
-                        &sandbox_runtime,
+                        &rooted_runtime,
                         self.ctx.platform,
                         Some(&bin_shell),
-                        Some(workspace.as_path()),
+                        Some(run_dir.as_path()),
                     )
                     .await
                 {
@@ -359,7 +363,7 @@ impl Tool for PowerShellTool {
         let pcmd = SbxCommand {
             command: bin.display().to_string(),
             args: vec!["-Command".into(), final_cmd],
-            cwd: Some(workspace.clone()),
+            cwd: Some(run_dir.clone()),
             env: HashMap::new(),
             timeout: Some(Duration::from_millis(timeout_ms)),
             stdin: None,
@@ -737,7 +741,7 @@ mod tests {
     fn sandbox_refusal_literal_byte_locked_at_m204_site() {
         // The literal lives at `SandboxError::Unsupported` in lingxi-traits:
         // `#[error("sandbox not supported on this platform")]`.
-        let err = platform_api::sandbox::SandboxError::Unsupported;
+        let err = lingxi_core::host::sandbox::SandboxError::Unsupported;
         assert_eq!(err.to_string(), "sandbox not supported on this platform");
     }
 

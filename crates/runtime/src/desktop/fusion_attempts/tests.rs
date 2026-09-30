@@ -5,7 +5,7 @@ use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct DurableLease(String);
-impl platform_api::live_sessions::SessionWriterLease for DurableLease {
+impl lingxi_core::host::live_sessions::SessionWriterLease for DurableLease {
     fn session_id(&self) -> &str {
         &self.0
     }
@@ -15,7 +15,7 @@ struct DurableQueue(tokio::sync::mpsc::Sender<cost::AttemptPersistRequest>);
 impl cost::CostPersistence for DurableQueue {
     async fn acquire_permit(
         &self,
-        _: protocol::SessionId,
+        _: lingxi_core::types::SessionId,
     ) -> Result<cost::CostPersistPermit, cost::CostPersistError> {
         Err(cost::CostPersistError::Rejected(
             "ordinary write not expected".into(),
@@ -23,7 +23,7 @@ impl cost::CostPersistence for DurableQueue {
     }
     async fn acquire_attempt_permit(
         &self,
-        _: protocol::SessionId,
+        _: lingxi_core::types::SessionId,
     ) -> Result<cost::AttemptPersistPermit, cost::CostPersistError> {
         let permit = self.0.clone().reserve_owned().await.unwrap();
         Ok(cost::AttemptPersistPermit::new(move |request| {
@@ -142,7 +142,7 @@ impl DurableHarness {
                 "pricing":{"input_per_million":0.002,"output_per_million":0.002,"cache_read_per_million":0.002}}]
         })).unwrap());
         let client = Arc::new(
-            llm_runtime::DefaultLlmClient::from_config(llm_runtime::ClientConfig {
+            llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
                 providers: vec![llm_runtime::ProviderProfile {
                     wire_profile,
                     regions: llm_runtime::Region::all(),
@@ -166,7 +166,7 @@ impl DurableHarness {
                     }],
                     pricing: llm_runtime::PricingConfig {
                         billing_mode: if dynamic {
-                            platform_api::ModelBillingMode::PerToken
+                            lingxi_core::host::ModelBillingMode::PerToken
                         } else {
                             Default::default()
                         },
@@ -196,7 +196,7 @@ impl DurableHarness {
             None,
             None,
         ));
-        let session = protocol::SessionId::new();
+        let session = lingxi_core::types::SessionId::new();
         let (legacy, _) = tokio::sync::mpsc::channel(1);
         let (tx, queue) = tokio::sync::mpsc::channel(4);
         let initial = cost::CostState {
@@ -228,7 +228,11 @@ impl DurableHarness {
         ));
         let outputs = budget.workflow_output_scopes();
         let scope = outputs
-            .begin_turn(session, protocol::MessageId::new(), Some(output_limit))
+            .begin_turn(
+                session,
+                lingxi_core::types::MessageId::new(),
+                Some(output_limit),
+            )
             .await
             .unwrap();
         let mut authority = authority().await;
@@ -236,17 +240,17 @@ impl DurableHarness {
         inner.output = scope;
         inner.tracker = tracker.scoped(session);
         inner.budget = budget.clone();
-        inner.captured.control = platform_api::FusionRunControl::new_with_billing_mode(
-            platform_api::FusionRunIdentity::new(
-                platform_api::FusionRunId::generated(),
+        inner.captured.control = lingxi_core::host::FusionRunControl::new_with_billing_mode(
+            lingxi_core::host::FusionRunIdentity::new(
+                lingxi_core::host::FusionRunId::generated(),
                 Some(session),
-                platform_api::FusionOrigin::Slash,
+                lingxi_core::host::FusionOrigin::Slash,
                 None,
             ),
             60_000,
             tokio_util::sync::CancellationToken::new(),
             Default::default(),
-            platform_api::ModelAttemptBillingMode::MeteredAttempts,
+            lingxi_core::host::ModelAttemptBillingMode::MeteredAttempts,
         );
         assert!(inner
             .captured
@@ -283,8 +287,9 @@ impl DurableHarness {
         service.set_model_attempt_hooks(host);
         let mut request = llm_runtime::LlmRequest::new("wire").with_user_text("hello");
         request.profile = Some("profile".into());
-        request.max_tokens = Some(50);
-        request.model_attempt = Some(run.context(ModelAttemptStage::Panel, Some(0)).unwrap());
+        request.input.max_tokens = Some(50);
+        request.execution.model_attempt =
+            Some(run.context(ModelAttemptStage::Panel, Some(0)).unwrap());
         Self {
             service,
             authority,
@@ -384,9 +389,6 @@ async fn desktop_attempt_panel_fence_waits_for_durable_receipt_and_keeps_analyst
     assert_eq!(harness.permits(), 4);
     assert!(!authority.state.lock().unwrap().closed);
     authority.live((ModelAttemptStage::Analyst, None)).unwrap();
-    authority
-        .live((ModelAttemptStage::Synthesis, None))
-        .unwrap();
     assert!(authority.live((ModelAttemptStage::Panel, Some(0))).is_err());
     assert!(authority
         .tracker
@@ -590,8 +592,7 @@ async fn desktop_attempt_registration_allows_pick_when_optional_synthesis_is_una
         request,
         resolved: fusion::ResolvedSet {
             panels: vec![panel.clone()],
-            analyst: panel.clone(),
-            synthesizer: panel,
+            analyst: panel,
         },
         snapshot: Arc::new(snapshot),
         live_policy: Arc::new(Live),
@@ -620,303 +621,7 @@ async fn desktop_attempt_registration_allows_pick_when_optional_synthesis_is_una
     assert!(authority
         .routes
         .contains_key(&(ModelAttemptStage::Analyst, None)));
-    assert!(!authority
-        .routes
-        .contains_key(&(ModelAttemptStage::Synthesis, None)));
     assert_eq!(harness.calls.load(Ordering::SeqCst), 0);
-}
-
-fn workflow_registration(
-    harness: &DurableHarness,
-    scope: Option<WorkflowOutputScope>,
-) -> (
-    Arc<DesktopFusionAttempts>,
-    fusion::FusionAttemptRegistration,
-) {
-    let origin = &harness.authority.captured;
-    let session = origin.control.identity().session_id.unwrap();
-    let mut request = origin.request.clone();
-    request.origin = platform_api::FusionOrigin::Workflow;
-    request.parent_model = "unavailable-parent".into();
-    request.workflow_run_id = Some("original-scope".into());
-    let panel = fusion::ResolvedPanel {
-        profile: "profile".into(),
-        model: "wire".into(),
-    };
-    let row = fusion::CatalogModel {
-        profile: panel.profile.clone(),
-        model: panel.model.clone(),
-        hints: Default::default(),
-        structured_output: true,
-        limits: route().limits,
-    };
-    let control = platform_api::FusionRunControl::new_with_billing_mode(
-        platform_api::FusionRunIdentity::new(
-            platform_api::FusionRunId::generated(),
-            Some(session),
-            platform_api::FusionOrigin::Workflow,
-            Some("original-scope".into()),
-        ),
-        60_000,
-        tokio_util::sync::CancellationToken::new(),
-        Default::default(),
-        platform_api::ModelAttemptBillingMode::MeteredAttempts,
-    );
-    let captured = fusion::FusionAttemptRegistration {
-        control,
-        inherit: origin.inherit.clone().with_output_scope(scope),
-        request,
-        resolved: fusion::ResolvedSet {
-            panels: vec![panel.clone()],
-            analyst: panel.clone(),
-            synthesizer: panel,
-        },
-        snapshot: Arc::new(fusion::FusionRuntimeSnapshot::new(
-            origin.snapshot.config.clone(),
-            fusion::CatalogSnapshot::capture(&vec![row]).unwrap(),
-            origin.snapshot.prices.clone(),
-        )),
-        live_policy: Arc::new(Live),
-    };
-    let host = DesktopFusionAttempts::new(
-        harness.service.clone(),
-        harness.authority.budget.clone(),
-        harness.authority.tracker.clone(),
-        Arc::new(cost::PricingCatalog::empty().with_entry(route().pricing)),
-        harness.authority.budget.workflow_output_scopes(),
-    );
-    (host, captured)
-}
-
-#[tokio::test]
-async fn desktop_attempt_concurrent_workflow_runs_share_real_output_admission() {
-    use fusion::FusionAttemptRegistrar;
-    let mut harness = DurableHarness::with_limits(true, 10_000, 50).await;
-    let original = harness.authority.output.clone();
-    let (host, first) = workflow_registration(&harness, Some(original.clone()));
-    let (_, second) = workflow_registration(&harness, Some(original.clone()));
-    let first_control = first.control.clone();
-    let second_control = second.control.clone();
-    let first = host.register(first).unwrap();
-    let second = host.register(second).unwrap();
-    assert!(first_control.activate_at(tokio::time::Instant::now()));
-    assert!(second_control.activate_at(tokio::time::Instant::now()));
-    harness.service.set_model_attempt_hooks(host);
-    let start = Arc::new(tokio::sync::Barrier::new(3));
-    let mut calls = Vec::new();
-    for registered in [&first, &second] {
-        let mut request = harness.request.clone();
-        request.model_attempt = Some(
-            registered
-                .run
-                .context(ModelAttemptStage::Panel, Some(0))
-                .unwrap(),
-        );
-        let service = harness.service.clone();
-        let start = start.clone();
-        calls.push(tokio::spawn(async move {
-            start.wait().await;
-            let mut stream = service.stream_request(request).await?;
-            while let Some(event) = stream.next().await {
-                event?;
-            }
-            Ok::<_, LlmError>(())
-        }));
-    }
-    let mut finish = tokio::spawn(async move {
-        let outcomes = futures::future::join_all(calls).await;
-        let first_drain = first.finalizer.finish();
-        let second_drain = second.finalizer.finish();
-        let (first, second) = tokio::join!(first_drain.wait(), second_drain.wait(),);
-        first.unwrap();
-        second.unwrap();
-        outcomes
-    });
-    start.wait().await;
-    let mut intents = 0;
-    let outcomes = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            tokio::select! {
-                result = &mut finish => break result.unwrap(),
-                request = harness.queue.recv() => {
-                    let request = request.expect("owned admission queue must remain open");
-                    if matches!(&request.mutation, cost::AttemptPersistMutation::Intent(_)) {
-                        intents += 1;
-                    }
-                    // Drain even an incorrect second admission before asserting,
-                    // so a regression cannot strand an accepted receipt waiter.
-                    harness.acknowledge(request);
-                }
-            }
-        }
-    })
-    .await
-    .expect("both run owners must finish admission and settlement");
-    let outcomes = outcomes.into_iter().map(Result::unwrap).collect::<Vec<_>>();
-    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
-    assert_eq!(
-        intents, 1,
-        "one output account cannot fund two 50-token holds"
-    );
-    assert_eq!(harness.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(original.spent(), 8);
-    assert_eq!(
-        harness.authority.budget.active_reservation_nano_usd().await,
-        0
-    );
-}
-
-#[tokio::test]
-async fn desktop_attempt_workflow_late_wire_charges_original_generation() {
-    use fusion::FusionAttemptRegistrar;
-    for complete in [true, false] {
-        let mut harness = DurableHarness::new(complete).await;
-        let original = harness.authority.output.clone();
-        let current = harness
-            .authority
-            .budget
-            .workflow_output_scopes()
-            .begin_turn(
-                original.session_id(),
-                protocol::MessageId::new(),
-                Some(1_000),
-            )
-            .await
-            .unwrap();
-        let (host, captured) = workflow_registration(&harness, Some(original.clone()));
-        let control = captured.control.clone();
-        let registered = host.register(captured).unwrap();
-        assert!(control.activate_at(tokio::time::Instant::now()));
-        harness.service.set_model_attempt_hooks(host);
-        let mut request = harness.request.clone();
-        request.model_attempt = Some(
-            registered
-                .run
-                .context(ModelAttemptStage::Panel, Some(0))
-                .unwrap(),
-        );
-        let service = harness.service.clone();
-        let call = tokio::spawn(async move {
-            let mut stream = service.stream_request(request).await.unwrap();
-            while let Some(event) = stream.next().await {
-                event.unwrap();
-            }
-        });
-        let intent = harness.queue.recv().await.unwrap();
-        let recorded_generation = match &intent.mutation {
-            cost::AttemptPersistMutation::Intent(intent) => {
-                intent.output_scope.as_ref().unwrap().generation_id
-            }
-            _ => panic!("intent expected"),
-        };
-        harness.acknowledge(intent);
-        let receipt = harness.queue.recv().await.unwrap();
-        harness.acknowledge(receipt);
-        call.await.unwrap();
-        let summary = registered.finalizer.finish().wait().await.unwrap();
-        assert_eq!(summary.usage.provider_requests, 1);
-        assert_eq!(
-            recorded_generation,
-            original.generation_id(),
-            "WAL intent must retain the launching turn"
-        );
-        assert_eq!(original.spent(), if complete { 8 } else { 50 });
-        assert_eq!(current.spent(), 0);
-        assert_eq!(
-            harness.authority.budget.active_reservation_nano_usd().await,
-            0
-        );
-    }
-}
-
-#[tokio::test]
-async fn desktop_attempt_workflow_missing_or_foreign_scope_rejects_before_wire() {
-    use fusion::FusionAttemptRegistrar;
-    for foreign in [false, true] {
-        let mut harness = DurableHarness::new(true).await;
-        let scope = foreign.then(|| {
-            WorkflowOutputScope::new(Arc::new(Output(
-                protocol::SessionId::new(),
-                protocol::MessageId::new(),
-            )))
-        });
-        let (host, captured) = workflow_registration(&harness, scope);
-        let result = host.register(captured);
-        assert!(
-            result.is_err(),
-            "workflow cannot recapture current scope when original authority is absent or foreign"
-        );
-        assert_eq!(harness.calls.load(Ordering::SeqCst), 0);
-        assert!(harness.queue.try_recv().is_err());
-        assert_eq!(
-            harness.authority.budget.active_reservation_nano_usd().await,
-            0
-        );
-        assert_eq!(harness.authority.output.spent(), 0);
-    }
-}
-
-#[tokio::test]
-async fn desktop_attempt_workflow_original_limit_blocks_borrowing_new_turn_capacity() {
-    use fusion::FusionAttemptRegistrar;
-    let mut harness = DurableHarness::with_limits(true, 10_000, 1).await;
-    let original = harness.authority.output.clone();
-    let current = harness
-        .authority
-        .budget
-        .workflow_output_scopes()
-        .begin_turn(
-            original.session_id(),
-            protocol::MessageId::new(),
-            Some(1_000),
-        )
-        .await
-        .unwrap();
-    let (host, captured) = workflow_registration(&harness, Some(original.clone()));
-    let control = captured.control.clone();
-    let registered = host.register(captured).unwrap();
-    assert!(control.activate_at(tokio::time::Instant::now()));
-    harness.service.set_model_attempt_hooks(host);
-    let mut request = harness.request.clone();
-    request.model_attempt = Some(
-        registered
-            .run
-            .context(ModelAttemptStage::Panel, Some(0))
-            .unwrap(),
-    );
-    let service = harness.service.clone();
-    let mut call = tokio::spawn(async move {
-        let mut stream = service.stream_request(request).await?;
-        while let Some(event) = stream.next().await {
-            event?;
-        }
-        Ok::<(), LlmError>(())
-    });
-    // A broken implementation can admit against A2. Acknowledge and drain
-    // that path before asserting, so the RED test cannot strand a WAL waiter.
-    let denied_without_intent = tokio::select! {
-        result = &mut call => result.unwrap().is_err(),
-        intent = harness.queue.recv() => {
-            harness.acknowledge(intent.unwrap());
-            let receipt = harness.queue.recv().await.unwrap();
-            harness.acknowledge(receipt);
-            let _ = call.await.unwrap();
-            false
-        }
-    };
-    registered.finalizer.finish().wait().await.unwrap();
-    assert!(
-        denied_without_intent,
-        "A2 headroom must not authorize a call belonging to A1"
-    );
-    assert_eq!(harness.calls.load(Ordering::SeqCst), 0);
-    assert!(harness.queue.try_recv().is_err());
-    assert_eq!(original.spent(), 0);
-    assert_eq!(current.spent(), 0);
-    assert_eq!(
-        harness.authority.budget.active_reservation_nano_usd().await,
-        0
-    );
 }
 
 #[tokio::test]
@@ -989,7 +694,7 @@ llm_runtime::impl_fixture_transport!(NoTransport);
 fn tracker_and_budget() -> (Arc<cost::CostTracker>, Arc<cost::BudgetEnforcer>) {
     let (tx, _) = tokio::sync::mpsc::channel(1);
     let tracker = Arc::new(cost::CostTracker::new(
-        protocol::SessionId::new(),
+        lingxi_core::types::SessionId::new(),
         Arc::new(cost::PricingCatalog::empty()),
         tx,
     ));
@@ -1009,7 +714,7 @@ fn tracker_and_budget() -> (Arc<cost::CostTracker>, Arc<cost::BudgetEnforcer>) {
 #[test]
 fn desktop_attempt_service_hook_backedge_is_weak() {
     let service = Arc::new(llm_runtime::ApiService::new(
-        Arc::new(llm_runtime::DefaultLlmClient::from_config(Default::default()).unwrap()),
+        Arc::new(llm_runtime::ModelRuntime::from_config(Default::default()).unwrap()),
         Arc::new(NoTransport),
         Default::default(),
         Default::default(),
@@ -1189,7 +894,7 @@ fn desktop_attempt_explicit_reasoning_zero_and_fast_override_stay_pinned() {
     let config = llm_runtime::PricingConfig {
         overrides: vec![(
             "test".into(),
-            llm_runtime::TokenPricing {
+            llm_runtime::PricingOverride {
                 input_per_million: 0.002,
                 output_per_million: 0.002,
                 cache_read_per_million: 0.002,
@@ -1210,7 +915,7 @@ fn desktop_attempt_explicit_reasoning_zero_and_fast_override_stay_pinned() {
     let stale = llm_runtime::PricingConfig {
         overrides: vec![(
             "test".into(),
-            llm_runtime::TokenPricing::input_output(1.0, 1.0),
+            llm_runtime::PricingOverride::input_output(1.0, 1.0),
         )],
         ..Default::default()
     };
@@ -1220,7 +925,7 @@ fn desktop_attempt_explicit_reasoning_zero_and_fast_override_stay_pinned() {
         "a different live override must not silently reuse stale catalog rates"
     );
     let subscription = llm_runtime::PricingConfig {
-        billing_mode: platform_api::ModelBillingMode::Subscription,
+        billing_mode: lingxi_core::host::ModelBillingMode::Subscription,
         ..Default::default()
     };
     assert!(pricing::captured_prices(
@@ -1250,13 +955,13 @@ async fn desktop_attempt_wait_slot_survives_dropped_waiter() {
 
 struct InertTools;
 #[async_trait]
-impl platform_api::ToolInvoker for InertTools {
+impl lingxi_core::host::ToolInvoker for InertTools {
     async fn invoke(
         &self,
         _: &str,
         _: serde_json::Value,
-        _: platform_api::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         Ok(serde_json::Value::Null)
     }
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1269,16 +974,16 @@ impl fusion::FusionAttemptLivePolicy for Live {
         &self,
         _: ModelAttemptStage,
         _: Option<u32>,
-    ) -> Result<(), platform_api::FusionError> {
+    ) -> Result<(), lingxi_core::host::FusionError> {
         Ok(())
     }
 }
-struct Output(protocol::SessionId, protocol::MessageId);
-impl platform_api::WorkflowOutputAccount for Output {
-    fn session_id(&self) -> protocol::SessionId {
+struct Output(lingxi_core::types::SessionId, lingxi_core::types::MessageId);
+impl lingxi_core::host::WorkflowOutputAccount for Output {
+    fn session_id(&self) -> lingxi_core::types::SessionId {
         self.0
     }
-    fn generation_id(&self) -> protocol::MessageId {
+    fn generation_id(&self) -> lingxi_core::types::MessageId {
         self.1
     }
     fn spent(&self) -> u64 {
@@ -1286,9 +991,9 @@ impl platform_api::WorkflowOutputAccount for Output {
     }
     fn record_legacy(
         &self,
-        _: platform_api::WorkflowOutputEventId,
+        _: lingxi_core::host::WorkflowOutputEventId,
         _: u64,
-    ) -> Result<(), platform_api::BudgetError> {
+    ) -> Result<(), lingxi_core::host::BudgetError> {
         Ok(())
     }
 }
@@ -1296,36 +1001,40 @@ impl platform_api::WorkflowOutputAccount for Output {
 async fn authority() -> Arc<RunAuthority> {
     let (tracker, budget) = tracker_and_budget();
     let session = tracker.session_id().await;
-    let output = WorkflowOutputScope::new(Arc::new(Output(session, protocol::MessageId::new())));
-    let control = platform_api::FusionRunControl::new_with_billing_mode(
-        platform_api::FusionRunIdentity::new(
-            platform_api::FusionRunId::generated(),
+    let output = WorkflowOutputScope::new(Arc::new(Output(
+        session,
+        lingxi_core::types::MessageId::new(),
+    )));
+    let control = lingxi_core::host::FusionRunControl::new_with_billing_mode(
+        lingxi_core::host::FusionRunIdentity::new(
+            lingxi_core::host::FusionRunId::generated(),
             Some(session),
-            platform_api::FusionOrigin::Slash,
+            lingxi_core::host::FusionOrigin::Slash,
             None,
         ),
         1_000,
         tokio_util::sync::CancellationToken::new(),
         Default::default(),
-        platform_api::ModelAttemptBillingMode::MeteredAttempts,
+        lingxi_core::host::ModelAttemptBillingMode::MeteredAttempts,
     );
     let config = fusion::FusionRuntimeConfig::defaults();
     let catalog = fusion::CatalogSnapshot::capture(&Vec::<fusion::CatalogModel>::new()).unwrap();
     let prices = fusion::CapturedPriceBook::capture(&(), Vec::<(String, String)>::new());
     let captured = fusion::FusionAttemptRegistration {
         control,
-        inherit: platform_api::FusionInheritance::new(
-            platform_api::SubagentInheritance {
+        inherit: lingxi_core::host::FusionInheritance::new(
+            lingxi_core::host::SubagentInheritance {
                 tool_invoker: Arc::new(InertTools),
                 budget: budget.clone(),
             },
             tokio_util::sync::CancellationToken::new(),
         ),
-        request: platform_api::FusionRequest {
-            schema_version: platform_api::FUSION_SCHEMA_VERSION,
-            origin: platform_api::FusionOrigin::Slash,
+        request: lingxi_core::host::FusionRequest {
+            verify_claims: false,
+            schema_version: lingxi_core::host::FUSION_SCHEMA_VERSION,
+            origin: lingxi_core::host::FusionOrigin::Slash,
             prompt: "test".into(),
-            preset: platform_api::FusionPreset::Quality,
+            preset: lingxi_core::host::FusionPreset::Quality,
             models: None,
             dimensions: vec!["correctness".into()],
             partial_ok: true,
@@ -1333,15 +1042,12 @@ async fn authority() -> Arc<RunAuthority> {
             cross_provider: false,
             parent_profile: "profile".into(),
             parent_model: "test".into(),
-            workflow_run_id: None,
+            mode: Default::default(),
+            verify_commands: Vec::new(),
         },
         resolved: fusion::ResolvedSet {
             panels: vec![],
             analyst: fusion::ResolvedPanel {
-                profile: "profile".into(),
-                model: "test".into(),
-            },
-            synthesizer: fusion::ResolvedPanel {
                 profile: "profile".into(),
                 model: "test".into(),
             },

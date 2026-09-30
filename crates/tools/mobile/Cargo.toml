@@ -12,8 +12,8 @@ license.workspace = true
 
 [dependencies]
 mobile-linux-api.workspace = true
+core = { path = "../../core" }
 tool-api = { path = "../../tool-api" }
-platform-api = { path = "../../platform-api" }
 permission = { path = "../../permission" }
 async-trait.workspace = true
 serde.workspace = true
@@ -23,7 +23,6 @@ once_cell = "1"
 
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }
-protocol = { path = "../../protocol" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-util.workspace = true
 

@@ -7,14 +7,14 @@ license.workspace = true
 
 [dependencies]
 mobile-linux-api.workspace = true
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
+core = { path = "../core" }
 permission = { path = "../permission" }
 # Reuse the byte-faithful k0d SBPL profile builder (the macOS sandbox profile
 # generator) instead of duplicating a minimal template here. `sandbox-runtime`
 # is a leaf crate (no path-dep on sandbox/permission/platform-api/protocol), so this
 # introduces no dependency cycle.
 sandbox-runtime = { path = "../sandbox-runtime" }
+branding.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -46,7 +46,7 @@
 //! handshake decisions. Legacy remains the fixed default when no negotiation
 //! flag is enabled.
 
-use platform_api::{McpTransportKind, McpTransportSpec};
+use lingxi_core::host::{McpTransportKind, McpTransportSpec};
 
 /// `tengu_mcp_protocol_negotiation_http` — default off.
 const FLAG_HTTP: &str = "tengu_mcp_protocol_negotiation_http";
@@ -367,7 +367,7 @@ mod tests {
     fn http_spec(url: &str) -> McpTransportSpec {
         McpTransportSpec::Http {
             url: url.to_string(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         }
@@ -780,7 +780,7 @@ mod tests {
         // invent an unsupported label.
         let sse = McpTransportSpec::Sse {
             url: "https://mcp.example.com".into(),
-            headers: platform_api::McpHeaders::new(),
+            headers: lingxi_core::host::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         };

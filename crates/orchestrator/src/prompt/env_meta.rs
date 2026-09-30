@@ -34,7 +34,7 @@ const WINDOWS_CMD_EXE: &str = "cmd.exe";
 #[must_use]
 pub fn marketing_name_for_model(model_id: &str) -> Option<&'static str> {
     let original = model_id.to_ascii_lowercase();
-    let canonical = platform_api::model_capabilities::normalize_model_id(model_id);
+    let canonical = lingxi_core::host::model_capabilities::normalize_model_id(model_id);
     let has_1m = original.contains("[1m]");
 
     if canonical == "claude-fable-5-1" {
@@ -130,7 +130,7 @@ pub fn marketing_name_for_model(model_id: &str) -> Option<&'static str> {
 /// omits the `Assistant knowledge cutoff is ...` sentence entirely).
 #[must_use]
 pub fn knowledge_cutoff_for_model(model_id: &str) -> Option<&'static str> {
-    let canonical = platform_api::model_capabilities::normalize_model_id(model_id);
+    let canonical = lingxi_core::host::model_capabilities::normalize_model_id(model_id);
     if canonical == "claude-opus-5" {
         Some("May 2026")
     } else if canonical == "claude-fable-5-1" || canonical == "claude-mythos-5-1" {

@@ -100,7 +100,7 @@ fn ranking_is_deterministic_across_repeated_runs() {
             team_boost_enabled: false,
         },
     );
-    let names = |v: &[protocol::MemoryEntry]| -> Vec<String> {
+    let names = |v: &[lingxi_core::types::MemoryEntry]| -> Vec<String> {
         v.iter()
             .map(|e| e.path.to_string_lossy().to_string())
             .collect()

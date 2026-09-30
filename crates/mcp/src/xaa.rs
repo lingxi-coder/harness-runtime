@@ -30,8 +30,8 @@
 #![allow(clippy::doc_markdown)]
 
 use base64::Engine;
-use platform_api::HttpTransport;
-use protocol::{HttpMethod, HttpRequest};
+use lingxi_core::host::HttpTransport;
+use lingxi_core::types::{HttpMethod, HttpRequest};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -96,9 +96,9 @@ impl XaaError {
     }
 }
 
-impl From<XaaError> for platform_api::McpError {
+impl From<XaaError> for lingxi_core::host::McpError {
     fn from(e: XaaError) -> Self {
-        platform_api::McpError::OAuth(e.to_string())
+        lingxi_core::host::McpError::OAuth(e.to_string())
     }
 }
 

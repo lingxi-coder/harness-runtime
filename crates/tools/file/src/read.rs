@@ -467,7 +467,7 @@ fn validate_utf8_stream_chunk(tail: &mut Vec<u8>, chunk: &[u8]) -> Result<(), ()
 
 /// Turn rendered page JPEGs into (image sources, tool-result data). Each page is
 /// run through [`crate::image_read::process_image`] (the claude-code image
-/// ladder) and becomes one [`protocol::ImageSource::Base64`]; the tool-result
+/// ladder) and becomes one [`lingxi_core::types::ImageSource::Base64`]; the tool-result
 /// text mirrors claude-code `FileReadTool.ts:684`.
 ///
 /// # Errors
@@ -477,12 +477,19 @@ pub(crate) fn build_pages_payload(
     canon: &std::path::Path,
     original_size: u64,
     page_jpegs: Vec<Vec<u8>>,
-) -> Result<(Vec<protocol::ImageSource>, serde_json::Value, String), String> {
+) -> Result<
+    (
+        Vec<lingxi_core::types::ImageSource>,
+        serde_json::Value,
+        String,
+    ),
+    String,
+> {
     let count = page_jpegs.len();
     let mut sources = Vec::with_capacity(count);
     for jpeg in page_jpegs {
         let processed = crate::image_read::process_image(jpeg)?;
-        sources.push(protocol::ImageSource::Base64 {
+        sources.push(lingxi_core::types::ImageSource::Base64 {
             media_type: processed.media_type,
             data: processed.base64,
         });
@@ -1104,26 +1111,29 @@ fn read_rooted_snapshot(
     requested: &std::path::Path,
     approved: &std::path::Path,
     trusted_dirs: &[std::path::PathBuf],
-) -> Result<platform_api::rooted_fs::RootedFileSnapshot, platform_api::rooted_fs::RootedFsError> {
+) -> Result<
+    lingxi_core::host::rooted_fs::RootedFileSnapshot,
+    lingxi_core::host::rooted_fs::RootedFsError,
+> {
     let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
-        return Err(platform_api::rooted_fs::RootedFsError::Fs(
-            platform_api::FsError::OutsideWorkspace(approved.display().to_string()),
+        return Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
+            lingxi_core::host::FsError::OutsideWorkspace(approved.display().to_string()),
         ));
     };
-    platform_api::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
+    lingxi_core::host::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
 }
 
 fn open_rooted_file(
     requested: &std::path::Path,
     approved: &std::path::Path,
     trusted_dirs: &[std::path::PathBuf],
-) -> Result<std::fs::File, platform_api::rooted_fs::RootedFsError> {
+) -> Result<std::fs::File, lingxi_core::host::rooted_fs::RootedFsError> {
     let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
-        return Err(platform_api::rooted_fs::RootedFsError::Fs(
-            platform_api::FsError::OutsideWorkspace(approved.display().to_string()),
+        return Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
+            lingxi_core::host::FsError::OutsideWorkspace(approved.display().to_string()),
         ));
     };
-    platform_api::rooted_fs::open_file_after_permission(&root, &relative, requested, approved)
+    lingxi_core::host::rooted_fs::open_file_after_permission(&root, &relative, requested, approved)
 }
 
 fn symlink_resolution_changed_message(path: &str) -> String {
@@ -1429,8 +1439,8 @@ impl FileReadTool {
         let new_messages = match processed.resized {
             Some((ow, oh, dw, dh)) => {
                 let scale = f64::from(ow) / f64::from(dw.max(1));
-                vec![protocol::ConversationMessage::user_meta(
-                    protocol::MessageId::new(),
+                vec![lingxi_core::types::ConversationMessage::user_meta(
+                    lingxi_core::types::MessageId::new(),
                     format!(
                         "[Image: original {ow}x{oh}, displayed at {dw}x{dh}. Multiply coordinates by {scale:.2} to map to original image.]"
                     ),
@@ -1509,8 +1519,8 @@ impl FileReadTool {
                     return Err(ToolError::Io(e));
                 }
             };
-        let msg = protocol::ConversationMessage::user_with_images(
-            protocol::MessageId::new(),
+        let msg = lingxi_core::types::ConversationMessage::user_with_images(
+            lingxi_core::types::MessageId::new(),
             String::new(),
             sources,
         );
@@ -1669,13 +1679,13 @@ impl FileReadTool {
         }
 
         let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let source = protocol::DocumentSource::Base64 {
+        let source = lingxi_core::types::DocumentSource::Base64 {
             media_type: "application/pdf".to_string(),
             // clone so the base64 also rides in the result `data.file.base64`.
             data: data.clone(),
         };
-        let msg = protocol::ConversationMessage::user_with_documents(
-            protocol::MessageId::new(),
+        let msg = lingxi_core::types::ConversationMessage::user_with_documents(
+            lingxi_core::types::MessageId::new(),
             String::new(),
             vec![source],
         );
@@ -1828,7 +1838,7 @@ impl Tool for FileReadTool {
         // `file_path` (the documented/expected case) is unaffected.
         let task_output_id = if let Some(registry) = self.ctx.task_registry.as_ref() {
             registry.task_output_directory().await.and_then(|root| {
-                platform_api::task_output::output_id(Path::new(&root), Path::new(file_path))
+                lingxi_core::host::task_output::output_id(Path::new(&root), Path::new(file_path))
                     .map(str::to_owned)
             })
         } else {
@@ -1872,7 +1882,7 @@ impl Tool for FileReadTool {
         // can't straddle a swap between the two calls.
         let mut trusted_dirs = self.ctx.trusted_dirs();
         if let Some(root) =
-            platform_api::teammate_plan::own_plan_file_root(ctx.agent_id.as_ref(), &path)
+            lingxi_core::host::teammate_plan::own_plan_file_root(ctx.agent_id.as_ref(), &path)
         {
             trusted_dirs.push(root);
         }
@@ -1915,7 +1925,7 @@ impl Tool for FileReadTool {
                             let size = metadata.len();
                             let modified = metadata.modified().ok();
                             stream_source = Some(file);
-                            break 'load platform_api::rooted_fs::RootedFileSnapshot {
+                            break 'load lingxi_core::host::rooted_fs::RootedFileSnapshot {
                                 bytes: Vec::new(),
                                 size,
                                 modified,
@@ -1927,8 +1937,8 @@ impl Tool for FileReadTool {
             }
             match read_rooted_snapshot(&path, &canon, &trusted_dirs) {
                 Ok(snapshot) => snapshot,
-                Err(platform_api::rooted_fs::RootedFsError::Fs(
-                    platform_api::FsError::NotFound(_),
+                Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
+                    lingxi_core::host::FsError::NotFound(_),
                 )) => {
                     // Missing-file UX (`FileReadTool.ts:608-649`). On ENOENT TS first
                     // tries the macOS-screenshot AM/PM space variant (regular space ⇄
@@ -1941,8 +1951,8 @@ impl Tool for FileReadTool {
                                     canon = alt_canon;
                                     snapshot
                                 }
-                                Err(platform_api::rooted_fs::RootedFsError::Fs(
-                                    platform_api::FsError::NotFound(_),
+                                Err(lingxi_core::host::rooted_fs::RootedFsError::Fs(
+                                    lingxi_core::host::FsError::NotFound(_),
                                 )) => {
                                     let not_found =
                                         std::io::Error::from(std::io::ErrorKind::NotFound);
@@ -1968,15 +1978,17 @@ impl Tool for FileReadTool {
                             .await;
                     }
                 }
-                Err(platform_api::rooted_fs::RootedFsError::SymlinkResolutionChanged)
-                | Err(platform_api::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged) => {
+                Err(lingxi_core::host::rooted_fs::RootedFsError::SymlinkResolutionChanged)
+                | Err(
+                    lingxi_core::host::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged,
+                ) => {
                     self.emit_failed(&invocation_id, "symlink_resolution_changed")
                         .await;
                     return Err(ToolError::InvalidInput(symlink_resolution_changed_message(
                         file_path,
                     )));
                 }
-                Err(platform_api::rooted_fs::RootedFsError::NotRegularFile)
+                Err(lingxi_core::host::rooted_fs::RootedFsError::NotRegularFile)
                     if std::path::Path::new(file_path)
                         .extension()
                         .and_then(|extension| extension.to_str())
@@ -2664,8 +2676,8 @@ impl Tool for FileReadTool {
         // lands it upstream. Empty for every non-truncated read, so the locked
         // turn-loop fixtures stay byte-identical.
         let new_messages = match &partial_note {
-            Some(note) => vec![protocol::ConversationMessage::user_meta(
-                protocol::MessageId::new(),
+            Some(note) => vec![lingxi_core::types::ConversationMessage::user_meta(
+                lingxi_core::types::MessageId::new(),
                 escape_attachment_banner(note),
             )],
             None => vec![],
@@ -4296,14 +4308,14 @@ mod tests {
             "a token-truncated read must inject exactly one truncation notice"
         );
         let banner = match &result.new_messages[0] {
-            protocol::ConversationMessage::User {
+            lingxi_core::types::ConversationMessage::User {
                 content, is_meta, ..
             } => {
                 assert!(*is_meta, "the truncation notice is an isMeta message");
                 content
                     .iter()
                     .find_map(|b| match b {
-                        protocol::ContentBlock::Text { text } => Some(text.clone()),
+                        lingxi_core::types::ContentBlock::Text { text } => Some(text.clone()),
                         _ => None,
                     })
                     .expect("truncation notice text block")
@@ -5009,7 +5021,7 @@ mod tests {
     #[cfg(feature = "image-read")]
     #[tokio::test]
     async fn resized_image_injects_only_the_meta_resize_note() {
-        use protocol::{ContentBlock, ConversationMessage};
+        use lingxi_core::types::{ContentBlock, ConversationMessage};
 
         // 4000px wide → exceeds IMAGE_MAX_DIM (2000) → resized.
         let tmp = TempDir::new().unwrap();
@@ -5113,7 +5125,7 @@ mod tests {
     #[cfg(feature = "pdf-read")]
     #[tokio::test]
     async fn reads_small_pdf_as_inline_document() {
-        use protocol::{ContentBlock, ConversationMessage, DocumentSource};
+        use lingxi_core::types::{ContentBlock, ConversationMessage, DocumentSource};
 
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("doc.pdf");
@@ -5186,7 +5198,7 @@ mod tests {
         // (20 MB); the old 3 MB error was a P4a simplification. A ~4 MB PDF must
         // inline as a Document block, NOT error. (Padding breaks lopdf parsing →
         // pdf_page_count None → the >10-page gate is skipped, which is fine here.)
-        use protocol::{ContentBlock, ConversationMessage, DocumentSource};
+        use lingxi_core::types::{ContentBlock, ConversationMessage, DocumentSource};
         let mut bytes = vec![b'%'; 4 * 1024 * 1024];
         bytes[..9].copy_from_slice(b"%PDF-1.4\n");
         let tmp = TempDir::new().unwrap();
@@ -5266,7 +5278,7 @@ mod tests {
         assert_eq!(sources.len(), 2, "one ImageSource per rendered page");
         for s in &sources {
             match s {
-                protocol::ImageSource::Base64 { media_type, data } => {
+                lingxi_core::types::ImageSource::Base64 { media_type, data } => {
                     assert_eq!(media_type, "image/jpeg");
                     assert!(!data.is_empty());
                 }

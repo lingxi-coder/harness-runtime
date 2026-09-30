@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use platform_api::{ProcessCommand, ProcessRunner, Sandbox};
+use lingxi_core::host::{ProcessCommand, ProcessRunner, Sandbox};
 
 /// Audit reason stamped on the `tmux new-session` command handed to the
 /// [`ProcessRunner`]. This is an internal infra invocation (not a
@@ -167,8 +167,8 @@ mod tests {
     use super::*;
     use crate::sandbox::PosixSandbox;
     use async_trait::async_trait;
+    use lingxi_core::host::{ProcessHandle, SandboxedCommand};
     use mobile_linux_api::{ProcessError, ProcessOutput};
-    use platform_api::{ProcessHandle, SandboxedCommand};
     use std::path::PathBuf;
     use std::sync::Mutex;
 

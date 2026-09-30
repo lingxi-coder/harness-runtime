@@ -97,6 +97,11 @@ def main():
             if d == "harness-runtime" and c not in LEAVES:
                 violations.append("%s depends on the Harness composition root" % n)
                 continue
+            if n == "core" and d not in {"branding", "jsonrpc"}:
+                violations.append(
+                    "core depends on %s — shared contracts must stay below domain and telemetry crates" % d
+                )
+                continue
             # API-crate purity: tool-api / skill-api / command-api stay abstract.
             optional_builtin_skill = (
                 n == "command-api"

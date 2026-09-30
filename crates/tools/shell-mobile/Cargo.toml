@@ -12,8 +12,8 @@ license.workspace = true
 
 [dependencies]
 mobile-linux-api.workspace = true
+core = { path = "../../core" }
 tool-api = { path = "../../tool-api" }
-platform-api = { path = "../../platform-api" }
 permission = { path = "../../permission" }
 async-trait.workspace = true
 serde.workspace = true

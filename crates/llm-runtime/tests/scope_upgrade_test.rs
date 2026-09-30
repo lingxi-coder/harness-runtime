@@ -1,12 +1,12 @@
 //! Scope upgrade: 403 with `required_scopes` re-triggers PKCE preserving the
 //! existing `refresh_token`. On PKCE failure, the old `refresh_token` is preserved.
 
-use llm_runtime::oauth::anthropic::refresh::AuthState;
-use llm_runtime::oauth::anthropic::scope_upgrade::{
-    parse_scope_upgrade, run_scope_upgrade, ScopeUpgradeRequired,
-};
-use llm_runtime::oauth::anthropic::{ClaudeAiOAuthConfig, OAuthError};
-use protocol::Secret;
+use lingxi_core::types::Secret;
+use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
+use lingxi_llm_client::auth::oauth::anthropic::{parse_scope_upgrade, ScopeUpgradeRequired};
+use llm_runtime::auth::anthropic::refresh::AuthState;
+use llm_runtime::auth::anthropic::scope_upgrade::run_scope_upgrade;
+use llm_runtime::auth::anthropic::OAuthError;
 use std::time::{Duration, SystemTime};
 
 #[test]
@@ -52,7 +52,7 @@ async fn run_scope_upgrade_on_pkce_failure_preserves_refresh_token() {
     );
 
     // Inject a PKCE runner that fails — simulates user closing the browser.
-    let failing_runner = llm_runtime::oauth::anthropic::scope_upgrade::PkceFailingRunner;
+    let failing_runner = llm_runtime::auth::anthropic::scope_upgrade::PkceFailingRunner;
 
     let r = run_scope_upgrade(
         &state,
@@ -88,7 +88,7 @@ async fn run_scope_upgrade_on_pkce_success_rotates_tokens_and_scopes() {
         SystemTime::now() + Duration::from_secs(3600),
     );
 
-    let success_runner = llm_runtime::oauth::anthropic::scope_upgrade::PkceFakeSuccessRunner::new(
+    let success_runner = llm_runtime::auth::anthropic::scope_upgrade::PkceFakeSuccessRunner::new(
         "NEW_ACCESS",
         "NEW_REFRESH",
         vec![

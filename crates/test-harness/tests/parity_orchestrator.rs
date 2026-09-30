@@ -310,11 +310,11 @@ fn fixture_scenarios_names_unique_and_outcomes_valid() {
 async fn parity_cost_after_one_turn() {
     use cost::pricing::PricingCatalog;
     use cost::CostTracker;
-    use platform_api::OrchestratorHandle;
-    use protocol::SessionId;
+    use lingxi_core::host::OrchestratorHandle;
+    use lingxi_core::types::SessionId;
     use tokio::sync::mpsc;
 
-    let response = llm_runtime::LlmResponse {
+    let response = llm_runtime::HistoryResponse {
         id: "msg_mock".into(),
         model: "claude-opus-4-6".into(),
         // A realistic end_turn response carries visible text. (An empty-content
@@ -330,12 +330,18 @@ async fn parity_cost_after_one_turn() {
         // COST.3/5: new UsageApi fields default to None (no web-search /
         // non-fast) → base pricing, so this fixture's asserted cost is
         // unchanged.
-        usage: llm_runtime::Usage {
-            billable_tokens: llm_runtime::TokenUsage {
-                input: 1_000,
-                output: 500,
-                ..Default::default()
-            },
+        usage: llm_runtime::ExecutionUsage {
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: 1_000,
+                    output_tokens: 500,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    reasoning_tokens: 0,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
             ..Default::default()
         },
         cost: None,
@@ -380,8 +386,8 @@ async fn parity_cost_after_one_turn() {
 #[tokio::test]
 async fn parity_force_compact_50_messages() {
     use compaction::CompactionOrchestrator;
-    use platform_api::OrchestratorHandle;
-    use protocol::{ConversationMessage, MessageId};
+    use lingxi_core::host::OrchestratorHandle;
+    use lingxi_core::types::{ConversationMessage, MessageId};
 
     // Drive the assertion from the fixture so the scenario fields are
     // load-bearing (matches the cost_after_one_turn convention).
@@ -468,7 +474,7 @@ async fn parity_force_compact_50_messages() {
             } else {
                 hist.history.push(ConversationMessage::Assistant {
                     id: MessageId::new(),
-                    content: vec![protocol::ContentBlock::Text {
+                    content: vec![lingxi_core::types::ContentBlock::Text {
                         text: format!("reply-{i}"),
                     }],
                     stop_reason: Some("end_turn".into()),

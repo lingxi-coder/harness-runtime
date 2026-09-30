@@ -171,7 +171,7 @@ mod tests {
         HookDefinition, HookEventType, HookExecutor as DefHookExecutor, HookPromptRunner,
         HookRegistry, HookSource, PromptHookError, PromptHookRequest,
     };
-    use protocol::HookId;
+    use lingxi_core::types::HookId;
     use tokio::sync::RwLock;
 
     // ── empty-registry (no hook) → allow ────────────────────────────────────
@@ -216,36 +216,41 @@ mod tests {
     /// Unused HTTP arm (the Prompt hook never touches it).
     struct UnusedHttp;
     #[async_trait]
-    impl platform_api::HttpTransport for UnusedHttp {
+    impl lingxi_core::host::HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
     /// Unused runtime arm.
     struct UnusedRuntime;
     #[async_trait]
-    impl platform_api::RuntimeSpawner for UnusedRuntime {
+    impl lingxi_core::host::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
-            Err(platform_api::RuntimeError::Internal("unused".into()))
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError>
+        {
+            Err(lingxi_core::host::RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _d: std::time::Duration) {}
         async fn cancel(
             &self,
-            _h: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::RuntimeError> {
+            _h: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::RuntimeError> {
             Ok(())
         }
     }
@@ -272,7 +277,7 @@ mod tests {
                 model: None,
                 continue_on_block: false,
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,

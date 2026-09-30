@@ -23,7 +23,8 @@ license.workspace = true
 # root simply never constructs one (mirrors upstream's darwin-only guard).
 
 [dependencies]
-platform-api = { path = "../../platform-api" }
+mobile-linux-api.workspace = true
+core = { path = "../../core" }
 async-trait.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

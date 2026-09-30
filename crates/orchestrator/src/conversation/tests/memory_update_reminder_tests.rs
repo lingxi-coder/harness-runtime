@@ -11,14 +11,14 @@ use tool_api::registry::ToolRegistry;
 
 struct InlineRuntime;
 #[async_trait]
-impl platform_api::RuntimeSpawner for InlineRuntime {
+impl lingxi_core::host::RuntimeSpawner for InlineRuntime {
     async fn spawn(
         &self,
         name: &str,
         task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError> {
         tokio::spawn(task);
-        Ok(platform_api::BackgroundTaskHandle {
+        Ok(lingxi_core::host::BackgroundTaskHandle {
             task_name: name.to_string(),
             task_id: 0,
         })
@@ -26,8 +26,8 @@ impl platform_api::RuntimeSpawner for InlineRuntime {
     async fn sleep(&self, _d: std::time::Duration) {}
     async fn cancel(
         &self,
-        _h: &platform_api::BackgroundTaskHandle,
-    ) -> Result<(), platform_api::RuntimeError> {
+        _h: &lingxi_core::host::BackgroundTaskHandle,
+    ) -> Result<(), lingxi_core::host::RuntimeError> {
         Ok(())
     }
 }
@@ -87,8 +87,8 @@ fn reset_scan_floor(orch: &ConversationOrchestrator) {
 fn dream_notification(
     result: Option<&str>,
     status: &str,
-) -> platform_api::task_registry::TaskNotification {
-    platform_api::task_registry::TaskNotification {
+) -> lingxi_core::host::task_registry::TaskNotification {
+    lingxi_core::host::task_registry::TaskNotification {
         task_id: "d12345678".into(),
         task_type: "dream".into(),
         status: status.into(),

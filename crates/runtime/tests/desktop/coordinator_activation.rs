@@ -9,11 +9,11 @@ use async_trait::async_trait;
 use client::adapter::test_support::MockSink;
 use client::adapter::AdapterOutputStream;
 use client::protocol::events::ClientEvent;
-use platform_api::filesystem::FileSystem;
-use platform_api::team_spawn::TeamSpawnSeam;
-use platform_api::{OutputStream, RuntimeSpawner};
+use lingxi_core::host::filesystem::FileSystem;
+use lingxi_core::host::team_spawn::TeamSpawnSeam;
+use lingxi_core::host::{OutputStream, RuntimeSpawner};
+use lingxi_core::types::AgentId;
 use platform_posix::{PosixFileSystem, PosixRuntime};
-use protocol::AgentId;
 use tasks::handlers::InProcessTeammateHandler;
 use tasks::output_manager::TaskOutputManager;
 use tasks::registry::TaskRegistry;
@@ -28,7 +28,7 @@ use tasks::TaskType;
 // ---------------------------------------------------------------------------
 
 struct ScriptedApiClient {
-    responses: StdMutex<VecDeque<llm_runtime::LlmResponse>>,
+    responses: StdMutex<VecDeque<llm_runtime::HistoryResponse>>,
     calls: AtomicUsize,
 }
 
@@ -50,12 +50,12 @@ impl agent::api::SubagentApiClient for ScriptedApiClient {
         &self,
         _model: &str,
         _system: Option<&str>,
-        _messages: Vec<protocol::ConversationMessage>,
+        _messages: Vec<lingxi_core::types::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
+    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let next = self.responses.lock().unwrap().pop_front();
-        Ok(next.unwrap_or_else(|| llm_runtime::LlmResponse {
+        Ok(next.unwrap_or_else(|| llm_runtime::HistoryResponse {
             id: "scripted".into(),
             model: "scripted".into(),
             content: vec![llm_runtime::ContentBlock::Text {
@@ -64,7 +64,7 @@ impl agent::api::SubagentApiClient for ScriptedApiClient {
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
-            usage: llm_runtime::Usage::default(),
+            usage: llm_runtime::ExecutionUsage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
         }))
@@ -154,13 +154,13 @@ fn make_coordinator_fixture(api: &Arc<ScriptedApiClient>) -> CoordinatorFixture 
 
 struct MockInvoker;
 #[async_trait]
-impl platform_api::tool_invoker::ToolInvoker for MockInvoker {
+impl lingxi_core::host::tool_invoker::ToolInvoker for MockInvoker {
     async fn invoke(
         &self,
         _: &str,
         _: serde_json::Value,
-        _: platform_api::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+        _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         Ok(serde_json::Value::Null)
     }
     fn as_any(&self) -> &dyn std::any::Any {
@@ -169,8 +169,8 @@ impl platform_api::tool_invoker::ToolInvoker for MockInvoker {
 }
 struct MockBudget;
 #[async_trait]
-impl platform_api::budget::BudgetEnforcerHandle for MockBudget {
-    async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::budget::BudgetError> {
+impl lingxi_core::host::budget::BudgetEnforcerHandle for MockBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), lingxi_core::host::budget::BudgetError> {
         Ok(())
     }
     async fn snapshot_total_nano_usd(&self) -> u64 {
@@ -245,13 +245,13 @@ async fn implicit_agent_spawn_flows_active_workers_to_client_event() {
     spawner.initialize().await;
     let result = spawner
         .spawn(
-            platform_api::subagent_spawn::SubagentSpawnRequest {
+            lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
                 name: Some("alpha".into()),
                 subagent_type: "general-purpose".into(),
                 prompt: "drive the activation gate".into(),
                 ..Default::default()
             },
-            platform_api::subagent_spawn::SubagentInheritance {
+            lingxi_core::host::subagent_spawn::SubagentInheritance {
                 tool_invoker: Arc::new(MockInvoker),
                 budget: Arc::new(MockBudget),
             },
@@ -499,7 +499,8 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
     use tool_api::Tool;
     let api = ScriptedApiClient::new();
     let fixture = make_coordinator_fixture(&api);
-    let cleanup: Arc<dyn platform_api::team_spawn::TeammateDepartureCleanup> = fixture.team.clone();
+    let cleanup: Arc<dyn lingxi_core::host::team_spawn::TeammateDepartureCleanup> =
+        fixture.team.clone();
     fixture
         .registry
         .set_teammate_departure_cleanup(Arc::downgrade(&cleanup))
@@ -514,13 +515,13 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
     spawner.initialize().await;
     spawner
         .spawn(
-            platform_api::subagent_spawn::SubagentSpawnRequest {
+            lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
                 name: Some("alpha".into()),
                 subagent_type: "general-purpose".into(),
                 prompt: "park until shutdown".into(),
                 ..Default::default()
             },
-            platform_api::subagent_spawn::SubagentInheritance {
+            lingxi_core::host::subagent_spawn::SubagentInheritance {
                 tool_invoker: Arc::new(MockInvoker),
                 budget: Arc::new(MockBudget),
             },

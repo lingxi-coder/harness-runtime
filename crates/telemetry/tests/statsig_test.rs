@@ -1,6 +1,6 @@
 //! `StatsigSink` trait + `MockStatsigSink` skeleton.
 
-use protocol::Secret;
+use lingxi_core::types::Secret;
 use std::collections::HashMap;
 use telemetry::{AnalyticsSink, AnalyticsValue, LogEventMetadata, MockStatsigSink, StatsigSink};
 

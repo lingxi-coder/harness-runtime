@@ -27,11 +27,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use harness_runtime::desktop::{build, desktop_tool_registry, DesktopAudio, DesktopConfig};
-use mobile_linux_api::ProcessOutput;
-use platform_api::audio::{
+
+use lingxi_core::host::audio::{
     AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioOperation, AudioOperationContext,
     AudioOperationKind, AudioOperationSuccess, AudioService,
 };
+use mobile_linux_api::ProcessOutput;
+
 use tool_api::BuiltinToolContext;
 
 /// A stand-in for `bridge_server::audio_bridge::AudioBridge`. Nothing here is
@@ -62,7 +64,7 @@ impl AudioService for StubAudio {
 
     async fn cancel(
         &self,
-        _identity: platform_api::audio::AudioOperationId,
+        _identity: lingxi_core::host::audio::AudioOperationId,
     ) -> Result<(), AudioError> {
         Ok(())
     }
@@ -190,7 +192,7 @@ fn sandbox_config(audio: Option<DesktopAudio>) -> (tempfile::TempDir, DesktopCon
 }
 
 async fn run_build(cfg: DesktopConfig) -> harness_runtime::desktop::DesktopRuntime {
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> = Arc::new(NoopPermissionSink);
     // `build` returns a large future; boxing it keeps this test off the stack

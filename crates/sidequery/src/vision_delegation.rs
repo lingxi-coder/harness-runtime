@@ -4,8 +4,8 @@ use crate::purposes::QuerySource;
 use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
 use base64::Engine as _;
 use hooks::SsrfGuard;
-use platform_api::{HttpError, HttpTransport};
-use protocol::{
+use lingxi_core::host::{HttpError, HttpTransport};
+use lingxi_core::types::{
     is_nested_media_value, ContentBlock, ConversationMessage, DocumentSource, HttpMethod,
     HttpRequest, ImageSource, MediaAnalysis, MediaObservation, MessageId, MessageRole,
 };
@@ -1185,7 +1185,7 @@ fn supported_image_media_type(headers: &[(String, String)]) -> Result<String, Si
 
 fn validate_public_target(
     url: &Url,
-    resolved: Option<&platform_api::ResolvedAddressOverride>,
+    resolved: Option<&lingxi_core::host::ResolvedAddressOverride>,
 ) -> Result<(), SideQueryError> {
     if let Some(resolved) = resolved {
         for addr in &resolved.addrs {
@@ -1372,8 +1372,8 @@ struct DelegateObservation {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::http::SseStream;
-    use protocol::{HttpResponse, ToolUseId};
+    use lingxi_core::host::http::SseStream;
+    use lingxi_core::types::{HttpResponse, ToolUseId};
     use std::collections::{HashMap, VecDeque};
     use std::future::pending;
     use std::net::SocketAddr;
@@ -1496,7 +1496,7 @@ mod tests {
 
     struct StaticHttpTransport {
         responses: Mutex<VecDeque<HttpResponse>>,
-        resolved: Mutex<Vec<Option<platform_api::ResolvedAddressOverride>>>,
+        resolved: Mutex<Vec<Option<lingxi_core::host::ResolvedAddressOverride>>>,
     }
 
     impl StaticHttpTransport {
@@ -1507,7 +1507,7 @@ mod tests {
             }
         }
 
-        fn resolved_calls(&self) -> Vec<Option<platform_api::ResolvedAddressOverride>> {
+        fn resolved_calls(&self) -> Vec<Option<lingxi_core::host::ResolvedAddressOverride>> {
             self.resolved.lock().unwrap().clone()
         }
     }
@@ -1527,7 +1527,10 @@ mod tests {
 
     #[async_trait]
     impl HttpTransport for StaticHttpTransport {
-        async fn request(&self, _req: HttpRequest) -> Result<protocol::HttpResponse, HttpError> {
+        async fn request(
+            &self,
+            _req: HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, HttpError> {
             Err(HttpError::InvalidRequest("unexpected request".into()))
         }
 
@@ -1538,8 +1541,8 @@ mod tests {
         async fn stream_raw_bytes_with_meta_no_follow_with_resolved_addrs(
             &self,
             _req: HttpRequest,
-            resolved: Option<platform_api::ResolvedAddressOverride>,
-        ) -> Result<platform_api::RawByteStreamWithMeta, HttpError> {
+            resolved: Option<lingxi_core::host::ResolvedAddressOverride>,
+        ) -> Result<lingxi_core::host::RawByteStreamWithMeta, HttpError> {
             self.resolved.lock().unwrap().push(resolved);
             let response = self
                 .responses
@@ -1548,7 +1551,7 @@ mod tests {
                 .pop_front()
                 .expect("missing scripted response");
             let bytes = response.body_bytes.clone();
-            Ok(platform_api::RawByteStreamWithMeta {
+            Ok(lingxi_core::host::RawByteStreamWithMeta {
                 status: response.status,
                 headers: response.headers,
                 stream: Box::pin(VecOnceStream(Some(Ok(bytes)))),
@@ -1823,12 +1826,14 @@ mod tests {
             stop_reason: Some("end_turn".into()),
             retry_count: 0,
         })]));
-        let http = Arc::new(StaticHttpTransport::new(vec![protocol::HttpResponse {
-            status: 200,
-            headers: vec![("content-type".into(), "image/png".into())],
-            body: String::new(),
-            body_bytes: b"ab".to_vec(),
-        }]));
+        let http = Arc::new(StaticHttpTransport::new(vec![
+            lingxi_core::types::HttpResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "image/png".into())],
+                body: String::new(),
+                body_bytes: b"ab".to_vec(),
+            },
+        ]));
         let resolver = StaticResolver::with_answers(vec![(
             ("example.com", 443),
             Ok(vec!["93.184.216.34:443".parse().unwrap()]),
@@ -1875,15 +1880,17 @@ mod tests {
     #[tokio::test]
     async fn analyze_rejects_private_redirect_targets() {
         let sidequery = Arc::new(FakeSideQueryClient::new(Vec::new()));
-        let http = Arc::new(StaticHttpTransport::new(vec![protocol::HttpResponse {
-            status: 302,
-            headers: vec![(
-                "location".into(),
-                "http://internal.example/image.png".into(),
-            )],
-            body: String::new(),
-            body_bytes: Vec::new(),
-        }]));
+        let http = Arc::new(StaticHttpTransport::new(vec![
+            lingxi_core::types::HttpResponse {
+                status: 302,
+                headers: vec![(
+                    "location".into(),
+                    "http://internal.example/image.png".into(),
+                )],
+                body: String::new(),
+                body_bytes: Vec::new(),
+            },
+        ]));
         let resolver = StaticResolver::with_answers(vec![
             (
                 ("public.example", 443),
@@ -1943,18 +1950,20 @@ mod tests {
     #[tokio::test]
     async fn analyze_rejects_oversized_url_images() {
         let sidequery = Arc::new(FakeSideQueryClient::new(Vec::new()));
-        let http = Arc::new(StaticHttpTransport::new(vec![protocol::HttpResponse {
-            status: 200,
-            headers: vec![
-                ("content-type".into(), "image/png".into()),
-                (
-                    "content-length".into(),
-                    (MAX_DECODED_BYTES_PER_QUERY + 1).to_string(),
-                ),
-            ],
-            body: String::new(),
-            body_bytes: vec![0; 8],
-        }]));
+        let http = Arc::new(StaticHttpTransport::new(vec![
+            lingxi_core::types::HttpResponse {
+                status: 200,
+                headers: vec![
+                    ("content-type".into(), "image/png".into()),
+                    (
+                        "content-length".into(),
+                        (MAX_DECODED_BYTES_PER_QUERY + 1).to_string(),
+                    ),
+                ],
+                body: String::new(),
+                body_bytes: vec![0; 8],
+            },
+        ]));
         let resolver = StaticResolver::with_answers(vec![(
             ("example.com", 443),
             Ok(vec!["93.184.216.34:443".parse().unwrap()]),

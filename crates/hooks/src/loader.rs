@@ -71,7 +71,7 @@
 
 use crate::definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
 use crate::events::HookEventType;
-use protocol::HookId;
+use lingxi_core::types::HookId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -101,7 +101,7 @@ use std::time::Duration;
 /// tier's hooks separately ([`parse_hooks_from_settings_json`] per [`HookSource`]), so
 /// the equivalent decision is "is THIS source's tier allowed to load at all?".
 /// [`Self::allows_source`] reproduces `vBr`'s branches as a per-source predicate:
-/// when only managed hooks survive (branches B/C/D) every non-[`HookSource::Settings(protocol::SettingsScope::Managed)`]
+/// when only managed hooks survive (branches B/C/D) every non-[`HookSource::Settings(lingxi_core::types::SettingsScope::Managed)`]
 /// tier is suppressed; when `disableAllHooks` is set in the policy tier
 /// (branch A) even the managed tier is suppressed.
 ///
@@ -192,8 +192,8 @@ impl HookPolicyGate {
     /// Whether hooks from `source` are allowed to load under this gate.
     ///
     /// - Branch A (`policy_disable_all_hooks`): no tier loads — returns `false`
-    ///   for every source, including [`HookSource::Settings(protocol::SettingsScope::Managed)`].
-    /// - Branches B/C/D ([`Self::managed_only`]): only [`HookSource::Settings(protocol::SettingsScope::Managed)`]
+    ///   for every source, including [`HookSource::Settings(lingxi_core::types::SettingsScope::Managed)`].
+    /// - Branches B/C/D ([`Self::managed_only`]): only [`HookSource::Settings(lingxi_core::types::SettingsScope::Managed)`]
     ///   loads.
     /// - Otherwise (branch E): every tier loads.
     #[must_use]
@@ -202,7 +202,7 @@ impl HookPolicyGate {
             return false;
         }
         if self.managed_only() {
-            return source == HookSource::Settings(protocol::SettingsScope::Managed);
+            return source == HookSource::Settings(lingxi_core::types::SettingsScope::Managed);
         }
         true
     }
@@ -717,7 +717,7 @@ mod tests {
     fn empty_settings_yields_no_hooks() {
         let hooks = parse_hooks_from_settings_json(
             "{}",
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert!(hooks.is_empty());
@@ -736,7 +736,7 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
@@ -745,7 +745,7 @@ mod tests {
         assert_eq!(hooks[0].timeout, Some(Duration::from_secs(30)));
         assert_eq!(
             hooks[0].source,
-            HookSource::Settings(protocol::SettingsScope::Project)
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project)
         );
         let cond = hooks[0].if_condition.as_ref().expect("matcher present");
         assert_eq!(cond.pattern, "Write|Edit");
@@ -767,7 +767,7 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
@@ -792,7 +792,7 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
@@ -807,7 +807,7 @@ mod tests {
             r#"{ "hooks": { "Bogus": [{ "hooks": [{ "type": "command", "command": "x" }]}]}}"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert!(hooks.is_empty());
@@ -818,7 +818,7 @@ mod tests {
         let raw = r#"{ "hooks": { "Stop": [{ "hooks": [{ "type": "command" }]}]}}"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert!(hooks.is_empty());
@@ -882,7 +882,7 @@ mod tests {
             let raw = one_command(name);
             let hooks = parse_hooks_from_settings_json(
                 &raw,
-                HookSource::Settings(protocol::SettingsScope::User),
+                HookSource::Settings(lingxi_core::types::SettingsScope::User),
             )
             .unwrap();
             assert_eq!(hooks.len(), 1, "event {name} should produce one hook");
@@ -901,7 +901,7 @@ mod tests {
         let raw = one_command("FileChanged");
         let hooks = parse_hooks_from_settings_json(
             &raw,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
@@ -920,7 +920,7 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
@@ -936,7 +936,7 @@ mod tests {
         let raw = one_command("Stop");
         let hooks = parse_hooks_from_settings_json(
             &raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
@@ -954,7 +954,7 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
@@ -974,7 +974,7 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
@@ -999,7 +999,7 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
@@ -1028,14 +1028,14 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].events, vec![HookEventType::PreToolUse]);
         assert_eq!(
             hooks[0].source,
-            HookSource::Settings(protocol::SettingsScope::Project)
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project)
         );
         // The per-hook timeout is carried onto the definition (seconds).
         assert_eq!(hooks[0].timeout, Some(Duration::from_secs(12)));
@@ -1082,7 +1082,7 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         let HookExecutor::Http {
@@ -1108,7 +1108,7 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         let HookExecutor::Agent { model, .. } = &hooks[0].executor else {
@@ -1131,7 +1131,7 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
@@ -1157,7 +1157,7 @@ mod tests {
         ]}]}}"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert!(hooks.is_empty(), "an http entry without a url is skipped");
@@ -1178,14 +1178,14 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::Local),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Local),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].events, vec![HookEventType::Stop]);
         assert_eq!(
             hooks[0].source,
-            HookSource::Settings(protocol::SettingsScope::Local)
+            HookSource::Settings(lingxi_core::types::SettingsScope::Local)
         );
         assert_eq!(hooks[0].timeout, Some(Duration::from_secs(90)));
         let HookExecutor::Agent {
@@ -1208,7 +1208,7 @@ mod tests {
         ]}]}}"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert!(
@@ -1234,14 +1234,14 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].events, vec![HookEventType::PreToolUse]);
         assert_eq!(
             hooks[0].source,
-            HookSource::Settings(protocol::SettingsScope::Project)
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project)
         );
         assert_eq!(hooks[0].timeout, Some(Duration::from_secs(15)));
         let HookExecutor::Prompt { prompt, model, .. } = &hooks[0].executor else {
@@ -1263,7 +1263,7 @@ mod tests {
         ]}]}}"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
@@ -1281,7 +1281,7 @@ mod tests {
         ]}]}}"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert!(
@@ -1313,7 +1313,7 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(
@@ -1362,7 +1362,7 @@ mod tests {
         ]}]}}"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1);
@@ -1382,7 +1382,7 @@ mod tests {
         ]}]}}"#;
         assert!(parse_hooks_from_settings_json(
             no_tool,
-            HookSource::Settings(protocol::SettingsScope::User)
+            HookSource::Settings(lingxi_core::types::SettingsScope::User)
         )
         .unwrap()
         .is_empty());
@@ -1391,7 +1391,7 @@ mod tests {
         ]}]}}"#;
         assert!(parse_hooks_from_settings_json(
             no_server,
-            HookSource::Settings(protocol::SettingsScope::User)
+            HookSource::Settings(lingxi_core::types::SettingsScope::User)
         )
         .unwrap()
         .is_empty());
@@ -1413,7 +1413,7 @@ mod tests {
         }"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
         )
         .unwrap();
         assert_eq!(hooks.len(), 4, "command + http + agent + prompt all parse");
@@ -1444,7 +1444,7 @@ mod tests {
         ]}]}}"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert_eq!(hooks.len(), 3);
@@ -1477,7 +1477,7 @@ mod tests {
         ]}]}}"#;
         let hooks = parse_hooks_from_settings_json(
             raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert_eq!(hooks.len(), 1, "only the valid entry survives");
@@ -1498,10 +1498,10 @@ mod tests {
         // faithful no-policy path: every tier loads.
         let gate = HookPolicyGate::default();
         for src in [
-            HookSource::Settings(protocol::SettingsScope::User),
-            HookSource::Settings(protocol::SettingsScope::Project),
-            HookSource::Settings(protocol::SettingsScope::Local),
-            HookSource::Settings(protocol::SettingsScope::Managed),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Local),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Managed),
             HookSource::Plugin,
             HookSource::FrontMatter,
         ] {
@@ -1518,9 +1518,9 @@ mod tests {
         let gate = HookPolicyGate::from_policy_settings_json(Some(policy), false, false);
         assert!(gate.policy_disable_all_hooks);
         for src in [
-            HookSource::Settings(protocol::SettingsScope::User),
-            HookSource::Settings(protocol::SettingsScope::Project),
-            HookSource::Settings(protocol::SettingsScope::Managed),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Managed),
         ] {
             assert!(
                 !gate.allows_source(src),
@@ -1536,10 +1536,12 @@ mod tests {
         let policy = r#"{ "allowManagedHooksOnly": true }"#;
         let gate = HookPolicyGate::from_policy_settings_json(Some(policy), false, false);
         assert!(gate.managed_only());
-        assert!(gate.allows_source(HookSource::Settings(protocol::SettingsScope::Managed)));
+        assert!(gate.allows_source(HookSource::Settings(
+            lingxi_core::types::SettingsScope::Managed
+        )));
         for src in [
-            HookSource::Settings(protocol::SettingsScope::User),
-            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             HookSource::Plugin,
         ] {
             assert!(!gate.allows_source(src), "managed-only must block {src:?}");
@@ -1553,8 +1555,12 @@ mod tests {
         let gate = HookPolicyGate::from_policy_settings_json(None, true, false);
         assert!(gate.safe_mode);
         assert!(gate.managed_only());
-        assert!(gate.allows_source(HookSource::Settings(protocol::SettingsScope::Managed)));
-        assert!(!gate.allows_source(HookSource::Settings(protocol::SettingsScope::User)));
+        assert!(gate.allows_source(HookSource::Settings(
+            lingxi_core::types::SettingsScope::Managed
+        )));
+        assert!(!gate.allows_source(HookSource::Settings(
+            lingxi_core::types::SettingsScope::User
+        )));
     }
 
     #[test]
@@ -1565,8 +1571,12 @@ mod tests {
         let gate = HookPolicyGate::from_policy_settings_json(None, false, true);
         assert!(gate.settings_disable_all_hooks);
         assert!(gate.managed_only());
-        assert!(gate.allows_source(HookSource::Settings(protocol::SettingsScope::Managed)));
-        assert!(!gate.allows_source(HookSource::Settings(protocol::SettingsScope::Project)));
+        assert!(gate.allows_source(HookSource::Settings(
+            lingxi_core::types::SettingsScope::Managed
+        )));
+        assert!(!gate.allows_source(HookSource::Settings(
+            lingxi_core::types::SettingsScope::Project
+        )));
     }
 
     #[test]
@@ -1578,8 +1588,12 @@ mod tests {
             ..HookPolicyGate::default()
         };
         assert!(gate.managed_only());
-        assert!(gate.allows_source(HookSource::Settings(protocol::SettingsScope::Managed)));
-        assert!(!gate.allows_source(HookSource::Settings(protocol::SettingsScope::User)));
+        assert!(gate.allows_source(HookSource::Settings(
+            lingxi_core::types::SettingsScope::Managed
+        )));
+        assert!(!gate.allows_source(HookSource::Settings(
+            lingxi_core::types::SettingsScope::User
+        )));
     }
 
     #[test]
@@ -1588,8 +1602,12 @@ mod tests {
         // allowManagedHooksOnly are set, even the managed tier is dropped.
         let policy = r#"{ "disableAllHooks": true, "allowManagedHooksOnly": true }"#;
         let gate = HookPolicyGate::from_policy_settings_json(Some(policy), false, false);
-        assert!(!gate.allows_source(HookSource::Settings(protocol::SettingsScope::Managed)));
-        assert!(!gate.allows_source(HookSource::Settings(protocol::SettingsScope::User)));
+        assert!(!gate.allows_source(HookSource::Settings(
+            lingxi_core::types::SettingsScope::Managed
+        )));
+        assert!(!gate.allows_source(HookSource::Settings(
+            lingxi_core::types::SettingsScope::User
+        )));
     }
 
     #[test]
@@ -1600,7 +1618,9 @@ mod tests {
         let gate = HookPolicyGate::from_policy_settings_json(Some("not json {"), false, false);
         assert!(!gate.policy_disable_all_hooks);
         assert!(!gate.allow_managed_hooks_only);
-        assert!(gate.allows_source(HookSource::Settings(protocol::SettingsScope::User)));
+        assert!(gate.allows_source(HookSource::Settings(
+            lingxi_core::types::SettingsScope::User
+        )));
     }
 
     #[test]
@@ -1610,7 +1630,9 @@ mod tests {
         let gate = HookPolicyGate::from_policy_settings_json(Some(policy), false, false);
         assert!(!gate.policy_disable_all_hooks);
         assert!(!gate.managed_only());
-        assert!(gate.allows_source(HookSource::Settings(protocol::SettingsScope::User)));
+        assert!(gate.allows_source(HookSource::Settings(
+            lingxi_core::types::SettingsScope::User
+        )));
     }
 
     #[test]
@@ -1625,7 +1647,7 @@ mod tests {
         let raw = one_stop_command();
         let hooks = parse_hooks_from_settings_json_gated(
             &raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
             gate,
         )
         .unwrap();
@@ -1646,19 +1668,19 @@ mod tests {
         // Managed tier loads.
         let managed = parse_hooks_from_settings_json_gated(
             &raw,
-            HookSource::Settings(protocol::SettingsScope::Managed),
+            HookSource::Settings(lingxi_core::types::SettingsScope::Managed),
             gate,
         )
         .unwrap();
         assert_eq!(managed.len(), 1);
         assert_eq!(
             managed[0].source,
-            HookSource::Settings(protocol::SettingsScope::Managed)
+            HookSource::Settings(lingxi_core::types::SettingsScope::Managed)
         );
         // User tier is suppressed.
         let user = parse_hooks_from_settings_json_gated(
             &raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
             gate,
         )
         .unwrap();
@@ -1672,13 +1694,13 @@ mod tests {
         let raw = one_stop_command();
         let gated = parse_hooks_from_settings_json_gated(
             &raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
             HookPolicyGate::default(),
         )
         .unwrap();
         let ungated = parse_hooks_from_settings_json(
             &raw,
-            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
         )
         .unwrap();
         assert_eq!(gated.len(), ungated.len());

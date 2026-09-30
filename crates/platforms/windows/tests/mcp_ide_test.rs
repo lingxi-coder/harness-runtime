@@ -12,7 +12,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use futures::{stream, Stream, StreamExt};
-use platform_api::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
+use lingxi_core::host::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
 use platform_windows::WindowsMcpTransport;
 use std::convert::Infallible;
 use std::net::SocketAddr;

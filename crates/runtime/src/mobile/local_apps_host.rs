@@ -25,6 +25,7 @@ use local_apps::{
     SessionPermissions,
 };
 use mobile_linux_api::{MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -952,7 +953,7 @@ pub(crate) struct SessionCatalog {
     /// The engine's per-profile data dir — `projects/` hangs off it.
     pub(crate) lingxi_home: std::path::PathBuf,
     /// The filesystem transcripts are read and appended through.
-    pub(crate) fs: Arc<dyn platform_api::FileSystem>,
+    pub(crate) fs: Arc<dyn lingxi_core::host::FileSystem>,
 }
 
 /// The latest effective `custom-title` for `session_id` in a transcript: the
@@ -1099,7 +1100,7 @@ pub(crate) fn latest_custom_title_is_mobile_placeholder(
 pub(crate) async fn reconcile_app_init_session_title(
     lingxi_home: &std::path::Path,
     data_root: &std::path::Path,
-    fs: Arc<dyn platform_api::FileSystem>,
+    fs: Arc<dyn lingxi_core::host::FileSystem>,
     record: &local_apps::AppRecord,
 ) -> Result<bool, String> {
     // Clause 1. Today no production state can reach this with a name that
@@ -1223,7 +1224,7 @@ pub(crate) struct LocalAppsHostBroker {
     /// supply one: the reminder is all it sees, and the reminder's device
     /// vocabulary (`phone`/`tablet`) does not name an iOS form factor.
     /// Unattached — desktop embedders and host tests — means no context.
-    host_environment: OnceLock<platform_api::MobileHostEnvironment>,
+    host_environment: OnceLock<lingxi_core::host::MobileHostEnvironment>,
     /// Host-owned app Agent execution seam, attached by the mobile composition
     /// root after the app service and MCP host are ready.
     agent_executor: OnceLock<Arc<dyn LocalAppsAgentExecutor>>,
@@ -1530,8 +1531,8 @@ impl LocalAppsHostBroker {
     /// call site as [`Self::attach_agent_executor`].
     pub(crate) fn attach_host_environment(
         &self,
-        environment: platform_api::MobileHostEnvironment,
-    ) -> Result<(), platform_api::MobileHostEnvironment> {
+        environment: lingxi_core::host::MobileHostEnvironment,
+    ) -> Result<(), lingxi_core::host::MobileHostEnvironment> {
         self.host_environment.set(environment)
     }
 
@@ -1619,11 +1620,11 @@ impl LocalAppsHostBroker {
         let mut body = serde_json::to_vec_pretty(candidate)
             .map_err(|error| format!("serialize MCP candidate: {error}"))?;
         body.push(b'\n');
-        platform_api::rooted_fs::atomic_write(
+        lingxi_core::host::rooted_fs::atomic_write(
             &self.root,
             &path,
             &body,
-            platform_api::rooted_fs::AtomicWriteOptions::default(),
+            lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
         )
         .map_err(|error| local_apps::AppError::from_fs("write MCP candidate", &error).to_string())
     }
@@ -1635,10 +1636,11 @@ impl LocalAppsHostBroker {
     ) -> Result<PersistedMcpCandidate, String> {
         let path =
             Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
-        let body = platform_api::rooted_fs::read_to_string_limited(&self.root, &path, 512 * 1024)
-            .map_err(|error| {
-            local_apps::AppError::from_fs("read MCP candidate", &error).to_string()
-        })?;
+        let body =
+            lingxi_core::host::rooted_fs::read_to_string_limited(&self.root, &path, 512 * 1024)
+                .map_err(|error| {
+                    local_apps::AppError::from_fs("read MCP candidate", &error).to_string()
+                })?;
         serde_json::from_str(&body).map_err(|error| format!("parse MCP candidate: {error}"))
     }
 
@@ -1651,8 +1653,8 @@ impl LocalAppsHostBroker {
         local_apps::delete_candidate_journal(layout).map_err(|error| error.to_string())?;
         let relative =
             Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
-        match platform_api::rooted_fs::remove_file(&self.root, &relative) {
-            Ok(()) | Err(platform_api::FsError::NotFound(_)) => {}
+        match lingxi_core::host::rooted_fs::remove_file(&self.root, &relative) {
+            Ok(()) | Err(lingxi_core::host::FsError::NotFound(_)) => {}
             Err(error) => {
                 return Err(local_apps::AppError::from_fs(
                     "delete create-only MCP candidate",
@@ -1701,9 +1703,9 @@ impl LocalAppsHostBroker {
         let rel = layout
             .workspace_rel()
             .join(".lingxi/mcp-flow-contexts.json");
-        let body = platform_api::rooted_fs::read_to_string_limited(&self.root, &rel, 512 * 1024)
+        let body = lingxi_core::host::rooted_fs::read_to_string_limited(&self.root, &rel, 512 * 1024)
             .map_err(|error| match error {
-                platform_api::FsError::NotFound(_) => {
+                lingxi_core::host::FsError::NotFound(_) => {
                     "mcp_flow_contexts_missing: Host could not resolve any trusted MCP flow contexts for this app".to_string()
                 }
                 other => local_apps::AppError::from_fs("read MCP flow contexts", &other).to_string(),
@@ -1778,6 +1780,7 @@ impl LocalAppsHostBroker {
                 detail: None,
             });
         }
+
         gates.push(LocalAppGateStatusDto {
             gate_id: "ui_runner".into(),
             label: "UI verification runner".into(),
@@ -1812,7 +1815,7 @@ impl LocalAppsHostBroker {
             .join(workflow_run_id)
             .join("validated-selection.json");
         let body =
-            platform_api::rooted_fs::read_to_string_limited(&self.root, &relative, 256 * 1024)
+            lingxi_core::host::rooted_fs::read_to_string_limited(&self.root, &relative, 256 * 1024)
                 .map_err(|error| format!("validated_selection_missing: {error}"))?;
         let value: Value = serde_json::from_str(&body)
             .map_err(|error| format!("validated_selection_invalid: {error}"))?;
@@ -2798,8 +2801,8 @@ impl LocalAppsHostBroker {
         create_seed: Option<CreateScaffoldSeed>,
     ) -> Result<
         (
-            platform_api::rooted_fs::RootedFileLock,
-            platform_api::rooted_fs::RootedFileLock,
+            lingxi_core::host::rooted_fs::RootedFileLock,
+            lingxi_core::host::rooted_fs::RootedFileLock,
             local_apps::storage::ScaffoldRecoveryHandle,
         ),
         String,
@@ -2843,8 +2846,8 @@ impl LocalAppsHostBroker {
             move ||
                 -> Result<
                     (
-                        platform_api::rooted_fs::RootedFileLock,
-                        platform_api::rooted_fs::RootedFileLock,
+                        lingxi_core::host::rooted_fs::RootedFileLock,
+                        lingxi_core::host::rooted_fs::RootedFileLock,
                         local_apps::storage::ScaffoldRecoveryHandle,
                     ),
                     String,
@@ -3400,10 +3403,10 @@ impl LocalAppsHostBroker {
         &self,
         app_id: &str,
         tool_input: Value,
-        definition: &platform_api::McpToolDefinitionDto,
+        definition: &lingxi_core::host::McpToolDefinitionDto,
         binding: &local_apps::AppMcpFlowBinding,
         context: &local_apps::AppMcpFlowContext,
-        catalog_ceiling: platform_api::McpPermissionCeiling,
+        catalog_ceiling: lingxi_core::host::McpPermissionCeiling,
         mode: BoundMcpFlowMode,
     ) -> Result<BoundMcpExecution, String> {
         let input_bytes = serde_json::to_vec(&tool_input)
@@ -3440,9 +3443,13 @@ impl LocalAppsHostBroker {
                     .into(),
             );
         }
-        if matches!(derived_ceiling, platform_api::McpPermissionCeiling::Deny)
-            || matches!(catalog_ceiling, platform_api::McpPermissionCeiling::Deny)
-        {
+        if matches!(
+            derived_ceiling,
+            lingxi_core::host::McpPermissionCeiling::Deny
+        ) || matches!(
+            catalog_ceiling,
+            lingxi_core::host::McpPermissionCeiling::Deny
+        ) {
             return Err("permission_ceiling: Host denied this MCP Flow".into());
         }
 
@@ -3682,7 +3689,7 @@ impl LocalAppsHostBroker {
                 "unknown_tool: Local App tool is not in the active catalog".to_string()
             })?;
         let definition_value = entry.get("definition").unwrap_or(entry);
-        let definition: platform_api::McpToolDefinitionDto =
+        let definition: lingxi_core::host::McpToolDefinitionDto =
             serde_json::from_value(definition_value.clone())
                 .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
         let binding_value = entry.get("flow").cloned().ok_or_else(|| {
@@ -3729,7 +3736,7 @@ impl LocalAppsHostBroker {
         let catalog_ceiling = entry
             .get("ceiling")
             .and_then(Value::as_str)
-            .and_then(platform_api::McpPermissionCeiling::from_policy_str)
+            .and_then(lingxi_core::host::McpPermissionCeiling::from_policy_str)
             .ok_or_else(|| "permission_ceiling: active tool ceiling is invalid".to_string())?;
         Ok(self
             .execute_bound_mcp_flow(
@@ -5511,7 +5518,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 .map_err(|error| format!("create pnpm dependency store: {error}"))?;
             let build_mount = MountSpec {
                 host_path: workspace.clone(),
-                guest_path: platform_api::local_app_paths::local_app_build_project(
+                guest_path: lingxi_core::host::local_app_paths::local_app_build_project(
                     &app_id, "store",
                 ),
                 read_only: false,
@@ -5519,7 +5526,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             };
             let store_mount = MountSpec {
                 host_path: dependency_store,
-                guest_path: platform_api::local_app_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
+                guest_path: lingxi_core::host::local_app_paths::LOCAL_APP_DEPENDENCY_STORE
+                    .to_string(),
                 read_only: false,
                 purpose: MountPurpose::Shared,
             };
@@ -5584,6 +5592,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 let _ = Self::remove_owned_path(&dependency_staging);
                 return Err(error);
             }
+
             let lock_digest = format!("{:x}", Sha256::digest(&lock_bytes));
             let snapshot_root = self.dependency_snapshot_root(&lock_digest, toolchain_key);
             let snapshot_lock = self.dependency_snapshot_lock(&lock_digest).await;
@@ -5672,6 +5681,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                     })?;
                 }
             }
+
             /*
              * The snapshot lock remains held through staging promotion and
              * profile metadata publication. A second app can therefore
@@ -5723,6 +5733,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             self.finalize_dependency_install(&layout, &dependency_staging, &lock_digest)
                 .await?;
             drop(_snapshot_guard);
+
             service
                 .complete_dependency_install_with_metadata(
                     &app_id,

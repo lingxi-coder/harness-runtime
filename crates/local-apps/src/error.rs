@@ -5,7 +5,7 @@
 //! one wire-level [`AppErrorCode`] so the engine can surface failures as a
 //! typed `AppOperationFailed { code, message }` client event.
 
-use platform_api::FsError;
+use lingxi_core::host::FsError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

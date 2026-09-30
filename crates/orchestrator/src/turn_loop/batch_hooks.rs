@@ -1,7 +1,7 @@
 use crate::conversation::ConversationOrchestrator;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
-use protocol::{ConversationMessage, MessageId, ToolUseId};
+use lingxi_core::types::{ConversationMessage, MessageId, ToolUseId};
 use tool_api::context::ToolUseContext;
 use tool_api::ContextModifier;
 
@@ -69,7 +69,7 @@ pub(super) async fn run_post_tool_batch_hooks_inner(
         .await;
     let mut injected_messages = Vec::new();
     let identity = post_tool_batch_identity();
-    let batch_id = protocol::ToolUseId::from(identity.tool_use_id.clone());
+    let batch_id = lingxi_core::types::ToolUseId::from(identity.tool_use_id.clone());
 
     if turn_already_ended {
         // `eBn` yields only `fe.message` from the hook runner, then logs
@@ -149,7 +149,7 @@ pub(super) fn post_tool_batch_identity() -> hooks::HookAttachmentIdentity {
     hooks::HookAttachmentIdentity {
         hook_name: "PostToolBatch".to_string(),
         hook_event: "PostToolBatch".to_string(),
-        tool_use_id: format!("hook-{}", protocol::HookId::new().as_uuid()),
+        tool_use_id: format!("hook-{}", lingxi_core::types::HookId::new().as_uuid()),
     }
 }
 
@@ -247,7 +247,8 @@ pub(crate) async fn apply_model_context_modifiers(
         .main_loop_model;
     if resolved != current {
         let listings = orch.api.list_model_listings();
-        let (target_model, explicit_profile) = platform_api::parse_model_ref(&resolved, &listings);
+        let (target_model, explicit_profile) =
+            lingxi_core::host::parse_model_ref(&resolved, &listings);
         let target_profile = explicit_profile.or_else(|| {
             current_profile
                 .as_ref()

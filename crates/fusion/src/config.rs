@@ -1,11 +1,80 @@
 //! Runtime Fusion settings with defaults applied.
 
+use lingxi_core::host::{
+    FusionError, FusionModelChoice, FusionModelRole, FusionPanelMode, FusionPreset,
+    FUSION_MAX_PANEL, FUSION_MIN_PANEL,
+};
 pub use lingxi_core::settings::schema::FusionCompletionPolicy;
 use lingxi_core::settings::schema::FusionSettingsJson;
-use platform_api::{
-    FusionError, FusionModelChoice, FusionModelRole, FusionPreset, FUSION_MAX_PANEL,
-    FUSION_MIN_PANEL,
-};
+
+/// Implement-mode knobs with defaults applied. See
+/// [`FusionRuntimeConfig::for_mode`] for how they reshape a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FusionImplementConfig {
+    /// Per-panel turn cap.
+    pub max_turns: u32,
+    /// Per-panel total timeout.
+    pub panel_timeout_ms: u64,
+    /// End-to-end timeout of an implement run.
+    pub total_timeout_ms: u64,
+    /// Commands the host runs in each worktree, in order.
+    pub verify_commands: Vec<String>,
+    /// Per-command verification timeout.
+    pub verify_timeout_ms: u64,
+    /// Worktrees verified at once.
+    pub verify_concurrency: u8,
+    /// Hours a worktree with changes is kept.
+    pub retain_hours: u32,
+    /// Refuse to start below this much free disk.
+    pub min_free_disk_bytes: u64,
+    /// Model-started implement runs quoted at most this much start without
+    /// asking. Never taken from the merged settings: the host fills it from
+    /// the user and local tiers only.
+    pub auto_approve_max_nano_usd: Option<u64>,
+    /// Most untracked files a workspace snapshot may carry.
+    pub max_untracked_files: usize,
+    /// Most bytes those untracked files may add up to.
+    pub max_untracked_bytes: u64,
+}
+
+impl FusionImplementConfig {
+    /// Documented defaults.
+    #[must_use]
+    pub fn defaults() -> Self {
+        Self {
+            max_turns: 40,
+            panel_timeout_ms: 1_800_000,
+            total_timeout_ms: 3_600_000,
+            verify_commands: Vec::new(),
+            verify_timeout_ms: 600_000,
+            verify_concurrency: 2,
+            retain_hours: 24,
+            min_free_disk_bytes: 5 * 1024 * 1024 * 1024,
+            auto_approve_max_nano_usd: None,
+            max_untracked_files: 2_000,
+            max_untracked_bytes: 100 * 1024 * 1024,
+        }
+    }
+}
+
+impl Default for FusionImplementConfig {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+
+/// USD from settings to nano-USD, saturating.
+#[must_use]
+pub fn usd_to_nano_usd(usd: f64) -> u64 {
+    if usd.is_finite() && usd > 0.0 {
+        // Saturating float-to-int cast: values past u64::MAX clamp.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let nano = (usd * 1e9).round() as u64;
+        nano
+    } else {
+        0
+    }
+}
 
 /// Resolved Fusion knobs. Invalid *present* settings fail construction;
 /// missing fields take the documented defaults.
@@ -15,7 +84,7 @@ use platform_api::{
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FusionRuntimeConfig {
-    /// Agent listing + workflow `fusion()` master switch.
+    /// Agent listing master switch.
     pub enabled: bool,
     /// Default preset for all entrypoints when the caller omits one.
     pub default_preset: FusionPreset,
@@ -41,16 +110,17 @@ pub struct FusionRuntimeConfig {
     pub max_reserved_nano_usd: Option<u64>,
     /// Analyst output cap.
     pub analyst_max_output_tokens: u32,
-    /// Synthesizer output cap.
-    pub synthesizer_max_output_tokens: u32,
+    /// The analyst checks panel claims with read-only tools (quality preset,
+    /// analysis mode). See [`Self::analyst_uses_tools`].
+    pub analyst_tools: bool,
+    /// Turn cap for the tool-using analyst.
+    pub analyst_max_turns: u32,
     /// Panel idle timeout.
     pub panel_idle_timeout_ms: u64,
     /// Panel total timeout.
     pub panel_total_timeout_ms: u64,
     /// Analyst timeout.
     pub analyst_timeout_ms: u64,
-    /// Synthesizer timeout.
-    pub synthesizer_timeout_ms: u64,
     /// End-to-end timeout.
     pub total_timeout_ms: u64,
     /// Analyst protocol retries (0 or 1).
@@ -59,15 +129,10 @@ pub struct FusionRuntimeConfig {
     pub slash_cross_provider_default: bool,
     /// Agent may request cross-provider.
     pub allow_cross_provider_for_agent: bool,
-    /// Workflow may request cross-provider.
-    pub allow_cross_provider_for_workflow: bool,
+    /// Fusion mode: the main model starts Fusion by default for substantial work.
+    pub proactive: bool,
     /// Hard allowlist of profile names. Empty = unrestricted.
     pub allowed_profiles: Vec<String>,
-    /// Per-workflow `fusion()` call cap.
-    pub workflow_fusion_call_cap: u32,
-    /// Requested Fusion batch concurrency. Effective concurrency also requires
-    /// the attempt host's atomic output-reservation capability.
-    pub workflow_concurrency: u8,
     /// Configured panel roster in the operator's priority order. A preset takes
     /// the first `quality_panel_count` / `fast_panel_count` entries. Empty
     /// means UNCONFIGURED — preflight fails with
@@ -75,11 +140,23 @@ pub struct FusionRuntimeConfig {
     pub panel_models: Vec<FusionModelChoice>,
     /// Configured analyst. `None` means unconfigured.
     pub analyst_model: Option<FusionModelChoice>,
-    /// Configured synthesizer. `None` means unconfigured.
-    pub synthesizer_model: Option<FusionModelChoice>,
+    /// Implement-mode knobs.
+    pub implement: FusionImplementConfig,
 }
 
 impl FusionRuntimeConfig {
+    /// Whether this run's analyst checks claims with tools. Implement mode
+    /// never does: the patches and the host's verification runs already are
+    /// its evidence. Otherwise the setting applies to the `quality` preset,
+    /// and a `/fusion --verify-claims` request turns it on for any preset.
+    #[must_use]
+    pub fn analyst_uses_tools(&self, request: &lingxi_core::host::FusionRequest) -> bool {
+        if request.mode != lingxi_core::host::FusionPanelMode::Analysis {
+            return false;
+        }
+        request.verify_claims
+            || (self.analyst_tools && request.preset == lingxi_core::host::FusionPreset::Quality)
+    }
     /// Documented defaults (enabled stays false).
     #[must_use]
     pub fn defaults() -> Self {
@@ -97,30 +174,27 @@ impl FusionRuntimeConfig {
             panel_reserved_input_tokens_per_turn: 32768,
             max_reserved_nano_usd: None,
             analyst_max_output_tokens: 8192,
-            synthesizer_max_output_tokens: 16384,
+            analyst_tools: false,
+            analyst_max_turns: 6,
             panel_idle_timeout_ms: 180_000,
             panel_total_timeout_ms: 600_000,
             analyst_timeout_ms: 120_000,
-            synthesizer_timeout_ms: 180_000,
             // F004: must stay >= panelTotal + analystTimeoutMs*(1 +
-            // analysisProtocolRetries) + synthesizerTimeoutMs, or the
-            // documented per-stage defaults can never all complete before the
-            // end-to-end deadline fires (600_000 + 120_000*2 + 180_000 =
-            // 1_020_000 > the previous 900_000 default). Raised rather than
+            // analysisProtocolRetries), or the documented per-stage defaults
+            // can never all complete before the end-to-end deadline fires
+            // (600_000 + 120_000*2 = 840_000). Raised rather than
             // shrinking the stage defaults, which are independently
             // documented budgets. `FusionSettingsJson::validate` enforces the
             // same inequality per-file when a file itself sets any of the
-            // three stage fields; `from_settings` below re-enforces it on the
+            // stage fields; `from_settings` below re-enforces it on the
             // fully merged, concrete view, since a merge of files that each
             // individually pass validation is not guaranteed to.
             total_timeout_ms: 1_200_000,
             analysis_protocol_retries: 1,
             slash_cross_provider_default: true,
             allow_cross_provider_for_agent: false,
-            allow_cross_provider_for_workflow: false,
+            proactive: false,
             allowed_profiles: Vec::new(),
-            workflow_fusion_call_cap: 20,
-            workflow_concurrency: 2,
             // Deliberately empty: there is no default model roster. Fusion
             // spends real money on every panel, and a default would mean the
             // set of models a run bills against could change under a working
@@ -128,8 +202,22 @@ impl FusionRuntimeConfig {
             // moved. `FusionError::NotConfigured` names the settings keys.
             panel_models: Vec::new(),
             analyst_model: None,
-            synthesizer_model: None,
+            implement: FusionImplementConfig::defaults(),
         }
+    }
+
+    /// The config a run in `mode` actually runs under. Implement panels
+    /// build and test, so they get their own turn cap and timeouts; the
+    /// analyst and everything else is shared.
+    #[must_use]
+    pub fn for_mode(&self, mode: FusionPanelMode) -> Self {
+        let mut cfg = self.clone();
+        if mode == FusionPanelMode::Implement {
+            cfg.panel_max_turns = self.implement.max_turns;
+            cfg.panel_total_timeout_ms = self.implement.panel_timeout_ms;
+            cfg.total_timeout_ms = self.implement.total_timeout_ms;
+        }
+        cfg
     }
 
     /// Roles that are still unconfigured, in [`FusionModelRole::ALL`] order.
@@ -141,9 +229,6 @@ impl FusionRuntimeConfig {
         }
         if self.analyst_model.is_none() {
             missing.push(FusionModelRole::Analyst);
-        }
-        if self.synthesizer_model.is_none() {
-            missing.push(FusionModelRole::Synthesizer);
         }
         missing
     }
@@ -200,8 +285,11 @@ impl FusionRuntimeConfig {
         if let Some(n) = settings.analyst_max_output_tokens {
             cfg.analyst_max_output_tokens = n;
         }
-        if let Some(n) = settings.synthesizer_max_output_tokens {
-            cfg.synthesizer_max_output_tokens = n;
+        if let Some(v) = settings.analyst_tools {
+            cfg.analyst_tools = v;
+        }
+        if let Some(n) = settings.analyst_max_turns {
+            cfg.analyst_max_turns = n;
         }
         if let Some(n) = settings.panel_idle_timeout_ms {
             cfg.panel_idle_timeout_ms = n;
@@ -211,9 +299,6 @@ impl FusionRuntimeConfig {
         }
         if let Some(n) = settings.analyst_timeout_ms {
             cfg.analyst_timeout_ms = n;
-        }
-        if let Some(n) = settings.synthesizer_timeout_ms {
-            cfg.synthesizer_timeout_ms = n;
         }
         if let Some(n) = settings.total_timeout_ms {
             cfg.total_timeout_ms = n;
@@ -227,26 +312,49 @@ impl FusionRuntimeConfig {
         if let Some(v) = settings.allow_cross_provider_for_agent {
             cfg.allow_cross_provider_for_agent = v;
         }
-        if let Some(v) = settings.allow_cross_provider_for_workflow {
-            cfg.allow_cross_provider_for_workflow = v;
+        if let Some(v) = settings.proactive {
+            cfg.proactive = v;
         }
         if let Some(ref names) = settings.allowed_profiles {
             cfg.allowed_profiles.clone_from(names);
-        }
-        if let Some(n) = settings.workflow_fusion_call_cap {
-            cfg.workflow_fusion_call_cap = n;
-        }
-        if let Some(n) = settings.workflow_concurrency {
-            cfg.workflow_concurrency = n;
         }
         if let Some(ref panels) = settings.panel_models {
             cfg.panel_models = panels.iter().map(choice_from_settings).collect();
         }
         cfg.analyst_model = settings.analyst_model.as_ref().map(choice_from_settings);
-        cfg.synthesizer_model = settings
-            .synthesizer_model
-            .as_ref()
-            .map(choice_from_settings);
+        if let Some(implement) = &settings.implement {
+            let target = &mut cfg.implement;
+            if let Some(n) = implement.max_turns {
+                target.max_turns = n;
+            }
+            if let Some(n) = implement.panel_timeout_ms {
+                target.panel_timeout_ms = n;
+            }
+            if let Some(n) = implement.total_timeout_ms {
+                target.total_timeout_ms = n;
+            }
+            if let Some(commands) = &implement.verify_commands {
+                target.verify_commands = commands
+                    .iter()
+                    .map(|command| command.trim().to_string())
+                    .collect();
+            }
+            if let Some(n) = implement.verify_timeout_ms {
+                target.verify_timeout_ms = n;
+            }
+            if let Some(n) = implement.verify_concurrency {
+                target.verify_concurrency = n;
+            }
+            if let Some(n) = implement.retain_hours {
+                target.retain_hours = n;
+            }
+            if let Some(n) = implement.min_free_disk_bytes {
+                target.min_free_disk_bytes = n;
+            }
+            // `auto_approve_max_usd` is deliberately not read here: this is
+            // the merged view, where a checked-in project tier could have set
+            // it. See `FusionImplementConfig::auto_approve_max_nano_usd`.
+        }
 
         // F004 / F011 item 6 (round-3 review fix): `FusionSettingsJson::validate`
         // above only checked THIS settings snapshot's own fields — and, per its
@@ -263,17 +371,30 @@ impl FusionRuntimeConfig {
                 "fusion.completionPolicy quorum_after_grace requires fusion.partialOk=true".into(),
             ));
         }
-        let stage_sum = cfg
-            .panel_total_timeout_ms
+        let stage_sum = cfg.panel_total_timeout_ms.saturating_add(
+            cfg.analyst_timeout_ms
+                .saturating_mul(1 + u64::from(cfg.analysis_protocol_retries)),
+        );
+        if stage_sum > cfg.total_timeout_ms {
+            return Err(FusionError::InvalidConfiguration(format!(
+                "fusion.panelTotalTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) ({stage_sum}) must not exceed fusion.totalTimeoutMs ({total})",
+                total = cfg.total_timeout_ms
+            )));
+        }
+        // The implement run's own stage sum: a panel, at least one
+        // verification command, and the analyst must fit its total.
+        let implement_sum = cfg
+            .implement
+            .panel_timeout_ms
+            .saturating_add(cfg.implement.verify_timeout_ms)
             .saturating_add(
                 cfg.analyst_timeout_ms
                     .saturating_mul(1 + u64::from(cfg.analysis_protocol_retries)),
-            )
-            .saturating_add(cfg.synthesizer_timeout_ms);
-        if stage_sum > cfg.total_timeout_ms {
+            );
+        if implement_sum > cfg.implement.total_timeout_ms {
             return Err(FusionError::InvalidConfiguration(format!(
-                "fusion.panelTotalTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) + fusion.synthesizerTimeoutMs ({stage_sum}) must not exceed fusion.totalTimeoutMs ({total})",
-                total = cfg.total_timeout_ms
+                "fusion.implement.panelTimeoutMs + fusion.implement.verifyTimeoutMs + fusion.analystTimeoutMs*(1+fusion.analysisProtocolRetries) ({implement_sum}) must not exceed fusion.implement.totalTimeoutMs ({total})",
+                total = cfg.implement.total_timeout_ms
             )));
         }
         // No merged-view re-check for the roster bounds, unlike the two
@@ -347,7 +468,7 @@ impl Default for FusionRuntimeConfig {
 /// change, or `fusion.enabled=false` (the design's §11 kill switch) had no
 /// effect on the session's already-built orchestrator until a restart. A
 /// `FusionConfigSource` is consulted at the start of every `run()` and every
-/// `agent_surface()`/`workflow_fusion_call_cap()` call instead, so the next
+/// `agent_surface()` call instead, so the next
 /// call — not the next restart — sees a settings change.
 pub trait FusionConfigSource: Send + Sync {
     /// Reload the current effective config.
@@ -386,27 +507,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workflow_concurrency_defaults_to_two_and_supports_sequential_rollback() {
-        assert_eq!(FusionRuntimeConfig::defaults().workflow_concurrency, 2);
-        for value in [1, 2] {
-            let settings = FusionSettingsJson {
-                workflow_concurrency: Some(value),
-                ..Default::default()
-            };
-            assert_eq!(
-                FusionRuntimeConfig::from_settings(&settings)
-                    .unwrap()
-                    .workflow_concurrency,
-                value
-            );
-        }
-        for value in [0, 3] {
-            assert!(FusionRuntimeConfig::from_settings(&FusionSettingsJson {
-                workflow_concurrency: Some(value),
-                ..Default::default()
-            })
-            .is_err());
-        }
+    fn fusion_mode_is_off_by_default_and_read_from_settings() {
+        assert!(!FusionRuntimeConfig::defaults().proactive);
+        let on = FusionSettingsJson {
+            proactive: Some(true),
+            ..FusionSettingsJson::default()
+        };
+        assert!(FusionRuntimeConfig::from_settings(&on).unwrap().proactive);
     }
 
     #[test]
@@ -472,7 +579,7 @@ mod tests {
     /// F004 regression (round-3 review): a merged settings snapshot that sets
     /// only `totalTimeoutMs` passes `FusionSettingsJson::validate` (the
     /// stage-sum check there is a per-FILE relaxation, deliberately silent
-    /// when none of the three stage fields are present in the same file) but
+    /// when none of the stage fields are present in the same file) but
     /// must still be rejected by `from_settings`, which sees the fully
     /// merged, concrete stage values and must enforce the stage-sum
     /// invariant there instead.
@@ -486,13 +593,12 @@ mod tests {
         // proving the file itself is not being dropped.
         settings.validate().expect("single-field file stays valid");
         let err = FusionRuntimeConfig::from_settings(&settings)
-            .expect_err("merged stage sum (1_020_000) exceeds totalTimeoutMs (500_000)");
+            .expect_err("merged stage sum (840_000) exceeds totalTimeoutMs (500_000)");
         match err {
             FusionError::InvalidConfiguration(msg) => {
                 assert!(
                     msg.contains("panelTotalTimeoutMs")
                         && msg.contains("analystTimeoutMs")
-                        && msg.contains("synthesizerTimeoutMs")
                         && msg.contains("totalTimeoutMs"),
                     "error must name the offending fields, got: {msg}"
                 );
@@ -572,7 +678,6 @@ mod tests {
             total_timeout_ms: Some(100_000),
             panel_total_timeout_ms: Some(60_000),
             analyst_timeout_ms: Some(10_000),
-            synthesizer_timeout_ms: Some(10_000),
             analysis_protocol_retries: Some(0),
             ..FusionSettingsJson::default()
         };
@@ -593,8 +698,7 @@ mod tests {
                     {"profile":"anthropic","model":" claude-opus-5 "},
                     {"profile":"openai","model":"gpt-5.6-sol"}
                 ],
-                "analystModel":{"profile":"openai","model":"gpt-5.6-terra"},
-                "synthesizerModel":{"profile":"anthropic","model":"claude-sonnet-5"}
+                "analystModel":{"profile":"openai","model":"gpt-5.6-terra"}
             }"#,
         )
         .unwrap()
@@ -605,7 +709,6 @@ mod tests {
         let cfg = FusionRuntimeConfig::defaults();
         assert!(cfg.panel_models.is_empty());
         assert_eq!(cfg.analyst_model, None);
-        assert_eq!(cfg.synthesizer_model, None);
         assert_eq!(cfg.missing_model_roles(), FusionModelRole::ALL.to_vec());
     }
 
@@ -623,10 +726,6 @@ mod tests {
         assert_eq!(
             cfg.analyst_model,
             Some(FusionModelChoice::new("openai", "gpt-5.6-terra"))
-        );
-        assert_eq!(
-            cfg.synthesizer_model,
-            Some(FusionModelChoice::new("anthropic", "claude-sonnet-5"))
         );
         assert!(cfg.missing_model_roles().is_empty());
     }
@@ -670,11 +769,11 @@ mod tests {
 
     /// `core` and `platform-api` cannot depend on each other, so the settings
     /// READER (`FusionSettingsJson`) and the settings WRITER the UIs use
-    /// (`platform_api::fusion_setup`) spell the same keys twice. This crate is
+    /// (`lingxi_core::host::fusion_setup`) spell the same keys twice. This crate is
     /// the one that sees both: it fails the moment either side is renamed.
     #[test]
     fn the_settings_reader_and_the_setup_writer_agree() {
-        use platform_api::fusion_setup::FusionModelRoles;
+        use lingxi_core::host::fusion_setup::FusionModelRoles;
 
         let roles = FusionModelRoles {
             panels: vec![
@@ -682,7 +781,6 @@ mod tests {
                 FusionModelChoice::new("openai", "gpt-5.6-sol"),
             ],
             analyst: Some(FusionModelChoice::new("openai", "gpt-5.6-terra")),
-            synthesizer: Some(FusionModelChoice::new("anthropic", "claude-sonnet-5")),
         };
         let mut written = serde_json::json!({});
         roles.write_settings_json(&mut written);
@@ -704,7 +802,6 @@ mod tests {
 
         assert_eq!(cfg.panel_models, roles.panels);
         assert_eq!(cfg.analyst_model, roles.analyst);
-        assert_eq!(cfg.synthesizer_model, roles.synthesizer);
         assert!(
             cfg.missing_model_roles().is_empty(),
             "a file the wizard just completed must not still read as unconfigured"
@@ -717,7 +814,7 @@ mod tests {
 
     #[test]
     fn the_enabled_switch_and_the_roles_are_independent_settings() {
-        use platform_api::fusion_setup;
+        use lingxi_core::host::fusion_setup;
 
         let mut written = serde_json::json!({"fusion": {"enabled": true}});
         fusion_setup::FusionModelRoles {
@@ -726,7 +823,6 @@ mod tests {
                 FusionModelChoice::new("openai", "gpt-5.6-sol"),
             ],
             analyst: Some(FusionModelChoice::new("openai", "gpt-5.6-terra")),
-            synthesizer: Some(FusionModelChoice::new("anthropic", "claude-sonnet-5")),
         }
         .write_settings_json(&mut written);
         let settings: lingxi_core::settings::schema::SettingsJson =

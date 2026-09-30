@@ -24,11 +24,11 @@ fn usage_log_path(config_home: &Path) -> PathBuf {
 /// malformed JSON is surfaced so `/skill-doctor` can report it truthfully.
 pub fn read_skill_usage(config_home: &Path) -> Result<HashMap<String, SkillUsageRecord>, String> {
     let path = usage_log_path(config_home);
-    match platform_api::rooted_fs::read_to_string(config_home, Path::new("skill_usage.json")) {
+    match lingxi_core::host::rooted_fs::read_to_string(config_home, Path::new("skill_usage.json")) {
         Ok(content) if content.trim().is_empty() => Ok(HashMap::new()),
         Ok(content) => serde_json::from_str(&content)
             .map_err(|e| format!("invalid JSON in {}: {e}", path.display())),
-        Err(platform_api::FsError::NotFound(_)) => Ok(HashMap::new()),
+        Err(lingxi_core::host::FsError::NotFound(_)) => Ok(HashMap::new()),
         Err(e) => Err(format!("failed to read {}: {e}", path.display())),
     }
 }
@@ -41,11 +41,11 @@ pub fn record_skill_usage(config_home: &Path, name: &str) -> Result<(), String> 
     let path = usage_log_path(config_home);
     std::fs::create_dir_all(config_home)
         .map_err(|e| format!("failed to create {}: {e}", config_home.display()))?;
-    let _lock = platform_api::rooted_fs::lock_exclusive(
+    let _lock = lingxi_core::host::rooted_fs::lock_exclusive(
         config_home,
         Path::new(".skill_usage.lock"),
-        platform_api::rooted_fs::PRIVATE_DIR_MODE,
-        platform_api::rooted_fs::PRIVATE_FILE_MODE,
+        lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
+        lingxi_core::host::rooted_fs::PRIVATE_FILE_MODE,
     )
     .map_err(|e| format!("failed to lock {}: {e}", path.display()))?;
     let mut map = read_skill_usage(config_home)?;
@@ -58,11 +58,11 @@ pub fn record_skill_usage(config_home: &Path, name: &str) -> Result<(), String> 
     let mut serialized = serde_json::to_vec_pretty(&map)
         .map_err(|e| format!("failed to serialize {}: {e}", path.display()))?;
     serialized.push(b'\n');
-    platform_api::rooted_fs::atomic_write(
+    lingxi_core::host::rooted_fs::atomic_write(
         config_home,
         Path::new("skill_usage.json"),
         &serialized,
-        platform_api::rooted_fs::AtomicWriteOptions::default(),
+        lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
     )
     .map_err(|e| format!("failed to write {}: {e}", path.display()))
 }

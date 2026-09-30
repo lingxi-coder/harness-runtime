@@ -2,7 +2,7 @@
 //!
 //! A side query is a stateless one-shot LLM call (see [`crate::side_query`]).
 //! [`ProviderSideQueryClient`] wires the [`SideQueryRequest`] DTO to the
-//! configured provider and decodes the [`LlmResponse`] back into a
+//! configured provider and decodes the [`HistoryResponse`] back into a
 //! [`SideQueryResponse`]. Utility callers can construct an isolated Anthropic
 //! client with [`ProviderSideQueryClient::new`]. Session-bound compaction and
 //! recap use [`ProviderSideQueryClient::from_service`] so the fork reuses the
@@ -34,19 +34,19 @@ use crate::side_query::{
     SideQueryRequest, SideQueryResponse,
 };
 use async_trait::async_trait;
+#[cfg(test)]
+use lingxi_core::host::http::SseStream;
+#[cfg(test)]
+use lingxi_core::host::{HttpError, HttpTransport};
+use lingxi_core::types::MediaAnalysis;
+#[cfg(test)]
+use lingxi_core::types::{HttpRequest, HttpResponse};
 use llm_runtime::Transport;
 use llm_runtime::{
-    AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, DefaultLlmClient,
-    LlmError, LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
+    AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, LlmError, LlmRequest,
+    ModelProfile, ModelRuntime, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
     StaticCredentialProvider, SystemBlock,
 };
-#[cfg(test)]
-use platform_api::http::{RawByteStream, SseStream};
-#[cfg(test)]
-use platform_api::{HttpError, HttpTransport};
-use protocol::MediaAnalysis;
-#[cfg(test)]
-use protocol::{HttpRequest, HttpResponse};
 use std::sync::Arc;
 
 /// Default Anthropic API base URL used when the caller passes `None`.
@@ -58,7 +58,7 @@ const SIDEQUERY_CRED_ID: &str = "sidequery_key";
 enum ProviderSideQueryBackend {
     /// Standalone utility-query client built from a raw Anthropic API key.
     Direct {
-        client: DefaultLlmClient,
+        client: ModelRuntime,
         transport: Arc<dyn Transport>,
     },
     /// The live session service used by compaction/recap.
@@ -114,7 +114,7 @@ impl ProviderSideQueryClient {
                 // entry keyed on the empty prefix so that ANY model string is
                 // accepted, then override at request time with the actual model.
                 //
-                // Because `DefaultLlmClient::prepare` resolves models by exact
+                // Because `ModelRuntime::prepare` resolves models by exact
                 // `display_model` or `aliases` match, we must register the
                 // models that callers actually request. The known set is:
                 //   - claude-haiku-4-5 (memory selector)
@@ -129,7 +129,7 @@ impl ProviderSideQueryClient {
         };
 
         let cred_provider = Arc::new(StaticCredentialProvider::new(Credential::ApiKey(api_key)));
-        let client = DefaultLlmClient::from_config(config)
+        let client = ModelRuntime::from_config(config)
             .expect("sidequery ClientConfig is structurally valid")
             .with_credential_provider(cred_provider);
 
@@ -217,7 +217,7 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
     ]
 }
 
-/// Decode an [`llm_runtime::LlmResponse`] into the side-query response shape.
+/// Decode an [`llm_runtime::HistoryResponse`] into the side-query response shape.
 ///
 /// * `Text` blocks are concatenated into the flattened `text`, except compact
 ///   responses, where cc 2.1.261 N0e selects the first text block only.
@@ -229,11 +229,11 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
 ///   as JSON. A non-JSON body leaves `structured` as `None` rather than
 ///   erroring — `MemorySelector` tolerates `None` (empty selection), so the
 ///   best-effort path is the safer default.
-/// * `usage` maps `llm_runtime::Usage.billable_tokens` → `cost::Usage` with the
+/// * `usage` maps canonical SDK counts → `cost::Usage` with the
 ///   same cross-naming the provider's own cost path uses: API `cache_write` →
 ///   cost `cache_write`, API `cache_read` → cost `cache_read`.
 fn decode_response(
-    resp: llm_runtime::LlmResponse,
+    resp: llm_runtime::HistoryResponse,
     want_structured: bool,
     first_text_only: bool,
     separate_text_blocks: bool,
@@ -295,15 +295,17 @@ fn decode_response(
         None
     };
 
-    let bt = resp.usage.billable_tokens;
+    let bt = resp.usage.counts();
     let usage = cost::Usage {
         tokens: cost::TokenUsage {
-            input: bt.input,
-            output: bt.output,
-            cache_read: bt.cache_read,
-            cache_write: bt.cache_write,
-            cache_write_1h: 0,
-            reasoning_output: bt.reasoning_output,
+            input: bt.input_tokens,
+            output: bt.output_tokens.saturating_sub(bt.reasoning_tokens),
+            cache_read: bt.cache_read_tokens,
+            cache_write: bt
+                .cache_write_tokens
+                .saturating_sub(bt.cache_write_1h_tokens),
+            cache_write_1h: bt.cache_write_1h_tokens,
+            reasoning_output: bt.reasoning_tokens,
         },
         server_tool_use: None,
         speed: None,
@@ -416,7 +418,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                 request.temperature,
                 Some(query_source),
             )?;
-            canonical.model_attempt = request.model_attempt;
+            canonical.execution.model_attempt = request.model_attempt;
             let resp = service.execute_side_query_request(canonical).await?;
             return Ok(decode_response(
                 resp,
@@ -443,7 +445,7 @@ impl SideQueryClient for ProviderSideQueryClient {
             .map(|s| vec![SystemBlock::text(s)])
             .unwrap_or_default();
 
-        // Convert protocol::ConversationMessage → llm_runtime::Message.
+        // Convert lingxi_core::types::ConversationMessage → llm_runtime::Message.
         // We inline a minimal conversion here so sidequery does not need to
         // depend on `agent` (which depends back on sidequery — a cycle).
         let messages = convert_messages(request.messages)?;
@@ -467,28 +469,39 @@ impl SideQueryClient for ProviderSideQueryClient {
         });
 
         let query_source = request.query_source.as_str().to_string();
-        let llm_req = LlmRequest {
-            model: request.model,
+        let family = client.protocol_for_model(&request.model, request.profile.as_deref())?;
+        let (input, overrides) = llm_runtime::convert::history_input(
+            &request.model,
+            &messages,
+            &system,
+            &tools,
+            family,
+        )?;
+        let mut llm_req = LlmRequest {
+            input,
             profile: request.profile,
-            system,
-            messages,
-            tools,
-            // output_format drives the structured text decode (NOT
-            // response_format); max_retries is a caller-side budget.
-            tool_choice: convert_tool_choice(request.tool_choice.as_ref()),
-            stop_sequences: request.stop_sequences,
-            max_tokens: Some(request.max_tokens),
-            temperature: request.temperature.map(f64::from),
-            reasoning,
-            effort: request.effort,
-            capture_retry_count: true,
-            query_source: Some(query_source),
-            ..LlmRequest::default()
+            stream: false,
+            execution: llm_runtime::ExecutionContext {
+                input_protocol: Some(family),
+                capture_retry_count: true,
+                query_source: Some(query_source),
+                message_json_string_overrides: overrides,
+                ..Default::default()
+            },
         };
+        llm_req.set_tool_choice(convert_tool_choice(request.tool_choice.as_ref()));
+        llm_req.input.stop_sequences = request.stop_sequences;
+        llm_req.input.max_tokens = Some(request.max_tokens);
+        llm_req.input.temperature = request.temperature;
+        llm_req.set_reasoning(reasoning);
+        llm_req.set_effort(request.effort)?;
 
         // Dispatch directly through the shared SDK transport.
 
-        let resp = client.execute(&llm_req, transport.clone()).await?;
+        let resp = llm_runtime::HistoryResponse::from_model(
+            client.execute(&llm_req, transport.clone()).await?,
+            family,
+        )?;
 
         Ok(decode_response(
             resp,
@@ -541,7 +554,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                         Some(query_source.as_str()),
                     )
                     .map_err(map_structured_llm_error)?;
-                canonical.model_attempt = request.model_attempt;
+                canonical.execution.model_attempt = request.model_attempt;
                 let stream = service
                     .stream_request(canonical)
                     .await
@@ -568,26 +581,45 @@ impl SideQueryClient for ProviderSideQueryClient {
                     &request.model,
                     request.temperature,
                 );
-                let llm_req = LlmRequest {
-                    model: request.model,
+                let family = client
+                    .protocol_for_model(&request.model, request.profile.as_deref())
+                    .map_err(map_structured_llm_error)?;
+                let (input, overrides) = llm_runtime::convert::history_input(
+                    &request.model,
+                    &messages,
+                    &system,
+                    &[],
+                    family,
+                )
+                .map_err(map_structured_llm_error)?;
+                let mut llm_req = LlmRequest {
+                    input,
                     profile: request.profile,
-                    system,
-                    messages,
-                    tools: Vec::new(),
-                    max_tokens: Some(request.max_tokens),
-                    temperature: temperature.map(f64::from),
-                    capture_retry_count: true,
-                    query_source: Some(request.query_source.as_str().to_string()),
-                    response_format: Some(llm_runtime::ResponseFormat::JsonSchema {
-                        schema: request.schema,
-                    }),
-                    ..LlmRequest::default()
+                    stream: false,
+                    execution: llm_runtime::ExecutionContext {
+                        input_protocol: Some(family),
+                        capture_retry_count: true,
+                        query_source: Some(request.query_source.as_str().to_string()),
+                        message_json_string_overrides: overrides,
+                        ..Default::default()
+                    },
                 };
-
-                client
-                    .execute(&llm_req, transport.clone())
-                    .await
-                    .map_err(map_structured_llm_error)?
+                llm_req.input.max_tokens = Some(request.max_tokens);
+                llm_req.input.temperature = temperature;
+                llm_req.input.output_format =
+                    llm_runtime::services::sdk::protocol::OutputFormat::JsonSchema {
+                        name: "response".into(),
+                        schema: request.schema,
+                        strict: true,
+                    };
+                llm_runtime::HistoryResponse::from_model(
+                    client
+                        .execute(&llm_req, transport.clone())
+                        .await
+                        .map_err(map_structured_llm_error)?,
+                    family,
+                )
+                .map_err(map_structured_llm_error)?
             }
         };
         let request_id = (!resp.id.is_empty()).then(|| resp.id.clone());
@@ -690,9 +722,9 @@ fn map_structured_llm_error(err: llm_runtime::LlmError) -> SideQueryError {
     SideQueryError::Api(err)
 }
 
-/// Drive a `query_json_schema` event stream to its final [`llm_runtime::LlmResponse`].
+/// Drive a `query_json_schema` event stream to its final [`llm_runtime::HistoryResponse`].
 ///
-/// F003: this previously scanned for an [`llm_runtime::LlmEvent::Completed`]
+/// F003: this previously scanned for an [`llm_runtime::HistoryEvent::Completed`]
 /// event by hand — but the Anthropic codec (the provider every real Fusion
 /// analyst call over the Session backend uses) never emits `Completed`; a
 /// normal stream ends `MessageStart` → `ContentBlockStart/Delta/Stop` →
@@ -706,40 +738,40 @@ fn map_structured_llm_error(err: llm_runtime::LlmError) -> SideQueryError {
 /// when a provider does send it) the same way every other streaming call in
 /// the codebase does.
 async fn collect_completed_response(
-    stream: impl futures_util::Stream<Item = Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>
+    stream: impl futures_util::Stream<Item = Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>>
         + Send
         + 'static,
-) -> Result<llm_runtime::LlmResponse, SideQueryError> {
+) -> Result<llm_runtime::HistoryResponse, SideQueryError> {
     llm_runtime::stream_accumulator::accumulate_stream_salvaging(Box::pin(stream))
         .await
         .map_err(|(_partial_content, err)| map_structured_llm_error(err))
 }
 
 fn convert_messages(
-    messages: Vec<protocol::ConversationMessage>,
+    messages: Vec<lingxi_core::types::ConversationMessage>,
 ) -> Result<Vec<llm_runtime::Message>, llm_runtime::LlmError> {
     messages.into_iter().map(convert_one_message).collect()
 }
 
 fn convert_one_message(
-    msg: protocol::ConversationMessage,
+    msg: lingxi_core::types::ConversationMessage,
 ) -> Result<llm_runtime::Message, llm_runtime::LlmError> {
     match msg {
-        protocol::ConversationMessage::User { content, .. } => Ok(llm_runtime::Message {
+        lingxi_core::types::ConversationMessage::User { content, .. } => Ok(llm_runtime::Message {
             role: "user".to_string(),
             content: content
                 .into_iter()
                 .map(convert_content_block)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
-        protocol::ConversationMessage::Assistant { content, .. } => Ok(llm_runtime::Message {
+        lingxi_core::types::ConversationMessage::Assistant { content, .. } => Ok(llm_runtime::Message {
             role: "assistant".to_string(),
             content: content
                 .into_iter()
                 .map(convert_content_block)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
-        protocol::ConversationMessage::System { .. } => Err(llm_runtime::LlmError::InvalidRequest {
+        lingxi_core::types::ConversationMessage::System { .. } => Err(llm_runtime::LlmError::InvalidRequest {
             message:
                 "System messages must not appear in the messages vec; pass them via system_prompt"
                     .to_string(),
@@ -748,17 +780,17 @@ fn convert_one_message(
 }
 
 fn convert_content_block(
-    block: protocol::ContentBlock,
+    block: lingxi_core::types::ContentBlock,
 ) -> Result<llm_runtime::ContentBlock, llm_runtime::LlmError> {
     match block {
-        protocol::ContentBlock::ProviderContent { protocol, value } => {
+        lingxi_core::types::ContentBlock::ProviderContent { protocol, value } => {
             Ok(llm_runtime::ContentBlock::ProviderContent { protocol, value })
         }
-        protocol::ContentBlock::Text { text } => Ok(llm_runtime::ContentBlock::Text {
+        lingxi_core::types::ContentBlock::Text { text } => Ok(llm_runtime::ContentBlock::Text {
             text,
             cache_control: None,
         }),
-        protocol::ContentBlock::TextJsUtf16 {
+        lingxi_core::types::ContentBlock::TextJsUtf16 {
             text,
             utf16_code_units,
         } => Ok(llm_runtime::ContentBlock::TextJsUtf16 {
@@ -766,7 +798,7 @@ fn convert_content_block(
             utf16_code_units,
             cache_control: None,
         }),
-        protocol::ContentBlock::ToolUse {
+        lingxi_core::types::ContentBlock::ToolUse {
             id,
             name,
             input,
@@ -777,7 +809,7 @@ fn convert_content_block(
             name,
             input,
         }),
-        protocol::ContentBlock::ToolResult {
+        lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id,
             content,
             is_error,
@@ -796,35 +828,37 @@ fn convert_content_block(
             cache_control: None,
             cache_reference: None,
         }),
-        protocol::ContentBlock::Thinking {
+        lingxi_core::types::ContentBlock::Thinking {
             thinking,
             signature,
         } => Ok(llm_runtime::ContentBlock::Reasoning {
             text: thinking,
             signature,
         }),
-        protocol::ContentBlock::Image { source } => convert_image(source),
-        protocol::ContentBlock::Document { source } => convert_document(source),
-        protocol::ContentBlock::MediaAnalysis { analysis } => Ok(llm_runtime::ContentBlock::Text {
-            text: render_media_analysis(&analysis),
-            cache_control: None,
-        }),
+        lingxi_core::types::ContentBlock::Image { source } => convert_image(source),
+        lingxi_core::types::ContentBlock::Document { source } => convert_document(source),
+        lingxi_core::types::ContentBlock::MediaAnalysis { analysis } => {
+            Ok(llm_runtime::ContentBlock::Text {
+                text: render_media_analysis(&analysis),
+                cache_control: None,
+            })
+        }
         // Low-frequency server-side blocks: replayed verbatim into the request
         // so the provider round-trips them (see agent::convert::convert_block).
-        protocol::ContentBlock::RedactedThinking { data } => {
+        lingxi_core::types::ContentBlock::RedactedThinking { data } => {
             Ok(llm_runtime::ContentBlock::RedactedThinking { data })
         }
-        protocol::ContentBlock::ServerToolUse { id, name, input } => {
+        lingxi_core::types::ContentBlock::ServerToolUse { id, name, input } => {
             Ok(llm_runtime::ContentBlock::ServerToolUse { id, name, input })
         }
-        protocol::ContentBlock::ConnectorText {
+        lingxi_core::types::ContentBlock::ConnectorText {
             connector_text,
             signature,
         } => Ok(llm_runtime::ContentBlock::ConnectorText {
             connector_text,
             signature,
         }),
-        protocol::ContentBlock::AdvisorToolResult {
+        lingxi_core::types::ContentBlock::AdvisorToolResult {
             tool_use_id,
             content,
             is_error,
@@ -837,10 +871,10 @@ fn convert_content_block(
 }
 
 fn convert_image(
-    source: protocol::ImageSource,
+    source: lingxi_core::types::ImageSource,
 ) -> Result<llm_runtime::ContentBlock, llm_runtime::LlmError> {
     match source {
-        protocol::ImageSource::Base64 { media_type, data } => {
+        lingxi_core::types::ImageSource::Base64 { media_type, data } => {
             use base64::Engine as _;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&data)
@@ -849,15 +883,17 @@ fn convert_image(
                 })?;
             Ok(llm_runtime::ContentBlock::Image { media_type, bytes })
         }
-        protocol::ImageSource::Url { url } => Ok(llm_runtime::ContentBlock::ImageUrl { url }),
+        lingxi_core::types::ImageSource::Url { url } => {
+            Ok(llm_runtime::ContentBlock::ImageUrl { url })
+        }
     }
 }
 
 fn convert_document(
-    source: protocol::DocumentSource,
+    source: lingxi_core::types::DocumentSource,
 ) -> Result<llm_runtime::ContentBlock, llm_runtime::LlmError> {
     match source {
-        protocol::DocumentSource::Base64 { media_type, data } => {
+        lingxi_core::types::DocumentSource::Base64 { media_type, data } => {
             use base64::Engine as _;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&data)
@@ -940,7 +976,7 @@ fn convert_one_tool(
 mod tests {
     use super::*;
     use crate::purposes::QuerySource;
-    use protocol::{ConversationMessage, MessageId};
+    use lingxi_core::types::{ConversationMessage, MessageId};
     use std::sync::Mutex;
 
     /// Minimal in-process [`HttpTransport`] that returns a single scripted
@@ -1005,11 +1041,11 @@ mod tests {
     async fn registered_side_queries_reject_direct_backend_and_json_cannot_grant_authority() {
         let transport = Arc::new(StubTransport::new("unused"));
         let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
-        let run = platform_api::ModelAttemptRun::new(Arc::new(()));
+        let run = lingxi_core::host::ModelAttemptRun::new(Arc::new(()));
         let mut request = req(None);
         let ordinary = serde_json::to_value(&request).unwrap();
         request.model_attempt = Some(
-            run.context(platform_api::ModelAttemptStage::Synthesis, None)
+            run.context(lingxi_core::host::ModelAttemptStage::Analyst, None)
                 .unwrap(),
         );
         assert_eq!(serde_json::to_value(&request).unwrap(), ordinary);
@@ -1022,7 +1058,7 @@ mod tests {
         assert!(client.query(request).await.is_err());
         let mut strict = strict_req();
         strict.model_attempt = Some(
-            run.context(platform_api::ModelAttemptStage::Analyst, None)
+            run.context(lingxi_core::host::ModelAttemptStage::Analyst, None)
                 .unwrap(),
         );
         assert!(client.query_json_schema(strict).await.is_err());
@@ -1221,7 +1257,7 @@ mod tests {
                 connection: Default::default(),
             }],
         };
-        let parent_client = DefaultLlmClient::from_config(config)
+        let parent_client = ModelRuntime::from_config(config)
             .expect("parent client config")
             .with_credential_provider(Arc::new(StaticCredentialProvider::new(
                 Credential::BearerToken("parent-oauth-token".to_string()),
@@ -1772,7 +1808,7 @@ mod tests {
                 connection: Default::default(),
             }],
         };
-        let session_client = DefaultLlmClient::from_config(config)
+        let session_client = ModelRuntime::from_config(config)
             .expect("session client config")
             .with_credential_provider(Arc::new(StaticCredentialProvider::new(
                 Credential::BearerToken("session-oauth-token".to_string()),
@@ -1885,7 +1921,7 @@ mod tests {
     struct SchemaAttemptProbe {
         usages: Mutex<
             Vec<(
-                llm_runtime::Usage,
+                llm_runtime::ExecutionUsage,
                 llm_runtime::ModelAttemptUsageCompleteness,
             )>,
         >,
@@ -1899,7 +1935,7 @@ mod tests {
     impl llm_runtime::ModelAttemptHooks for SchemaAttemptHooks {
         async fn begin(
             &self,
-            _: &platform_api::ModelAttemptContext,
+            _: &lingxi_core::host::ModelAttemptContext,
             _: &LlmRequest,
             _: &llm_runtime::PreparedLlmCall,
         ) -> Result<Box<dyn llm_runtime::ModelAttemptLease>, LlmError> {
@@ -1913,7 +1949,7 @@ mod tests {
         }
         fn observe_usage(
             &mut self,
-            usage: &llm_runtime::Usage,
+            usage: &llm_runtime::ExecutionUsage,
             completeness: llm_runtime::ModelAttemptUsageCompleteness,
         ) {
             self.0
@@ -1948,8 +1984,8 @@ mod tests {
         service.set_model_attempt_hooks(Arc::new(SchemaAttemptHooks(probe.clone())));
         let mut request = strict_req();
         request.model_attempt = Some(
-            platform_api::ModelAttemptRun::new(Arc::new(()))
-                .context(platform_api::ModelAttemptStage::Analyst, None)
+            lingxi_core::host::ModelAttemptRun::new(Arc::new(()))
+                .context(lingxi_core::host::ModelAttemptStage::Analyst, None)
                 .unwrap(),
         );
         assert!(matches!(
@@ -1959,8 +1995,14 @@ mod tests {
         assert!(probe.settled.load(std::sync::atomic::Ordering::SeqCst));
         let usages = probe.usages.lock().unwrap();
         let (usage, completeness) = usages.last().unwrap();
-        assert_eq!(usage.billable_tokens.input, 1);
-        assert_eq!(usage.billable_tokens.output, 1);
+        assert_eq!(usage.counts().input_tokens, 1);
+        assert_eq!(
+            usage
+                .counts()
+                .output_tokens
+                .saturating_sub(usage.counts().reasoning_tokens),
+            1
+        );
         assert_eq!(
             *completeness,
             llm_runtime::ModelAttemptUsageCompleteness::Complete
@@ -2059,7 +2101,7 @@ mod tests {
                     // real gpt-5.6-*/kimi-* judge rows carry this exact
                     // value (`llm-runtime/data/models-dev/openai.json` etc.,
                     // mapped by `catalog::map::to_metadata`).
-                    metadata: platform_api::ModelMetadata {
+                    metadata: lingxi_core::host::ModelMetadata {
                         temperature_control: Some(false),
                         ..Default::default()
                     },
@@ -2081,7 +2123,7 @@ mod tests {
                 connection: Default::default(),
             }],
         };
-        let session_client = DefaultLlmClient::from_config(config)
+        let session_client = ModelRuntime::from_config(config)
             .expect("session client config")
             .with_credential_provider(Arc::new(StaticCredentialProvider::new(
                 Credential::BearerToken("session-oauth-token".to_string()),

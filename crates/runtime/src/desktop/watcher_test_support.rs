@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use futures_core::Stream;
-use platform_api::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use lingxi_core::host::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use platform_posix::PosixFileSystem;
 use std::path::PathBuf;
 use std::pin::Pin;

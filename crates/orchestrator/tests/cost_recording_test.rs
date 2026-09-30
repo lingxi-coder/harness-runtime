@@ -3,20 +3,20 @@
 
 use cost::pricing::PricingCatalog;
 use cost::CostTracker;
-use llm_runtime::{ContentBlock, LlmResponse, TokenUsage, Usage};
+use lingxi_core::types::SessionId;
+use llm_runtime::{ContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use protocol::SessionId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tool_api::registry::ToolRegistry;
 
-/// Build an `LlmResponse` that emulates a single `end_turn` API reply with
+/// Build an `HistoryResponse` that emulates a single `end_turn` API reply with
 /// the given token usage.
-fn end_turn_response_with_usage(input: u64, output: u64) -> LlmResponse {
-    LlmResponse {
+fn end_turn_response_with_usage(input: u64, output: u64) -> HistoryResponse {
+    HistoryResponse {
         id: "msg_mock".to_string(),
         model: "claude-opus-4-6".to_string(),
         // Visible text so the response is a genuine end_turn completion — an
@@ -29,11 +29,17 @@ fn end_turn_response_with_usage(input: u64, output: u64) -> LlmResponse {
         stop_reason: Some("end_turn".to_string()),
         stop_details: None,
         usage: Usage {
-            billable_tokens: TokenUsage {
-                input,
-                output,
-                ..Default::default()
-            },
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    reasoning_tokens: 0,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
             ..Default::default()
         },
         cost: None,
@@ -178,7 +184,7 @@ async fn run_turn_emits_tengu_api_success_when_bus_attached() {
 
 /// A non-`end_turn` (looping) reply that records the same $0.0175 (17.5M nano)
 /// cost per turn.
-fn looping_response_with_usage(input: u64, output: u64) -> LlmResponse {
+fn looping_response_with_usage(input: u64, output: u64) -> HistoryResponse {
     let mut r = end_turn_response_with_usage(input, output);
     r.stop_reason = Some("max_tokens".to_string()); // not end_turn → loop continues
     r

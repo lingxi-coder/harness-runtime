@@ -1,6 +1,6 @@
 use llm_runtime::{
-    CostEstimator, LlmError, PricingCatalog, PricingConfig, PricingModelRef, PricingPolicy,
-    ProviderId, TokenPricing, TokenUsage, Usage,
+    CostEstimator, LlmError, PricingCatalog, PricingConfig, PricingModelRef, PricingOverride,
+    PricingPolicy, ProviderId, TokenPricing,
 };
 
 fn pricing_model() -> PricingModelRef {
@@ -12,16 +12,23 @@ fn pricing_model() -> PricingModelRef {
     }
 }
 
-fn usage() -> Usage {
-    Usage {
-        billable_tokens: TokenUsage {
-            input: 1_000_000,
-            output: 2_000_000,
-            cache_write: 500_000,
-            cache_read: 250_000,
-            reasoning_output: 100_000,
-        },
-        ..Usage::default()
+fn usage() -> lingxi_llm_client::protocol::Usage {
+    lingxi_llm_client::protocol::Usage {
+        input_tokens: 1_000_000,
+        output_tokens: 2_100_000,
+        cache_write_tokens: 500_000,
+        cache_read_tokens: 250_000,
+        reasoning_tokens: 100_000,
+        ..Default::default()
+    }
+}
+
+fn fixed_price(input: f64, output: f64) -> TokenPricing {
+    TokenPricing {
+        cache_read_per_million: Some(0.0),
+        cache_write_per_million: Some(0.0),
+        cache_write_1h_per_million: Some(0.0),
+        ..TokenPricing::input_output(input, output)
     }
 }
 
@@ -31,11 +38,13 @@ fn exact_price_match_computes_independent_token_bucket_costs() {
         ProviderId::AnthropicFirstParty,
         "claude-sonnet-4",
         TokenPricing {
-            input_per_million: 3.0,
-            output_per_million: 15.0,
-            cache_write_per_million: 3.75,
-            cache_read_per_million: 0.30,
-            reasoning_per_million: 15.0,
+            input_per_million: Some(3.0),
+            output_per_million: Some(15.0),
+            cache_write_per_million: Some(3.75),
+            cache_write_1h_per_million: Some(3.75),
+            cache_read_per_million: Some(0.30),
+            reasoning_per_million: Some(15.0),
+            ..Default::default()
         },
     );
     let estimator = CostEstimator::new(catalog, PricingPolicy::MarkUnestimated);
@@ -59,12 +68,12 @@ fn external_override_wins_over_builtin_price() {
         .with_price(
             ProviderId::AnthropicFirstParty,
             "claude-sonnet-4",
-            TokenPricing::input_output(3.0, 15.0),
+            fixed_price(3.0, 15.0),
         )
         .with_override(
             ProviderId::AnthropicFirstParty,
             "claude-sonnet-4",
-            TokenPricing::input_output(1.0, 2.0),
+            fixed_price(1.0, 2.0),
         );
     let estimator = CostEstimator::new(catalog, PricingPolicy::MarkUnestimated);
 
@@ -101,6 +110,120 @@ fn require_priced_policy_returns_cost_unavailable_for_unknown_pricing() {
     assert!(matches!(error, LlmError::CostUnavailable { .. }));
 }
 
+#[test]
+fn static_estimator_rejects_context_dependent_rules() {
+    let mut pricing = fixed_price(1.0, 2.0);
+    pricing
+        .rules
+        .push(lingxi_llm_client::protocol::PriceRule::default());
+    let estimator = CostEstimator::new(
+        PricingCatalog::empty().with_price(
+            ProviderId::AnthropicFirstParty,
+            "claude-sonnet-4",
+            pricing,
+        ),
+        PricingPolicy::RequirePriced,
+    );
+    assert!(matches!(
+        estimator.estimate(pricing_model(), &usage()),
+        Err(LlmError::CostUnavailable { .. })
+    ));
+
+    let mut pricing = fixed_price(1.0, 2.0);
+    pricing.quota.push(lingxi_llm_client::protocol::QuotaPrice {
+        service_tier: lingxi_llm_client::protocol::ServiceTier::Standard,
+        multiplier: 1.0,
+        unit: "request".into(),
+        source: "fixture".into(),
+        verified_at: None,
+    });
+    let estimator = CostEstimator::new(
+        PricingCatalog::empty().with_price(
+            ProviderId::AnthropicFirstParty,
+            "claude-sonnet-4",
+            pricing,
+        ),
+        PricingPolicy::RequirePriced,
+    );
+    assert!(matches!(
+        estimator.estimate(pricing_model(), &usage()),
+        Err(LlmError::CostUnavailable { .. })
+    ));
+}
+
+#[test]
+fn unknown_cache_bucket_fails_only_when_consumed() {
+    let pricing = TokenPricing::input_output(1.0, 2.0);
+    let estimator = CostEstimator::new(
+        PricingCatalog::empty().with_price(
+            ProviderId::AnthropicFirstParty,
+            "claude-sonnet-4",
+            pricing,
+        ),
+        PricingPolicy::RequirePriced,
+    );
+    let mut observed = lingxi_llm_client::protocol::Usage {
+        input_tokens: 1_000_000,
+        ..Default::default()
+    };
+    assert_eq!(
+        estimator
+            .estimate(pricing_model(), &observed)
+            .unwrap()
+            .total_cost_usd,
+        Some(1.0)
+    );
+    observed.cache_read_tokens = 1;
+    assert!(matches!(
+        estimator.estimate(pricing_model(), &observed),
+        Err(LlmError::CostUnavailable { .. })
+    ));
+}
+
+#[test]
+fn explicit_zero_reasoning_rate_remains_free() {
+    let mut pricing = fixed_price(1.0, 2.0);
+    pricing.reasoning_per_million = Some(0.0);
+    let estimator = CostEstimator::new(
+        PricingCatalog::empty().with_price(
+            ProviderId::AnthropicFirstParty,
+            "claude-sonnet-4",
+            pricing,
+        ),
+        PricingPolicy::RequirePriced,
+    );
+    let observed = lingxi_llm_client::protocol::Usage {
+        output_tokens: 1_000_000,
+        reasoning_tokens: 1_000_000,
+        ..Default::default()
+    };
+    let estimate = estimator.estimate(pricing_model(), &observed).unwrap();
+    assert_eq!(estimate.output_cost_usd, Some(0.0));
+    assert_eq!(estimate.reasoning_cost_usd, Some(0.0));
+}
+
+#[test]
+fn catalog_provenance_wins_over_embedded_price_source() {
+    let mut pricing = fixed_price(1.0, 2.0);
+    pricing.source = Some("external-label".into());
+    let estimator = CostEstimator::new(
+        PricingCatalog::empty().with_price(
+            ProviderId::AnthropicFirstParty,
+            "claude-sonnet-4",
+            pricing,
+        ),
+        PricingPolicy::RequirePriced,
+    );
+    assert_eq!(
+        estimator
+            .estimate(pricing_model(), &usage())
+            .unwrap()
+            .pricing_source
+            .as_deref(),
+        Some("builtin")
+    );
+}
+
 // ── Task 2: add_override + PricingConfig serde tests ─────────────────────────
 
 /// `add_override` (mutable builder) produces the same result as the existing
@@ -110,22 +233,19 @@ fn add_override_wins_over_builtin_price() {
     let mut catalog = PricingCatalog::empty().with_price(
         ProviderId::AnthropicFirstParty,
         "claude-sonnet-4",
-        TokenPricing::input_output(3.0, 15.0),
+        fixed_price(3.0, 15.0),
     );
     // add_override applied after construction — should shadow the builtin.
     catalog.add_override(
         ProviderId::AnthropicFirstParty,
         "claude-sonnet-4",
-        TokenPricing::input_output(1.5, 7.0),
+        fixed_price(1.5, 7.0),
     );
     let estimator = CostEstimator::new(catalog, PricingPolicy::MarkUnestimated);
 
-    let usage_1m = Usage {
-        billable_tokens: TokenUsage {
-            input: 1_000_000,
-            output: 1_000_000,
-            ..Default::default()
-        },
+    let usage_1m = lingxi_llm_client::protocol::Usage {
+        input_tokens: 1_000_000,
+        output_tokens: 1_000_000,
         ..Default::default()
     };
     let estimate = estimator
@@ -149,7 +269,7 @@ fn add_override_wins_over_builtin_price() {
 /// `PricingConfig` with overrides round-trips through JSON serde.
 #[test]
 fn pricing_config_with_overrides_serde_roundtrip() {
-    let tp = TokenPricing {
+    let tp = PricingOverride {
         input_per_million: 1.5,
         output_per_million: 6.0,
         cache_write_per_million: 1.875,
@@ -193,7 +313,7 @@ fn pricing_config_absent_overrides_deserializes_to_empty() {
     assert!(default_cfg.overrides.is_empty());
 }
 
-/// `TokenPricing` JSON round-trip via camelCase serde names.
+/// The settings override JSON retains its camelCase field names.
 #[test]
 fn token_pricing_serde_roundtrip_camel_case() {
     let json = r#"{
@@ -203,7 +323,7 @@ fn token_pricing_serde_roundtrip_camel_case() {
         "cacheReadPerMtok": 0.30,
         "reasoningPerMtok": 1.5
     }"#;
-    let tp: TokenPricing = serde_json::from_str(json).expect("deserialize");
+    let tp: PricingOverride = serde_json::from_str(json).expect("deserialize");
     assert!((tp.input_per_million - 3.0).abs() < 1e-12);
     assert!((tp.output_per_million - 15.0).abs() < 1e-12);
     assert!((tp.cache_write_per_million - 3.75).abs() < 1e-12);
@@ -226,19 +346,19 @@ fn token_pricing_serde_roundtrip_camel_case() {
 #[test]
 fn token_pricing_omitted_reasoning_defaults_to_output() {
     let json = r#"{"inputPerMtok": 2.0, "outputPerMtok": 8.0}"#;
-    let tp: TokenPricing = serde_json::from_str(json).expect("deserialize");
+    let tp: PricingOverride = serde_json::from_str(json).expect("deserialize");
     assert!((tp.cache_write_per_million - 0.0).abs() < 1e-12);
     assert!((tp.cache_read_per_million - 0.0).abs() < 1e-12);
     assert!((tp.reasoning_per_million - 8.0).abs() < 1e-12);
-    assert_eq!(tp, TokenPricing::input_output(2.0, 8.0));
+    assert_eq!(tp, PricingOverride::input_output(2.0, 8.0));
 }
 
 #[test]
 fn token_pricing_explicit_zero_reasoning_survives_serde() {
     let json = r#"{"inputPerMtok": 2.0, "outputPerMtok": 8.0, "reasoningPerMtok": 0.0}"#;
-    let tp: TokenPricing = serde_json::from_str(json).expect("deserialize");
+    let tp: PricingOverride = serde_json::from_str(json).expect("deserialize");
     assert_eq!(tp.reasoning_per_million, 0.0);
-    let roundtrip: TokenPricing =
+    let roundtrip: PricingOverride =
         serde_json::from_value(serde_json::to_value(tp).unwrap()).unwrap();
     assert_eq!(roundtrip, tp);
 }
@@ -248,7 +368,7 @@ async fn deepseek_override_is_fixed_across_peak_hours_without_changing_sibling_p
     use lingxi_llm_client::protocol::{
         InferenceReport, ServiceTier, Submission, UsageReport, UsageState,
     };
-    use llm_runtime::{client::DefaultLlmClient, ClientConfig, CredentialConfig, LlmRequest};
+    use llm_runtime::{client::ModelRuntime, ClientConfig, CredentialConfig, LlmRequest};
 
     let mut profile = llm_runtime::builtin_presets()
         .providers
@@ -269,13 +389,13 @@ async fn deepseek_override_is_fixed_across_peak_hours_without_changing_sibling_p
         .clone();
     profile.pricing.overrides.push((
         model.display_model.clone(),
-        TokenPricing::input_output(2.0, 8.0),
+        PricingOverride::input_output(2.0, 8.0),
     ));
     std::env::set_var("LLM_DEEPSEEK_OVERRIDE_TEST_KEY", "test-key");
     profile.credential = CredentialConfig::Env {
         var: "LLM_DEEPSEEK_OVERRIDE_TEST_KEY".into(),
     };
-    let client = DefaultLlmClient::from_config(ClientConfig {
+    let client = ModelRuntime::from_config(ClientConfig {
         providers: vec![profile],
     })
     .unwrap();
@@ -333,7 +453,7 @@ async fn deepseek_override_is_fixed_across_peak_hours_without_changing_sibling_p
 #[tokio::test]
 async fn api_service_override_prices_omitted_and_explicit_zero_reasoning() {
     use llm_runtime::{
-        client::DefaultLlmClient, parse_provider_profiles_strict, pricing_provider_id_for_profile,
+        client::ModelRuntime, parse_provider_profiles_strict, pricing_provider_id_for_profile,
         ApiService, BoxFuture, ClientConfig, ProviderParseOptions, ProviderRequest,
         ProviderResponse, StreamingResponse, Transport,
     };
@@ -401,9 +521,9 @@ async fn api_service_override_prices_omitted_and_explicit_zero_reasoning() {
         let catalog = PricingCatalog::empty().with_override(
             provider,
             "custom",
-            profile.pricing.overrides[0].1,
+            profile.pricing.overrides[0].1.to_sdk(),
         );
-        let client = DefaultLlmClient::from_config(ClientConfig {
+        let client = ModelRuntime::from_config(ClientConfig {
             providers: vec![profile],
         })
         .expect("client");
@@ -425,8 +545,8 @@ async fn api_service_override_prices_omitted_and_explicit_zero_reasoning() {
             .messages_create("custom", Some("reasoning-test"), None, vec![], vec![])
             .await
             .expect("decoded response with SDK quote");
-        assert_eq!(response.usage.billable_tokens.output, 10_000);
-        assert_eq!(response.usage.billable_tokens.reasoning_output, 30_000);
+        assert_eq!(response.usage.counts().output_tokens, 40_000);
+        assert_eq!(response.usage.counts().reasoning_tokens, 30_000);
         let cost = response.cost.expect("SDK cost");
         assert!(cost.estimated);
         assert!((cost.total_cost_usd.unwrap() - expected).abs() < 1e-12);

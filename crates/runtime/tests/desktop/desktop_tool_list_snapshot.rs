@@ -10,6 +10,7 @@
 #![allow(clippy::unwrap_used)]
 
 use harness_runtime::desktop::desktop_tool_registry;
+
 use mobile_linux_api::ProcessOutput;
 
 #[test]

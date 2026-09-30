@@ -1,6 +1,6 @@
+use lingxi_core::host::CredentialStoragePolicy;
 use orchestrator::{QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK};
 use permission::gate::PermissionGate;
-use platform_api::CredentialStoragePolicy;
 #[cfg(windows)]
 use platform_windows::process::supervisor as shell_supervisor;
 #[cfg(windows)]
@@ -19,9 +19,9 @@ pub(super) enum ApiProvider {
 }
 
 /// Port of `isEnvTruthy` (`envUtils.ts:32-37`); value test delegated to
-/// [`platform_api::env::is_env_truthy`].
+/// [`lingxi_core::host::env::is_env_truthy`].
 pub(super) fn is_env_truthy(key: &str) -> bool {
-    platform_api::env::is_env_truthy(std::env::var(key).ok().as_deref())
+    lingxi_core::host::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
 /// Session-memory writes persist into the same memdir-backed Session tier that
@@ -210,7 +210,7 @@ impl Default for DesktopEngineConfig {
 ///     api_base: "https://api.anthropic.com".to_string(),
 ///     api_key: "sk-test".to_string(),
 ///     isolated_credential_storage: false,
-///     credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
+///     credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::NativePreferred,
 ///     injected_plugin_secrets: BTreeMap::new(),
 ///     api_key_helper: None,
 ///     managed_oauth_only: false,
@@ -341,10 +341,10 @@ pub struct DesktopConfig {
     /// (M13) The HOST launcher forces Claude.ai OAuth as the effective auth
     /// source: with a stored OAuth session it then outranks even an env
     /// `ANTHROPIC_API_KEY` in the auth resolver
-    /// (`llm_runtime::oauth::anthropic::resolver`). claude-code derives this
+    /// (`llm_runtime::auth::anthropic::resolver`). claude-code derives this
     /// from `KWr()` (@228931361), a pure env predicate that
     /// `resolve_llm_stack` reads itself via
-    /// [`llm_runtime::oauth::anthropic::resolver::host_managed_oauth_only`], so
+    /// [`llm_runtime::auth::anthropic::resolver::host_managed_oauth_only`], so
     /// every host gets it for free; this field only lets an embedding host
     /// declare the same forcing without the launcher env. A managed
     /// `forceLoginMethod` policy must NEVER be fed here — it has no place in
@@ -527,7 +527,7 @@ pub struct DesktopConfig {
     /// Construction-only writer claim acquired by the host. When present the
     /// engine consumes this exact Arc instead of opening a second OS lock;
     /// None keeps standalone desktop/test hosts on the local claim path.
-    pub session_writer_lease: Option<platform_api::live_sessions::SharedSessionWriterLease>,
+    pub session_writer_lease: Option<lingxi_core::host::live_sessions::SharedSessionWriterLease>,
     /// Source session id for a forked transcript. When present it is appended
     /// to Anthropic's JSON-string `metadata.user_id` as `parent_session_id`.
     /// Ordinary fresh/resumed sessions leave this unset.
@@ -687,7 +687,7 @@ pub struct DesktopConfig {
     /// variant fails with a clear `ActionFailed` — INERT boot. The concrete impl
     /// lives in `apps/cli` (which owns the daemon dispatch machinery); injecting
     /// it here keeps the leaf `orchestrator` crate off an `apps/cli` dependency.
-    pub bg_session_forker: Option<Arc<dyn platform_api::bg_session_forker::BgSessionForker>>,
+    pub bg_session_forker: Option<Arc<dyn lingxi_core::host::bg_session_forker::BgSessionForker>>,
     /// Optional per-runtime TUI AskUserQuestion bridge sender. Interactive TUI
     /// hosts fill this so questionnaire tools open the mounted bottom-pane
     /// view; non-TUI hosts leave it `None`.
@@ -704,7 +704,7 @@ pub struct DesktopConfig {
     /// message events. The bridge supplies this after it creates its outbound
     /// event sink; CLI/TUI hosts leave it unset so their behavior is unchanged.
     pub session_agent_observer:
-        Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
+        Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawnObserver>>,
     /// Optional app-scoped device-audio service (capture / live recognition /
     /// synthesis / playback).
     ///

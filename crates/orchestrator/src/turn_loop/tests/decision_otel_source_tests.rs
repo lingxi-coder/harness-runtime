@@ -75,7 +75,7 @@ fn no_matched_rule_is_config() {
 /// telemetry it was restoring.
 #[test]
 fn an_auto_mode_approval_renders_as_a_temporary_user_allow() {
-    use platform_api::permission_gate::ToolDecisionClassification;
+    use lingxi_core::host::permission_gate::ToolDecisionClassification;
     assert_eq!(
         ToolDecisionClassification::UserTemporary.as_str(),
         "user_temporary"

@@ -17,14 +17,14 @@ use crate::definition::{AgentDefinition, AgentIsolation, AgentModel, AgentSource
 use crate::pool::StateMachinePool;
 use crate::runner::SubagentEvent;
 use async_trait::async_trait;
-use permission::PermissionMode;
-use platform_api::coordinator_mode::CoordinatorModeHandle;
-use platform_api::subagent_spawn::{
+use lingxi_core::host::coordinator_mode::CoordinatorModeHandle;
+use lingxi_core::host::subagent_spawn::{
     SubagentInheritance, SubagentListingEntry, SubagentObservation, SubagentResult,
     SubagentSpawnError, SubagentSpawnObserver, SubagentSpawnRequest, SubagentSpawner,
     SubagentUsage, SubagentUsageRecorder,
 };
-use protocol::{AgentId, ConversationMessage};
+use lingxi_core::types::{AgentId, ConversationMessage};
+use permission::PermissionMode;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,6 +44,8 @@ use crate::definition::AgentToolPolicy;
 use cleanup::McpCleanupGuard;
 use cleanup::SpawnDeallocGuard;
 use cleanup::SPAWN_CANCEL_GRACE;
+#[cfg(test)]
+use lingxi_core::types::MessageId;
 pub(crate) use output::agent_source_to_claude_str;
 use output::forward_subagent_message_line;
 use output::observer_initial_message_index;
@@ -52,8 +54,6 @@ use output::record_subagent_usage;
 use output::short_input_hint;
 use output::subagent_tool_call_lines;
 pub(crate) use output::subagent_usage_from_llm_usage;
-#[cfg(test)]
-use protocol::MessageId;
 pub use runtime_links::RuntimeLink;
 pub use spawn_context::agent_listing_entries;
 pub use spawn_context::append_subagent_system_prompt_suffix;
@@ -66,7 +66,7 @@ pub use spawn_context::tools_description;
 tokio::task_local! {
     static WORKFLOW_TRANSCRIPT_SUBDIR_OVERRIDE: Option<std::path::PathBuf>;
     static WORKFLOW_QUERY_WATCHDOG_OVERRIDE:
-        std::cell::RefCell<Option<platform_api::WorkflowQueryWatchdog>>;
+        std::cell::RefCell<Option<lingxi_core::host::WorkflowQueryWatchdog>>;
     // Consumed at spawn_with_observer entry, before any user/MCP callback.
     // Never copy this authority into inheritance or observer follow-ups.
     static PANEL_POOL_PERMIT_OVERRIDE:
@@ -148,14 +148,15 @@ pub struct PoolSubagentSpawner {
     /// general-purpose child no longer inherits `Agent`/`Task`; it narrows
     /// further once the spawn path loads real per-agent definitions.
     tool_registry: Arc<RuntimeLink<Arc<ToolRegistry>>>,
-    task_registry:
-        std::sync::OnceLock<std::sync::Weak<dyn platform_api::task_registry::TaskRegistryHandle>>,
+    task_registry: std::sync::OnceLock<
+        std::sync::Weak<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+    >,
     /// Creates one independent passive-diagnostics cursor per spawn. The cwd
     /// lets a host scope the cursor to the child workspace (Local App builders
     /// must never observe another app's diagnostics).
     new_diagnostics_source_factory: Option<
         Arc<
-            dyn Fn(Option<&std::path::Path>) -> Arc<dyn platform_api::NewDiagnosticsSource>
+            dyn Fn(Option<&std::path::Path>) -> Arc<dyn lingxi_core::host::NewDiagnosticsSource>
                 + Send
                 + Sync,
         >,
@@ -283,23 +284,23 @@ pub struct PoolSubagentSpawner {
     /// rule on the way down — the failure `hook_executor` had and that
     /// `is_sealed` exists to prevent.
     permission_gate:
-        Arc<std::sync::OnceLock<Arc<dyn platform_api::permission_gate::PermissionGate>>>,
+        Arc<std::sync::OnceLock<Arc<dyn lingxi_core::host::permission_gate::PermissionGate>>>,
     /// Managed hook-slot lock, filled by the composition root after settings
     /// policy resolution. Unfilled means the legacy permissive default.
     strict_plugin_only_hooks: Arc<std::sync::OnceLock<bool>>,
     /// Skill loader handed to every child runner via
     /// [`SubagentContext::skill_loader`] so the runner can preload the agent
     /// definition's frontmatter `skills:` (claude runAgent.ts:577-646). A leaf
-    /// trait ([`platform_api::skill_loader::SkillLoader`]) so the agent crate avoids a
+    /// trait ([`lingxi_core::host::skill_loader::SkillLoader`]) so the agent crate avoids a
     /// cycle into the command/skill registry; the concrete impl is built at the
     /// composition root. SET-ONCE cell (same cycle-break as the others). Unfilled
     /// ⇒ no skill preloading (byte-identical legacy).
-    skill_loader: Arc<RuntimeLink<Arc<dyn platform_api::skill_loader::SkillLoader>>>,
+    skill_loader: Arc<RuntimeLink<Arc<dyn lingxi_core::host::skill_loader::SkillLoader>>>,
     /// Session id stamped on the `HookContext` the child runner builds for the
     /// SubagentStart fire (claude `createBaseHookInput`). Set at boot via
     /// [`Self::with_hook_context`]; defaults to a nil session (only consulted when
     /// [`Self::hook_executor`] is filled).
-    hook_session_id: protocol::SessionId,
+    hook_session_id: lingxi_core::types::SessionId,
     /// Engine cwd stamped on that `HookContext`. Set at boot via
     /// [`Self::with_hook_context`]; defaults to an empty path.
     hook_cwd: std::path::PathBuf,
@@ -322,20 +323,23 @@ pub struct PoolSubagentSpawner {
     /// Resolve an explicitly owned child independently of the active session.
     subagents_dir_for_session_provider: Option<
         Arc<
-            dyn Fn(protocol::SessionId) -> Result<std::path::PathBuf, SubagentSpawnError>
+            dyn Fn(lingxi_core::types::SessionId) -> Result<std::path::PathBuf, SubagentSpawnError>
                 + Send
                 + Sync,
         >,
     >,
     /// Allocation-pinned paths remain available after a runner exits, for resume.
-    allocated_transcript_paths:
-        Arc<std::sync::Mutex<HashMap<AgentId, (std::path::PathBuf, Option<protocol::SessionId>)>>>,
+    allocated_transcript_paths: Arc<
+        std::sync::Mutex<
+            HashMap<AgentId, (std::path::PathBuf, Option<lingxi_core::types::SessionId>)>,
+        >,
+    >,
     /// Filesystem the child uses to APPEND its conversation to
     /// `<hook_subagents_dir>/agent-<id>.jsonl`. Set with the subagents dir at
     /// boot: naming the path without wiring a writer is what left the
     /// `SubagentStop` hook reporting a transcript that did not exist. `None`
     /// ⇒ nothing is persisted (byte-identical legacy).
-    transcript_fs: Option<std::sync::Arc<dyn platform_api::FileSystem>>,
+    transcript_fs: Option<std::sync::Arc<dyn lingxi_core::host::FileSystem>>,
     /// G14: name → child agent-id registry for `SendMessage` routing of spawned
     /// ASYNC subagents (claude `AppState.agentNameRegistry`, AgentTool.tsx:704-711).
     /// `AgentTool` calls [`SubagentSpawner::register_name`] after a successful
@@ -389,7 +393,7 @@ pub struct PoolSubagentSpawner {
     /// provider/model environment renderer because inference routing is not a
     /// device capability and may change independently.
     mobile_runtime_environment:
-        Option<platform_api::mobile_runtime_environment::MobileRuntimeEnvironment>,
+        Option<lingxi_core::host::mobile_runtime_environment::MobileRuntimeEnvironment>,
     mobile_workspace_cwd_provider: Option<MobileWorkspaceCwdProvider>,
     session_interactive: Option<bool>,
     spawn_observer: Option<Arc<dyn SubagentSpawnObserver>>,
@@ -475,7 +479,7 @@ impl PoolSubagentSpawner {
             .collect();
         let panel_pool = Arc::new(StateMachinePool::new(
             pool.runtime(),
-            platform_api::FUSION_PANEL_POOL_CAP,
+            lingxi_core::host::FUSION_PANEL_POOL_CAP,
         ));
         Self {
             pool,
@@ -501,7 +505,7 @@ impl PoolSubagentSpawner {
             permission_gate: Arc::new(std::sync::OnceLock::new()),
             strict_plugin_only_hooks: Arc::new(std::sync::OnceLock::new()),
             skill_loader: Arc::new(RuntimeLink::new()),
-            hook_session_id: protocol::SessionId::nil(),
+            hook_session_id: lingxi_core::types::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
             hook_subagents_dir: None,
             subagents_dir_provider: None,
@@ -543,7 +547,7 @@ impl PoolSubagentSpawner {
     pub fn with_new_diagnostics_source_factory(
         mut self,
         factory: Arc<
-            dyn Fn(Option<&std::path::Path>) -> Arc<dyn platform_api::NewDiagnosticsSource>
+            dyn Fn(Option<&std::path::Path>) -> Arc<dyn lingxi_core::host::NewDiagnosticsSource>
                 + Send
                 + Sync,
         >,
@@ -557,7 +561,7 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn with_mobile_runtime_environment(
         mut self,
-        environment: platform_api::mobile_runtime_environment::MobileRuntimeEnvironment,
+        environment: lingxi_core::host::mobile_runtime_environment::MobileRuntimeEnvironment,
     ) -> Self {
         self.mobile_runtime_environment = Some(environment);
         self
@@ -823,7 +827,7 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn with_permission_gate(
         self,
-        gate: Arc<dyn platform_api::permission_gate::PermissionGate>,
+        gate: Arc<dyn lingxi_core::host::permission_gate::PermissionGate>,
     ) -> Self {
         let _ = self.permission_gate.set(gate);
         self
@@ -833,7 +837,7 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn permission_gate_handle(
         &self,
-    ) -> Arc<std::sync::OnceLock<Arc<dyn platform_api::permission_gate::PermissionGate>>> {
+    ) -> Arc<std::sync::OnceLock<Arc<dyn lingxi_core::host::permission_gate::PermissionGate>>> {
         self.permission_gate.clone()
     }
 
@@ -858,7 +862,7 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn with_skill_loader(
         self,
-        loader: Arc<dyn platform_api::skill_loader::SkillLoader>,
+        loader: Arc<dyn lingxi_core::host::skill_loader::SkillLoader>,
     ) -> Self {
         let _ = self.skill_loader.set(loader);
         self
@@ -870,7 +874,7 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn skill_loader_handle(
         &self,
-    ) -> Arc<RuntimeLink<Arc<dyn platform_api::skill_loader::SkillLoader>>> {
+    ) -> Arc<RuntimeLink<Arc<dyn lingxi_core::host::skill_loader::SkillLoader>>> {
         self.skill_loader.clone()
     }
 
@@ -886,7 +890,7 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn with_hook_context(
         mut self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         cwd: std::path::PathBuf,
         subagents_dir: Option<std::path::PathBuf>,
     ) -> Self {
@@ -912,7 +916,7 @@ impl PoolSubagentSpawner {
     pub fn with_subagents_dir_for_session_provider(
         mut self,
         provider: Arc<
-            dyn Fn(protocol::SessionId) -> Result<std::path::PathBuf, SubagentSpawnError>
+            dyn Fn(lingxi_core::types::SessionId) -> Result<std::path::PathBuf, SubagentSpawnError>
                 + Send
                 + Sync,
         >,
@@ -924,17 +928,18 @@ impl PoolSubagentSpawner {
     fn resolved_origin_session_id(
         &self,
         request: &SubagentSpawnRequest,
-    ) -> Option<protocol::SessionId> {
+    ) -> Option<lingxi_core::types::SessionId> {
         workflow_transcript_subdir_override()
             .and_then(|path| path.ancestors().nth(3).map(std::path::Path::to_path_buf))
             .and_then(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .and_then(protocol::SessionId::parse_prefixed)
+                    .and_then(lingxi_core::types::SessionId::parse_prefixed)
             })
             .or(request.origin_session_id)
             .or_else(|| {
-                (self.hook_session_id != protocol::SessionId::nil()).then_some(self.hook_session_id)
+                (self.hook_session_id != lingxi_core::types::SessionId::nil())
+                    .then_some(self.hook_session_id)
             })
     }
 
@@ -953,7 +958,10 @@ impl PoolSubagentSpawner {
     /// Pairs with [`Self::with_hook_context`]'s `subagents_dir` — a dir without
     /// a writer names a file nothing creates.
     #[must_use]
-    pub fn with_transcript_fs(mut self, fs: std::sync::Arc<dyn platform_api::FileSystem>) -> Self {
+    pub fn with_transcript_fs(
+        mut self,
+        fs: std::sync::Arc<dyn lingxi_core::host::FileSystem>,
+    ) -> Self {
         self.transcript_fs = Some(fs);
         self
     }
@@ -999,7 +1007,7 @@ impl PoolSubagentSpawner {
             return None;
         }
         let spec = request.observer.as_ref()?;
-        if spec.schema_version != platform_api::subagent_spawn::OBSERVER_SCHEMA_VERSION
+        if spec.schema_version != lingxi_core::host::subagent_spawn::OBSERVER_SCHEMA_VERSION
             || spec.agent == request.subagent_type
             || !self
                 .listing_entries()
@@ -1041,7 +1049,7 @@ impl PoolSubagentSpawner {
             // Captured from the ORIGINAL request, which still has the observed
             // agent's name, its declaration and its creator. `observer_request`
             // above has had all three rewritten or cleared.
-            seed: platform_api::observer_pairing::ObserverPairingSeed {
+            seed: lingxi_core::host::observer_pairing::ObserverPairingSeed {
                 spec: spec.clone(),
                 observed_name: request
                     .name
@@ -1058,7 +1066,7 @@ impl PoolSubagentSpawner {
     /// registry → handler → spawner → registry ownership cycle.
     pub fn set_task_registry(
         &self,
-        registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     ) {
         let _ = self.task_registry.set(Arc::downgrade(&registry));
     }
@@ -1137,7 +1145,7 @@ impl PoolSubagentSpawner {
 /// The persistent / resumable subagent seam (claude-code `run_in_background` +
 /// "comes to rest" + `resumeAgentBackground`).
 ///
-/// Distinct from the cross-crate [`platform_api::SubagentSpawner`] (whose return type
+/// Distinct from the cross-crate [`lingxi_core::host::SubagentSpawner`] (whose return type
 /// is the traits-level [`SubagentResult`] — it cannot reference the `agent`-crate
 /// [`SubagentEvent`] stream). The task-layer LocalAgent handler — which already
 /// depends on `agent` — drives a persistent (background/resumable) local_agent
@@ -1309,8 +1317,8 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
             .send_event(
                 agent_id,
                 lingxi_core::Event::UserMessage {
-                    message_id: protocol::MessageId::new(),
-                    request_id: protocol::RequestId::new(),
+                    message_id: lingxi_core::types::MessageId::new(),
+                    request_id: lingxi_core::types::RequestId::new(),
                     content: message,
                 },
             )
@@ -1320,7 +1328,8 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
 
     async fn stop(&self, agent_id: &AgentId) -> Result<(), SubagentSpawnError> {
         // Close the spawn gate throughout cooperative cancellation and teardown.
-        let _stop_pending = platform_api::agent_processes::mark_stop_pending(&agent_id.to_string());
+        let _stop_pending =
+            lingxi_core::host::agent_processes::mark_stop_pending(&agent_id.to_string());
         // Cooperative exit first: a parked runner wakes on `UserExit` and emits
         // a clean `Killed` before the hard cancel. A send failure means the slot
         // is already gone (runner dropped its receiver) — non-fatal, proceed to
@@ -1841,7 +1850,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
         observer: Option<Arc<dyn SubagentSpawnObserver>>,
-        watchdog: platform_api::WorkflowQueryWatchdog,
+        watchdog: lingxi_core::host::WorkflowQueryWatchdog,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         WORKFLOW_QUERY_WATCHDOG_OVERRIDE
             .scope(
@@ -1855,8 +1864,8 @@ impl SubagentSpawner for PoolSubagentSpawner {
         &self,
         count: usize,
         deadline: tokio::time::Instant,
-        cancel: platform_api::panel_pool::PanelAdmissionCancellation,
-    ) -> Result<platform_api::PanelPoolLease, SubagentSpawnError> {
+        cancel: lingxi_core::host::panel_pool::PanelAdmissionCancellation,
+    ) -> Result<lingxi_core::host::PanelPoolLease, SubagentSpawnError> {
         self.panel_pool
             .reserve_panel_group(count, deadline, cancel)
             .await
@@ -1868,8 +1877,8 @@ impl SubagentSpawner for PoolSubagentSpawner {
         inherit: SubagentInheritance,
         progress: Option<tokio::sync::mpsc::Sender<String>>,
         observer: Option<Arc<dyn SubagentSpawnObserver>>,
-        watchdog: platform_api::WorkflowQueryWatchdog,
-        permit: platform_api::PanelPoolPermit,
+        watchdog: lingxi_core::host::WorkflowQueryWatchdog,
+        permit: lingxi_core::host::PanelPoolPermit,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         let permit = self
             .panel_pool
@@ -1934,7 +1943,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         &self,
         subagent_type: &str,
         model: Option<&str>,
-    ) -> platform_api::subagent_spawn::SelectedAgentMeta {
+    ) -> lingxi_core::host::subagent_spawn::SelectedAgentMeta {
         let def = self.lookup_definition(subagent_type).await;
         let observer = if crate::observer::observer_agents_enabled() && def.observer.is_some() {
             let mut definitions = vec![def.clone()];
@@ -1999,7 +2008,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
             }
             None => String::new(),
         };
-        platform_api::subagent_spawn::SelectedAgentMeta {
+        lingxi_core::host::subagent_spawn::SelectedAgentMeta {
             agent_type: def.agent_type.clone(),
             observer,
             resolved_model,

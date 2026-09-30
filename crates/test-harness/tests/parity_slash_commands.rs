@@ -20,8 +20,10 @@ use command_api::builtins::{
 };
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
+use lingxi_core::host::{
+    AuthError, AuthHandle, LoginInfo, SlashCommandDispatcher, SlashDispatchResult,
+};
 use orchestrator::test_support::MockOrchestratorHandle;
-use platform_api::{AuthError, AuthHandle, LoginInfo, SlashCommandDispatcher, SlashDispatchResult};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;

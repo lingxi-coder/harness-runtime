@@ -3,7 +3,8 @@
 //! Asserts:
 //!   - both paths produce `ConversationOutcome::EndTurn { turn_count: 1, .. }`
 //!   - both paths append identical assistant message bodies to the session.
-use llm_runtime::{ContentBlock as LlmContentBlock, LlmResponse, Usage};
+use lingxi_core::types::{ContentBlock, ConversationMessage};
+use llm_runtime::{ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
@@ -12,7 +13,6 @@ use orchestrator::test_support::{
 use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use protocol::{ContentBlock, ConversationMessage};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,8 +43,8 @@ where
 /// `todo_tools_gate` allowlist, or the task reminder stops firing.
 const FIXTURE_MODEL: &str = "claude-opus-4-7";
 
-fn batched_response(text: &str) -> LlmResponse {
-    LlmResponse {
+fn batched_response(text: &str) -> HistoryResponse {
+    HistoryResponse {
         id: "msg_eq".into(),
         model: "claude-opus-4-7".into(),
         content: vec![LlmContentBlock::Text {
@@ -152,12 +152,14 @@ fn batched_and_streaming_produce_same_assistant_text() {
 // path. These two tests pin the symmetry: each reminder, when its source is
 // wired, now appears on BOTH paths.
 
-struct OnceTaskNotifications(std::sync::Mutex<Vec<platform_api::task_registry::TaskNotification>>);
+struct OnceTaskNotifications(
+    std::sync::Mutex<Vec<lingxi_core::host::task_registry::TaskNotification>>,
+);
 #[async_trait::async_trait]
 impl orchestrator::prompt::task_notification::TaskNotificationProvider for OnceTaskNotifications {
     async fn take_pending_task_notifications(
         &self,
-    ) -> Vec<platform_api::task_registry::TaskNotification> {
+    ) -> Vec<lingxi_core::host::task_registry::TaskNotification> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
 }
@@ -165,14 +167,14 @@ impl orchestrator::prompt::task_notification::TaskNotificationProvider for OnceT
 struct InlineRuntime;
 
 #[async_trait::async_trait]
-impl platform_api::RuntimeSpawner for InlineRuntime {
+impl lingxi_core::host::RuntimeSpawner for InlineRuntime {
     async fn spawn(
         &self,
         name: &str,
         task: std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, platform_api::RuntimeError> {
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError> {
         tokio::spawn(task);
-        Ok(platform_api::BackgroundTaskHandle {
+        Ok(lingxi_core::host::BackgroundTaskHandle {
             task_name: name.to_string(),
             task_id: 0,
         })
@@ -182,8 +184,8 @@ impl platform_api::RuntimeSpawner for InlineRuntime {
 
     async fn cancel(
         &self,
-        _handle: &platform_api::BackgroundTaskHandle,
-    ) -> Result<(), platform_api::RuntimeError> {
+        _handle: &lingxi_core::host::BackgroundTaskHandle,
+    ) -> Result<(), lingxi_core::host::RuntimeError> {
         Ok(())
     }
 }
@@ -317,14 +319,14 @@ fn gated_tool_registry() -> Arc<ToolRegistry> {
 
 struct MockDiag(Option<String>);
 #[async_trait::async_trait]
-impl platform_api::NewDiagnosticsSource for MockDiag {
+impl lingxi_core::host::NewDiagnosticsSource for MockDiag {
     async fn take_new_diagnostics_block(&self) -> Option<String> {
         self.0.clone()
     }
 }
 
-fn one_task_notification() -> platform_api::task_registry::TaskNotification {
-    platform_api::task_registry::TaskNotification {
+fn one_task_notification() -> lingxi_core::host::task_registry::TaskNotification {
+    lingxi_core::host::task_registry::TaskNotification {
         task_id: "b12345678".into(),
         task_type: "local_bash".into(),
         status: "completed".into(),
@@ -347,8 +349,8 @@ fn one_task_notification() -> platform_api::task_registry::TaskNotification {
     }
 }
 
-fn one_dream_notification() -> platform_api::task_registry::TaskNotification {
-    platform_api::task_registry::TaskNotification {
+fn one_dream_notification() -> lingxi_core::host::task_registry::TaskNotification {
+    lingxi_core::host::task_registry::TaskNotification {
         task_id: "d12345678".into(),
         task_type: "dream".into(),
         status: "completed".into(),
@@ -371,7 +373,7 @@ async fn arm_gated_reminders(orch: &ConversationOrchestrator) {
     s.turns_since_last_todo_write = tool_task::reminder::TURNS_SINCE_WRITE;
     s.turns_since_last_reminder = tool_task::reminder::TURNS_BETWEEN_REMINDERS;
     s.history.push(ConversationMessage::user_meta(
-        protocol::MessageId::new(),
+        lingxi_core::types::MessageId::new(),
         "seed".into(),
     ));
 }

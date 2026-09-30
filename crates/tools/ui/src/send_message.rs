@@ -14,7 +14,7 @@
 //! `coordinator/src/tool_send_message.rs`, adapted so `parse_recipient`
 //! resolves a teammate *name* (the TS contract) rather than a bare UUID.
 //!
-//! Delivery routes through the injected [`platform_api::mailbox::MailboxRouterHandle`]
+//! Delivery routes through the injected [`lingxi_core::host::mailbox::MailboxRouterHandle`]
 //! seam for teammates. Canonical `session:<uuid>` recipients use the local live
 //! session registry with UDS first and a JSONL inbox fallback.
 //!
@@ -27,10 +27,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use lingxi_core::host::mailbox::{MailboxMessage, MailboxRouterHandle};
+use lingxi_core::host::task_registry::TaskRegistryHandle;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::mailbox::{MailboxMessage, MailboxRouterHandle};
-use platform_api::task_registry::TaskRegistryHandle;
 use serde_json::{json, Value};
 use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -84,10 +84,10 @@ pub fn truncate_preview(s: &str, max_width: usize) -> String {
 /// `isAgentSwarmsEnabled()` gate: Anthropic-internal runs are on by default,
 /// while external runs require the experimental env opt-in. `SendMessage`
 /// mirrors that runtime gate and additionally requires a live mailbox router.
-/// Delegates to the SHARED [`platform_api::env::agent_swarms_enabled`] (one
+/// Delegates to the SHARED [`lingxi_core::host::env::agent_swarms_enabled`] (one
 /// implementation with `tool-task`'s `is_agent_swarms_enabled`).
 fn agent_swarms_enabled() -> bool {
-    platform_api::env::agent_swarms_enabled()
+    lingxi_core::host::env::agent_swarms_enabled()
 }
 
 /// Resolved `to` recipient.
@@ -170,13 +170,14 @@ impl SendMessageTool {
         // Resolve by teammate NAME first, then the explicit session/agent UUID
         // forms. The session ID is the canonical cross-process identity.
         if let Some(session_id) = trimmed.strip_prefix("session:") {
-            let parsed = protocol::SessionId::parse_prefixed(session_id).ok_or_else(|| {
-                ToolError::InvalidInput("session address must contain a valid UUID".into())
-            })?;
+            let parsed =
+                lingxi_core::types::SessionId::parse_prefixed(session_id).ok_or_else(|| {
+                    ToolError::InvalidInput("session address must contain a valid UUID".into())
+                })?;
             return Ok(Recipient::Session(parsed.as_uuid().to_string()));
         }
         if !trimmed.contains(':') {
-            if let Some(agent) = protocol::AgentId::parse_prefixed(trimmed) {
+            if let Some(agent) = lingxi_core::types::AgentId::parse_prefixed(trimmed) {
                 return Ok(Recipient::Agent(agent.as_uuid().to_string()));
             }
         }
@@ -229,7 +230,7 @@ impl SendMessageTool {
                     )
                 })
             }),
-            Recipient::Session(id) => platform_api::live_sessions::process_session_id()
+            Recipient::Session(id) => lingxi_core::host::live_sessions::process_session_id()
                 .filter(|self_id| self_id == id)
                 .map(|_| format!("'{to_display}' is this session's own address.")),
             Recipient::Teammate(_) => {
@@ -237,15 +238,15 @@ impl SendMessageTool {
                 if ctx.agent_name.as_deref().is_some_and(|name| name == trimmed) {
                     return Some(format!("Not sent — '{trimmed}' is this session's own name."));
                 }
-                if platform_api::live_sessions::process_name()
+                if lingxi_core::host::live_sessions::process_name()
                     .as_deref()
                     .is_some_and(|name| name == trimmed)
                 {
                     return Some(format!("Not sent — '{trimmed}' is this session's own name."));
                 }
-                platform_api::live_sessions::process_dir()
+                lingxi_core::host::live_sessions::process_dir()
                     .and_then(|dir| dir.find_exact(trimmed, None))
-                    .zip(platform_api::live_sessions::process_session_id())
+                    .zip(lingxi_core::host::live_sessions::process_session_id())
                     .and_then(|(rec, self_id)| {
                         (rec.sid() == self_id).then(|| {
                             format!(
@@ -314,7 +315,7 @@ impl SendMessageTool {
         };
         if record.killed_by.as_deref() == Some("user") {
             return Err(ToolError::InvalidInput(
-                platform_api::task_registry::stopped_by_user_message(&record.task_id),
+                lingxi_core::host::task_registry::stopped_by_user_message(&record.task_id),
             ));
         }
         Ok(())
@@ -422,30 +423,32 @@ impl SendMessageTool {
         }
 
         let live_target = match recipient {
-            Recipient::Session(session_id) => {
-                platform_api::live_sessions::process_dir().and_then(|dir| {
+            Recipient::Session(session_id) => lingxi_core::host::live_sessions::process_dir()
+                .and_then(|dir| {
                     dir.find_by_session_id(
                         session_id,
-                        platform_api::live_sessions::process_session_id().as_deref(),
+                        lingxi_core::host::live_sessions::process_session_id().as_deref(),
+                    )
+                    .map(|peer| (dir, peer))
+                }),
+            Recipient::Teammate(_) => {
+                lingxi_core::host::live_sessions::process_dir().and_then(|dir| {
+                    dir.find_exact(
+                        to_display,
+                        lingxi_core::host::live_sessions::process_session_id().as_deref(),
                     )
                     .map(|peer| (dir, peer))
                 })
             }
-            Recipient::Teammate(_) => platform_api::live_sessions::process_dir().and_then(|dir| {
-                dir.find_exact(
-                    to_display,
-                    platform_api::live_sessions::process_session_id().as_deref(),
-                )
-                .map(|peer| (dir, peer))
-            }),
             _ => None,
         };
         if let Some((dir, peer)) = live_target {
-            let from_name =
-                platform_api::live_sessions::process_name().unwrap_or_else(|| from.to_string());
-            let from_sid = platform_api::live_sessions::process_session_id().unwrap_or_default();
+            let from_name = lingxi_core::host::live_sessions::process_name()
+                .unwrap_or_else(|| from.to_string());
+            let from_sid =
+                lingxi_core::host::live_sessions::process_session_id().unwrap_or_default();
             let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
-            let message = platform_api::live_sessions::outbound_peer_message(
+            let message = lingxi_core::host::live_sessions::outbound_peer_message(
                 &from_name, &from_sid, content, summary,
             );
             // See `coordinator::tool_send_message::route_live_session` for the
@@ -463,14 +466,15 @@ impl SendMessageTool {
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(std::path::PathBuf::from)
-                .filter(|p| platform_api::uds_inbox::is_canonical_inbox_sock(p))
+                .filter(|p| lingxi_core::host::uds_inbox::is_canonical_inbox_sock(p))
             {
-                let _ = platform_api::uds_inbox::send_peer_message(&sock, &message, peer.sid());
+                let _ =
+                    lingxi_core::host::uds_inbox::send_peer_message(&sock, &message, peer.sid());
             }
             let subscribed = if notify_when_idle {
                 dir.append_idle_subscription(
                     peer.sid(),
-                    &platform_api::live_sessions::IdleNotificationRequest {
+                    &lingxi_core::host::live_sessions::IdleNotificationRequest {
                         from: from_name.clone(),
                         from_session_id: from_sid.clone(),
                         summary: summary.map(str::to_string),
@@ -532,15 +536,15 @@ impl SendMessageTool {
         summary: Option<&str>,
         sender: &str,
     ) -> Result<Value, ToolError> {
-        let Some((dir, peer)) = platform_api::live_sessions::process_dir().and_then(|d| {
+        let Some((dir, peer)) = lingxi_core::host::live_sessions::process_dir().and_then(|d| {
             let peer = match recipient {
                 Recipient::Session(session_id) => d.find_by_session_id(
                     session_id,
-                    platform_api::live_sessions::process_session_id().as_deref(),
+                    lingxi_core::host::live_sessions::process_session_id().as_deref(),
                 ),
                 Recipient::Teammate(_) => d.find_exact(
                     to_display,
-                    platform_api::live_sessions::process_session_id().as_deref(),
+                    lingxi_core::host::live_sessions::process_session_id().as_deref(),
                 ),
                 _ => None,
             };
@@ -551,11 +555,11 @@ impl SendMessageTool {
             ));
         };
         let from_name =
-            platform_api::live_sessions::process_name().unwrap_or_else(|| sender.to_string());
-        let from_sid = platform_api::live_sessions::process_session_id().unwrap_or_default();
+            lingxi_core::host::live_sessions::process_name().unwrap_or_else(|| sender.to_string());
+        let from_sid = lingxi_core::host::live_sessions::process_session_id().unwrap_or_default();
         dir.append_idle_subscription(
             peer.sid(),
-            &platform_api::live_sessions::IdleNotificationRequest {
+            &lingxi_core::host::live_sessions::IdleNotificationRequest {
                 from: from_name,
                 from_session_id: from_sid,
                 summary: summary.map(str::to_string),
@@ -847,7 +851,7 @@ impl Tool for SendMessageTool {
     }
     fn input_schema(&self) -> &Value {
         tool_api::send_message_contract::schema(
-            platform_api::live_sessions::cross_session_messaging_enabled(),
+            lingxi_core::host::live_sessions::cross_session_messaging_enabled(),
             agent_swarms_enabled(),
         )
     }
@@ -919,7 +923,7 @@ impl Tool for SendMessageTool {
 
     async fn prompt(&self, _: &PromptOptions) -> String {
         tool_api::send_message_contract::prompt(
-            platform_api::live_sessions::cross_session_messaging_enabled(),
+            lingxi_core::host::live_sessions::cross_session_messaging_enabled(),
             agent_swarms_enabled(),
         )
         .into()
@@ -938,9 +942,9 @@ impl Tool for SendMessageTool {
         // 2.1.266 `a0`: refuse while THIS agent's own stop is still completing
         // (see `agent_processes::mark_stop_pending`).
         if let Some(agent_id) = ctx.agent_id {
-            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+            if lingxi_core::host::agent_processes::is_stop_pending(&agent_id.to_string()) {
                 return Err(ToolError::InvalidInput(
-                    platform_api::agent_processes::stop_pending_refusal("send messages."),
+                    lingxi_core::host::agent_processes::stop_pending_refusal("send messages."),
                 ));
             }
         }
@@ -1254,12 +1258,12 @@ impl Tool for SendMessageTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mobile_linux_api::ProcessOutput;
-    use platform_api::mailbox::{MailboxError, RouteAck};
-    use platform_api::task_registry::{
+    use lingxi_core::host::mailbox::{MailboxError, RouteAck};
+    use lingxi_core::host::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
     };
+    use mobile_linux_api::ProcessOutput;
     use std::sync::{Mutex, OnceLock};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
@@ -1504,7 +1508,7 @@ mod tests {
         assert_eq!(
             tool.input_schema(),
             tool_api::send_message_contract::schema(
-                platform_api::live_sessions::cross_session_messaging_enabled(),
+                lingxi_core::host::live_sessions::cross_session_messaging_enabled(),
                 agent_swarms_enabled()
             )
         );
@@ -1581,10 +1585,11 @@ mod tests {
     async fn validate_rejects_sending_to_self() {
         let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
-        platform_api::live_sessions::set_process_dir(dir.clone());
-        platform_api::live_sessions::set_process_session_id("self-session");
-        platform_api::live_sessions::set_process_name("lead");
+        let dir =
+            lingxi_core::host::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        lingxi_core::host::live_sessions::set_process_dir(dir.clone());
+        lingxi_core::host::live_sessions::set_process_session_id("self-session");
+        lingxi_core::host::live_sessions::set_process_name("lead");
         std::fs::create_dir_all(dir.root()).unwrap();
         std::fs::write(
             dir.root().join("111.json"),
@@ -1619,10 +1624,11 @@ mod tests {
     async fn notify_when_idle_sends_immediately_and_subscribes_once() {
         let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
-        platform_api::live_sessions::set_process_dir(dir.clone());
-        platform_api::live_sessions::set_process_session_id("self-session");
-        platform_api::live_sessions::set_process_name("lead");
+        let dir =
+            lingxi_core::host::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        lingxi_core::host::live_sessions::set_process_dir(dir.clone());
+        lingxi_core::host::live_sessions::set_process_session_id("self-session");
+        lingxi_core::host::live_sessions::set_process_name("lead");
         std::fs::create_dir_all(dir.root()).unwrap();
         std::fs::write(
             dir.root().join("222.json"),
@@ -1664,7 +1670,7 @@ mod tests {
         let delivered = dir.drain_inbox("peer-session").unwrap();
         assert_eq!(delivered.len(), 1);
         assert_eq!(
-            platform_api::live_sessions::extract_cross_session_inner(&delivered[0].content),
+            lingxi_core::host::live_sessions::extract_cross_session_inner(&delivered[0].content),
             "check this when free"
         );
         assert_eq!(delivered[0].summary.as_deref(), Some("later"));
@@ -1684,17 +1690,19 @@ mod tests {
         let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
         let peer_session_id = "11111111-2222-3333-4444-555555555555";
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
-        platform_api::live_sessions::set_process_dir(dir.clone());
-        platform_api::live_sessions::set_process_session_id("self-session");
-        platform_api::live_sessions::set_process_name("lead");
+        let dir =
+            lingxi_core::host::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        lingxi_core::host::live_sessions::set_process_dir(dir.clone());
+        lingxi_core::host::live_sessions::set_process_session_id("self-session");
+        lingxi_core::host::live_sessions::set_process_name("lead");
         std::fs::create_dir_all(dir.root()).unwrap();
 
         // Stand in for the peer's listener, so the tool's canonical-socket gate
         // admits it and the accept loop is actually running.
-        let socket = platform_api::uds_inbox::default_socket_path(std::process::id());
-        platform_api::uds_inbox::stop_process_inbox();
-        platform_api::uds_inbox::start_process_inbox_for_session(&socket, peer_session_id).unwrap();
+        let socket = lingxi_core::host::uds_inbox::default_socket_path(std::process::id());
+        lingxi_core::host::uds_inbox::stop_process_inbox();
+        lingxi_core::host::uds_inbox::start_process_inbox_for_session(&socket, peer_session_id)
+            .unwrap();
         std::fs::write(
             dir.root().join(format!("{}.json", std::process::id())),
             serde_json::to_vec(&serde_json::json!({
@@ -1727,14 +1735,14 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut woken = Vec::new();
         while std::time::Instant::now() < deadline {
-            woken = platform_api::uds_inbox::take_accepted_peer_reminders(false);
+            woken = lingxi_core::host::uds_inbox::take_accepted_peer_reminders(false);
             if !woken.is_empty() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let inbox = dir.drain_inbox(peer_session_id).unwrap();
-        platform_api::uds_inbox::stop_process_inbox();
+        lingxi_core::host::uds_inbox::stop_process_inbox();
 
         assert_eq!(woken.len(), 1, "an idle peer must be woken: {woken:?}");
         assert!(woken[0].contains("hello over the socket"), "{woken:?}");
@@ -1744,7 +1752,7 @@ mod tests {
             "the durable copy must be written even when the socket answered"
         );
         assert_eq!(
-            platform_api::live_sessions::extract_cross_session_inner(&inbox[0].content),
+            lingxi_core::host::live_sessions::extract_cross_session_inner(&inbox[0].content),
             "hello over the socket"
         );
     }
@@ -1754,10 +1762,11 @@ mod tests {
         let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
         let peer_session_id = "11111111-2222-3333-4444-555555555555";
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
-        platform_api::live_sessions::set_process_dir(dir.clone());
-        platform_api::live_sessions::set_process_session_id("self-session");
-        platform_api::live_sessions::set_process_name("lead");
+        let dir =
+            lingxi_core::host::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        lingxi_core::host::live_sessions::set_process_dir(dir.clone());
+        lingxi_core::host::live_sessions::set_process_session_id("self-session");
+        lingxi_core::host::live_sessions::set_process_name("lead");
         std::fs::create_dir_all(dir.root()).unwrap();
         std::fs::write(
             dir.root().join("222.json"),
@@ -1768,7 +1777,7 @@ mod tests {
                 "kind": "interactive",
                 "startedAt": 0,
                 "status": "idle",
-                "messagingSocketPath": platform_api::uds_inbox::default_socket_path(222).to_string_lossy()
+                "messagingSocketPath": lingxi_core::host::uds_inbox::default_socket_path(222).to_string_lossy()
             }))
             .unwrap(),
         )
@@ -1797,7 +1806,7 @@ mod tests {
         let messages = dir.drain_inbox(peer_session_id).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(
-            platform_api::live_sessions::extract_cross_session_inner(&messages[0].content),
+            lingxi_core::host::live_sessions::extract_cross_session_inner(&messages[0].content),
             "hello by stable id"
         );
         assert!(messages[0].msg_id.is_some());
@@ -1808,10 +1817,11 @@ mod tests {
         let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
         let peer_session_id = "22222222-3333-4444-8555-666666666666";
         let temp = tempfile::TempDir::new().unwrap();
-        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
-        platform_api::live_sessions::set_process_dir(dir.clone());
-        platform_api::live_sessions::set_process_session_id("self-session");
-        platform_api::live_sessions::set_process_name("lead");
+        let dir =
+            lingxi_core::host::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        lingxi_core::host::live_sessions::set_process_dir(dir.clone());
+        lingxi_core::host::live_sessions::set_process_session_id("self-session");
+        lingxi_core::host::live_sessions::set_process_name("lead");
         std::fs::create_dir_all(dir.root()).unwrap();
         std::fs::write(
             dir.root().join("222.json"),
@@ -1971,7 +1981,7 @@ mod tests {
         let router = Arc::new(RecordingRouter::new());
         let tool = SendMessageTool::new(ctx_with(router.clone()));
         let mut ctx = fresh_ctx();
-        ctx.agent_id = Some(protocol::AgentId::new());
+        ctx.agent_id = Some(lingxi_core::types::AgentId::new());
         ctx.agent_name = Some("scout".into());
         let result = tool
             .call(
@@ -2019,7 +2029,7 @@ mod tests {
         ]);
         let tool = SendMessageTool::new(ctx_with(router.clone()));
         let mut ctx = fresh_ctx();
-        ctx.agent_id = Some(protocol::AgentId::new());
+        ctx.agent_id = Some(lingxi_core::types::AgentId::new());
         ctx.agent_name = Some("scout".into());
         let result = tool
             .call(
@@ -2054,7 +2064,7 @@ mod tests {
 
     #[tokio::test]
     async fn raw_agent_id_emitted_by_agent_tool_routes_without_prefix_translation() {
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         let emitted = id.as_uuid().to_string();
         assert_eq!(
             SendMessageTool::parse_recipient(&emitted).unwrap(),
@@ -2108,7 +2118,7 @@ mod tests {
         let router = Arc::new(RecordingRouter::new());
         let tool = SendMessageTool::new(ctx_with(router.clone()));
         let mut call_ctx = fresh_ctx();
-        call_ctx.agent_id = Some(protocol::AgentId::new());
+        call_ctx.agent_id = Some(lingxi_core::types::AgentId::new());
         call_ctx.agent_name = Some("researcher".to_string());
 
         let res = tool
@@ -2415,7 +2425,7 @@ mod tests {
             let router = Arc::new(RecordingRouter::new());
             let tool = SendMessageTool::new(ctx_with(router.clone()));
             let mut call_ctx = fresh_ctx();
-            call_ctx.agent_id = Some(protocol::AgentId::new());
+            call_ctx.agent_id = Some(lingxi_core::types::AgentId::new());
             call_ctx.agent_name = Some("reviewer".to_string());
             let error = tool
                 .call(
@@ -2445,7 +2455,7 @@ mod tests {
         let registry = Arc::new(RecordingTaskRegistry::default());
         let tool = SendMessageTool::new(ctx_with_shutdown(router.clone(), registry.clone()));
         let mut call_ctx = fresh_ctx();
-        let agent_id = protocol::AgentId::new();
+        let agent_id = lingxi_core::types::AgentId::new();
         call_ctx.agent_id = Some(agent_id);
         call_ctx.agent_name = Some("researcher".into());
 
@@ -2493,7 +2503,7 @@ mod tests {
 
         assert_eq!(
             err.model_facing_message(),
-            platform_api::task_registry::stopped_by_user_message("a1b2c3d4e")
+            lingxi_core::host::task_registry::stopped_by_user_message("a1b2c3d4e")
         );
         // The refusal is a PRE-flight: nothing may reach the mailbox, because
         // `deliver` returns as soon as the mailbox accepts and the registry's

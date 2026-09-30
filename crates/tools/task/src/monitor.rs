@@ -23,7 +23,7 @@ use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 
-use platform_api::task_registry::{MonitorRegistration, WebSocketMonitorRegistration};
+use lingxi_core::host::task_registry::{MonitorRegistration, WebSocketMonitorRegistration};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -177,7 +177,7 @@ fn websocket_host(ws: &Value) -> Result<String, ValidationError> {
 
 /// Assemble the description for the current background-tasks setting.
 fn cjr() -> String {
-    let disabled = platform_api::env::background_tasks_disabled();
+    let disabled = lingxi_core::host::env::background_tasks_disabled();
     let (one_shot, unbounded) = if disabled {
         (CJR_ONE_SHOT_FOREGROUND, CJR_UNBOUNDED_FOREGROUND)
     } else {
@@ -225,7 +225,7 @@ fn amber_sentinel_enabled() -> bool {
 ///
 /// NOT unconditional: on Windows the tool is withdrawn unless a bash can be
 /// found. `_1()` is the Git-Bash discovery the Bash tool already ports as
-/// [`platform_api::shell_support::git_bash_path`], so this reuses it instead of repeating
+/// [`lingxi_core::host::shell_support::git_bash_path`], so this reuses it instead of repeating
 /// the probe order (env override → Program Files → git-on-PATH). Every other
 /// platform answers `true`, which is why the previous unconditional `true` was
 /// right everywhere except a Windows host with no Git Bash — there it offered a
@@ -234,7 +234,7 @@ fn shell_available() -> bool {
     if !cfg!(windows) {
         return true;
     }
-    platform_api::shell_support::git_bash_path().is_some()
+    lingxi_core::host::shell_support::git_bash_path().is_some()
 }
 
 /// Binary `Mnl` (`applyCcrTimeoutCap`): under `LINGXI_REMOTE` a persistent
@@ -451,7 +451,7 @@ impl Tool for MonitorTool {
             };
             if host
                 .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| !platform_api::http::is_public_monitor_address(ip))
+                .is_ok_and(|ip| !lingxi_core::host::http::is_public_monitor_address(ip))
             {
                 return PermissionResult::Deny {
                     reason: PermissionDecisionReason::Other { reason: "SSRF-blocked address range".into() },
@@ -571,9 +571,9 @@ impl Tool for MonitorTool {
         // 2.1.266 `a0`: refuse while THIS agent's own stop is still completing
         // (see `agent_processes::mark_stop_pending`).
         if let Some(agent_id) = ctx.agent_id {
-            if platform_api::agent_processes::is_stop_pending(&agent_id.to_string()) {
+            if lingxi_core::host::agent_processes::is_stop_pending(&agent_id.to_string()) {
                 return Err(ToolError::InvalidInput(
-                    platform_api::agent_processes::stop_pending_refusal("start monitors."),
+                    lingxi_core::host::agent_processes::stop_pending_refusal("start monitors."),
                 ));
             }
         }
@@ -720,7 +720,7 @@ impl Tool for MonitorTool {
         let spawn_command = match decision {
             sandbox::decision::SandboxDecision::NoSandbox => None,
             sandbox::decision::SandboxDecision::Sandbox { .. } => {
-                let shell = platform_api::shell_support::resolve_shell_path().to_string();
+                let shell = lingxi_core::host::shell_support::resolve_shell_path().to_string();
                 match self
                     .ctx
                     .sandbox_runner
@@ -784,11 +784,11 @@ impl Tool for MonitorTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mobile_linux_api::ProcessOutput;
-    use platform_api::task_registry::{
+    use lingxi_core::host::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
     };
+    use mobile_linux_api::ProcessOutput;
     use std::sync::{Arc, Mutex};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
@@ -838,7 +838,7 @@ mod tests {
         async fn spawn_websocket_monitor(
             &self,
             reg: WebSocketMonitorRegistration,
-            _: Arc<dyn platform_api::HttpTransport>,
+            _: Arc<dyn lingxi_core::host::HttpTransport>,
         ) -> Result<String, TaskRegistryError> {
             *self.websocket.lock().unwrap() = Some(reg);
             Ok("s12345678".into())
@@ -874,9 +874,9 @@ mod tests {
         std::env::remove_var("LINGXI_REMOTE");
         telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
         telemetry::test_clear_flag("tengu_breezy_crescent");
-        platform_api::session_flags::set_single_shot_print_session(false);
+        lingxi_core::host::session_flags::set_single_shot_print_session(false);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
-        platform_api::session_flags::set_agent_push_notif_enabled(false);
+        lingxi_core::host::session_flags::set_agent_push_notif_enabled(false);
         g
     }
     fn tool() -> MonitorTool {
@@ -1058,7 +1058,7 @@ mod tests {
         // Yke() = push flag && agentPushNotifEnabled.
         telemetry::test_set_flag("tengu_kairos_push_notifications", true);
         assert!(!cron::is_push_notif_enabled(), "Yke needs the setting too");
-        platform_api::session_flags::set_agent_push_notif_enabled(true);
+        lingxi_core::host::session_flags::set_agent_push_notif_enabled(true);
         assert!(cron::is_push_notif_enabled());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let d = rt.block_on(tool().description(
@@ -1077,7 +1077,7 @@ mod tests {
             "description must carry the byte-exact ybn() splice; tail was: {:?}",
             &d[d.len().saturating_sub(400)..]
         );
-        platform_api::session_flags::set_agent_push_notif_enabled(false);
+        lingxi_core::host::session_flags::set_agent_push_notif_enabled(false);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
     }
 
@@ -1152,10 +1152,10 @@ mod tests {
             std::env::temp_dir().join(format!("lingxi-monitor-cwd-{}", std::process::id()));
         std::fs::create_dir_all(&monitor_cwd).expect("create the monitor cwd");
         call_ctx.cwd = Some(monitor_cwd.clone());
-        call_ctx.tool_use_id = Some(protocol::ToolUseId::new());
+        call_ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::new());
         call_ctx.agent_name = Some("builder".into());
         call_ctx.team_name = Some("alpha".into());
-        let creator_agent_id = protocol::AgentId::new();
+        let creator_agent_id = lingxi_core::types::AgentId::new();
         call_ctx.agent_id = Some(creator_agent_id);
         let expected_tool_use_id = call_ctx.tool_use_id.as_ref().map(ToString::to_string);
         let out = tool_with_registry(registry.clone())
@@ -1207,7 +1207,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_monitor_schema_matches_270_on_actual_nested_dispatch() {
-        use platform_api::tool_invoker::{
+        use lingxi_core::host::tool_invoker::{
             SubagentInvocationContext, ToolExecutionPolicy, ToolInvoker,
         };
         fn invocation_context() -> SubagentInvocationContext {
@@ -1384,27 +1384,27 @@ mod tests {
         allow: bool,
     }
     #[async_trait]
-    impl platform_api::HttpTransport for PreflightHttp {
+    impl lingxi_core::host::HttpTransport for PreflightHttp {
         async fn request(
             &self,
-            _: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            _: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
             unreachable!()
         }
         async fn stream_sse(
             &self,
-            _: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            _: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
             unreachable!()
         }
         async fn preflight_monitor_websocket(
             &self,
             _: &str,
-        ) -> Result<(), platform_api::HttpError> {
+        ) -> Result<(), lingxi_core::host::HttpError> {
             if self.allow {
                 Ok(())
             } else {
-                Err(platform_api::HttpError::InvalidRequest(
+                Err(lingxi_core::host::HttpError::InvalidRequest(
                     "DNS resolved private address".into(),
                 ))
             }
@@ -1444,7 +1444,7 @@ mod tests {
             "Every monitor expires after `timeout_ms` (default 5 minutes, at most 30 minutes)"
         ));
         assert!(t.parse_native_input(&json!({"description":"d","command":"echo ok","timeout_ms":9_000_000,"persistent":true})).unwrap().is_err());
-        platform_api::session_flags::set_single_shot_print_session(true);
+        lingxi_core::host::session_flags::set_single_shot_print_session(true);
         assert_eq!(apply_ccr_timeout_cap(3_600_000, false), (600_000, false));
         assert_eq!(t.input_schema()["properties"]["timeout_ms"]["description"], "Kill the monitor after this deadline. Default 300000ms. Deadlines above 600000ms are capped to 600000ms. You are notified at expiry and can re-arm.");
         let registry = Arc::new(RecordingRegistry::default());
@@ -1461,7 +1461,7 @@ mod tests {
             .model_content
             .unwrap()
             .contains("expires in 10m unless the source ends first"));
-        platform_api::session_flags::set_single_shot_print_session(false);
+        lingxi_core::host::session_flags::set_single_shot_print_session(false);
         telemetry::test_clear_flag("tengu_breezy_crescent");
     }
     #[test]

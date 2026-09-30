@@ -12,7 +12,7 @@
 use async_trait::async_trait;
 use harness_runtime::desktop::settings_watch::{ConfigChangeFirer, SettingsWatcher};
 use hooks::events::ConfigChangeSource;
-use platform_api::filesystem::{
+use lingxi_core::host::filesystem::{
     FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError,
 };
 use std::path::PathBuf;

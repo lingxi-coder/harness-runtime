@@ -77,7 +77,7 @@ pub(crate) use restoration::run_app_boot_backfill_sweep;
 use restoration::{boot_backfill_sweep_should_run, lower_session_mode};
 
 #[cfg(test)]
-use platform_api::{Clock, FileSystem};
+use lingxi_core::host::{Clock, FileSystem};
 
 #[cfg(test)]
 use provider_services::{
@@ -130,20 +130,24 @@ use client::protocol::permission::PermissionResponseDto;
 use command_api::RegistrySlashDispatcher;
 use cron::CronJobFirer;
 use local_apps::{AppError, AppService};
+
 use mcp::{ConfigScope as McpConfigScope, McpRegistry, McpServerConfig};
 
 use mobile_linux_api::MobileLinuxRuntime;
+
 use orchestrator::test_support::StaticMemoryProvider;
 use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, StreamingApiClient,
 };
 use permission::gate::PermissionGate;
 use permission::PermissionMode;
-use platform_api::audio::{
+
+use lingxi_core::host::audio::{
     AudioError, AudioErrorKind, AudioOperation, AudioOperationContext, AudioOperationId,
     AudioOperationSuccess, AudioOwner, AudioService,
 };
-use platform_api::{AuthHandle, OrchestratorHandle, Platform, SlashCommandDispatcher};
+use lingxi_core::host::{AuthHandle, OrchestratorHandle, Platform, SlashCommandDispatcher};
+
 use secret::CredentialManager;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -156,7 +160,7 @@ const MOBILE_AUDIO_OWNER_TEARDOWN_BUDGET: std::time::Duration = std::time::Durat
 async fn end_mobile_audio_owner(
     service: &Arc<dyn AudioService>,
     recording_handles: &Arc<
-        tokio::sync::Mutex<HashMap<AudioOwner, platform_api::audio::AudioRecordingHandle>>,
+        tokio::sync::Mutex<HashMap<AudioOwner, lingxi_core::host::audio::AudioRecordingHandle>>,
     >,
     owner: AudioOwner,
 ) -> Result<(), AudioError> {
@@ -294,7 +298,7 @@ pub struct MobileRuntime {
     /// preload silently warn-and-skip on mobile.
     #[cfg(test)]
     pub(crate) wired_subagent_skill_loader_cell:
-        Arc<agent::RuntimeLink<Arc<dyn platform_api::skill_loader::SkillLoader>>>,
+        Arc<agent::RuntimeLink<Arc<dyn lingxi_core::host::skill_loader::SkillLoader>>>,
     /// Auth handle for `/login` and `/logout`.
     pub auth: Arc<dyn AuthHandle>,
     /// Native mobile OAuth coordinator. It owns the provider-specific handles
@@ -388,7 +392,7 @@ pub struct MobileRuntime {
     ///
     /// Desktop needs no equivalent: its picker gates the same static catalog on
     /// per-provider availability maps that mobile does not have.
-    pub routable_listings: Vec<platform_api::ModelListing>,
+    pub routable_listings: Vec<lingxi_core::host::ModelListing>,
     /// Settings-visible provider model directory generated before the mobile
     /// routing allowlist is applied.
     pub provider_model_catalog: Vec<ProviderModelCatalogEntryDto>,
@@ -510,14 +514,15 @@ impl MobileAppAgentExecutor {
         let call_budget = scoped
             .call_budget()
             .ok_or_else(|| "app Agent MCP budget was not attached".to_string())?;
-        let registry = McpRegistry::new(Arc::new(scoped) as Arc<dyn platform_api::McpTransport>);
+        let registry =
+            McpRegistry::new(Arc::new(scoped) as Arc<dyn lingxi_core::host::McpTransport>);
         registry
             .connect(McpServerConfig {
                 name: LOCAL_APPS_REGISTRY_KEY.into(),
-                spec: platform_api::McpTransportSpec::InProcess {
+                spec: lingxi_core::host::McpTransportSpec::InProcess {
                     registry_key: LOCAL_APPS_REGISTRY_KEY.into(),
                 },
-                scope: McpConfigScope::Settings(protocol::SettingsScope::Managed),
+                scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
                 disabled: false,
                 timeout_ms: Some(LOCAL_APPS_MCP_TIMEOUT_MS),
                 always_load: true,
@@ -580,14 +585,14 @@ impl MobileAppAgentExecutor {
                 Arc::new(StaticMemoryProvider::empty()),
                 layout.root().join(layout.workspace_rel()),
             )
-            .with_session_id(protocol::SessionId::new())
+            .with_session_id(lingxi_core::types::SessionId::new())
             .with_config_home(self.config_home.clone())
             .with_hooks_restricted(true),
         );
         let history = local_apps::load_agent_history(&layout, session_id)
             .map_err(|error| error.to_string())?
             .into_iter()
-            .map(serde_json::from_value::<protocol::ConversationMessage>)
+            .map(serde_json::from_value::<lingxi_core::types::ConversationMessage>)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("invalid persisted Agent history: {error}"))?;
         agent
@@ -662,7 +667,7 @@ struct SlashAuthoritySnapshot {
 }
 
 fn lower_controls(
-    controls: platform_api::ConversationControls,
+    controls: lingxi_core::host::ConversationControls,
     requested_permission: String,
 ) -> ConversationControlsDto {
     let mut controls = lower_conversation_controls(controls);
@@ -675,7 +680,7 @@ fn lower_controls(
     controls
 }
 
-fn lower_model_details(listing: &platform_api::ModelListing) -> ModelDetailsDto {
+fn lower_model_details(listing: &lingxi_core::host::ModelListing) -> ModelDetailsDto {
     client::adapter::lowering::lower_model_details(listing)
 }
 
@@ -882,8 +887,8 @@ fn mobile_mcp_preflight(
         if config.config_error.is_none()
             && matches!(
                 config.spec,
-                platform_api::McpTransportSpec::Sse { oauth: Some(_), .. }
-                    | platform_api::McpTransportSpec::Http { oauth: Some(_), .. }
+                lingxi_core::host::McpTransportSpec::Sse { oauth: Some(_), .. }
+                    | lingxi_core::host::McpTransportSpec::Http { oauth: Some(_), .. }
             )
         {
             config.config_error =
@@ -1102,7 +1107,7 @@ async fn mobile_mcp_run_reload_job(
 
 fn mobile_mcp_oauth_authorization_callback(
     slot: Arc<StdMutex<Option<String>>>,
-    opener: Option<Arc<dyn platform_api::DeepLinkOpener>>,
+    opener: Option<Arc<dyn lingxi_core::host::DeepLinkOpener>>,
 ) -> mcp::oauth::OnAuthorizationUrl {
     Arc::new(move |url| {
         // Record before attempting the native opener. A successful open is
@@ -1171,12 +1176,14 @@ pub enum MobileEngineError {
 /// - the registered foreign [`ClientEventListener`] (re-surfaced via
 ///   [`MobileRuntime::listener`]) that the adapter feeds every translated
 ///   [`client::protocol::events::ClientEvent`].
+
 ///
 /// Both FFI packager crates (`ios-framework` / `android-aar`) RE-EXPORT this
 /// shared host rather than each re-deriving it — that is what keeps iOS and
 /// Android from drifting (plan F3-04). Under the `uniffi` feature this becomes
 /// `#[derive(uniffi::Object)]`.
 ///
+
 /// The connection-scoped adapter sinks (output stream / permission gate /
 /// listener) survive an in-place orchestrator swap on New / Resume (§0.5); F3-05
 /// adds the async `submit` that resolves the parked permission gate from inbound
@@ -1261,7 +1268,7 @@ pub struct MobileEngineHandle {
     /// through (`list_recent_sessions`' `Arc<dyn FileSystem>` argument). The SAME
     /// `fs` the orchestrator's tools use — captured from the `Platform` so the
     /// session listing reads through the device's real backend.
-    fs: Arc<dyn platform_api::FileSystem>,
+    fs: Arc<dyn lingxi_core::host::FileSystem>,
     /// The deterministic build recipe, captured so the cron firing path
     /// (the per-task `run_cron_task_if_due`) can rebuild a FRESH, throwaway
     /// [`MobileRuntime`] per fired job (an isolated session that never pollutes
@@ -1304,7 +1311,7 @@ impl MobileRuntime {
     async fn retarget_session_context(
         &self,
         home: &std::path::Path,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         cwd: &str,
     ) {
         let next_session_id = session_id.as_uuid().to_string();
@@ -1360,8 +1367,8 @@ impl MobileRuntime {
                 let plans_dir = identity.plans_dir.clone();
                 self.plan_files
                     .publish(permission::plan_files::PlanFileIdentity {
-                        slug: platform_api::plan_slug::generate_slug(None, &|candidate| {
-                            platform_api::plan_slug::slug_taken_in(&plans_dir, candidate)
+                        slug: lingxi_core::host::plan_slug::generate_slug(None, &|candidate| {
+                            lingxi_core::host::plan_slug::slug_taken_in(&plans_dir, candidate)
                         }),
                         ..identity
                     });
@@ -1444,13 +1451,15 @@ fn session_agent_transcript_revision(raw: &[u8]) -> u64 {
         .filter(|line| !line.is_empty())
         .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
         .filter_map(|value| value.get("message").cloned())
-        .filter_map(|message| serde_json::from_value::<protocol::ConversationMessage>(message).ok())
+        .filter_map(|message| {
+            serde_json::from_value::<lingxi_core::types::ConversationMessage>(message).ok()
+        })
         .count() as u64
 }
 
 fn session_agent_transcript_event(
-    requested_session_id: protocol::SessionId,
-    current_session_id: protocol::SessionId,
+    requested_session_id: lingxi_core::types::SessionId,
+    current_session_id: lingxi_core::types::SessionId,
     agent_id: String,
     messages: Vec<client::protocol::message::MessageDto>,
     revision: u64,
@@ -1473,7 +1482,7 @@ fn session_agent_id_from_path(path: &std::path::Path) -> Option<String> {
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix("agent-"))
         .and_then(|id| id.strip_suffix(".jsonl"))
-        .and_then(protocol::AgentId::parse_prefixed)
+        .and_then(lingxi_core::types::AgentId::parse_prefixed)
         .map(|id| id.to_string())
 }
 
@@ -1522,15 +1531,17 @@ async fn find_session_agent_transcript_path(
 /// compact-summary, and transcript-only user records must not become
 /// standalone MessageDto rows. Agent indexes count only rows that the full
 /// transcript and live stream can both expose.
-fn session_agent_conversation_is_visible(message: &protocol::ConversationMessage) -> bool {
+fn session_agent_conversation_is_visible(
+    message: &lingxi_core::types::ConversationMessage,
+) -> bool {
     !matches!(
         message,
-        protocol::ConversationMessage::User { is_meta: true, .. }
-            | protocol::ConversationMessage::User {
+        lingxi_core::types::ConversationMessage::User { is_meta: true, .. }
+            | lingxi_core::types::ConversationMessage::User {
                 is_compact_summary: true,
                 ..
             }
-            | protocol::ConversationMessage::User {
+            | lingxi_core::types::ConversationMessage::User {
                 is_visible_in_transcript_only: true,
                 ..
             }
@@ -1722,12 +1733,15 @@ fn persist_mobile_settings_root(
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
+
     let write_result = (|| -> Result<(), String> {
         let mut file = options.open(&tmp_path).map_err(|error| error.to_string())?;
+
         {
             use std::io::Write as _;
             file.write_all(&bytes).map_err(|error| error.to_string())?;
         }
+
         file.sync_all().map_err(|error| error.to_string())?;
         drop(file);
         std::fs::rename(&tmp_path, settings_path).map_err(|error| error.to_string())?;
@@ -1761,24 +1775,30 @@ fn mobile_settings_write_lock(settings_path: &std::path::Path) -> Arc<Mutex<()>>
     lock
 }
 
-fn live_session_agent_activity(message: &protocol::ConversationMessage) -> Option<String> {
+fn live_session_agent_activity(
+    message: &lingxi_core::types::ConversationMessage,
+) -> Option<String> {
     match message {
-        protocol::ConversationMessage::Assistant { content, .. }
-        | protocol::ConversationMessage::User { content, .. } => {
+        lingxi_core::types::ConversationMessage::Assistant { content, .. }
+        | lingxi_core::types::ConversationMessage::User { content, .. } => {
             content.iter().find_map(|block| match block {
-                protocol::ContentBlock::Text { text } if !text.is_empty() => {
+                lingxi_core::types::ContentBlock::Text { text } if !text.is_empty() => {
                     Some(text.chars().take(160).collect())
                 }
-                protocol::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
-                protocol::ContentBlock::ToolResult { content, .. } if !content.is_empty() => {
+                lingxi_core::types::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                lingxi_core::types::ContentBlock::ToolResult { content, .. }
+                    if !content.is_empty() =>
+                {
                     Some(content.chars().take(160).collect())
                 }
+
                 _ => None,
             })
         }
-        protocol::ConversationMessage::System { content, .. } if !content.is_empty() => {
+        lingxi_core::types::ConversationMessage::System { content, .. } if !content.is_empty() => {
             Some(content.chars().take(160).collect())
         }
+
         _ => None,
     }
 }
@@ -1837,10 +1857,10 @@ impl MobileSessionAgentObserver {
 }
 
 #[async_trait::async_trait]
-impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentObserver {
-    async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
+impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentObserver {
+    async fn on_event(&self, event: lingxi_core::host::subagent_spawn::SubagentObservation) {
         match event {
-            platform_api::subagent_spawn::SubagentObservation::Allocated {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Allocated {
                 agent_id,
                 agent_type,
                 name,
@@ -1883,14 +1903,17 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                     })
                     .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Message { agent_id, message } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Message {
+                agent_id,
+                message,
+            } => {
                 let parked = matches!(
                     &message,
-                    protocol::ConversationMessage::System { subtype: Some(subtype), .. } if subtype == "agent_idle"
+                    lingxi_core::types::ConversationMessage::System { subtype: Some(subtype), .. } if subtype == "agent_idle"
                 );
                 let hidden_wake = matches!(
                     &message,
-                    protocol::ConversationMessage::User { is_meta: true, .. }
+                    lingxi_core::types::ConversationMessage::User { is_meta: true, .. }
                 );
                 if parked || hidden_wake {
                     let agent_key = agent_id.to_string();
@@ -1918,6 +1941,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                         .await;
                     return;
                 }
+
                 if !session_agent_conversation_is_visible(&message) {
                     return;
                 }
@@ -1961,7 +1985,9 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                     })
                     .await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Completed { agent_id, .. } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Completed {
+                agent_id, ..
+            } => {
                 let agent_key = agent_id.to_string();
                 let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
                     return;
@@ -1992,7 +2018,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                     self.clear_agent_state(&agent_key).await;
                 }
             }
-            platform_api::subagent_spawn::SubagentObservation::Failed { agent_id, error } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Failed { agent_id, error } => {
                 let agent_key = agent_id.to_string();
                 let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
                     return;
@@ -2014,7 +2040,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                     .await;
                 self.clear_agent_state(&agent_key).await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Killed { agent_id } => {
+            lingxi_core::host::subagent_spawn::SubagentObservation::Killed { agent_id } => {
                 let agent_key = agent_id.to_string();
                 let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
                     return;
@@ -2036,13 +2062,13 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                     .await;
                 self.clear_agent_state(&agent_key).await;
             }
-            platform_api::subagent_spawn::SubagentObservation::Progress { .. } => {}
-            platform_api::subagent_spawn::SubagentObservation::Retry { .. } => {}
+            lingxi_core::host::subagent_spawn::SubagentObservation::Progress { .. } => {}
+            lingxi_core::host::subagent_spawn::SubagentObservation::Retry { .. } => {}
         }
     }
 }
 
-fn parse_session_agent_messages(raw: &[u8]) -> Vec<protocol::ConversationMessage> {
+fn parse_session_agent_messages(raw: &[u8]) -> Vec<lingxi_core::types::ConversationMessage> {
     let mut messages = Vec::new();
     for line in raw.split(|byte| *byte == b'\n') {
         if line.is_empty() {
@@ -2055,13 +2081,13 @@ fn parse_session_agent_messages(raw: &[u8]) -> Vec<protocol::ConversationMessage
             continue;
         };
         let Ok(conversation) =
-            serde_json::from_value::<protocol::ConversationMessage>(message.clone())
+            serde_json::from_value::<lingxi_core::types::ConversationMessage>(message.clone())
         else {
             continue;
         };
         if matches!(
             &conversation,
-            protocol::ConversationMessage::System {
+            lingxi_core::types::ConversationMessage::System {
                 subtype: Some(subtype),
                 ..
             } if subtype.starts_with("agent_")
@@ -2095,6 +2121,7 @@ impl cron::scheduler::SessionCronDelivery for MobileWakeupDelivery {
     async fn is_loading(&self) -> bool {
         self.queue.has_active_turn().await
     }
+
     async fn enqueue(&self, fire: cron::scheduler::SessionCronFire) -> Result<(), String> {
         if fire.cron.is_empty() {
             self.queue
@@ -2159,6 +2186,7 @@ struct MobileWakeupDelivery {
 impl tool_cron::WakeupDelivery for MobileWakeupDelivery {
     async fn deliver(
         &self,
+
         command_id: &str,
         prompt: String,
         _reason: String,
@@ -2917,7 +2945,7 @@ impl MobileEngineHandle {
             .is_some_and(|turn| turn.cancel.is_cancelled())
     }
 
-    async fn retarget_session_writer(&self, session_id: protocol::SessionId, cwd: &str) {
+    async fn retarget_session_writer(&self, session_id: lingxi_core::types::SessionId, cwd: &str) {
         self.inner
             .retarget_session_context(&self.lingxi_home, session_id, cwd)
             .await;
@@ -3012,7 +3040,7 @@ impl MobileEngineHandle {
             if let Err(error) = handle.set_reasoning_selection(selection).await {
                 tracing::warn!(%error, "saved mobile reasoning selection rejected by current model");
                 let _ = handle
-                    .set_reasoning_selection(platform_api::ReasoningSelection::Automatic)
+                    .set_reasoning_selection(lingxi_core::host::ReasoningSelection::Automatic)
                     .await;
             }
             return;
@@ -3020,7 +3048,7 @@ impl MobileEngineHandle {
         if let Some(controls) = handle.conversation_controls().await {
             if controls.requested_reasoning_selection != controls.effective_reasoning_selection {
                 let _ = handle
-                    .set_reasoning_selection(platform_api::ReasoningSelection::Automatic)
+                    .set_reasoning_selection(lingxi_core::host::ReasoningSelection::Automatic)
                     .await;
             }
         }
@@ -3219,11 +3247,11 @@ impl MobileEngineHandle {
                     .await;
                 if let Err(error) = handle
                     .resume_session(
-                        protocol::SessionId::from_uuid(uuid),
+                        lingxi_core::types::SessionId::from_uuid(uuid),
                         replayed.state.history.clone(),
                         replayed.last_message_uuid.map(|id| id.to_string()),
                         replayed.state.active_goal.clone().map(|goal| {
-                            platform_api::ActiveGoalSnapshot {
+                            lingxi_core::host::ActiveGoalSnapshot {
                                 condition: goal.condition,
                                 set_at: goal.set_at,
                                 last_reason: goal.last_reason,
@@ -3259,7 +3287,7 @@ impl MobileEngineHandle {
                 self.inner
                     .local_apps_llm
                     .set_model(current_model.model, current_model.model_profile);
-                self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
+                self.retarget_session_writer(lingxi_core::types::SessionId::from_uuid(uuid), &cwd)
                     .await;
                 self.inner
                     .workflow_checkpoints
@@ -3337,12 +3365,12 @@ impl MobileEngineHandle {
                     .await?;
                 if let Err(resume_error) = handle
                     .resume_session(
-                        protocol::SessionId::from_uuid(uuid),
+                        lingxi_core::types::SessionId::from_uuid(uuid),
                         Vec::new(),
                         None,
                         None,
                         self.resume_runtime_with_model_preference(
-                            platform_api::ResumeRuntimeSnapshot::default(),
+                            lingxi_core::host::ResumeRuntimeSnapshot::default(),
                         )
                         .await,
                     )
@@ -3367,7 +3395,7 @@ impl MobileEngineHandle {
                 self.inner
                     .local_apps_llm
                     .set_model(current_model.model, current_model.model_profile);
-                self.retarget_session_writer(protocol::SessionId::from_uuid(uuid), &cwd)
+                self.retarget_session_writer(lingxi_core::types::SessionId::from_uuid(uuid), &cwd)
                     .await;
                 self.inner
                     .workflow_checkpoints
@@ -3431,6 +3459,7 @@ impl MobileEngineHandle {
                     tool_cron::cancel_dynamic_loop_on_user_abort(scheduler).await;
                 }
             }
+
             // A paused / waiting turn has no executor owner, but its durable
             // checkpoint remains cancellable. Re-check the owner slot while
             // holding the lock so a newly reserved turn cannot be confused
@@ -3502,11 +3531,11 @@ impl MobileEngineHandle {
         };
         let permission_count = cancelled_permissions.len();
         drop(cancelled_permissions);
-        if !platform_api::env::background_tasks_disabled() {
+        if !lingxi_core::host::env::background_tasks_disabled() {
             self.inner
                 .task_registry
                 .background_all_tasks_with_reason(
-                    platform_api::task_registry::TaskBackgroundReason::TurnAbort,
+                    lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort,
                 )
                 .await;
         }
@@ -3664,11 +3693,11 @@ impl MobileEngineHandle {
                 self.message_queue
                     .enqueue(mobile_prompt_command(text))
                     .await;
-                if !platform_api::env::background_tasks_disabled() {
+                if !lingxi_core::host::env::background_tasks_disabled() {
                     self.inner
                         .task_registry
                         .background_all_tasks_with_reason(
-                            platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                            lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
                         )
                         .await;
                 }
@@ -4066,6 +4095,7 @@ impl MobileEngineHandle {
             Err(error) => {
                 self.emit_app_failure(app_id.map(str::to_string), error)
                     .await;
+
                 None
             }
         }
@@ -5205,11 +5235,11 @@ impl MobileEngineHandle {
                             controls.reasoning_spec.selections_persistable,
                         )
                     })
-                    .unwrap_or((platform_api::ReasoningSelection::Automatic, true));
+                    .unwrap_or((lingxi_core::host::ReasoningSelection::Automatic, true));
                 let persisted_default = if persistable {
                     effective
                 } else {
-                    platform_api::ReasoningSelection::Automatic
+                    lingxi_core::host::ReasoningSelection::Automatic
                 };
                 if let Err(error) =
                     command_api::builtins::effort::persist_reasoning_default_selection_at(
@@ -5220,14 +5250,14 @@ impl MobileEngineHandle {
                     let rollback = previous
                         .as_ref()
                         .map(|(requested, _, _)| requested.clone())
-                        .unwrap_or(platform_api::ReasoningSelection::Automatic);
+                        .unwrap_or(lingxi_core::host::ReasoningSelection::Automatic);
                     let _ = handle.set_reasoning_selection(rollback.clone()).await;
                     let previous_default = previous.as_ref().map_or(
-                        platform_api::ReasoningSelection::Automatic,
+                        lingxi_core::host::ReasoningSelection::Automatic,
                         |(_, effective, persistable)| {
                             persistable
                                 .then_some(effective.clone())
-                                .unwrap_or(platform_api::ReasoningSelection::Automatic)
+                                .unwrap_or(lingxi_core::host::ReasoningSelection::Automatic)
                         },
                     );
                     let _ = command_api::builtins::effort::persist_reasoning_default_selection_at(
@@ -5471,11 +5501,11 @@ impl MobileEngineHandle {
                 }
                 let before = self.capture_slash_authority().await;
                 match self.inner.dispatcher.dispatch(&raw).await {
-                    platform_api::SlashDispatchResult::RunAsTurn { prompt } => {
+                    lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt } => {
                         self.start_streaming_turn(prompt, None, Vec::new(), turn_id, false)
                             .await?;
                     }
-                    platform_api::SlashDispatchResult::Handled { display } => {
+                    lingxi_core::host::SlashDispatchResult::Handled { display } => {
                         self.event_sink
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -5484,7 +5514,7 @@ impl MobileEngineHandle {
                             })
                             .await;
                     }
-                    platform_api::SlashDispatchResult::Unknown { display, .. } => {
+                    lingxi_core::host::SlashDispatchResult::Unknown { display, .. } => {
                         self.event_sink
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -5493,7 +5523,7 @@ impl MobileEngineHandle {
                             })
                             .await;
                     }
-                    platform_api::SlashDispatchResult::NotASlashCommand => {
+                    lingxi_core::host::SlashDispatchResult::NotASlashCommand => {
                         self.event_sink
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -6315,7 +6345,7 @@ impl MobileEngineHandle {
             // one `TaskRow` per record, one `TaskOutputChunk`, one
             // `TaskStatusChanged` after a stop.
             ClientCommand::TaskList { status_filter, .. } => {
-                let filter = platform_api::task_registry::TaskListFilter {
+                let filter = lingxi_core::host::task_registry::TaskListFilter {
                     status: status_filter.map(|s| {
                         match s {
                             client::protocol::listings::TaskStatusDto::Pending => "pending",
@@ -6331,7 +6361,7 @@ impl MobileEngineHandle {
                         .to_string()
                     }),
                 };
-                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
+                let registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 let records = registry
                     .list(filter)
@@ -6346,7 +6376,7 @@ impl MobileEngineHandle {
                 Ok(())
             }
             ClientCommand::TaskOutput { task_id, offset } => {
-                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
+                let registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 let chunk = registry.output(&task_id, Some(offset)).await.map_err(|e| {
                     ClientError::Internal {
@@ -6371,7 +6401,7 @@ impl MobileEngineHandle {
                         message: "Trust this workspace before messaging a task".into(),
                     });
                 }
-                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
+                let registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 registry
                     .send_human_task_message(&task_id, &message)
@@ -6390,7 +6420,7 @@ impl MobileEngineHandle {
                 Ok(())
             }
             ClientCommand::TaskStop { task_id } => {
-                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
+                let registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 let record = registry
                     .kill(&task_id)
@@ -6412,7 +6442,7 @@ impl MobileEngineHandle {
                 Ok(())
             }
             ClientCommand::ResumeWorkflow { task_id } => {
-                let registry: &dyn platform_api::task_registry::TaskRegistryHandle =
+                let registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle =
                     &*self.inner.task_registry;
                 let resume_session = self
                     .inner
@@ -6544,6 +6574,7 @@ impl MobileEngineHandle {
     /// Test a provider endpoint without exposing a stored credential to the
     /// foreign host or mutating the live engine configuration.
     ///
+
     /// The request uses each provider's model-list endpoint because it verifies
     /// DNS/TLS, authentication, and the selected model without consuming
     /// inference tokens. An optional draft credential takes precedence over the
@@ -6657,6 +6688,7 @@ impl MobileEngineHandle {
         let Some(runtime) = self.inner.mobile_linux.as_ref() else {
             return Err(MobileEngineError::PlatformUnavailable);
         };
+
         Self::read_mobile_linux_status(runtime.as_ref()).await
     }
 
@@ -6844,7 +6876,7 @@ impl MobileEngineHandle {
     /// fail-closed and strips every profile. Nothing is routable in that state
     /// whatever we show, so fall back to the static catalog rather than hand the
     /// client an empty picker it can neither act on nor explain.
-    async fn routable_model_listings(&self) -> Vec<platform_api::ModelListing> {
+    async fn routable_model_listings(&self) -> Vec<lingxi_core::host::ModelListing> {
         if !self.inner.routable_listings.is_empty() {
             return self.inner.routable_listings.clone();
         }
@@ -6867,8 +6899,8 @@ impl MobileEngineHandle {
 
     async fn resume_runtime_with_model_preference(
         &self,
-        mut runtime: platform_api::ResumeRuntimeSnapshot,
-    ) -> platform_api::ResumeRuntimeSnapshot {
+        mut runtime: lingxi_core::host::ResumeRuntimeSnapshot,
+    ) -> lingxi_core::host::ResumeRuntimeSnapshot {
         if self.inner.interactive_launch {
             if let Some(saved) = model_preference::load(&self.lingxi_home) {
                 // Picker listings can fall back to unavailable built-ins. Only
@@ -6899,8 +6931,10 @@ impl MobileEngineHandle {
                 message: format!("switch_model failed: {error}"),
             })?;
         let current = handle.get_status_snapshot().await;
-        let selected =
-            platform_api::qualified_model_ref(&current.model, current.model_profile.as_deref());
+        let selected = lingxi_core::host::qualified_model_ref(
+            &current.model,
+            current.model_profile.as_deref(),
+        );
         if self.inner.interactive_launch {
             if let Err(error) = model_preference::save(&self.lingxi_home, &selected) {
                 let rollback = handle
@@ -6930,7 +6964,7 @@ impl MobileEngineHandle {
     /// Resolve a client-supplied model reference into the `(wire id, profile)`
     /// pair the orchestrator takes, REFUSING one no configured provider serves.
     ///
-    /// [`platform_api::parse_model_ref`] falls back to treating an unresolvable
+    /// [`lingxi_core::host::parse_model_ref`] falls back to treating an unresolvable
     /// reference as a bare wire id, so accepting one put `provider/model` —
     /// which is not a wire id at all — into `session.model`. Every turn of that
     /// session then 404'd, and because the transcript persists the session
@@ -6940,7 +6974,7 @@ impl MobileEngineHandle {
         model: &str,
     ) -> Result<(String, Option<String>), ClientError> {
         let listings = &self.inner.routable_listings;
-        let (model_id, profile) = platform_api::parse_model_ref(model, listings);
+        let (model_id, profile) = lingxi_core::host::parse_model_ref(model, listings);
         let routable = listings.iter().any(|listing| {
             listing.request_model == model_id
                 && profile
@@ -6962,7 +6996,7 @@ impl MobileEngineHandle {
     /// Return the directory containing child-agent transcripts for the live
     /// connection session. The path is derived exclusively from engine-owned
     /// session state; callers never get to supply a filesystem path.
-    async fn session_agent_dir(&self) -> (protocol::SessionId, std::path::PathBuf) {
+    async fn session_agent_dir(&self) -> (lingxi_core::types::SessionId, std::path::PathBuf) {
         let session_id = self.inner.orchestrator.current_session_id().await;
         let dir = orchestrator::transcript_paths::subagents_dir(
             &self.lingxi_home,
@@ -7001,14 +7035,14 @@ impl MobileEngineHandle {
     }
 
     fn hide_agent_lifecycle_messages(
-        messages: Vec<protocol::ConversationMessage>,
-    ) -> Vec<protocol::ConversationMessage> {
+        messages: Vec<lingxi_core::types::ConversationMessage>,
+    ) -> Vec<lingxi_core::types::ConversationMessage> {
         messages
             .into_iter()
             .filter(|message| {
                 !matches!(
                     message,
-                    protocol::ConversationMessage::System {
+                    lingxi_core::types::ConversationMessage::System {
                         subtype: Some(subtype),
                         ..
                     } if subtype.starts_with("agent_")
@@ -7181,7 +7215,7 @@ impl MobileEngineHandle {
 
     async fn load_session_agent_transcript_for_session(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         dir: &std::path::Path,
         agent_id: &str,
     ) -> Result<(Vec<client::protocol::message::MessageDto>, u64), ClientError> {
@@ -7208,11 +7242,12 @@ impl MobileEngineHandle {
                 session_agent_transcript_revision(&raw),
             )
         } else {
-            let parsed = protocol::AgentId::parse_prefixed(agent_id).ok_or_else(|| {
-                ClientError::Rejected {
-                    message: format!("malformed session agent id: {agent_id:?}"),
-                }
-            })?;
+            let parsed =
+                lingxi_core::types::AgentId::parse_prefixed(agent_id).ok_or_else(|| {
+                    ClientError::Rejected {
+                        message: format!("malformed session agent id: {agent_id:?}"),
+                    }
+                })?;
             let path = find_session_agent_transcript_path(dir, &parsed.to_string())
                 .await
                 .map_err(|error| ClientError::Rejected {
@@ -7288,7 +7323,7 @@ impl MobileEngineHandle {
                 .await
                 .as_uuid()
                 .to_string(),
-            model: platform_api::qualified_model_ref(
+            model: lingxi_core::host::qualified_model_ref(
                 &snapshot.model,
                 snapshot.model_profile.as_deref(),
             ),
@@ -7381,19 +7416,19 @@ impl MobileEngineHandle {
                 let available = handle.list_available_models().await;
                 let listings = self.routable_model_listings().await;
                 let snapshot = handle.get_status_snapshot().await;
-                let curated = platform_api::curated_model_listings(
+                let curated = lingxi_core::host::curated_model_listings(
                     &listings,
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
-                let models = platform_api::curated_model_refs(
+                let models = lingxi_core::host::curated_model_refs(
                     &listings,
                     &available,
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
                 let details = curated.iter().map(lower_model_details).collect();
-                let current = platform_api::qualified_model_ref(
+                let current = lingxi_core::host::qualified_model_ref(
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
@@ -7644,11 +7679,19 @@ impl MobileEngineHandle {
 fn command_source_string(source: command_api::model::CommandSource) -> &'static str {
     match source {
         command_api::model::CommandSource::Builtin => "builtin",
-        command_api::model::CommandSource::Settings(protocol::SettingsScope::User) => "user",
-        command_api::model::CommandSource::Settings(protocol::SettingsScope::Project) => "project",
-        command_api::model::CommandSource::Settings(protocol::SettingsScope::Local) => "local",
+        command_api::model::CommandSource::Settings(lingxi_core::types::SettingsScope::User) => {
+            "user"
+        }
+        command_api::model::CommandSource::Settings(lingxi_core::types::SettingsScope::Project) => {
+            "project"
+        }
+        command_api::model::CommandSource::Settings(lingxi_core::types::SettingsScope::Local) => {
+            "local"
+        }
         command_api::model::CommandSource::Plugin => "plugin",
-        command_api::model::CommandSource::Settings(protocol::SettingsScope::Managed) => "managed",
+        command_api::model::CommandSource::Settings(lingxi_core::types::SettingsScope::Managed) => {
+            "managed"
+        }
         command_api::model::CommandSource::Mcp => "mcp",
         command_api::model::CommandSource::Bundled => "bundled",
     }

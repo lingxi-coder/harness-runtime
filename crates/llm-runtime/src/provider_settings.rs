@@ -11,12 +11,11 @@ use serde_json::{Map, Value};
 
 use crate::{
     AuthStrategy, AzureConfig, Capabilities, ConnectionSpec, CredentialConfig, FailoverTriggers,
-    LlmError, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
-    SigningConfig, TokenPricing,
+    LlmError, ModelProfile, PricingConfig, PricingOverride, ProtocolFamily, ProviderId,
+    ProviderProfile, SigningConfig,
 };
 
-const SUPPORTED_PROVIDER_TYPES: &str =
-    "openai, openai-responses, anthropic, gemini, azure-openai, bedrock-claude, vertex-claude, vertex-gemini, foundry-claude";
+const SUPPORTED_PROVIDER_TYPES: &str = "openai, openai-responses, anthropic, gemini, azure-openai, bedrock-claude, vertex-claude, vertex-gemini, foundry-claude";
 
 /// Provider kinds accepted in `settings.providers`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -621,10 +620,10 @@ fn parse_flat_provider(
             .as_str()
             .ok_or_else(|| format!("provider {name:?}: billingMode must be a string"))?;
         pricing.billing_mode = match raw {
-            "perToken" => platform_api::ModelBillingMode::PerToken,
-            "subscription" => platform_api::ModelBillingMode::Subscription,
-            "free" => platform_api::ModelBillingMode::Free,
-            "unknown" => platform_api::ModelBillingMode::Unknown,
+            "perToken" => lingxi_core::host::ModelBillingMode::PerToken,
+            "subscription" => lingxi_core::host::ModelBillingMode::Subscription,
+            "free" => lingxi_core::host::ModelBillingMode::Free,
+            "unknown" => lingxi_core::host::ModelBillingMode::Unknown,
             _ => {
                 return Err(format!(
                     "provider {name:?}: unsupported billingMode {raw:?}"
@@ -635,7 +634,7 @@ fn parse_flat_provider(
     if !pricing.overrides.is_empty() {
         // A concrete per-model price sheet is stronger evidence than a broad
         // provider billing hint and must drive both cost lookup and display.
-        pricing.billing_mode = platform_api::ModelBillingMode::PerToken;
+        pricing.billing_mode = lingxi_core::host::ModelBillingMode::PerToken;
     }
     for (model_id, model_pricing) in display_overrides {
         if let Some(model) = models
@@ -818,7 +817,7 @@ fn parse_model_entry(provider_name: &str, value: &Value) -> Result<ModelProfile,
             let metadata = obj
                 .get("metadata")
                 .cloned()
-                .map(serde_json::from_value::<platform_api::ModelMetadata>)
+                .map(serde_json::from_value::<lingxi_core::host::ModelMetadata>)
                 .transpose()
                 .map_err(|error| {
                     format!("provider {provider_name:?}: model {id:?} metadata is invalid: {error}")
@@ -882,7 +881,13 @@ fn parse_pricing_overrides(
     profile_name: &str,
     pricing_val: &Value,
     model_profiles: &[ModelProfile],
-) -> Result<(PricingConfig, Vec<(String, platform_api::ModelPricing)>), String> {
+) -> Result<
+    (
+        PricingConfig,
+        Vec<(String, lingxi_core::host::ModelPricing)>,
+    ),
+    String,
+> {
     const KNOWN_PRICING_KEYS: &[&str] = &[
         "inputPerMtok",
         "outputPerMtok",
@@ -962,7 +967,7 @@ fn parse_pricing_overrides(
 
         overrides.push((
             model_id.clone(),
-            TokenPricing {
+            PricingOverride {
                 input_per_million: input_per_million.unwrap_or(0.0),
                 output_per_million: output_per_million.unwrap_or(0.0),
                 cache_write_per_million: cache_write_per_million.unwrap_or(0.0),
@@ -972,8 +977,8 @@ fn parse_pricing_overrides(
         ));
         display_overrides.push((
             model_id.clone(),
-            platform_api::ModelPricing {
-                billing_mode: platform_api::ModelBillingMode::PerToken,
+            lingxi_core::host::ModelPricing {
+                billing_mode: lingxi_core::host::ModelBillingMode::PerToken,
                 input_per_million,
                 output_per_million,
                 cache_read_per_million,
@@ -988,9 +993,9 @@ fn parse_pricing_overrides(
     Ok((
         PricingConfig {
             billing_mode: if overrides.is_empty() {
-                platform_api::ModelBillingMode::Unknown
+                lingxi_core::host::ModelBillingMode::Unknown
             } else {
-                platform_api::ModelBillingMode::PerToken
+                lingxi_core::host::ModelBillingMode::PerToken
             },
             require_priced: false,
             overrides,
@@ -1038,7 +1043,7 @@ fn json_type_name(value: &Value) -> &'static str {
     }
 }
 
-fn anthropic_metadata(model: &str) -> platform_api::ModelMetadata {
+fn anthropic_metadata(model: &str) -> lingxi_core::host::ModelMetadata {
     use crate::model::context_window::{context_window_for_model, max_output_tokens_for_model};
 
     let rates = match model {
@@ -1050,7 +1055,7 @@ fn anthropic_metadata(model: &str) -> platform_api::ModelMetadata {
         "claude-sonnet-4-6" => Some((3.0, 15.0, 0.3, 3.75)),
         _ => None,
     };
-    platform_api::ModelMetadata {
+    lingxi_core::host::ModelMetadata {
         input_modalities: vec!["text".to_string(), "image".to_string(), "pdf".to_string()],
         output_modalities: vec!["text".to_string()],
         context_window_tokens: Some(context_window_for_model(model, &[])),
@@ -1066,18 +1071,18 @@ fn anthropic_metadata(model: &str) -> platform_api::ModelMetadata {
                 max_output_tokens_for_model(model)
             },
         ),
-        pricing: rates.map(
-            |(input, output, cache_read, cache_write)| platform_api::ModelPricing {
-                billing_mode: platform_api::ModelBillingMode::PerToken,
+        pricing: rates.map(|(input, output, cache_read, cache_write)| {
+            lingxi_core::host::ModelPricing {
+                billing_mode: lingxi_core::host::ModelBillingMode::PerToken,
                 input_per_million: Some(input),
                 output_per_million: Some(output),
                 cache_read_per_million: Some(cache_read),
                 cache_write_per_million: Some(cache_write),
                 source: Some("official".to_string()),
-                ..platform_api::ModelPricing::default()
-            },
-        ),
-        ..platform_api::ModelMetadata::default()
+                ..lingxi_core::host::ModelPricing::default()
+            }
+        }),
+        ..lingxi_core::host::ModelMetadata::default()
     }
 }
 
@@ -1202,7 +1207,7 @@ pub fn anthropic_provider_profile(
         credential,
         models: anthropic_model_profiles(),
         pricing: PricingConfig {
-            billing_mode: platform_api::ModelBillingMode::PerToken,
+            billing_mode: lingxi_core::host::ModelBillingMode::PerToken,
             ..PricingConfig::default()
         },
         signing: None,
@@ -1662,7 +1667,7 @@ mod tests {
             .expect("display pricing override");
         assert_eq!(
             display.billing_mode,
-            platform_api::ModelBillingMode::PerToken
+            lingxi_core::host::ModelBillingMode::PerToken
         );
         assert_eq!(display.input_per_million, Some(1.0));
         assert_eq!(display.output_per_million, Some(2.0));
@@ -1696,7 +1701,7 @@ mod tests {
         let profile = &parsed[0].profile;
         assert_eq!(
             profile.pricing.billing_mode,
-            platform_api::ModelBillingMode::PerToken
+            lingxi_core::host::ModelBillingMode::PerToken
         );
         let display = profile.models[0]
             .metadata
@@ -1736,7 +1741,7 @@ mod tests {
         let profile = &parsed[0].profile;
         assert_eq!(
             profile.pricing.billing_mode,
-            platform_api::ModelBillingMode::Subscription
+            lingxi_core::host::ModelBillingMode::Subscription
         );
         let model = &profile.models[0];
         assert_eq!(model.metadata.status.as_deref(), Some("beta"));

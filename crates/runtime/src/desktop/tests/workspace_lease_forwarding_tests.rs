@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex as StdMutex};
 
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
 /// Terminal invoker that records the lease token it was dispatched with.
 struct RecordingInvoker {
@@ -15,9 +15,9 @@ impl ToolInvoker for RecordingInvoker {
         _input: serde_json::Value,
         _ctx: SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
-    ) -> Result<platform_api::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         *self.seen.lock().unwrap() = Some(workspace_lease_token);
-        Ok(platform_api::tool_invoker::ToolInvocationResult {
+        Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
             is_error: false,
             data: serde_json::json!({"awaitingLeaderApproval": true}),
             model_content: Some("Wait for the team lead to review your plan".into()),
@@ -55,7 +55,7 @@ fn bare_ctx() -> SubagentInvocationContext {
         permission_pause_observer: None,
         parent_agent_id: None,
         origin_session_id: None,
-        tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+        tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
         agent_name: None,
         team_name: None,
         is_async: false,

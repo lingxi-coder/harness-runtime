@@ -40,9 +40,9 @@ use tool_api::tool_trait::{
 use tool_api::util::output_truncation::{truncate_shell_output, MAX_TOOL_OUTPUT_LENGTH};
 use tool_api::BuiltinToolContext;
 
+use lingxi_core::host::sandbox::{ProcessCommand, SandboxError, SandboxPolicy};
 use mobile_linux_api::ProcessError;
 use mobile_linux_api::{NetworkPolicy, ResourceLimits};
-use platform_api::sandbox::{ProcessCommand, SandboxError, SandboxPolicy};
 
 /// Tool name byte-lock — the model-facing name for the mobile shell.
 pub const TOOL_NAME: &str = "Shell";
@@ -494,12 +494,12 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mobile_linux_api::ProcessOutput;
-    use mobile_linux_api::SandboxBackend;
-    use platform_api::process::{ProcessHandle, ProcessRunner};
-    use platform_api::sandbox::{
+    use lingxi_core::host::process::{ProcessHandle, ProcessRunner};
+    use lingxi_core::host::sandbox::{
         Sandbox, SandboxCapability, SandboxFeatures, SandboxedCommand, SandboxedTag,
     };
+    use mobile_linux_api::ProcessOutput;
+    use mobile_linux_api::SandboxBackend;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};

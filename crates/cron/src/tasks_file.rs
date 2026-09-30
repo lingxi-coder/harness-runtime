@@ -19,7 +19,7 @@
 //! at runtime from the cron string + `lastFiredAt ?? createdAt`
 //! ([`crate::schedule::CronExpression::next_match_after`]).
 
-use platform_api::{FileSystem, FlockGuard, FsError};
+use lingxi_core::host::{FileSystem, FlockGuard, FsError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -70,7 +70,7 @@ impl CronTaskCreator {
         }
         match (
             self.created_by_proc_start.as_deref(),
-            platform_api::live_sessions::process_start_identity(pid),
+            lingxi_core::host::live_sessions::process_start_identity(pid),
         ) {
             (Some(expected), Some(actual)) => expected != actual,
             _ => false,
@@ -660,7 +660,7 @@ mod tests {
         let roundtrip = parse_tasks(&serialize_tasks(&doc));
         assert_eq!(roundtrip.tasks[0].creator, *creator);
         assert_eq!(serde_json::to_value(creator).unwrap()["createdByPid"], pid);
-        if platform_api::live_sessions::process_start_identity(pid).is_some() {
+        if lingxi_core::host::live_sessions::process_start_identity(pid).is_some() {
             assert!(
                 creator.can_run_for(Some("foreign")),
                 "reused PID with a different process birth becomes orphaned"

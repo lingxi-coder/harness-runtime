@@ -8,9 +8,9 @@
 //! `taskkill /T /F /PID <pid>`.
 
 use async_trait::async_trait;
+use lingxi_core::host::{ProcessHandle, ProcessRunner, SandboxedCommand};
 use mobile_linux_api::ProcessStreamSink;
 use mobile_linux_api::{ProcessError, ProcessOutput};
-use platform_api::{ProcessHandle, ProcessRunner, SandboxedCommand};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -77,12 +77,12 @@ impl WindowsProcess {
 #[async_trait]
 impl ProcessRunner for WindowsProcess {
     async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
-        let owned = platform_api::agent_processes::snapshot_entries(owner);
+        let owned = lingxi_core::host::agent_processes::snapshot_entries(owner);
         for entry in &owned {
-            if platform_api::shell_supervisor::kill_owned_registration(owner, *entry)
+            if lingxi_core::host::shell_supervisor::kill_owned_registration(owner, *entry)
                 .await
                 .is_none()
-                && platform_api::agent_processes::is_current(owner, *entry)
+                && lingxi_core::host::agent_processes::is_current(owner, *entry)
             {
                 let _ = super::kill_tree::kill_tree_windows(entry.pid).await;
             }
@@ -99,7 +99,7 @@ impl ProcessRunner for WindowsProcess {
 
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
         let _agent_registration =
-            platform_api::agent_processes::register(cmd.process_owner(), child.id());
+            lingxi_core::host::agent_processes::register(cmd.process_owner(), child.id());
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin
@@ -137,7 +137,7 @@ impl ProcessRunner for WindowsProcess {
 
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
         let _agent_registration =
-            platform_api::agent_processes::register(cmd.process_owner(), child.id());
+            lingxi_core::host::agent_processes::register(cmd.process_owner(), child.id());
         let pid = child
             .id()
             .ok_or_else(|| ProcessError::Io("streaming child has no pid".into()))?;
@@ -244,7 +244,7 @@ impl ProcessRunner for WindowsProcess {
     async fn run_foreground(
         &self,
         cmd: &SandboxedCommand,
-    ) -> Result<platform_api::ForegroundOutcome, ProcessError> {
+    ) -> Result<lingxi_core::host::ForegroundOutcome, ProcessError> {
         Ok(self
             .run_foreground_with_output_limit(cmd, None)
             .await?
@@ -254,7 +254,7 @@ impl ProcessRunner for WindowsProcess {
         &self,
         cmd: &SandboxedCommand,
         limit: Option<usize>,
-    ) -> Result<platform_api::ForegroundRunResult, ProcessError> {
+    ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
         #[cfg(windows)]
         if super::supervisor::enabled(cmd) {
             return super::supervisor::execute(cmd, limit, false).await;
@@ -268,13 +268,13 @@ impl ProcessRunner for WindowsProcess {
         #[cfg(windows)]
         if super::supervisor::enabled(cmd) {
             return match super::supervisor::execute(cmd, None, true).await?.outcome {
-                platform_api::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
+                lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
                 _ => Err(ProcessError::Io("supervisor did not detach shell".into())),
             };
         }
         match super::background::run(cmd, Some(8192), true).await?.outcome {
-            platform_api::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
-            platform_api::ForegroundOutcome::Completed(_) => {
+            lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => Ok(handle),
+            lingxi_core::host::ForegroundOutcome::Completed(_) => {
                 unreachable!("explicit background path always hands off its spawned child")
             }
         }
@@ -282,35 +282,35 @@ impl ProcessRunner for WindowsProcess {
 
     #[cfg(windows)]
     async fn acknowledge_shell(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
-        platform_api::shell_supervisor::acknowledge(handle).await
+        lingxi_core::host::shell_supervisor::acknowledge(handle).await
     }
     #[cfg(windows)]
     async fn export_shell(
         &self,
         handle: &ProcessHandle,
-    ) -> Result<platform_api::process::ShellProcessHandoff, ProcessError> {
+    ) -> Result<lingxi_core::host::process::ShellProcessHandoff, ProcessError> {
         self.acknowledge_shell(handle).await?;
         super::supervisor::export(handle)
     }
     #[cfg(windows)]
     async fn validate_shell(
         &self,
-        handoff: &platform_api::process::ShellProcessHandoff,
+        handoff: &lingxi_core::host::process::ShellProcessHandoff,
     ) -> Result<(), ProcessError> {
         super::supervisor::validate(handoff).await
     }
     #[cfg(windows)]
     async fn adopt_shell(
         &self,
-        handoff: &platform_api::process::ShellProcessHandoff,
-        sink: std::sync::Arc<dyn platform_api::BackgroundExitSink>,
+        handoff: &lingxi_core::host::process::ShellProcessHandoff,
+        sink: std::sync::Arc<dyn lingxi_core::host::BackgroundExitSink>,
     ) -> Result<ProcessHandle, ProcessError> {
         super::supervisor::adopt(handoff, sink).await
     }
     #[cfg(windows)]
     async fn release_shell(
         &self,
-        handoff: &platform_api::process::ShellProcessHandoff,
+        handoff: &lingxi_core::host::process::ShellProcessHandoff,
     ) -> Result<(), ProcessError> {
         super::supervisor::release(handoff).await
     }

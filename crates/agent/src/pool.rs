@@ -11,8 +11,8 @@ pub(crate) use capacity::TrackedPoolPermit;
 
 use crate::context::SubagentContext;
 use crate::runner::SubagentEvent;
-use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
-use protocol::AgentId;
+use lingxi_core::host::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use lingxi_core::types::AgentId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -202,8 +202,8 @@ impl StateMachinePool {
         &self,
         count: usize,
         deadline: tokio::time::Instant,
-        cancel: platform_api::panel_pool::PanelAdmissionCancellation,
-    ) -> Result<platform_api::PanelPoolLease, platform_api::SubagentSpawnError> {
+        cancel: lingxi_core::host::panel_pool::PanelAdmissionCancellation,
+    ) -> Result<lingxi_core::host::PanelPoolLease, lingxi_core::host::SubagentSpawnError> {
         self.capacity
             .reserve_group(count, deadline, cancel)
             .await
@@ -212,16 +212,16 @@ impl StateMachinePool {
                 for permit in &mut permits {
                     permit.track_group(drain.clone());
                 }
-                platform_api::PanelPoolLease::with_drain(
+                lingxi_core::host::PanelPoolLease::with_drain(
                     permits
                         .into_iter()
-                        .map(platform_api::PanelPoolPermit::new)
+                        .map(lingxi_core::host::PanelPoolPermit::new)
                         .collect(),
                     drain,
                 )
             })
             .map_err(|error| {
-                platform_api::SubagentSpawnError::Runtime(format!(
+                lingxi_core::host::SubagentSpawnError::Runtime(format!(
                     "Fusion panel admission rejected: {error:?}"
                 ))
             })
@@ -229,7 +229,7 @@ impl StateMachinePool {
 
     pub(crate) fn take_panel_permit(
         &self,
-        permit: platform_api::PanelPoolPermit,
+        permit: lingxi_core::host::PanelPoolPermit,
     ) -> Result<TrackedPoolPermit, PoolError> {
         let permit = permit
             .into_inner::<TrackedPoolPermit>()
@@ -504,7 +504,7 @@ mod tests {
             hook_executor: None,
             strict_plugin_only_hooks: false,
             skill_loader: None,
-            hook_session_id: protocol::SessionId::nil(),
+            hook_session_id: lingxi_core::types::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
             depth: 0,
             observer: None,
@@ -641,7 +641,7 @@ mod tests {
             .reserve_panel_group(
                 2,
                 deadline,
-                platform_api::panel_pool::PanelAdmissionCancellation::new(),
+                lingxi_core::host::panel_pool::PanelAdmissionCancellation::new(),
             )
             .await
             .unwrap();
@@ -668,7 +668,7 @@ mod tests {
             .reserve_panel_group(
                 2,
                 deadline,
-                platform_api::panel_pool::PanelAdmissionCancellation::new(),
+                lingxi_core::host::panel_pool::PanelAdmissionCancellation::new(),
             )
             .await
             .unwrap();
@@ -685,7 +685,7 @@ mod tests {
             .reserve_panel_group(
                 1,
                 deadline,
-                platform_api::panel_pool::PanelAdmissionCancellation::new(),
+                lingxi_core::host::panel_pool::PanelAdmissionCancellation::new(),
             )
             .await
             .unwrap()
@@ -702,7 +702,7 @@ mod tests {
             .reserve_panel_group(
                 1,
                 deadline,
-                platform_api::panel_pool::PanelAdmissionCancellation::new(),
+                lingxi_core::host::panel_pool::PanelAdmissionCancellation::new(),
             )
             .await
             .unwrap()
@@ -824,7 +824,7 @@ mod tests {
             pool.capacity.reserve_group(
                 1,
                 tokio::time::Instant::now() + std::time::Duration::from_secs(2),
-                platform_api::panel_pool::PanelAdmissionCancellation::new(),
+                lingxi_core::host::panel_pool::PanelAdmissionCancellation::new(),
             ),
         )
         .await
@@ -868,7 +868,7 @@ mod tests {
             .reserve_panel_group(
                 1,
                 tokio::time::Instant::now() + std::time::Duration::from_secs(2),
-                platform_api::panel_pool::PanelAdmissionCancellation::new(),
+                lingxi_core::host::panel_pool::PanelAdmissionCancellation::new(),
             )
             .await
             .unwrap();
@@ -997,8 +997,8 @@ mod tests {
             .send_event(
                 &aid,
                 lingxi_core::Event::UserMessage {
-                    message_id: protocol::MessageId::new(),
-                    request_id: protocol::RequestId::new(),
+                    message_id: lingxi_core::types::MessageId::new(),
+                    request_id: lingxi_core::types::RequestId::new(),
                     content: "hello".into(),
                 },
             )

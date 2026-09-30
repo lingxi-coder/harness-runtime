@@ -28,6 +28,8 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
+use lingxi_core::host::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
+use lingxi_core::types::{HookId, HttpRequest, HttpResponse};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -36,8 +38,6 @@ use orchestrator::test_support_stream::{
     text_delta, MockStreamingApiClient,
 };
 use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use platform_api::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
-use protocol::{HookId, HttpRequest, HttpResponse};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -55,7 +55,7 @@ impl HttpTransport for UnusedHttp {
     async fn stream_sse(
         &self,
         _req: HttpRequest,
-    ) -> Result<platform_api::http::SseStream, HttpError> {
+    ) -> Result<lingxi_core::host::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -66,11 +66,14 @@ impl RuntimeSpawner for UnusedRuntime {
         &self,
         _name: &str,
         _task: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, RuntimeError> {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _d: Duration) {}
-    async fn cancel(&self, _h: &platform_api::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+    async fn cancel(
+        &self,
+        _h: &lingxi_core::host::BackgroundTaskHandle,
+    ) -> Result<(), RuntimeError> {
         Ok(())
     }
 }
@@ -164,7 +167,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         executor: DefHookExecutor::Builtin {
             handler_id: handler_id.into(),
         },
-        source: HookSource::Settings(protocol::SettingsScope::User),
+        source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -176,7 +179,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
     }
 }
 
-fn single_text_turn() -> Vec<llm_runtime::LlmEvent> {
+fn single_text_turn() -> Vec<llm_runtime::HistoryEvent> {
     scripted![
         message_start("msg_01", "claude-opus-4-7"),
         content_block_start_text(0),

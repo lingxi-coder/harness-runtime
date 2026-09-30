@@ -32,6 +32,12 @@ class DependencyRules(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("core depends on the Harness composition root", result.stderr)
 
+    def test_shared_core_cannot_depend_on_telemetry(self):
+        result = self.run_gate({"core": "crates/core", "telemetry": "crates/telemetry"},
+                               {"core": ["telemetry"]})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("shared contracts must stay below domain and telemetry crates", result.stderr)
+
     def test_runtime_cannot_reach_tui_transitively(self):
         result = self.run_gate({"helper": "crates/helper", "tui": "crates/tui"},
                                {"harness-runtime": ["helper"], "helper": ["tui"]})

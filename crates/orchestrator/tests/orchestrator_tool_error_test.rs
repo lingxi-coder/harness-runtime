@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use lingxi_core::host::OutputEvent;
+use lingxi_core::types::{ContentBlock, ConversationMessage, ToolUseId};
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
@@ -7,8 +9,6 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::OutputEvent;
-use protocol::{ContentBlock, ConversationMessage, ToolUseId};
 use serde_json::json;
 use std::sync::Arc;
 use tool_api::progress::ToolProgressSender;

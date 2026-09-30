@@ -1,5 +1,5 @@
 //! Pre-flight symlink guard for the desktop `git worktree`-backed
-//! [`WorktreeManager`](platform_api::WorktreeManager) create path (posix + windows).
+//! [`WorktreeManager`](lingxi_core::host::WorktreeManager) create path (posix + windows).
 //!
 //! Behavioral port of claude-code 2.1.212's `yWi(repoRoot, target)`, called
 //! immediately before the `git worktree add` spawn. It `lstat`s the managed
@@ -17,7 +17,7 @@
 //! documented-but-unwired `tengu_feature_bad` convention), so this guard mirrors
 //! only the observable refusal + byte-faithful message, not the telemetry.
 
-use platform_api::WorktreeError;
+use lingxi_core::host::WorktreeError;
 use std::path::Path;
 
 /// Reject worktree creation when a committed symlink at the managed dot-dir

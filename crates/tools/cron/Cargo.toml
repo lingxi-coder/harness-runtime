@@ -7,10 +7,9 @@ license.workspace = true
 
 [dependencies]
 mobile-linux-api.workspace = true
+core = { path = "../../core" }
 branding.workspace = true
 tool-api = { path = "../../tool-api" }
-platform-api = { path = "../../platform-api" }
-protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
 async-trait.workspace = true

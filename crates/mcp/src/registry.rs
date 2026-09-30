@@ -13,11 +13,11 @@ use crate::oauth::{self, OnAuthorizationUrl};
 use crate::raw_conn::RawConnectionProvider;
 use futures_util::FutureExt as _;
 use indexmap::IndexMap;
-use platform_api::{
+use lingxi_core::host::{
     Clock, HttpTransport, McpError, McpNotificationStream, McpRawConnection, McpTransport,
     McpTransportSpec, SecureStorage, ServerCapabilitiesDto,
 };
-use protocol::{AgentId, McpConnectionId};
+use lingxi_core::types::{AgentId, McpConnectionId};
 use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::OnceLock;
@@ -580,12 +580,12 @@ struct LiveDiscovery {
     /// Immutable grant identity captured alongside the successful connect
     /// spec; write-through revalidates it before persisting any catalog.
     grant_provenance: Option<GrantProvenance>,
-    negotiated: platform_api::McpNegotiatedProtocol,
+    negotiated: lingxi_core::host::McpNegotiatedProtocol,
     capabilities: ServerCapabilitiesDto,
-    tools: Vec<platform_api::McpToolDto>,
-    resources: Vec<platform_api::McpResourceDto>,
-    resource_templates: Vec<platform_api::McpResourceTemplateDto>,
-    prompts: Vec<platform_api::McpPromptDto>,
+    tools: Vec<lingxi_core::host::McpToolDto>,
+    resources: Vec<lingxi_core::host::McpResourceDto>,
+    resource_templates: Vec<lingxi_core::host::McpResourceTemplateDto>,
+    prompts: Vec<lingxi_core::host::McpPromptDto>,
     catalog_failures: CatalogFetchFailures,
     discovery_cache_partition: Option<DiscoveryCachePartition>,
     client: Option<Arc<McpClient>>,
@@ -818,25 +818,25 @@ const LISTENER_REOPEN_PARK_POLL: Duration = Duration::from_secs(5);
 
 fn negotiated_protocol_from_cache_entry(
     entry: &crate::discovery_cache::DiscoveryCacheEntry,
-) -> platform_api::McpNegotiatedProtocol {
+) -> lingxi_core::host::McpNegotiatedProtocol {
     let era = match entry.negotiated_era.as_deref() {
-        Some("modern") => platform_api::McpProtocolEra::Modern,
-        _ => platform_api::McpProtocolEra::Legacy,
+        Some("modern") => lingxi_core::host::McpProtocolEra::Modern,
+        _ => lingxi_core::host::McpProtocolEra::Legacy,
     };
-    platform_api::McpNegotiatedProtocol {
+    lingxi_core::host::McpNegotiatedProtocol {
         era,
         version: match era {
-            platform_api::McpProtocolEra::Modern => "2026-07-28",
-            platform_api::McpProtocolEra::Legacy => "2025-11-25",
+            lingxi_core::host::McpProtocolEra::Modern => "2026-07-28",
+            lingxi_core::host::McpProtocolEra::Legacy => "2025-11-25",
         }
         .to_string(),
     }
 }
 
-fn negotiated_era_label(era: platform_api::McpProtocolEra) -> &'static str {
+fn negotiated_era_label(era: lingxi_core::host::McpProtocolEra) -> &'static str {
     match era {
-        platform_api::McpProtocolEra::Modern => "modern",
-        platform_api::McpProtocolEra::Legacy => "legacy",
+        lingxi_core::host::McpProtocolEra::Modern => "modern",
+        lingxi_core::host::McpProtocolEra::Legacy => "legacy",
     }
 }
 
@@ -1535,7 +1535,7 @@ impl McpRegistry {
         input: serde_json::Value,
         tool_use_id: Option<&str>,
         on_progress: Option<crate::client::McpProgressCallback>,
-    ) -> Result<platform_api::McpToolResultDto, crate::client::McpClientError> {
+    ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
         let mut lazy_dialed = false;
         let client = if let Some(client) = self.get_client(server).await {
             Some(client)
@@ -3143,10 +3143,10 @@ impl McpRegistry {
         connection_id: McpConnectionId,
         discovery: &LiveDiscovery,
     ) -> (
-        Vec<platform_api::McpToolDto>,
-        Vec<platform_api::McpResourceDto>,
-        Vec<platform_api::McpResourceTemplateDto>,
-        Vec<platform_api::McpPromptDto>,
+        Vec<lingxi_core::host::McpToolDto>,
+        Vec<lingxi_core::host::McpResourceDto>,
+        Vec<lingxi_core::host::McpResourceTemplateDto>,
+        Vec<lingxi_core::host::McpPromptDto>,
     ) {
         let conns = self.connections.read().await;
         match conns.get(key) {
@@ -3358,7 +3358,7 @@ impl McpRegistry {
         (
             McpRawConnection,
             ServerCapabilitiesDto,
-            platform_api::McpNegotiatedProtocol,
+            lingxi_core::host::McpNegotiatedProtocol,
         ),
         McpError,
     > {
@@ -3371,10 +3371,10 @@ impl McpRegistry {
         };
         let expected_era = match negotiation_mode {
             crate::protocol_negotiation::NegotiationMode::Auto { .. } => {
-                platform_api::McpProtocolEra::Modern
+                lingxi_core::host::McpProtocolEra::Modern
             }
             crate::protocol_negotiation::NegotiationMode::Legacy => {
-                platform_api::McpProtocolEra::Legacy
+                lingxi_core::host::McpProtocolEra::Legacy
             }
         };
         let probe_timeout_ms = match negotiation_mode {
@@ -3388,7 +3388,7 @@ impl McpRegistry {
                 deadline,
                 self.transport.connect_and_initialize(
                     &spec,
-                    platform_api::McpConnectOptions {
+                    lingxi_core::host::McpConnectOptions {
                         expected_era: Some(expected_era),
                         deadline_ms: timeout.as_millis() as u64,
                         probe_timeout_ms,
@@ -3889,7 +3889,7 @@ impl McpRegistry {
     /// Returns `Ok(None)` when the config was already in the requested state (a
     /// no-op — claude's `p` filter excludes it). Otherwise `Ok(Some(state))`
     /// carries the server's post-toggle action state (claude's fulfilled
-    /// `u(name).type`): after disable it is [`platform_api::McpActionState::Disabled`];
+    /// `u(name).type`): after disable it is [`lingxi_core::host::McpActionState::Disabled`];
     /// after enable it is the live post-connect state read back from the
     /// registry (`Connected` / `Failed` / `NeedsAuth` / …). Crucially, a failed
     /// enable **connect** is NOT surfaced as `Err` — the server flips on but
@@ -3900,7 +3900,7 @@ impl McpRegistry {
         &self,
         name: &str,
         disabled: bool,
-    ) -> Result<Option<platform_api::McpActionState>, McpError> {
+    ) -> Result<Option<lingxi_core::host::McpActionState>, McpError> {
         let lifecycle = self.lifecycle_lock(name);
         let _guard = lifecycle.lock().await;
         self.kick_pending_transport_cleanups().await;
@@ -3949,7 +3949,7 @@ impl McpRegistry {
                 self.emit_retire_event_if_shared(&retired_config, name, connection_id)
                     .await;
             }
-            return Ok(Some(platform_api::McpActionState::Disabled));
+            return Ok(Some(lingxi_core::host::McpActionState::Disabled));
         }
 
         config.disabled = false;
@@ -3971,9 +3971,10 @@ impl McpRegistry {
         let _ = self.connect_locked(config, Some(name.to_string())).await;
         let resulting = {
             let conns = self.connections.read().await;
-            conns
-                .get(name)
-                .map_or(platform_api::McpActionState::Failed, project_action_state)
+            conns.get(name).map_or(
+                lingxi_core::host::McpActionState::Failed,
+                project_action_state,
+            )
         };
         Ok(Some(resulting))
     }
@@ -4043,16 +4044,16 @@ impl McpRegistry {
     }
 
     /// Project every known connection into the trait-facing
-    /// [`platform_api::McpServerInfo`] shape. Used by
+    /// [`lingxi_core::host::McpServerInfo`] shape. Used by
     /// `OrchestratorHandle::list_mcp_servers` (M6-07) so `/mcp` can list
     /// the registry without exposing the internal state-machine enum.
     ///
     /// Returned list is sorted by `name` for stable display order.
-    pub async fn snapshot(&self) -> Vec<platform_api::McpServerInfo> {
+    pub async fn snapshot(&self) -> Vec<lingxi_core::host::McpServerInfo> {
         let conns = self.connections.read().await;
-        let mut out: Vec<platform_api::McpServerInfo> = conns
+        let mut out: Vec<lingxi_core::host::McpServerInfo> = conns
             .values()
-            .map(|s| platform_api::McpServerInfo {
+            .map(|s| lingxi_core::host::McpServerInfo {
                 name: s.name().to_string(),
                 status: project_status(s),
                 transport: s.transport_kind().to_string(),
@@ -4067,9 +4068,9 @@ impl McpRegistry {
     /// preserves the full state vocabulary (pending / disabled / needs-auth /
     /// failed) the handler needs to pick claude-code's byte-exact state-aware
     /// message. Sorted by name for stable display.
-    pub async fn action_states(&self) -> Vec<(String, platform_api::McpActionState)> {
+    pub async fn action_states(&self) -> Vec<(String, lingxi_core::host::McpActionState)> {
         let conns = self.connections.read().await;
-        let mut out: Vec<(String, platform_api::McpActionState)> = conns
+        let mut out: Vec<(String, lingxi_core::host::McpActionState)> = conns
             .values()
             .map(|s| (s.name().to_string(), project_action_state(s)))
             .collect();
@@ -4080,7 +4081,7 @@ impl McpRegistry {
     /// Failed servers with their sanitized error text, for the `ToolSearch`
     /// empty-result diagnostics note — a port of claude-code's `wZr(u())`
     /// (`failed_mcp_servers`). Every server whose action state projects to
-    /// [`platform_api::McpActionState::Failed`] ("not connected") is included,
+    /// [`lingxi_core::host::McpActionState::Failed`] ("not connected") is included,
     /// carrying its recorded error where one exists, sanitized through
     /// [`sanitize_diagnostic`] (claude's `xLt`). Both the name and the error are
     /// sanitized (claude sanitizes both); the error is the untrusted, model-
@@ -4093,7 +4094,7 @@ impl McpRegistry {
         let conns = self.connections.read().await;
         let mut out: Vec<(String, Option<String>)> = conns
             .values()
-            .filter(|s| project_action_state(s) == platform_api::McpActionState::Failed)
+            .filter(|s| project_action_state(s) == lingxi_core::host::McpActionState::Failed)
             .map(|s| {
                 let error = match s {
                     McpConnectionState::Failed { error, .. } => Some(error.clone()),
@@ -4114,7 +4115,7 @@ impl McpRegistry {
     /// `Connecting` / `AwaitingOAuth` / `Reconnecting` (claude-code's MCP client
     /// `type === "pending"`). These may yet expose tools, so the `AgentTool`
     /// required-MCP gate waits on them before failing. NOTE: the public
-    /// [`platform_api::McpStatus`] UI projection collapses these into `Disconnected`;
+    /// [`lingxi_core::host::McpStatus`] UI projection collapses these into `Disconnected`;
     /// this reads the INTERNAL state map so a connecting server is
     /// distinguishable from a failed/absent one (the gap that blocked the
     /// 30s poll-wait).
@@ -4155,7 +4156,7 @@ impl McpRegistry {
             .read()
             .await
             .values()
-            .any(|s| project_action_state(s) == platform_api::McpActionState::Pending);
+            .any(|s| project_action_state(s) == lingxi_core::host::McpActionState::Pending);
         self.pending_servers
             .store(pending, std::sync::atomic::Ordering::Relaxed);
         pending
@@ -4214,7 +4215,10 @@ impl McpRegistry {
         // shows as available. `cached` (both `Connected` and `Cached`) is
         // reused as the fast-path source for a server that DOES have a
         // client, same as before this change.
-        let (cached, cache_only): (HashMap<String, Vec<platform_api::McpToolDto>>, Vec<String>) = {
+        let (cached, cache_only): (
+            HashMap<String, Vec<lingxi_core::host::McpToolDto>>,
+            Vec<String>,
+        ) = {
             let conns = self.connections.read().await;
             let mut cached = HashMap::new();
             let mut cache_only = Vec::new();
@@ -4233,7 +4237,7 @@ impl McpRegistry {
             (cached, cache_only)
         };
         let mut out: Vec<String> = Vec::new();
-        let push_tools = |tools: Vec<platform_api::McpToolDto>, out: &mut Vec<String>| {
+        let push_tools = |tools: Vec<lingxi_core::host::McpToolDto>, out: &mut Vec<String>| {
             for tool in tools {
                 // `full_name` is `mcp__<server>__<tool>` (rewrite site in
                 // `connect`); the server segment is index 1.
@@ -4281,8 +4285,8 @@ impl McpRegistry {
         &self,
     ) -> Vec<(
         String,
-        protocol::McpConnectionId,
-        platform_api::McpPromptDto,
+        lingxi_core::types::McpConnectionId,
+        lingxi_core::host::McpPromptDto,
     )> {
         let conns = self.connections.read().await;
         let mut servers: Vec<&String> = conns.keys().collect();
@@ -4317,7 +4321,7 @@ impl McpRegistry {
     /// entry through a newer connection generation.
     pub async fn get_prompt(
         &self,
-        connection_id: protocol::McpConnectionId,
+        connection_id: lingxi_core::types::McpConnectionId,
         prompt_name: &str,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, McpError> {
@@ -4422,7 +4426,7 @@ impl McpRegistry {
     /// segment, 1:1 with claude-code's `buildMcpToolName`. The MCP server,
     /// however, expects the UNNORMALIZED wire name in its `tools/call` request.
     /// claude-code keeps it as `mcpInfo.toolName` (`client.ts:1774`); here it
-    /// lives on the cached [`platform_api::McpToolDto::tool_name`], so the dispatch
+    /// lives on the cached [`lingxi_core::host::McpToolDto::tool_name`], so the dispatch
     /// path recovers it by matching the dto whose `full_name` equals the
     /// model-supplied name.
     ///
@@ -4549,7 +4553,7 @@ mod backoff_schedule_tests;
 /// without making the helpers part of the public API.
 #[doc(hidden)]
 pub mod test_support {
-    use platform_api::McpError;
+    use lingxi_core::host::McpError;
 
     /// See [`super::error_is_403_insufficient_scope`].
     #[must_use]
@@ -4669,15 +4673,15 @@ fn state_is_disabled(state: &McpConnectionState) -> bool {
 }
 
 /// Project a [`McpConnectionState`] onto the fine-grained
-/// [`platform_api::McpActionState`] used by the `/mcp reconnect|enable|disable`
+/// [`lingxi_core::host::McpActionState`] used by the `/mcp reconnect|enable|disable`
 /// action handler — a faithful mirror of claude-code's client `type`
 /// discriminant. The `config.disabled` gate takes precedence (a disabled
 /// server reports `"disabled"` regardless of its last live state), then:
 /// `Connected`/`HealthChecking` → connected, `Connecting`/`Reconnecting` →
 /// pending, `AwaitingOAuth` → needs-auth, everything else (`Failed`,
 /// `Disconnected`, `Stopped`) → failed ("not connected").
-fn project_action_state(state: &McpConnectionState) -> platform_api::McpActionState {
-    use platform_api::McpActionState;
+fn project_action_state(state: &McpConnectionState) -> lingxi_core::host::McpActionState {
+    use lingxi_core::host::McpActionState;
     if state_is_disabled(state) {
         return McpActionState::Disabled;
     }
@@ -4699,9 +4703,9 @@ fn project_action_state(state: &McpConnectionState) -> platform_api::McpActionSt
 }
 
 /// Project a [`McpConnectionState`] variant onto the trait-facing
-/// [`platform_api::McpStatus`] (M6-07).
-fn project_status(state: &McpConnectionState) -> platform_api::McpStatus {
-    use platform_api::McpStatus;
+/// [`lingxi_core::host::McpStatus`] (M6-07).
+fn project_status(state: &McpConnectionState) -> lingxi_core::host::McpStatus {
+    use lingxi_core::host::McpStatus;
     match state {
         // §11 Stage 2 — same rationale as `project_action_state`: a cached
         // server reports `Connected`, never a distinct status.

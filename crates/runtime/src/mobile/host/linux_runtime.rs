@@ -132,57 +132,57 @@ pub(super) fn gate_mobile_git_ctx(
 }
 
 pub(super) fn build_mobile_runtime_environment(
-    host_environment: Option<&platform_api::MobileHostEnvironment>,
+    host_environment: Option<&lingxi_core::host::MobileHostEnvironment>,
     shell_ctx: Option<&tool_api::MobileShellToolCtx>,
     capability: Option<&MobileLinuxCapability>,
     session_cwd: &SessionCwd,
-) -> Option<platform_api::MobileRuntimeEnvironment> {
+) -> Option<lingxi_core::host::MobileRuntimeEnvironment> {
     let host_environment = host_environment?.clone();
     let enabled_shell = shell_ctx.filter(|ctx| ctx.enabled);
     let tool_runtime = if capability
         .is_some_and(|cap| matches!(cap.mode, MobileLinuxRuntimeMode::MobileLinux) && cap.available)
         || enabled_shell.is_some_and(|ctx| ctx.force_platform_sandbox)
     {
-        platform_api::MobileToolRuntime::MobileLinuxGuest
+        lingxi_core::host::MobileToolRuntime::MobileLinuxGuest
     } else if enabled_shell.is_some() {
-        platform_api::MobileToolRuntime::AndroidLegacy
+        lingxi_core::host::MobileToolRuntime::AndroidLegacy
     } else {
-        platform_api::MobileToolRuntime::Unavailable
+        lingxi_core::host::MobileToolRuntime::Unavailable
     };
     let network_policy = match tool_runtime {
-        platform_api::MobileToolRuntime::MobileLinuxGuest => {
-            platform_api::MobileNetworkPolicy::PermissionMediated
+        lingxi_core::host::MobileToolRuntime::MobileLinuxGuest => {
+            lingxi_core::host::MobileNetworkPolicy::PermissionMediated
         }
-        platform_api::MobileToolRuntime::AndroidLegacy => {
-            platform_api::MobileNetworkPolicy::DeniedByHost
+        lingxi_core::host::MobileToolRuntime::AndroidLegacy => {
+            lingxi_core::host::MobileNetworkPolicy::DeniedByHost
         }
-        platform_api::MobileToolRuntime::Unavailable => {
-            platform_api::MobileNetworkPolicy::DeniedByHost
+        lingxi_core::host::MobileToolRuntime::Unavailable => {
+            lingxi_core::host::MobileNetworkPolicy::DeniedByHost
         }
     };
     let lifecycle_policy = match host_environment.launch_mode {
-        platform_api::MobileLaunchMode::ScheduledHeadless => {
-            platform_api::MobileLifecyclePolicy::ScheduledHeadlessBestEffort
+        lingxi_core::host::MobileLaunchMode::ScheduledHeadless => {
+            lingxi_core::host::MobileLifecyclePolicy::ScheduledHeadlessBestEffort
         }
-        platform_api::MobileLaunchMode::Interactive => match host_environment.host_os {
-            platform_api::MobileHostOs::Ios => {
-                platform_api::MobileLifecyclePolicy::IosFiniteBackgroundAssertion
+        lingxi_core::host::MobileLaunchMode::Interactive => match host_environment.host_os {
+            lingxi_core::host::MobileHostOs::Ios => {
+                lingxi_core::host::MobileLifecyclePolicy::IosFiniteBackgroundAssertion
             }
-            platform_api::MobileHostOs::Android => {
-                platform_api::MobileLifecyclePolicy::AndroidForegroundServiceBestEffort
+            lingxi_core::host::MobileHostOs::Android => {
+                lingxi_core::host::MobileLifecyclePolicy::AndroidForegroundServiceBestEffort
             }
         },
-        platform_api::MobileLaunchMode::Unknown => {
-            platform_api::MobileLifecyclePolicy::UnknownBestEffort
+        lingxi_core::host::MobileLaunchMode::Unknown => {
+            lingxi_core::host::MobileLifecyclePolicy::UnknownBestEffort
         }
     };
 
     let guest_cwd = matches!(
         tool_runtime,
-        platform_api::MobileToolRuntime::MobileLinuxGuest
+        lingxi_core::host::MobileToolRuntime::MobileLinuxGuest
     )
     .then(|| session_cwd.cwd().to_string_lossy().to_string());
-    Some(platform_api::MobileRuntimeEnvironment::new(
+    Some(lingxi_core::host::MobileRuntimeEnvironment::new(
         host_environment,
         tool_runtime,
         guest_cwd,
@@ -194,12 +194,12 @@ pub(super) fn build_mobile_runtime_environment(
 }
 
 pub(super) fn mobile_launch_is_interactive(
-    host_environment: Option<&platform_api::MobileHostEnvironment>,
+    host_environment: Option<&lingxi_core::host::MobileHostEnvironment>,
 ) -> bool {
     !host_environment.is_some_and(|environment| {
         matches!(
             environment.launch_mode,
-            platform_api::MobileLaunchMode::ScheduledHeadless
+            lingxi_core::host::MobileLaunchMode::ScheduledHeadless
         )
     })
 }
@@ -207,14 +207,14 @@ pub(super) fn mobile_launch_is_interactive(
 pub(super) async fn mobile_typescript_lsp_ready(
     runtime: &Arc<dyn mobile_linux_api::MobileLinuxRuntime>,
     capability: Option<&mobile_linux_api::MobileLinuxCapability>,
-    host_environment: Option<&platform_api::MobileHostEnvironment>,
+    host_environment: Option<&lingxi_core::host::MobileHostEnvironment>,
 ) -> bool {
     if !capability.is_some_and(|value| value.available)
         || host_environment.is_some_and(|environment| {
-            matches!(environment.host_os, platform_api::MobileHostOs::Ios)
+            matches!(environment.host_os, lingxi_core::host::MobileHostOs::Ios)
                 && matches!(
                     environment.execution_target,
-                    platform_api::MobileExecutionTarget::Simulator
+                    lingxi_core::host::MobileExecutionTarget::Simulator
                 )
         })
     {
@@ -265,7 +265,7 @@ pub(super) fn model_visible_mobile_cwd(
     }
     mobile_linux_api::map_host_path_to_guest(path, mounts).or_else(|| {
         path.to_str()
-            .and_then(platform_api::mobile_runtime_environment::normalize_mobile_guest_cwd)
+            .and_then(lingxi_core::host::mobile_runtime_environment::normalize_mobile_guest_cwd)
     })
 }
 
@@ -279,7 +279,7 @@ pub(super) fn subagent_env_platform_name(rust_os: &str) -> &str {
 
 pub(super) fn build_mobile_subagent_env_renderer(
     probe_cwd: std::path::PathBuf,
-    mobile_runtime_environment: Option<&platform_api::MobileRuntimeEnvironment>,
+    mobile_runtime_environment: Option<&lingxi_core::host::MobileRuntimeEnvironment>,
     mobile_workspace_cwd_provider: agent::handle::MobileWorkspaceCwdProvider,
 ) -> agent::handle::SubagentEnvRenderer {
     if mobile_runtime_environment.is_none() {
@@ -298,7 +298,7 @@ pub(super) fn build_mobile_subagent_env_renderer(
         .or_else(|| {
             probe_cwd
                 .to_str()
-                .and_then(platform_api::mobile_runtime_environment::normalize_mobile_guest_cwd)
+                .and_then(lingxi_core::host::mobile_runtime_environment::normalize_mobile_guest_cwd)
         })
         .unwrap_or_else(|| mobile_linux_api::guest_paths::WORKSPACE_ROOT.to_string());
 
@@ -308,7 +308,7 @@ pub(super) fn build_mobile_subagent_env_renderer(
                 .or_else(|| {
                     cwd_override.and_then(|path| {
                         path.to_str().and_then(
-                            platform_api::mobile_runtime_environment::normalize_mobile_guest_cwd,
+                            lingxi_core::host::mobile_runtime_environment::normalize_mobile_guest_cwd,
                         )
                     })
                 })

@@ -5,7 +5,7 @@ pub use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{MediaAnalysis, MediaObservation, MessageId, ToolUseId};
+    use lingxi_core::types::{MediaAnalysis, MediaObservation, MessageId, ToolUseId};
 
     // ── to_llm_messages ───────────────────────────────────────────────────────
 
@@ -581,7 +581,7 @@ mod tests {
 
     #[test]
     fn typed_compact_boundary_and_summary_metadata_never_reach_provider_wire() {
-        let metadata: protocol::CompactBoundaryMetadata =
+        let metadata: lingxi_core::types::CompactBoundaryMetadata =
             serde_json::from_value(serde_json::json!({"trigger":"manual","preTokens":42})).unwrap();
         let summary =
             ConversationMessage::compact_summary(MessageId::new(), "typed summary".to_string());

@@ -81,7 +81,7 @@ fn current_audit_keeps_unimplemented_mcp_telemetry_visible() {
 
 #[test]
 fn cost_sample_payloads_match_mock_statsig_wire() {
-    use protocol::Secret;
+    use lingxi_core::types::Secret;
     use std::collections::HashMap;
     use telemetry::{AnalyticsValue, LogEventMetadata, MockStatsigSink};
 

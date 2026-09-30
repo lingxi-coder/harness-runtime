@@ -5,8 +5,8 @@
 //! exposes only the Anthropic API key; OAuth access/refresh tokens land in a
 //! follow-up task.
 
-use platform_api::{Clock, HttpTransport, SecureStorage, SecureStorageError};
-use protocol::{Secret, SecureStorageData, SecureStorageMetadata};
+use lingxi_core::host::{Clock, HttpTransport, SecureStorage, SecureStorageError};
+use lingxi_core::types::{Secret, SecureStorageData, SecureStorageMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -961,7 +961,7 @@ impl CredentialManager {
 mod oauth_tests {
     use super::*;
     use async_trait::async_trait;
-    use platform_api::SecureStorageBackend;
+    use lingxi_core::host::SecureStorageBackend;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
 
@@ -1046,14 +1046,14 @@ mod oauth_tests {
     impl HttpTransport for NoHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
             panic!("credential tests must not perform HTTP");
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
             panic!("credential tests must not perform HTTP");
         }
     }

@@ -30,11 +30,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use lingxi_core::host::task_registry::TaskRegistryError;
 use lingxi_core::TodoState;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::task_registry::TaskRegistryError;
 use serde_json::{json, Map, Value};
 use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -187,7 +187,7 @@ fn iso8601_utc(t: std::time::SystemTime) -> String {
 /// Port of `isEnvTruthy(process.env[key])` (`envUtils.ts:32-37`): lower-cased,
 /// trimmed value ∈ {`1`,`true`,`yes`,`on`}.
 fn env_truthy(key: &str) -> bool {
-    platform_api::env::is_env_truthy(std::env::var(key).ok().as_deref())
+    lingxi_core::host::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
 /// Pure core of [`is_todo_v2_enabled`] — 1:1 with the binary's tasks-v2 gate,
@@ -196,7 +196,7 @@ fn env_truthy(key: &str) -> bool {
 /// `function X_(){if(a.CLAUDE_CODE_ENABLE_TASKS===!1)return!1;return!0}`,
 /// previously `function TE(){if(_l(process.env.LINGXI_ENABLE_TASKS))return!1;return!0}`.
 /// i.e. V2-Task-tools-enabled = NOT (the env normalizes to `0`/`false`/`no`/`off`).
-/// `_l` = [`platform_api::env::is_env_defined_falsy`] (byte-exact: `e===void 0`⇒false,
+/// `_l` = [`lingxi_core::host::env::is_env_defined_falsy`] (byte-exact: `e===void 0`⇒false,
 /// boolean⇒`!e`, else lowercased+trimmed ∈ {`0`,`false`,`no`,`off`}).
 ///
 /// The 2.1.263 rename is NOT a behaviour change: `CLAUDE_CODE_ENABLE_TASKS` is
@@ -243,11 +243,11 @@ const NO_OWNER_DISPLAY: &str = "main session";
 /// under its name.
 async fn not_found_rosters(
     ctx: &tool_api::BuiltinToolContext,
-    registry: &std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    registry: &std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     caller_agent_id: Option<&str>,
 ) -> (
     Vec<String>,
-    platform_api::task_registry::TaskNotFoundRosters,
+    lingxi_core::host::task_registry::TaskNotFoundRosters,
 ) {
     // `wzo`: a registry name counts only while its agent is actually running.
     let mut named_agents = Vec::new();
@@ -282,12 +282,12 @@ async fn not_found_rosters(
 /// clause comes from the registry's `XFe`/`Szo` name resolver.
 async fn task_stop_not_found_message(
     ctx: &tool_api::BuiltinToolContext,
-    registry: &std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    registry: &std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     requested: &str,
     suggestion: Option<&str>,
     caller_agent_id: Option<&str>,
 ) -> String {
-    use platform_api::display::sanitize_display;
+    use lingxi_core::host::display::sanitize_display;
     let (named_agents, rosters) = not_found_rosters(ctx, registry, caller_agent_id).await;
     let mut message = format!("No task found with ID: {}", sanitize_display(requested));
     if let Some(suggestion) = suggestion {
@@ -319,7 +319,7 @@ async fn task_stop_not_found_message(
 /// clause. Folding the two together would diverge on both axes at once.
 async fn task_output_not_found_message(
     ctx: &tool_api::BuiltinToolContext,
-    registry: &std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    registry: &std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     requested: &str,
     caller_agent_id: Option<&str>,
 ) -> String {
@@ -331,7 +331,9 @@ async fn task_output_not_found_message(
 }
 
 /// `JFe`'s tail: the clause, or an empty string when the roster is empty.
-fn background_agents_clause(rosters: &platform_api::task_registry::TaskNotFoundRosters) -> String {
+fn background_agents_clause(
+    rosters: &lingxi_core::host::task_registry::TaskNotFoundRosters,
+) -> String {
     if rosters.background_agents.is_empty() {
         return String::new();
     }
@@ -347,7 +349,7 @@ fn background_agents_clause(rosters: &platform_api::task_registry::TaskNotFoundR
 fn join_sanitized(values: &[String]) -> String {
     values
         .iter()
-        .map(|value| platform_api::display::sanitize_display(value))
+        .map(|value| lingxi_core::host::display::sanitize_display(value))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -368,7 +370,7 @@ fn join_sanitized(values: &[String]) -> String {
 /// session/interactive signal.
 #[must_use]
 pub fn is_todo_v2_enabled(_ctx: &ToolStaticContext) -> bool {
-    todo_v2_enabled_inner(platform_api::env::is_env_defined_falsy(
+    todo_v2_enabled_inner(lingxi_core::host::env::is_env_defined_falsy(
         std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref(),
     ))
 }
@@ -399,7 +401,7 @@ pub fn todo_write_enabled(ctx: &ToolStaticContext) -> bool {
 /// auto-owner + owner-change mailbox notification side-effects and the
 /// teammate completion reminder.
 ///
-/// Delegates to the SHARED [`platform_api::env::agent_swarms_enabled`] — one
+/// Delegates to the SHARED [`lingxi_core::host::env::agent_swarms_enabled`] — one
 /// implementation for this crate and `tool-ui`'s SendMessage (the
 /// previously-divergent private copies are gone). `isEnabled()` for the swarm
 /// *tools* reads the `agent_swarms_enabled` [`ToolStaticContext`] feature
@@ -407,7 +409,7 @@ pub fn todo_write_enabled(ctx: &ToolStaticContext) -> bool {
 /// env read.
 #[must_use]
 pub fn is_agent_swarms_enabled() -> bool {
-    platform_api::env::agent_swarms_enabled()
+    lingxi_core::host::env::agent_swarms_enabled()
 }
 
 // ==== Product-A V2 shared helpers ==========================================
@@ -457,7 +459,7 @@ enum StatusInput {
 ///    leader's task list.
 /// 3. `LINGXI_TEAM_NAME` env (TS `getTeamName()`, set when running as a
 ///    process-based teammate).
-/// 4. Leader team name ([`platform_api::team_registry::leader_team_name_for_session`], TS
+/// 4. Leader team name ([`lingxi_core::host::team_registry::leader_team_name_for_session`], TS
 ///    `leaderTeamName` set by implicit team initialization).
 /// 5. Session id (fallback for standalone sessions).
 ///
@@ -488,7 +490,7 @@ async fn resolve_task_list_id(ctx: &ToolUseContext) -> String {
     session_id.map_or_else(
         || "default".to_string(),
         |id| {
-            platform_api::team_registry::leader_team_name_for_session(&id)
+            lingxi_core::host::team_registry::leader_team_name_for_session(&id)
                 .filter(|team| !team.is_empty())
                 .unwrap_or(id)
         },
@@ -2131,7 +2133,7 @@ impl Tool for TaskUpdateTool {
                     "timestamp": timestamp,
                 }))
                 .unwrap_or_default();
-                let msg = platform_api::mailbox::MailboxMessage {
+                let msg = lingxi_core::host::mailbox::MailboxMessage {
                     message_id: fresh_invocation_id(),
                     content: assignment_message,
                     timestamp: std::time::SystemTime::now(),
@@ -2414,11 +2416,11 @@ impl Tool for TaskStopTool {
             None => Vec::new(),
         };
         let record = match registry.resolve_stop_target(&task_id, &named_agents).await {
-            Ok(platform_api::task_registry::TaskStopResolution::Found(record)) => record,
-            Ok(platform_api::task_registry::TaskStopResolution::Ambiguous(message)) => {
+            Ok(lingxi_core::host::task_registry::TaskStopResolution::Found(record)) => record,
+            Ok(lingxi_core::host::task_registry::TaskStopResolution::Ambiguous(message)) => {
                 return Err(ToolError::InvalidInput(message));
             }
-            Ok(platform_api::task_registry::TaskStopResolution::NotFound { suggestion }) => {
+            Ok(lingxi_core::host::task_registry::TaskStopResolution::NotFound { suggestion }) => {
                 emit_failed(
                     &bus,
                     TASK_STOP_FAILED,
@@ -2445,7 +2447,7 @@ impl Tool for TaskStopTool {
         } else {
             format!(
                 "{} ({})",
-                platform_api::display::sanitize_display(&task_id),
+                lingxi_core::host::display::sanitize_display(&task_id),
                 record.task_id
             )
         };
@@ -2455,10 +2457,10 @@ impl Tool for TaskStopTool {
         let owner_refusal = || {
             ToolError::InvalidInput(format!(
                 "Task {display_id} is owned by {}; agent {} cannot stop it.",
-                platform_api::display::sanitize_display(
+                lingxi_core::host::display::sanitize_display(
                     record.owner_agent_id.as_deref().unwrap_or(NO_OWNER_DISPLAY)
                 ),
-                platform_api::display::sanitize_display(
+                lingxi_core::host::display::sanitize_display(
                     caller_agent_id.as_deref().unwrap_or_default()
                 ),
             ))
@@ -2569,7 +2571,7 @@ impl Tool for TaskStopTool {
             // TaskCreate / TaskOutput / TeamSpawn and with the spawn path,
             // where a `TaskStop:`-prefixed message would be wrong.
             return Err(match &e {
-                platform_api::task_registry::TaskRegistryError::InvalidInput(reason)
+                lingxi_core::host::task_registry::TaskRegistryError::InvalidInput(reason)
                     if reason == "unknown task type" =>
                 {
                     ToolError::InvalidInput(format!("Unsupported task type: {task_type}"))
@@ -2741,7 +2743,7 @@ fn parse_int_radix10(s: &str) -> Option<i128> {
 /// A value outside the range is PULLED to the nearest bound, not rejected;
 /// that is what makes the setting safe to honour ahead of the env var.
 fn settings_task_output_cap() -> Option<usize> {
-    platform_api::session_flags::task_output_max_chars()
+    lingxi_core::host::session_flags::task_output_max_chars()
         .map(|v| (v as usize).clamp(TASK_OUTPUT_SETTING_MIN, TASK_OUTPUT_SETTING_MAX))
 }
 
@@ -2796,7 +2798,7 @@ fn max_task_output_length() -> usize {
 fn task_output_path(task_id: &str, output_path: Option<&str>) -> String {
     match output_path {
         Some(p) if !p.is_empty() => p.to_string(),
-        _ => platform_api::task_output::output_filename(task_id),
+        _ => lingxi_core::host::task_output::output_filename(task_id),
     }
 }
 
@@ -2898,7 +2900,7 @@ fn render_task_output(retrieval_status: &str, task: Option<&TaskOutputView>) -> 
             let body = if t.task_type == "local_bash" {
                 trimmed.to_string()
             } else {
-                platform_api::subagent_output_guard::sanitize_text(
+                lingxi_core::host::subagent_output_guard::sanitize_text(
                     trimmed,
                     // `prependMarker: !isRawTranscript` — a raw transcript was
                     // never a report addressed to the model, so it is
@@ -2969,7 +2971,7 @@ const MCP_STATUS_MESSAGE_MAX: usize = 200;
 /// * the `sep2663` protocol sentence needs a protocol field the port has not
 ///   modelled.
 fn render_mcp_task_output(
-    meta: &platform_api::task_registry::McpTaskOutputMeta,
+    meta: &lingxi_core::host::task_registry::McpTaskOutputMeta,
     status: &str,
 ) -> String {
     let mut lines = vec![
@@ -2989,7 +2991,7 @@ fn render_mcp_task_output(
     }
     lines.push(format!(
         "elapsed: {}",
-        platform_api::shell_support::format_duration_ms(meta.elapsed_ms)
+        lingxi_core::host::shell_support::format_duration_ms(meta.elapsed_ms)
     ));
     if meta.mcp_status == "input_required" && status == "running" {
         lines.push("waiting on the user: an elicitation dialog is open".to_string());

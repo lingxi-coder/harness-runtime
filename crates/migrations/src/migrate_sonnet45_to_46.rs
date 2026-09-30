@@ -9,7 +9,7 @@
 use crate::context::MigrationEnv;
 use crate::global_config;
 use crate::settings_update::{read_settings_map, settings_path, update_settings, WritableScope};
-use llm_runtime::oauth::anthropic::limits::SubscriptionType;
+use llm_runtime::auth::anthropic::limits::SubscriptionType;
 use serde_json::{json, Value};
 use telemetry::sink::AnalyticsValue;
 
@@ -95,7 +95,7 @@ mod tests {
         force_rename_failure_for_test, read_settings_map, settings_path, WritableScope,
     };
     use crate::test_support::temp_config;
-    use llm_runtime::oauth::anthropic::limits::SubscriptionType;
+    use llm_runtime::auth::anthropic::limits::SubscriptionType;
 
     fn test_env(t: &crate::test_support::TempConfig) -> crate::context::MigrationEnv {
         crate::context::MigrationEnv {

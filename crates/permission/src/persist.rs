@@ -23,8 +23,8 @@
 use crate::result::PermissionUpdateDestination;
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleValue};
 use crate::update::PermissionUpdate;
-use platform_api::rooted_fs::{self, AtomicWriteOptions, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE};
-use platform_api::FsError;
+use lingxi_core::host::rooted_fs::{self, AtomicWriteOptions, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE};
+use lingxi_core::host::FsError;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -826,7 +826,7 @@ mod tests {
             rule: PermissionRule {
                 value: PermissionRuleValue::from_rule_string(spec),
                 behavior: PermissionBehavior::Allow,
-                source: PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
             },
             destination: dest,
         }
@@ -949,7 +949,7 @@ mod tests {
         let deny_rule = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Bash(rm:*)"),
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         };
         assert!(replace_rules_in_settings_json(
             r#"{ "permissions": { "allow": ["Read"] } }"#,
@@ -972,7 +972,7 @@ mod tests {
         let rule = PermissionRule {
             value: PermissionRuleValue::from_rule_string("Read(./secrets/**)"),
             behavior: PermissionBehavior::Deny,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         };
         let out = apply_rule_to_settings_json("{}", &rule).unwrap().unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();

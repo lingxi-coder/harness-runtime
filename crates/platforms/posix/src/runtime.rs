@@ -5,7 +5,7 @@
 //! [`RuntimeSpawner::cancel`] can abort a running task by id.
 
 use async_trait::async_trait;
-use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use lingxi_core::host::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;

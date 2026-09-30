@@ -1,63 +1,40 @@
-//! Translation helpers between `llm_runtime::Usage` and
+//! Translation helpers between `llm_runtime::ExecutionUsage` and
 //! `cost::Usage` plus model-string → `ProviderId` resolution.
 //!
 //! Also contains the bridge that populates an `llm_runtime::PricingCatalog` from
-//! the `cost::PricingCatalog` so `LlmResponse.cost` carries real estimates.
+//! the `cost::PricingCatalog` so `HistoryResponse.cost` carries real estimates.
 //!
-//! Used by M6-06 to feed `LlmResponse.usage` into `CostTracker`.
+//! Used by M6-06 to feed `HistoryResponse.usage` into `CostTracker`.
 
 use cost::pricing::{ProviderId, TokenClass};
 use cost::usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};
 use cost::ModelRef;
-use llm_runtime::Usage as LlmUsage;
+use llm_runtime::ExecutionUsage as LlmUsage;
 
-/// Translate an `llm_runtime::Usage` into the cost crate's `Usage` shape.
-///
-/// Maps `billable_tokens.cache_write` → `TokenUsage::cache_write`
-/// and `billable_tokens.cache_read` → `TokenUsage::cache_read`.
-///
-/// Also surfaces the two cost-side billing signals the API response carries:
-/// `server_tool_use.web_search_requests` (billed per request — COST.5) and the
-/// `speed` tier, where `"fast"` maps to [`ApiSpeed::Fast`] so the Opus-4.6
-/// fast-mode rates fire (COST.3). Any non-`"fast"` speed string maps to
-/// [`ApiSpeed::Standard`]; an absent `speed`/`server_tool_use` stays `None`,
-/// matching claude-code (`utils/cost-tracker.ts:282`, `utils/modelCost.ts:139`).
+/// Adapt canonical SDK counters to the host cost ledger's disjoint buckets.
+/// Provider metadata is presentation data and never participates in billing.
 #[must_use]
 pub(crate) fn llm_usage_to_cost_usage(usage: &LlmUsage) -> Usage {
-    // Anthropic reports cache creation both as a total and, on current
-    // responses, as TTL-specific buckets. Pricing differs for the 5-minute and
-    // 1-hour tiers, so split the total without double charging. Providers that
-    // do not expose the nested object retain the legacy single-bucket shape.
-    let cache_write_1h = usage
-        .provider_metadata
-        .pointer("/cache_creation/ephemeral_1h_input_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let cache_write = usage
-        .provider_metadata
-        .pointer("/cache_creation/ephemeral_5m_input_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or_else(|| {
-            usage
-                .billable_tokens
-                .cache_write
-                .saturating_sub(cache_write_1h)
-        });
+    let counts = usage.counts();
     Usage {
         tokens: TokenUsage {
-            input: usage.billable_tokens.input,
-            output: usage.billable_tokens.output,
-            cache_write,
-            cache_read: usage.billable_tokens.cache_read,
-            reasoning_output: usage.billable_tokens.reasoning_output,
-            cache_write_1h,
+            input: counts.input_tokens,
+            output: counts.output_tokens.saturating_sub(counts.reasoning_tokens),
+            cache_write: counts
+                .cache_write_tokens
+                .saturating_sub(counts.cache_write_1h_tokens),
+            cache_read: counts.cache_read_tokens,
+            reasoning_output: counts.reasoning_tokens,
+            cache_write_1h: counts.cache_write_1h_tokens,
         },
-        server_tool_use: usage.server_tool_use.map(|s| ServerToolUsage {
-            // cost's counter is u32; clamp the (u64) wire value defensively.
-            web_search_requests: u32::try_from(s.web_search_requests).unwrap_or(u32::MAX),
-        }),
-        speed: usage.speed.as_deref().map(|s| {
-            if s == "fast" {
+        server_tool_use: counts
+            .server_tool_usage
+            .and_then(|s| s.web_search_requests)
+            .map(|count| ServerToolUsage {
+                web_search_requests: u32::try_from(count).unwrap_or(u32::MAX),
+            }),
+        speed: usage.inference.service_tier.map(|tier| {
+            if tier == llm_runtime::services::sdk::protocol::ServiceTier::Fast {
                 ApiSpeed::Fast
             } else {
                 ApiSpeed::Standard
@@ -66,148 +43,34 @@ pub(crate) fn llm_usage_to_cost_usage(usage: &LlmUsage) -> Usage {
     }
 }
 
-/// Checked conversion for registered attempts. The caller supplies normalized,
-/// disjoint billable buckets; this function never subtracts reasoning a second
-/// time or resolves prices. Missing TTL metadata keeps the legacy 5m bucket.
-/// A supplied TTL split must reconcile exactly with the normalized cache total;
-/// one supplied tier determines the other by checked subtraction.
+/// Validate the SDK report before adapting its observations for settlement.
 pub fn llm_usage_to_cost_usage_checked(usage: &LlmUsage) -> Result<Usage, cost::AttemptFoldError> {
     use cost::AttemptFoldError;
-    let metadata = &usage.provider_metadata;
-    for container in [
-        "cache_creation",
-        "server_tool_use",
-        "prompt_tokens_details",
-        "completion_tokens_details",
-        "input_tokens_details",
-        "output_tokens_details",
-    ] {
-        if metadata
-            .get(container)
-            .is_some_and(|value| !value.is_object())
-        {
-            return Err(AttemptFoldError::Invalid(
-                "malformed billing metadata object",
-            ));
-        }
-    }
-    // Validate only recognized billing fields. Absence is permitted; a value
-    // present with the wrong type must not be converted into a fabricated zero.
-    for path in [
-        "/input_tokens",
-        "/output_tokens",
-        "/cache_creation_input_tokens",
-        "/cache_read_input_tokens",
-        "/reasoning_output_tokens",
-        "/prompt_tokens",
-        "/completion_tokens",
-        "/total_tokens",
-        "/cached_tokens",
-        "/promptTokenCount",
-        "/candidatesTokenCount",
-        "/thoughtsTokenCount",
-        "/cachedContentTokenCount",
-        "/totalTokenCount",
-        "/cache_creation/ephemeral_5m_input_tokens",
-        "/cache_creation/ephemeral_1h_input_tokens",
-        "/server_tool_use/web_search_requests",
-        "/prompt_tokens_details/cached_tokens",
-        "/completion_tokens_details/reasoning_tokens",
-        "/input_tokens_details/cached_tokens",
-        "/output_tokens_details/reasoning_tokens",
-    ] {
-        if metadata
-            .pointer(path)
-            .is_some_and(|value| value.as_u64().is_none())
-        {
-            return Err(AttemptFoldError::Invalid("malformed numeric billing field"));
-        }
-    }
-    let total = usage.billable_tokens.cache_write;
-    if metadata
-        .get("cache_creation_input_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .is_some_and(|reported| reported != total)
-    {
+    use llm_runtime::services::sdk::protocol::UsageState;
+    if matches!(
+        usage.report.state,
+        UsageState::Invalid | UsageState::Missing
+    ) {
         return Err(AttemptFoldError::Invalid(
-            "cache total disagrees with normalized usage",
+            "usage report has no valid measurement",
         ));
     }
-    let five = metadata
-        .pointer("/cache_creation/ephemeral_5m_input_tokens")
-        .and_then(serde_json::Value::as_u64);
-    let hour = metadata
-        .pointer("/cache_creation/ephemeral_1h_input_tokens")
-        .and_then(serde_json::Value::as_u64);
-    let (cache_write, cache_write_1h) = match (five, hour) {
-        (Some(five), Some(hour)) => {
-            if five.checked_add(hour).ok_or(AttemptFoldError::Arithmetic)? != total {
-                return Err(AttemptFoldError::Invalid(
-                    "cache TTL split disagrees with total",
-                ));
-            }
-            (five, hour)
-        }
-        (Some(five), None) => (
-            five,
-            total
-                .checked_sub(five)
-                .ok_or(AttemptFoldError::Arithmetic)?,
-        ),
-        (None, Some(hour)) => (
-            total
-                .checked_sub(hour)
-                .ok_or(AttemptFoldError::Arithmetic)?,
-            hour,
-        ),
-        (None, None) => {
-            if metadata.get("cache_creation").is_some() && total != 0 {
-                return Err(AttemptFoldError::Invalid(
-                    "cache TTL object has no recognized split",
-                ));
-            }
-            (total, 0)
-        }
-    };
-    if metadata
-        .pointer("/server_tool_use/web_search_requests")
-        .and_then(serde_json::Value::as_u64)
-        .is_some_and(|reported| {
-            usage.server_tool_use.map(|tools| tools.web_search_requests) != Some(reported)
-        })
+    let counts = usage
+        .report
+        .usage
+        .ok_or(AttemptFoldError::Invalid("usage report has no counters"))?;
+    if counts.reasoning_tokens > counts.output_tokens
+        || counts.cache_write_1h_tokens > counts.cache_write_tokens
     {
-        return Err(AttemptFoldError::Invalid(
-            "server-tool count disagrees with normalized usage",
-        ));
+        return Err(AttemptFoldError::Invalid("usage subset exceeds its total"));
     }
-    let server_tool_use = usage
-        .server_tool_use
-        .map(|tools| {
-            u32::try_from(tools.web_search_requests)
-                .map(|web_search_requests| ServerToolUsage {
-                    web_search_requests,
-                })
-                .map_err(|_| AttemptFoldError::Arithmetic)
-        })
-        .transpose()?;
-    Ok(Usage {
-        tokens: TokenUsage {
-            input: usage.billable_tokens.input,
-            output: usage.billable_tokens.output,
-            cache_write,
-            cache_read: usage.billable_tokens.cache_read,
-            reasoning_output: usage.billable_tokens.reasoning_output,
-            cache_write_1h,
-        },
-        server_tool_use,
-        speed: usage.speed.as_deref().map(|speed| {
-            if speed == "fast" {
-                ApiSpeed::Fast
-            } else {
-                ApiSpeed::Standard
-            }
-        }),
-    })
+    if let Some(count) = counts
+        .server_tool_usage
+        .and_then(|tools| tools.web_search_requests)
+    {
+        u32::try_from(count).map_err(|_| AttemptFoldError::Arithmetic)?;
+    }
+    Ok(llm_usage_to_cost_usage(usage))
 }
 
 fn llm_provider_to_cost_provider(provider: &llm_runtime::ProviderId) -> ProviderId {
@@ -352,9 +215,8 @@ pub fn llm_catalog_from_cost(
 ) -> llm_runtime::PricingCatalog {
     let mut out = llm_runtime::PricingCatalog::empty();
     for entry in catalog.entries() {
-        // The legacy estimator's TokenPricing has mandatory numeric fields.
-        // Do not turn an unpublished cache rate into a free (zero) rate here;
-        // production responses use the SDK's frozen, bucket-aware estimate.
+        // Preserve absent buckets as unknown; production responses use the
+        // SDK's frozen price snapshot for the selected attempt.
         if matches!(entry.source, cost::PricingSource::PublishedPartial { .. }) {
             continue;
         }
@@ -367,11 +229,28 @@ pub fn llm_catalog_from_cost(
                 .map_or(0.0, |m| m.nano_usd_per_token as f64 / 1000.0)
         };
         let pricing = llm_runtime::TokenPricing {
-            input_per_million: nano_to_usd(TokenClass::Input),
-            output_per_million: nano_to_usd(TokenClass::Output),
-            cache_write_per_million: nano_to_usd(TokenClass::CacheWrite),
-            cache_read_per_million: nano_to_usd(TokenClass::CacheRead),
-            reasoning_per_million: nano_to_usd(TokenClass::ReasoningOutput),
+            currency: Some("USD".into()),
+            input_per_million: entry
+                .token_rates
+                .get(&TokenClass::Input)
+                .map(|_| nano_to_usd(TokenClass::Input)),
+            output_per_million: entry
+                .token_rates
+                .get(&TokenClass::Output)
+                .map(|_| nano_to_usd(TokenClass::Output)),
+            cache_write_per_million: entry
+                .token_rates
+                .get(&TokenClass::CacheWrite)
+                .map(|_| nano_to_usd(TokenClass::CacheWrite)),
+            cache_read_per_million: entry
+                .token_rates
+                .get(&TokenClass::CacheRead)
+                .map(|_| nano_to_usd(TokenClass::CacheRead)),
+            reasoning_per_million: entry
+                .token_rates
+                .get(&TokenClass::ReasoningOutput)
+                .map(|_| nano_to_usd(TokenClass::ReasoningOutput)),
+            ..Default::default()
         };
         out = out.with_price(provider, billing_model, pricing);
     }
@@ -381,7 +260,7 @@ pub fn llm_catalog_from_cost(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_runtime::{ServerToolUsage as LlmServerToolUsage, TokenUsage as LlmTokenUsage};
+    use llm_runtime::ServerToolUsage as LlmServerToolUsage;
 
     #[test]
     fn frozen_quote_carries_exact_price_identity_and_nano_amount() {
@@ -469,21 +348,34 @@ mod tests {
         speed: Option<String>,
     ) -> LlmUsage {
         LlmUsage {
-            billable_tokens: LlmTokenUsage {
-                input,
-                output,
-                cache_write,
-                cache_read,
-                reasoning_output: 0,
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_write_tokens: cache_write,
+                    cache_read_tokens: cache_read,
+                    reasoning_tokens: 0,
+                    server_tool_usage: server_tool_use,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
+            inference: llm_runtime::services::sdk::protocol::InferenceReport {
+                service_tier: speed.map(|s| {
+                    if s == "fast" {
+                        llm_runtime::services::sdk::protocol::ServiceTier::Fast
+                    } else {
+                        llm_runtime::services::sdk::protocol::ServiceTier::Standard
+                    }
+                }),
+                ..Default::default()
             },
-            server_tool_use,
-            speed,
             ..Default::default()
         }
     }
 
     #[test]
-    fn checked_usage_preserves_disjoint_tokens_and_infers_only_reconciled_ttl() {
+    fn checked_usage_preserves_canonical_subsets_independent_of_metadata() {
         for split in [
             serde_json::json!({"ephemeral_5m_input_tokens":12,"ephemeral_1h_input_tokens":18}),
             serde_json::json!({"ephemeral_1h_input_tokens":18}),
@@ -495,11 +387,14 @@ mod tests {
                 30,
                 10,
                 Some(LlmServerToolUsage {
-                    web_search_requests: 3,
+                    web_search_requests: Some(3),
+                    ..Default::default()
                 }),
                 Some("fast".into()),
             );
-            usage.billable_tokens.reasoning_output = 60;
+            usage.counts_mut().reasoning_tokens = 60;
+            usage.counts_mut().output_tokens = 100;
+            usage.counts_mut().cache_write_1h_tokens = 18;
             usage.provider_metadata =
                 serde_json::json!({"cache_creation_input_tokens":30,"cache_creation":split});
             let before = usage.clone();
@@ -525,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_usage_rejects_cache_mismatch_underflow_overflow_and_malformed_fields() {
+    fn checked_usage_ignores_non_authoritative_presentation_metadata() {
         for metadata in [
             serde_json::json!({"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":10}}),
             serde_json::json!({"cache_creation":{"ephemeral_1h_input_tokens":31}}),
@@ -542,11 +437,25 @@ mod tests {
             let mut usage = make_llm_usage(100, 50, 30, 10, None, None);
             usage.provider_metadata = metadata;
             assert!(
-                llm_usage_to_cost_usage_checked(&usage).is_err(),
+                llm_usage_to_cost_usage_checked(&usage).is_ok(),
                 "{:?}",
                 usage.provider_metadata
             );
         }
+    }
+
+    #[test]
+    fn checked_usage_rejects_invalid_canonical_measurements() {
+        let mut usage = make_llm_usage(100, 50, 30, 10, None, None);
+        usage.counts_mut().reasoning_tokens = 51;
+        assert!(llm_usage_to_cost_usage_checked(&usage).is_err());
+        usage.counts_mut().reasoning_tokens = 0;
+        usage.counts_mut().cache_write_1h_tokens = 31;
+        assert!(llm_usage_to_cost_usage_checked(&usage).is_err());
+        usage.counts_mut().cache_write_1h_tokens = 0;
+        usage.report.state = llm_runtime::services::sdk::protocol::UsageState::Invalid;
+        assert!(llm_usage_to_cost_usage_checked(&usage).is_err());
+        assert!(llm_usage_to_cost_usage_checked(&LlmUsage::default()).is_err());
     }
 
     #[test]
@@ -557,7 +466,8 @@ mod tests {
             0,
             0,
             Some(LlmServerToolUsage {
-                web_search_requests: u64::from(u32::MAX) + 1,
+                web_search_requests: Some(u64::from(u32::MAX) + 1),
+                ..Default::default()
             }),
             None,
         );
@@ -575,7 +485,7 @@ mod tests {
         let mut inconsistent = make_llm_usage(0, 0, 0, 0, None, None);
         inconsistent.provider_metadata =
             serde_json::json!({"server_tool_use":{"web_search_requests":1}});
-        assert!(llm_usage_to_cost_usage_checked(&inconsistent).is_err());
+        assert!(llm_usage_to_cost_usage_checked(&inconsistent).is_ok());
     }
 
     #[test]
@@ -595,6 +505,7 @@ mod tests {
     #[test]
     fn splits_anthropic_cache_creation_by_ttl() {
         let mut usage = make_llm_usage(100, 50, 30, 10, None, None);
+        usage.counts_mut().cache_write_1h_tokens = 18;
         usage.provider_metadata = serde_json::json!({
             "cache_creation_input_tokens": 30,
             "cache_creation": {
@@ -611,6 +522,7 @@ mod tests {
     #[test]
     fn subtracts_one_hour_bucket_when_five_minute_breakdown_is_absent() {
         let mut usage = make_llm_usage(100, 50, 30, 10, None, None);
+        usage.counts_mut().cache_write_1h_tokens = 18;
         usage.provider_metadata = serde_json::json!({
             "cache_creation_input_tokens": 30,
             "cache_creation": { "ephemeral_1h_input_tokens": 18 }
@@ -643,7 +555,8 @@ mod tests {
             0,
             0,
             Some(LlmServerToolUsage {
-                web_search_requests: 3,
+                web_search_requests: Some(3),
+                ..Default::default()
             }),
             None,
         );
@@ -821,7 +734,7 @@ mod tests {
     #[test]
     fn bridge_opus_4_6_converts_exact_rates() {
         use cost::pricing::PricingCatalog as CostCatalog;
-        use llm_runtime::{CostEstimator, PricingPolicy, TokenUsage, Usage as LlmUsage};
+        use llm_runtime::{CostEstimator, ExecutionUsage as LlmUsage, PricingPolicy};
 
         let cost_cat = CostCatalog::builtin_reference();
         let llm_cat = llm_catalog_from_cost(&cost_cat);
@@ -838,17 +751,21 @@ mod tests {
             display_model: "Claude Opus 4.6".to_string(),
         };
         let usage = LlmUsage {
-            billable_tokens: TokenUsage {
-                input: 1_000_000,
-                output: 1_000_000,
-                cache_write: 0,
-                cache_read: 0,
-                reasoning_output: 0,
-            },
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: 1_000_000,
+                    output_tokens: 1_000_000,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    reasoning_tokens: 0,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
             ..Default::default()
         };
         let estimate = estimator
-            .estimate(pricing_ref, &usage)
+            .estimate(pricing_ref, &usage.counts())
             .expect("opus-4-6 must be priced");
         // 1M input × $5.0/M = $5.0
         let total = estimate
@@ -875,7 +792,7 @@ mod tests {
     #[test]
     fn bridge_unknown_model_returns_unestimated() {
         use cost::pricing::PricingCatalog as CostCatalog;
-        use llm_runtime::{CostEstimator, PricingPolicy, Usage as LlmUsage};
+        use llm_runtime::{CostEstimator, PricingPolicy};
 
         let cost_cat = CostCatalog::builtin_reference();
         let llm_cat = llm_catalog_from_cost(&cost_cat);
@@ -888,7 +805,7 @@ mod tests {
             display_model: "Claude Nonexistent".to_string(),
         };
         let estimate = estimator
-            .estimate(pricing_ref, &LlmUsage::default())
+            .estimate(pricing_ref, &llm_runtime::Usage::default())
             .expect("MarkUnestimated must not error");
         // Unpriced → total_cost_usd is None.
         assert!(
@@ -905,7 +822,7 @@ mod tests {
     #[test]
     fn bridge_openai_gpt4o_maps_to_correct_provider() {
         use cost::pricing::PricingCatalog as CostCatalog;
-        use llm_runtime::{CostEstimator, PricingPolicy, TokenUsage, Usage as LlmUsage};
+        use llm_runtime::{CostEstimator, ExecutionUsage as LlmUsage, PricingPolicy};
 
         let cost_cat = CostCatalog::builtin_reference();
         let llm_cat = llm_catalog_from_cost(&cost_cat);
@@ -918,14 +835,21 @@ mod tests {
             display_model: "GPT-4o".to_string(),
         };
         let usage = LlmUsage {
-            billable_tokens: TokenUsage {
-                input: 1_000_000,
-                ..Default::default()
-            },
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: 1_000_000,
+                    output_tokens: 0,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    reasoning_tokens: 0,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
             ..Default::default()
         };
         let estimate = estimator
-            .estimate(pricing_ref, &usage)
+            .estimate(pricing_ref, &usage.counts())
             .expect("gpt-4o must be priced");
         // gpt-4o input = 2_500 nano_usd/token → 2.5 usd/M
         let input = estimate

@@ -1,6 +1,6 @@
 use super::{mcp_servers_inventory_payload, mcp_tools_commands_loaded_payload};
-use platform_api::McpTransportSpec;
-use protocol::McpConnectionId;
+use lingxi_core::host::McpTransportSpec;
+use lingxi_core::types::McpConnectionId;
 use std::collections::HashMap;
 
 fn stdio_config(name: &str, scope: mcp::ConfigScope) -> mcp::McpServerConfig {
@@ -29,19 +29,19 @@ fn mcp_server_inventory_matches_oracle_scope_buckets_and_folds_managed_into_ente
         stdio_config("enterprise", mcp::ConfigScope::Enterprise),
         stdio_config(
             "managed",
-            mcp::ConfigScope::Settings(protocol::SettingsScope::Managed),
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
         ),
         stdio_config(
             "global",
-            mcp::ConfigScope::Settings(protocol::SettingsScope::User),
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         ),
         stdio_config(
             "project",
-            mcp::ConfigScope::Settings(protocol::SettingsScope::Project),
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         ),
         stdio_config(
             "user",
-            mcp::ConfigScope::Settings(protocol::SettingsScope::Local),
+            mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Local),
         ),
         stdio_config("dynamic", mcp::ConfigScope::Dynamic),
         stdio_config("agent", mcp::ConfigScope::Agent),
@@ -62,10 +62,10 @@ fn mcp_tools_commands_loaded_uses_utf16_lengths_like_the_oracle_js_strings() {
     let prompts = [(
         "srv".to_string(),
         McpConnectionId::new(),
-        platform_api::McpPromptDto {
+        lingxi_core::host::McpPromptDto {
             name: "emoji".to_string(),
             description: Some("desc😀".to_string()),
-            arguments: vec![platform_api::McpPromptArgumentDto {
+            arguments: vec![lingxi_core::host::McpPromptArgumentDto {
                 name: "旗".to_string(),
                 description: None,
                 required: true,

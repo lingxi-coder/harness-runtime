@@ -7,8 +7,8 @@
 
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
+use lingxi_core::host::{ProcessCommand, Sandbox, SandboxPolicy, SandboxedTag};
 use mobile_linux_api::{NetworkPolicy, ResourceLimits};
-use platform_api::{ProcessCommand, Sandbox, SandboxPolicy, SandboxedTag};
 use platform_posix::sandbox::PosixSandbox;
 use std::collections::HashMap;
 use std::path::PathBuf;

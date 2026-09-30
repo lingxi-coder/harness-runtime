@@ -6,11 +6,9 @@
 //! later task can swap in a live `sandbox-runtime`-backed runner (per-session
 //! `SandboxManager`, proxy/MITM/seccomp) without touching the tool call sites.
 //!
-//! [`LegacyWrapRunner`] is the default and is byte-identical to the current
-//! direct call: its [`wrap`](SandboxRunner::wrap) ignores `bin_shell`/`cwd`
-//! and forwards `command`/`cfg`/`platform` straight to
-//! [`sandbox::wrap::wrap_with_sandbox`]. The live runner (added later) uses the
-//! extra arguments.
+//! [`LegacyWrapRunner`] is the default: its [`wrap`](SandboxRunner::wrap)
+//! ignores `bin_shell` and forwards to [`sandbox::wrap::wrap_with_sandbox_at`]
+//! with `cwd` as the sandbox root. The live runner also uses `bin_shell`.
 
 use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use sandbox::wrap::SandboxWrapError;
@@ -34,9 +32,12 @@ pub trait SandboxRunner: Send + Sync {
     /// Wrap `command` so it runs under the host sandbox described by `cfg` on
     /// `platform`.
     ///
-    /// `bin_shell` is the shell binary the command runs under (e.g. `/bin/bash`)
-    /// and `cwd` the working directory; a live runner uses these to scope the
-    /// sandbox, while [`LegacyWrapRunner`] ignores them.
+    /// `bin_shell` is the shell binary the command runs under (e.g. `/bin/bash`).
+    /// `cwd` is the command's sandbox root — the agent's own directory or the
+    /// session workspace, never the shell's current `cd` — and must be the
+    /// root `cfg` was resolved against
+    /// ([`crate::BuiltinToolContext::sandbox_runtime_at`]): backends anchor the
+    /// mandatory `.git`/dotfile denies there.
     ///
     /// # Errors
     /// Returns [`SandboxWrapError`] when the host cannot produce a wrapped
@@ -65,12 +66,11 @@ pub trait SandboxRunner: Send + Sync {
     }
 }
 
-/// The current behavior, hoisted behind the [`SandboxRunner`] seam.
+/// The sync wrap, hoisted behind the [`SandboxRunner`] seam.
 ///
-/// [`wrap`](SandboxRunner::wrap) forwards straight to
-/// [`sandbox::wrap::wrap_with_sandbox`], ignoring `bin_shell`/`cwd`, so it is
-/// byte-identical to the direct call the tools make today. `cleanup`/`reset`
-/// are the no-op defaults.
+/// [`wrap`](SandboxRunner::wrap) forwards to
+/// [`sandbox::wrap::wrap_with_sandbox_at`] with `cwd` as the sandbox root,
+/// ignoring `bin_shell`. `cleanup`/`reset` are the no-op defaults.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LegacyWrapRunner;
 
@@ -82,9 +82,9 @@ impl SandboxRunner for LegacyWrapRunner {
         cfg: &SandboxRuntimeConfig,
         platform: Platform,
         _bin_shell: Option<&str>,
-        _cwd: Option<&Path>,
+        cwd: Option<&Path>,
     ) -> Result<String, SandboxWrapError> {
-        sandbox::wrap::wrap_with_sandbox(command, cfg, platform)
+        sandbox::wrap::wrap_with_sandbox_at(command, cfg, platform, cwd)
     }
 }
 
@@ -165,8 +165,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_runner_ignores_bin_shell_and_cwd() {
-        // Faithful to today: bin_shell/cwd must NOT alter the legacy output.
+    async fn legacy_linux_wrap_ignores_bin_shell_and_cwd() {
+        // bwrap binds the (already rooted) config as given: bin_shell/cwd only
+        // matter to the macOS profile's mandatory denies.
         let cfg = SandboxRuntimeConfig::default();
         let platform = PARITY_PLATFORM;
         let runner = LegacyWrapRunner;

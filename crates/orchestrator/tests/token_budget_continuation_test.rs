@@ -3,19 +3,19 @@
 //! AND a budget is configured, keeps nudging the model past `end_turn` until
 //! ~90% of the budget is spent — and that with the gate OFF (the parity
 //! default) the loop stops at the first `end_turn` (NO-OP).
-use llm_runtime::{ContentBlock as LlmContentBlock, LlmResponse, TokenUsage, Usage};
+use lingxi_core::types::ConversationMessage;
+use llm_runtime::{ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use protocol::ConversationMessage;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
 /// Build an `end_turn` response with a single text block and a given
 /// `output_tokens` usage count.
-fn end_turn_with_output_tokens(output_tokens: u64) -> LlmResponse {
-    LlmResponse {
+fn end_turn_with_output_tokens(output_tokens: u64) -> HistoryResponse {
+    HistoryResponse {
         id: "msg_mock".to_string(),
         model: "claude-opus-4-7".to_string(),
         content: vec![LlmContentBlock::Text {
@@ -25,10 +25,17 @@ fn end_turn_with_output_tokens(output_tokens: u64) -> LlmResponse {
         stop_reason: Some("end_turn".to_string()),
         stop_details: None,
         usage: Usage {
-            billable_tokens: TokenUsage {
-                output: output_tokens,
-                ..Default::default()
-            },
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: 0,
+                    output_tokens: output_tokens,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    reasoning_tokens: 0,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
             ..Default::default()
         },
         cost: None,
@@ -58,9 +65,9 @@ fn count_nudge_user_messages(snapshot: &[ConversationMessage]) -> usize {
     snapshot
         .iter()
         .filter(|m| match m {
-            ConversationMessage::User { content, .. } => content
-                .iter()
-                .any(|b| matches!(b, protocol::ContentBlock::Text { text } if text == NUDGE)),
+            ConversationMessage::User { content, .. } => content.iter().any(
+                |b| matches!(b, lingxi_core::types::ContentBlock::Text { text } if text == NUDGE),
+            ),
             _ => false,
         })
         .count()
@@ -216,7 +223,7 @@ async fn budget_on_resets_recovery_count_on_continuation() {
                 ConversationMessage::User { content, .. }
                     if content.iter().any(|b| matches!(
                         b,
-                        protocol::ContentBlock::Text { text }
+                        lingxi_core::types::ContentBlock::Text { text }
                             if text.starts_with("Stopped at")
                                 && text.contains('\u{2014}')
                     ))
@@ -247,7 +254,7 @@ async fn budget_on_resets_recovery_count_on_continuation() {
 fn streamed_end_turn_with_output_tokens(
     id: &str,
     output_tokens: u64,
-) -> Vec<llm_runtime::LlmEvent> {
+) -> Vec<llm_runtime::HistoryEvent> {
     use orchestrator::test_support::{
         content_block_start_text, content_block_stop, message_start, message_stop, text_delta,
     };
@@ -259,10 +266,17 @@ fn streamed_end_turn_with_output_tokens(
         orchestrator::test_support_stream::message_delta_stop_with_usage(
             "end_turn",
             Usage {
-                billable_tokens: TokenUsage {
-                    output: output_tokens,
-                    ..Default::default()
-                },
+                report: llm_runtime::UsageReport::measured(
+                    llm_runtime::Usage {
+                        input_tokens: 0,
+                        output_tokens: output_tokens,
+                        cache_write_tokens: 0,
+                        cache_read_tokens: 0,
+                        reasoning_tokens: 0,
+                        ..Default::default()
+                    },
+                    llm_runtime::services::sdk::protocol::UsageState::Complete,
+                ),
                 ..Default::default()
             },
         ),

@@ -3,14 +3,14 @@
 #![allow(missing_docs)]
 
 use async_trait::async_trait;
+use lingxi_core::host::{
+    BackendPlanHandle, ProcessCommand, ProcessHandle, ProcessRunner, Sandbox, SandboxCapability,
+    SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
+};
 use mobile_linux_api::{
     LinuxCommandRequest, LinuxProcessHandle, MobileLinuxError, MobileLinuxRuntime,
     MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskStatus, MountSpec, ProcessError,
     ProcessOutput, ProcessStreamSink, SandboxBackend,
-};
-use platform_api::{
-    BackendPlanHandle, ProcessCommand, ProcessHandle, ProcessRunner, Sandbox, SandboxCapability,
-    SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs;

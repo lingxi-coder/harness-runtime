@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
 };
 use futures::{stream, Stream, StreamExt};
-use platform_api::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
+use lingxi_core::host::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 use platform_common::RemoteMcpTransport;
 use serde_json::{json, Value};
 use std::convert::Infallible;
@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 fn spec(kind: &str, url: String) -> McpTransportSpec {
-    let headers = platform_api::McpHeaders::new();
+    let headers = lingxi_core::host::McpHeaders::new();
     match kind {
         "sse" => McpTransportSpec::Sse {
             url,
@@ -207,7 +207,7 @@ async fn exercise(kind: &str, url: String) {
     transport.disconnect(conn.connection_id).await.unwrap();
     assert!(matches!(
         transport.ping(conn.connection_id).await,
-        Err(platform_api::McpError::Connection(_))
+        Err(lingxi_core::host::McpError::Connection(_))
     ));
 }
 

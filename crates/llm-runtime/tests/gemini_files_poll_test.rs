@@ -10,11 +10,11 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use llm_runtime::client::DefaultLlmClient;
+use llm_runtime::client::ModelRuntime;
 use llm_runtime::{
     AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig, FileActivationPoll,
     LlmError, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
-    ProviderRequest, ProviderResponse, StreamingResponse, Transport,
+    ProviderRequest, ProviderResponse, StreamingResponse,
 };
 
 const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -67,9 +67,9 @@ impl llm_runtime::test_support::FixtureTransport for ScriptedTransport {
 }
 llm_runtime::impl_fixture_transport!(ScriptedTransport);
 
-fn gemini_client() -> DefaultLlmClient {
+fn gemini_client() -> ModelRuntime {
     std::env::set_var("LLM_CLIENT_GEMINI_POLL_TEST_KEY", "gemini-poll-key");
-    DefaultLlmClient::from_config(ClientConfig {
+    ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: lingxi_llm_client::protocol::Region::all(),
@@ -107,9 +107,9 @@ fn gemini_client() -> DefaultLlmClient {
     .expect("client")
 }
 
-fn anthropic_client() -> DefaultLlmClient {
+fn anthropic_client() -> ModelRuntime {
     std::env::set_var("LLM_CLIENT_GEMINI_POLL_TEST_KEY", "gemini-poll-key");
-    DefaultLlmClient::from_config(ClientConfig {
+    ModelRuntime::from_config(ClientConfig {
         providers: vec![ProviderProfile {
             wire_profile: None,
             regions: lingxi_llm_client::protocol::Region::all(),

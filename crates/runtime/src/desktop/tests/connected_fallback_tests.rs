@@ -1,8 +1,8 @@
 use super::{connected_provider_fallback, RecentModelRef};
 use std::collections::BTreeMap;
 
-fn listing(provider_id: &str, request_model: &str) -> platform_api::ModelListing {
-    platform_api::ModelListing {
+fn listing(provider_id: &str, request_model: &str) -> lingxi_core::host::ModelListing {
+    lingxi_core::host::ModelListing {
         display_model: request_model.to_string(),
         request_model: request_model.to_string(),
         provider_id: provider_id.to_string(),
@@ -18,7 +18,7 @@ fn listing(provider_id: &str, request_model: &str) -> platform_api::ModelListing
 }
 
 /// Catalog fixture: anthropic + a few presets + a user-defined "groq".
-fn listings() -> Vec<platform_api::ModelListing> {
+fn listings() -> Vec<lingxi_core::host::ModelListing> {
     vec![
         listing("anthropic", "claude-sonnet-5"),
         listing("anthropic", "claude-opus-4-8"),
@@ -294,7 +294,7 @@ fn gateway_flag_does_not_shield_non_anthropic_defaults() {
 /// serves it.
 #[test]
 fn curated_default_missing_from_catalog_falls_to_first_listing() {
-    let listings: Vec<platform_api::ModelListing> = vec![
+    let listings: Vec<lingxi_core::host::ModelListing> = vec![
         listing("anthropic", "claude-sonnet-5"),
         listing("deepseek", "deepseek-reasoner"), // no deepseek-chat
     ];

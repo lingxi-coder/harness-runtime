@@ -225,7 +225,7 @@ pub(super) struct BootPermissionTiers {
 ///   the allowed-source set, so managed rules can NEVER be excluded.
 /// - Managed tiers (`managed-settings.json` + `managed-settings.d/*.json`,
 ///   already ascending from `managed_settings_raw_tiers`) parse with
-///   `PermissionRuleSource::Settings(protocol::SettingsScope::Managed)` (`RKt()→Fwt("policySettings")`),
+///   `PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)` (`RKt()→Fwt("policySettings")`),
 ///   so enterprise deny/ask/allow rules bind on the boot policy and decisions
 ///   cite "enterprise managed settings". Managed `defaultMode` /
 ///   `disableBypassPermissionsMode` / `additionalDirectories` fold like any
@@ -266,17 +266,17 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
     for (path, source, included) in [
         (
             lingxi_home.join("settings.json"),
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             incl_user_settings,
         ),
         (
             cwd.join(branding::DOT_DIR).join("settings.json"),
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             incl_project_settings,
         ),
         (
             cwd.join(branding::DOT_DIR).join("settings.local.json"),
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
             incl_project_settings,
         ),
     ] {
@@ -402,7 +402,7 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
     for raw in &managed_tiers {
         match permission::permission_rules_from_settings_json(
             raw,
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
         ) {
             Ok(mut r) => {
                 // parity 2.1.210: same file-matcher warning for managed rules.
@@ -434,7 +434,7 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
         }
         additional_working_dirs.extend_from_source(
             permission::additional_directories_from_settings_json(raw),
-            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+            permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
         );
         if permission::block_reads_outside_working_directories_from_settings_json(raw) {
             block_reads_outside_working_directories = true; // managed arming binds (sticky)
@@ -445,7 +445,10 @@ pub(super) async fn load_boot_permission_tiers_with_flag(
         .any(|raw| permission::allow_managed_permission_rules_only_from_settings_json(raw));
     if allow_managed_permission_rules_only {
         rules.retain(|r| {
-            r.source == permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
+            r.source
+                == permission::PermissionRuleSource::Settings(
+                    lingxi_core::types::SettingsScope::Managed,
+                )
         });
     }
     let mode_preference_allowed = !managed_tiers
@@ -516,9 +519,9 @@ pub(super) fn managed_model_policy_source(
 pub(super) fn model_provenance_for_config(
     cfg: &DesktopConfig,
     effective_settings: Option<&lingxi_core::settings::EffectiveSettings>,
-) -> platform_api::ModelProvenance {
+) -> lingxi_core::host::ModelProvenance {
     if cfg.default_model_explicit || cfg.default_model_env_pinned {
-        return platform_api::ModelProvenance::UserOrEnv;
+        return lingxi_core::host::ModelProvenance::UserOrEnv;
     }
     match effective_settings
         .and_then(|settings| settings.effective_for("model"))
@@ -529,7 +532,7 @@ pub(super) fn model_provenance_for_config(
                 .and_then(|settings| settings.settings.model.as_deref())
                 .is_some_and(|model| !model.trim().is_empty()) =>
         {
-            platform_api::ModelProvenance::ManagedAdministratorDefault
+            lingxi_core::host::ModelProvenance::ManagedAdministratorDefault
         }
         Some(
             lingxi_core::settings::tracer::Source::Env
@@ -537,12 +540,12 @@ pub(super) fn model_provenance_for_config(
             | lingxi_core::settings::tracer::Source::Project
             | lingxi_core::settings::tracer::Source::Local
             | lingxi_core::settings::tracer::Source::Cli,
-        ) => platform_api::ModelProvenance::UserOrEnv,
+        ) => lingxi_core::host::ModelProvenance::UserOrEnv,
         Some(lingxi_core::settings::tracer::Source::Managed) => {
-            platform_api::ModelProvenance::ProviderCatalogTier
+            lingxi_core::host::ModelProvenance::ProviderCatalogTier
         }
         Some(lingxi_core::settings::tracer::Source::Defaults) | None => {
-            platform_api::ModelProvenance::ProviderCatalogTier
+            lingxi_core::host::ModelProvenance::ProviderCatalogTier
         }
     }
 }

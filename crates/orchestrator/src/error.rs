@@ -61,7 +61,7 @@ pub enum OrchestratorError {
 
     /// The model API call failed (transport, rate-limit, context overflow,
     /// etc). Wraps `llm_runtime::LlmError` — the live path flows through
-    /// `ProviderApiAdapter → DefaultLlmClient`.
+    /// `ProviderApiAdapter → ModelRuntime`.
     ///
     /// Note: `LlmError::Overloaded { repeated: true }` is **not** wrapped here;
     /// it is converted to [`OrchestratorError::RepeatedOverloaded`] instead.

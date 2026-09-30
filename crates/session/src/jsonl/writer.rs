@@ -15,8 +15,8 @@ use crate::jsonl::transcript_compact::{
     local_gc_enabled, next_backstop, perform_compact_transcript, CompactOutcome, CompactStats,
     COMPACT_BACKSTOP_BYTES,
 };
-use platform_api::{FileSystem, FsError};
-use protocol::SessionId;
+use lingxi_core::host::{FileSystem, FsError};
+use lingxi_core::types::SessionId;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -689,7 +689,7 @@ impl JsonlWriter {
                             "transcript destination has no parent".into(),
                         ))
                     })?;
-                    let identity = platform_api::rooted_fs::root_identity(parent)?;
+                    let identity = lingxi_core::host::rooted_fs::root_identity(parent)?;
                     let relative =
                         operation_path
                             .file_name()
@@ -1118,7 +1118,7 @@ impl JsonlWriter {
                 })?;
                 std::fs::create_dir_all(parent)
                     .map_err(|error| TranscriptWriterError::Fs(FsError::Io(error.to_string())))?;
-                let identity = platform_api::rooted_fs::root_identity(parent)?;
+                let identity = lingxi_core::host::rooted_fs::root_identity(parent)?;
                 let relative = active_path.file_name().map(PathBuf::from).ok_or_else(|| {
                     TranscriptWriterError::Fs(FsError::Io(
                         "active transcript path has no file name".into(),
@@ -1148,7 +1148,7 @@ impl JsonlWriter {
                 })?;
                 std::fs::create_dir_all(parent)
                     .map_err(|error| TranscriptWriterError::Fs(FsError::Io(error.to_string())))?;
-                let identity = platform_api::rooted_fs::root_identity(parent)?;
+                let identity = lingxi_core::host::rooted_fs::root_identity(parent)?;
                 let relative = active_path.file_name().map(PathBuf::from).ok_or_else(|| {
                     TranscriptWriterError::Fs(FsError::Io(
                         "active transcript path has no file name".into(),

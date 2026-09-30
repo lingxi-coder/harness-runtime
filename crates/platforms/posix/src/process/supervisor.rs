@@ -1,11 +1,11 @@
 //! Unix transport and process boundary for the shared supervision protocol.
 use super::runner::PosixProcess;
-use mobile_linux_api::ProcessError;
-use platform_api::process::ShellProcessHandoff;
-use platform_api::shell_supervisor::{self as shared, BoxStream, Listener, Platform};
-use platform_api::{
+use lingxi_core::host::process::ShellProcessHandoff;
+use lingxi_core::host::shell_supervisor::{self as shared, BoxStream, Listener, Platform};
+use lingxi_core::host::{
     BackgroundExitSink, ForegroundRunResult, ProcessHandle, ProcessRunner, SandboxedCommand,
 };
+use mobile_linux_api::ProcessError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
@@ -60,7 +60,7 @@ impl Platform for UnixPlatform {
         {
             None
         } else {
-            platform_api::live_sessions::process_start_identity(pid)
+            lingxi_core::host::live_sessions::process_start_identity(pid)
         }
     }
 
@@ -202,7 +202,7 @@ fn guarded_orphan_cleanup(handoff: &ShellProcessHandoff) -> Result<(), ProcessEr
         .process_start_identity
         .as_ref()
         .ok_or(ProcessError::Unsupported)?;
-    match platform_api::live_sessions::process_start_identity(handoff.pid) {
+    match lingxi_core::host::live_sessions::process_start_identity(handoff.pid) {
         Some(actual) if &actual == expected => super::kill_tree::kill_tree_force(handoff.pid),
         None => Ok(()),
         _ => Err(error("orphan shell birth identity mismatch")),
@@ -216,7 +216,7 @@ pub async fn serve_supervisor(
     shared::run_at(directory, factory).await
 }
 #[cfg(test)]
-use platform_api::{BackgroundTaskBinding, ForegroundOutcome, ProcessCommand, SandboxedTag};
+use lingxi_core::host::{BackgroundTaskBinding, ForegroundOutcome, ProcessCommand, SandboxedTag};
 #[cfg(test)]
 use std::{collections::HashMap, sync::Mutex, time::Duration};
 #[cfg(test)]
@@ -242,7 +242,7 @@ mod tests {
             true
         }
         async fn append_output(&self, _: &str, text: &str) -> Result<(), ProcessError> {
-            platform_api::rooted_fs::append_file(
+            lingxi_core::host::rooted_fs::append_file(
                 self.path.parent().unwrap(),
                 Path::new(self.path.file_name().unwrap()),
                 text,
@@ -348,7 +348,7 @@ mod tests {
                 .parse::<u32>()
                 .unwrap();
             assert!(
-                platform_api::agent_processes::snapshot("pre-cap").is_empty(),
+                lingxi_core::host::agent_processes::snapshot("pre-cap").is_empty(),
                 "source has no capability yet"
             );
             assert!(!directory.join("payload.started").exists());
@@ -368,7 +368,7 @@ mod tests {
                 .unwrap()
                 .is_err());
             tokio::time::timeout(CROSS_PROCESS_WAIT, async {
-                while platform_api::live_sessions::process_start_identity(child).is_some() {
+                while lingxi_core::host::live_sessions::process_start_identity(child).is_some() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
@@ -388,13 +388,13 @@ mod tests {
                     .await
             });
             tokio::time::timeout(CROSS_PROCESS_WAIT, async {
-                while platform_api::agent_processes::snapshot("fg-crash").is_empty() {
+                while lingxi_core::host::agent_processes::snapshot("fg-crash").is_empty() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })
             .await
             .unwrap();
-            let child = platform_api::agent_processes::snapshot("fg-crash")[0];
+            let child = lingxi_core::host::agent_processes::snapshot("fg-crash")[0];
             let supervisor = std::fs::read_to_string(directory.join("supervisor.pid"))
                 .unwrap()
                 .trim()
@@ -412,7 +412,7 @@ mod tests {
                 assert!(run.await.unwrap().is_err());
             }
             tokio::time::timeout(CROSS_PROCESS_WAIT, async {
-                while platform_api::live_sessions::process_start_identity(child).is_some() {
+                while lingxi_core::host::live_sessions::process_start_identity(child).is_some() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
@@ -531,25 +531,25 @@ mod tests {
                 .await
         });
         tokio::time::timeout(CROSS_PROCESS_WAIT, async {
-            while platform_api::agent_processes::snapshot("owner-a").is_empty()
-                || platform_api::agent_processes::snapshot("owner-b").is_empty()
+            while lingxi_core::host::agent_processes::snapshot("owner-a").is_empty()
+                || lingxi_core::host::agent_processes::snapshot("owner-b").is_empty()
             {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
         .unwrap();
-        let owned = platform_api::agent_processes::snapshot("owner-a");
+        let owned = lingxi_core::host::agent_processes::snapshot("owner-a");
         assert_eq!(
             PosixProcess::new().kill_owner_processes("owner-a").await,
             owned
         );
         assert!(a.await.unwrap().is_err());
         assert!(!b.is_finished());
-        assert!(platform_api::agent_processes::snapshot("owner-a").is_empty());
+        assert!(lingxi_core::host::agent_processes::snapshot("owner-a").is_empty());
         PosixProcess::new().kill_owner_processes("owner-b").await;
         assert!(b.await.unwrap().is_err());
-        assert!(platform_api::agent_processes::snapshot("owner-b").is_empty());
+        assert!(lingxi_core::host::agent_processes::snapshot("owner-b").is_empty());
         let command = make_command(directory, "b3333333", "owner-a");
         let handle = PosixProcess::new()
             .spawn_background(&command)
@@ -558,15 +558,15 @@ mod tests {
         shared::acknowledge(&handle).await.unwrap();
         let handoff = export(&handle).unwrap();
         assert_eq!(
-            platform_api::agent_processes::snapshot("owner-a"),
+            lingxi_core::host::agent_processes::snapshot("owner-a"),
             vec![handle.pid]
         );
         release(&handoff).await.unwrap();
-        assert!(platform_api::agent_processes::snapshot("owner-a").is_empty());
+        assert!(lingxi_core::host::agent_processes::snapshot("owner-a").is_empty());
         let sink = Arc::new(Sink::new(PathBuf::from(&handoff.output_path)));
         adopt(&handoff, sink.clone()).await.unwrap();
         assert_eq!(
-            platform_api::agent_processes::snapshot("owner-a"),
+            lingxi_core::host::agent_processes::snapshot("owner-a"),
             vec![handle.pid]
         );
         PosixProcess::new().kill_owner_processes("owner-a").await;
@@ -597,7 +597,7 @@ mod tests {
             "new owner work must not join an already-started stop snapshot"
         );
         std::env::remove_var("LXS_TEST_DELAY_ENDPOINT");
-        assert!(platform_api::live_sessions::process_start_identity(next.pid).is_some());
+        assert!(lingxi_core::host::live_sessions::process_start_identity(next.pid).is_some());
         let next_cap = export(&next).unwrap();
         PosixProcess::new().kill(&next).await.unwrap();
         release(&next_cap).await.unwrap();
@@ -791,7 +791,7 @@ mod tests {
         assert_eq!(output.matches("[supervisor lost; task failed]").count(), 1);
 
         tokio::time::timeout(Duration::from_secs(5), async {
-            while platform_api::live_sessions::process_start_identity(handoff.pid).is_some() {
+            while lingxi_core::host::live_sessions::process_start_identity(handoff.pid).is_some() {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
@@ -810,7 +810,7 @@ mod tests {
         )
         .unwrap();
         tokio::time::timeout(CROSS_PROCESS_WAIT, async {
-            while platform_api::live_sessions::process_start_identity(handle.pid).is_some() {
+            while lingxi_core::host::live_sessions::process_start_identity(handle.pid).is_some() {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
@@ -829,7 +829,7 @@ mod tests {
         if let Ok(pid) = std::fs::read_to_string(directory.path().join("child.pid")) {
             let pid = pid.trim().parse::<u32>().unwrap();
             tokio::time::timeout(Duration::from_secs(2), async {
-                while platform_api::live_sessions::process_start_identity(pid).is_some() {
+                while lingxi_core::host::live_sessions::process_start_identity(pid).is_some() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })

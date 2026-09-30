@@ -1,7 +1,7 @@
 //! Fusion multi-model deliberation orchestrator.
 //!
 //! This crate implements the Fusion state machine. Callers depend on
-//! [`platform_api::FusionExecutor`]; composition roots inject a
+//! [`lingxi_core::host::FusionExecutor`]; composition roots inject a
 //! [`FusionOrchestrator`]. There is no public Agent / slash / workflow entry
 //! here — those land in later PRs.
 
@@ -28,16 +28,15 @@
 mod analyst;
 mod attempts;
 mod budget;
-mod citations;
 mod config;
-mod decision;
+mod evidence;
+mod implement;
 mod model_resolver;
 mod orchestrator;
 mod packing;
 mod panel;
 mod progress;
 mod snapshot;
-mod synthesizer;
 
 pub use attempts::{
     FusionAttemptFinalizer, FusionAttemptLivePolicy, FusionAttemptRegistrar,
@@ -45,7 +44,11 @@ pub use attempts::{
     FusionAttemptSummary, FusionPanelAttemptFence, RegisteredFusionAttempts,
 };
 pub use budget::{CapturedPriceBook, FusionPriceBook, FusionQuote, ModelRates};
-pub use config::{FusionCompletionPolicy, FusionConfigSource, FusionRuntimeConfig};
+pub use config::{
+    usd_to_nano_usd, FusionCompletionPolicy, FusionConfigSource, FusionImplementConfig,
+    FusionRuntimeConfig,
+};
+pub use implement::clean_worktrees;
 pub use model_resolver::{CatalogModel, ModelLimits, ModelSource, ResolvedPanel, ResolvedSet};
 pub use orchestrator::FusionOrchestrator;
 pub use snapshot::{CatalogRevision, CatalogSnapshot, FusionRuntimeSnapshot};

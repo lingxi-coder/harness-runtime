@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     FusionError, FusionInheritance, FusionRequest, FusionRunControl, FusionUsage, ModelAttemptRun,
     ModelAttemptStage,
 };
@@ -16,7 +16,7 @@ use platform_api::{
 use crate::{FusionRuntimeSnapshot, ResolvedSet};
 
 /// Seal Panel admission and wait for its owned durable receipts while leaving
-/// Analyst/Synthesis admission available. Waiting never owns or cancels work.
+/// Analyst admission available. Waiting never owns or cancels work.
 #[async_trait]
 pub trait FusionPanelAttemptFence: Send + Sync {
     fn close(&self);
@@ -58,12 +58,6 @@ impl FusionAttemptLivePolicy for CapturedLivePolicy {
                 "analyst",
                 self.snapshot.config.analyst_max_output_tokens,
                 true,
-            ),
-            (ModelAttemptStage::Synthesis, None) => (
-                &self.resolved.synthesizer,
-                "synthesizer",
-                self.snapshot.config.synthesizer_max_output_tokens,
-                false,
             ),
             _ => return Err(FusionError::Internal),
         };
@@ -118,12 +112,6 @@ pub struct FusionAttemptRegistration {
 
 /// Optional host capability. A configured rejection never falls back to legacy.
 pub trait FusionAttemptRegistrar: Send + Sync {
-    /// Safe workflow concurrency backed by origin-bound atomic money/output
-    /// holds on every physical attempt. Unqualified registrars stay sequential.
-    fn workflow_batch_concurrency(&self) -> usize {
-        1
-    }
-
     /// Validate host binding and mint a registration without dispatch effects.
     fn register(
         &self,

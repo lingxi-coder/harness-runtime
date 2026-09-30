@@ -12,14 +12,13 @@ license.workspace = true
 # compiled-in builtin skill templates live in this crate's `builtin` module.
 
 [dependencies]
+core = { path = "../core" }
 # Conditional-skill `paths:` matching uses gitignore semantics, the same
 # `ignore` crate the `.worktreeinclude` matcher uses.
 ignore = "0.4"
 tracing = { workspace = true }
 telemetry = { path = "../telemetry" }
 branding = { path = "../branding" }
-protocol = { path = "../protocol" }
-platform-api = { path = "../platform-api" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"

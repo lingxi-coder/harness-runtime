@@ -1,5 +1,5 @@
 use super::new_desktop_mcp_transport;
-use platform_api::{McpTransport, McpTransportKind};
+use lingxi_core::host::{McpTransport, McpTransportKind};
 use std::sync::Arc;
 
 /// Compile-time coverage for the production composition boundary. The

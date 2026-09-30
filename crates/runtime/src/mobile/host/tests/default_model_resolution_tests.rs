@@ -1,6 +1,6 @@
 use super::{anthropic_models, resolve_default_model_ref};
 
-fn listings() -> Vec<platform_api::ModelListing> {
+fn listings() -> Vec<lingxi_core::host::ModelListing> {
     let assembled = provider_config::assemble(provider_config::AssembleInputs {
         anthropic_api_base: "https://api.anthropic.com".to_string(),
         anthropic_models: anthropic_models("claude-sonnet-5"),
@@ -42,7 +42,7 @@ fn routable_refs_are_preserved() {
 /// reports the ambiguity rather than this function silently picking one.
 #[test]
 fn a_bare_id_served_by_two_profiles_stays_unscoped() {
-    let listing = |provider: &str| platform_api::ModelListing {
+    let listing = |provider: &str| lingxi_core::host::ModelListing {
         connection: Default::default(),
         display_model: "claude-fable-5-1".to_string(),
         request_model: "claude-fable-5-1".to_string(),
@@ -74,7 +74,7 @@ fn double_qualified_ref_falls_back_to_the_anthropic_boot_default() {
     // provider-qualified rows, so a bare `current` matches none of them and
     // the client's picker renders with nothing selected.
     assert_eq!(profile.as_deref(), Some("anthropic"));
-    assert!(platform_api::is_curated_model("anthropic", &model));
+    assert!(lingxi_core::host::is_curated_model("anthropic", &model));
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn unknown_qualified_ref_falls_back() {
 /// unroutable ref for another while the warn log claimed a repair.
 #[test]
 fn fallback_is_taken_from_the_listings_when_anthropic_is_not_registered() {
-    let listings = vec![platform_api::ModelListing {
+    let listings = vec![lingxi_core::host::ModelListing {
         connection: Default::default(),
         display_model: "deepseek-flash".to_string(),
         request_model: "deepseek-flash".to_string(),

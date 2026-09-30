@@ -1,6 +1,6 @@
 //! Captured main-response participation in the host's shared output book.
 use super::*;
-use platform_api::{WorkflowOutputEventId, WorkflowOutputScope};
+use lingxi_core::host::{WorkflowOutputEventId, WorkflowOutputScope};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone)]
@@ -19,33 +19,28 @@ pub(crate) struct MainOutputObservation {
 }
 
 impl MainOutputObservation {
-    pub(crate) fn observe(&mut self, usage: &llm_runtime::Usage) {
-        // Provider-normalized cumulative buckets are disjoint. Partial frames
-        // may omit a bucket; never replace previously known counts with zero.
-        self.visible = self.visible.max(usage.billable_tokens.output);
-        self.reasoning = self.reasoning.max(usage.billable_tokens.reasoning_output);
-        self.observed = true;
+    pub(crate) fn observe(&mut self, usage: &llm_runtime::ExecutionUsage) {
+        // SDK partial reports are cumulative snapshots too: reclassification
+        // of output into reasoning must not charge both old and new buckets.
+        if let Some(counts) = usage.report.usage {
+            self.visible = counts.output_tokens.saturating_sub(counts.reasoning_tokens);
+            self.reasoning = counts.reasoning_tokens;
+            self.observed = true;
+        }
     }
 
-    fn observe_completed(&mut self, usage: &llm_runtime::Usage) {
+    fn observe_completed(&mut self, usage: &llm_runtime::ExecutionUsage) {
         // A completed output report replaces provisional bucket splits;
         // max-per-bucket would double count reclassified reasoning tokens.
         // An absent/default Completed usage must not erase retained partials.
         // Speed/context/diagnostic metadata alone is not an output report.
-        let has_output = usage.billable_tokens.output != 0
-            || usage.billable_tokens.reasoning_output != 0
-            || ["output_tokens", "completion_tokens", "candidatesTokenCount"]
-                .iter()
-                .any(|key| {
-                    usage
-                        .provider_metadata
-                        .get(key)
-                        .and_then(serde_json::Value::as_u64)
-                        .is_some()
-                });
+        let has_output = usage.report.complete().is_some();
         if has_output {
-            self.visible = usage.billable_tokens.output;
-            self.reasoning = usage.billable_tokens.reasoning_output;
+            self.visible = usage
+                .counts()
+                .output_tokens
+                .saturating_sub(usage.counts().reasoning_tokens);
+            self.reasoning = usage.counts().reasoning_tokens;
             self.observed = true;
         }
     }
@@ -86,10 +81,10 @@ impl Drop for MainOutputObservation {
 pub(crate) fn account_stream(
     stream: futures::stream::BoxStream<
         'static,
-        Result<llm_runtime::LlmEvent, llm_runtime::LlmError>,
+        Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
     >,
     observation: Option<MainOutputObservation>,
-) -> futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>> {
+) -> futures::stream::BoxStream<'static, Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>> {
     let Some(observation) = observation else {
         return stream;
     };
@@ -100,36 +95,38 @@ pub(crate) fn account_stream(
 }
 
 struct OutputStream {
-    stream:
-        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
+    stream: futures::stream::BoxStream<
+        'static,
+        Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+    >,
     observation: MainOutputObservation,
 }
 
 impl futures::Stream for OutputStream {
-    type Item = Result<llm_runtime::LlmEvent, llm_runtime::LlmError>;
+    type Item = Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>;
     fn poll_next(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        use llm_runtime::LlmEvent;
+        use llm_runtime::HistoryEvent;
         use std::task::Poll;
         let this = self.get_mut();
         let polled = this.stream.as_mut().poll_next(cx);
         let terminal = match &polled {
             Poll::Ready(Some(Ok(event))) => {
                 match event {
-                    LlmEvent::MessageStart { response } => {
+                    HistoryEvent::MessageStart { response } => {
                         this.observation.observe(&response.usage)
                     }
-                    LlmEvent::Completed { response } => {
+                    HistoryEvent::Completed { response } => {
                         this.observation.observe_completed(&response.usage)
                     }
-                    LlmEvent::MessageDelta {
+                    HistoryEvent::MessageDelta {
                         usage: Some(usage), ..
                     } => this.observation.observe(usage),
                     _ => {}
                 }
-                matches!(event, LlmEvent::Completed { .. })
+                matches!(event, HistoryEvent::Completed { .. })
             }
             Poll::Ready(None | Some(Err(_))) => true,
             Poll::Pending => false,
@@ -295,7 +292,7 @@ mod tests {
         NoOpPermissionGate, StaticMemoryProvider,
     };
     use futures::StreamExt;
-    use platform_api::{BudgetError, WorkflowOutputAccount, WorkflowOutputScopes};
+    use lingxi_core::host::{BudgetError, WorkflowOutputAccount, WorkflowOutputScopes};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -382,7 +379,7 @@ mod tests {
                 .ok_or_else(|| BudgetError::Internal("missing scope".into()))
         }
     }
-    fn orch(responses: Vec<llm_runtime::LlmResponse>) -> ConversationOrchestrator {
+    fn orch(responses: Vec<llm_runtime::HistoryResponse>) -> ConversationOrchestrator {
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(responses)),
@@ -394,13 +391,19 @@ mod tests {
             std::env::temp_dir(),
         )
     }
-    fn usage(visible: u64, reasoning: u64) -> llm_runtime::Usage {
-        llm_runtime::Usage {
-            billable_tokens: llm_runtime::TokenUsage {
-                output: visible,
-                reasoning_output: reasoning,
-                ..Default::default()
-            },
+    fn usage(visible: u64, reasoning: u64) -> llm_runtime::ExecutionUsage {
+        llm_runtime::ExecutionUsage {
+            report: llm_runtime::UsageReport::measured(
+                llm_runtime::Usage {
+                    input_tokens: 0,
+                    output_tokens: visible.saturating_add(reasoning),
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    reasoning_tokens: reasoning,
+                    ..Default::default()
+                },
+                llm_runtime::services::sdk::protocol::UsageState::Complete,
+            ),
             ..Default::default()
         }
     }
@@ -447,14 +450,14 @@ mod tests {
         let old = scopes.capture(old_session).unwrap();
         old.record_legacy(WorkflowOutputEventId::MainResponse(MessageId::new()), 13)
             .unwrap();
-        platform_api::OrchestratorHandle::clear_session(&orch)
+        lingxi_core::host::OrchestratorHandle::clear_session(&orch)
             .await
             .unwrap();
         let cleared = orch.session.lock().await.session_id;
         assert_ne!(old_session, cleared);
         assert!(orch.capture_main_output().await.unwrap().is_some());
         assert_eq!(scopes.capture(cleared).unwrap().spent(), 0);
-        platform_api::OrchestratorHandle::resume_session(
+        lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
             old_session,
             vec![],
@@ -472,10 +475,10 @@ mod tests {
         let marker = ConversationMessage::user(MessageId::new(), "preserve history".to_string());
         orch.session.lock().await.history.push(marker.clone());
         scopes.1.store(true, Ordering::Release);
-        assert!(platform_api::OrchestratorHandle::clear_session(&orch)
+        assert!(lingxi_core::host::OrchestratorHandle::clear_session(&orch)
             .await
             .is_err());
-        assert!(platform_api::OrchestratorHandle::resume_session(
+        assert!(lingxi_core::host::OrchestratorHandle::resume_session(
             &orch,
             cleared,
             vec![],
@@ -526,14 +529,15 @@ mod tests {
         response.usage = usage(40, 60);
         let expected = response.usage.clone();
         let stream = futures::stream::iter(vec![
-            Ok(llm_runtime::LlmEvent::Completed {
+            Ok(llm_runtime::HistoryEvent::Completed {
                 response: Box::new(response),
             }),
             Err(llm_runtime::LlmError::Overloaded { repeated: false }),
         ])
         .boxed();
         let mut wrapped = account_stream(stream, Some(observation));
-        let Some(Ok(llm_runtime::LlmEvent::Completed { response })) = wrapped.next().await else {
+        let Some(Ok(llm_runtime::HistoryEvent::Completed { response })) = wrapped.next().await
+        else {
             panic!("output failure replaced final paid usage");
         };
         assert_eq!(response.usage, expected);
@@ -581,8 +585,8 @@ mod tests {
             content_block_start_text(0),
             text_delta(0, "done"),
             content_block_stop(0),
-            llm_runtime::LlmEvent::MessageDelta {
-                delta: llm_runtime::MessageDeltaPayload {
+            llm_runtime::HistoryEvent::MessageDelta {
+                delta: llm_runtime::HistoryMessageDelta {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
@@ -619,13 +623,18 @@ mod tests {
                 .unwrap();
             let mut observation = orch.capture_main_output().await.unwrap().unwrap();
             observation.observe(&usage(4, 6));
-            let mut completed = llm_runtime::Usage {
-                speed: Some("fast".into()),
+            let mut completed = llm_runtime::ExecutionUsage {
+                inference: llm_runtime::services::sdk::protocol::InferenceReport {
+                    service_tier: Some(llm_runtime::services::sdk::protocol::ServiceTier::Fast),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             if explicit_zero {
-                completed.provider_metadata =
-                    serde_json::json!({"input_tokens": 0, "output_tokens": 0});
+                completed.report = llm_runtime::UsageReport::measured(
+                    llm_runtime::Usage::default(),
+                    llm_runtime::services::sdk::protocol::UsageState::Complete,
+                );
             }
             observation.observe_completed(&completed);
             observation.finish().unwrap();
@@ -656,19 +665,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_output_missing_capture_and_overflow_fail_closed_within_the_turn() {
+    async fn main_output_missing_capture_and_maximum_canonical_counts() {
         let orch = orch(vec![]).with_workflow_output_scopes(Arc::new(Scopes::default()));
         assert!(orch.capture_main_output().await.is_err());
         orch.begin_output_turn(MessageId::new()).await.unwrap();
         let mut observation = orch.capture_main_output().await.unwrap().unwrap();
-        observation.observe(&usage(u64::MAX, 1));
-        assert!(observation.finish().is_err());
-        // The failure closes THIS turn: no further capture inside it.
-        assert!(orch.capture_main_output().await.is_err());
-        // It does not condemn the session. A new turn starts clean, and paid
-        // work on a broken ledger is stopped by the durability preflight.
-        assert!(orch.begin_output_turn(MessageId::new()).await.is_ok());
+        // Reasoning is a subset of SDK output, so even the largest canonical
+        // counter is representable without adding that subset a second time.
+        observation.observe(&usage(u64::MAX - 1, 1));
+        assert!(observation.finish().is_ok());
         assert!(orch.capture_main_output().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn partial_reclassification_uses_latest_canonical_snapshot() {
+        let scopes = Arc::new(Scopes::default());
+        let orch = orch(vec![]).with_workflow_output_scopes(scopes.clone());
+        orch.begin_output_turn(MessageId::new()).await.unwrap();
+        let scope = scopes
+            .capture(orch.session.lock().await.session_id)
+            .unwrap();
+        let mut observation = orch.capture_main_output().await.unwrap().unwrap();
+        observation.observe(&usage(10, 0));
+        let mut partial = usage(4, 6);
+        partial.report.state = llm_runtime::services::sdk::protocol::UsageState::Partial;
+        observation.observe(&partial);
+        observation.observe(&llm_runtime::ExecutionUsage::default());
+        observation.finish().unwrap();
+        assert_eq!(scope.spent(), 10);
     }
 
     #[tokio::test]
@@ -679,8 +703,8 @@ mod tests {
         let scope = scopes
             .capture(orch.session.lock().await.session_id)
             .unwrap();
-        let event = llm_runtime::LlmEvent::MessageDelta {
-            delta: llm_runtime::MessageDeltaPayload {
+        let event = llm_runtime::HistoryEvent::MessageDelta {
+            delta: llm_runtime::HistoryMessageDelta {
                 stop_reason: None,
                 stop_details: None,
             },
@@ -707,16 +731,16 @@ mod tests {
         let mut response = mock_message_response(vec![], Some("end_turn"));
         response.usage = usage(40, 60);
         let stream = futures::stream::iter(vec![
-            Ok(llm_runtime::LlmEvent::MessageDelta {
-                delta: llm_runtime::MessageDeltaPayload {
+            Ok(llm_runtime::HistoryEvent::MessageDelta {
+                delta: llm_runtime::HistoryMessageDelta {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
                 // The final provider snapshot reclassifies provisional visible output.
                 usage: Some(usage(100, 0)),
             }),
-            Ok(llm_runtime::LlmEvent::MessageStop),
-            Ok(llm_runtime::LlmEvent::Completed {
+            Ok(llm_runtime::HistoryEvent::MessageStop),
+            Ok(llm_runtime::HistoryEvent::Completed {
                 response: Box::new(response),
             }),
         ])

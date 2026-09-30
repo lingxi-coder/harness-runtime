@@ -7,7 +7,7 @@
 
 use crate::session::SessionState;
 use crate::token::Usage;
-use protocol::{ConversationMessage, MessageId, RequestId, ToolUseId};
+use crate::types::{ConversationMessage, MessageId, RequestId, ToolUseId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

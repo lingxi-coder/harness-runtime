@@ -214,7 +214,7 @@ impl Tool for SyntheticOutputTool {
                     "StructuredOutput: 'agent_id' is not a valid UUID: {agent_id_str}"
                 ))
             })?;
-            let worker_id = protocol::AgentId::from_uuid(uuid);
+            let worker_id = lingxi_core::types::AgentId::from_uuid(uuid);
 
             // Serialize the structured payload as the message content.
             let content = serde_json::to_string(&payload).map_err(|e| {
@@ -267,7 +267,7 @@ impl Tool for SyntheticOutputTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::AgentId;
+    use lingxi_core::types::AgentId;
     use tool_api::context::ToolUseOptions;
 
     /// Build a minimal [`ToolUseContext`] without depending on the optional
@@ -294,7 +294,7 @@ mod tests {
             observer_pairings: None,
             team_name: None,
             origin_session_id: None,
-            tool_execution_policy: platform_api::tool_invoker::ToolExecutionPolicy::Ordinary,
+            tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,

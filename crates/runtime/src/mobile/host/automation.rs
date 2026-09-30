@@ -5,7 +5,7 @@ use client::protocol::events::ClientEvent;
 use client::protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
-use platform_api::{Clock, FileSystem, OrchestratorHandle, Platform};
+use lingxi_core::host::{Clock, FileSystem, OrchestratorHandle, Platform};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -439,12 +439,12 @@ impl MobileTurnFirer {
                 None => (
                     Vec::new(),
                     None,
-                    platform_api::ResumeRuntimeSnapshot::default(),
+                    lingxi_core::host::ResumeRuntimeSnapshot::default(),
                 ),
             };
             handle
                 .resume_session(
-                    protocol::SessionId::from_uuid(uuid),
+                    lingxi_core::types::SessionId::from_uuid(uuid),
                     history,
                     last_message,
                     None,
@@ -454,7 +454,7 @@ impl MobileTurnFirer {
                 .map_err(|error| format!("paused: Cannot restore conversation: {error}"))?;
             rt.retarget_session_context(
                 &self.cfg.lingxi_home,
-                protocol::SessionId::from_uuid(uuid),
+                lingxi_core::types::SessionId::from_uuid(uuid),
                 &cwd,
             )
             .await;
@@ -504,7 +504,7 @@ impl MobileTurnFirer {
         let run = async {
             if let Some(automation) = automation {
                 let reasoning = if automation.reasoning.is_null() {
-                    platform_api::ReasoningSelection::Automatic
+                    lingxi_core::host::ReasoningSelection::Automatic
                 } else {
                     serde_json::from_value(automation.reasoning.clone())
                         .map_err(|e| format!("paused: {e}"))?
@@ -807,13 +807,13 @@ impl MobileCronStoreHandle {
                 Ok(file) => Some(serde_json::from_str(&file.content).map_err(|e| {
                     MobileEngineError::Internal(format!("invalid cron migration marker: {e}"))
                 })?),
-                Err(platform_api::FsError::NotFound(_)) => None,
+                Err(lingxi_core::host::FsError::NotFound(_)) => None,
                 Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
             };
         let old_body =
             match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), root).await {
                 Ok(body) => body,
-                Err(platform_api::FsError::NotFound(_)) => {
+                Err(lingxi_core::host::FsError::NotFound(_)) => {
                     cron::serialize_tasks(&cron::ScheduledTasks::default())
                 }
                 Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
@@ -868,7 +868,7 @@ impl MobileCronStoreHandle {
             match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
                 Ok(body) => cron::tasks_file::parse_automation_tasks_strict(&body)
                     .map_err(|e| MobileEngineError::Internal(e.to_string()))?,
-                Err(platform_api::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
+                Err(lingxi_core::host::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
                 Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
             };
         for mut task in source.tasks {
@@ -927,8 +927,9 @@ impl MobileCronStoreHandle {
         if model.trim().is_empty() {
             return Ok(());
         }
-        let reasoning: platform_api::ReasoningSelection = serde_json::from_str(&reasoning_json)
-            .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
+        let reasoning: lingxi_core::host::ReasoningSelection =
+            serde_json::from_str(&reasoning_json)
+                .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
         let reasoning = serde_json::to_value(reasoning)
             .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
         let _guard = cron::lock_cron_file().await;
@@ -938,7 +939,7 @@ impl MobileCronStoreHandle {
         let body =
             match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
                 Ok(body) => body,
-                Err(platform_api::FsError::NotFound(_)) => return Ok(()),
+                Err(lingxi_core::host::FsError::NotFound(_)) => return Ok(()),
                 Err(error) => return Err(MobileEngineError::Internal(error.to_string())),
             };
         let mut document = cron::tasks_file::parse_automation_tasks_strict(&body)
@@ -1059,7 +1060,7 @@ impl MobileCronStoreHandle {
         let mut document =
             match cron::tasks_file::read_automation_tasks_body(self.fs.as_ref(), &self.cwd).await {
                 Ok(body) => cron::tasks_file::parse_automation_tasks(&body),
-                Err(platform_api::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
+                Err(lingxi_core::host::FsError::NotFound(_)) => cron::ScheduledTasks::default(),
                 Err(error) => {
                     return Err(MobileEngineError::Internal(format!(
                         "read scheduled_tasks.json: {error}"

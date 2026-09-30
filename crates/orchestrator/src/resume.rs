@@ -30,10 +30,10 @@
 use crate::config::OrchestratorConfig;
 use crate::conversation::{ConversationOrchestrator, NoStreamingApiClient, OrchestratorApiClient};
 use crate::test_support::{HookExecutor, PermissionGate};
+use lingxi_core::host::{FileSystem, OutputStream};
 use lingxi_core::session::{ActiveGoalState, GoalOrigin};
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, SessionId, ToolUseId};
 use lingxi_core::SessionState;
-use platform_api::{FileSystem, OutputStream};
-use protocol::{ContentBlock, ConversationMessage, MessageId, SessionId, ToolUseId};
 use serde_json::Value;
 use session::jsonl::{
     load_session_across_worktrees, load_session_entries_across_worktrees, JsonlMessage,
@@ -94,7 +94,7 @@ impl ReplayedSession {
     /// hot-resume. Keeping this conversion beside replay prevents individual
     /// hosts from restoring only a subset of compaction state.
     #[must_use]
-    pub fn handle_runtime_snapshot(&self) -> platform_api::ResumeRuntimeSnapshot {
+    pub fn handle_runtime_snapshot(&self) -> lingxi_core::host::ResumeRuntimeSnapshot {
         let tracking = &self.runtime_metadata.compaction_tracking;
         // Only present a model in the snapshot when a REAL assistant model row
         // was recovered from the transcript (same filter the replay uses:
@@ -109,7 +109,7 @@ impl ReplayedSession {
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|s| !s.is_empty() && !(s.starts_with('<') && s.ends_with('>')))
         });
-        platform_api::ResumeRuntimeSnapshot {
+        lingxi_core::host::ResumeRuntimeSnapshot {
             current_usage: self.runtime_metadata.current_usage,
             model: if model_recovered {
                 self.state.model.clone()
@@ -164,11 +164,11 @@ impl ReplayedSession {
 #[derive(Debug, Clone)]
 pub struct ResumeRuntimeMetadata {
     /// Latest real assistant usage, never cumulative session billing.
-    pub current_usage: Option<platform_api::CurrentUsageSnapshot>,
+    pub current_usage: Option<lingxi_core::host::CurrentUsageSnapshot>,
     /// Last real assistant response's top-level `effort` value.
     pub effort: Option<String>,
     /// Structured reasoning selection persisted by newer runtimes.
-    pub reasoning_selection: Option<platform_api::ReasoningSelection>,
+    pub reasoning_selection: Option<lingxi_core::host::ReasoningSelection>,
     /// Persisted main-thread agent name, when the session selected one.
     pub main_thread_agent_type: Option<String>,
     /// Integrity-checked immutable resolved agent definition, when available.
@@ -178,9 +178,9 @@ pub struct ResumeRuntimeMetadata {
     /// Reconstructed rapid-refill/autocompact tracking state.
     pub compaction_tracking: compaction::AutoCompactTrackingState,
     /// Deferred hook tools that were persisted but never produced a result.
-    pub deferred_tools: Vec<platform_api::DeferredToolReplay>,
+    pub deferred_tools: Vec<lingxi_core::host::DeferredToolReplay>,
     /// Last valid static prompt snapshot recovered from the transcript.
-    pub prompt_snapshot: Option<platform_api::PromptSnapshot>,
+    pub prompt_snapshot: Option<lingxi_core::host::PromptSnapshot>,
 }
 
 /// Load + replay a session by UUID. Emits a single [`RESUMED`]
@@ -296,7 +296,7 @@ pub fn post_compact_skill_attachments_from_messages(
 #[must_use]
 pub fn prompt_snapshot_from_messages(
     messages: &[JsonlMessage],
-) -> Option<platform_api::PromptSnapshot> {
+) -> Option<lingxi_core::host::PromptSnapshot> {
     messages.iter().rev().find_map(|message| {
         if message.message_type != "attachment" {
             return None;
@@ -306,7 +306,7 @@ pub fn prompt_snapshot_from_messages(
             return None;
         }
         let snapshot =
-            serde_json::from_value::<platform_api::PromptSnapshot>(attachment.clone()).ok()?;
+            serde_json::from_value::<lingxi_core::host::PromptSnapshot>(attachment.clone()).ok()?;
         (!snapshot.system_prompt.is_empty()
             && snapshot.system_prompt.iter().all(|part| !part.is_empty())
             && snapshot.tools.iter().all(|tool| !tool.name.is_empty()))
@@ -571,7 +571,10 @@ fn build_state_from_jsonl(
                         .get("compactMetadata")
                         .cloned()
                         .and_then(|value| {
-                            serde_json::from_value::<protocol::CompactBoundaryMetadata>(value).ok()
+                            serde_json::from_value::<lingxi_core::types::CompactBoundaryMetadata>(
+                                value,
+                            )
+                            .ok()
                         })
                         .map(|mut metadata| {
                             metadata.logical_parent_uuid = m.logical_parent_uuid.clone();
@@ -892,7 +895,7 @@ pub fn client_state_tool_results_from_messages(
 #[must_use]
 pub fn deferred_tool_replays_from_messages(
     messages: &[JsonlMessage],
-) -> Vec<platform_api::DeferredToolReplay> {
+) -> Vec<lingxi_core::host::DeferredToolReplay> {
     let mut resolved: HashSet<&str> = HashSet::new();
     let mut seen: HashSet<&str> = HashSet::new();
     let mut deferred = Vec::new();
@@ -930,7 +933,7 @@ pub fn deferred_tool_replays_from_messages(
         let Some(tool_input) = attachment.get("toolInput") else {
             continue;
         };
-        deferred.push(platform_api::DeferredToolReplay {
+        deferred.push(lingxi_core::host::DeferredToolReplay {
             tool_use_id: tool_use_id.to_string(),
             tool_name: tool_name.to_string(),
             tool_input: tool_input.clone(),
@@ -957,7 +960,7 @@ struct DeferredReplayOutcome {
 
 async fn replay_deferred_tool_after_resume(
     orch: &ConversationOrchestrator,
-    deferred: platform_api::DeferredToolReplay,
+    deferred: lingxi_core::host::DeferredToolReplay,
 ) -> Result<DeferredReplayOutcome, crate::OrchestratorError> {
     let tool_use_id = ToolUseId::from(deferred.tool_use_id);
     let trace_context = deferred.traceparent.as_deref().map(|traceparent| {
@@ -1015,7 +1018,7 @@ async fn replay_deferred_tool_after_resume(
 /// Replay all persisted deferred hook tools after a cold or in-place resume.
 pub async fn replay_deferred_tools_after_resume(
     orch: &ConversationOrchestrator,
-    deferred_tools: Vec<platform_api::DeferredToolReplay>,
+    deferred_tools: Vec<lingxi_core::host::DeferredToolReplay>,
 ) -> Result<(), crate::OrchestratorError> {
     // ONE user message carrying EVERY replayed result, exactly as the normal
     // dispatch path batches a turn's results. Emitting one message per tool
@@ -1075,7 +1078,7 @@ fn goal_state_from_message(message: &JsonlMessage) -> Option<Option<ActiveGoalSt
     if message.message_type == "attachment" {
         let attachment = message.extra.get("attachment")?;
         if attachment.get("type").and_then(serde_json::Value::as_str) == Some("goal_status") {
-            let status: platform_api::GoalStatusAttachment =
+            let status: lingxi_core::host::GoalStatusAttachment =
                 serde_json::from_value(attachment.clone()).ok()?;
             // 2.1.266 shape: a SENTINEL announces set (`met:false`) or clear
             // (`met:true`); a non-sentinel record is an evaluation, terminal
@@ -1179,7 +1182,7 @@ fn is_compact_boundary(message: &JsonlMessage) -> bool {
 /// the session loader before this projection.
 fn current_usage_from_messages(
     messages: &[JsonlMessage],
-) -> Option<platform_api::CurrentUsageSnapshot> {
+) -> Option<lingxi_core::host::CurrentUsageSnapshot> {
     for message in messages.iter().rev() {
         if is_compact_boundary(message) {
             break;
@@ -1506,7 +1509,10 @@ fn extract_content_blocks(message: &serde_json::Value) -> Vec<ContentBlock> {
 }
 
 impl ConversationOrchestrator {
-    pub(crate) fn restore_response_usage(&self, usage: Option<platform_api::CurrentUsageSnapshot>) {
+    pub(crate) fn restore_response_usage(
+        &self,
+        usage: Option<lingxi_core::host::CurrentUsageSnapshot>,
+    ) {
         let usage = usage.unwrap_or_default();
         self.compaction_runtime.last_response_input_tokens.store(
             usage

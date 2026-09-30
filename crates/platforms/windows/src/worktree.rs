@@ -7,7 +7,7 @@
 //! [`platform_posix::worktree`] for the canonical doc.
 
 use async_trait::async_trait;
-use platform_api::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
+use lingxi_core::host::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
@@ -384,7 +384,7 @@ mod slug_tests {
 #[cfg(test)]
 mod create_tests {
     use super::*;
-    use platform_api::WorktreeManager;
+    use lingxi_core::host::WorktreeManager;
     use tempfile::TempDir;
     use tokio::process::Command;
 

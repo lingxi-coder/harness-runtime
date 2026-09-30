@@ -135,16 +135,16 @@ mod tests {
     /// A registry that knows nothing but its rosters — enough to pin the
     /// ASSEMBLY of the two not-found messages. Roster COMPUTATION is tested
     /// against the real registry in `tasks`.
-    struct RosterRegistry(platform_api::task_registry::TaskNotFoundRosters);
+    struct RosterRegistry(lingxi_core::host::task_registry::TaskNotFoundRosters);
 
     #[async_trait::async_trait]
-    impl platform_api::task_registry::TaskRegistryHandle for RosterRegistry {
+    impl lingxi_core::host::task_registry::TaskRegistryHandle for RosterRegistry {
         async fn create(
             &self,
-            _i: platform_api::task_registry::TaskCreateInput,
+            _i: lingxi_core::host::task_registry::TaskCreateInput,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -152,27 +152,27 @@ mod tests {
             &self,
             _id: &str,
         ) -> Result<
-            Option<platform_api::task_registry::TaskRecord>,
-            platform_api::task_registry::TaskRegistryError,
+            Option<lingxi_core::host::task_registry::TaskRecord>,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             Ok(None)
         }
         async fn list(
             &self,
-            _f: platform_api::task_registry::TaskListFilter,
+            _f: lingxi_core::host::task_registry::TaskListFilter,
         ) -> Result<
-            Vec<platform_api::task_registry::TaskRecord>,
-            platform_api::task_registry::TaskRegistryError,
+            Vec<lingxi_core::host::task_registry::TaskRecord>,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             Ok(Vec::new())
         }
         async fn update(
             &self,
             _id: &str,
-            _p: platform_api::task_registry::TaskUpdatePatch,
+            _p: lingxi_core::host::task_registry::TaskUpdatePatch,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -181,8 +181,8 @@ mod tests {
             _id: &str,
             _s: &str,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -190,8 +190,8 @@ mod tests {
             &self,
             _id: &str,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -200,8 +200,8 @@ mod tests {
             _id: &str,
             _offset: Option<u64>,
         ) -> Result<
-            platform_api::task_registry::TaskOutputChunk,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskOutputChunk,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -209,7 +209,7 @@ mod tests {
             &self,
             _caller: Option<&str>,
             _named: &[String],
-        ) -> platform_api::task_registry::TaskNotFoundRosters {
+        ) -> lingxi_core::host::task_registry::TaskNotFoundRosters {
             self.0.clone()
         }
     }
@@ -230,8 +230,8 @@ mod tests {
     #[tokio::test]
     async fn task_stop_not_found_names_what_could_have_been_addressed() {
         use std::sync::Arc;
-        let registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle> = Arc::new(
-            RosterRegistry(platform_api::task_registry::TaskNotFoundRosters {
+        let registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle> = Arc::new(
+            RosterRegistry(lingxi_core::host::task_registry::TaskNotFoundRosters {
                 running_teammates: vec!["buddy@alpha".into(), "pal@alpha".into()],
                 background_agents: vec!["a1b2c3d4e (survey the crate)".into()],
             }),
@@ -257,7 +257,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
     #[tokio::test]
     async fn task_stop_not_found_is_bare_when_nothing_is_running() {
         use std::sync::Arc;
-        let registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle> =
+        let registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle> =
             Arc::new(RosterRegistry(Default::default()));
         let message =
             super::task_stop_not_found_message(&roster_ctx(), &registry, "nope", None, None).await;
@@ -269,8 +269,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
     #[tokio::test]
     async fn task_output_not_found_appends_only_the_background_agents_clause() {
         use std::sync::Arc;
-        let registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle> = Arc::new(
-            RosterRegistry(platform_api::task_registry::TaskNotFoundRosters {
+        let registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle> = Arc::new(
+            RosterRegistry(lingxi_core::host::task_registry::TaskNotFoundRosters {
                 running_teammates: vec!["buddy@alpha".into()],
                 background_agents: vec!["a1b2c3d4e".into()],
             }),
@@ -283,7 +283,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
         );
         // The raw-id half, made observable: TaskStop would collapse this,
         // TaskOutput must not.
-        let empty: Arc<dyn platform_api::task_registry::TaskRegistryHandle> =
+        let empty: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle> =
             Arc::new(RosterRegistry(Default::default()));
         let raw = super::task_output_not_found_message(&roster_ctx(), &empty, "a  b", None).await;
         assert_eq!(raw, "No task found with ID: a  b");
@@ -580,7 +580,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             ..Default::default()
         }) {
             let gated = names(&reg);
-            for name in platform_api::session_flags::TODO_TOOL_NAMES {
+            for name in lingxi_core::host::session_flags::TODO_TOOL_NAMES {
                 assert!(!gated.iter().any(|n| n == name), "{name} must be withdrawn");
             }
             // `ERe` has exactly five members; TaskStop/TaskOutput are not among
@@ -596,10 +596,10 @@ Running background agents: a1b2c3d4e (survey the crate)"
         // The ctx is unused by TE(); the gate is purely the LINGXI_ENABLE_TASKS
         // defined-falsy check. Default (unset env) → enabled. We don't mutate the
         // global env here (to avoid races); the defined-falsy truth table is
-        // covered by `todo_v2_enabled_inner` + `platform_api::env::is_env_defined_falsy`.
+        // covered by `todo_v2_enabled_inner` + `lingxi_core::host::env::is_env_defined_falsy`.
         let ctx = ToolStaticContext::default();
         // Holds whenever LINGXI_ENABLE_TASKS is NOT a defined-falsy value.
-        if !platform_api::env::is_env_defined_falsy(
+        if !lingxi_core::host::env::is_env_defined_falsy(
             std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref(),
         ) {
             assert!(is_todo_v2_enabled(&ctx));
@@ -867,8 +867,10 @@ Running background agents: a1b2c3d4e (survey the crate)"
     //   notification (TaskUpdateTool.ts:277-298).
     mod swarm_side_effects {
         use super::*;
-        use platform_api::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
-        use protocol::AgentId;
+        use lingxi_core::host::mailbox::{
+            MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
+        };
+        use lingxi_core::types::AgentId;
         use std::sync::{Arc, Mutex};
         use telemetry::AnalyticsBus;
         use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
@@ -1484,7 +1486,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
         /// module flips. Holds the shared ENV_LOCK so it does not race other
         /// env-mutating tests.
         struct Guard {
-            session_id: protocol::SessionId,
+            session_id: lingxi_core::types::SessionId,
             prev_list: Option<std::ffi::OsString>,
             prev_team: Option<std::ffi::OsString>,
             _lock: std::sync::MutexGuard<'static, ()>,
@@ -1499,7 +1501,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     Some(v) => std::env::set_var("LINGXI_TEAM_NAME", v),
                     None => std::env::remove_var("LINGXI_TEAM_NAME"),
                 }
-                platform_api::team_registry::set_leader_team_name_for_session(
+                lingxi_core::host::team_registry::set_leader_team_name_for_session(
                     &self.session_id.to_string(),
                     None,
                 );
@@ -1511,7 +1513,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let g = Guard {
-                session_id: protocol::SessionId::new(),
+                session_id: lingxi_core::types::SessionId::new(),
                 prev_list: std::env::var_os("LINGXI_TASK_LIST_ID"),
                 prev_team: std::env::var_os("LINGXI_TEAM_NAME"),
                 _lock: lock,
@@ -1522,7 +1524,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             g
         }
 
-        fn session_ctx(session_id: protocol::SessionId) -> ToolUseContext {
+        fn session_ctx(session_id: lingxi_core::types::SessionId) -> ToolUseContext {
             let mut ctx = tool_api::test_support::fresh_ctx();
             ctx.session = Some(std::sync::Arc::new(tokio::sync::Mutex::new(
                 lingxi_core::SessionState::empty(session_id, "test-model".into()),
@@ -1536,7 +1538,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             std::env::set_var("LINGXI_TASK_LIST_ID", "explicit-list");
             // Even with every lower level set, the explicit env wins.
             std::env::set_var("LINGXI_TEAM_NAME", "env-team");
-            platform_api::team_registry::set_leader_team_name_for_session(
+            lingxi_core::host::team_registry::set_leader_team_name_for_session(
                 &_g.session_id.to_string(),
                 Some("leader-team"),
             );
@@ -1550,7 +1552,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             let _g = guard();
             // No env override; teammate ctx team_name wins over env + leader.
             std::env::set_var("LINGXI_TEAM_NAME", "env-team");
-            platform_api::team_registry::set_leader_team_name_for_session(
+            lingxi_core::host::team_registry::set_leader_team_name_for_session(
                 &_g.session_id.to_string(),
                 Some("leader-team"),
             );
@@ -1563,7 +1565,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
         async fn level3_env_team_name() {
             let _g = guard();
             std::env::set_var("LINGXI_TEAM_NAME", "env-team");
-            platform_api::team_registry::set_leader_team_name_for_session(
+            lingxi_core::host::team_registry::set_leader_team_name_for_session(
                 &_g.session_id.to_string(),
                 Some("leader-team"),
             );
@@ -1575,7 +1577,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
         #[tokio::test]
         async fn level4_leader_team_name() {
             let _g = guard();
-            platform_api::team_registry::set_leader_team_name_for_session(
+            lingxi_core::host::team_registry::set_leader_team_name_for_session(
                 &_g.session_id.to_string(),
                 Some("leader-team"),
             );
@@ -1599,7 +1601,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             ctx.session = None;
             ctx.origin_session_id = Some(g.session_id);
             assert_eq!(resolve_task_list_id(&ctx).await, g.session_id.to_string());
-            platform_api::team_registry::set_leader_team_name_for_session(
+            lingxi_core::host::team_registry::set_leader_team_name_for_session(
                 &g.session_id.to_string(),
                 Some("origin-team"),
             );
@@ -1612,7 +1614,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             // Leader (no teammate ctx) resolves to the leader team name; an
             // in-process teammate (ctx.team_name set to the SAME team) resolves
             // to the same on-disk dir — the goal of T1.
-            platform_api::team_registry::set_leader_team_name_for_session(
+            lingxi_core::host::team_registry::set_leader_team_name_for_session(
                 &_g.session_id.to_string(),
                 Some("alpha-team"),
             );
@@ -1628,12 +1630,12 @@ Running background agents: a1b2c3d4e (survey the crate)"
         #[tokio::test]
         async fn independent_sessions_do_not_share_task_lists() {
             let _g = guard();
-            let other = protocol::SessionId::new();
-            platform_api::team_registry::set_leader_team_name_for_session(
+            let other = lingxi_core::types::SessionId::new();
+            lingxi_core::host::team_registry::set_leader_team_name_for_session(
                 &_g.session_id.to_string(),
                 Some("alpha"),
             );
-            platform_api::team_registry::set_leader_team_name_for_session(
+            lingxi_core::host::team_registry::set_leader_team_name_for_session(
                 &other.to_string(),
                 Some("beta"),
             );
@@ -1642,7 +1644,10 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 "alpha"
             );
             assert_eq!(resolve_task_list_id(&session_ctx(other)).await, "beta");
-            platform_api::team_registry::set_leader_team_name_for_session(&other.to_string(), None);
+            lingxi_core::host::team_registry::set_leader_team_name_for_session(
+                &other.to_string(),
+                None,
+            );
             assert_eq!(
                 resolve_task_list_id(&session_ctx(other)).await,
                 other.to_string()
@@ -2349,7 +2354,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
 
     mod product_b {
         use super::*;
-        use platform_api::task_registry::{
+        use lingxi_core::host::task_registry::{
             TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryHandle,
             TaskUpdatePatch,
         };
@@ -3137,7 +3142,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
 
         #[tokio::test]
         async fn task_stop_observer_checks_self_and_owner_before_terminal_status() {
-            let owner = protocol::AgentId::new();
+            let owner = lingxi_core::types::AgentId::new();
             let mut record = agent_rec("completed");
             record.owner_agent_id = Some(owner.to_string());
             record.is_observer = true;
@@ -3151,7 +3156,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 .unwrap_err();
             assert!(err_msg(error).starts_with("Observer a12345678 cannot stop itself;"));
             let mut other = fresh_ctx();
-            other.agent_id = Some(protocol::AgentId::new());
+            other.agent_id = Some(lingxi_core::types::AgentId::new());
             let error = tool
                 .call(json!({"task_id": "a12345678"}), other, fresh_tx())
                 .await
@@ -3171,24 +3176,24 @@ Running background agents: a1b2c3d4e (survey the crate)"
         async fn task_stop_live_loop_note_counts_process_groups_not_task_rows() {
             struct Processes(StdMutex<Vec<String>>);
             #[async_trait]
-            impl platform_api::ProcessRunner for Processes {
+            impl lingxi_core::host::ProcessRunner for Processes {
                 async fn run(
                     &self,
-                    _: &platform_api::SandboxedCommand,
+                    _: &lingxi_core::host::SandboxedCommand,
                 ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError>
                 {
                     unreachable!()
                 }
                 async fn spawn_background(
                     &self,
-                    _: &platform_api::SandboxedCommand,
-                ) -> Result<platform_api::ProcessHandle, mobile_linux_api::ProcessError>
+                    _: &lingxi_core::host::SandboxedCommand,
+                ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError>
                 {
                     unreachable!()
                 }
                 async fn kill(
                     &self,
-                    _: &platform_api::ProcessHandle,
+                    _: &lingxi_core::host::ProcessHandle,
                 ) -> Result<(), mobile_linux_api::ProcessError> {
                     unreachable!()
                 }
@@ -3386,7 +3391,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
         }
 
         async fn stop_as(
-            caller: Option<protocol::AgentId>,
+            caller: Option<lingxi_core::types::AgentId>,
             record: TaskRecord,
         ) -> Result<ToolCallResult, ToolError> {
             let reg = MockRegistry::with_record(Some(record));
@@ -3402,8 +3407,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
         /// agent could stop ANY other agent's work.
         #[tokio::test]
         async fn a_subagent_cannot_stop_another_agents_task() {
-            let owner = protocol::AgentId::new();
-            let intruder = protocol::AgentId::new();
+            let owner = lingxi_core::types::AgentId::new();
+            let intruder = lingxi_core::types::AgentId::new();
             let err = stop_as(
                 Some(intruder),
                 owned_rec("running", Some(&owner.to_string())),
@@ -3422,7 +3427,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
         /// ...and the owner still can.
         #[tokio::test]
         async fn the_owning_agent_may_stop_its_own_task() {
-            let owner = protocol::AgentId::new();
+            let owner = lingxi_core::types::AgentId::new();
             stop_as(Some(owner), owned_rec("running", Some(&owner.to_string())))
                 .await
                 .expect("the owner may stop it");
@@ -3432,7 +3437,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
         /// stop anything — including a task an agent owns.
         #[tokio::test]
         async fn the_main_session_may_stop_any_task() {
-            let owner = protocol::AgentId::new();
+            let owner = lingxi_core::types::AgentId::new();
             stop_as(None, owned_rec("running", Some(&owner.to_string())))
                 .await
                 .expect("the main session may stop it");
@@ -3445,7 +3450,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
         /// false, and the refusal names the owner as "main session".
         #[tokio::test]
         async fn an_ownerless_task_refuses_an_agent_caller() {
-            let caller = protocol::AgentId::new();
+            let caller = lingxi_core::types::AgentId::new();
             let err = stop_as(Some(caller), owned_rec("running", None))
                 .await
                 .expect_err("an agent may not stop an ownerless task");
@@ -3460,8 +3465,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
         /// not that it belongs to someone else.
         #[tokio::test]
         async fn not_running_is_reported_before_ownership() {
-            let owner = protocol::AgentId::new();
-            let intruder = protocol::AgentId::new();
+            let owner = lingxi_core::types::AgentId::new();
+            let intruder = lingxi_core::types::AgentId::new();
             let err = stop_as(
                 Some(intruder),
                 owned_rec("completed", Some(&owner.to_string())),
@@ -3478,8 +3483,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
 
         // ── TO-06: the synthetic mcp_task metadata block ─────────────────────
 
-        fn mcp_meta() -> platform_api::task_registry::McpTaskOutputMeta {
-            platform_api::task_registry::McpTaskOutputMeta {
+        fn mcp_meta() -> lingxi_core::host::task_registry::McpTaskOutputMeta {
+            lingxi_core::host::task_registry::McpTaskOutputMeta {
                 server_name: "acme".into(),
                 tool_name: "deploy".into(),
                 mcp_status: "input_required".into(),
@@ -3550,7 +3555,7 @@ waiting on the user: an elicitation dialog is open"
                 truncated: false,
                 status: Some("completed".into()),
                 done: true,
-                mcp: Some(platform_api::task_registry::McpTaskOutputMeta {
+                mcp: Some(lingxi_core::host::task_registry::McpTaskOutputMeta {
                     server_name: "acme".into(),
                     tool_name: "deploy".into(),
                     mcp_status: "completed".into(),
@@ -3603,9 +3608,9 @@ waiting on the user: an elicitation dialog is open"
             let _lock = super::ENV_LOCK
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            platform_api::session_flags::set_task_output_max_chars(chars);
+            lingxi_core::host::session_flags::set_task_output_max_chars(chars);
             let out = f();
-            platform_api::session_flags::set_task_output_max_chars(None);
+            lingxi_core::host::session_flags::set_task_output_max_chars(None);
             out
         }
 

@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use crate::{CostEstimate, LlmError, PricingModelRef, ProviderId, Usage};
+use crate::{CostEstimate, LlmError, PricingModelRef, ProviderId};
+use lingxi_llm_client::protocol::TokenPricing;
 
 /// Unknown-pricing policy for cost estimation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,15 +14,15 @@ pub enum PricingPolicy {
     RequirePriced,
 }
 
-/// Per-million-token prices for independent billable buckets.
+/// Saved-settings adapter for fixed USD per-million-token price overrides.
 ///
 /// All fields are USD per million tokens (llm-runtime native unit).  Use
-/// [`TokenPricing::input_output`] to create a value with only input/output
+/// [`PricingOverride::input_output`] to create a value with only input/output
 /// buckets set; reasoning uses the output rate and cache buckets default to
 /// `0.0`. An explicitly supplied zero reasoning rate remains free.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TokenPricing {
+pub struct PricingOverride {
     /// Input-token price per million tokens.
     #[serde(rename = "inputPerMtok")]
     pub input_per_million: f64,
@@ -40,7 +41,7 @@ pub struct TokenPricing {
     pub reasoning_per_million: f64,
 }
 
-impl<'de> serde::Deserialize<'de> for TokenPricing {
+impl<'de> serde::Deserialize<'de> for PricingOverride {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(serde::Deserialize)]
         struct Input {
@@ -67,7 +68,7 @@ impl<'de> serde::Deserialize<'de> for TokenPricing {
     }
 }
 
-impl TokenPricing {
+impl PricingOverride {
     /// Create pricing with reasoning billed at the output rate and no cache charges.
     #[must_use]
     pub fn input_output(input_per_million: f64, output_per_million: f64) -> Self {
@@ -101,8 +102,9 @@ impl PricingCatalog {
         mut self,
         provider_id: ProviderId,
         billing_model: impl Into<String>,
-        pricing: TokenPricing,
+        mut pricing: TokenPricing,
     ) -> Self {
+        pricing.source = Some("builtin".into());
         self.prices
             .insert(PricingKey::new(provider_id, billing_model), pricing);
         self
@@ -114,8 +116,9 @@ impl PricingCatalog {
         mut self,
         provider_id: ProviderId,
         billing_model: impl Into<String>,
-        pricing: TokenPricing,
+        mut pricing: TokenPricing,
     ) -> Self {
+        pricing.source = Some("override".into());
         self.overrides
             .insert(PricingKey::new(provider_id, billing_model), pricing);
         self
@@ -132,13 +135,14 @@ impl PricingCatalog {
         &mut self,
         provider_id: ProviderId,
         billing_model: impl Into<String>,
-        pricing: TokenPricing,
+        mut pricing: TokenPricing,
     ) {
+        pricing.source = Some("override".into());
         self.overrides
             .insert(PricingKey::new(provider_id, billing_model), pricing);
     }
 
-    /// Look up the [`TokenPricing`] for a `(provider_id, billing_model)` pair,
+    /// Look up SDK [`TokenPricing`] for a `(provider_id, billing_model)` pair,
     /// preferring an override over the built-in entry. Returns `None` when the
     /// catalog has no price for that model.
     ///
@@ -150,11 +154,11 @@ impl PricingCatalog {
         let key = PricingKey::new(provider_id.clone(), billing_model.to_string());
         self.overrides
             .get(&key)
-            .copied()
-            .or_else(|| self.prices.get(&key).copied())
+            .or_else(|| self.prices.get(&key))
+            .cloned()
     }
 
-    fn lookup(&self, pricing_model: &PricingModelRef) -> Option<(TokenPricing, &'static str)> {
+    fn lookup(&self, pricing_model: &PricingModelRef) -> Option<(&TokenPricing, &'static str)> {
         let key = PricingKey::new(
             pricing_model.pricing_provider_id.clone(),
             pricing_model.billing_model.clone(),
@@ -162,14 +166,8 @@ impl PricingCatalog {
 
         self.overrides
             .get(&key)
-            .copied()
             .map(|pricing| (pricing, "override"))
-            .or_else(|| {
-                self.prices
-                    .get(&key)
-                    .copied()
-                    .map(|pricing| (pricing, "builtin"))
-            })
+            .or_else(|| self.prices.get(&key).map(|pricing| (pricing, "builtin")))
     }
 }
 
@@ -191,7 +189,7 @@ impl CostEstimator {
     pub fn estimate(
         &self,
         pricing_model: PricingModelRef,
-        usage: &Usage,
+        usage: &lingxi_llm_client::protocol::Usage,
     ) -> Result<CostEstimate, LlmError> {
         let Some((pricing, source)) = self.catalog.lookup(&pricing_model) else {
             return match self.policy {
@@ -205,35 +203,6 @@ impl CostEstimator {
             };
         };
 
-        let tokens = usage.billable_tokens;
-        let sdk_usage = lingxi_llm_client::protocol::Usage {
-            input_tokens: tokens.input,
-            output_tokens: tokens.output.saturating_add(tokens.reasoning_output),
-            reasoning_tokens: tokens.reasoning_output,
-            cache_read_tokens: tokens.cache_read,
-            cache_write_tokens: tokens.cache_write,
-            ..Default::default()
-        };
-        let quote = lingxi_llm_client::protocol::PriceQuote {
-            rule: None,
-            multiplier: None,
-            status: lingxi_llm_client::protocol::PriceStatus::Priced,
-            context: Default::default(),
-            rates: Some(lingxi_llm_client::protocol::TokenRates {
-                input_per_million: Some(pricing.input_per_million),
-                output_per_million: Some(pricing.output_per_million),
-                cache_read_per_million: Some(pricing.cache_read_per_million),
-                cache_write_per_million: Some(pricing.cache_write_per_million),
-                cache_write_1h_per_million: Some(pricing.cache_write_per_million),
-                reasoning_per_million: Some(pricing.reasoning_per_million),
-            }),
-            quota: None,
-            currency: "USD".into(),
-            unit: "per_million_tokens".into(),
-            source: Some(source.into()),
-            verified_at: None,
-            reason: None,
-        };
         let identity = lingxi_llm_client::PricingModelRef {
             pricing_provider_id: lingxi_llm_client::protocol::ProviderId::new(
                 crate::upstream::provider_name(&pricing_model.pricing_provider_id),
@@ -242,8 +211,9 @@ impl CostEstimator {
             request_model: pricing_model.request_model.clone(),
             display_model: pricing_model.display_model.clone(),
         };
-        let estimate = lingxi_llm_client::client::pricing::estimate(&quote, &sdk_usage, &identity)
-            .map_err(crate::upstream::error)?;
+        let estimate =
+            lingxi_llm_client::client::pricing::estimate_fixed(pricing, usage, &identity, source)
+                .map_err(crate::upstream::error)?;
         project_estimate(estimate, pricing_model)
     }
 }
@@ -263,10 +233,10 @@ impl PricingKey {
     }
 }
 
-impl TokenPricing {
-    pub(crate) fn to_wire(self, source: &str) -> lingxi_llm_client::protocol::TokenPricing {
-        use lingxi_llm_client::protocol::{PriceRule, ServiceTier, Submission, TokenRates};
-        let mut pricing = lingxi_llm_client::protocol::TokenPricing {
+impl PricingOverride {
+    /// Convert a saved fixed-price declaration into the SDK's pricing model.
+    pub fn to_sdk(self) -> TokenPricing {
+        TokenPricing {
             currency: Some("USD".into()),
             input_per_million: Some(self.input_per_million),
             output_per_million: Some(self.output_per_million),
@@ -274,29 +244,9 @@ impl TokenPricing {
             cache_write_per_million: Some(self.cache_write_per_million),
             cache_write_1h_per_million: Some(self.cache_write_per_million),
             reasoning_per_million: Some(self.reasoning_per_million),
-            source: Some(source.into()),
+            source: Some("override".into()),
             ..Default::default()
-        };
-        if source == "override" {
-            // User prices replace the model's published schedule as well as
-            // its base rates. A model-local rule leaves sibling models on the
-            // provider's original peak schedule. It declares no Fast price.
-            pricing.rules.push(PriceRule {
-                service_tier: ServiceTier::Standard,
-                submission: Submission::Interactive,
-                rates: TokenRates {
-                    input_per_million: pricing.input_per_million,
-                    output_per_million: pricing.output_per_million,
-                    cache_read_per_million: pricing.cache_read_per_million,
-                    cache_write_per_million: pricing.cache_write_per_million,
-                    cache_write_1h_per_million: pricing.cache_write_1h_per_million,
-                    reasoning_per_million: pricing.reasoning_per_million,
-                },
-                apply_peak_schedule: false,
-                ..Default::default()
-            });
         }
-        pricing
     }
 }
 pub(crate) fn project_estimate(
@@ -328,7 +278,13 @@ impl CostEstimator {
     ) -> lingxi_llm_client::FrozenPricing {
         if let Some((pricing, source)) = self.catalog.lookup(identity) {
             if source == "override" || snapshot.model().pricing.is_none() {
-                return snapshot.with_token_pricing(pricing.to_wire(source));
+                let mut prices = if source == "override" {
+                    pricing.clone().with_fixed_standard_override()
+                } else {
+                    pricing.clone()
+                };
+                prices.source = Some(source.into());
+                return snapshot.with_token_pricing(prices);
             }
         }
         snapshot

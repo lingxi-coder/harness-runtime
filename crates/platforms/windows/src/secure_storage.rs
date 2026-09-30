@@ -1,15 +1,15 @@
 //! Windows secure storage backends.
 //!
 //! Production prefers the native Windows Credential Manager backend and falls
-//! back according to [`platform_api::CredentialStoragePolicy`]. Tests can still
+//! back according to [`lingxi_core::host::CredentialStoragePolicy`]. Tests can still
 //! opt into the existing plain-text fixture directly.
 
 use async_trait::async_trait;
-use platform_api::{
+use lingxi_core::host::{
     CredentialStoragePolicy, InMemorySecureStorage, SecureStorage, SecureStorageBackend,
     SecureStorageError,
 };
-use protocol::SecureStorageData;
+use lingxi_core::types::SecureStorageData;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -494,7 +494,7 @@ impl CredentialBackendApi for RealCredentialBackend {
 #[allow(unsafe_code)]
 mod wincred {
     use super::CREDENTIAL_BLOB_LIMIT;
-    use platform_api::SecureStorageError;
+    use lingxi_core::host::SecureStorageError;
     use std::ffi::c_void;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
@@ -660,7 +660,7 @@ mod wincred {
 
 #[cfg(not(target_os = "windows"))]
 mod wincred {
-    use platform_api::SecureStorageError;
+    use lingxi_core::host::SecureStorageError;
 
     pub(super) fn write(
         _target: &str,
@@ -694,7 +694,7 @@ mod wincred {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{SecretKindDto, SecureStorageMetadata};
+    use lingxi_core::types::{SecretKindDto, SecureStorageMetadata};
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Mutex;
     use std::time::SystemTime;

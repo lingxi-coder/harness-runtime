@@ -331,7 +331,7 @@ impl ConversationOrchestrator {
     pub async fn force_compact_with_cancel(
         &self,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
+    ) -> Result<lingxi_core::host::CompactionSummary, lingxi_core::host::HandleError> {
         self.force_compact_with_instructions_and_cancel(None, cancel)
             .await
     }
@@ -359,9 +359,9 @@ impl ConversationOrchestrator {
         user_context: Option<&str>,
         direction: compaction::prompt::SummarizeDirection,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
+    ) -> Result<lingxi_core::host::CompactionSummary, lingxi_core::host::HandleError> {
         let Some(compactor) = self.compaction_runtime.compaction.clone() else {
-            return Err(platform_api::HandleError::ActionFailed(
+            return Err(lingxi_core::host::HandleError::ActionFailed(
                 "compaction unavailable".into(),
             ));
         };
@@ -369,7 +369,7 @@ impl ConversationOrchestrator {
         let _turn_guard = tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                return Err(platform_api::HandleError::ActionFailed(
+                return Err(lingxi_core::host::HandleError::ActionFailed(
                     "Compaction canceled.".into(),
                 ));
             }
@@ -381,20 +381,23 @@ impl ConversationOrchestrator {
             (session.model_context_history(), session.model.clone())
         };
         if history_before.is_empty() {
-            return Err(platform_api::HandleError::ActionFailed(
+            return Err(lingxi_core::host::HandleError::ActionFailed(
                 "No messages to compact".into(),
             ));
         }
         let Some(index) = compaction::selector::index_of(&history_before, message_uuid) else {
-            return Err(platform_api::HandleError::ActionFailed(
+            return Err(lingxi_core::host::HandleError::ActionFailed(
                 "Message not found.".into(),
             ));
         };
         let split = compaction::selector::split_at(&history_before, index, direction)
-            .map_err(|message| platform_api::HandleError::ActionFailed(message.to_string()))?;
+            .map_err(|message| lingxi_core::host::HandleError::ActionFailed(message.to_string()))?;
 
         let messages_before = u32::try_from(history_before.len()).unwrap_or(u32::MAX);
-        let bytes_before: u64 = history_before.iter().map(protocol::text_byte_size).sum();
+        let bytes_before: u64 = history_before
+            .iter()
+            .map(lingxi_core::types::text_byte_size)
+            .sum();
         let pre_tokens_estimate =
             compaction::grouping::estimate_tokens_for_range(&split.to_summarize);
         let messages_summarized = u32::try_from(split.to_summarize.len()).unwrap_or(u32::MAX);
@@ -410,7 +413,7 @@ impl ConversationOrchestrator {
                     format!("Compaction blocked by PreCompact hook: {detail}")
                 };
                 tracing::warn!("{msg}");
-                return Err(platform_api::HandleError::ActionFailed(msg));
+                return Err(lingxi_core::host::HandleError::ActionFailed(msg));
             }
 
             // `xe = lRe(we.newCustomInstructions, m ? `User context: ${m}` : undefined)`.
@@ -433,7 +436,7 @@ impl ConversationOrchestrator {
 
             self.output.emit_compaction_phase("summarizing").await;
             let cost_scope = self.compaction_cost_scope().await.map_err(|error| {
-                platform_api::HandleError::ActionFailed(format!(
+                lingxi_core::host::HandleError::ActionFailed(format!(
                     "Compaction cost preflight failed: {error}"
                 ))
             })?;
@@ -442,7 +445,7 @@ impl ConversationOrchestrator {
             let mut result = tokio::select! {
                 biased;
                 () = cancel.cancelled() => {
-                    return Err(platform_api::HandleError::ActionFailed(
+                    return Err(lingxi_core::host::HandleError::ActionFailed(
                         "Compaction canceled.".into(),
                     ));
                 }
@@ -458,14 +461,14 @@ impl ConversationOrchestrator {
             let cost_receipt =
                 self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
             if cancel.is_cancelled() {
-                return Err(platform_api::HandleError::ActionFailed(
+                return Err(lingxi_core::host::HandleError::ActionFailed(
                     "Compaction canceled.".into(),
                 ));
             }
             self.settle_compaction_usage(cost_receipt)
                 .await
                 .map_err(|error| {
-                    platform_api::HandleError::ActionFailed(format!(
+                    lingxi_core::host::HandleError::ActionFailed(format!(
                         "Compaction cost settlement failed: {error}"
                     ))
                 })?;
@@ -500,7 +503,7 @@ impl ConversationOrchestrator {
                 )
                 .await
             else {
-                return Err(platform_api::HandleError::ActionFailed(
+                return Err(lingxi_core::host::HandleError::ActionFailed(
                     "Compaction canceled.".into(),
                 ));
             };
@@ -510,8 +513,8 @@ impl ConversationOrchestrator {
         .await;
         if let Err(error) = &outcome {
             let detail = match error {
-                platform_api::HandleError::ActionFailed(detail) => detail.as_str(),
-                platform_api::HandleError::Unimplemented(_) => "compaction failed",
+                lingxi_core::host::HandleError::ActionFailed(detail) => detail.as_str(),
+                lingxi_core::host::HandleError::Unimplemented(_) => "compaction failed",
             };
             self.output.emit_compaction_finished(Some(detail)).await;
         }
@@ -522,9 +525,9 @@ impl ConversationOrchestrator {
     /// summarize path with `/compact`'s mapping.
     fn summarize_error(
         error: compaction::autocompact::CompactionError,
-    ) -> platform_api::HandleError {
+    ) -> lingxi_core::host::HandleError {
         use compaction::autocompact::CompactionError;
-        platform_api::HandleError::ActionFailed(match error {
+        lingxi_core::host::HandleError::ActionFailed(match error {
             CompactionError::MaxRetriesExceeded => {
                 "Compaction failed \u{b7} conversation could not be reduced below the context limit"
                     .to_string()
@@ -545,9 +548,9 @@ impl ConversationOrchestrator {
         &self,
         custom_instructions: Option<&str>,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
+    ) -> Result<lingxi_core::host::CompactionSummary, lingxi_core::host::HandleError> {
         let Some(compactor) = self.compaction_runtime.compaction.clone() else {
-            return Err(platform_api::HandleError::ActionFailed(
+            return Err(lingxi_core::host::HandleError::ActionFailed(
                 "compaction unavailable".into(),
             ));
         };
@@ -560,7 +563,7 @@ impl ConversationOrchestrator {
         let _turn_guard = tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                return Err(platform_api::HandleError::ActionFailed(
+                return Err(lingxi_core::host::HandleError::ActionFailed(
                     "Compaction canceled.".into(),
                 ));
             }
@@ -574,7 +577,10 @@ impl ConversationOrchestrator {
             (s.model_context_history(), s.model.clone())
         };
         let messages_before = u32::try_from(history_before.len()).unwrap_or(u32::MAX);
-        let bytes_before: u64 = history_before.iter().map(protocol::text_byte_size).sum();
+        let bytes_before: u64 = history_before
+            .iter()
+            .map(lingxi_core::types::text_byte_size)
+            .sum();
         // Capture the token estimate before `history_before` is consumed by
         // `process_iteration` — used for the boundary `preTokens`.
         let pre_tokens_estimate = compaction::grouping::estimate_tokens_for_range(&history_before);
@@ -585,7 +591,7 @@ impl ConversationOrchestrator {
         // deterministic even when process_iteration completes synchronously
         // (e.g. the M3 stub Autocompactor path).
         if cancel.is_cancelled() {
-            return Err(platform_api::HandleError::ActionFailed(
+            return Err(lingxi_core::host::HandleError::ActionFailed(
                 "Compaction canceled.".into(),
             ));
         }
@@ -599,7 +605,7 @@ impl ConversationOrchestrator {
         // which the port surfaces via `process_forced`'s
         // `CompactionError::NotEnoughMessages` mapping below.
         if history_before.is_empty() {
-            return Err(platform_api::HandleError::ActionFailed(
+            return Err(lingxi_core::host::HandleError::ActionFailed(
                 "No messages to compact".into(),
             ));
         }
@@ -627,7 +633,7 @@ impl ConversationOrchestrator {
                 format!("Compaction blocked by PreCompact hook: {detail}")
             };
             tracing::warn!("{msg}");
-            return Err(platform_api::HandleError::ActionFailed(msg));
+            return Err(lingxi_core::host::HandleError::ActionFailed(msg));
         }
 
         let merged_instructions = merge_compact_instructions(
@@ -655,7 +661,7 @@ impl ConversationOrchestrator {
         // boundary's durationMs.
         self.output.emit_compaction_phase("summarizing").await;
         let cost_scope = self.compaction_cost_scope().await.map_err(|error| {
-            platform_api::HandleError::ActionFailed(format!(
+            lingxi_core::host::HandleError::ActionFailed(format!(
                 "Compaction cost preflight failed: {error}"
             ))
         })?;
@@ -663,7 +669,7 @@ impl ConversationOrchestrator {
         let result = tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                return Err(platform_api::HandleError::ActionFailed(
+                return Err(lingxi_core::host::HandleError::ActionFailed(
                     "Compaction canceled.".into(),
                 ));
             }
@@ -674,23 +680,23 @@ impl ConversationOrchestrator {
                     // as `MaxRetriesExceeded`. Surface the byte-exact GJn message
                     // rather than the generic "compaction failed: …".
                     compaction::autocompact::CompactionError::MaxRetriesExceeded => {
-                        platform_api::HandleError::ActionFailed(
+                        lingxi_core::host::HandleError::ActionFailed(
                             "Compaction failed · conversation could not be reduced below the context limit".to_string(),
                         )
                     }
                     compaction::autocompact::CompactionError::NotEnoughMessages => {
-                        platform_api::HandleError::ActionFailed(
+                        lingxi_core::host::HandleError::ActionFailed(
                             "Not enough messages to compact.".to_string(),
                         )
                     }
                     compaction::autocompact::CompactionError::MediaUnstrippable => {
-                        platform_api::HandleError::ActionFailed("Compaction failed · attached media exceeds size limits".into())
+                        lingxi_core::host::HandleError::ActionFailed("Compaction failed · attached media exceeds size limits".into())
                     }
                     compaction::autocompact::CompactionError::Summary(detail)
                     | compaction::autocompact::CompactionError::Internal(detail) => {
-                        platform_api::HandleError::ActionFailed(format!("Error during compaction: {detail}"))
+                        lingxi_core::host::HandleError::ActionFailed(format!("Error during compaction: {detail}"))
                     }
-                    other => platform_api::HandleError::ActionFailed(format!("Error during compaction: {other}")),
+                    other => lingxi_core::host::HandleError::ActionFailed(format!("Error during compaction: {other}")),
                 })?,
         };
         let compact_duration = api_started.elapsed();
@@ -702,7 +708,7 @@ impl ConversationOrchestrator {
         // hooks, history swap) — otherwise the cancelled task swaps history out
         // from under a prompt the user has since submitted.
         if cancel.is_cancelled() {
-            return Err(platform_api::HandleError::ActionFailed(
+            return Err(lingxi_core::host::HandleError::ActionFailed(
                 "Compaction canceled.".into(),
             ));
         }
@@ -713,7 +719,7 @@ impl ConversationOrchestrator {
         self.settle_compaction_usage(cost_receipt)
             .await
             .map_err(|error| {
-                platform_api::HandleError::ActionFailed(format!(
+                lingxi_core::host::HandleError::ActionFailed(format!(
                     "Compaction cost settlement failed: {error}"
                 ))
             })?;
@@ -737,7 +743,7 @@ impl ConversationOrchestrator {
         else {
             // Esc landed before the post-compact commit phase: no auxiliary
             // state or history has been changed.
-            return Err(platform_api::HandleError::ActionFailed(
+            return Err(lingxi_core::host::HandleError::ActionFailed(
                 "Compaction canceled.".into(),
             ));
         };
@@ -746,8 +752,8 @@ impl ConversationOrchestrator {
         }.await;
         if let Err(error) = &outcome {
             let detail = match error {
-                platform_api::HandleError::ActionFailed(detail) => detail.as_str(),
-                platform_api::HandleError::Unimplemented(_) => "compaction failed",
+                lingxi_core::host::HandleError::ActionFailed(detail) => detail.as_str(),
+                lingxi_core::host::HandleError::Unimplemented(_) => "compaction failed",
             };
             self.output.emit_compaction_finished(Some(detail)).await;
         }
@@ -757,7 +763,7 @@ impl ConversationOrchestrator {
     /// Apply a completed compaction pass to the live session: append the
     /// `[Compacted N → M messages]` boundary marker, swap `session.history`
     /// under the lock, persist the marker to the optional JSONL writer, and
-    /// emit [`platform_api::OutputStream::emit_compaction_completed`].
+    /// emit [`lingxi_core::host::OutputStream::emit_compaction_completed`].
     ///
     /// Factored out of [`Self::force_compact_with_cancel`] (Batch 4) so the
     /// manual `/compact` path, the proactive pre-call trigger
@@ -813,8 +819,8 @@ impl ConversationOrchestrator {
     ///
     pub(super) async fn restore_post_compact_attachments_against(
         &self,
-        boundary_context: &[protocol::ConversationMessage],
-    ) -> Vec<protocol::ConversationMessage> {
+        boundary_context: &[lingxi_core::types::ConversationMessage],
+    ) -> Vec<lingxi_core::types::ConversationMessage> {
         // Snapshot then clear the MODEL-VISIBLE portion of the ONE read-file-
         // state registry (the `eOt` snapshot + `readFileState.clear()` step),
         // so the post-compact context starts from the restored set only.
@@ -832,7 +838,7 @@ impl ConversationOrchestrator {
         // The two arms are independent: skills restore from the process-global
         // registry even when no file was read this session, so we do NOT early-
         // return on an empty file snapshot.
-        let mut out: Vec<protocol::ConversationMessage> = Vec::new();
+        let mut out: Vec<lingxi_core::types::ConversationMessage> = Vec::new();
 
         if !snapshot.is_empty() {
             let already_attached = Self::post_compact_attached_file_paths(boundary_context);
@@ -866,7 +872,7 @@ impl ConversationOrchestrator {
         if let Some(rendered) =
             compaction::render_invoked_skills_attachment_with_sidecar(&restored_skills)
         {
-            let message_id = protocol::MessageId::new();
+            let message_id = lingxi_core::types::MessageId::new();
             let contents = restored_skills
                 .iter()
                 .map(|skill| skill.content.clone())
@@ -876,7 +882,7 @@ impl ConversationOrchestrator {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(message_id, contents);
-            out.push(protocol::ConversationMessage::User {
+            out.push(lingxi_core::types::ConversationMessage::User {
                 id: message_id,
                 content: vec![rendered.into_content_block()],
                 is_meta: true,
@@ -910,7 +916,7 @@ impl ConversationOrchestrator {
     /// cache).
     pub(super) async fn plan_file_reference_attachment(
         &self,
-    ) -> Option<protocol::ConversationMessage> {
+    ) -> Option<lingxi_core::types::ConversationMessage> {
         let path = {
             let session = self.session.lock().await;
             self.session_plan_file_path(&session.session_id)
@@ -920,26 +926,28 @@ impl ConversationOrchestrator {
             return None;
         }
         let body = crate::prompt::plan_reminder::render_plan_file_reference(&path, &content);
-        Some(protocol::ConversationMessage::user_meta(
-            protocol::MessageId::new(),
+        Some(lingxi_core::types::ConversationMessage::user_meta(
+            lingxi_core::types::MessageId::new(),
             format!("<system-reminder>\n{body}\n</system-reminder>"),
         ))
     }
 
-    fn post_compact_attached_file_paths(messages: &[protocol::ConversationMessage]) -> Vec<String> {
+    fn post_compact_attached_file_paths(
+        messages: &[lingxi_core::types::ConversationMessage],
+    ) -> Vec<String> {
         // Native 2.1.261 `kXo`: only preserved Read tool calls establish that
         // a file is still in context. A Read that returned an unchanged-file
         // stub depends on an earlier result and cannot establish that itself.
         let dedup_reads = messages
             .iter()
             .flat_map(|message| {
-                let protocol::ConversationMessage::User { content, .. } = message else {
+                let lingxi_core::types::ConversationMessage::User { content, .. } = message else {
                     return Vec::new();
                 };
                 content
                     .iter()
                     .filter_map(|block| match block {
-                        protocol::ContentBlock::ToolResult {
+                        lingxi_core::types::ContentBlock::ToolResult {
                             tool_use_id,
                             content,
                             content_blocks: None,
@@ -958,13 +966,14 @@ impl ConversationOrchestrator {
         messages
             .iter()
             .flat_map(|message| {
-                let protocol::ConversationMessage::Assistant { content, .. } = message else {
+                let lingxi_core::types::ConversationMessage::Assistant { content, .. } = message
+                else {
                     return Vec::new();
                 };
                 content
                     .iter()
                     .filter_map(|block| {
-                        let protocol::ContentBlock::ToolUse {
+                        let lingxi_core::types::ContentBlock::ToolUse {
                             id,
                             name,
                             input,
@@ -993,11 +1002,11 @@ impl ConversationOrchestrator {
 
     fn post_compact_attached_skill_contents(
         &self,
-        messages: &[protocol::ConversationMessage],
+        messages: &[lingxi_core::types::ConversationMessage],
     ) -> Vec<compaction::AttachedSkillContent> {
         let surviving_ids = messages
             .iter()
-            .map(protocol::ConversationMessage::id)
+            .map(lingxi_core::types::ConversationMessage::id)
             .collect::<std::collections::HashSet<_>>();
         let mut known_attachments = self
             .transcript
@@ -1020,7 +1029,7 @@ impl ConversationOrchestrator {
             // Native `Lle` accepts only meta-user messages made entirely of
             // text, joining multiple blocks with a blank line. Ordinary user
             // or assistant text must not suppress registry write-backs.
-            if let protocol::ConversationMessage::User {
+            if let lingxi_core::types::ConversationMessage::User {
                 content,
                 is_meta: true,
                 ..
@@ -1029,8 +1038,10 @@ impl ConversationOrchestrator {
                 let text = content
                     .iter()
                     .map(|block| match block {
-                        protocol::ContentBlock::Text { text }
-                        | protocol::ContentBlock::TextJsUtf16 { text, .. } => Some(text.as_str()),
+                        lingxi_core::types::ContentBlock::Text { text }
+                        | lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. } => {
+                            Some(text.as_str())
+                        }
                         _ => None,
                     })
                     .collect::<Option<Vec<_>>>();
@@ -1052,7 +1063,7 @@ impl ConversationOrchestrator {
         snapshot: Vec<(std::path::PathBuf, tool_api::read_file_state::ReadFileEntry)>,
         already_attached: &[String],
         plan_file: &std::path::Path,
-    ) -> Vec<protocol::ConversationMessage> {
+    ) -> Vec<lingxi_core::types::ConversationMessage> {
         let candidates: Vec<compaction::FileRestoreCandidate> = snapshot
             .into_iter()
             .map(|(path, entry)| compaction::FileRestoreCandidate {
@@ -1257,8 +1268,8 @@ impl ConversationOrchestrator {
             }
             running_tokens = running_tokens.saturating_add(cost);
             restored.extend(bodies.into_iter().map(|body| {
-                protocol::ConversationMessage::user_meta(
-                    protocol::MessageId::new(),
+                lingxi_core::types::ConversationMessage::user_meta(
+                    lingxi_core::types::MessageId::new(),
                     format!("<system-reminder>\n{body}\n</system-reminder>"),
                 )
             }));
@@ -1301,7 +1312,7 @@ impl ConversationOrchestrator {
         bytes_before: u64,
         compact_started: std::time::Instant,
         cancel: Option<&tokio_util::sync::CancellationToken>,
-    ) -> Option<platform_api::CompactionSummary> {
+    ) -> Option<lingxi_core::host::CompactionSummary> {
         self.apply_post_compact_placed(
             result,
             trigger,
@@ -1337,7 +1348,7 @@ impl ConversationOrchestrator {
         cancel: Option<&tokio_util::sync::CancellationToken>,
         placement: SummaryPlacement,
         selector_metadata: Option<SelectorBoundaryMetadata>,
-    ) -> Option<platform_api::CompactionSummary> {
+    ) -> Option<lingxi_core::host::CompactionSummary> {
         self.output.emit_compaction_phase("restoring").await;
         // Preserve the transcript-only summary before `result.messages` is
         // consumed into the replacement history. The TUI carries this on the
@@ -1386,7 +1397,7 @@ impl ConversationOrchestrator {
         // preserved tail would make a cold resume splice them after the summary
         // — the exact reordering this placement exists to avoid — so the
         // boundary is built with no preserved segment at all.
-        let boundary_tail: &[protocol::ConversationMessage] = match placement {
+        let boundary_tail: &[lingxi_core::types::ConversationMessage] = match placement {
             SummaryPlacement::BeforeKept => &preserved_tail,
             SummaryPlacement::AfterKept => &[],
         };
@@ -1396,7 +1407,7 @@ impl ConversationOrchestrator {
             result
                 .messages
                 .last()
-                .map(protocol::ConversationMessage::id)
+                .map(lingxi_core::types::ConversationMessage::id)
         };
         // RV6 (parity 2.1.208): the full auto/manual compaction path — the only
         // one this port implements — builds its boundary via the 3-arg
@@ -1559,7 +1570,10 @@ impl ConversationOrchestrator {
         metadata.logical_parent_uuid = pre_boundary_last_uuid.clone();
 
         let messages_after = u32::try_from(history_after.len()).unwrap_or(u32::MAX);
-        let bytes_after: u64 = history_after.iter().map(protocol::text_byte_size).sum();
+        let bytes_after: u64 = history_after
+            .iter()
+            .map(lingxi_core::types::text_byte_size)
+            .sum();
         let bytes_saved = bytes_before.saturating_sub(bytes_after);
 
         // Swap model-visible history under the same lock while retaining
@@ -1662,7 +1676,7 @@ impl ConversationOrchestrator {
             )
             .await;
 
-        Some(platform_api::CompactionSummary {
+        Some(lingxi_core::host::CompactionSummary {
             messages_before,
             messages_after,
             bytes_saved,
@@ -1708,12 +1722,12 @@ impl ConversationOrchestrator {
     /// overflow guard. Called by both turn drivers after every successful call.
     /// Mirrors claude-code's `Xtt` last-usage snapshot (see
     /// [`Self::last_response_input_tokens`]).
-    pub(crate) fn record_response_input_tokens(&self, usage: &llm_runtime::Usage) {
+    pub(crate) fn record_response_input_tokens(&self, usage: &llm_runtime::ExecutionUsage) {
         let total_input = usage
-            .billable_tokens
-            .input
-            .saturating_add(usage.billable_tokens.cache_read)
-            .saturating_add(usage.billable_tokens.cache_write);
+            .counts()
+            .input_tokens
+            .saturating_add(usage.counts().cache_read_tokens)
+            .saturating_add(usage.counts().cache_write_tokens);
         self.compaction_runtime
             .last_response_input_tokens
             .store(total_input, std::sync::atomic::Ordering::Relaxed);
@@ -1721,7 +1735,10 @@ impl ConversationOrchestrator {
         // INCLUDING output tokens; the `total_tokens_reminder` needs that total,
         // so cache the output half here at the same chokepoint.
         self.compaction_runtime.last_response_output_tokens.store(
-            usage.billable_tokens.output,
+            usage
+                .counts()
+                .output_tokens
+                .saturating_sub(usage.counts().reasoning_tokens),
             std::sync::atomic::Ordering::Relaxed,
         );
         // Feed the shared workflow `budget.spent()` pool: this is the single
@@ -1731,7 +1748,10 @@ impl ConversationOrchestrator {
         // same `Arc`, so `budget.spent()` reads main loop + all workflows.
         if self.model_runtime.output_scopes.is_none() {
             self.compaction_runtime.output_token_pool.fetch_add(
-                usage.billable_tokens.output,
+                usage
+                    .counts()
+                    .output_tokens
+                    .saturating_sub(usage.counts().reasoning_tokens),
                 std::sync::atomic::Ordering::Relaxed,
             );
         }
@@ -2075,7 +2095,10 @@ impl ConversationOrchestrator {
         }
 
         let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
-        let bytes_before: u64 = snapshot.iter().map(protocol::text_byte_size).sum();
+        let bytes_before: u64 = snapshot
+            .iter()
+            .map(lingxi_core::types::text_byte_size)
+            .sum();
 
         // hooks compaction lifecycle: PreCompact fires once we have crossed the
         // autocompact threshold and are about to run the summary pass (TS
@@ -2222,8 +2245,9 @@ impl ConversationOrchestrator {
         sdk_compact_metadata: serde_json::Value,
     ) {
         let compact_metadata = camelize_json_keys(sdk_compact_metadata);
-        if let Ok(typed_metadata) =
-            serde_json::from_value::<protocol::CompactBoundaryMetadata>(compact_metadata.clone())
+        if let Ok(typed_metadata) = serde_json::from_value::<
+            lingxi_core::types::CompactBoundaryMetadata,
+        >(compact_metadata.clone())
         {
             let _ = marker.set_compact_metadata(typed_metadata);
         }
@@ -2434,7 +2458,7 @@ impl ConversationOrchestrator {
         result
             .messages
             .iter()
-            .map(protocol::ConversationMessage::text_content)
+            .map(lingxi_core::types::ConversationMessage::text_content)
             .filter(|t| !t.is_empty())
             .collect::<Vec<_>>()
             .join("\n")

@@ -372,7 +372,7 @@ async fn turn_end_checkin_drives_another_round_without_duplicate_feedback() {
             &mut active,
             &mut count,
             1,
-            protocol::MessageId::new(),
+            lingxi_core::types::MessageId::new(),
             false,
         )
         .await;

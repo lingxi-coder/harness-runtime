@@ -619,7 +619,7 @@ mod tests {
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
         telemetry::test_clear_flag("tengu_breezy_crescent");
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
-        platform_api::session_flags::set_agent_push_notif_enabled(false);
+        lingxi_core::host::session_flags::set_agent_push_notif_enabled(false);
         g
     }
 
@@ -760,7 +760,7 @@ mod tests {
             let push = case["push"].as_bool().unwrap();
             telemetry::test_set_flag("tengu_kairos_loop_persistent", persistent);
             telemetry::test_set_flag("tengu_kairos_push_notifications", push);
-            platform_api::session_flags::set_agent_push_notif_enabled(push);
+            lingxi_core::host::session_flags::set_agent_push_notif_enabled(push);
             let timeout = case["timeout"].as_u64().filter(|n| *n != 0);
             let name = case["name"].as_str().unwrap();
             let actual = match name {
@@ -779,7 +779,7 @@ mod tests {
         }
         telemetry::test_clear_flag("tengu_kairos_loop_persistent");
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
-        platform_api::session_flags::set_agent_push_notif_enabled(false);
+        lingxi_core::host::session_flags::set_agent_push_notif_enabled(false);
     }
 
     #[test]

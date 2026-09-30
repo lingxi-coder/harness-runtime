@@ -32,6 +32,7 @@ pub mod dependency_check;
 pub mod path_pattern;
 pub mod policy;
 pub mod policy_convert;
+pub mod root;
 pub mod runtime_config;
 pub mod violation_store;
 pub mod wrap;
@@ -42,9 +43,10 @@ pub use decision::{
 pub use dependency_check::{
     check_dependencies, sandbox_unavailable_reason, MissingDeps, SandboxDependencyCheck,
 };
+pub use lingxi_core::host::{Sandbox, SandboxError, SandboxPolicy, SandboxedCommand, SandboxedTag};
+pub use mobile_linux_api::{NetworkPolicy, ResourceLimits, SandboxBackend};
 pub use path_pattern::resolve_path_pattern_for_sandbox;
 pub use permission::shell_command::strip_env_and_wrappers_fixedpoint;
-pub use platform_api::{Sandbox, SandboxError, SandboxPolicy, SandboxedCommand, SandboxedTag};
 pub use policy::default_policy;
 pub use policy_convert::{convert_settings_to_runtime_config, linux_glob_pattern_warnings};
 pub use runtime_config::{
@@ -64,19 +66,19 @@ pub use wrap::{wrap_with_sandbox, SandboxWrapError};
 /// process to write outside the project.
 ///
 /// # Errors
-/// Returns [`platform_api::SandboxError::PathCanonicalize`] if the kernel
+/// Returns [`lingxi_core::host::SandboxError::PathCanonicalize`] if the kernel
 /// canonicalization itself fails, or
-/// [`platform_api::SandboxError::SymlinkEscape`] when the canonical path
+/// [`lingxi_core::host::SandboxError::SymlinkEscape`] when the canonical path
 /// resolves outside `workspace`.
 pub fn canonicalize_safely(
     path: &std::path::Path,
     workspace: &std::path::Path,
-) -> Result<std::path::PathBuf, platform_api::SandboxError> {
+) -> Result<std::path::PathBuf, lingxi_core::host::SandboxError> {
     let canon = path
         .canonicalize()
-        .map_err(|e| platform_api::SandboxError::PathCanonicalize(e.to_string()))?;
+        .map_err(|e| lingxi_core::host::SandboxError::PathCanonicalize(e.to_string()))?;
     if !canon.starts_with(workspace) {
-        return Err(platform_api::SandboxError::SymlinkEscape(
+        return Err(lingxi_core::host::SandboxError::SymlinkEscape(
             path.display().to_string(),
         ));
     }

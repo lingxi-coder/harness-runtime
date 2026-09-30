@@ -17,8 +17,8 @@ use std::sync::Arc;
 use command_api::{
     CommandFrontmatter, CommandRegistry, CommandSource, SlashCommand, SlashCommandKind,
 };
-use platform_api::skill_loader::{SkillLoad, SkillLoader as AgentSkillLoader};
-use protocol::ContentBlock;
+use lingxi_core::host::skill_loader::{SkillLoad, SkillLoader as AgentSkillLoader};
+use lingxi_core::types::ContentBlock;
 use session::jsonl::SessionMode;
 use tokio::sync::RwLock;
 use tool_api::tool_trait::ToolError;
@@ -486,7 +486,7 @@ mod tests {
 
     async fn loaded_local_app_skill_registry() -> MobileDiskSkillLoader {
         let plugin_root = local_app_plugin_root();
-        let plugin_id = protocol::PluginId::new();
+        let plugin_id = lingxi_core::types::PluginId::new();
         let mut commands = Vec::new();
         let skills_root = plugin_root.join("skills");
         let entries = std::fs::read_dir(&skills_root).expect("read Local App skills");
@@ -634,7 +634,7 @@ mod tests {
             "IOS-PROFILE-ONLY-MARKER",
         )
         .unwrap();
-        let plugin_id = protocol::PluginId::new();
+        let plugin_id = lingxi_core::types::PluginId::new();
         let command = SlashCommand {
             name: "lingxi-local-app:frontend-design".into(),
             source: CommandSource::Plugin,

@@ -18,6 +18,7 @@ use client::protocol::local_apps::LocalAppVerificationSummaryDto;
 use client::protocol::local_apps::ManagedLocalAppMcpServerDto;
 use client::protocol::local_apps::ManagedLocalAppMcpStatusDto;
 use client::protocol::local_apps::McpAppWidgetDto;
+use lingxi_core::host::McpError;
 use local_apps::derive_mcp_status;
 use local_apps::effective_tool_surface_sha256;
 use local_apps::load_manifest;
@@ -27,7 +28,6 @@ use local_apps::save_mcp_settings;
 use local_apps::AppLayout;
 use local_apps::AppMcpSettings;
 use local_apps::AppMcpStatus;
-use platform_api::McpError;
 use serde_json::Value;
 use sha2::Digest;
 use sha2::Sha256;
@@ -46,7 +46,7 @@ pub(super) fn lower_managed_mcp_status(status: AppMcpStatus) -> ManagedLocalAppM
 }
 
 pub(super) fn tool_meta_resource_uri(
-    definition: &platform_api::McpToolDefinitionDto,
+    definition: &lingxi_core::host::McpToolDefinitionDto,
 ) -> Option<String> {
     let meta = definition.meta.as_ref()?;
     meta.get("ui")
@@ -95,9 +95,12 @@ pub(super) fn validate_managed_mcp_widget_file(
         .join(local_apps::manifest::MCP_DIR)
         .join(LOCAL_APP_WIDGET_DIR)
         .join(format!("{resource_sha256}.html"));
-    let body =
-        platform_api::rooted_fs::read_to_string_limited(layout.root(), &relative, 4 * 1024 * 1024)
-            .map_err(|error| format!("widget_invalid: {}: {error}", relative.display()))?;
+    let body = lingxi_core::host::rooted_fs::read_to_string_limited(
+        layout.root(),
+        &relative,
+        4 * 1024 * 1024,
+    )
+    .map_err(|error| format!("widget_invalid: {}: {error}", relative.display()))?;
     let actual = format!("{:x}", Sha256::digest(body.as_bytes()));
     if actual != resource_sha256 {
         return Err("widget_invalid: Local App MCP widget digest mismatch".into());
@@ -171,7 +174,7 @@ pub(super) fn managed_mcp_widget_resource(
         .and_then(Value::as_array)
         .ok_or_else(|| "catalog_invalid: active catalog tools are missing".to_string())?;
     for entry in entries {
-        let definition: platform_api::McpToolDefinitionDto =
+        let definition: lingxi_core::host::McpToolDefinitionDto =
             serde_json::from_value(entry.get("definition").unwrap_or(entry).clone())
                 .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
         let Some(uri) = tool_meta_resource_uri(&definition) else {
@@ -206,9 +209,9 @@ pub(super) fn managed_mcp_widget_resource(
 }
 
 pub(super) fn mcp_tool_surface(
-    definition: platform_api::McpToolDefinitionDto,
+    definition: lingxi_core::host::McpToolDefinitionDto,
     flow: Value,
-    ceiling: platform_api::McpPermissionCeiling,
+    ceiling: lingxi_core::host::McpPermissionCeiling,
 ) -> Result<LocalAppMcpToolSurfaceDto, String> {
     Ok(LocalAppMcpToolSurfaceDto {
         name: definition.name,
@@ -222,9 +225,9 @@ pub(super) fn mcp_tool_surface(
         visible_meta_json: optional_json_string(definition.meta.as_ref())?,
         semantic_flow_json: serde_json::to_string(&flow).map_err(|error| error.to_string())?,
         permission_ceiling: match ceiling {
-            platform_api::McpPermissionCeiling::Allow => "allow",
-            platform_api::McpPermissionCeiling::Ask => "ask",
-            platform_api::McpPermissionCeiling::Deny => "deny",
+            lingxi_core::host::McpPermissionCeiling::Allow => "allow",
+            lingxi_core::host::McpPermissionCeiling::Ask => "ask",
+            lingxi_core::host::McpPermissionCeiling::Deny => "deny",
         }
         .into(),
     })
@@ -239,7 +242,7 @@ pub(super) fn mcp_tool_surfaces_from_catalog(
         .ok_or_else(|| "catalog_invalid: active catalog tools are missing".to_string())?;
     let mut tools = Vec::with_capacity(entries.len());
     for entry in entries {
-        let definition: platform_api::McpToolDefinitionDto =
+        let definition: lingxi_core::host::McpToolDefinitionDto =
             serde_json::from_value(entry.get("definition").unwrap_or(entry).clone())
                 .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
         let flow = entry
@@ -249,7 +252,7 @@ pub(super) fn mcp_tool_surfaces_from_catalog(
         let ceiling = entry
             .get("ceiling")
             .and_then(Value::as_str)
-            .and_then(platform_api::McpPermissionCeiling::from_policy_str)
+            .and_then(lingxi_core::host::McpPermissionCeiling::from_policy_str)
             .ok_or_else(|| "catalog_invalid: active tool ceiling is invalid".to_string())?;
         tools.push(mcp_tool_surface(definition, flow, ceiling)?);
     }
@@ -368,12 +371,12 @@ impl LocalAppsHostBroker {
     ) -> Result<mcp::McpServerConfig, String> {
         Ok(mcp::McpServerConfig {
             name: scope.server_name(),
-            spec: platform_api::McpTransportSpec::InProcess {
+            spec: lingxi_core::host::McpTransportSpec::InProcess {
                 registry_key: scope
                     .scoped_registry_key(conversation_id)
                     .map_err(|error| error.to_string())?,
             },
-            scope: mcp::ConfigScope::Settings(protocol::SettingsScope::Managed),
+            scope: mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
             disabled: false,
             timeout_ms: Some(crate::mobile::host::LOCAL_APPS_MCP_TIMEOUT_MS),
             always_load: true,
@@ -443,7 +446,7 @@ impl LocalAppsHostBroker {
 
         let desired = Self::managed_mcp_config(&scope, conversation_id)?;
         let desired_registry_key = match &desired.spec {
-            platform_api::McpTransportSpec::InProcess { registry_key } => registry_key,
+            lingxi_core::host::McpTransportSpec::InProcess { registry_key } => registry_key,
             _ => unreachable!("managed Local App MCP is always in-process"),
         };
         let existing = registry.get_config(&scope.server_name()).await;
@@ -451,7 +454,7 @@ impl LocalAppsHostBroker {
             existing
                 .as_ref()
                 .is_some_and(|current| match &current.spec {
-                    platform_api::McpTransportSpec::InProcess { registry_key } => {
+                    lingxi_core::host::McpTransportSpec::InProcess { registry_key } => {
                         let current_route = registry_key.rsplit_once(':').map(|(route, _)| route);
                         let desired_route = desired_registry_key
                             .rsplit_once(':')

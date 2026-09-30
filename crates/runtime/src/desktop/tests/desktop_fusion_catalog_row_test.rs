@@ -16,7 +16,7 @@ fn anthropic_rows_carry_structured_output_true() {
     let row = desktop_fusion_catalog_row(
         "anthropic",
         opus,
-        platform_api::ModelBillingMode::PerToken,
+        lingxi_core::host::ModelBillingMode::PerToken,
         &llm_runtime::ProtocolFamily::AnthropicMessages,
     );
     assert_eq!(row.profile, "anthropic");
@@ -42,18 +42,18 @@ fn unhinted_model_on_a_subscription_profile_is_classified_subscription() {
         billing_model: "claude-sonnet-4.6".to_string(),
         aliases: Vec::new(),
         description: None,
-        metadata: platform_api::ModelMetadata::default(),
+        metadata: lingxi_core::host::ModelMetadata::default(),
         capabilities: llm_runtime::Capabilities::default(),
     };
     let row = desktop_fusion_catalog_row(
         "github-copilot",
         &unhinted,
-        platform_api::ModelBillingMode::Subscription,
+        lingxi_core::host::ModelBillingMode::Subscription,
         &llm_runtime::ProtocolFamily::OpenAiChat,
     );
     assert_eq!(
         row.hints.cost_class,
-        platform_api::FusionCostClass::Subscription,
+        lingxi_core::host::FusionCostClass::Subscription,
         "a model unlisted in fusion_hints must inherit its profile's Subscription billing, \
 not fall back to FusionModelHints::default()'s cost_class: Medium"
     );
@@ -71,29 +71,24 @@ fn unhinted_model_on_a_per_token_profile_keeps_the_default_cost_class() {
         billing_model: "some-new-model".to_string(),
         aliases: Vec::new(),
         description: None,
-        metadata: platform_api::ModelMetadata::default(),
+        metadata: lingxi_core::host::ModelMetadata::default(),
         capabilities: llm_runtime::Capabilities::default(),
     };
     let row = desktop_fusion_catalog_row(
         "openai",
         &unhinted,
-        platform_api::ModelBillingMode::PerToken,
+        lingxi_core::host::ModelBillingMode::PerToken,
         &llm_runtime::ProtocolFamily::OpenAiResponses,
     );
-    assert_eq!(row.hints.cost_class, platform_api::FusionCostClass::Medium);
+    assert_eq!(
+        row.hints.cost_class,
+        lingxi_core::host::FusionCostClass::Medium
+    );
 }
 
-/// Round-5 review finding [3]: a `gemini` row's model capability bit says
-/// `structured_output: true` (it is copied verbatim from the vendored
-/// models.dev slice), but `GeminiCodec::encode_request` rejects ANY
-/// `response_format` outright. Before this fix the row was built with
-/// `structured_output: true`, so `resolve_analyst`'s `with_schema` gate
-/// happily elected a Gemini analyst, §4 preflight passed with zero
-/// errors, both panels burned real tokens, and only THEN did
-/// `analyst.rs`'s `query_json_schema` die with
-/// `InvalidRequest("GeminiCodec does not encode response_format yet")`.
+/// Gemini rows retain structured output now that the SDK codec encodes it.
 #[test]
-fn a_gemini_row_is_not_marked_structured_output_capable() {
+fn a_gemini_row_is_marked_structured_output_capable() {
     let providers = llm_runtime::builtin_presets().providers;
     let gemini = providers
         .iter()
@@ -111,8 +106,7 @@ fn a_gemini_row_is_not_marked_structured_output_capable() {
         .expect("gemini-3.1-pro-preview present in the vendored gemini slice");
     assert!(
         pro.capabilities.structured_output,
-        "sanity: this test is only meaningful while the MODEL bit is true — \
-that mismatch with the codec is the whole defect"
+        "the Gemini model must advertise structured output"
     );
     let row = desktop_fusion_catalog_row(
         &gemini.profile_name,
@@ -121,9 +115,8 @@ that mismatch with the codec is the whole defect"
         &gemini.protocol,
     );
     assert!(
-        !row.structured_output,
-        "a GeminiGenerateContent row must NOT claim structured_output: its codec \
-rejects every response_format, so electing it analyst fails only AFTER the panels have spent"
+        row.structured_output,
+        "the SDK Gemini codec encodes structured output for a capable model"
     );
 }
 
@@ -168,12 +161,9 @@ fn no_judge_eligible_row_claims_structured_output_on_a_non_encoding_codec() {
         );
 }
 
-/// Both halves of the AND must be load-bearing: an encoding codec must
-/// keep a `structured_output: false` model false (the codec bit cannot
-/// manufacture a capability), and a non-encoding codec must not be
-/// rescued by a true model bit.
+/// Codec support must preserve capable models and leave incapable models false.
 #[test]
-fn protocol_gate_and_model_bit_are_both_required() {
+fn supported_protocols_preserve_the_model_capability_bit() {
     let mut caps = llm_runtime::Capabilities::default();
     caps.structured_output = true;
     let capable = llm_runtime::ModelProfile {
@@ -182,7 +172,7 @@ fn protocol_gate_and_model_bit_are_both_required() {
         billing_model: "m".to_string(),
         aliases: Vec::new(),
         description: None,
-        metadata: platform_api::ModelMetadata::default(),
+        metadata: lingxi_core::host::ModelMetadata::default(),
         capabilities: caps,
     };
     let mut incapable = capable.clone();
@@ -191,23 +181,6 @@ fn protocol_gate_and_model_bit_are_both_required() {
     for family in [
         llm_runtime::ProtocolFamily::GeminiGenerateContent,
         llm_runtime::ProtocolFamily::VertexGemini,
-    ] {
-        assert!(
-            !family.encodes_response_format(),
-            "{family:?} delegates to GeminiCodec, which rejects response_format"
-        );
-        assert!(
-            !desktop_fusion_catalog_row(
-                "p",
-                &capable,
-                platform_api::ModelBillingMode::PerToken,
-                &family,
-            )
-            .structured_output,
-            "{family:?} must gate the row false even with capabilities.structured_output = true"
-        );
-    }
-    for family in [
         llm_runtime::ProtocolFamily::AnthropicMessages,
         llm_runtime::ProtocolFamily::OpenAiResponses,
         llm_runtime::ProtocolFamily::OpenAiChat,
@@ -224,7 +197,7 @@ fn protocol_gate_and_model_bit_are_both_required() {
             desktop_fusion_catalog_row(
                 "p",
                 &capable,
-                platform_api::ModelBillingMode::PerToken,
+                lingxi_core::host::ModelBillingMode::PerToken,
                 &family,
             )
             .structured_output,
@@ -234,7 +207,7 @@ fn protocol_gate_and_model_bit_are_both_required() {
             !desktop_fusion_catalog_row(
                 "p",
                 &incapable,
-                platform_api::ModelBillingMode::PerToken,
+                lingxi_core::host::ModelBillingMode::PerToken,
                 &family,
             )
             .structured_output,

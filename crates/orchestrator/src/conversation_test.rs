@@ -26,7 +26,9 @@ mod audio_schema_projection_tests;
 mod durable_cost_handoff_tests;
 
 impl ConversationOrchestrator {
-    async fn restore_post_compact_attachments(&self) -> Vec<protocol::ConversationMessage> {
+    async fn restore_post_compact_attachments(
+        &self,
+    ) -> Vec<lingxi_core::types::ConversationMessage> {
         self.restore_post_compact_attachments_against(&[]).await
     }
 }

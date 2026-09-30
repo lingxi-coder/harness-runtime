@@ -50,11 +50,11 @@ use crate::response::{
 };
 use crate::ssrf_guard::SsrfGuard;
 use async_trait::async_trait;
-use mobile_linux_api::ProcessError;
-use platform_api::subagent_spawn::SubagentSpawner;
-use platform_api::{
+use lingxi_core::host::subagent_spawn::SubagentSpawner;
+use lingxi_core::host::{
     HttpTransport, OutputStream, ProcessCommand, ProcessRunner, RuntimeSpawner, Sandbox,
 };
+use mobile_linux_api::ProcessError;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -212,8 +212,10 @@ pub trait BuiltinHookHandler: Send + Sync {
 ///
 /// The `http` transport is shared with the rest of the engine so requests
 /// flow through the same retry / telemetry plumbing.
-type AgentPromptTranscripts =
-    HashMap<(protocol::SessionId, protocol::AgentId), crate::PromptHookTranscript>;
+type AgentPromptTranscripts = HashMap<
+    (lingxi_core::types::SessionId, lingxi_core::types::AgentId),
+    crate::PromptHookTranscript,
+>;
 
 pub struct HookExecutorImpl {
     agent_prompt_transcripts: std::sync::Mutex<AgentPromptTranscripts>,
@@ -240,7 +242,7 @@ pub struct HookExecutorImpl {
     /// `stderr: "Hook {id} failed: command executor not wired"`.
     process: Option<Arc<dyn ProcessRunner>>,
     /// Optional sandbox — required alongside `process` to mint the
-    /// [`platform_api::SandboxedCommand`] the runner accepts. Attached via
+    /// [`lingxi_core::host::SandboxedCommand`] the runner accepts. Attached via
     /// [`Self::with_process_runner`].
     sandbox: Option<Arc<dyn Sandbox>>,
     /// Optional name-addressed MCP invoker for `mcp_tool` hooks.
@@ -491,7 +493,7 @@ impl HookExecutorImpl {
 
     /// Attach a [`ProcessRunner`] + [`Sandbox`] so the `Command` arm can spawn
     /// child processes. Both are required: the runner only accepts a
-    /// [`platform_api::SandboxedCommand`], which only the sandbox can mint (the
+    /// [`lingxi_core::host::SandboxedCommand`], which only the sandbox can mint (the
     /// D2 / spec A1 sandbox-decision invariant). Without this, `Command`
     /// hooks return a structured "not wired" error.
     #[must_use]
@@ -565,7 +567,7 @@ impl HookExecutorImpl {
     /// (claude's `clearSessionHooks` in the `runAgent` finally).
     pub async fn register_agent_hooks(
         &self,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
         hooks: &[HookDefinition],
         is_agent: bool,
     ) {
@@ -578,14 +580,14 @@ impl HookExecutorImpl {
     /// Remove every frontmatter hook scoped to `agent_id` (G4 — claude
     /// `clearSessionHooks(rootSetAppState, agentId)`, runAgent.ts finally).
     /// Returns the number of hooks dropped.
-    pub async fn clear_agent_hooks(&self, agent_id: protocol::AgentId) -> usize {
+    pub async fn clear_agent_hooks(&self, agent_id: lingxi_core::types::AgentId) -> usize {
         self.registry.write().await.clear_agent_hooks(agent_id)
     }
 
     /// Insert or replace one named runtime hook scoped to `session_id`.
     pub async fn upsert_session_named_hook(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         name: String,
         hook: HookDefinition,
     ) -> Option<HookDefinition> {
@@ -598,7 +600,7 @@ impl HookExecutorImpl {
     /// Borrow a named runtime hook scoped to `session_id`, if present.
     pub async fn get_session_named_hook(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         name: &str,
     ) -> Option<HookDefinition> {
         self.registry
@@ -611,7 +613,7 @@ impl HookExecutorImpl {
     /// Remove one named runtime hook scoped to `session_id`.
     pub async fn remove_session_named_hook(
         &self,
-        session_id: protocol::SessionId,
+        session_id: lingxi_core::types::SessionId,
         name: &str,
     ) -> Option<HookDefinition> {
         self.registry
@@ -624,8 +626,8 @@ impl HookExecutorImpl {
     /// race the transcript writer or accidentally evaluate the parent history.
     pub fn publish_agent_prompt_transcript(
         &self,
-        session_id: protocol::SessionId,
-        agent_id: protocol::AgentId,
+        session_id: lingxi_core::types::SessionId,
+        agent_id: lingxi_core::types::AgentId,
         transcript: crate::PromptHookTranscript,
     ) {
         self.agent_prompt_transcripts
@@ -636,8 +638,8 @@ impl HookExecutorImpl {
 
     pub fn take_agent_prompt_transcript(
         &self,
-        session_id: protocol::SessionId,
-        agent_id: protocol::AgentId,
+        session_id: lingxi_core::types::SessionId,
+        agent_id: lingxi_core::types::AgentId,
     ) -> Option<crate::PromptHookTranscript> {
         self.agent_prompt_transcripts
             .lock()
@@ -646,7 +648,7 @@ impl HookExecutorImpl {
     }
 
     /// Remove every named runtime hook scoped to `session_id`.
-    pub async fn clear_session_hooks(&self, session_id: protocol::SessionId) -> usize {
+    pub async fn clear_session_hooks(&self, session_id: lingxi_core::types::SessionId) -> usize {
         self.agent_prompt_transcripts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -867,7 +869,7 @@ impl HookExecutorImpl {
         &self,
         event: HookEvent,
         ctx: HookContext,
-        excluded: Option<protocol::HookId>,
+        excluded: Option<lingxi_core::types::HookId>,
     ) -> AggregateHookResult {
         // #41 runner-head gate (`h$`): `policySettings.disableAllHooks` skips
         // ALL hooks before any matching/dispatch.
@@ -1004,7 +1006,7 @@ impl HookExecutorImpl {
         &self,
         event: HookEvent,
         ctx: HookContext,
-        agent_id: protocol::AgentId,
+        agent_id: lingxi_core::types::AgentId,
     ) -> AggregateHookResult {
         // #41 runner-head gate (`h$`).
         if let Some(skipped) = self.policy_disable_gate(&event) {
@@ -1078,7 +1080,7 @@ impl HookExecutorImpl {
         &self,
         event: HookEvent,
         mut ctx: HookContext,
-        exclude_agent_id: protocol::AgentId,
+        exclude_agent_id: lingxi_core::types::AgentId,
     ) -> AggregateHookResult {
         if matches!(&event, HookEvent::SubagentStop { agent_id, .. } if *agent_id == exclude_agent_id)
         {
@@ -1795,11 +1797,11 @@ impl Dispatcher {
                 let progress_frames = self
                     .begin_hook_progress_frames(hook, &format!("{:?}", event.event_type()))
                     .await;
-                let live_observer: Option<Arc<dyn platform_api::HookOutputObserver>> =
+                let live_observer: Option<Arc<dyn lingxi_core::host::HookOutputObserver>> =
                     progress_frames.as_ref().map(|frames| {
                         Arc::new(HookLiveOutputObserver {
                             buf: frames.buf.clone(),
-                        }) as Arc<dyn platform_api::HookOutputObserver>
+                        }) as Arc<dyn lingxi_core::host::HookOutputObserver>
                     });
                 // Runtime `{"async":true}` first-line detection (claude-code
                 // `hooks.ts:1117-1166`): a hook whose first stdout line is that
@@ -1820,7 +1822,7 @@ impl Dispatcher {
                     )
                     .await
                 {
-                    Ok(platform_api::HookRunOutcome::Backgrounded {
+                    Ok(lingxi_core::host::HookRunOutcome::Backgrounded {
                         async_timeout,
                         output,
                     }) => {
@@ -1899,7 +1901,7 @@ impl Dispatcher {
                             false,
                         )
                     }
-                    Ok(platform_api::HookRunOutcome::Completed(output)) => {
+                    Ok(lingxi_core::host::HookRunOutcome::Completed(output)) => {
                         map_command_output(hook, Ok(output), expected_event)
                     }
                     Err(e) => map_command_output(hook, Err(e), expected_event),
@@ -2464,13 +2466,13 @@ impl HookLiveOutput {
     }
 }
 
-/// SH-07 — the [`platform_api::HookOutputObserver`] the runner pushes chunks into.
+/// SH-07 — the [`lingxi_core::host::HookOutputObserver`] the runner pushes chunks into.
 struct HookLiveOutputObserver {
     buf: Arc<std::sync::Mutex<HookLiveOutput>>,
 }
 
 #[async_trait]
-impl platform_api::HookOutputObserver for HookLiveOutputObserver {
+impl lingxi_core::host::HookOutputObserver for HookLiveOutputObserver {
     async fn on_chunk(&self, stdout_delta: &[u8], stderr_delta: &[u8]) {
         let mut live = self.buf.lock().unwrap_or_else(|e| e.into_inner());
         if !stdout_delta.is_empty() {
@@ -2489,7 +2491,7 @@ impl platform_api::HookOutputObserver for HookLiveOutputObserver {
 struct HookProgressFrames {
     buf: Arc<std::sync::Mutex<HookLiveOutput>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
-    handle: Option<platform_api::BackgroundTaskHandle>,
+    handle: Option<lingxi_core::host::BackgroundTaskHandle>,
 }
 
 /// SH-06 — `Otr()` (oracle 2.1.238 @ 284437507):
@@ -3607,6 +3609,7 @@ fn process_error_outcome(hook: &HookDefinition, e: &ProcessError) -> (HookResult
 fn map_command_output(
     hook: &HookDefinition,
     run: Result<mobile_linux_api::ProcessOutput, ProcessError>,
+
     expected_event: &'static str,
 ) -> (HookResult, bool) {
     match run {
@@ -3917,7 +3920,7 @@ fn attachment_identity(event: &HookEvent) -> HookAttachmentIdentity {
         hook_name: attachment::hook_name_for_event(event),
         hook_event: format!("{:?}", event.event_type()),
         tool_use_id: attachment::tool_use_id_for_event(event)
-            .unwrap_or_else(|| protocol::HookId::new().as_uuid().to_string()),
+            .unwrap_or_else(|| lingxi_core::types::HookId::new().as_uuid().to_string()),
     }
 }
 
@@ -4191,7 +4194,7 @@ mod executor_test;
 /// the port keeps that exact spelling rather than the usual truthy allowlist.
 #[must_use]
 pub fn eval_confined_session() -> bool {
-    platform_api::env::is_eval_confined_session()
+    lingxi_core::host::env::is_eval_confined_session()
 }
 
 // Hook-run transcript attachments (`hook_success` / `hook_non_blocking_error` /
@@ -4204,12 +4207,12 @@ mod attachment_wiring_tests {
     use crate::definition::{HookDefinition, HookSource};
     use crate::events::HookEventType;
     use crate::registry::HookRegistry;
-    use mobile_linux_api::{ProcessOutput, SandboxBackend};
-    use platform_api::{
+    use lingxi_core::host::{
         ProcessHandle, RuntimeError, SandboxCapability, SandboxPolicy, SandboxedCommand,
         SandboxedTag,
     };
-    use protocol::{HookId, ToolUseId};
+    use lingxi_core::types::{HookId, ToolUseId};
+    use mobile_linux_api::{ProcessOutput, SandboxBackend};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -4269,7 +4272,7 @@ mod attachment_wiring_tests {
             &self,
             cmd: ProcessCommand,
             _policy: &SandboxPolicy,
-        ) -> Result<SandboxedCommand, platform_api::SandboxError> {
+        ) -> Result<SandboxedCommand, lingxi_core::host::SandboxError> {
             Ok(SandboxedCommand::__new_sandboxed(
                 cmd,
                 SandboxedTag::BypassAuditedWithReason {
@@ -4289,7 +4292,7 @@ mod attachment_wiring_tests {
             SandboxCapability {
                 available: true,
                 reason: None,
-                features: platform_api::SandboxFeatures::default(),
+                features: lingxi_core::host::SandboxFeatures::default(),
             }
         }
     }
@@ -4301,13 +4304,13 @@ mod attachment_wiring_tests {
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, RuntimeError> {
             Err(RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
         async fn cancel(
             &self,
-            _handle: &platform_api::BackgroundTaskHandle,
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
         ) -> Result<(), RuntimeError> {
             Ok(())
         }
@@ -4318,15 +4321,19 @@ mod attachment_wiring_tests {
     impl HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<protocol::HttpResponse, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::types::HttpResponse, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
         async fn stream_sse(
             &self,
-            _req: protocol::HttpRequest,
-        ) -> Result<platform_api::http::SseStream, platform_api::HttpError> {
-            Err(platform_api::HttpError::InvalidRequest("unused".into()))
+            _req: lingxi_core::types::HttpRequest,
+        ) -> Result<lingxi_core::host::http::SseStream, lingxi_core::host::HttpError> {
+            Err(lingxi_core::host::HttpError::InvalidRequest(
+                "unused".into(),
+            ))
         }
     }
 
@@ -4343,7 +4350,7 @@ mod attachment_wiring_tests {
                 cwd: None,
                 shell: None,
             },
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: Some(Duration::from_secs(90)),
             priority: 0,

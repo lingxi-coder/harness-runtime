@@ -65,25 +65,25 @@ pub fn load_file_skill_sections_with_roots(
     let managed_rows = managed_skills_dir.as_ref().map_or_else(Vec::new, |dir| {
         load_skills_from_dirs(
             std::slice::from_ref(dir),
-            SkillSource::Settings(protocol::SettingsScope::Managed),
+            SkillSource::Settings(lingxi_core::types::SettingsScope::Managed),
             &mut seen,
         )
     });
     let project_dirs = project_skills_dirs(cwd, lingxi_home);
     let project_rows = load_skills_from_dirs(
         &project_dirs,
-        SkillSource::Settings(protocol::SettingsScope::Project),
+        SkillSource::Settings(lingxi_core::types::SettingsScope::Project),
         &mut seen,
     );
     let user_skills_dir = lingxi_home.join("skills");
     let user_rows = load_skills_from_dirs(
         std::slice::from_ref(&user_skills_dir),
-        SkillSource::Settings(protocol::SettingsScope::User),
+        SkillSource::Settings(lingxi_core::types::SettingsScope::User),
         &mut seen,
     );
     let additional_rows = load_skills_from_dirs(
         additional_skill_dirs,
-        SkillSource::Settings(protocol::SettingsScope::Project),
+        SkillSource::Settings(lingxi_core::types::SettingsScope::Project),
         &mut seen,
     );
 

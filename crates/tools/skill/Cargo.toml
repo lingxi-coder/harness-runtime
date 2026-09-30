@@ -7,10 +7,9 @@ license.workspace = true
 
 [dependencies]
 mobile-linux-api.workspace = true
+core = { path = "../../core" }
 tool-api = { path = "../../tool-api" }
-platform-api = { path = "../../platform-api" }
 session = { path = "../../session" }
-protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
 # SKILLEXEC.3: `substitute_arguments_faithful` expands the skill body's

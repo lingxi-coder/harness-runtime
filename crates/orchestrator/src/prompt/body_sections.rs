@@ -133,12 +133,12 @@ pub(crate) const TURN_UPDATES_SECTION: &str = "Before you start, say in a line w
 /// under the oracle's spelling, like every other `CLAUDE_CODE_*` knob the port
 /// honours (`CLAUDE_CODE_SILENT_TURN_REMINDER`, `CLAUDE_CODE_TOTAL_TOKENS_REMINDER`).
 fn turn_updates_enabled() -> bool {
-    platform_api::env::is_env_truthy(std::env::var("CLAUDE_CODE_TURN_UPDATES").ok().as_deref())
+    lingxi_core::host::env::is_env_truthy(std::env::var("CLAUDE_CODE_TURN_UPDATES").ok().as_deref())
 }
 
 #[must_use]
 fn anti_verbosity_section(model: &str) -> String {
-    use platform_api::model_capabilities::{prompt_profile_for, PromptProfile};
+    use lingxi_core::host::model_capabilities::{prompt_profile_for, PromptProfile};
 
     // `T9T`'s FIRST branch, ahead of every model check.
     if turn_updates_enabled() {
@@ -162,7 +162,7 @@ fn anti_verbosity_section(model: &str) -> String {
 #[must_use]
 pub(crate) fn is_communicating_model(model: &str) -> bool {
     matches!(
-        platform_api::model_capabilities::normalize_model_id(model).as_str(),
+        lingxi_core::host::model_capabilities::normalize_model_id(model).as_str(),
         "claude-fable-5-1" | "claude-mythos-5-1"
     )
 }
@@ -258,7 +258,7 @@ fn session_guidance(
     if has_agent_tool && !lean {
         if fork_mode_enabled {
             bullets.push("Calling Agent with subagent_type: \"fork\" creates a fork \u{2014} it inherits your full conversation context, runs in the background, and keeps its tool output out of your context \u{2014} so you can keep chatting with the user while it works. Reach for it when research or multi-step implementation work would otherwise fill your context with raw output you won't need again. Other subagent_type values start fresh agents with no context. **If you ARE the fork** \u{2014} execute directly; do not re-delegate.".to_string());
-        } else if platform_api::live_sessions::subagent_steer_is_default() {
+        } else if lingxi_core::host::live_sessions::subagent_steer_is_default() {
             bullets.push("Use the Agent tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.".to_string());
         } else {
             // 2.1.232 `N7()!=="default"` short arm.
@@ -362,9 +362,9 @@ const CORRECTIONS_SECTION: &str = "# Corrections\nAvoid unnecessary or excessive
 /// two feature gates that both default false, and this build has no gate
 /// client — so this capability IS the condition.
 fn has_opus_5_prompt_bundle(model: &str) -> bool {
-    platform_api::model_capabilities::has_capability(
+    lingxi_core::host::model_capabilities::has_capability(
         model,
-        platform_api::model_capabilities::ModelCapability::Opus5PromptBundle,
+        lingxi_core::host::model_capabilities::ModelCapability::Opus5PromptBundle,
     )
 }
 
@@ -396,21 +396,21 @@ const TOOL_PARAM_JSON_SECTION: &str = "Object and array parameter values must be
 ///   so this whole arm is off in a stock install regardless of the model.
 ///   `Vpe` is the same predicate the `fable_identity` slot uses
 ///   (`tBr(i)||Vpe(t)?C9T:null`), which the port models as the
-///   [`platform_api::model_capabilities::ModelCapability::Fable5Mitigations`]
+///   [`lingxi_core::host::model_capabilities::ModelCapability::Fable5Mitigations`]
 ///   capability; the flag stand-in is `LINGXI_SILENT_HARBOR`.
 ///
 /// Both arms are therefore OFF by default and this section is INERT — the
 /// system prompt is byte-identical to before. It exists so that flipping either
 /// gate matches upstream.
 fn tool_param_json_enabled(model: &str) -> bool {
-    let env = |key: &str| platform_api::env::is_env_truthy(std::env::var(key).ok().as_deref());
+    let env = |key: &str| lingxi_core::host::env::is_env_truthy(std::env::var(key).ok().as_deref());
     if env("LINGXI_TOOL_PARAM_STRICTNESS") {
         return true;
     }
     env("LINGXI_SILENT_HARBOR")
-        && platform_api::model_capabilities::has_capability(
+        && lingxi_core::host::model_capabilities::has_capability(
             model,
-            platform_api::model_capabilities::ModelCapability::Fable5Mitigations,
+            lingxi_core::host::model_capabilities::ModelCapability::Fable5Mitigations,
         )
 }
 
@@ -426,7 +426,7 @@ fn act_dont_rederive_enabled() -> bool {
     match std::env::var("LINGXI_ACT_DONT_REDERIVE")
         .or_else(|_| std::env::var("CLAUDE_CODE_ACT_DONT_REDERIVE"))
     {
-        Ok(v) => platform_api::env::is_env_truthy(Some(&v)),
+        Ok(v) => lingxi_core::host::env::is_env_truthy(Some(&v)),
         Err(_) => true,
     }
 }
@@ -450,7 +450,7 @@ fn lean_body(output_style_active: bool, model: &str) -> String {
         "with software engineering tasks."
     };
     let system_turns =
-        if platform_api::model_capabilities::normalize_model_id(model) == "claude-opus-4-8" {
+        if lingxi_core::host::model_capabilities::normalize_model_id(model) == "claude-opus-4-8" {
             LEAN_REMINDER_TAGS
         } else {
             LEAN_SYSTEM_TURNS
@@ -479,8 +479,8 @@ fn lean_body(output_style_active: bool, model: &str) -> String {
 /// routes through the model CAPABILITY registry (`LN(t,"lean_prompt")`), not a
 /// model-name pattern.
 fn is_lean_prompt_model(model: &str) -> bool {
-    platform_api::model_capabilities::prompt_profile_for(model)
-        == platform_api::model_capabilities::PromptProfile::ClaudeLean
+    lingxi_core::host::model_capabilities::prompt_profile_for(model)
+        == lingxi_core::host::model_capabilities::PromptProfile::ClaudeLean
 }
 
 fn opening_paragraph(output_style_active: bool) -> String {
@@ -639,9 +639,9 @@ pub fn format(
     if lean {
         sections.push(action_caution_section(model));
     }
-    if platform_api::model_capabilities::has_capability(
+    if lingxi_core::host::model_capabilities::has_capability(
         model,
-        platform_api::model_capabilities::ModelCapability::Fable5Mitigations,
+        lingxi_core::host::model_capabilities::ModelCapability::Fable5Mitigations,
     ) {
         sections.push(FABLE_IDENTITY_SECTION.to_string());
     }
@@ -691,7 +691,7 @@ pub fn post_context_sections(model: &str, output_style_active: bool) -> Vec<Stri
             "{CORRECTIONS_SECTION}\n\n{OPUS_5_TERMINAL_RESTRICTIONS}"
         ));
     } else if matches!(
-        platform_api::model_capabilities::normalize_model_id(model).as_str(),
+        lingxi_core::host::model_capabilities::normalize_model_id(model).as_str(),
         "claude-fable-5-1" | "claude-mythos-5-1"
     ) {
         sections.push(FABLE_MYTHOS_MITIGATIONS.to_string());

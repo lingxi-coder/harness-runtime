@@ -197,6 +197,6 @@ fn shell_tools_parity() {
 
     // Sandbox refusal literal — sourced from M2-04 lock at
     // SandboxError::Unsupported display.
-    let err = platform_api::sandbox::SandboxError::Unsupported;
+    let err = lingxi_core::host::sandbox::SandboxError::Unsupported;
     assert_eq!(f.sandbox_refusal_windows_literal, err.to_string());
 }

@@ -65,8 +65,8 @@ use tool_api::builtin_context::BuiltinToolContext;
 /// the BASH.4 persistent-cwd `pwd -P` readback is omitted (one-shot expansion
 /// keeps no shell-cwd state).
 pub struct PromptShellRunner {
-    process: Arc<dyn platform_api::process::ProcessRunner>,
-    sandbox: Arc<dyn platform_api::sandbox::Sandbox>,
+    process: Arc<dyn lingxi_core::host::process::ProcessRunner>,
+    sandbox: Arc<dyn lingxi_core::host::sandbox::Sandbox>,
     workspace: std::path::PathBuf,
     // ===== Sandbox-decision inputs, captured from the `BuiltinToolContext`
     // (mirrors what `BashTool::call` reads off `self.ctx`). 1:1 with claude-code
@@ -128,11 +128,11 @@ impl ShellSnapshot {
     async fn ensure(
         &self,
         shell_path: &str,
-        process: &dyn platform_api::process::ProcessRunner,
-        sandbox: &dyn platform_api::sandbox::Sandbox,
+        process: &dyn lingxi_core::host::process::ProcessRunner,
+        sandbox: &dyn lingxi_core::host::sandbox::Sandbox,
         workspace: &Path,
     ) -> Option<&Path> {
-        use platform_api::sandbox::ProcessCommand;
+        use lingxi_core::host::sandbox::ProcessCommand;
 
         let ready = self
             .initialized
@@ -267,7 +267,7 @@ impl ShellRunner for PromptShellRunner {
         command: &str,
         _shell: Option<FrontmatterShell>,
     ) -> Result<ShellOut, ShellRunError> {
-        use platform_api::sandbox::ProcessCommand;
+        use lingxi_core::host::sandbox::ProcessCommand;
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
 
         if self.mobile_shell && !self.shell_enabled {
@@ -328,14 +328,18 @@ impl ShellRunner for PromptShellRunner {
             // string bash surfaces). See the struct doc.
             SandboxDecision::Sandbox { policy: _ } => {
                 // Wrap through the injected async `SandboxRunner` (same seam the
-                // Bash tool uses). The default `LegacyWrapRunner` forwards to the
-                // sync `wrap_with_sandbox` (ignoring `bin_shell`/`cwd`), so this
-                // is byte-identical to the previous direct call.
+                // Bash tool uses), rooted at the session workspace the prompt
+                // shell runs in.
+                let rooted_runtime = sandbox::root::rooted_at(
+                    &self.sandbox_runtime,
+                    &self.workspace,
+                    sandbox::root::SandboxRootScope::Session,
+                );
                 match self
                     .sandbox_runner
                     .wrap(
                         &spawn_cmd,
-                        &self.sandbox_runtime,
+                        &rooted_runtime,
                         self.platform,
                         Some(shell_path),
                         Some(self.workspace.as_path()),
@@ -373,7 +377,7 @@ impl ShellRunner for PromptShellRunner {
             stdin: None,
         };
         let sandboxed = if self.force_platform_sandbox {
-            let policy = platform_api::sandbox::SandboxPolicy {
+            let policy = lingxi_core::host::sandbox::SandboxPolicy {
                 network: mobile_linux_api::NetworkPolicy::Disabled,
                 writable_paths: vec![],
                 denied_paths: vec![],
@@ -450,7 +454,7 @@ struct PolicyShellPermissionGate {
     mode: PermissionMode,
     /// The session's enforcing gate. When present and rule-aware, this is the
     /// source of truth for the LIVE mode and `updatedPermissions` overlay.
-    live_gate: Option<Arc<dyn platform_api::permission_gate::PermissionGate>>,
+    live_gate: Option<Arc<dyn lingxi_core::host::permission_gate::PermissionGate>>,
     /// Frontmatter allow rules injected only for this prompt command.
     transient_allow_rules: Vec<String>,
     /// Actual registered command tool name (`Shell` on mobile, otherwise the
@@ -490,10 +494,10 @@ impl ShellPermissionGate for PolicyShellPermissionGate {
             )
         }) {
             return match decision {
-                platform_api::permission_gate::NonInteractivePermissionDecision::Allow => {
+                lingxi_core::host::permission_gate::NonInteractivePermissionDecision::Allow => {
                     ShellPermissionDecision::Allow
                 }
-                platform_api::permission_gate::NonInteractivePermissionDecision::Deny {
+                lingxi_core::host::permission_gate::NonInteractivePermissionDecision::Deny {
                     reason,
                 } => ShellPermissionDecision::Deny { message: reason },
             };
@@ -661,14 +665,14 @@ pub fn build_prompt_shell_provider(ctx: &BuiltinToolContext) -> Arc<dyn ShellExp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mobile_linux_api::SandboxBackend;
-    use mobile_linux_api::{ProcessError, ProcessOutput};
-    use permission::filesystem::FsRoots;
-    use platform_api::process::{ProcessHandle, ProcessRunner};
-    use platform_api::sandbox::{
+    use lingxi_core::host::process::{ProcessHandle, ProcessRunner};
+    use lingxi_core::host::sandbox::{
         Sandbox, SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand,
         SandboxedTag,
     };
+    use mobile_linux_api::SandboxBackend;
+    use mobile_linux_api::{ProcessError, ProcessOutput};
+    use permission::filesystem::FsRoots;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -700,7 +704,7 @@ mod tests {
         }
         fn prepare(
             &self,
-            cmd: platform_api::sandbox::ProcessCommand,
+            cmd: lingxi_core::host::sandbox::ProcessCommand,
             policy: &SandboxPolicy,
         ) -> Result<SandboxedCommand, SandboxError> {
             self.prepare_calls.fetch_add(1, Ordering::SeqCst);
@@ -714,7 +718,7 @@ mod tests {
         }
         fn bypass_with_audit(
             &self,
-            cmd: platform_api::sandbox::ProcessCommand,
+            cmd: lingxi_core::host::sandbox::ProcessCommand,
             reason: &str,
         ) -> SandboxedCommand {
             let _ = reason;
@@ -953,13 +957,13 @@ mod tests {
     fn mobile_prompt_commands_authorize_as_shell_not_bash() {
         struct RecordingGate(Mutex<Vec<String>>);
         #[async_trait]
-        impl platform_api::permission_gate::PermissionGate for RecordingGate {
+        impl lingxi_core::host::permission_gate::PermissionGate for RecordingGate {
             async fn check(
                 &self,
                 _tool_name: &str,
                 _input: &serde_json::Value,
-            ) -> platform_api::permission_gate::PermissionDecision {
-                platform_api::permission_gate::PermissionDecision::Allow
+            ) -> lingxi_core::host::permission_gate::PermissionDecision {
+                lingxi_core::host::permission_gate::PermissionDecision::Allow
             }
 
             fn check_noninteractive_with_allow_rules(
@@ -967,10 +971,10 @@ mod tests {
                 tool_name: &str,
                 _input: &serde_json::Value,
                 _allow_rules: &[String],
-            ) -> Option<platform_api::permission_gate::NonInteractivePermissionDecision>
+            ) -> Option<lingxi_core::host::permission_gate::NonInteractivePermissionDecision>
             {
                 self.0.lock().unwrap().push(tool_name.to_string());
-                Some(platform_api::permission_gate::NonInteractivePermissionDecision::Allow)
+                Some(lingxi_core::host::permission_gate::NonInteractivePermissionDecision::Allow)
             }
         }
 

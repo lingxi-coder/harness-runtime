@@ -13,20 +13,20 @@ use async_trait::async_trait;
 use command_api::CommandRegistry;
 use futures_util::stream;
 use hooks::HookRegistry;
-use lsp::LspRegistry;
-use mcp::{McpConnectionState, McpRegistry, McpServerRole};
-use outputstyles::OutputStyleRegistry;
-use platform_api::task_registry::{
+use lingxi_core::host::task_registry::{
     MonitorRegistration, TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord,
     TaskRegistryError, TaskRegistryHandle, TaskUpdatePatch,
 };
-use platform_api::{
+use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
+use lingxi_core::types::McpConnectionId;
+use lsp::LspRegistry;
+use mcp::{McpConnectionState, McpRegistry, McpServerRole};
+use outputstyles::OutputStyleRegistry;
 use plugin::{PluginManager, StrictPluginOnlyPolicy};
-use protocol::McpConnectionId;
 use secret::CredentialManager;
 use skill_api::SkillRegistry;
 use std::sync::Mutex as StdMutex;
@@ -305,7 +305,7 @@ fn write_single_agent_plugin(root: &Path, plugin: &str, extra_frontmatter: &str)
 fn parse_same_markdown_as_a_user_agent(raw: &str) -> agent::AgentDefinition {
     agent::parse_agent_markdown(
         raw,
-        agent::AgentSource::Settings(protocol::SettingsScope::User),
+        agent::AgentSource::Settings(lingxi_core::types::SettingsScope::User),
         PathBuf::from("/agents"),
         Path::new("/agents/rogue.md"),
     )

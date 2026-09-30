@@ -268,7 +268,8 @@ impl AdditionalWorkingDirs {
         self.entries
             .iter()
             .filter(|entry| {
-                entry.source != PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+                entry.source
+                    != PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project)
             })
             .map(|entry| entry.path.clone())
             .collect()
@@ -294,7 +295,7 @@ mod tests {
         let mut dirs = AdditionalWorkingDirs::new();
         dirs.insert(
             "/a",
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         dirs.insert("/b", PermissionRuleSource::CliArg);
         // Re-setting an existing key keeps its POSITION and takes the new source.
@@ -315,12 +316,12 @@ mod tests {
         let dirs = AdditionalWorkingDirs::from_sources([
             (
                 vec!["/from-project"],
-                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             ),
             (vec!["/from-cli"], PermissionRuleSource::CliArg),
             (
                 vec!["/from-local"],
-                PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
             ),
         ]);
         assert_eq!(dirs.paths().len(), 3);

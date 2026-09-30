@@ -5,13 +5,13 @@ use std::sync::Arc;
 struct DenyOneType(&'static str);
 
 #[async_trait]
-impl platform_api::permission_gate::PermissionGate for DenyOneType {
+impl lingxi_core::host::permission_gate::PermissionGate for DenyOneType {
     async fn check(
         &self,
         _name: &str,
         _input: &serde_json::Value,
-    ) -> platform_api::permission_gate::PermissionDecision {
-        platform_api::permission_gate::PermissionDecision::Allow
+    ) -> lingxi_core::host::permission_gate::PermissionDecision {
+        lingxi_core::host::permission_gate::PermissionDecision::Allow
     }
 
     async fn agent_type_deny(&self, agent_type: &str) -> Option<String> {
@@ -31,7 +31,7 @@ impl platform_api::permission_gate::PermissionGate for DenyOneType {
 /// reaches it WITH bypass.
 #[tokio::test]
 async fn a_hook_cannot_rewrite_into_an_agent_type_a_rule_denies() {
-    let gate: Arc<dyn platform_api::permission_gate::PermissionGate> =
+    let gate: Arc<dyn lingxi_core::host::permission_gate::PermissionGate> =
         Arc::new(DenyOneType("dangerous"));
 
     // The rule denies `dangerous`, and the rewrite targets exactly it.

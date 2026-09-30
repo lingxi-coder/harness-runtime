@@ -429,7 +429,7 @@ fn compaction_completed_round_trips() {
 }
 
 /// `ThinkingDelta` — now LIVE-FED (§0.7 follow-up): `event_router` emits it per
-/// `ContentDelta::ThinkingDelta` chunk. The wire shape is unchanged, so the
+/// `HistoryContentDelta::ThinkingDelta` chunk. The wire shape is unchanged, so the
 /// frozen round-trip still holds (the live stream carries `signature: None`).
 #[test]
 fn thinking_delta_round_trips() {

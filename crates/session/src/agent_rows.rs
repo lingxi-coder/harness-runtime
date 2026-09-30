@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
-use platform_api::subagent_spawn::SubagentSpawnRequest;
+use lingxi_core::host::subagent_spawn::SubagentSpawnRequest;
 use serde::{Deserialize, Serialize};
 
 /// Maximum on-disk size of a row. A row is a few KB; anything approaching this
@@ -40,7 +40,7 @@ pub struct ParkedAgentRow {
     pub task_id: String,
     /// The agent id its transcript and sidecars are keyed on.
     #[serde(rename = "agentId")]
-    pub agent_id: protocol::AgentId,
+    pub agent_id: lingxi_core::types::AgentId,
     /// Human-readable description (the task's).
     pub description: String,
     /// The full spawn request, so the rebuilt runner is configured exactly as
@@ -147,7 +147,7 @@ pub async fn list_restorable(subagents_dir: &Path) -> Vec<ParkedAgentRow> {
 pub async fn read_transcript_messages(
     subagents_dir: &Path,
     agent_id: &str,
-) -> Vec<protocol::ConversationMessage> {
+) -> Vec<lingxi_core::types::ConversationMessage> {
     let path = crate::forked_skill::agent_transcript_path(subagents_dir, agent_id);
     let Ok(text) = tokio::fs::read_to_string(&path).await else {
         return Vec::new();
@@ -158,7 +158,9 @@ pub async fn read_transcript_messages(
             serde_json::from_str::<serde_json::Value>(line)
                 .ok()
                 .and_then(|v| v.get("message").cloned())
-                .and_then(|m| serde_json::from_value::<protocol::ConversationMessage>(m).ok())
+                .and_then(|m| {
+                    serde_json::from_value::<lingxi_core::types::ConversationMessage>(m).ok()
+                })
         })
         .collect()
 }
@@ -215,7 +217,7 @@ mod tests {
         }
     }
 
-    fn row(agent_id: protocol::AgentId) -> ParkedAgentRow {
+    fn row(agent_id: lingxi_core::types::AgentId) -> ParkedAgentRow {
         ParkedAgentRow {
             task_id: "a00000001".into(),
             agent_id,
@@ -229,8 +231,10 @@ mod tests {
         let path = crate::forked_skill::agent_transcript_path(dir, agent_id);
         let mut body = String::new();
         for t in texts {
-            let msg =
-                protocol::ConversationMessage::user(protocol::MessageId::new(), (*t).to_string());
+            let msg = lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                (*t).to_string(),
+            );
             let entry = serde_json::json!({
                 "agent_id": agent_id,
                 "timestamp": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
@@ -245,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn a_row_round_trips_its_full_launch_configuration() {
         let dir = tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         let r = row(id);
         write_row(dir.path(), &r).await.unwrap();
 
@@ -264,7 +268,7 @@ mod tests {
     #[tokio::test]
     async fn removing_a_row_makes_the_agent_unrestorable() {
         let dir = tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         write_row(dir.path(), &row(id)).await.unwrap();
         seed_transcript(dir.path(), &id.to_string(), &["hi"]).await;
         assert_eq!(list_restorable(dir.path()).await.len(), 1);
@@ -281,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn a_row_without_a_transcript_is_not_restorable() {
         let dir = tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         write_row(dir.path(), &row(id)).await.unwrap();
         assert!(list_restorable(dir.path()).await.is_empty());
     }
@@ -289,7 +293,7 @@ mod tests {
     #[tokio::test]
     async fn a_malformed_or_oversized_row_is_ignored() {
         let dir = tempdir().unwrap();
-        let id = protocol::AgentId::new().to_string();
+        let id = lingxi_core::types::AgentId::new().to_string();
         seed_transcript(dir.path(), &id, &["hi"]).await;
 
         tokio::fs::write(row_path(dir.path(), &id), "{ not json")
@@ -313,7 +317,7 @@ mod tests {
     #[tokio::test]
     async fn a_symlinked_row_is_rejected() {
         let dir = tempdir().unwrap();
-        let id = protocol::AgentId::new();
+        let id = lingxi_core::types::AgentId::new();
         let real = dir.path().join("real.json");
         tokio::fs::write(&real, serde_json::to_string(&row(id)).unwrap())
             .await
@@ -325,7 +329,7 @@ mod tests {
     #[tokio::test]
     async fn the_transcript_reads_back_as_the_conversation() {
         let dir = tempdir().unwrap();
-        let id = protocol::AgentId::new().to_string();
+        let id = lingxi_core::types::AgentId::new().to_string();
         seed_transcript(dir.path(), &id, &["first", "second"]).await;
         let msgs = read_transcript_messages(dir.path(), &id).await;
         assert_eq!(msgs.len(), 2);
@@ -337,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn a_truncated_final_line_costs_only_that_line() {
         let dir = tempdir().unwrap();
-        let id = protocol::AgentId::new().to_string();
+        let id = lingxi_core::types::AgentId::new().to_string();
         seed_transcript(dir.path(), &id, &["first", "second"]).await;
         let path = crate::forked_skill::agent_transcript_path(dir.path(), &id);
         let mut body = tokio::fs::read_to_string(&path).await.unwrap();
@@ -350,7 +354,8 @@ mod tests {
     #[tokio::test]
     async fn listing_is_deterministic_and_ignores_unrelated_files() {
         let dir = tempdir().unwrap();
-        let mut ids: Vec<protocol::AgentId> = (0..3).map(|_| protocol::AgentId::new()).collect();
+        let mut ids: Vec<lingxi_core::types::AgentId> =
+            (0..3).map(|_| lingxi_core::types::AgentId::new()).collect();
         for id in &ids {
             write_row(dir.path(), &row(*id)).await.unwrap();
             seed_transcript(dir.path(), &id.to_string(), &["hi"]).await;

@@ -3,13 +3,13 @@ use client::adapter::{AdapterPermissionGate, PermissionRequestSink};
 use command_api::model::BuiltinCommandHandler;
 use command_api::{parse_slash_command, CommandRegistry, RegistrySlashDispatcher};
 use cost::CostHydrator;
+use lingxi_core::host::{McpTransport, OrchestratorHandle, OutputStream};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::test_support::{NoOpPermissionGate, StaticMemoryProvider};
 use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
 };
 use permission::gate::PermissionGate;
-use platform_api::{McpTransport, OrchestratorHandle, OutputStream};
 use platform_posix::{
     PosixFileSystem, PosixProcess, PosixRuntime, PosixSandbox, PosixWorktreeManager,
 };
@@ -153,7 +153,7 @@ pub async fn build_with_credential_stack(
     let main_session_id = cfg
         .session_id_override
         .as_deref()
-        .and_then(protocol::SessionId::parse_prefixed)
+        .and_then(lingxi_core::types::SessionId::parse_prefixed)
         .unwrap_or_default();
     let main_session_uuid = main_session_id.as_uuid().to_string();
     // (/rewind) One shared file-history checkpoint store: cloned into the
@@ -175,7 +175,7 @@ pub async fn build_with_credential_stack(
     // durable transaction; legacy/no-persistence hosts keep compatibility.
     let main_jsonl_writer = session::jsonl::writer::JsonlWriter::new(
         main_transcript_path.clone(),
-        Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>,
+        Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn lingxi_core::host::FileSystem>,
     );
     // Resume the live file-history index before the first restored turn. The
     // `/rewind` command can parse snapshots directly from disk, but the edit
@@ -205,7 +205,7 @@ pub async fn build_with_credential_stack(
         subscription,
         resolved_anthropic_api_key: _,
         is_subscriber,
-        openai_oauth_client,
+        openai_oauth_handle,
         pricing,
         chains,
         model_providers,
@@ -293,7 +293,7 @@ pub async fn build_with_credential_stack(
     let interactive_session = session_composition.is_interactive_session();
     let service_built = llm_runtime::ApiService::new_with_routing(
         llm_runtime,
-        llm_transport,
+        llm_transport.clone(),
         subscriber_state,
         UserAgentEnv::from_process_env(),
         env!("CARGO_PKG_VERSION"),
@@ -463,7 +463,7 @@ pub async fn build_with_credential_stack(
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
     // / "default" / unknown ⇒ no section (prompt byte-identical to before).
     orch_cfg.output_style = output_style;
-    platform_api::session_flags::set_show_thinking_summaries(if cfg.restricted {
+    lingxi_core::host::session_flags::set_show_thinking_summaries(if cfg.restricted {
         effective_settings
             .as_ref()
             .and_then(|settings| settings.settings.show_thinking_summaries)
@@ -471,7 +471,7 @@ pub async fn build_with_credential_stack(
     } else {
         load_merged_show_thinking_summaries(&cfg.cwd)
     });
-    platform_api::session_flags::set_agent_push_notif_enabled(if cfg.restricted {
+    lingxi_core::host::session_flags::set_agent_push_notif_enabled(if cfg.restricted {
         effective_settings
             .as_ref()
             .and_then(|settings| settings.settings.agent_push_notif_enabled)
@@ -482,7 +482,7 @@ pub async fn build_with_credential_stack(
     // `settings.taskOutputMaxChars` — the soft cap `TaskOutput` truncates a
     // task's model-facing output to, and the base its result budget is derived
     // from. Published RAW; `tool_task` applies the oracle's `see()` clamp.
-    platform_api::session_flags::set_task_output_max_chars(if cfg.restricted {
+    lingxi_core::host::session_flags::set_task_output_max_chars(if cfg.restricted {
         effective_settings
             .as_ref()
             .and_then(|settings| settings.settings.task_output_max_chars)
@@ -491,7 +491,7 @@ pub async fn build_with_credential_stack(
     });
     // `settings.bashOutputMaxChars` (2.1.261) — the same shape for Bash output.
     // Published RAW; `tool_shell` applies the `see()` clamp.
-    platform_api::session_flags::set_bash_output_max_chars(if cfg.restricted {
+    lingxi_core::host::session_flags::set_bash_output_max_chars(if cfg.restricted {
         effective_settings
             .as_ref()
             .and_then(|settings| settings.settings.bash_output_max_chars)
@@ -516,9 +516,9 @@ pub async fn build_with_credential_stack(
     } else {
         load_merged_attribution(&cfg.cwd)
     };
-    platform_api::session_flags::set_attribution(attribution_commit, attribution_pr);
-    platform_api::session_flags::set_include_co_authored_by(include_co_authored_by);
-    platform_api::session_flags::set_include_git_instructions(if cfg.restricted {
+    lingxi_core::host::session_flags::set_attribution(attribution_commit, attribution_pr);
+    lingxi_core::host::session_flags::set_include_co_authored_by(include_co_authored_by);
+    lingxi_core::host::session_flags::set_include_git_instructions(if cfg.restricted {
         effective_settings
             .as_ref()
             .and_then(|settings| settings.settings.include_git_instructions)
@@ -563,8 +563,8 @@ pub async fn build_with_credential_stack(
     // seed source, so it takes the unseeded form.
     let plans_dir =
         orchestrator::ConversationOrchestrator::plans_dir(&cwd, cfg.plans_directory.as_deref());
-    let plan_slug = platform_api::plan_slug::generate_slug(None, &|candidate| {
-        platform_api::plan_slug::slug_taken_in(&plans_dir, candidate)
+    let plan_slug = lingxi_core::host::plan_slug::generate_slug(None, &|candidate| {
+        lingxi_core::host::plan_slug::slug_taken_in(&plans_dir, candidate)
     });
     let plan_files = std::sync::Arc::new(permission::plan_files::PlanFileMatcher::with_identity(
         permission::plan_files::PlanFileIdentity {
@@ -638,7 +638,7 @@ pub async fn build_with_credential_stack(
     let session_state_manager = {
         let legacy_shadow = legacy_opening_balance.map(|(legacy_session_id, amount)| {
             Arc::new(move |session_id| (session_id == legacy_session_id).then_some(amount))
-                as Arc<dyn Fn(protocol::SessionId) -> Option<u64> + Send + Sync + 'static>
+                as Arc<dyn Fn(lingxi_core::types::SessionId) -> Option<u64> + Send + Sync + 'static>
         });
         session_state::SessionStateManager::new_with_legacy_shadow(
             ledger_home.clone(),
@@ -649,7 +649,7 @@ pub async fn build_with_credential_stack(
         let lease = if let Some(lease) = construction_writer_lease {
             lease
         } else {
-            platform_api::live_sessions::LiveSessionDir::at_live(ledger_home.join("sessions"))
+            lingxi_core::host::live_sessions::LiveSessionDir::at_live(ledger_home.join("sessions"))
                 .claim_session_id(&main_session_id.to_string(), std::process::id())
                 .map_err(|error| BuildError::DurableSession(error.to_string()))?
                 .into_shared()
@@ -732,9 +732,9 @@ pub async fn build_with_credential_stack(
         .recorder_for_session(main_session_id)
         .expect("boot durable session is registered before recorder wiring");
     let fusion_recorder =
-        fusion_recovery_recorder.clone() as Arc<dyn platform_api::FusionRunRecorder>;
-    let fusion_recorder_factory =
-        fusion_recorder_factory_impl.clone() as Arc<dyn platform_api::FusionRunRecorderFactory>;
+        fusion_recovery_recorder.clone() as Arc<dyn lingxi_core::host::FusionRunRecorder>;
+    let fusion_recorder_factory = fusion_recorder_factory_impl.clone()
+        as Arc<dyn lingxi_core::host::FusionRunRecorderFactory>;
 
     // One CostTracker per process. The ephemeral path retains compatibility
     // with hosts that explicitly disabled session persistence; production
@@ -783,7 +783,7 @@ pub async fn build_with_credential_stack(
     //       the legacy stub completion.
     let subagent_pool = Arc::new(agent::StateMachinePool::new(
         Arc::new(PosixRuntime::new()),
-        platform_api::subagent_spawn::max_concurrent_subagents(),
+        lingxi_core::host::subagent_spawn::max_concurrent_subagents(),
     ));
     // Clone the subagent model seam BEFORE it is moved into the spawner — the
     // M10 coordinator teammate handler (T13) hands the SAME seam to every
@@ -860,14 +860,14 @@ pub async fn build_with_credential_stack(
         .with_subagents_dir_for_session_provider(Arc::new({
             let lingxi_home = cfg.lingxi_home.clone();
             let project_cwd = cwd.to_string_lossy().into_owned();
-            move |session_id: protocol::SessionId| {
+            move |session_id: lingxi_core::types::SessionId| {
                 let dir = orchestrator::transcript_paths::subagents_dir(
                     &lingxi_home,
                     &project_cwd,
                     &session_id.as_uuid().to_string(),
                 );
                 std::fs::create_dir_all(&dir).map_err(|error| {
-                    platform_api::subagent_spawn::SubagentSpawnError::Runtime(format!(
+                    lingxi_core::host::subagent_spawn::SubagentSpawnError::Runtime(format!(
                         "cannot create subagent transcript directory {}: {error}",
                         dir.display(),
                     ))
@@ -879,7 +879,7 @@ pub async fn build_with_credential_stack(
         // Without it `agent_transcript_path` pointed at nothing, and a
         // background agent's conversation existed only in memory.
         .with_transcript_fs(
-            Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>
+            Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn lingxi_core::host::FileSystem>
         )
         // Every subagent gets its own passive-diagnostics cursor. Sharing the
         // main registry as a source would make diagnostics first-reader-wins
@@ -953,7 +953,7 @@ pub async fn build_with_credential_stack(
     // the streaming half to make a backgrounded agent "come to rest" + resume.
     let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
     let lifecycle_subagent_spawner = subagent_spawner_arc.clone();
-    let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
+    let subagent_spawner: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
     let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> =
         subagent_spawner_arc.clone();
@@ -981,7 +981,7 @@ pub async fn build_with_credential_stack(
         if let Err(error) = workflow_output_scopes
             .ensure_current(
                 main_session_id,
-                protocol::MessageId::new(),
+                lingxi_core::types::MessageId::new(),
                 orch_cfg.token_budget,
             )
             .await
@@ -1006,7 +1006,7 @@ pub async fn build_with_credential_stack(
         pricing.clone(),
         workflow_output_scopes.clone(),
     );
-    let budget_enforcer: Arc<dyn platform_api::budget::BudgetEnforcerHandle> =
+    let budget_enforcer: Arc<dyn lingxi_core::host::budget::BudgetEnforcerHandle> =
         shared_budget_enforcer;
 
     // (5) Memory filler + the permission gate. The gate is the F2-01 branch
@@ -1173,7 +1173,7 @@ pub async fn build_with_credential_stack(
             matches!(
                 cfg.scope,
                 mcp::ConfigScope::Enterprise
-                    | mcp::ConfigScope::Settings(protocol::SettingsScope::Managed)
+                    | mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed)
             )
         });
     }
@@ -1243,7 +1243,7 @@ pub async fn build_with_credential_stack(
             agent::catalog::policy_agent_dir(
                 &crate::desktop::settings_watch::managed_settings_dir(),
             ),
-            agent::definition::AgentSource::Settings(protocol::SettingsScope::Managed),
+            agent::definition::AgentSource::Settings(lingxi_core::types::SettingsScope::Managed),
         )])
         .await;
         agent::catalog::merge_agents_later_wins(&mut agents, policy_agents);
@@ -1266,8 +1266,8 @@ pub async fn build_with_credential_stack(
     ) = match cfg.cli_agent.clone() {
         Some(w) => (Some(w), None, false),
         None if cfg.session_id_override.is_some() => {
-            let snapshot_fs =
-                Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>;
+            let snapshot_fs = Arc::new(PosixFileSystem::new(cwd.clone()))
+                as Arc<dyn lingxi_core::host::FileSystem>;
             let (persisted, snapshot) = session::jsonl::read_agent_resume_state(
                 &main_transcript_path,
                 snapshot_fs,
@@ -1392,17 +1392,17 @@ pub async fn build_with_credential_stack(
     for (path, source, included) in [
         (
             user_settings_path,
-            hooks::definition::HookSource::Settings(protocol::SettingsScope::User),
+            hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::User),
             incl_user_settings,
         ),
         (
             project_settings_path,
-            hooks::definition::HookSource::Settings(protocol::SettingsScope::Project),
+            hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             incl_project_settings,
         ),
         (
             local_settings_path,
-            hooks::definition::HookSource::Settings(protocol::SettingsScope::Local),
+            hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::Local),
             incl_project_settings,
         ),
     ] {
@@ -1449,7 +1449,7 @@ pub async fn build_with_credential_stack(
         for raw in &managed_settings_for_strict {
             match hooks::parse_hooks_from_settings_json(
                 raw,
-                hooks::definition::HookSource::Settings(protocol::SettingsScope::Managed),
+                hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::Managed),
             ) {
                 Ok(hooks_vec) => {
                     for hook in hooks_vec {
@@ -1579,7 +1579,7 @@ pub async fn build_with_credential_stack(
         // inside the clamp, because `CLAUDE_CODE_EVAL_CONFINED` is a process global
         // and an env-reading gate makes a parallel test suite flaky.
         let _ = subagent_bypass_gates_cell.set(agent::permission_mode::SpawnBypassGates {
-            confined: platform_api::env::is_eval_confined_session(),
+            confined: lingxi_core::host::env::is_eval_confined_session(),
             bypass_disabled,
             restricted: cfg.restricted,
         });
@@ -1637,7 +1637,7 @@ pub async fn build_with_credential_stack(
         // CLI overrides but above settings `defaultMode`. An explicit CLI
         // `default` still suppresses the agent mode, so we must key off the
         // RAW request rather than the resolved `cfg.permission_mode` alone.
-        let env_scrub_active = platform_api::env::is_env_truthy(
+        let env_scrub_active = lingxi_core::host::env::is_env_truthy(
             std::env::var("LINGXI_SUBPROCESS_ENV_SCRUB").ok().as_deref(),
         );
         if mode_preference_allowed && !env_scrub_active && !cfg.restricted {
@@ -1797,7 +1797,7 @@ pub async fn build_with_credential_stack(
     // loaded, so `disableBypassPermissionsMode` is unknown (⇒ `false`). A no-op
     // when the enforcing arm above already filled the cell.
     let _ = subagent_bypass_gates_cell.set(agent::permission_mode::SpawnBypassGates {
-        confined: platform_api::env::is_eval_confined_session(),
+        confined: lingxi_core::host::env::is_eval_confined_session(),
         bypass_disabled: false,
         restricted: cfg.restricted,
     });
@@ -1853,9 +1853,9 @@ pub async fn build_with_credential_stack(
     //         this wiring is a no-op for the common case (byte-identical).
     let hook_runtime = Arc::new(PosixRuntime::new());
     let (async_hook_completion_tx, mut async_hook_completion_rx) =
-        tokio::sync::mpsc::channel::<(protocol::HookId, hooks::HookResult)>(64);
+        tokio::sync::mpsc::channel::<(lingxi_core::types::HookId, hooks::HookResult)>(64);
     let async_hook_registry = Arc::new(hooks::AsyncHookRegistry::new(
-        hook_runtime.clone() as Arc<dyn platform_api::RuntimeSpawner>,
+        hook_runtime.clone() as Arc<dyn lingxi_core::host::RuntimeSpawner>,
         async_hook_completion_tx,
     ));
     // B5 fold-back (claude-code `getAsyncHookResponseAttachments` +
@@ -1927,7 +1927,7 @@ pub async fn build_with_credential_stack(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
             http.clone(),
-            hook_runtime as Arc<dyn platform_api::RuntimeSpawner>,
+            hook_runtime as Arc<dyn lingxi_core::host::RuntimeSpawner>,
         )
         .with_policy_disable_all_hooks(if cfg.restricted {
             effective_settings
@@ -1939,8 +1939,8 @@ pub async fn build_with_credential_stack(
         })
         .with_http_hook_policy(http_hook_urls, http_hook_env_vars)
         .with_process_runner(
-            Arc::new(PosixProcess::new()) as Arc<dyn platform_api::ProcessRunner>,
-            Arc::new(PosixSandbox::new()) as Arc<dyn platform_api::Sandbox>,
+            Arc::new(PosixProcess::new()) as Arc<dyn lingxi_core::host::ProcessRunner>,
+            Arc::new(PosixSandbox::new()) as Arc<dyn lingxi_core::host::Sandbox>,
         )
         .with_prompt_runner(hook_prompt_runner.clone() as Arc<dyn hooks::HookPromptRunner>)
         .with_async_registry(async_hook_registry)
@@ -2018,8 +2018,8 @@ pub async fn build_with_credential_stack(
                 mcp_configs.iter().map(|c| (c.name.as_str(), &c.spec)),
             );
             Arc::new(mcp::XaaIdpConfigProvider::new(
-                http.clone() as Arc<dyn platform_api::HttpTransport>,
-                clock.clone() as Arc<dyn platform_api::Clock>,
+                http.clone() as Arc<dyn lingxi_core::host::HttpTransport>,
+                clock.clone() as Arc<dyn lingxi_core::host::Clock>,
                 mcp_oauth_storage.clone(),
                 mcp_on_auth_url.clone(),
                 settings,
@@ -2028,8 +2028,8 @@ pub async fn build_with_credential_stack(
         })
     };
     let mcp_oauth_deps = mcp::registry::OAuthDeps {
-        http: http.clone() as Arc<dyn platform_api::HttpTransport>,
-        clock: clock.clone() as Arc<dyn platform_api::Clock>,
+        http: http.clone() as Arc<dyn lingxi_core::host::HttpTransport>,
+        clock: clock.clone() as Arc<dyn lingxi_core::host::Clock>,
         storage: mcp_oauth_storage,
         on_authorization_url: mcp_on_auth_url,
         xaa_config,
@@ -2215,7 +2215,7 @@ pub async fn build_with_credential_stack(
     //        coordinator (the registry is built-once-and-moved, so mode-exclusive
     //        tool selection must be decided here); a default session leaves it
     //        DISABLED so the build is byte-identical to the pre-M10 build.
-    let coordinator_id = protocol::AgentId::new();
+    let coordinator_id = lingxi_core::types::AgentId::new();
     let coordinator = Arc::new(
         coordinator::TeamRegistry::new(coordinator_id).with_config_home(cfg.lingxi_home.clone()),
     );
@@ -2247,9 +2247,8 @@ pub async fn build_with_credential_stack(
         }
         Arc::new(mode)
     };
-    let _ = subagent_coordinator_mode_cell
-        .set(coordinator_mode.clone()
-            as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>);
+    let _ = subagent_coordinator_mode_cell.set(coordinator_mode.clone()
+        as Arc<dyn lingxi_core::host::coordinator_mode::CoordinatorModeHandle>);
 
     // (5.46-prompt) D1 ITEM 4: coordinator-mode system prompt + user context.
     //        Mirrors TS `buildEffectiveSystemPrompt` (systemPrompt.ts:59-75):
@@ -2335,7 +2334,9 @@ pub async fn build_with_credential_stack(
         team: coordinator.clone(),
         catalog: agent_catalog.clone(),
     }))
-    .with_tool_invoker(teammate_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>)
+    .with_tool_invoker(
+        teammate_invoker.clone() as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>
+    )
     // Anchor the teammate's `AgentModel::Inherit` / family aliases to the parent
     // model — the same seam the `PoolSubagentSpawner` gets above. #15: resolve
     // the alias to the concrete main-loop wire id (claude `getMainLoopModel()`)
@@ -2429,7 +2430,7 @@ pub async fn build_with_credential_stack(
     tasks::registry::register_dream_handler(
         &mut task_registry_inner,
         subagent_spawner.clone(),
-        dream_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+        dream_invoker.clone() as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
         budget_enforcer.clone(),
         dream_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
     );
@@ -2470,7 +2471,7 @@ pub async fn build_with_credential_stack(
     // worktree + judges it on the SYNC path) and the LocalAgent handler (which
     // judges it when a BACKGROUND agent reaches a terminal state — claude-code's
     // `getWorktreeResult` closure handed to the detached lifecycle).
-    let worktree_manager: Arc<dyn platform_api::worktree::WorktreeManager> =
+    let worktree_manager: Arc<dyn lingxi_core::host::worktree::WorktreeManager> =
         Arc::new(PosixWorktreeManager::new(cwd.clone()));
     // The forked-skill resume gate. Its skill resolver is bound LATER (the
     // command registry does not exist yet — the same registration cycle the
@@ -2489,7 +2490,8 @@ pub async fn build_with_credential_stack(
         Arc::new(
             tasks::handlers::LocalAgentHandler::new(
                 subagent_spawner.clone(),
-                local_agent_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+                local_agent_invoker.clone()
+                    as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
                 budget_enforcer.clone(),
                 task_registry_inner.output_manager.clone(),
             )
@@ -2506,15 +2508,14 @@ pub async fn build_with_credential_stack(
             // Refuse to resume a forked skill whose permission scoping cannot
             // be re-established — resuming one unscoped would run it under the
             // parent's (strictly wider) permissions.
-            .with_fork_resume_gate(
-                fork_resume_gate.clone() as Arc<dyn platform_api::fork_resume_gate::ForkResumeGate>
-            )
+            .with_fork_resume_gate(fork_resume_gate.clone()
+                as Arc<dyn lingxi_core::host::fork_resume_gate::ForkResumeGate>)
             // Record each parked agent so a LATER process can rebuild it; the
             // record is erased the moment it terminates.
             .with_parked_agent_store(Arc::new(agent_restore::DesktopParkedAgentStore {
                 subagents_dir: main_subagents_dir.clone(),
             })
-                as Arc<dyn platform_api::parked_agent_store::ParkedAgentStore>),
+                as Arc<dyn lingxi_core::host::parked_agent_store::ParkedAgentStore>),
         ),
     );
 
@@ -2565,7 +2566,12 @@ pub async fn build_with_credential_stack(
         registry: local_workflow_status_sink.clone(),
         tx: workflow_event_tx,
     });
-    let fusion_executor: Arc<dyn platform_api::FusionExecutor> = desktop_fusion_executor(
+    let fusion_implement_host = Arc::new(super::fusion_implement::DesktopFusionImplementHost::new(
+        worktree_manager.clone(),
+        cwd.clone(),
+    ));
+    let fusion_implement_ctx = fusion_implement_host.context_cell();
+    let fusion_executor: Arc<dyn lingxi_core::host::FusionExecutor> = desktop_fusion_executor(
         subagent_spawner.clone(),
         Arc::new(sidequery::ProviderSideQueryClient::from_service(
             api_service.clone(),
@@ -2575,10 +2581,11 @@ pub async fn build_with_credential_stack(
         fusion_catalog_source.clone(),
         analytics_bus.clone(),
         pricing.clone(),
+        Some(fusion_implement_host.clone() as Arc<dyn lingxi_core::host::FusionImplementHost>),
     );
     let local_workflow_handler = tasks::handlers::LocalWorkflowHandler::new(
         subagent_spawner.clone(),
-        local_workflow_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+        local_workflow_invoker.clone() as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
         budget_enforcer.clone(),
         task_registry_inner.output_manager.clone(),
     )
@@ -2589,9 +2596,6 @@ pub async fn build_with_credential_stack(
     .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
     .with_workspace_permission_leases(workspace_leases.clone(), cwd.clone())
     .with_worktree_manager(worktree_manager.clone())
-    .with_fusion(fusion_executor.clone())
-    .with_terminal_recorder_opt(Some(fusion_recorder.clone()))
-    .with_terminal_recorder_factory(fusion_recorder_factory.clone())
     .with_status_sink(local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>)
     .with_workflow_progress_sink(local_workflow_event_sink.clone()
         as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>)
@@ -2615,8 +2619,8 @@ pub async fn build_with_credential_stack(
     tasks::registry::register_fusion_handler_with_recorder_factory(
         &mut task_registry_inner,
         fusion_executor.clone(),
-        fusion_completion_sink.clone() as Arc<dyn platform_api::FusionCompletionSink>,
-        fusion_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+        fusion_completion_sink.clone() as Arc<dyn lingxi_core::host::FusionCompletionSink>,
+        fusion_invoker.clone() as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
         budget_enforcer.clone(),
         fusion_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
         Some(fusion_recorder.clone()),
@@ -2629,7 +2633,7 @@ pub async fn build_with_credential_stack(
     // via the orchestrator below. Two tables would look wired and answer
     // "not armed" forever, so this is created once and shared, never cloned
     // from a second `ObserverPairings::new()`.
-    let observer_pairings = Arc::new(platform_api::observer_pairing::ObserverPairings::new());
+    let observer_pairings = Arc::new(lingxi_core::host::observer_pairing::ObserverPairings::new());
     task_registry.set_observer_pairings(observer_pairings.clone());
     subagent_spawner_arc.set_task_registry(task_registry.clone());
     teammate_registry_status_sink.bind(task_registry.clone());
@@ -2680,7 +2684,7 @@ pub async fn build_with_credential_stack(
                             .is_none_or(|profile| &listing.provider_id == profile)
                 })
                 .map(|listing| {
-                    platform_api::qualified_model_ref(
+                    lingxi_core::host::qualified_model_ref(
                         &listing.request_model,
                         Some(&listing.provider_id),
                     )
@@ -2739,8 +2743,8 @@ pub async fn build_with_credential_stack(
     };
 
     // Share task delivery and cancellation with the implicit team service.
-    let spawn_seam: Arc<dyn platform_api::team_spawn::TeamSpawnSeam> =
-        if platform_api::env::agent_swarms_enabled() {
+    let spawn_seam: Arc<dyn lingxi_core::host::team_spawn::TeamSpawnSeam> =
+        if lingxi_core::host::env::agent_swarms_enabled() {
             let executable = std::env::current_exe()
                 .ok()
                 .filter(|path| {
@@ -2776,13 +2780,13 @@ pub async fn build_with_credential_stack(
             task_registry.clone()
         };
 
-    let departure_owner: Arc<dyn platform_api::team_spawn::TeammateDepartureCleanup> =
+    let departure_owner: Arc<dyn lingxi_core::host::team_spawn::TeammateDepartureCleanup> =
         coordinator.clone();
     task_registry
         .set_teammate_departure_cleanup(Arc::downgrade(&departure_owner))
         .await;
 
-    if platform_api::env::agent_swarms_enabled() {
+    if lingxi_core::host::env::agent_swarms_enabled() {
         task_registry
             .set_external_teammate_controller(Arc::downgrade(&spawn_seam))
             .await;
@@ -2800,9 +2804,9 @@ pub async fn build_with_credential_stack(
     // always resolves a running async agent. Non-async default sessions are
     // unaffected — with no teammates/agents registered a send resolves to
     // `NotFound`, the same effective outcome as the prior `None`.
-    let coordinator_mailbox: Option<Arc<dyn platform_api::mailbox::MailboxRouterHandle>> =
+    let coordinator_mailbox: Option<Arc<dyn lingxi_core::host::mailbox::MailboxRouterHandle>> =
         Some(coordinator.mailbox_router.clone()
-            as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
+            as Arc<dyn lingxi_core::host::mailbox::MailboxRouterHandle>);
     // (SANDBOX.1) Make the bash sandbox path LIVE (parity §0.2 / §B). Previously
     // `sandbox_available` was hardcoded `false`, so bash NEVER sandboxed — even
     // when the user enabled it in settings — leaving the macOS SBPL / Linux bwrap /
@@ -2988,7 +2992,7 @@ pub async fn build_with_credential_stack(
     // after `task_registry` exists — so NO deferred cell is needed; the
     // one-shot / teammate / workflow handlers keep the raw spawner captured
     // earlier (they only use the sync `spawn`, which the decorator delegates).
-    let teammate_spawner = if platform_api::env::agent_swarms_enabled() {
+    let teammate_spawner = if lingxi_core::host::env::agent_swarms_enabled() {
         let spawner = Arc::new(coordinator::ImplicitTeammateSpawner::new(
             coordinator.clone(),
             spawn_seam.clone(),
@@ -3001,13 +3005,13 @@ pub async fn build_with_credential_stack(
     } else {
         None
     };
-    let subagent_spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner> =
+    let subagent_spawner: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner> =
         Arc::new(background_agent::BackgroundAgentSpawner {
             inner: subagent_spawner,
             teammate_spawner,
             registry: task_registry.clone(),
             mailbox_router: coordinator.mailbox_router.clone(),
-            runtime: Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
+            runtime: Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
             // Where a forked skill's scoping sidecars land — beside the
             // background agent's own transcript in this session's
             // `subagents/` directory.
@@ -3063,7 +3067,7 @@ pub async fn build_with_credential_stack(
     // Local IDE endpoints are discovered lazily by the provider-neutral
     // controller. The same MCP registry owns their live JSON-RPC connection;
     // no Anthropic credential or cloud auth path participates here.
-    let ide_handle: Arc<dyn platform_api::IdeHandle> = Arc::new(DesktopIdeHandle::new(
+    let ide_handle: Arc<dyn lingxi_core::host::IdeHandle> = Arc::new(DesktopIdeHandle::new(
         cfg.lingxi_home.join("ide"),
         mcp_registry.clone(),
     ));
@@ -3087,7 +3091,7 @@ pub async fn build_with_credential_stack(
     // refinements — not needed to close the ExitWorktree-after-resume no-op.)
     let worktree_session_cell = tool_api::worktree_session::new_worktree_session_cell();
     if cfg.session_id_override.is_some() {
-        let restore_fs: Arc<dyn platform_api::FileSystem> =
+        let restore_fs: Arc<dyn lingxi_core::host::FileSystem> =
             Arc::new(PosixFileSystem::new(cwd.clone()));
         if let Some(payload) = session::jsonl::loader::read_worktree_state(
             &main_transcript_path,
@@ -3240,7 +3244,7 @@ pub async fn build_with_credential_stack(
         worktree: worktree_manager.clone(),
         subagent_spawner: Some(subagent_spawner.clone()),
         task_registry: Some(
-            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>
         ),
         mailbox_router: coordinator_mailbox,
         budget_enforcer: Some(budget_enforcer.clone()),
@@ -3260,7 +3264,7 @@ pub async fn build_with_credential_stack(
             }
         })),
         coordinator_mode: Some(coordinator_mode.clone()
-            as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>),
+            as Arc<dyn lingxi_core::host::coordinator_mode::CoordinatorModeHandle>),
         // (3b) AgentTool threads this into the subagent's RegistryToolInvoker so
         // spawned subagents are gated by the same boot gate as the main loop.
         permission_gate: Some(perms.clone()),
@@ -3327,7 +3331,7 @@ pub async fn build_with_credential_stack(
     // for that worktree — independently inert when `None` (see the function
     // doc); a tmux failure is logged, not a hard boot failure.
     apply_worktree_launch(&cfg.worktree_launch, &cfg.tmux_launch, &tool_ctx).await?;
-    let coordinator_wiring = (platform_api::env::agent_swarms_enabled()
+    let coordinator_wiring = (lingxi_core::host::env::agent_swarms_enabled()
         || cfg.session_started_as_coordinator)
         .then(|| CoordinatorWiring {
             team: coordinator.clone(),
@@ -3394,7 +3398,7 @@ pub async fn build_with_credential_stack(
     // so the `Skill` tool substitutes `${LINGXI_SESSION_ID}` in the body (TS
     // `getSessionId()`, a per-process session value). Generated once here at build
     // time; format mirrors the engine's `SessionId` Display (`sess:<uuid>`).
-    let skill_session_id = protocol::SessionId::new().to_string();
+    let skill_session_id = lingxi_core::types::SessionId::new().to_string();
     let monitor_runtime = repo_root_reloader.clone();
     let skill_invocation_observer: command_api::SkillInvocationObserver = Arc::new(move |skill| {
         let monitor_runtime = monitor_runtime.clone();
@@ -3413,11 +3417,11 @@ pub async fn build_with_credential_stack(
         .with_invocation_observer(skill_invocation_observer.clone()),
     );
     // G5: fill the subagent spawner's skill-loader cell with a
-    // `platform_api::skill_loader::SkillLoader` over the SAME shared command registry,
+    // `lingxi_core::host::skill_loader::SkillLoader` over the SAME shared command registry,
     // so a child agent runner can preload its frontmatter `skills:` (claude
     // runAgent.ts:577-646). First fill wins; the registry is filled at (6) before
     // any spawn fires, so the loader never reads the empty registry.
-    let skill_loader_arc: Arc<dyn platform_api::skill_loader::SkillLoader> = Arc::new(
+    let skill_loader_arc: Arc<dyn lingxi_core::host::skill_loader::SkillLoader> = Arc::new(
         agent_skill_loader::AgentSkillLoader::new(
             shared_command_registry.clone(),
             Some(skill_session_id),
@@ -3472,23 +3476,24 @@ pub async fn build_with_credential_stack(
     // session `<uuid>.jsonl` the resume loader reads. Gated on
     // `session_persistence` (no writer ⇒ nothing to resume from), mirroring the
     // `main_jsonl_writer` wiring below.
-    let worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>> = if cfg
-        .session_persistence
-    {
-        Some(Arc::new(JsonlWorktreeStatePersister {
-            writer: Arc::new(session::jsonl::writer::JsonlWriter::new(
-                main_transcript_path.clone(),
-                Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>,
-            )),
-            session_uuid: main_session_uuid.clone(),
-        }))
-    } else {
-        None
-    };
+    let worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>> =
+        if cfg.session_persistence {
+            Some(Arc::new(JsonlWorktreeStatePersister {
+                writer: Arc::new(session::jsonl::writer::JsonlWriter::new(
+                    main_transcript_path.clone(),
+                    Arc::new(PosixFileSystem::new(cwd.clone()))
+                        as Arc<dyn lingxi_core::host::FileSystem>,
+                )),
+                session_uuid: main_session_uuid.clone(),
+            }))
+        } else {
+            None
+        };
     // Keep a slash-command façade over the SAME context + persister before the
     // tool registry consumes `tool_ctx`. The handler itself is registered only
     // in the desktop command registry below, leaving the locked upstream
     // command-api builtin table untouched.
+    let _ = fusion_implement_ctx.set(tool_ctx.clone());
     let worktree_command_handler: Arc<dyn BuiltinCommandHandler> = Arc::new(
         DesktopWorktreeCommandHandler::new(tool_ctx.clone(), worktree_state_persister.clone()),
     );
@@ -3564,7 +3569,7 @@ pub async fn build_with_credential_stack(
         let (workflow_size_guideline, managed_workflow, default_workflow) =
             resolve_workflow_size_guideline(&cfg, &cwd, &managed_workflow_layers);
         workflow_size_guideline_state =
-            platform_api::session_flags::WorkflowSizeGuidelineState::new(
+            lingxi_core::host::session_flags::WorkflowSizeGuidelineState::new(
                 workflow_size_guideline.as_wire(),
                 managed_workflow,
                 default_workflow,
@@ -3586,7 +3591,7 @@ pub async fn build_with_credential_stack(
         })
         .unwrap_or(false);
         let workflow_policy_enabled = tool_workflow::workflows_enabled(managed_disable_workflows);
-        dynamic_workflows_gate = platform_api::session_flags::DynamicWorkflowsGate::new(
+        dynamic_workflows_gate = lingxi_core::host::session_flags::DynamicWorkflowsGate::new(
             workflow_policy_enabled && workflow_session_enabled,
             workflow_session_managed || !workflow_policy_enabled,
         );
@@ -3675,7 +3680,7 @@ pub async fn build_with_credential_stack(
     // the probe stays unpublished and `read_auto_allowed` keeps answering
     // `false` — the fail-safe answer.
     if let Some(policy) = boot_permission_policy.clone() {
-        platform_api::read_auto_allow::set_read_auto_allow_probe(std::sync::Arc::new(
+        lingxi_core::host::read_auto_allow::set_read_auto_allow_probe(std::sync::Arc::new(
             permission::read_auto_allow::PolicyReadAutoAllow::new(policy, tools.all_names()),
         ));
     }
@@ -3915,7 +3920,7 @@ pub async fn build_with_credential_stack(
     // move into the orchestrator. The actual cold restore runs later, after the
     // live model/provider selection cell is published.
     let parked_agent_restore_inheritance = cfg.session_id_override.is_some().then(|| {
-        platform_api::subagent_spawn::SubagentInheritance {
+        lingxi_core::host::subagent_spawn::SubagentInheritance {
             tool_invoker: Arc::new(
                 tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
                     .with_gate(perms.clone()),
@@ -4082,7 +4087,7 @@ pub async fn build_with_credential_stack(
         .with_loop_usage_opt(
             cron_scheduler
                 .clone()
-                .map(|scheduler| scheduler as Arc<dyn platform_api::LoopUsageProvider>),
+                .map(|scheduler| scheduler as Arc<dyn lingxi_core::host::LoopUsageProvider>),
         )
         .with_cost_session_switcher_opt(Some(session_state_manager.clone()))
         .with_session_activation_observer(Arc::new(ProcessSessionActivationObserver))
@@ -4111,7 +4116,7 @@ pub async fn build_with_credential_stack(
         // Surface LSP `<new-diagnostics>` to the model each turn (the same sink the
         // LSP registry drains publishDiagnostics into).
         .with_new_diagnostics_source(
-            Arc::new(lsp_diagnostics.clone()) as Arc<dyn platform_api::NewDiagnosticsSource>
+            Arc::new(lsp_diagnostics.clone()) as Arc<dyn lingxi_core::host::NewDiagnosticsSource>
         )
         // SKILLLIST.1: enumerate model-invocable skills each turn so the model
         // can discover them. Reads `shared_command_registry` lazily at turn time
@@ -4130,7 +4135,7 @@ pub async fn build_with_credential_stack(
         // context above; the provider drains the registry's terminal-not-notified
         // tasks each turn (mark-notified + evict ⇒ each completion surfaces once).
         .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
-            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
         )))
         // hook-bg-fields: populate the `Stop` / `SubagentStop` hook payload's
         // `background_tasks` (claude-code `Lic(taskRegistry.all())`) +
@@ -4141,7 +4146,7 @@ pub async fn build_with_credential_stack(
         // (claude's tool-use-context `s` gate).
         .with_stop_hook_snapshot(Arc::new(RegistryStopHookSnapshot {
             registry: task_registry.clone()
-                as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+                as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
             project_root: watch_cwd.clone(),
         }))
         // Finding #73: supply the V2 task list to the per-turn `task_reminder`
@@ -4181,7 +4186,7 @@ pub async fn build_with_credential_stack(
         (true, Some(home)) => {
             orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
                 side_query_client.clone(),
-                Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
+                Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
                 &home,
                 &cfg.cwd,
             ))
@@ -4196,9 +4201,8 @@ pub async fn build_with_credential_stack(
     // the `ScheduleWakeup` that armed a wakeup (binary's lone-wakeup arm). Same
     // `Arc` the tool raises.
     let orch_builder = orch_builder.with_loop_wakeup_armed_slot(loop_wakeup_armed);
-    let orch_builder = orch_builder
-        .with_coordinator_mode(coordinator_mode.clone()
-            as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>);
+    let orch_builder = orch_builder.with_coordinator_mode(coordinator_mode.clone()
+        as Arc<dyn lingxi_core::host::coordinator_mode::CoordinatorModeHandle>);
     let orch_builder = match end_conversation_slot.clone() {
         Some(slot) => orch_builder.with_end_conversation_slot(slot),
         None => orch_builder,
@@ -4240,7 +4244,7 @@ pub async fn build_with_credential_stack(
         orch_builder.with_skill_discovery_prefetch(Arc::new(
             skill_api::SkillDiscoveryPrefetch::new(
                 source,
-                Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
+                Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
             ),
         ))
     } else {
@@ -4263,7 +4267,7 @@ pub async fn build_with_credential_stack(
                 0,
                 0,
                 &home,
-                Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
+                Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
             ))
         }
         _ => orch_builder,
@@ -4468,6 +4472,7 @@ pub async fn build_with_credential_stack(
         Arc::new(FusionCatalogRefreshingCopilotConnect {
             inner: Arc::new(crate::desktop::connect::EngineCopilotConnect::new(
                 credentials.clone(),
+                llm_transport.clone(),
             )),
             refresher: fusion_catalog_refresher.clone(),
         });
@@ -4482,11 +4487,9 @@ pub async fn build_with_credential_stack(
             )),
             refresher: fusion_catalog_refresher.clone(),
         });
-    let connect_chatgpt_inner: Arc<dyn command_api::builtins::ChatGptConnectDriver> =
-        Arc::new(crate::desktop::connect::EngineChatGptConnect::new(
-            openai_oauth_client,
-            credentials.clone(),
-        ));
+    let connect_chatgpt_inner: Arc<dyn command_api::builtins::ChatGptConnectDriver> = Arc::new(
+        crate::desktop::connect::EngineChatGptConnect::new(openai_oauth_handle),
+    );
     // Round-5 review finding [15] class sweep: EVERY `/connect` seam that
     // persists a credential refreshes Fusion's catalog, not just the two
     // round 4 wrapped. The OAuth driver below is built over the UNWRAPPED
@@ -4531,7 +4534,7 @@ pub async fn build_with_credential_stack(
     // same registry-backed text projection for headless/bridge dispatch paths.
     reg.register_builtin_handler(Arc::new(
         command_api::builtins::WorkflowsHandler::with_registry(
-            task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
+            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>
         ),
     ));
     reg.register_builtin_handler(worktree_command_handler);
@@ -4551,7 +4554,10 @@ pub async fn build_with_credential_stack(
                 .collect(),
         )
         .with_durable_publication_available(cfg.session_persistence)
-        .with_publication_retrier(Some(fusion_recorder_factory_impl.clone())),
+        .with_publication_retrier(Some(fusion_recorder_factory_impl.clone()))
+        .with_implement_host(Some(
+            fusion_implement_host.clone() as Arc<dyn lingxi_core::host::FusionImplementHost>
+        )),
     ));
 
     // WIZARD-06: re-register `/auto-mode-setup` WITH its runners attached.
@@ -4747,9 +4753,8 @@ pub async fn build_with_credential_stack(
             .with_safe_mode(cfg.customization_gates.safe_mode)
             .with_plugin_workflows(plugin_workflow_registry.clone())
             .with_project_dir(cwd_for_plugins.clone())
-            .with_task_registry(
-                task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>
-            ),
+            .with_task_registry(task_registry.clone()
+                as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>),
         );
         for (id, manifest, dir) in discovered {
             let plugin_name = manifest.name.clone();
@@ -5174,12 +5179,12 @@ pub async fn build_with_credential_stack(
     //       keeps boot cheap and avoids holding an OS watch handle nobody
     //       consumes.
     #[cfg(not(test))]
-    let watch_fs: Arc<dyn platform_api::FileSystem> =
+    let watch_fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(PosixFileSystem::new(watch_cwd.clone()));
     // Unit tests exercise the real watcher lifecycle with cancellable streams,
     // without depending on the host FSEvents daemon's blocking startup/stop RPCs.
     #[cfg(test)]
-    let watch_fs: Arc<dyn platform_api::FileSystem> =
+    let watch_fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(watcher_test_support::WatchFs::new(watch_cwd.clone()));
     let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
     let settings_watcher =
@@ -5212,10 +5217,10 @@ pub async fn build_with_credential_stack(
     let watcher =
         file_changed_watch::FileChangedWatcher::new(&matcher_refs, &watch_cwd, file_changed_firer);
     #[cfg(not(test))]
-    let watch_fs: Arc<dyn platform_api::FileSystem> =
+    let watch_fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(PosixFileSystem::new(watch_cwd.clone()));
     #[cfg(test)]
-    let watch_fs: Arc<dyn platform_api::FileSystem> =
+    let watch_fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(watcher_test_support::WatchFs::new(watch_cwd.clone()));
     let file_changed_watcher = watcher.spawn(watch_fs).await;
     // Fill the `CwdChanged` firer's deferred rebinder cell now that the watcher
@@ -5332,10 +5337,11 @@ pub async fn build_with_credential_stack(
         model_providers,
         provider_adapter: provider_adapter_handle,
         credentials,
-        http: http.clone() as Arc<dyn platform_api::HttpTransport>,
+        http: http.clone() as Arc<dyn lingxi_core::host::HttpTransport>,
         structured_output_slot,
         wakeup_scheduler_cell,
-        runtime_spawner: Arc::new(PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
+        runtime_spawner: Arc::new(PosixRuntime::new())
+            as Arc<dyn lingxi_core::host::RuntimeSpawner>,
         bash_runner,
         shell_expansion: shell_expansion_provider,
         connect_copilot,

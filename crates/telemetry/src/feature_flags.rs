@@ -5,7 +5,7 @@
 //! refreshes on a fixed interval via the [`RuntimeSpawner`] trait so engine
 //! code never spawns tasks directly.
 
-use platform_api::{RuntimeError, RuntimeSpawner};
+use lingxi_core::host::{RuntimeError, RuntimeSpawner};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -59,7 +59,7 @@ fn flag_test_override() -> &'static StdRwLock<HashMap<String, bool>> {
 #[must_use]
 pub fn push_notifications_enabled() -> bool {
     flag_bool("tengu_kairos_push_notifications", false)
-        && platform_api::session_flags::agent_push_notif_enabled()
+        && lingxi_core::host::session_flags::agent_push_notif_enabled()
 }
 
 #[must_use]

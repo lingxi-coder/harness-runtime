@@ -294,91 +294,7 @@ impl ProviderProfile {
     }
 }
 
-/// Wire protocol route family.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProtocolFamily {
-    /// Anthropic Messages API.
-    AnthropicMessages,
-    /// `OpenAI` Responses API.
-    OpenAiResponses,
-    /// `OpenAI` Chat Completions API.
-    OpenAiChat,
-    /// Gemini generateContent API.
-    GeminiGenerateContent,
-    /// Vertex Gemini route family.
-    VertexGemini,
-    /// Vertex Claude route family.
-    VertexClaude,
-    /// Bedrock Claude route family.
-    BedrockClaude,
-    /// Azure AI Foundry Claude route family (Anthropic Messages wire on Azure).
-    FoundryClaude,
-    /// Azure `OpenAI` route family.
-    AzureOpenAi,
-}
-
-impl ProtocolFamily {
-    /// Whether this family's codec can put an `LlmRequest.response_format` on
-    /// the wire at all.
-    ///
-    /// `protocol::validate_capabilities` — the only pre-transport gate — checks
-    /// the MODEL's `structured_output` capability bit and nothing else, so a
-    /// request carrying a `response_format` reaches the codec whenever that bit
-    /// is true, and `GeminiCodec::encode_request` then hard-fails with
-    /// `InvalidRequest("GeminiCodec does not encode response_format yet")`. For
-    /// Fusion that failure lands in the analyst call AFTER every panel has
-    /// already spent real money, which is why the Fusion catalog row and the
-    /// `/fusion setup` analyst picker both AND this in.
-    ///
-    /// `VertexGemini` is in the same class: its codec delegates body
-    /// construction to the inner `GeminiCodec` and only rewrites the URL.
-    /// `VertexClaude`/`BedrockClaude`/`FoundryClaude` delegate to
-    /// `AnthropicMessagesCodec` and `AzureOpenAi` to `OpenAiChatCodec`, all of
-    /// which do encode it.
-    ///
-    /// Deliberately an exhaustive `match` rather than a `matches!`: a new
-    /// family must not silently default to "encodes it" and re-introduce this
-    /// defect for the next codec that does not.
-    #[must_use]
-    pub const fn encodes_response_format(&self) -> bool {
-        match self {
-            Self::GeminiGenerateContent | Self::VertexGemini => false,
-            Self::AnthropicMessages
-            | Self::OpenAiResponses
-            | Self::OpenAiChat
-            | Self::VertexClaude
-            | Self::BedrockClaude
-            | Self::FoundryClaude
-            | Self::AzureOpenAi => true,
-        }
-    }
-}
-
-/// Authenticator strategy for a resolved route.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthStrategy {
-    /// Provider API key header or query auth.
-    ApiKey,
-    /// Bearer-token auth.
-    Bearer,
-    /// OAuth bearer-token auth.
-    OAuthBearer,
-    /// GitHub Copilot: GitHub OAuth token used directly as the bearer, plus the
-    /// Copilot header set (see [`crate::CopilotAuthenticator`]).
-    CopilotBearer,
-    /// ChatGPT-account OAuth: bearer access token + `ChatGPT-Account-ID` header.
-    ChatGptOAuth,
-    /// AWS `SigV4` request signing.
-    AwsSigV4,
-    /// GCP bearer token auth.
-    GcpToken,
-    /// Azure bearer token auth.
-    AzureToken,
-    /// No auth.
-    None,
-}
+pub use lingxi_llm_client::protocol::{AuthStrategy, ProtocolFamily};
 
 /// Serializable credential reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,7 +340,7 @@ pub struct ModelProfile {
     /// Provider-published display metadata. This is informational and never
     /// participates in model routing.
     #[serde(default)]
-    pub metadata: platform_api::ModelMetadata,
+    pub metadata: lingxi_core::host::ModelMetadata,
     /// Model capabilities used for preflight validation.
     #[serde(default)]
     pub capabilities: Capabilities,
@@ -477,7 +393,7 @@ pub struct PricingConfig {
     /// Whether this provider charges per token, via subscription, or is
     /// explicitly free. Unknown is distinct from free.
     #[serde(default, rename = "billingMode")]
-    pub billing_mode: platform_api::ModelBillingMode,
+    pub billing_mode: lingxi_core::host::ModelBillingMode,
     /// Whether missing pricing must fail instead of returning unestimated cost.
     #[serde(default)]
     pub require_priced: bool,
@@ -487,5 +403,5 @@ pub struct PricingConfig {
     /// resolution and catalog insertion happen at the host build step, not at
     /// parse time.  Absent → empty (no overrides).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overrides: Vec<(String, crate::cost::TokenPricing)>,
+    pub overrides: Vec<(String, crate::cost::PricingOverride)>,
 }

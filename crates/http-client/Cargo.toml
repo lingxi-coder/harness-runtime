@@ -6,8 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-platform-api = { path = "../platform-api" }
-protocol = { path = "../protocol" }
+core = { path = "../core" }
 lingxi-llm-client = { workspace = true, features = ["responses-websocket"] }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

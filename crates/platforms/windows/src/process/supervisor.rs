@@ -1,11 +1,11 @@
 //! Windows named-pipe adapter for the shared acknowledged shell supervisor.
 use super::{runner::WindowsProcess, supervisor_native as native};
-use mobile_linux_api::ProcessError;
-use platform_api::process::ShellProcessHandoff;
-use platform_api::shell_supervisor::{self as shared, BoxStream, Listener, Platform};
-use platform_api::{
+use lingxi_core::host::process::ShellProcessHandoff;
+use lingxi_core::host::shell_supervisor::{self as shared, BoxStream, Listener, Platform};
+use lingxi_core::host::{
     BackgroundExitSink, ForegroundRunResult, ProcessHandle, ProcessRunner, SandboxedCommand,
 };
+use mobile_linux_api::ProcessError;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -80,7 +80,7 @@ impl Platform for WindowsPlatform {
             .process_start_identity
             .as_ref()
             .ok_or(ProcessError::Unsupported)?;
-        match platform_api::live_sessions::process_start_identity(handoff.pid) {
+        match lingxi_core::host::live_sessions::process_start_identity(handoff.pid) {
             Some(actual) if &actual == expected => {
                 super::kill_tree::kill_tree_windows(handoff.pid).await
             }

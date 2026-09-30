@@ -49,7 +49,7 @@ class SdkSourceTests(unittest.TestCase):
             self.inspect()
 
     def test_host_path_even_into_checkout_is_rejected(self):
-        self.metadata["packages"].append({"name": "platform-api", "source": None, "dependencies": [
+        self.metadata["packages"].append({"name": "core", "source": None, "dependencies": [
             {"name": "platform-pty", "path": "/tmp/locked-sdk/crates/platform-pty",
              "target": "cfg(target_os = ios)", "kind": "build"}
         ]})
@@ -63,7 +63,7 @@ class SdkSourceTests(unittest.TestCase):
         self.assertEqual(self.inspect()["revision"], self.rev)
 
     def test_inactive_alternate_dev_edge(self):
-        self.metadata["packages"].append({"name": "platform-api", "dependencies": [
+        self.metadata["packages"].append({"name": "core", "dependencies": [
             {"name": "platform-pty", "source": self.source.replace(self.rev, "d" * 40),
              "target": "cfg(windows)", "kind": "dev"}
         ]})

@@ -37,9 +37,9 @@
 //!   (`utils.ts:437-442`) is out of scope per the batch spec and is not emitted
 //!   (no equivalent telemetry event exists today).
 
+use lingxi_core::host::http::HttpTransport;
+use lingxi_core::types::{HttpMethod, HttpRequest};
 use once_cell::sync::Lazy;
-use platform_api::http::HttpTransport;
-use protocol::{HttpMethod, HttpRequest};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -309,12 +309,12 @@ pub async fn check_domain_blocklist_at(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::http::HttpError;
+    use lingxi_core::host::http::HttpError;
     use std::sync::Arc;
     use test_harness::mocks::{MockHttpTransport, ScriptedResponse};
 
     fn sync_resp(status: u16, body: &str) -> ScriptedResponse {
-        ScriptedResponse::Sync(protocol::HttpResponse {
+        ScriptedResponse::Sync(lingxi_core::types::HttpResponse {
             status,
             headers: vec![],
             body: body.to_string(),

@@ -79,7 +79,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         // Sandboxed boot: inherit no machine credentials, so the
         // assertions do not depend on the developer's env/keychain.
         isolated_credential_storage: true,
-        credential_storage_policy: platform_api::CredentialStoragePolicy::PlainTextFixture,
+        credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::PlainTextFixture,
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
         api_key_helper: None,
@@ -154,7 +154,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
 async fn run_build(
     cfg: DesktopConfig,
 ) -> Result<harness_runtime::desktop::DesktopRuntime, BuildError> {
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> = Arc::new(NoopPermissionSink);
     build(cfg, output, perm_sink).await

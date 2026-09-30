@@ -32,10 +32,10 @@
 //!
 //! The composition root (`apps/cli`) owns the actual write (it holds the
 //! `session::jsonl::JsonlWriter` + resolved `projects/<sanitize(cwd)>/…` path);
-//! this helper lives in `orchestrator` so the `protocol::ConversationMessage`
+//! this helper lives in `orchestrator` so the `lingxi_core::types::ConversationMessage`
 //! → `session::JsonlMessage` mapping stays next to `to_jsonl_message`.
 
-use protocol::ConversationMessage;
+use lingxi_core::types::ConversationMessage;
 use session::JsonlMessage;
 
 /// ISO-8601 UTC timestamp with millisecond precision (`new Date().toISOString()`
@@ -184,11 +184,11 @@ pub fn history_to_jsonl_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{ContentBlock, ConversationMessage};
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
 
     fn user(text: &str) -> ConversationMessage {
         ConversationMessage::User {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
@@ -200,7 +200,7 @@ mod tests {
 
     fn assistant(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
-            id: protocol::MessageId::new(),
+            id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
@@ -257,7 +257,7 @@ mod tests {
             &[],
         );
         let summary = ConversationMessage::compact_summary(
-            protocol::MessageId::new(),
+            lingxi_core::types::MessageId::new(),
             "Summary:\nS".to_string(),
         );
         let history = vec![old, boundary.clone(), summary.clone()];

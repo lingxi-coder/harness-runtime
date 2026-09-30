@@ -1,6 +1,6 @@
 //! `JsonlReader` full + lite parity.
 
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::{json, Map};
 use session::jsonl::reader::{route_lines, JsonlReader, SessionMetadata};

@@ -157,7 +157,9 @@ pub enum LlmError {
         message: String,
     },
     /// Model-generated tool arguments were not valid JSON. Never a transport failure.
-    #[error("malformed tool input for {tool_name} on block {block_index} ({input_bytes} bytes): {reason}")]
+    #[error(
+        "malformed tool input for {tool_name} on block {block_index} ({input_bytes} bytes): {reason}"
+    )]
     MalformedToolInput {
         /// Name of the tool whose arguments failed parsing.
         tool_name: String,

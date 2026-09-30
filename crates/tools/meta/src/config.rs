@@ -113,9 +113,10 @@ const PERMISSION_DEFAULT_MODES: &[&str] = &["default", "plan", "acceptEdits", "d
 /// 2.1.201). Default is `never` (block on the user; no auto-continue).
 const ASK_USER_QUESTION_TIMEOUTS: &[&str] = &["60s", "5m", "10m", "never"];
 /// `dialogExpiry` — 2.1.232 `_Vp`.
-const DIALOG_EXPIRY: &[&str] = platform_api::live_sessions::DIALOG_EXPIRY_OPTIONS;
+const DIALOG_EXPIRY: &[&str] = lingxi_core::host::live_sessions::DIALOG_EXPIRY_OPTIONS;
 /// `crossSessionInbound` — 2.1.232 `bVp`.
-const CROSS_SESSION_INBOUND: &[&str] = platform_api::live_sessions::CROSS_SESSION_INBOUND_OPTIONS;
+const CROSS_SESSION_INBOUND: &[&str] =
+    lingxi_core::host::live_sessions::CROSS_SESSION_INBOUND_OPTIONS;
 
 /// Storage source for a setting. Both currently back to the single
 /// `~/.lingxi/settings.json` file in this Rust stub.
@@ -879,19 +880,19 @@ impl Tool for ConfigTool {
             return Err(e);
         }
         if setting == "agentPushNotifEnabled" {
-            platform_api::session_flags::set_agent_push_notif_enabled(
+            lingxi_core::host::session_flags::set_agent_push_notif_enabled(
                 final_value.as_bool().unwrap_or(false),
             );
         }
         if setting == "includeGitInstructions" {
             // Republish so the git/PR sections follow the setting inside the
             // running session, like the attribution trailers below.
-            platform_api::session_flags::set_include_git_instructions(final_value.as_bool());
+            lingxi_core::host::session_flags::set_include_git_instructions(final_value.as_bool());
         }
         if setting == "includeCoAuthoredBy" {
             // Republish so the attribution trailers follow the setting inside
             // the running session, like the output caps below.
-            platform_api::session_flags::set_include_co_authored_by(final_value.as_bool());
+            lingxi_core::host::session_flags::set_include_co_authored_by(final_value.as_bool());
         }
         if setting == "attribution" {
             let commit = final_value
@@ -902,19 +903,19 @@ impl Tool for ConfigTool {
                 .get("pr")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            platform_api::session_flags::set_attribution(commit, pr);
+            lingxi_core::host::session_flags::set_attribution(commit, pr);
         }
         if setting == "bashOutputMaxChars" {
             // Republish so the Bash cap moves with the setting inside the
             // running session, exactly as `taskOutputMaxChars` does below.
-            platform_api::session_flags::set_bash_output_max_chars(
+            lingxi_core::host::session_flags::set_bash_output_max_chars(
                 final_value.as_u64().and_then(|n| u32::try_from(n).ok()),
             );
         }
         if setting == "taskOutputMaxChars" {
             // Republish so `TaskOutput`'s cap moves with the setting inside the
             // running session, exactly as the push flag above does.
-            platform_api::session_flags::set_task_output_max_chars(
+            lingxi_core::host::session_flags::set_task_output_max_chars(
                 final_value.as_u64().and_then(|n| u32::try_from(n).ok()),
             );
         }

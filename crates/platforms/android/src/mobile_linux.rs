@@ -64,9 +64,9 @@ impl AndroidProotRuntime {
 
 fn product_build_profile() -> mobile_linux_android::IsolatedBuildProfile {
     mobile_linux_android::IsolatedBuildProfile {
-        guest_root: platform_api::local_app_paths::LOCAL_APP_BUILD_ROOT.into(),
-        project_directory: platform_api::local_app_paths::LOCAL_APP_BUILD_PROJECT_DIR.into(),
-        dependency_store: platform_api::local_app_paths::LOCAL_APP_DEPENDENCY_STORE.into(),
+        guest_root: lingxi_core::host::local_app_paths::LOCAL_APP_BUILD_ROOT.into(),
+        project_directory: lingxi_core::host::local_app_paths::LOCAL_APP_BUILD_PROJECT_DIR.into(),
+        dependency_store: lingxi_core::host::local_app_paths::LOCAL_APP_DEPENDENCY_STORE.into(),
         state_directory: ".lingxi-build-state".into(),
         host_apps_directory: "apps".into(),
         host_build_directory: "build".into(),

@@ -1,7 +1,7 @@
 //! `JsonlWriter` raw-byte assertion — three appends produce three lines, one
 //! `\n` per line, no extra whitespace.
 
-use platform_api::FileSystem;
+use lingxi_core::host::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::{json, Map};
 use session::jsonl::schema::JsonlMessage;

@@ -213,7 +213,7 @@ pub(crate) fn open_rooted_search_file(
         let filename = candidate
             .file_name()
             .ok_or(SearchResolutionError::SearchRootChanged)?;
-        return platform_api::rooted_fs::open_file_after_permission(
+        return lingxi_core::host::rooted_fs::open_file_after_permission(
             parent,
             Path::new(filename),
             candidate,
@@ -224,8 +224,13 @@ pub(crate) fn open_rooted_search_file(
     let relative = candidate
         .strip_prefix(search_root)
         .map_err(|_| SearchResolutionError::SearchRootChanged)?;
-    platform_api::rooted_fs::open_file_after_permission(search_root, relative, candidate, candidate)
-        .map_err(|_| SearchResolutionError::SearchRootChanged)
+    lingxi_core::host::rooted_fs::open_file_after_permission(
+        search_root,
+        relative,
+        candidate,
+        candidate,
+    )
+    .map_err(|_| SearchResolutionError::SearchRootChanged)
 }
 
 /// Map an approved canonical path back to a canonical trusted root and a
@@ -352,16 +357,16 @@ pub(crate) struct TaskOutputTestRegistry(pub std::path::PathBuf);
 
 #[cfg(test)]
 #[async_trait::async_trait]
-impl platform_api::task_registry::TaskRegistryHandle for TaskOutputTestRegistry {
+impl lingxi_core::host::task_registry::TaskRegistryHandle for TaskOutputTestRegistry {
     async fn task_output_directory(&self) -> Option<String> {
         Some(self.0.to_string_lossy().into_owned())
     }
     async fn create(
         &self,
-        _: platform_api::task_registry::TaskCreateInput,
+        _: lingxi_core::host::task_registry::TaskCreateInput,
     ) -> Result<
-        platform_api::task_registry::TaskRecord,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!()
     }
@@ -369,27 +374,27 @@ impl platform_api::task_registry::TaskRegistryHandle for TaskOutputTestRegistry 
         &self,
         _: &str,
     ) -> Result<
-        Option<platform_api::task_registry::TaskRecord>,
-        platform_api::task_registry::TaskRegistryError,
+        Option<lingxi_core::host::task_registry::TaskRecord>,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         Ok(None)
     }
     async fn list(
         &self,
-        _: platform_api::task_registry::TaskListFilter,
+        _: lingxi_core::host::task_registry::TaskListFilter,
     ) -> Result<
-        Vec<platform_api::task_registry::TaskRecord>,
-        platform_api::task_registry::TaskRegistryError,
+        Vec<lingxi_core::host::task_registry::TaskRecord>,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         Ok(vec![])
     }
     async fn update(
         &self,
         _: &str,
-        _: platform_api::task_registry::TaskUpdatePatch,
+        _: lingxi_core::host::task_registry::TaskUpdatePatch,
     ) -> Result<
-        platform_api::task_registry::TaskRecord,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!()
     }
@@ -398,8 +403,8 @@ impl platform_api::task_registry::TaskRegistryHandle for TaskOutputTestRegistry 
         _: &str,
         _: &str,
     ) -> Result<
-        platform_api::task_registry::TaskRecord,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!()
     }
@@ -407,8 +412,8 @@ impl platform_api::task_registry::TaskRegistryHandle for TaskOutputTestRegistry 
         &self,
         _: &str,
     ) -> Result<
-        platform_api::task_registry::TaskRecord,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!()
     }
@@ -417,8 +422,8 @@ impl platform_api::task_registry::TaskRegistryHandle for TaskOutputTestRegistry 
         _: &str,
         _: Option<u64>,
     ) -> Result<
-        platform_api::task_registry::TaskOutputChunk,
-        platform_api::task_registry::TaskRegistryError,
+        lingxi_core::host::task_registry::TaskOutputChunk,
+        lingxi_core::host::task_registry::TaskRegistryError,
     > {
         unreachable!()
     }

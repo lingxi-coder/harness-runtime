@@ -5,8 +5,8 @@ use crate::test_support::{
 use crate::turn_loop::dispatch_tool_uses_tracked;
 use crate::OrchestratorConfig;
 use async_trait::async_trait;
-use platform_api::observer_pairing::ObserverPairings;
-use protocol::{ContentBlock, ToolUseId};
+use lingxi_core::host::observer_pairing::ObserverPairings;
+use lingxi_core::types::{ContentBlock, ToolUseId};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

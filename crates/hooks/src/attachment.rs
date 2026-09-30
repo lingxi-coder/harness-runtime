@@ -840,7 +840,7 @@ mod tests {
     #[test]
     fn hook_name_is_tool_qualified_for_tool_events_and_source_qualified_for_session_start() {
         use crate::events::HookEvent;
-        use protocol::{SessionId, ToolUseId};
+        use lingxi_core::types::{SessionId, ToolUseId};
 
         let post = HookEvent::PostToolUse {
             tool_name: "Bash".into(),
@@ -893,12 +893,12 @@ mod tests {
         use std::collections::HashMap;
 
         let base = |executor: HookExecutor| HookDefinition {
-            id: protocol::HookId::new(),
+            id: lingxi_core::types::HookId::new(),
             name: "h".into(),
             events: vec![HookEventType::Stop],
             if_condition: None,
             executor,
-            source: HookSource::Settings(protocol::SettingsScope::User),
+            source: HookSource::Settings(lingxi_core::types::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,

@@ -1,6 +1,6 @@
 use super::apply_spawn_rewrite;
 
-use platform_api::subagent_spawn::SubagentSpawnRequest;
+use lingxi_core::host::subagent_spawn::SubagentSpawnRequest;
 use serde_json::json;
 
 fn request() -> SubagentSpawnRequest {

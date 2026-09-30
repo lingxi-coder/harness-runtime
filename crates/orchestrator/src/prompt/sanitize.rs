@@ -93,7 +93,7 @@ pub fn escape_reminder_path(s: &str) -> String {
 /// with optional JS `\s` runs around the `/` and before the `>`. JS `\s` is
 /// the Unicode whitespace set plus `U+FEFF`, which is exactly
 /// `char::is_whitespace()` plus `U+FEFF` (Rust excludes the BOM).
-pub use platform_api::task_notification::escape_closing_system_reminder;
+pub use lingxi_core::host::task_notification::escape_closing_system_reminder;
 
 #[cfg(test)]
 mod tests {

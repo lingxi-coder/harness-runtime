@@ -175,7 +175,10 @@ impl TaskRegistry {
         Ok(())
     }
 
-    pub async fn take_human_task_messages_for(&self, agent_id: protocol::AgentId) -> Vec<String> {
+    pub async fn take_human_task_messages_for(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+    ) -> Vec<String> {
         let rows = self.tasks.read().await;
         let Some((id, _)) = rows.iter().find(|(_, state)| matches!(state, TaskState::LocalAgent(agent) if agent.agent_id == agent_id && !state.is_terminated())) else { return Vec::new(); };
         let mut inboxes = self.human_messages.lock().unwrap();
@@ -193,8 +196,8 @@ impl TaskRegistry {
     pub async fn register_agent_resume_recipe(
         &self,
         id: &str,
-        request: platform_api::SubagentSpawnRequest,
-        inheritance: platform_api::SubagentInheritance,
+        request: lingxi_core::host::SubagentSpawnRequest,
+        inheritance: lingxi_core::host::SubagentInheritance,
     ) -> Result<(), TaskError> {
         let id = self.canonical_or_raw(id).await;
         self.handler_for(TaskType::LocalAgent)

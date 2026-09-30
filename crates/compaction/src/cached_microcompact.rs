@@ -1,7 +1,7 @@
 //! Cached microcompact — same-input result cache for the microcompact layer.
 
 use crate::microcompact::MicrocompactResult;
-use protocol::ConversationMessage;
+use lingxi_core::types::ConversationMessage;
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
@@ -86,7 +86,7 @@ fn input_hash(messages: &[ConversationMessage], key_material: impl Hash) -> u64 
 mod tests {
     use super::*;
     use crate::microcompact::MicrocompactResult;
-    use protocol::{ConversationMessage, MessageId};
+    use lingxi_core::types::{ConversationMessage, MessageId};
     use std::cell::Cell;
     use std::time::SystemTime;
 

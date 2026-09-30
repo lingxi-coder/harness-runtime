@@ -38,8 +38,10 @@
 
 use crate::env::{encode_sandboxed_command, Platform};
 use crate::fs_args::{ReadConfig, WriteConfig};
+#[cfg(test)]
+use crate::path_utils::normalize_path_for_sandbox;
 use crate::path_utils::{
-    contains_glob_chars, get_dangerous_directories, glob_to_regex, normalize_path_for_sandbox,
+    contains_glob_chars, get_dangerous_directories, glob_to_regex, normalize_path_for_sandbox_in,
     posix_dirname, DANGEROUS_FILES,
 };
 
@@ -218,12 +220,16 @@ fn static_prefix(s: &str) -> String {
 /// symlink replacement.
 ///
 /// Ported from `macos-sandbox-utils.js:73-120` (`generateMoveBlockingRules`).
-fn generate_move_blocking_rules(path_patterns: &[String], log_tag: &str) -> Vec<String> {
+fn generate_move_blocking_rules(
+    path_patterns: &[String],
+    log_tag: &str,
+    cwd: Option<&str>,
+) -> Vec<String> {
     let mut rules: Vec<String> = Vec::new();
     let ops = ["file-write-unlink", "file-write-create"];
 
     for path_pattern in path_patterns {
-        let normalized_path = normalize_path_for_sandbox(path_pattern);
+        let normalized_path = normalize_path_for_sandbox_in(path_pattern, cwd);
         if contains_glob_chars(&normalized_path) {
             // Regex matching for glob patterns.
             let regex_pattern = glob_to_regex(&normalized_path);
@@ -291,6 +297,7 @@ fn generate_read_rules(
     config: Option<&ReadConfig>,
     log_tag: &str,
     write_allow_paths: Option<&[String]>,
+    cwd: Option<&str>,
 ) -> Vec<String> {
     let Some(config) = config else {
         return vec!["(allow file-read*)".to_string()];
@@ -304,7 +311,7 @@ fn generate_read_rules(
 
     // Then deny specific paths.
     for path_pattern in &config.deny_only {
-        let normalized_path = normalize_path_for_sandbox(path_pattern);
+        let normalized_path = normalize_path_for_sandbox_in(path_pattern, cwd);
         if normalized_path == "/" {
             denies_root = true;
         }
@@ -330,7 +337,7 @@ fn generate_read_rules(
     // (v0d's `s` set).
     let mut reallowed_subpaths: Vec<String> = Vec::new();
     for path_pattern in &config.allow_within_deny {
-        let normalized_path = normalize_path_for_sandbox(path_pattern);
+        let normalized_path = normalize_path_for_sandbox_in(path_pattern, cwd);
         if contains_glob_chars(&normalized_path) {
             let regex_pattern = glob_to_regex(&normalized_path);
             rules.push("(allow file-read*".to_string());
@@ -353,7 +360,7 @@ fn generate_read_rules(
         if contains_glob_chars(path_pattern) {
             continue;
         }
-        let normalized_path = normalize_path_for_sandbox(path_pattern);
+        let normalized_path = normalize_path_for_sandbox_in(path_pattern, cwd);
         if reallowed_subpaths
             .iter()
             .any(|allowed| normalized_path.starts_with(&format!("{allowed}/")))
@@ -371,13 +378,17 @@ fn generate_read_rules(
     }
 
     // Block file movement to prevent bypass via mv/rename.
-    rules.extend(generate_move_blocking_rules(&config.deny_only, log_tag));
+    rules.extend(generate_move_blocking_rules(
+        &config.deny_only,
+        log_tag,
+        cwd,
+    ));
 
     // Re-allow file-write-unlink / file-write-create for write-allowed paths.
     if let Some(write_allow_paths) = write_allow_paths {
         if !write_allow_paths.is_empty() {
             for path_pattern in write_allow_paths {
-                let normalized_path = normalize_path_for_sandbox(path_pattern);
+                let normalized_path = normalize_path_for_sandbox_in(path_pattern, cwd);
                 for op in ["file-write-unlink", "file-write-create"] {
                     if contains_glob_chars(&normalized_path) {
                         let regex_pattern = glob_to_regex(&normalized_path);
@@ -408,6 +419,7 @@ fn generate_write_rules(
     config: Option<&WriteConfig>,
     log_tag: &str,
     allow_git_config: bool,
+    cwd: Option<&str>,
 ) -> Vec<String> {
     let Some(config) = config else {
         return vec!["(allow file-write*)".to_string()];
@@ -417,7 +429,7 @@ fn generate_write_rules(
 
     // Allow rules.
     for path_pattern in &config.allow_only {
-        let normalized_path = normalize_path_for_sandbox(path_pattern);
+        let normalized_path = normalize_path_for_sandbox_in(path_pattern, cwd);
         if contains_glob_chars(&normalized_path) {
             let regex_pattern = glob_to_regex(&normalized_path);
             rules.push("(allow file-write*".to_string());
@@ -432,10 +444,13 @@ fn generate_write_rules(
 
     // Combine user-specified + mandatory deny patterns.
     let mut deny_paths: Vec<String> = config.deny_within_allow.clone();
-    deny_paths.extend(mac_get_mandatory_deny_patterns(allow_git_config));
+    deny_paths.extend(match cwd {
+        Some(cwd) => mac_get_mandatory_deny_patterns_with(allow_git_config, cwd),
+        None => mac_get_mandatory_deny_patterns(allow_git_config),
+    });
 
     for path_pattern in &deny_paths {
-        let normalized_path = normalize_path_for_sandbox(path_pattern);
+        let normalized_path = normalize_path_for_sandbox_in(path_pattern, cwd);
         if contains_glob_chars(&normalized_path) {
             let regex_pattern = glob_to_regex(&normalized_path);
             rules.push("(deny file-write*".to_string());
@@ -449,7 +464,7 @@ fn generate_write_rules(
     }
 
     // Block file movement to prevent bypass via mv/rename.
-    rules.extend(generate_move_blocking_rules(&deny_paths, log_tag));
+    rules.extend(generate_move_blocking_rules(&deny_paths, log_tag, cwd));
 
     rules
 }
@@ -491,6 +506,10 @@ pub struct ProfileParams<'a> {
     pub allow_apple_events: bool,
     /// The log tag stamped into `(deny default ...)` and every rule message.
     pub log_tag: &'a str,
+    /// Directory relative paths and the mandatory `.git`/dotfile denies
+    /// resolve against — the command's sandbox root. `None` falls back to the
+    /// host process's `current_dir()`.
+    pub cwd: Option<&'a str>,
 }
 
 /// Generate the complete SBPL sandbox profile text.
@@ -683,7 +702,7 @@ pub fn generate_sandbox_profile(params: &ProfileParams<'_>) -> String {
             if !sockets.is_empty() {
                 profile.push("(allow system-socket (socket-domain AF_UNIX))".to_string());
                 for socket_path in sockets {
-                    let normalized_path = normalize_path_for_sandbox(socket_path);
+                    let normalized_path = normalize_path_for_sandbox_in(socket_path, params.cwd);
                     profile.push(format!(
                         "(allow network-bind (local unix-socket (subpath {})))",
                         escape_path(&normalized_path)
@@ -732,6 +751,7 @@ pub fn generate_sandbox_profile(params: &ProfileParams<'_>) -> String {
         params.read_config,
         log_tag,
         write_allow_paths,
+        params.cwd,
     ));
     profile.push(String::new());
 
@@ -741,6 +761,7 @@ pub fn generate_sandbox_profile(params: &ProfileParams<'_>) -> String {
         params.write_config,
         log_tag,
         params.allow_git_config,
+        params.cwd,
     ));
 
     // ===== Pty support (macos-sandbox-utils.js:499-512) =====
@@ -883,6 +904,8 @@ pub struct WrapParams<'a> {
     pub tmpdir: &'a str,
     /// Optional per-session token that validates per-command proxy credentials.
     pub proxy_auth_token: Option<&'a str>,
+    /// The command's sandbox root; see [`ProfileParams::cwd`].
+    pub cwd: Option<&'a str>,
 }
 
 /// Wrap a command with the macOS Seatbelt sandbox.
@@ -931,6 +954,7 @@ pub fn wrap_command_with_sandbox_macos(params: &WrapParams<'_>) -> std::io::Resu
         enable_weaker_network_isolation: params.enable_weaker_network_isolation,
         allow_apple_events: params.allow_apple_events,
         log_tag: &log_tag,
+        cwd: params.cwd,
     });
 
     // Proxy env vars (KEY=value strings) via the shared utility.
@@ -1259,7 +1283,7 @@ mod profile_text_tests {
     #[test]
     fn read_rules_none_allows_all() {
         assert_eq!(
-            generate_read_rules(None, "TAG", None),
+            generate_read_rules(None, "TAG", None, None),
             vec!["(allow file-read*)".to_string()]
         );
     }
@@ -1268,7 +1292,7 @@ mod profile_text_tests {
     fn read_rules_deny_then_reallow_in_order() {
         // Literal (non-glob) paths -> subpath matching, deterministic order.
         let config = rc(&["/x"], &["/x/y"]);
-        let rules = generate_read_rules(Some(&config), "TAG", None);
+        let rules = generate_read_rules(Some(&config), "TAG", None, None);
         let joined = rules.join("\n");
         // Default allow first.
         assert_eq!(rules[0], "(allow file-read*)");
@@ -1289,7 +1313,7 @@ mod profile_text_tests {
         // leak read access to the nested deny. Order: deny /x, deny /x/secret,
         // allow /x, deny /x/secret (again).
         let config = rc(&["/x", "/x/secret"], &["/x"]);
-        let rules = generate_read_rules(Some(&config), "TAG", None);
+        let rules = generate_read_rules(Some(&config), "TAG", None, None);
         let joined = rules.join("\n");
         let reallow = joined
             .find("(allow file-read*\n  (subpath \"/x\")")
@@ -1314,7 +1338,7 @@ mod profile_text_tests {
     #[test]
     fn read_rules_glob_uses_regex() {
         let config = rc(&["/x/*.env"], &[]);
-        let rules = generate_read_rules(Some(&config), "TAG", None);
+        let rules = generate_read_rules(Some(&config), "TAG", None, None);
         let joined = rules.join("\n");
         // A glob path -> (deny file-read* (regex ...)).
         assert!(joined.contains("(deny file-read*\n  (regex "));
@@ -1326,7 +1350,7 @@ mod profile_text_tests {
     #[test]
     fn read_rules_deny_root_reallows_literal_root() {
         let config = rc(&["/"], &[]);
-        let rules = generate_read_rules(Some(&config), "TAG", None);
+        let rules = generate_read_rules(Some(&config), "TAG", None, None);
         let joined = rules.join("\n");
         assert!(joined.contains("(allow file-read* (literal \"/\"))"));
     }
@@ -1335,7 +1359,7 @@ mod profile_text_tests {
     fn read_rules_write_allow_reallows_unlink_create() {
         let config = rc(&["/x"], &[]);
         let write_allow = vec!["/w".to_string()];
-        let rules = generate_read_rules(Some(&config), "TAG", Some(&write_allow));
+        let rules = generate_read_rules(Some(&config), "TAG", Some(&write_allow), None);
         let joined = rules.join("\n");
         assert!(joined.contains("(allow file-write-unlink\n  (subpath \"/w\")"));
         assert!(joined.contains("(allow file-write-create\n  (subpath \"/w\")"));
@@ -1346,7 +1370,7 @@ mod profile_text_tests {
     #[test]
     fn write_rules_none_allows_all() {
         assert_eq!(
-            generate_write_rules(None, "TAG", false),
+            generate_write_rules(None, "TAG", false, None),
             vec!["(allow file-write*)".to_string()]
         );
     }
@@ -1354,7 +1378,7 @@ mod profile_text_tests {
     #[test]
     fn write_rules_allow_then_deny_then_mandatory() {
         let config = wc(&["/w"], &["/w/d"]);
-        let rules = generate_write_rules(Some(&config), "TAG", false);
+        let rules = generate_write_rules(Some(&config), "TAG", false, None);
         let joined = rules.join("\n");
         // Allow /w.
         let allow_pos = joined

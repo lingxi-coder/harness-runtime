@@ -1071,8 +1071,8 @@ async fn host_qa_fixture_with_mobile_linux(
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
         .attach_host_environment(host_environment(
-            platform_api::MobileHostOs::Ios,
-            platform_api::MobileDeviceClass::Phone,
+            lingxi_core::host::MobileHostOs::Ios,
+            lingxi_core::host::MobileDeviceClass::Phone,
         ))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Host QA").await;
@@ -3460,7 +3460,8 @@ async fn execute_mcp_flow_runs_the_host_reloaded_typed_binding() {
     )
     .expect("write flow contexts");
 
-    let mut definition = platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
+    let mut definition =
+        lingxi_core::host::McpToolDefinitionDto::new("runtime_status", input_schema);
     definition.output_schema = Some(output_schema);
     let binding = json!({
         "flowId": "runtime-status-flow",
@@ -3825,8 +3826,8 @@ async fn scaffold_records_the_host_device_context() {
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     assert!(broker
         .attach_host_environment(host_environment(
-            platform_api::MobileHostOs::Ios,
-            platform_api::MobileDeviceClass::Tablet,
+            lingxi_core::host::MobileHostOs::Ios,
+            lingxi_core::host::MobileDeviceClass::Tablet,
         ))
         .is_ok());
     let record = service
@@ -4362,7 +4363,8 @@ fn persist_initial_mcp_candidate_fixture(
         "additionalProperties": false,
     });
     let output_schema = runtime_record_output_schema();
-    let mut definition = platform_api::McpToolDefinitionDto::new("runtime_status", input_schema);
+    let mut definition =
+        lingxi_core::host::McpToolDefinitionDto::new("runtime_status", input_schema);
     definition.title = Some("Runtime status".into());
     definition.description = Some("Read the current runtime status from the staged flow.".into());
     definition.output_schema = Some(output_schema);
@@ -4384,7 +4386,7 @@ fn persist_initial_mcp_candidate_fixture(
         tools: vec![local_apps::HostValidatedMcpTool {
             definition: definition.clone(),
             flow,
-            ceiling: platform_api::McpPermissionCeiling::Allow,
+            ceiling: lingxi_core::host::McpPermissionCeiling::Allow,
         }],
         proposal_sha256: local_apps::approval_contract_sha256(
             serde_json::to_value(&proposal).expect("serialize proposal"),
@@ -12048,15 +12050,15 @@ fn declare_capability(root: &TempDir, app_id: &str, capability: AppCapability) {
 
 /// Build the host facts a native client reports for one device.
 fn host_environment(
-    host_os: platform_api::MobileHostOs,
-    device_class: platform_api::MobileDeviceClass,
-) -> platform_api::MobileHostEnvironment {
-    platform_api::MobileHostEnvironment::new(
+    host_os: lingxi_core::host::MobileHostOs,
+    device_class: lingxi_core::host::MobileDeviceClass,
+) -> lingxi_core::host::MobileHostEnvironment {
+    lingxi_core::host::MobileHostEnvironment::new(
         host_os,
         Some("19.0".into()),
         device_class,
-        platform_api::MobileExecutionTarget::PhysicalDevice,
-        platform_api::MobileLaunchMode::Interactive,
+        lingxi_core::host::MobileExecutionTarget::PhysicalDevice,
+        lingxi_core::host::MobileLaunchMode::Interactive,
     )
 }
 
@@ -12080,8 +12082,8 @@ async fn the_host_stamps_the_iphone_device_context_the_agent_cannot_name() {
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
         .attach_host_environment(host_environment(
-            platform_api::MobileHostOs::Ios,
-            platform_api::MobileDeviceClass::Phone,
+            lingxi_core::host::MobileHostOs::Ios,
+            lingxi_core::host::MobileDeviceClass::Phone,
         ))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Device").await;
@@ -12118,8 +12120,8 @@ async fn the_host_stamps_the_android_tablet_device_context() {
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
         .attach_host_environment(host_environment(
-            platform_api::MobileHostOs::Android,
-            platform_api::MobileDeviceClass::Tablet,
+            lingxi_core::host::MobileHostOs::Android,
+            lingxi_core::host::MobileDeviceClass::Tablet,
         ))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Tablet").await;
@@ -12149,8 +12151,8 @@ async fn an_unclassified_host_records_no_device_context() {
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
         .attach_host_environment(host_environment(
-            platform_api::MobileHostOs::Ios,
-            platform_api::MobileDeviceClass::Unknown,
+            lingxi_core::host::MobileHostOs::Ios,
+            lingxi_core::host::MobileDeviceClass::Unknown,
         ))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Unclassified").await;
@@ -12179,8 +12181,8 @@ async fn an_agent_supplied_device_context_never_overrides_the_host() {
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
         .attach_host_environment(host_environment(
-            platform_api::MobileHostOs::Ios,
-            platform_api::MobileDeviceClass::Tablet,
+            lingxi_core::host::MobileHostOs::Ios,
+            lingxi_core::host::MobileDeviceClass::Tablet,
         ))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Ignored").await;
@@ -12569,7 +12571,7 @@ struct PinnedShell {
     service: Arc<AppService>,
     broker: Arc<LocalAppsHostBroker>,
     lingxi_home: PathBuf,
-    fs: Arc<dyn platform_api::FileSystem>,
+    fs: Arc<dyn lingxi_core::host::FileSystem>,
     app_id: String,
     init_session_id: String,
     /// Captured at creation so the transcript path is derived exactly the
@@ -12691,7 +12693,7 @@ async fn pinned_shell() -> PinnedShell {
     let root = TempDir::new().expect("tempdir");
     let lingxi_home = root.path().join(".lingxi");
     fs::create_dir_all(&lingxi_home).expect("create lingxi home");
-    let fs_impl: Arc<dyn platform_api::FileSystem> = Arc::new(
+    let fs_impl: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
         platform_posix_minimal::PosixFileSystem::new(root.path().to_path_buf()),
     );
     let service = test_service(&root).await;

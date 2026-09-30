@@ -10,7 +10,6 @@ mobile-linux-api.workspace = true
 lingxi-llm-client.workspace = true
 unicode-width = "=0.1.14"
 unicode-segmentation = "=1.12.0"
-protocol = { path = "../protocol" }
 session = { path = "../session" }
 branding.workspace = true
 permission = { path = "../permission" }
@@ -22,7 +21,6 @@ core = { path = "../core" }
 # takes) moved here so per-category tool crates (tools/file, tools/shell, …)
 # can construct tools without depending on the `tools` monolith. Pulls in the
 # handle-providing crates. The design §5.1 ToolCtx reshape will slim this later.
-platform-api = { path = "../platform-api" }
 telemetry = { path = "../telemetry" }
 sandbox = { path = "../sandbox" }
 mcp = { path = "../mcp" }
