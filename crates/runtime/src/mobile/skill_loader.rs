@@ -169,17 +169,7 @@ fn base_tool_name(value: &str) -> &str {
 }
 
 fn chat_safe_tool_name(name: &str) -> bool {
-    matches!(
-        name,
-        "AskUserQuestion"
-            | "Glob"
-            | "Grep"
-            | "Read"
-            | "Skill"
-            | "StructuredOutput"
-            | "WebFetch"
-            | "WebSearch"
-    )
+    super::MOBILE_CHAT_TOOL_ALLOWLIST.contains(&name)
 }
 
 fn chat_compatible(frontmatter: &CommandFrontmatter) -> bool {

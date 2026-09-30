@@ -67,7 +67,7 @@ impl Tool for ClipboardTool {
         &INPUT_SCHEMA
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        true
+        self.ctx.clipboard.is_some()
     }
     fn max_result_size_chars(&self) -> usize {
         4096
@@ -221,6 +221,16 @@ mod tests {
         let mut ctx = tool_api::test_support::shell_test_ctx(empty_output());
         ctx.clipboard = clipboard;
         ctx
+    }
+
+    #[test]
+    fn clipboard_requires_a_backend_and_classifies_writes_as_side_effects() {
+        let static_ctx = ToolStaticContext::default();
+        assert!(!ClipboardTool::new(ctx_with(None)).is_enabled(&static_ctx));
+        let tool = ClipboardTool::new(ctx_with(Some(Arc::new(FakeClipboard::default()))));
+        assert!(tool.is_enabled(&static_ctx));
+        assert!(tool.is_read_only(&json!({ "action": "get" })));
+        assert!(!tool.is_read_only(&json!({ "action": "set", "text": "hello" })));
     }
 
     #[tokio::test]
