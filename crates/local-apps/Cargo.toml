@@ -25,7 +25,9 @@ tokio = { workspace = true }
 tracing.workspace = true
 rusqlite = { version = "0.32.1", features = ["backup", "bundled"] }
 sha2 = "0.10"
-git2 = { path = "../../third_party/git2-rs/git2", optional = true, default-features = false, features = ["vendored-libgit2"] }
+# Resolved from crates.io. The one dependency graph that links libgit2 chooses where it comes from:
+# a top-level workspace that already vendors a patched copy points `[patch.crates-io]` at it.
+git2 = { version = "0.21", optional = true, default-features = false, features = ["vendored-libgit2"] }
 # Feature-scoped persisted ids (8 lowercase hex chars), same generator family as
 # `tools/cron::generate_cron_task_id`.
 rand = "0.9"

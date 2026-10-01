@@ -380,3 +380,9 @@ lingxi-llm-client = { path = "deps/llm-client" }
 
 [profile.release]
 lto = "thin"
+
+# `local-apps` asks crates.io for git2 so that it does not depend on where a workspace keeps libgit2. This workspace
+# already carries a patched copy (SSH and TLS through mbedTLS) that `plugin` and `tools/git-mobile` use by path, and it
+# is the one place that decides: a package may link libgit2 once.
+[patch.crates-io]
+git2 = { path = "third_party/git2-rs/git2" }
