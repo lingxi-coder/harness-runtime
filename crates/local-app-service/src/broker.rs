@@ -4,7 +4,11 @@
 //! WebView handles.  This broker is the single trust boundary for those
 //! operations and is also used by the native client command surface.
 
-use crate::mobile::local_apps_mcp::LocalAppsMcpHost;
+use crate::host::{BuildExecutor, ConversationHost, DiagnosticsProvider, HostEvent, HostEventSink};
+use crate::mcp_server::LocalAppsMcpHost;
+use crate::plan_approval::CreateApprovalAuthority;
+use crate::publication::McpPublisher;
+use crate::template_catalog::PluginBundle;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use local_app_contracts::approvals::{
@@ -14,14 +18,6 @@ use local_app_contracts::approvals::{
 };
 use local_app_contracts::events::BackgroundRunOutcome;
 use local_app_contracts::execution::{Mount, MountKind, NetworkPolicy};
-use local_app_service::host::BuildExecutor;
-use local_app_service::host::ConversationHost;
-use local_app_service::host::DiagnosticsProvider;
-use local_app_service::host::HostEvent;
-use local_app_service::host::HostEventSink;
-use local_app_service::plan_approval::CreateApprovalAuthority;
-use local_app_service::publication::McpPublisher;
-use local_app_service::template_catalog::PluginBundle;
 use local_apps::{
     load_manifest, load_mcp_settings, load_permissions, mcp_catalog_tool_names, save_mcp_settings,
     AppCapability, AppDependencyState, AppLayout, AppMcpSettings, AppRuntimeState, AppService,
@@ -58,8 +54,7 @@ const RUNTIME_SEED_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEPENDENCY_INSTALL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEPENDENCY_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 #[cfg(test)]
-const PNPM_TOOLCHAIN_KEY: &str =
-    crate::mobile::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY;
+const PNPM_TOOLCHAIN_KEY: &str = crate::runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY;
 const LOCAL_APP_PERF_DIAGNOSTIC_ENV: &str = "LINGXI_LOCAL_APP_PERF_DIAGNOSTIC";
 /// Emitted by `stage-local-app-runtime.py` beside the staged `node_modules`.
 const BUNDLED_SEED_MANIFEST_FILE: &str = "runtime-manifest.json";
@@ -77,14 +72,12 @@ const MCP_FLOW_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 // Generation optimization Host extensions live in a child module so the
 // existing broker remains the owner of WebView/data/runtime handles while the
 // contract and QA journals stay private to the Host.  The MCP trait wiring is
-// intentionally left to local_apps_mcp.rs' owner.
-#[path = "local_apps_host/authoring.rs"]
+// intentionally left to mcp_server.rs' owner.
 mod authoring;
-pub(crate) use authoring::PreparedWorkflowQaPublication;
+pub use authoring::PreparedWorkflowQaPublication;
 
 /// The plan-driven create/modify preparation. See [`prepare`].
-#[path = "local_apps_prepare.rs"]
-pub(crate) mod prepare;
+pub mod prepare;
 
 /// Availability of the exact profile dependency lock on this host. The
 /// selector distinguishes a reusable shared snapshot from a device-bundled
@@ -184,7 +177,7 @@ struct PersistedMcpCandidate {
 
 #[derive(Clone, Debug)]
 struct CreateProposalContext {
-    selection: crate::mobile::local_app_template_catalog::ValidatedTemplateSelection,
+    selection: crate::template_catalog::ValidatedTemplateSelection,
     staging_evidence: Value,
     design_spec: Option<Value>,
     design_spec_sha256: Option<String>,
@@ -215,7 +208,7 @@ struct CreateProposalContext {
 
 #[derive(Clone, Debug)]
 struct CreateScaffoldSeed {
-    selection: crate::mobile::local_app_template_catalog::ValidatedTemplateSelection,
+    selection: crate::template_catalog::ValidatedTemplateSelection,
     template_root: PathBuf,
     contexts: BTreeMap<String, local_apps::AppMcpFlowContext>,
     /// Staged through `LocalAppStageCreate`; authoritative over whatever name/brief
@@ -487,7 +480,7 @@ impl Drop for RuntimeReservation {
         let runtimes = Arc::clone(&self.runtimes);
         let app_id = std::mem::take(&mut self.app_id);
         let generation = self.generation;
-        crate::mobile::local_apps_profile::worker_runtime().spawn(async move {
+        crate::worker::worker_runtime().spawn(async move {
             Self::abandon(&mut *runtimes.lock().await, &app_id, generation);
         });
     }
@@ -790,26 +783,21 @@ impl Drop for PendingDependencyConfirmationGuard<'_> {
 // / notify. A CHILD module (not a sibling) so it reaches the broker's private
 // fields and `authorize_declared_capability` without widening their
 // visibility; split out purely for size. The dispatch match stays here.
-#[path = "local_apps_host_device.rs"]
 mod device_ops;
 
 // `files.read` / `files.write` — app-private file store operations.
-#[path = "local_apps_host_files.rs"]
 mod files_ops;
 
 // `llm.chat` — the app-initiated model call. A child module for the same
 // reason as `device_ops`.
-#[path = "local_apps_host_llm.rs"]
 mod llm_ops;
 
 // `agent.post` — the app-to-conversation mailbox write.
-#[path = "local_apps_host_agent.rs"]
 mod agent_ops;
-pub(crate) use agent_ops::{
+pub use agent_ops::{
     AgentOutputStream, AgentTurnControl, AgentTurnUsageState, LocalAppsAgentExecutor,
 };
 
-#[path = "local_apps_host_background.rs"]
 mod background_ops;
 
 /// A bridge failure: human-readable message plus an optional stable machine
@@ -862,7 +850,7 @@ impl From<&str> for BridgeFailure {
 /// canonicalize THAT, and reappend the removed suffix — this reproduces the
 /// same spelling `canonicalize` would have produced while the leaf still
 /// existed, so mint and a post-deletion cleanup always agree.
-pub(crate) fn canonical_cwd_string(path: &std::path::Path) -> String {
+pub fn canonical_cwd_string(path: &std::path::Path) -> String {
     let mut removed_suffix: Vec<std::ffi::OsString> = Vec::new();
     let mut ancestor = path.to_path_buf();
     loop {
@@ -917,7 +905,7 @@ struct LocalAppsRuntimeConfiguration {
 
 /// Profile-scoped broker.  The service is attached after its durable load has
 /// completed, while command/capability resolution can be wired immediately.
-pub(crate) struct LocalAppsHostBroker {
+pub struct LocalAppsHostBroker {
     root: PathBuf,
     event_sink: Arc<dyn HostEventSink>,
     runtime_configuration: RwLock<LocalAppsRuntimeConfiguration>,
@@ -930,18 +918,18 @@ pub(crate) struct LocalAppsHostBroker {
     diagnostics: OnceLock<Arc<dyn DiagnosticsProvider>>,
     /// Set once at profile load (same call site as `attach_service`), so the
     /// broker's `llm.chat` bridge operation reaches the live model.
-    llm: OnceLock<Arc<local_app_service::llm::SharedLlm>>,
+    llm: OnceLock<Arc<crate::llm::SharedLlm>>,
     /// Set at the same profile-load site as `llm` — live per-connection
-    /// device handles behind a swap cell (see `local_apps_device`).
-    device: OnceLock<Arc<crate::mobile::local_apps_device::SharedDeviceCapabilities>>,
+    /// device handles behind a swap cell (see `device_capabilities`).
+    device: OnceLock<Arc<crate::device_capabilities::SharedDeviceCapabilities>>,
     /// The single active `device.recordAudio*` session (one per broker — the
     /// platform has ONE audio session). Arc'd like `runtimes` so the duration
     /// watchdog task can reach it. See `device_ops`.
     recording: Arc<Mutex<Option<device_ops::ActiveRecording>>>,
     /// Captures retained so `llm.chat` can attach them by handle instead of
     /// copying base64 through every WebView/FFI layer. See
-    /// [`crate::mobile::local_apps_device::MediaCache`].
-    media: crate::mobile::local_apps_device::MediaCache,
+    /// [`crate::device_capabilities::MediaCache`].
+    media: crate::device_capabilities::MediaCache,
     /// Apps with an `llm.chat` call in flight. One per app: an app-initiated
     /// call spends the user's quota, so a page cannot fan out.
     ///
@@ -1115,7 +1103,7 @@ impl LocalAppsHostBroker {
         Self::new_with_physical_memory(root, event_sink, build_executor, false, runtime_root, 0)
     }
 
-    pub(crate) fn new_with_physical_memory(
+    pub fn new_with_physical_memory(
         root: PathBuf,
         event_sink: Arc<dyn HostEventSink>,
         build_executor: Option<Arc<dyn BuildExecutor>>,
@@ -1145,7 +1133,7 @@ impl LocalAppsHostBroker {
             llm: OnceLock::new(),
             device: OnceLock::new(),
             recording: Arc::new(Mutex::new(None)),
-            media: crate::mobile::local_apps_device::MediaCache::default(),
+            media: crate::device_capabilities::MediaCache::default(),
             llm_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             mailbox_writes: Mutex::new(()),
             agent_session_writes: Mutex::new(()),
@@ -1208,18 +1196,18 @@ impl LocalAppsHostBroker {
             .clone())
     }
 
-    pub(crate) fn attach_service(&self, service: Arc<AppService>) -> Result<(), Arc<AppService>> {
+    pub fn attach_service(&self, service: Arc<AppService>) -> Result<(), Arc<AppService>> {
         self.service.set(service)
     }
 
-    pub(crate) fn attach_publisher(
+    pub fn attach_publisher(
         &self,
         publisher: Arc<dyn McpPublisher>,
     ) -> Result<(), Arc<dyn McpPublisher>> {
         self.publisher.set(publisher)
     }
 
-    pub(crate) fn attach_plugin_bundle(
+    pub fn attach_plugin_bundle(
         &self,
         bundle: Arc<dyn PluginBundle>,
     ) -> Result<(), Arc<dyn PluginBundle>> {
@@ -1242,7 +1230,7 @@ impl LocalAppsHostBroker {
             .cloned()
     }
 
-    pub(crate) fn attach_diagnostics(
+    pub fn attach_diagnostics(
         &self,
         provider: Arc<dyn DiagnosticsProvider>,
     ) -> Result<(), Arc<dyn DiagnosticsProvider>> {
@@ -1253,7 +1241,7 @@ impl LocalAppsHostBroker {
         self.diagnostics.get().cloned()
     }
 
-    pub(crate) fn refresh_runtime_configuration(
+    pub fn refresh_runtime_configuration(
         &self,
         build_executor: Option<Arc<dyn BuildExecutor>>,
         runtime_root: Option<PathBuf>,
@@ -1283,21 +1271,21 @@ impl LocalAppsHostBroker {
             .clone()
     }
 
-    pub(crate) async fn has_active_runtimes(&self) -> bool {
+    pub async fn has_active_runtimes(&self) -> bool {
         !self.runtimes.lock().await.is_empty()
     }
 
-    pub(crate) fn attach_llm(
+    pub fn attach_llm(
         &self,
-        llm: Arc<local_app_service::llm::SharedLlm>,
-    ) -> Result<(), Arc<local_app_service::llm::SharedLlm>> {
+        llm: Arc<crate::llm::SharedLlm>,
+    ) -> Result<(), Arc<crate::llm::SharedLlm>> {
         self.llm.set(llm)
     }
 
     /// Bind the confirmed native target of this host: `None` when the client
     /// could not classify the device. Set once, at the same composition-root
     /// call site as [`Self::attach_agent_executor`].
-    pub(crate) fn attach_device_context(
+    pub fn attach_device_context(
         &self,
         context: Option<local_apps::DeviceContext>,
     ) -> Result<(), Option<local_apps::DeviceContext>> {
@@ -1307,7 +1295,7 @@ impl LocalAppsHostBroker {
     /// Bind the session catalog the scaffold commit renames the pinned init
     /// session in. Set once, at the same composition-root call site as
     /// [`Self::attach_device_context`].
-    pub(crate) fn attach_conversations(
+    pub fn attach_conversations(
         &self,
         conversations: Arc<dyn ConversationHost>,
     ) -> Result<(), Arc<dyn ConversationHost>> {
@@ -1323,17 +1311,17 @@ impl LocalAppsHostBroker {
         self.device_context.get().cloned().flatten()
     }
 
-    pub(crate) fn attach_agent_executor(
+    pub fn attach_agent_executor(
         &self,
         executor: Arc<dyn LocalAppsAgentExecutor>,
     ) -> Result<(), Arc<dyn LocalAppsAgentExecutor>> {
         self.agent_executor.set(executor)
     }
 
-    pub(crate) fn attach_device(
+    pub fn attach_device(
         &self,
-        device: Arc<crate::mobile::local_apps_device::SharedDeviceCapabilities>,
-    ) -> Result<(), Arc<crate::mobile::local_apps_device::SharedDeviceCapabilities>> {
+        device: Arc<crate::device_capabilities::SharedDeviceCapabilities>,
+    ) -> Result<(), Arc<crate::device_capabilities::SharedDeviceCapabilities>> {
         self.device.set(device)
     }
 
@@ -1435,7 +1423,7 @@ impl LocalAppsHostBroker {
         // candidate state it gates is torn down. Reclaim exactly that
         // subtree — NOT the whole `<run>/` directory, which is also home to
         // `validated-selection.json` and the selector capability
-        // (`local_app_template_catalog::journal_path`). Two of this
+        // (`template_catalog::journal_path`). Two of this
         // function's callers are NOT terminal for the workflow run: the
         // `Err(error)` arm after a five-minute native-approval timeout, and
         // the `McpCreateCandidateGuard` Drop on a Stop / teardown mid-sheet.
@@ -1560,9 +1548,9 @@ impl LocalAppsHostBroker {
         &self,
         app_id: &str,
         workflow_run_id: &str,
-    ) -> Result<crate::mobile::local_app_template_catalog::ValidatedTemplateSelection, String> {
+    ) -> Result<crate::template_catalog::ValidatedTemplateSelection, String> {
         let handle = self.create_selection_handle_for_run(app_id, workflow_run_id)?;
-        crate::mobile::local_app_template_catalog::resolve_typed(
+        crate::template_catalog::resolve_typed(
             self.plugin_bundle()?.as_ref(),
             &self.root,
             app_id,
@@ -1811,7 +1799,7 @@ impl LocalAppsHostBroker {
     ///
     /// Only an ALREADY-SCAFFOLDED app reaches here: the create-time
     /// confirmation is the user's plan approval (see
-    /// [`crate::mobile::local_apps_prepare`]), so there is no second sheet to answer
+    /// [`crate::broker::prepare`]), so there is no second sheet to answer
     /// for an app whose shape is not yet fixed.
     async fn request_mcp_candidate_approval(
         &self,
@@ -1941,7 +1929,7 @@ impl LocalAppsHostBroker {
         AppLayout::new(&self.root, app_id).map_err(|error| error.to_string())
     }
 
-    pub(crate) fn physical_memory_bytes(&self) -> u64 {
+    pub fn physical_memory_bytes(&self) -> u64 {
         self.runtime_configuration
             .read()
             .expect("local-app runtime configuration poisoned")
@@ -1974,7 +1962,7 @@ impl LocalAppsHostBroker {
         // process-global path/mtime metadata.
         let mut dependency_availability_by_lock = HashMap::new();
         Ok(json!({
-            "profiles": crate::mobile::local_app_runtime_profiles::list_runtime_profiles()
+            "profiles": crate::runtime_profiles::list_runtime_profiles()
                 .into_iter()
                 .map(|entry| {
                     let dependency_status = if entry.available {
@@ -2022,7 +2010,7 @@ impl LocalAppsHostBroker {
         }))
     }
 
-    pub(crate) async fn restore_checkpoint_value(&self, input: Value) -> Result<Value, String> {
+    pub async fn restore_checkpoint_value(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
         let checkpoint_id = required_string(&input, "checkpoint_id")?.to_string();
         let service = self.service()?;
@@ -2079,7 +2067,7 @@ impl LocalAppsHostBroker {
             .await
             .map_err(|error| error.to_string())?;
         // Rebuild the restored source so the served output matches it.
-        let builder = crate::mobile::local_apps_build::LocalAppBuilder {
+        let builder = crate::app_build::LocalAppBuilder {
             executor: self.build_executor(),
             host: self,
         };
@@ -2167,7 +2155,7 @@ impl LocalAppsHostBroker {
     /// Write the GUIDED workspace contract for a `CreateMode::Shell` app —
     /// the pre-commit initializer of the "+" button's create.
     ///
-    /// This is the twin of [`Self::land_scaffold`], and the difference is the
+    /// This is the twin of `land_scaffold`, and the difference is the
     /// whole point: it lays down no source, stamps no surface, and touches
     /// nothing but `workspace/LINGXI.md`. A shell has no shape yet, so there
     /// is nothing to scaffold; what it needs is a contract that sends the
@@ -2183,7 +2171,7 @@ impl LocalAppsHostBroker {
     /// rooted in this workspace). If this file is missing, the interview never
     /// starts: the agent sees an empty directory, assumes a normal app, and
     /// starts writing source that `LocalAppScaffold` is going to delete.
-    pub(crate) async fn write_guided_contract_value(
+    pub async fn write_guided_contract_value(
         &self,
         record: &local_apps::AppRecord,
     ) -> Result<(), String> {
@@ -2576,9 +2564,8 @@ impl LocalAppsHostBroker {
                 surface.as_str()
             ));
         }
-        let target =
-            crate::mobile::local_apps_build::LocalAppBuildTarget::from_runtime_binding(&binding)
-                .map_err(|error| error.to_string())?;
+        let target = crate::app_build::LocalAppBuildTarget::from_runtime_binding(&binding)
+            .map_err(|error| error.to_string())?;
         let template_origin = create_seed
             .as_ref()
             .map(|seed| local_apps::AppTemplateOrigin {
@@ -2634,7 +2621,7 @@ impl LocalAppsHostBroker {
                     // the interview is removed before the seed lands, because
                     // a pre-written `app/app.js` would out-resolve the seeded
                     // `app/app.jsx` and the seed would become dead code.
-                    crate::mobile::local_apps_build::scaffold_workspace_initialized(&layout, target, true)
+                    crate::app_build::scaffold_workspace_initialized(&layout, target, true)
                         .map_err(|error| error.to_string())?;
                     // 3e — the formal contract, overwriting the guided one.
                     let workspace = layout.root().join(layout.workspace_rel());
@@ -2720,7 +2707,7 @@ fn stamp_scaffold_identity(
 fn scaffold_runtime_profile(
     requested_binding: Option<local_apps::AppRuntimeProfileBinding>,
     surface: local_apps::AppSurface,
-) -> Result<crate::mobile::local_app_runtime_profiles::RuntimeProfileScaffoldArtifacts, String> {
+) -> Result<crate::runtime_profiles::RuntimeProfileScaffoldArtifacts, String> {
     let binding = requested_binding.ok_or_else(|| {
         "runtime profile binding is required; scaffold must consume a native confirmation receipt"
             .to_string()
@@ -2733,16 +2720,16 @@ fn scaffold_runtime_profile(
             surface.as_str()
         ));
     }
-    crate::mobile::local_app_runtime_profiles::scaffold_artifacts_for_binding(&binding)
+    crate::runtime_profiles::scaffold_artifacts_for_binding(&binding)
         .map_err(|error| error.to_string())
 }
 
 fn persist_runtime_profile_files(
     workspace: &Path,
-    artifacts: &crate::mobile::local_app_runtime_profiles::RuntimeProfileScaffoldArtifacts,
+    artifacts: &crate::runtime_profiles::RuntimeProfileScaffoldArtifacts,
 ) -> Result<(), String> {
     for (relative, bytes) in &artifacts.files {
-        crate::mobile::local_apps_build::write_file(workspace, relative, bytes, true)
+        crate::app_build::write_file(workspace, relative, bytes, true)
             .map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -2792,7 +2779,7 @@ fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), Stri
         let relative_str = relative.to_str().ok_or_else(|| {
             "create_staging_invalid: staged template path is not valid UTF-8".to_string()
         })?;
-        crate::mobile::local_apps_build::write_file(destination, relative_str, &bytes, true)
+        crate::app_build::write_file(destination, relative_str, &bytes, true)
             .map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -2830,17 +2817,14 @@ fn refresh_runtime_profile_snapshot(
         )
     })?;
     let workspace = layout.root().join(layout.workspace_rel());
-    let requested_bytes = std::fs::read(
-        workspace.join(crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL),
-    )
-    .map_err(|error| format!("read requested dependency snapshot input: {error}"))?;
-    let package_bytes = std::fs::read(
-        workspace.join(crate::mobile::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL),
-    )
-    .map_err(|error| format!("read effective dependency package: {error}"))?;
-    let lockfile_bytes =
-        std::fs::read(workspace.join(crate::mobile::local_app_runtime_profiles::LOCKFILE_FILE_REL))
-            .map_err(|error| format!("read dependency lockfile: {error}"))?;
+    let requested_bytes =
+        std::fs::read(workspace.join(crate::runtime_profiles::REQUESTED_FILE_REL))
+            .map_err(|error| format!("read requested dependency snapshot input: {error}"))?;
+    let package_bytes =
+        std::fs::read(workspace.join(crate::runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL))
+            .map_err(|error| format!("read effective dependency package: {error}"))?;
+    let lockfile_bytes = std::fs::read(workspace.join(crate::runtime_profiles::LOCKFILE_FILE_REL))
+        .map_err(|error| format!("read dependency lockfile: {error}"))?;
     let sbom_span = tracing::debug_span!(
         "local_app_dependency_sbom",
         app_id = %layout.app_id(),
@@ -2858,17 +2842,17 @@ fn refresh_runtime_profile_snapshot(
             )
         })?
     };
-    let artifacts = crate::mobile::local_app_runtime_profiles::snapshot_artifacts_for_binding(
+    let artifacts = crate::runtime_profiles::snapshot_artifacts_for_binding(
         &binding,
-        crate::mobile::local_app_runtime_profiles::hash_bytes(&requested_bytes),
-        crate::mobile::local_app_runtime_profiles::hash_bytes(&package_bytes),
-        crate::mobile::local_app_runtime_profiles::hash_bytes(&lockfile_bytes),
+        crate::runtime_profiles::hash_bytes(&requested_bytes),
+        crate::runtime_profiles::hash_bytes(&package_bytes),
+        crate::runtime_profiles::hash_bytes(&lockfile_bytes),
         tree_sha256.to_string(),
         &sbom,
     )
     .map_err(|error| error.to_string())?;
     for (relative, bytes) in &artifacts.files {
-        crate::mobile::local_apps_build::write_file(&workspace, relative, bytes, true)
+        crate::app_build::write_file(&workspace, relative, bytes, true)
             .map_err(|error| error.to_string())?;
     }
     manifest.dependency_snapshot = Some(artifacts.snapshot.clone());
@@ -2963,7 +2947,7 @@ fn formal_workspace_contract(
             // The Phaser and Babylon templates ship `lib/frame-loop.js` NEXT
             // TO their engine adapter, and both their
             // `.lingxi/source-policy.json` and
-            // `local_apps_build::HOST_MANAGED_FILES` list it as host-managed.
+            // `app_build::HOST_MANAGED_FILES` list it as host-managed.
             // Naming only `{helper}` for those two profiles would leave the
             // contract silently narrower than the set actually enforced: the
             // lease accepts an edit to `lib/frame-loop.js`, the next build's
@@ -3411,7 +3395,7 @@ impl LocalAppsHostBroker {
         if active.catalog_sha256 != requested_catalog {
             return Err("catalog_stale: active Local App catalog changed".into());
         }
-        let active_build_id = crate::mobile::local_apps_build::active_build_id(&layout)
+        let active_build_id = crate::app_build::active_build_id(&layout)
             .map_err(|_| "active build unavailable".to_string())?
             .ok_or_else(|| "active build unavailable".to_string())?;
         if active.build_id != active_build_id {
@@ -4088,8 +4072,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
     }
 
     async fn template_catalog(&self, _input: Value) -> Result<Value, String> {
-        let view =
-            crate::mobile::local_app_template_catalog::catalog_view(self.plugin_bundle()?.as_ref())?;
+        let view = crate::template_catalog::catalog_view(self.plugin_bundle()?.as_ref())?;
         serde_json::to_value(view).map_err(|error| format!("serialize template catalog: {error}"))
     }
 
@@ -4110,7 +4093,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         if record.scaffolded {
             return Err("template_selection_rejected: app is already scaffolded; update/verify must use its persisted profile".into());
         }
-        crate::mobile::local_app_template_catalog::validate_and_journal(
+        crate::template_catalog::validate_and_journal(
             self.plugin_bundle()?.as_ref(),
             &self.root,
             app_id,
@@ -4127,7 +4110,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .record(app_id)
             .await
             .map_err(|error| error.to_string())?;
-        crate::mobile::local_app_template_catalog::resolve(
+        crate::template_catalog::resolve(
             self.plugin_bundle()?.as_ref(),
             &self.root,
             app_id,
@@ -4224,7 +4207,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 }
             }
         }
-        let selection = crate::mobile::local_app_template_catalog::resolve_typed(
+        let selection = crate::template_catalog::resolve_typed(
             self.plugin_bundle()?.as_ref(),
             &self.root,
             app_id,
@@ -4232,16 +4215,13 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             handle,
         )?;
         validate_create_stage_quality(quality_level, selection.runtime_profile.family)?;
-        let artifacts = crate::mobile::local_app_runtime_profiles::scaffold_artifacts_for_binding(
-            &selection.runtime_profile,
-        )
-        .map_err(|error| format!("stage template dependencies: {error}"))?;
+        let artifacts =
+            crate::runtime_profiles::scaffold_artifacts_for_binding(&selection.runtime_profile)
+                .map_err(|error| format!("stage template dependencies: {error}"))?;
         let requested = artifacts
             .files
             .iter()
-            .find(|(path, _)| {
-                *path == crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL
-            })
+            .find(|(path, _)| *path == crate::runtime_profiles::REQUESTED_FILE_REL)
             .map(|(_, bytes)| bytes.as_slice())
             .ok_or_else(|| {
                 "create_staging_invalid: requested dependency input missing".to_string()
@@ -4249,15 +4229,13 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         let effective = artifacts
             .files
             .iter()
-            .find(|(path, _)| {
-                *path == crate::mobile::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL
-            })
+            .find(|(path, _)| *path == crate::runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL)
             .map(|(_, bytes)| bytes.as_slice())
             .ok_or_else(|| "create_staging_invalid: effective package input missing".to_string())?;
         let lock = artifacts
             .files
             .iter()
-            .find(|(path, _)| *path == crate::mobile::local_app_runtime_profiles::LOCKFILE_FILE_REL)
+            .find(|(path, _)| *path == crate::runtime_profiles::LOCKFILE_FILE_REL)
             .map(|(_, bytes)| bytes.as_slice())
             .ok_or_else(|| "create_staging_invalid: base lock input missing".to_string())?;
         // Not a verification: `dependency_input_sha256` is a pure function of
@@ -4267,13 +4245,12 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         // that and was unreachable dead weight. The digest is still recorded
         // into `evidence.json` for provenance; nothing re-verifies it against
         // the materialized staging bytes at landing time (a separate gap).
-        let dependency_input_sha256 =
-            crate::mobile::local_app_template_catalog::dependency_input_sha256(
-                requested,
-                effective,
-                lock,
-                crate::mobile::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY,
-            );
+        let dependency_input_sha256 = crate::template_catalog::dependency_input_sha256(
+            requested,
+            effective,
+            lock,
+            crate::runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY,
+        );
         let staging = self
             .root
             .join(".lingxi-build-state/template-candidates")
@@ -4463,8 +4440,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         );
         let approval_contract_sha256 = local_apps::approval_contract_sha256(review_surface.clone())
             .map_err(|issue| format!("proposal_invalid: {}", issue.message))?;
-        let active_build_id = crate::mobile::local_apps_build::active_build_id(&layout)
-            .map_err(|error| error.to_string())?;
+        let active_build_id =
+            crate::app_build::active_build_id(&layout).map_err(|error| error.to_string())?;
         let mut journal = local_apps::McpCandidateJournal {
             schema_version: local_apps::APPS_SCHEMA_VERSION,
             app_id: app_id.clone(),
@@ -4552,7 +4529,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                     .join("; ")
             )
         })?;
-        let build_id = crate::mobile::local_apps_build::active_build_id(&layout)
+        let build_id = crate::app_build::active_build_id(&layout)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "mcp_qa_failed: app has no active build".to_string())?;
         let contexts = self.load_active_mcp_flow_contexts(&layout)?;
@@ -4770,7 +4747,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .clone()
             .or_else(|| journal.catalog_sha256.clone())
             .ok_or_else(|| "catalog_invalid: candidate catalog digest is missing".to_string())?;
-        let build_id = crate::mobile::local_apps_build::active_build_id(&layout)
+        let build_id = crate::app_build::active_build_id(&layout)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "promotion_failed: app has no active build".to_string())?;
         let execution = serde_json::to_value(
@@ -4945,7 +4922,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 );
             }
         }
-        let builder = crate::mobile::local_apps_build::LocalAppBuilder {
+        let builder = crate::app_build::LocalAppBuilder {
             executor: self.build_executor(),
             host: self,
         };
@@ -4953,7 +4930,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .build_workspace_with_authoring(
                 &layout,
                 authoring_candidate.as_ref().map(|candidate| {
-                    crate::mobile::local_apps_build::AuthoringCandidateIdentity {
+                    crate::app_build::AuthoringCandidateIdentity {
                         handle: candidate.handle.clone(),
                         workflow_run_id: candidate.workflow_run_id.clone(),
                         contract_sha256: candidate.contract_sha256.clone(),
@@ -4972,7 +4949,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         let served_index = layout
             .root()
             .join(layout.build_rel(false))
-            .join(crate::mobile::local_apps_build::VITE_OUTPUT_DIR)
+            .join(crate::app_build::VITE_OUTPUT_DIR)
             .join("index.html");
         if !served_index.exists() {
             return Err(format!(
@@ -4993,8 +4970,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .dependency_record(&app_id)
             .await
             .map_err(|e| e.to_string())?;
-        let target = crate::mobile::local_apps_build::detect_build_target(&layout)
-            .map_err(|e| e.to_string())?;
+        let target = crate::app_build::detect_build_target(&layout).map_err(|e| e.to_string())?;
         Ok(serde_json::json!({
             "ok": true,
             "app_id": app_id,
@@ -5250,7 +5226,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 "the mobile Node runtime is unavailable for dependency updates".to_string()
             })?;
             let dependency_staging = Self::prepare_dependency_staging(&layout)?;
-            crate::mobile::local_apps_build::write_file(
+            crate::app_build::write_file(
                 &dependency_staging,
                 "package.json",
                 &receipt.effective_package_json,
@@ -5289,9 +5265,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             let dependency_staging_guest_path =
                 format!("{project_guest_path}/.lingxi-build-state/dependency-staging");
             let build_state_root = format!("{project_guest_path}/.lingxi-build-state");
-            let memory_mb = crate::mobile::local_apps_build::build_memory_budget_mb(
-                self.physical_memory_bytes(),
-            );
+            let memory_mb = crate::app_build::build_memory_budget_mb(self.physical_memory_bytes());
             let requires_network = receipt
                 .summary
                 .iter()
@@ -5443,41 +5417,36 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
              * inventory-backed snapshot.
              */
             let commit_result: Result<(), String> = (|| {
-                crate::mobile::local_apps_build::write_file(
+                crate::app_build::write_file(
                     &workspace,
-                    crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL,
+                    crate::runtime_profiles::REQUESTED_FILE_REL,
                     &receipt.requested_json,
                     true,
                 )
                 .map_err(|error| error.to_string())?;
-                crate::mobile::local_apps_build::write_file(
+                crate::app_build::write_file(
                     &workspace,
-                    crate::mobile::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
+                    crate::runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
                     &receipt.effective_package_json,
                     true,
                 )
                 .map_err(|error| error.to_string())?;
-                crate::mobile::local_apps_build::write_file(
+                crate::app_build::write_file(
                     &workspace,
-                    crate::mobile::local_app_runtime_profiles::LOCKFILE_FILE_REL,
+                    crate::runtime_profiles::LOCKFILE_FILE_REL,
                     &lock_bytes,
                     true,
                 )
                 .map_err(|error| error.to_string())?;
-                crate::mobile::local_apps_build::write_file(
+                crate::app_build::write_file(
                     &workspace,
                     "package.json",
                     &receipt.effective_package_json,
                     true,
                 )
                 .map_err(|error| error.to_string())?;
-                crate::mobile::local_apps_build::write_file(
-                    &workspace,
-                    "pnpm-lock.yaml",
-                    &lock_bytes,
-                    true,
-                )
-                .map_err(|error| error.to_string())?;
+                crate::app_build::write_file(&workspace, "pnpm-lock.yaml", &lock_bytes, true)
+                    .map_err(|error| error.to_string())?;
                 Ok(())
             })();
             if let Err(error) = commit_result {
@@ -5500,7 +5469,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 .dependency_record(&app_id)
                 .await
                 .map_err(|error| error.to_string())?;
-            let builder = crate::mobile::local_apps_build::LocalAppBuilder {
+            let builder = crate::app_build::LocalAppBuilder {
                 executor: self.build_executor(),
                 host: self,
             };
@@ -5508,7 +5477,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 .build_workspace_locked(&layout, &dependencies)
                 .await
                 .map_err(|error| format!("dependency update production build failed: {error}"))?;
-            crate::mobile::local_apps_build::validate_build_for_launch(&layout)
+            crate::app_build::validate_build_for_launch(&layout)
                 .map_err(|error| format!("dependency update profile smoke failed: {error}"))?;
             self.rebind_active_mcp_catalog_to_current_build(&app_id, &layout)
                 .await?;
@@ -5626,7 +5595,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         // Schema changes against live data go through the SAME preview +
         // destructive-approval gate the pipeline used — an agent declaring a
         // narrower schema cannot silently drop user rows.
-        crate::mobile::local_apps_build::migrate_manifest_with_approval(self, &layout, &manifest)
+        crate::app_build::migrate_manifest_with_approval(self, &layout, &manifest)
             .await
             .map_err(|e| e.to_string())?;
         local_apps::save_manifest(&layout, &manifest).map_err(|e| e.to_string())?;
@@ -6395,7 +6364,6 @@ fn public_ip(ip: IpAddr) -> bool {
 }
 
 #[cfg(test)]
-#[path = "local_apps_host/tests/tests.rs"]
 mod tests;
 
 mod approvals;
@@ -6407,6 +6375,7 @@ mod mcp_publication;
 mod runtime_lifecycle;
 mod static_server;
 
+use crate::dependency_integrity;
 use dependency_integrity::dependency_change_cache_status;
 use dependency_integrity::installed_dependency_sbom_with_inventory;
 #[cfg(not(unix))]
@@ -6415,7 +6384,6 @@ use dependency_integrity::validate_dependency_lifecycle_scripts;
 use dependency_integrity::validate_resolved_dependency_lock;
 use dependency_integrity::DependencyChange;
 use dependency_integrity::DependencyChangeKind;
-use local_app_service::dependency_integrity;
 
 use dependency_recovery::DependencyUpdateRecoveryStatus;
 use mcp_publication::mcp_tool_diffs;
@@ -6487,14 +6455,7 @@ use static_server::static_cache_control;
 use static_server::STATIC_ACCEPT_RETRY;
 
 #[cfg(test)]
-use crate::mobile::local_app_runtime_profiles::RuntimeToolchain;
-#[cfg(test)]
-use client::protocol::events::ClientEvent;
-#[cfg(test)]
-use client::protocol::local_apps::{
-    AppCapabilityKindDto, AppEventDto, AppWorkflowStateDto, LocalAppVerificationStatusDto,
-    ManagedLocalAppMcpStatusDto,
-};
+use crate::runtime_profiles::RuntimeToolchain;
 #[cfg(test)]
 use dependency_integrity::clone_or_copy_tree;
 #[cfg(test)]

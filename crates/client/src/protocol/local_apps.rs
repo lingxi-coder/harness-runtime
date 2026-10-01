@@ -1207,7 +1207,7 @@ pub enum LocalAppVerificationStatusDto {
     // history now, and this paragraph must not be read as saying the variant
     // is unreachable. It has exactly one producer:
     //
-    //   `runtime/src/mobile/local_apps_host.rs:2016-2036` -- the
+    //   `runtime/src/mobile/broker.rs:2016-2036` -- the
     //   managed-MCP inventory loop (which also feeds
     //   `VerificationSummaryChanged`) marks ONE app `Failed` with
     //   `code: Some("active_state_corrupt")` when its active catalog's
@@ -1216,7 +1216,7 @@ pub enum LocalAppVerificationStatusDto {
     //   listing, so one corrupt app made every other app vanish from both
     //   clients. Pinned by the regression test
     //   `a_corrupt_active_mcp_catalog_fails_only_that_app_and_still_lists_the_others`
-    //   (local_apps_host.rs:13717-13799).
+    //   (broker.rs:13717-13799).
     //
     // No `local_apps_verification_summary_active_state_corrupt` key exists in
     // `clients/translations/` (the only `active_state_corrupt` key there is

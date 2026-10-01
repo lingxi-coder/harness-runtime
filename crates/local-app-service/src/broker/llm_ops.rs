@@ -14,11 +14,11 @@
 //! Small app-generated images (a canvas export) may still be sent inline.
 
 use super::{AgentOutputStream, BridgeFailure, LocalAppsHostBroker};
+use crate::host::HostEvent;
+use crate::llm::{ChatMessage, ChatPart, ChatRequest, ChatRole, ChatStreamEvent};
 use base64::Engine as _;
 use futures_util::StreamExt;
 use local_app_contracts::approvals::CapabilityKind;
-use local_app_service::host::HostEvent;
-use local_app_service::llm::{ChatMessage, ChatPart, ChatRequest, ChatRole, ChatStreamEvent};
 use local_apps::AppCapability;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -50,7 +50,7 @@ const CHAT_TIMEOUT: Duration = Duration::from_secs(120);
 struct LlmInflightGuard {
     app_id: String,
     slots: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    event_sink: std::sync::Arc<dyn local_app_service::host::HostEventSink>,
+    event_sink: std::sync::Arc<dyn crate::host::HostEventSink>,
     armed: bool,
 }
 
@@ -501,20 +501,18 @@ impl LocalAppsHostBroker {
 
 #[cfg(test)]
 mod tests {
-    use crate::mobile::local_apps_host::LocalAppsHostBroker;
-    use crate::mobile::local_apps_llm::{
+    use crate::broker::LocalAppsHostBroker;
+    use crate::host::HostEvent;
+    use crate::llm::{
         ChatOutcome, ChatPart, ChatRequest, ChatStreamEvent, LocalAppsLlm, LocalAppsModel,
-        ModelStream,
+        ModelStream, SharedLlm,
     };
+    use crate::test_support::RecordingSink;
     use async_trait::async_trait;
     use base64::Engine as _;
-    use client::adapter::{ClientEventSink, MockSink};
-    use client::protocol::events::ClientEvent;
-    use client::protocol::local_apps::AppEventDto;
     use futures_util::stream;
     use local_app_contracts::approvals::AuthorizationDecision;
     use local_app_contracts::bridge::{BridgeOperation, BridgeRequest};
-    use local_app_service::llm::SharedLlm;
     use local_apps::error::AppError;
     use local_apps::test_support::FixedClock;
     use local_apps::{
@@ -596,7 +594,7 @@ mod tests {
     struct Harness {
         _root: TempDir,
         broker: Arc<LocalAppsHostBroker>,
-        sink: Arc<MockSink>,
+        sink: Arc<RecordingSink>,
         app_id: String,
         layout: AppLayout,
     }
@@ -605,12 +603,12 @@ mod tests {
     struct StubCamera(Vec<u8>);
 
     #[async_trait]
-    impl lingxi_core::host::CameraControl for StubCamera {
+    impl device_api::CameraControl for StubCamera {
         async fn capture_photo(
             &self,
-            _opts: lingxi_core::host::CapturePhotoOpts,
-        ) -> Result<lingxi_core::host::CapturedImage, lingxi_core::host::CameraError> {
-            Ok(lingxi_core::host::CapturedImage {
+            _opts: device_api::CapturePhotoOpts,
+        ) -> Result<device_api::CapturedImage, device_api::CameraError> {
+            Ok(device_api::CapturedImage {
                 jpeg_bytes: self.0.clone(),
                 width: 1280,
                 height: 960,
@@ -619,9 +617,9 @@ mod tests {
 
         async fn pick_from_library(
             &self,
-        ) -> Result<lingxi_core::host::CapturedImage, lingxi_core::host::CameraError> {
-            self.capture_photo(lingxi_core::host::CapturePhotoOpts {
-                position: lingxi_core::host::CameraPosition::Back,
+        ) -> Result<device_api::CapturedImage, device_api::CameraError> {
+            self.capture_photo(device_api::CapturePhotoOpts {
+                position: device_api::CameraPosition::Back,
                 allow_editing: false,
             })
             .await
@@ -631,20 +629,20 @@ mod tests {
     async fn harness(model: Arc<ChatModel>) -> Harness {
         harness_with_devices(
             model,
-            crate::mobile::local_apps_device::DeviceCapabilities::default(),
+            crate::device_capabilities::DeviceCapabilities::default(),
         )
         .await
     }
 
     async fn harness_with_devices(
         model: Arc<ChatModel>,
-        devices: crate::mobile::local_apps_device::DeviceCapabilities,
+        devices: crate::device_capabilities::DeviceCapabilities,
     ) -> Harness {
         let h = build_harness(model).await;
         assert!(h
             .broker
             .attach_device(Arc::new(
-                crate::mobile::local_apps_device::SharedDeviceCapabilities::new(devices)
+                crate::device_capabilities::SharedDeviceCapabilities::new(devices)
             ))
             .is_ok());
         h
@@ -661,10 +659,10 @@ mod tests {
             .await
             .expect("load app service"),
         );
-        let sink = MockSink::arc();
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let sink = RecordingSink::arc();
+        let broker = crate::test_support::broker_with_sink(
             root.path().to_path_buf(),
-            sink.clone() as Arc<dyn ClientEventSink>,
+            sink.clone(),
             None,
             false,
             None,
@@ -720,9 +718,9 @@ mod tests {
             .into_iter()
             .rev()
             .find_map(|event| match event {
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppBridgeResponse { response },
-                } if response.request_id == request_id => Some(response),
+                HostEvent::BridgeResponse(response) if response.request_id == request_id => {
+                    Some(response)
+                }
                 _ => None,
             })
             .expect("a bridge response event");
@@ -741,9 +739,7 @@ mod tests {
             .await
             .into_iter()
             .filter_map(|event| match event {
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppLlmActivityChanged { active, .. },
-                } => Some(active),
+                HostEvent::LlmActivityChanged { active, .. } => Some(active),
                 _ => None,
             })
             .collect()
@@ -843,10 +839,7 @@ mod tests {
             tokio::spawn(async move {
                 loop {
                     for event in sink.events().await {
-                        if let ClientEvent::AppEvent {
-                            event: AppEventDto::AppCapabilityRequested { request },
-                        } = event
-                        {
+                        if let HostEvent::CapabilityRequested(request) = event {
                             assert!(
                                 request.reason.contains("用量"),
                                 "the first-use prompt must say the call spends the user's \
@@ -996,26 +989,23 @@ mod tests {
         let response = events
             .into_iter()
             .find_map(|event| match event {
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppBridgeStreamFrame { frame, .. },
-                } => {
+                HostEvent::BridgeStreamFrame(frame) => {
                     match frame {
-                        client::protocol::local_apps::AppBridgeStreamFrameDto::Data {
+                        local_app_contracts::bridge::BridgeStreamFrame::Data {
                             seq,
                             data_json,
                             ..
                         } => data.push((seq, data_json)),
-                        client::protocol::local_apps::AppBridgeStreamFrameDto::Completed {
-                            seq,
-                            ..
+                        local_app_contracts::bridge::BridgeStreamFrame::Completed {
+                            seq, ..
                         } => completed_seq = Some(seq),
                         _ => {}
                     }
                     None
                 }
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppBridgeResponse { response },
-                } if response.request_id == request_id => Some(response),
+                HostEvent::BridgeResponse(response) if response.request_id == request_id => {
+                    Some(response)
+                }
                 _ => None,
             })
             .expect("stream response");
@@ -1082,9 +1072,9 @@ mod tests {
         let model = ChatModel::answering("这是一只猫", Some("end_turn"));
         let h = harness_with_devices(
             model.clone(),
-            crate::mobile::local_apps_device::DeviceCapabilities {
+            crate::device_capabilities::DeviceCapabilities {
                 camera: Some(Arc::new(StubCamera(jpeg.clone()))),
-                ..crate::mobile::local_apps_device::DeviceCapabilities::default()
+                ..crate::device_capabilities::DeviceCapabilities::default()
             },
         )
         .await;
@@ -1111,9 +1101,9 @@ mod tests {
             .into_iter()
             .rev()
             .find_map(|event| match event {
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppBridgeResponse { response },
-                } if response.request_id == "cap-1" => Some(response),
+                HostEvent::BridgeResponse(response) if response.request_id == "cap-1" => {
+                    Some(response)
+                }
                 _ => None,
             })
             .expect("capture response");

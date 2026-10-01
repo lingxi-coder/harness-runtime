@@ -24,7 +24,7 @@
 //! today there is none.
 //!
 //! The three sibling comments in `apps/engine-mobile` that used to repeat the
-//! same non-existent symbol (`local_apps_build.rs`'s test-module tail,
+//! same non-existent symbol (`app_build.rs`'s test-module tail,
 //! `tests/component_literal_scan.rs`'s module doc and
 //! `tests/component_literal_allowlist.txt`'s `tasks/src` section) have all
 //! been corrected; the scan one additionally named

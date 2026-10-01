@@ -6,9 +6,9 @@
 //! same Host boundary used by the foreground bridge.
 
 use super::LocalAppsHostBroker;
+use crate::host::HostEvent;
 use local_app_contracts::approvals::CapabilityKind;
 use local_app_contracts::events::BackgroundRunOutcome;
-use local_app_service::host::HostEvent;
 use local_apps::{AppCapability, BackgroundTaskStatus, CapabilityId};
 use serde_json::{json, Map, Value};
 use std::time::Duration;
@@ -38,7 +38,7 @@ impl LocalAppsHostBroker {
     /// wake-ups are harmless: the in-memory claim set covers one process, the
     /// per-app file lock covers concurrent engine instances, and the persisted
     /// `Running`/journal state covers process death.
-    pub(crate) async fn run_due_background_tasks(&self, now_ms: u64) -> Vec<BackgroundRunOutcome> {
+    pub async fn run_due_background_tasks(&self, now_ms: u64) -> Vec<BackgroundRunOutcome> {
         let Some(service) = self.service().ok() else {
             return Vec::new();
         };
@@ -104,7 +104,7 @@ impl LocalAppsHostBroker {
     /// Return the earliest persisted wake-up so iOS can submit a precise
     /// `earliestBeginDate`. Android uses its bounded watchdog because periodic
     /// WorkManager is the reliable path across reboot and exact-alarm policy.
-    pub(crate) async fn next_background_wake_ms(&self, now_ms: u64) -> Option<u64> {
+    pub async fn next_background_wake_ms(&self, now_ms: u64) -> Option<u64> {
         let service = self.service().ok()?;
         let mut next = None;
         for record in service.records().await {
@@ -144,7 +144,7 @@ impl LocalAppsHostBroker {
 
     /// Cancel one task from a trusted native management surface. A page may
     /// only request cancellation through the normal capability route.
-    pub(crate) async fn cancel_background_task(&self, app_id: &str, task_id: &str) -> bool {
+    pub async fn cancel_background_task(&self, app_id: &str, task_id: &str) -> bool {
         let Ok(layout) = self.layout(app_id) else {
             return false;
         };
@@ -1133,10 +1133,8 @@ fn outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mobile::local_apps_mcp::LocalAppsMcpHost;
-    use async_trait::async_trait;
-    use client::adapter::ClientEventSink;
-    use client::protocol::events::ClientEvent;
+    use crate::mcp_server::LocalAppsMcpHost;
+    use crate::test_support::{broker_with_sink, DiscardSink};
     use local_apps::test_support::FixedClock;
     use local_apps::{
         AppService, BackgroundJournalEntry, BackgroundTaskRecord, BackgroundTrigger,
@@ -1144,14 +1142,6 @@ mod tests {
     };
     use std::sync::Arc;
     use tempfile::TempDir;
-
-    #[derive(Default)]
-    struct Sink;
-
-    #[async_trait]
-    impl ClientEventSink for Sink {
-        async fn emit(&self, _event: ClientEvent) {}
-    }
 
     async fn harness() -> (TempDir, Arc<AppService>, Arc<LocalAppsHostBroker>, String) {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1164,9 +1154,9 @@ mod tests {
             .await
             .expect("service"),
         );
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let broker = broker_with_sink(
             root.path().to_path_buf(),
-            Arc::new(Sink),
+            Arc::new(DiscardSink),
             None,
             false,
             None,
@@ -1412,9 +1402,9 @@ mod tests {
             .expect("first schedule");
         let first_id = first["task"]["taskId"].as_str().expect("first task id");
 
-        let restarted = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let restarted = broker_with_sink(
             root.path().to_path_buf(),
-            Arc::new(Sink),
+            Arc::new(DiscardSink),
             None,
             false,
             None,

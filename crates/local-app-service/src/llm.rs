@@ -136,7 +136,7 @@ pub trait LocalAppsModel: Send + Sync {
     /// `ClientCommand::SetModel` calls this so app-initiated `llm.chat`
     /// follows a `/model` switch instead of staying pinned to whatever was
     /// live at engine build time. Default is a no-op: only
-    /// [`ApiServiceModel`] (the production implementation) has a live
+    /// the host's production implementation has a live
     /// selection to update; test doubles ignore it.
     fn set_model(&self, _model: String, _profile: Option<String>) {}
 }

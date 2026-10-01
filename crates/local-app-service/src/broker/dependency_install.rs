@@ -24,12 +24,12 @@ use super::DEPENDENCY_INSTALL_POLL_INTERVAL;
 use super::DEPENDENCY_INSTALL_TIMEOUT;
 use super::RUNTIME_SEED_POLL_INTERVAL;
 use super::WORKSPACE_DEPENDENCY_ATTESTATION_FILE;
-use crate::mobile::local_app_runtime_profiles::toolchain_for_binding;
-use crate::mobile::local_app_runtime_profiles::RuntimeToolchain;
+use crate::host::BuildExecutor;
+use crate::runtime_profiles::toolchain_for_binding;
+use crate::runtime_profiles::RuntimeToolchain;
 use local_app_contracts::execution::{
     IsolatedCommand, Mount, MountKind, NetworkPolicy, ResourceLimits,
 };
-use local_app_service::host::BuildExecutor;
 use local_apps::load_manifest;
 use local_apps::AppDependencyState;
 use local_apps::AppLayout;
@@ -111,9 +111,8 @@ impl LocalAppsHostBroker {
         let manifest = load_manifest(layout).map_err(|error| error.to_string())?;
         let expected_files: Vec<(&'static str, Vec<u8>)> = match manifest.runtime_profile.as_ref() {
             Some(binding) => {
-                let contract =
-                    crate::mobile::local_app_runtime_profiles::contract_for_binding(binding)
-                        .map_err(|error| error.to_string())?;
+                let contract = crate::runtime_profiles::contract_for_binding(binding)
+                    .map_err(|error| error.to_string())?;
                 let has_snapshot = manifest.dependency_snapshot.is_some();
                 contract
                     .managed_files
@@ -136,23 +135,22 @@ impl LocalAppsHostBroker {
                     })
                     .map(|(relative, bytes)| {
                         let expected = match (relative, has_snapshot) {
-                            ("package.json", true) => std::fs::read(workspace.join(
-                                crate::mobile::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
-                            ))
-                            .map_err(|error| {
-                                format!(
-                                    "read {}: {error}",
-                                    crate::mobile::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL
-                                )
-                            })?,
-                            ("pnpm-lock.yaml", true) => std::fs::read(
-                                workspace
-                                    .join(crate::mobile::local_app_runtime_profiles::LOCKFILE_FILE_REL),
+                            ("package.json", true) => std::fs::read(
+                                workspace.join(crate::runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL),
                             )
                             .map_err(|error| {
                                 format!(
                                     "read {}: {error}",
-                                    crate::mobile::local_app_runtime_profiles::LOCKFILE_FILE_REL
+                                    crate::runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL
+                                )
+                            })?,
+                            ("pnpm-lock.yaml", true) => std::fs::read(
+                                workspace.join(crate::runtime_profiles::LOCKFILE_FILE_REL),
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "read {}: {error}",
+                                    crate::runtime_profiles::LOCKFILE_FILE_REL
                                 )
                             })?,
                             _ => bytes.to_vec(),
@@ -248,7 +246,7 @@ impl LocalAppsHostBroker {
         Ok(())
     }
     pub(super) fn dependency_manifest_bytes(
-        contract: &crate::mobile::local_app_runtime_profiles::RuntimeProfileContract,
+        contract: &crate::runtime_profiles::RuntimeProfileContract,
     ) -> Result<&'static [u8], String> {
         contract
             .managed_files
@@ -267,9 +265,9 @@ impl LocalAppsHostBroker {
     ) -> Result<BTreeMap<String, String>, String> {
         let bytes = Self::read_regular_dependency_input_bytes(
             workspace,
-            crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL,
+            crate::runtime_profiles::REQUESTED_FILE_REL,
         )?;
-        let path = workspace.join(crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL);
+        let path = workspace.join(crate::runtime_profiles::REQUESTED_FILE_REL);
         let value: Value = serde_json::from_slice(&bytes)
             .map_err(|error| format!("parse {}: {error}", path.display()))?;
         let dependencies = value
@@ -309,7 +307,7 @@ impl LocalAppsHostBroker {
     ) -> Result<
         (
             local_apps::AppRuntimeProfileBinding,
-            &'static crate::mobile::local_app_runtime_profiles::RuntimeProfileContract,
+            &'static crate::runtime_profiles::RuntimeProfileContract,
             BTreeMap<String, String>,
             DependencyBaselineIdentity,
         ),
@@ -343,16 +341,14 @@ impl LocalAppsHostBroker {
                 layout.app_id()
             ));
         }
-        let contract = crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
+        let contract = crate::runtime_profiles::contract_for_binding(&binding)
             .map_err(|error| error.to_string())?;
         let workspace = layout.root().join(layout.workspace_rel());
         let requested_bytes = Self::read_regular_dependency_input_bytes(
             &workspace,
-            crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL,
+            crate::runtime_profiles::REQUESTED_FILE_REL,
         )?;
-        if crate::mobile::local_app_runtime_profiles::hash_bytes(&requested_bytes)
-            != snapshot.requested_sha256
-        {
+        if crate::runtime_profiles::hash_bytes(&requested_bytes) != snapshot.requested_sha256 {
             return Err(format!(
                 "dependencies_dirty: app {} requested dependency baseline was modified outside the host-managed dependency flow",
                 layout.app_id()
@@ -360,10 +356,9 @@ impl LocalAppsHostBroker {
         }
         let effective_package_bytes = Self::read_regular_dependency_input_bytes(
             &workspace,
-            crate::mobile::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
+            crate::runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
         )?;
-        if crate::mobile::local_app_runtime_profiles::hash_bytes(&effective_package_bytes)
-            != snapshot.package_sha256
+        if crate::runtime_profiles::hash_bytes(&effective_package_bytes) != snapshot.package_sha256
         {
             return Err(format!(
                 "dependencies_dirty: app {} effective dependency baseline drifted from the verified snapshot",
@@ -372,11 +367,9 @@ impl LocalAppsHostBroker {
         }
         let lockfile_bytes = Self::read_regular_dependency_input_bytes(
             &workspace,
-            crate::mobile::local_app_runtime_profiles::LOCKFILE_FILE_REL,
+            crate::runtime_profiles::LOCKFILE_FILE_REL,
         )?;
-        if crate::mobile::local_app_runtime_profiles::hash_bytes(&lockfile_bytes)
-            != snapshot.lockfile_sha256
-        {
+        if crate::runtime_profiles::hash_bytes(&lockfile_bytes) != snapshot.lockfile_sha256 {
             return Err(format!(
                 "dependencies_dirty: app {} lockfile baseline drifted from the verified snapshot",
                 layout.app_id()
@@ -419,7 +412,7 @@ impl LocalAppsHostBroker {
         Ok(bytes)
     }
     pub(super) fn build_effective_package_json(
-        contract: &crate::mobile::local_app_runtime_profiles::RuntimeProfileContract,
+        contract: &crate::runtime_profiles::RuntimeProfileContract,
         requested_dependencies: &BTreeMap<String, String>,
     ) -> Result<Vec<u8>, String> {
         let template = Self::dependency_manifest_bytes(contract)?;
@@ -562,7 +555,7 @@ impl LocalAppsHostBroker {
         }
         let manifest = load_manifest(layout).map_err(|error| error.to_string())?;
         if let Some(binding) = manifest.runtime_profile.as_ref() {
-            let contract = crate::mobile::local_app_runtime_profiles::contract_for_binding(binding)
+            let contract = crate::runtime_profiles::contract_for_binding(binding)
                 .map_err(|error| error.to_string())?;
             if let Some((relative, bytes)) = contract
                 .editable_files
@@ -847,7 +840,7 @@ impl LocalAppsHostBroker {
         if dependency_tree_digest(&workspace_node_modules)? != expected_tree_digest {
             return Ok(false);
         }
-        crate::mobile::local_apps_build::write_file(
+        crate::app_build::write_file(
             workspace,
             WORKSPACE_DEPENDENCY_ATTESTATION_FILE,
             expected_attestation.as_bytes(),
@@ -1139,7 +1132,7 @@ impl LocalAppsHostBroker {
                 // (`local_apps_tools.rs:112`/`:116`) pinned by
                 // `dependency_review_operations_are_wired_as_builtin_tools`. Only their old
                 // `mcp__local_apps__*` spelling is refused, and the builtin path is the
-                // supported one (`local_apps_mcp.rs`'s
+                // supported one (`mcp_server.rs`'s
                 // `the_mcp_surface_no_longer_serves_the_static_host_operations`).
                 //
                 // The real reason: neither can repair THIS failure. `update_dependencies`
@@ -1152,9 +1145,9 @@ impl LocalAppsHostBroker {
                         .into(),
                 );
             } else {
-                let target = crate::mobile::local_apps_build::detect_build_target(&layout)
+                let target = crate::app_build::detect_build_target(&layout)
                     .map_err(|error| error.to_string())?;
-                crate::mobile::local_apps_build::restore_host_managed_files(&workspace, target)
+                crate::app_build::restore_host_managed_files(&workspace, target)
                     .map_err(|error| error.to_string())?;
             }
         }
@@ -1261,7 +1254,7 @@ impl LocalAppsHostBroker {
         let tree_digest = dependency_tree_digest_from_marker(&snapshot_marker)?
             .ok_or_else(|| "dependency snapshot marker is malformed".to_string())?;
         let attestation = dependency_attestation(expected_lock_digest, &tree_digest, toolchain_key);
-        crate::mobile::local_apps_build::write_file(
+        crate::app_build::write_file(
             &workspace,
             WORKSPACE_DEPENDENCY_ATTESTATION_FILE,
             attestation.as_bytes(),
@@ -1387,8 +1380,7 @@ impl LocalAppsHostBroker {
         let dependency_staging_guest_path =
             format!("{project_guest_path}/.lingxi-build-state/dependency-staging");
         let build_state_root = format!("{project_guest_path}/.lingxi-build-state");
-        let memory_mb =
-            crate::mobile::local_apps_build::build_memory_budget_mb(self.physical_memory_bytes());
+        let memory_mb = crate::app_build::build_memory_budget_mb(self.physical_memory_bytes());
         let request = Self::dependency_install_request(
             &build_mount,
             &store_mount,
@@ -1687,7 +1679,7 @@ impl LocalAppsHostBroker {
             )))
         }
     }
-    pub(crate) async fn await_fixed_runtime_root(
+    pub async fn await_fixed_runtime_root(
         &self,
         timeout_duration: Duration,
     ) -> Result<PathBuf, String> {
@@ -1739,21 +1731,17 @@ impl LocalAppsHostBroker {
         revision: u32,
         availability_by_lock: &mut HashMap<String, RuntimeProfileDependencyAvailability>,
     ) -> RuntimeProfileDependencyAvailability {
-        let Ok(binding) =
-            crate::mobile::local_app_runtime_profiles::current_binding_for_family(family)
-        else {
+        let Ok(binding) = crate::runtime_profiles::current_binding_for_family(family) else {
             return RuntimeProfileDependencyAvailability::DownloadRequired;
         };
         if binding.revision != revision {
             return RuntimeProfileDependencyAvailability::DownloadRequired;
         }
-        let Ok(contract) =
-            crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
-        else {
+        let Ok(contract) = crate::runtime_profiles::contract_for_binding(&binding) else {
             return RuntimeProfileDependencyAvailability::DownloadRequired;
         };
         let toolchain_key = contract.toolchain_key;
-        let lock_digest = crate::mobile::local_app_runtime_profiles::lockfile_sha256(contract);
+        let lock_digest = crate::runtime_profiles::lockfile_sha256(contract);
         if let Some(availability) = availability_by_lock.get(&lock_digest) {
             return *availability;
         }

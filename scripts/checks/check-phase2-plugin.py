@@ -22,7 +22,7 @@ CODE = REPO / "crates"
 PLUGIN = CODE / "plugins" / "lingxi-local-app"
 MANIFEST = REPO / "docs" / "local-apps" / "harness" / "template-migration-manifest.json"
 INVENTORY = CODE / "runtime" / "builtin-plugin-inventory.txt"
-PROFILE_RS = CODE / "runtime" / "src" / "mobile" / "local_app_runtime_profiles.rs"
+PROFILE_RS = CODE / "local-app-service" / "src" / "runtime_profiles.rs"
 PERMISSIONS_RS = CODE / "local-apps" / "src" / "permissions.rs"
 PERMISSIONS_ASSET = CODE / "local-apps" / "assets" / "default-workspace-settings.local.json"
 TASKS_PHASE2 = REPO / "docs" / "local-apps" / "harness" / "tasks-phase-2.json"
@@ -371,7 +371,7 @@ def check_build_inventory_and_permissions() -> None:
         fail("permission settings must not be copied into Plugin template assets")
     profile_text = PROFILE_RS.read_text(encoding="utf-8")
     if len(re.findall(r'profile_file!\(\s*"', profile_text)) < 112:
-        fail("local_app_runtime_profiles.rs must retain at least the 112 current profile_file! call sites")
+        fail("runtime_profiles.rs must retain at least the 112 current profile_file! call sites")
     if "plugins/lingxi-local-app/assets/templates/" not in profile_text or "runtime-profiles" in profile_text:
         fail("runtime profile production includes must point only at Plugin template assets")
 

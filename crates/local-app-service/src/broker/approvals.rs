@@ -5,9 +5,9 @@ use super::LocalAppsHostBroker;
 use super::PendingNativeApproval;
 use super::UiResolution;
 use super::APPROVAL_TIMEOUT;
+use crate::host::HostEvent;
 use local_app_contracts::approvals::{AuthorizationDecision, CapabilityKind, CapabilityRequest};
 use local_app_contracts::events::PluginErrorCode;
-use local_app_service::host::HostEvent;
 use local_apps::load_manifest;
 use local_apps::load_permissions;
 use local_apps::save_permissions;
@@ -22,7 +22,7 @@ use tokio::time::timeout;
 use tokio::time::Duration;
 
 impl LocalAppsHostBroker {
-    pub(crate) async fn reset_permissions(&self, app_id: &str) -> Result<(), String> {
+    pub async fn reset_permissions(&self, app_id: &str) -> Result<(), String> {
         self.service()?
             .record(app_id)
             .await
@@ -160,7 +160,7 @@ impl LocalAppsHostBroker {
             }
         }
     }
-    pub(crate) async fn resolve_capability(
+    pub async fn resolve_capability(
         &self,
         request_id: &str,
         decision: AuthorizationDecision,
@@ -175,7 +175,7 @@ impl LocalAppsHostBroker {
     /// separate one-shot channel from generic capability approvals so the
     /// package diff and supply-chain policy shown by the client cannot be
     /// replaced by a generic allow/deny response.
-    pub(crate) async fn resolve_dependency_change_confirmation(
+    pub async fn resolve_dependency_change_confirmation(
         &self,
         request_id: &str,
         approved: bool,
@@ -186,19 +186,11 @@ impl LocalAppsHostBroker {
             .remove(request_id)
             .is_some_and(|sender| sender.send(approved).is_ok())
     }
-    pub(crate) async fn resolve_create_confirmation(
-        &self,
-        request_id: &str,
-        approved: bool,
-    ) -> bool {
+    pub async fn resolve_create_confirmation(&self, request_id: &str, approved: bool) -> bool {
         Self::resolve_native_approval(&self.pending_create_confirmations, request_id, approved)
             .await
     }
-    pub(crate) async fn resolve_mcp_proposal_approval(
-        &self,
-        request_id: &str,
-        approved: bool,
-    ) -> bool {
+    pub async fn resolve_mcp_proposal_approval(&self, request_id: &str, approved: bool) -> bool {
         Self::resolve_native_approval(&self.pending_mcp_proposal_approvals, request_id, approved)
             .await
     }
@@ -221,7 +213,7 @@ impl LocalAppsHostBroker {
     /// future was dropped leaves a closed sender behind, and re-emitting a
     /// sheet nobody is listening for would strand the user in front of a
     /// prompt whose answer goes nowhere.
-    pub(crate) async fn reemit_pending_native_approvals(&self) {
+    pub async fn reemit_pending_native_approvals(&self) {
         let mut events = Vec::new();
         for pending in [
             &self.pending_create_confirmations,
@@ -246,7 +238,7 @@ impl LocalAppsHostBroker {
             .remove(request_id)
             .is_some_and(|request| request.sender.send(approved).is_ok())
     }
-    pub(crate) async fn resolve_ui(
+    pub async fn resolve_ui(
         &self,
         request_id: &str,
         decision: AuthorizationDecision,

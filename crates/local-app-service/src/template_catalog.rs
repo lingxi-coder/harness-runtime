@@ -607,21 +607,7 @@ pub fn dependency_input_sha256(
 mod tests {
     use super::*;
 
-    /// The checked-in catalog, as the plugin bundle builds carry it.
-    struct CheckedInBundle;
-
-    impl PluginBundle for CheckedInBundle {
-        fn catalog_bytes(&self) -> &[u8] {
-            include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../plugins/lingxi-local-app/assets/templates/catalog.json"
-            ))
-        }
-
-        fn bundle_sha256(&self) -> &str {
-            "b0d1e5f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c"
-        }
-    }
+    use crate::test_support::CheckedInBundle;
 
     #[test]
     fn semantic_view_redacts_host_identity_and_unavailable_babylon() {

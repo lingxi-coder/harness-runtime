@@ -332,7 +332,7 @@ fn derive_workflow_state(app_data_root: &Path, record: &AppRecord) -> AppWorkflo
         Ok(manifest) => manifest,
         Err(_) => return AppWorkflowStateDto::Draft,
     };
-    let active_build_id = match crate::mobile::local_apps_build::active_build_id(&layout) {
+    let active_build_id = match local_app_service::app_build::active_build_id(&layout) {
         Ok(value) => value,
         Err(_) => return AppWorkflowStateDto::Draft,
     };
@@ -452,28 +452,28 @@ fn lower_surface(surface: AppSurface) -> AppSurfaceDto {
 }
 
 fn lower_runtime_profile_status(
-    status: crate::mobile::local_apps_build::AppRuntimeProfileStatus,
+    status: local_app_service::app_build::AppRuntimeProfileStatus,
 ) -> AppRuntimeProfileStatusDto {
     match status {
-        crate::mobile::local_apps_build::AppRuntimeProfileStatus::Verified => {
+        local_app_service::app_build::AppRuntimeProfileStatus::Verified => {
             AppRuntimeProfileStatusDto::Verified
         }
-        crate::mobile::local_apps_build::AppRuntimeProfileStatus::DependenciesDirty => {
+        local_app_service::app_build::AppRuntimeProfileStatus::DependenciesDirty => {
             AppRuntimeProfileStatusDto::DependenciesDirty
         }
-        crate::mobile::local_apps_build::AppRuntimeProfileStatus::CoreDependencyDrift => {
+        local_app_service::app_build::AppRuntimeProfileStatus::CoreDependencyDrift => {
             AppRuntimeProfileStatusDto::CoreDependencyDrift
         }
-        crate::mobile::local_apps_build::AppRuntimeProfileStatus::RebuildRequired => {
+        local_app_service::app_build::AppRuntimeProfileStatus::RebuildRequired => {
             AppRuntimeProfileStatusDto::RebuildRequired
         }
-        crate::mobile::local_apps_build::AppRuntimeProfileStatus::MigrationAvailable => {
+        local_app_service::app_build::AppRuntimeProfileStatus::MigrationAvailable => {
             AppRuntimeProfileStatusDto::MigrationAvailable
         }
-        crate::mobile::local_apps_build::AppRuntimeProfileStatus::RuntimeBundleMissing => {
+        local_app_service::app_build::AppRuntimeProfileStatus::RuntimeBundleMissing => {
             AppRuntimeProfileStatusDto::RuntimeBundleMissing
         }
-        crate::mobile::local_apps_build::AppRuntimeProfileStatus::RuntimeContractCorrupt => {
+        local_app_service::app_build::AppRuntimeProfileStatus::RuntimeContractCorrupt => {
             AppRuntimeProfileStatusDto::RuntimeContractCorrupt
         }
     }
@@ -570,7 +570,7 @@ pub(crate) fn lower_details(
     Ok(AppDetailsDto {
         app: lower_record(root, record),
         manifest: load_manifest_snapshot(root, &record.id)?,
-        runtime_profile_status: crate::mobile::local_apps_build::derive_runtime_profile_status(
+        runtime_profile_status: local_app_service::app_build::derive_runtime_profile_status(
             root, record,
         )
         .map(lower_runtime_profile_status),

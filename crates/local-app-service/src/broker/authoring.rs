@@ -1,10 +1,10 @@
 //! Host bindings for the core authoring and QA persistence contracts.
 
 use super::*;
+use crate::host::HostEvent;
 use base64::Engine;
 use local_app_contracts::approvals::{VerificationStatus, VerificationSummary};
 use local_app_contracts::events::PublicationState;
-use local_app_service::host::HostEvent;
 use rooted_fs::AtomicWriteOptions;
 use serde::Deserialize;
 use serde_json::Value;
@@ -209,7 +209,7 @@ pub(crate) struct AuthoringBuildInput {
 /// commit path re-checks the immutable receipt/result bytes before writing
 /// the publication marker and active receipt pointer.
 #[derive(Debug, Clone)]
-pub(crate) struct PreparedWorkflowQaPublication {
+pub struct PreparedWorkflowQaPublication {
     pub(crate) canonical_result: Value,
     layout: local_apps::AppLayout,
     receipt: local_apps::QaReceipt,
@@ -220,7 +220,7 @@ pub(crate) struct PreparedWorkflowQaPublication {
 }
 
 impl PreparedWorkflowQaPublication {
-    pub(crate) fn canonical_result(&self) -> Value {
+    pub fn canonical_result(&self) -> Value {
         self.canonical_result.clone()
     }
 
@@ -544,7 +544,7 @@ impl Drop for QaBridgeRequestGuard {
 fn active_contract(
     layout: &local_apps::AppLayout,
 ) -> Result<(String, local_apps::AppAuthoringContract), String> {
-    let digest = crate::mobile::local_apps_build::active_build_authoring_contract_sha256(layout)
+    let digest = crate::app_build::active_build_authoring_contract_sha256(layout)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| {
             "authoring_contract_unavailable: active build has no contract".to_string()
@@ -557,9 +557,8 @@ fn active_contract(
 fn active_contract_optional(
     layout: &local_apps::AppLayout,
 ) -> Result<Option<(String, local_apps::AppAuthoringContract)>, String> {
-    let Some(digest) =
-        crate::mobile::local_apps_build::active_build_authoring_contract_sha256(layout)
-            .map_err(|error| error.to_string())?
+    let Some(digest) = crate::app_build::active_build_authoring_contract_sha256(layout)
+        .map_err(|error| error.to_string())?
     else {
         return Ok(None);
     };
@@ -663,7 +662,7 @@ fn qa_scope_for_contract(
 }
 
 fn checked_binding(
-    bundle: &dyn local_app_service::template_catalog::PluginBundle,
+    bundle: &dyn crate::template_catalog::PluginBundle,
     manifest: &local_apps::AppManifest,
     app_id: &str,
     workflow_run_id: &str,
@@ -674,13 +673,7 @@ fn checked_binding(
         return Ok(binding);
     }
     let handle = required_string(input, "validated_selection_handle")?;
-    crate::mobile::local_app_template_catalog::resolve_typed(
-        bundle,
-        root,
-        app_id,
-        workflow_run_id,
-        handle,
-    )
+    crate::template_catalog::resolve_typed(bundle, root, app_id, workflow_run_id, handle)
         .map(|selection| selection.runtime_profile)
         .map_err(|error| error.to_string())
 }
@@ -1035,7 +1028,7 @@ impl LocalAppsHostBroker {
         &self,
         layout: &local_apps::AppLayout,
     ) -> Result<Option<String>, String> {
-        crate::mobile::local_apps_build::active_build_authoring_contract_sha256(layout)
+        crate::app_build::active_build_authoring_contract_sha256(layout)
             .map_err(|error| error.to_string())
     }
 
@@ -1051,9 +1044,8 @@ impl LocalAppsHostBroker {
                 "authoring_contract_stale: candidate changed while the build was running".into(),
             );
         }
-        let active_digest =
-            crate::mobile::local_apps_build::active_build_authoring_contract_sha256(layout)
-                .map_err(|error| error.to_string())?;
+        let active_digest = crate::app_build::active_build_authoring_contract_sha256(layout)
+            .map_err(|error| error.to_string())?;
         if candidate.base_contract_sha256 != active_digest {
             return Err(
                 "authoring_contract_stale: candidate base no longer matches the active build"
@@ -1066,7 +1058,7 @@ impl LocalAppsHostBroker {
     pub(crate) fn verify_authoring_candidate_identity(
         &self,
         layout: &local_apps::AppLayout,
-        expected: &crate::mobile::local_apps_build::AuthoringCandidateIdentity,
+        expected: &crate::app_build::AuthoringCandidateIdentity,
     ) -> Result<(), String> {
         let candidate = local_apps::load_authoring_candidate(layout)
             .map_err(|error| format!("authoring_candidate_invalid: {error}"))?;
@@ -1109,7 +1101,7 @@ impl LocalAppsHostBroker {
                 Ok(json!({
                     "ok": true,
                     "app_id": app_id,
-                    "build_id": crate::mobile::local_apps_build::active_build_id(&layout).map_err(|error| error.to_string())?,
+                    "build_id": crate::app_build::active_build_id(&layout).map_err(|error| error.to_string())?,
                     "contract_sha256": contract.as_ref().map(|(digest, _)| digest),
                     "contract": contract.as_ref().map(|(_, contract)| contract),
                     "summary": contract.as_ref().map(|(_, contract)| json!({
@@ -1135,15 +1127,14 @@ impl LocalAppsHostBroker {
                 )
                 .map_err(|error| format!("authoring spec invalid: {error}"))?;
                 let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
-                let binding =
-                    checked_binding(
-                        self.plugin_bundle()?.as_ref(),
-                        &manifest,
-                        &app_id,
-                        workflow_run_id,
-                        &self.root,
-                        &input,
-                    )?;
+                let binding = checked_binding(
+                    self.plugin_bundle()?.as_ref(),
+                    &manifest,
+                    &app_id,
+                    workflow_run_id,
+                    &self.root,
+                    &input,
+                )?;
                 let revision = active_contract_optional(&layout)?
                     .map(|(_, contract)| contract.revision.saturating_add(1))
                     .unwrap_or(1);
@@ -1159,10 +1150,8 @@ impl LocalAppsHostBroker {
                     .and_then(Value::as_str)
                     .map(ToString::to_string);
                 let effective_digest =
-                    crate::mobile::local_apps_build::active_build_authoring_contract_sha256(
-                        &layout,
-                    )
-                    .map_err(|error| error.to_string())?;
+                    crate::app_build::active_build_authoring_contract_sha256(&layout)
+                        .map_err(|error| error.to_string())?;
                 if base_contract_sha256.as_deref() != effective_digest.as_deref()
                     && (base_contract_sha256.is_some() || effective_digest.is_some())
                 {
@@ -1224,7 +1213,7 @@ impl LocalAppsHostBroker {
 
     async fn validate_qa_identity(&self, identity: &local_apps::QaIdentity) -> Result<(), String> {
         let layout = self.layout(&identity.app_id)?;
-        let active_build = crate::mobile::local_apps_build::active_build_id(&layout)
+        let active_build = crate::app_build::active_build_id(&layout)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "qa_stale_build: active build is missing".to_string())?;
         if active_build != identity.build_id {
@@ -1247,7 +1236,7 @@ impl LocalAppsHostBroker {
         {
             return Err("qa_stale_manifest: manifest or dependencies changed during QA".into());
         }
-        if crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&layout)
+        if crate::app_build::active_build_authoring_contract_sha256(&layout)
             .map_err(|error| error.to_string())?
             .as_deref()
             != Some(identity.authoring_contract_sha256.as_str())
@@ -1267,10 +1256,10 @@ impl LocalAppsHostBroker {
             .await
             .map_err(|error| error.to_string())?;
         let layout = self.layout(&app_id)?;
-        let build_id = crate::mobile::local_apps_build::active_build_id(&layout)
+        let build_id = crate::app_build::active_build_id(&layout)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "qa_begin_rejected: app has no active build".to_string())?;
-        crate::mobile::local_apps_build::validate_build_for_launch(&layout)
+        crate::app_build::validate_build_for_launch(&layout)
             .map_err(|error| format!("qa_begin_rejected: {error}"))?;
         let (runtime_generation, running_build) = self
             .runtime_identity(&app_id)
@@ -1833,7 +1822,7 @@ impl LocalAppsHostBroker {
     /// Validate a workflow's candidate without publishing it.  The expected
     /// strategy comes from the authenticated `LocalWorkflow.args` row at the
     /// composition boundary; it is never inferred from the model result.
-    pub(crate) async fn prepare_workflow_qa_outcome(
+    pub async fn prepare_workflow_qa_outcome(
         &self,
         app_id: &str,
         workflow_run_id: &str,
@@ -1972,7 +1961,7 @@ impl LocalAppsHostBroker {
     /// written to the task spool.  This path is deliberately bounded and
     /// local: it only rechecks immutable receipt/result bytes, publishes the
     /// core marker, and atomically advances the active receipt pointer.
-    pub(crate) fn commit_prepared_workflow_qa_publication(
+    pub fn commit_prepared_workflow_qa_publication(
         &self,
         prepared: &PreparedWorkflowQaPublication,
     ) -> Result<(), String> {
@@ -1993,16 +1982,14 @@ impl LocalAppsHostBroker {
         {
             return Err("qa_terminal_rejected: prepared result changed before commit".into());
         }
-        let active_build = crate::mobile::local_apps_build::active_build_id(&prepared.layout)
+        let active_build = crate::app_build::active_build_id(&prepared.layout)
             .map_err(|error| error.to_string())?;
         if active_build.as_deref() != Some(result.identity.build_id.as_str()) {
             return Err("qa_terminal_rejected: active build changed before commit".into());
         }
         let active_contract =
-            crate::mobile::local_apps_build::active_build_authoring_contract_sha256(
-                &prepared.layout,
-            )
-            .map_err(|error| error.to_string())?;
+            crate::app_build::active_build_authoring_contract_sha256(&prepared.layout)
+                .map_err(|error| error.to_string())?;
         if active_contract.as_deref() != Some(result.identity.authoring_contract_sha256.as_str()) {
             return Err("qa_terminal_rejected: active contract changed before commit".into());
         }
@@ -2074,8 +2061,8 @@ impl LocalAppsHostBroker {
         {
             return Err("active QA publication receipt/result binding is corrupt".into());
         }
-        let active_build_id = crate::mobile::local_apps_build::active_build_id(&layout)
-            .map_err(|error| error.to_string())?;
+        let active_build_id =
+            crate::app_build::active_build_id(&layout).map_err(|error| error.to_string())?;
         let Some(active_build_id) = active_build_id else {
             return Ok(None);
         };
@@ -2083,9 +2070,8 @@ impl LocalAppsHostBroker {
         let dependency_sha256 = manifest
             .dependency_snapshot_hash()
             .map_err(|error| error.to_string())?;
-        let authoring_sha256 =
-            crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&layout)
-                .map_err(|error| error.to_string())?;
+        let authoring_sha256 = crate::app_build::active_build_authoring_contract_sha256(&layout)
+            .map_err(|error| error.to_string())?;
         if active_build_id != result.identity.build_id
             || authoring_sha256.as_deref()
                 != Some(result.identity.authoring_contract_sha256.as_str())
@@ -2131,8 +2117,8 @@ impl LocalAppsHostBroker {
         let ui_verification = self.qa_ui_verification_summary(app_id).await;
         let summary = (|| -> Result<_, String> {
             let manifest = load_manifest(layout).map_err(|error| error.to_string())?;
-            let active_build_id = crate::mobile::local_apps_build::active_build_id(layout)
-                .map_err(|error| error.to_string())?;
+            let active_build_id =
+                crate::app_build::active_build_id(layout).map_err(|error| error.to_string())?;
             let publication = local_apps::derive_publication_state(
                 &manifest,
                 active_build_id.as_deref(),
@@ -2203,7 +2189,7 @@ impl LocalAppsHostBroker {
     /// Emit the one app whose UI verification just committed, then reclaim
     /// raw evidence and bounded durable history. The terminal registry lock is
     /// already released before this async best-effort notification is called.
-    pub(crate) async fn emit_committed_workflow_qa_summary(
+    pub async fn emit_committed_workflow_qa_summary(
         &self,
         prepared: &PreparedWorkflowQaPublication,
     ) {
@@ -2225,7 +2211,7 @@ impl LocalAppsHostBroker {
     /// Clean every in-flight QA session for one authenticated workflow run.
     /// Core removes only temporary session/artifact state; immutable results,
     /// receipts, and the active publication marker remain durable history.
-    pub(crate) fn cleanup_workflow_qa_run(
+    pub fn cleanup_workflow_qa_run(
         &self,
         app_id: &str,
         workflow_run_id: &str,
@@ -2465,7 +2451,7 @@ mod tests {
     #[test]
     fn qa_scope_preserves_declared_matrix_and_marks_other_platforms_unverified() {
         let mut fixture: Value = serde_json::from_str(include_str!(
-            "../../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+            "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
         ))
         .expect("authoring fixture");
         fixture["targets"]

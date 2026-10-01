@@ -8,12 +8,12 @@ use super::LOCAL_APP_BRIDGE_FILE_BYTES;
 use super::LOCAL_APP_BRIDGE_LLM_BYTES;
 use super::MAX_NETWORK_RESPONSE_BYTES;
 use super::UI_TIMEOUT;
-use crate::mobile::local_apps_mcp::LocalAppsMcpHost;
+use crate::host::HostEvent;
+use crate::mcp_server::LocalAppsMcpHost;
 use local_app_contracts::approvals::{AuthorizationDecision, UiRequest};
 use local_app_contracts::bridge::BridgeOperation;
 use local_app_contracts::bridge::BridgeRequest;
 use local_app_contracts::bridge::BridgeResponse;
-use local_app_service::host::HostEvent;
 use local_apps::load_manifest;
 use local_apps::load_permissions;
 use serde_json::json;
@@ -78,7 +78,7 @@ impl LocalAppsHostBroker {
         serde_json::from_str(&result)
             .map_err(|error| format!("invalid WebView result JSON: {error}"))
     }
-    pub(crate) async fn execute_bridge(&self, request: BridgeRequest) {
+    pub async fn execute_bridge(&self, request: BridgeRequest) {
         let result = self.execute_bridge_inner(&request).await;
         let response = match result {
             Ok(value) => BridgeResponse {
@@ -101,7 +101,7 @@ impl LocalAppsHostBroker {
         self.emit_bridge_response(response).await;
     }
     /// Deliver the answer to a bridge request to the client that holds the page.
-    pub(crate) async fn emit_bridge_response(&self, response: BridgeResponse) {
+    pub async fn emit_bridge_response(&self, response: BridgeResponse) {
         self.event_sink
             .emit(HostEvent::BridgeResponse(response))
             .await;

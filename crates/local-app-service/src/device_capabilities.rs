@@ -4,7 +4,7 @@
 //! (see `local_apps_profile`). The Swift/Kotlin-backed device objects belong
 //! to ONE connection's platform, so — exactly like `SharedLlm` — the broker
 //! must never pin them: it reads through this cell on every bridge call, and
-//! [`crate::mobile::local_apps_profile::profile_apps`] swaps the whole set on every
+//! the host's profile loader swaps the whole set on every
 //! (re)build, cached hit or not. A bare `OnceLock<Arc<dyn CameraControl>>`
 //! here would dispatch a fresh connection's capture into a torn-down engine's
 //! Swift object.
@@ -90,28 +90,28 @@ impl MediaCache {
 /// is optional — a Store build without a runtime, a stub platform, or a
 /// desktop host simply exposes none, and the bridge fails typed instead.
 #[derive(Clone, Default)]
-pub(crate) struct DeviceCapabilities {
-    pub(crate) camera: Option<Arc<dyn CameraControl>>,
+pub struct DeviceCapabilities {
+    pub camera: Option<Arc<dyn CameraControl>>,
     /// Shared device AudioService. Local App capture, live transcription and
     /// silent synthesis use the same service as tools and Computer Use.
-    pub(crate) audio: Option<Arc<dyn AudioService>>,
-    pub(crate) location: Option<Arc<dyn LocationProvider>>,
-    pub(crate) notifications: Option<Arc<dyn NotificationService>>,
-    pub(crate) clipboard: Option<Arc<dyn Clipboard>>,
-    pub(crate) share: Option<Arc<dyn SharingService>>,
-    pub(crate) device_status: Option<Arc<dyn DeviceStatusProvider>>,
-    pub(crate) haptics: Option<Arc<dyn HapticService>>,
-    pub(crate) deep_link: Option<Arc<dyn DeepLinkOpener>>,
-    pub(crate) calendar: Option<Arc<dyn CalendarProvider>>,
-    pub(crate) contacts: Option<Arc<dyn ContactsProvider>>,
+    pub audio: Option<Arc<dyn AudioService>>,
+    pub location: Option<Arc<dyn LocationProvider>>,
+    pub notifications: Option<Arc<dyn NotificationService>>,
+    pub clipboard: Option<Arc<dyn Clipboard>>,
+    pub share: Option<Arc<dyn SharingService>>,
+    pub device_status: Option<Arc<dyn DeviceStatusProvider>>,
+    pub haptics: Option<Arc<dyn HapticService>>,
+    pub deep_link: Option<Arc<dyn DeepLinkOpener>>,
+    pub calendar: Option<Arc<dyn CalendarProvider>>,
+    pub contacts: Option<Arc<dyn ContactsProvider>>,
 }
 
 /// Mirror of `SharedLlm` for device handles: read fresh on every use,
 /// swapped whole on every engine (re)build.
-pub(crate) struct SharedDeviceCapabilities(RwLock<DeviceCapabilities>);
+pub struct SharedDeviceCapabilities(RwLock<DeviceCapabilities>);
 
 impl SharedDeviceCapabilities {
-    pub(crate) fn new(devices: DeviceCapabilities) -> Self {
+    pub fn new(devices: DeviceCapabilities) -> Self {
         Self(RwLock::new(devices))
     }
 
@@ -124,7 +124,7 @@ impl SharedDeviceCapabilities {
     }
 
     /// Swap in a fresh connection's handles.
-    pub(crate) fn replace(&self, devices: DeviceCapabilities) {
+    pub fn replace(&self, devices: DeviceCapabilities) {
         *self.0.write().expect("shared device capabilities poisoned") = devices;
     }
 }

@@ -1,10 +1,10 @@
 //! Process-wide, profile-keyed local-app service registry.
 
-use crate::mobile::local_apps_host::LocalAppsHostBroker;
 use crate::mobile::local_apps_llm::LocalAppsLlm;
 use async_trait::async_trait;
 use client::adapter::ClientEventSink;
 use client::protocol::events::ClientEvent;
+use local_app_service::broker::LocalAppsHostBroker;
 use local_app_service::llm::SharedLlm;
 use local_apps::{AppError, AppEventFanout, AppService, Clock};
 use mobile_linux_api::MobileLinuxRuntime;
@@ -111,7 +111,7 @@ pub(crate) struct ProfileApps {
     pub(crate) llm: Arc<SharedLlm>,
     /// Refreshed on every [`profile_apps`] call for the same reason as
     /// `llm`: the handles are one connection's Swift/Kotlin objects.
-    pub(crate) device: Arc<crate::mobile::local_apps_device::SharedDeviceCapabilities>,
+    pub(crate) device: Arc<local_app_service::device_capabilities::SharedDeviceCapabilities>,
 }
 
 impl ProfileApps {
@@ -123,11 +123,12 @@ impl ProfileApps {
         runtime_root: Option<PathBuf>,
         physical_memory_bytes: u64,
         llm: Arc<LocalAppsLlm>,
-        devices: crate::mobile::local_apps_device::DeviceCapabilities,
+        devices: local_app_service::device_capabilities::DeviceCapabilities,
     ) -> Result<Arc<Self>, AppError> {
         let llm = Arc::new(SharedLlm::new(llm));
-        let device =
-            Arc::new(crate::mobile::local_apps_device::SharedDeviceCapabilities::new(devices));
+        let device = Arc::new(
+            local_app_service::device_capabilities::SharedDeviceCapabilities::new(devices),
+        );
         let client_events = Arc::new(ClientEventFanout::new());
         // Dependency updates publish a durable journal before touching the
         // manifest, dependency record or promoted build. Recovery must finish
@@ -152,10 +153,10 @@ impl ProfileApps {
         }
         let host = LocalAppsHostBroker::new_with_physical_memory(
             root.clone(),
-            crate::mobile::local_apps_wire::ClientSinkAdapter::new(client_events.clone()),
+            crate::mobile::local_apps_wire::ClientSinkAdapter::sink(client_events.clone()),
             mobile_linux
                 .clone()
-                .map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new),
+                .map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::executor),
             full_runtime,
             runtime_root,
             physical_memory_bytes,
@@ -190,7 +191,7 @@ pub(crate) async fn profile_apps(
     runtime_root: Option<PathBuf>,
     physical_memory_bytes: u64,
     llm: Arc<LocalAppsLlm>,
-    devices: crate::mobile::local_apps_device::DeviceCapabilities,
+    devices: local_app_service::device_capabilities::DeviceCapabilities,
 ) -> Result<Arc<ProfileApps>, AppError> {
     let cell = {
         let mut profiles = registry()
@@ -264,7 +265,7 @@ pub(crate) async fn profile_apps(
         }
     };
     profile.host.refresh_runtime_configuration(
-        refresh_mobile_linux.map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new),
+        refresh_mobile_linux.map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::executor),
         refresh_runtime_root,
         physical_memory_bytes,
     );
@@ -365,7 +366,7 @@ mod tests {
             None,
             0,
             no_op_llm(),
-            crate::mobile::local_apps_device::DeviceCapabilities::default(),
+            local_app_service::device_capabilities::DeviceCapabilities::default(),
         )
         .await
         .expect("first profile");
@@ -377,7 +378,7 @@ mod tests {
             None,
             0,
             no_op_llm(),
-            crate::mobile::local_apps_device::DeviceCapabilities::default(),
+            local_app_service::device_capabilities::DeviceCapabilities::default(),
         )
         .await
         .expect("second profile");
@@ -399,7 +400,7 @@ mod tests {
             None,
             0,
             no_op_llm(),
-            crate::mobile::local_apps_device::DeviceCapabilities::default(),
+            local_app_service::device_capabilities::DeviceCapabilities::default(),
         )
         .await
         {
@@ -422,7 +423,7 @@ mod tests {
                 None,
                 0,
                 no_op_llm(),
-                crate::mobile::local_apps_device::DeviceCapabilities::default(),
+                local_app_service::device_capabilities::DeviceCapabilities::default(),
             )
             .await
             .expect("profile");
@@ -452,7 +453,7 @@ mod tests {
             None,
             128,
             no_op_llm(),
-            crate::mobile::local_apps_device::DeviceCapabilities::default(),
+            local_app_service::device_capabilities::DeviceCapabilities::default(),
         )
         .await
         .expect("first profile");
@@ -464,7 +465,7 @@ mod tests {
             Some(runtime_root.clone()),
             256,
             no_op_llm(),
-            crate::mobile::local_apps_device::DeviceCapabilities::default(),
+            local_app_service::device_capabilities::DeviceCapabilities::default(),
         )
         .await
         .expect("second profile");

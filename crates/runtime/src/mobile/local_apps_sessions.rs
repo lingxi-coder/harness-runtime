@@ -7,8 +7,8 @@
 //! backfill sweep repairs titles a crash left behind. The service knows none of
 //! that: it is told, through [`ConversationHost`], that a scaffold committed.
 
-use crate::mobile::local_apps_host::canonical_cwd_string;
 use async_trait::async_trait;
+use local_app_service::broker::canonical_cwd_string;
 use local_app_service::host::ConversationHost;
 use serde_json::Value;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ pub(crate) struct SessionTitles {
 }
 
 impl SessionTitles {
-    pub(crate) fn new(
+    pub(crate) fn host(
         catalog: SessionCatalog,
         data_root: std::path::PathBuf,
     ) -> Arc<dyn ConversationHost> {
@@ -295,3 +295,6 @@ pub(crate) async fn reconcile_app_init_session_title(
         .map_err(|error| format!("rename pinned init session: {error}"))?;
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests;

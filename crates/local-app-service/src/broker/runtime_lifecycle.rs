@@ -24,7 +24,7 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 
 impl LocalAppsHostBroker {
-    pub(crate) async fn manage_runtime_value(&self, input: Value) -> Result<Value, String> {
+    pub async fn manage_runtime_value(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
         let action = required_string(&input, "action")?;
         match action {
@@ -46,7 +46,7 @@ impl LocalAppsHostBroker {
             .await
             .map_err(|error| error.to_string())?;
         let layout = self.layout(app_id)?;
-        let requested_build_id = crate::mobile::local_apps_build::active_build_id(&layout)
+        let requested_build_id = crate::app_build::active_build_id(&layout)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "runtime start requires an active build".to_string())?;
         let publication_cell = self.runtime_publication_cell(app_id)?;
@@ -130,9 +130,8 @@ impl LocalAppsHostBroker {
                         .runtime_record(app_id)
                         .await
                         .map_err(|error| error.to_string())?;
-                    let build_id =
-                        crate::mobile::local_apps_build::active_build_id(&self.layout(app_id)?)
-                            .map_err(|error| error.to_string())?;
+                    let build_id = crate::app_build::active_build_id(&self.layout(app_id)?)
+                        .map_err(|error| error.to_string())?;
                     return Ok(json!({
                         "app_id": app_id,
                         "state": runtime.state,
@@ -156,7 +155,7 @@ impl LocalAppsHostBroker {
         };
         let service = self.service()?;
         let layout = self.layout(app_id)?;
-        let expected_build_id = crate::mobile::local_apps_build::active_build_id(&layout)
+        let expected_build_id = crate::app_build::active_build_id(&layout)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "runtime start requires an active build".to_string())?;
         let reservation_matches = {
@@ -190,7 +189,7 @@ impl LocalAppsHostBroker {
                 )
                 .await;
         }
-        if let Err(error) = crate::mobile::local_apps_build::validate_build_for_launch(&layout) {
+        if let Err(error) = crate::app_build::validate_build_for_launch(&layout) {
             return self
                 .fail_reserved_runtime_start(app_id, generation, None, error.to_string())
                 .await;
@@ -198,7 +197,7 @@ impl LocalAppsHostBroker {
         let static_root = layout
             .root()
             .join(layout.build_rel(false))
-            .join(crate::mobile::local_apps_build::VITE_OUTPUT_DIR);
+            .join(crate::app_build::VITE_OUTPUT_DIR);
         if !static_root.join("index.html").is_file() {
             return self
                 .fail_reserved_runtime_start(
@@ -239,7 +238,7 @@ impl LocalAppsHostBroker {
             // runtime, where it is an ordinary `AppService` read — no runtime
             // affinity, nothing blocking.
             let sibling_pins = sibling_pinned_ports(&service, &app_id).await;
-            crate::mobile::local_apps_profile::worker_runtime()
+            crate::worker::worker_runtime()
                 .spawn(async move {
                     bind_stable_loopback(&app_id, assigned, &sibling_pins, &leases, &registry).await
                 })
@@ -254,7 +253,7 @@ impl LocalAppsHostBroker {
                     .await;
             }
         };
-        let latest_build_id = crate::mobile::local_apps_build::active_build_id(&layout)
+        let latest_build_id = crate::app_build::active_build_id(&layout)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "runtime start lost its active build".to_string())?;
         if latest_build_id != expected_build_id {
@@ -337,7 +336,7 @@ impl LocalAppsHostBroker {
                 )
                 .await;
         }
-        let latest_build_id = crate::mobile::local_apps_build::active_build_id(&layout)
+        let latest_build_id = crate::app_build::active_build_id(&layout)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "runtime start lost its active build".to_string())?;
         if latest_build_id != expected_build_id {
@@ -577,7 +576,7 @@ impl LocalAppsHostBroker {
     ) {
         let runtimes = Arc::clone(&self.runtimes);
         let broker = self.weak_self();
-        crate::mobile::local_apps_profile::worker_runtime().spawn(async move {
+        crate::worker::worker_runtime().spawn(async move {
             let Some(detail) = run_static_server(listener, root, shutdown).await else {
                 return;
             };

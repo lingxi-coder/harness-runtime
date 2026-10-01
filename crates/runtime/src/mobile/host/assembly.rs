@@ -1,7 +1,5 @@
 use crate::mobile::{
-    local_apps_host::{LocalAppsAgentExecutor, LocalAppsHostBroker},
     local_apps_llm::{ApiServiceModel, LocalAppsLlm},
-    local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
     local_apps_profile::profile_apps,
     mcp_transport::MobileMcpTransport,
     mobile_command_registry, register_android_ui_automation,
@@ -21,6 +19,8 @@ use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
 use llm_runtime::auth::anthropic::{OAuthCredentialProvider, OAuthHandle, RefreshDriver};
 use llm_runtime::auth::openai as openai_oauth;
 use llm_runtime::{CredentialProvider, ModelRuntime, Transport};
+use local_app_service::broker::{LocalAppsAgentExecutor, LocalAppsHostBroker};
+use local_app_service::mcp_server::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY};
 use mcp::registry::OAuthDeps;
 use mcp::{ConfigScope as McpConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 use orchestrator::model::user_agent::UserAgentEnv;
@@ -182,9 +182,11 @@ pub(super) async fn build_mobile_inner_with_ask(
     }
     let mcp_registry = Arc::new(mcp_registry);
     local_apps_mcp
-        .attach_publisher(crate::mobile::local_apps_adapters::RegistryPublisher::new(
-            Arc::downgrade(&mcp_registry),
-        ))
+        .attach_publisher(
+            crate::mobile::local_apps_adapters::RegistryPublisher::publisher(Arc::downgrade(
+                &mcp_registry,
+            )),
+        )
         .map_err(|_| {
             MobileBuildError::Orchestrator(
                 "local apps MCP registry was already attached during bootstrap".into(),
@@ -2989,7 +2991,7 @@ pub fn build_mobile_engine_inner(
         firer_cfg.local_apps_runtime_root.clone(),
         firer_cfg.physical_memory_bytes,
         inner.local_apps_llm.clone(),
-        crate::mobile::local_apps_device::DeviceCapabilities {
+        local_app_service::device_capabilities::DeviceCapabilities {
             camera: firer_platform.camera(),
             audio: firer_platform.audio_service(),
             location: firer_platform.location(),
@@ -3033,11 +3035,11 @@ pub fn build_mobile_engine_inner(
             // same unavailable state and never mutate data.
             let host = LocalAppsHostBroker::new_with_physical_memory(
                 mobile_apps_data_root(&firer_cfg),
-                crate::mobile::local_apps_wire::ClientSinkAdapter::new(event_sink.clone()),
+                crate::mobile::local_apps_wire::ClientSinkAdapter::sink(event_sink.clone()),
                 inner
                     .mobile_linux
                     .clone()
-                    .map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new),
+                    .map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::executor),
                 firer_cfg.local_apps_full_runtime,
                 firer_cfg.local_apps_runtime_root.clone(),
                 firer_cfg.physical_memory_bytes,
@@ -3067,17 +3069,21 @@ pub fn build_mobile_engine_inner(
         tracing::warn!("local-apps workflow status sink was already attached");
     }
     if local_apps_host
-        .attach_publisher(crate::mobile::local_apps_adapters::RegistryPublisher::new(
-            Arc::downgrade(&inner.mcp_registry),
-        ))
+        .attach_publisher(
+            crate::mobile::local_apps_adapters::RegistryPublisher::publisher(Arc::downgrade(
+                &inner.mcp_registry,
+            )),
+        )
         .is_err()
     {
         tracing::warn!("local-apps MCP registry was already attached");
     }
     if local_apps_host
-        .attach_diagnostics(crate::mobile::local_apps_adapters::LspDiagnostics::new(
-            Arc::downgrade(&inner.lsp_registry),
-        ))
+        .attach_diagnostics(
+            crate::mobile::local_apps_adapters::LspDiagnostics::provider(Arc::downgrade(
+                &inner.lsp_registry,
+            )),
+        )
         .is_err()
     {
         tracing::warn!("local-apps LSP registry was already attached");
@@ -3107,7 +3113,7 @@ pub fn build_mobile_engine_inner(
     // The broker already knows the apps data root; `lingxi_home` and the
     // filesystem are the composition root's to hand over.
     if local_apps_host
-        .attach_conversations(crate::mobile::local_apps_sessions::SessionTitles::new(
+        .attach_conversations(crate::mobile::local_apps_sessions::SessionTitles::host(
             crate::mobile::local_apps_sessions::SessionCatalog {
                 lingxi_home: firer_cfg.lingxi_home.clone(),
                 fs: fs.clone(),

@@ -6,13 +6,13 @@ use super::PersistedMcpCandidate;
 use super::LOCAL_APP_WIDGET_DIR;
 use super::LOCAL_APP_WIDGET_FILE;
 use super::LOCAL_APP_WIDGET_MIME;
+use crate::host::HostEvent;
+use crate::publication::{Exposure, ManagedApp, ManagedRuntime, WidgetResource};
 use local_app_contracts::approvals::{
     McpToolChangeKind, McpToolDiff, McpToolField, McpToolSurface, VerificationStatus,
     VerificationSummary,
 };
 use local_app_contracts::events::{ManagedMcpServer, ManagedMcpStatus, McpAppWidget};
-use local_app_service::host::HostEvent;
-use local_app_service::publication::{Exposure, ManagedApp, ManagedRuntime, WidgetResource};
 use local_apps::derive_mcp_status;
 use local_apps::effective_tool_surface_sha256;
 use local_apps::load_manifest;
@@ -358,7 +358,7 @@ impl LocalAppsHostBroker {
     /// Make one enabled Local App MCP visible to one conversation and create
     /// the real logical MCP connection whose discovered tools are registered
     /// into that conversation's shared ToolRegistry.
-    pub(crate) async fn expose_managed_mcp_for_conversation(
+    pub async fn expose_managed_mcp_for_conversation(
         &self,
         conversation_id: &str,
         app_id: &str,
@@ -403,7 +403,7 @@ impl LocalAppsHostBroker {
         publisher.expose(conversation_id, &app, pin).await?;
         Ok(true)
     }
-    pub(crate) async fn set_managed_mcp_conversation_pinned(
+    pub async fn set_managed_mcp_conversation_pinned(
         &self,
         conversation_id: &str,
         app_id: &str,
@@ -426,7 +426,7 @@ impl LocalAppsHostBroker {
     /// Local App MCP partition. Existing per-conversation LRU/pin metadata is
     /// retained, while live logical connections from the previous session are
     /// removed before the new session is exposed.
-    pub(crate) async fn activate_managed_mcp_conversation(
+    pub async fn activate_managed_mcp_conversation(
         &self,
         conversation_id: &str,
         cwd: &str,
@@ -462,7 +462,7 @@ impl LocalAppsHostBroker {
         }
         self.emit_managed_mcp_inventory().await
     }
-    pub(crate) async fn set_managed_mcp_enabled(
+    pub async fn set_managed_mcp_enabled(
         &self,
         app_id: &str,
         enabled: bool,
@@ -501,7 +501,7 @@ impl LocalAppsHostBroker {
         self.sync_managed_local_app_publication(app_id).await?;
         self.emit_managed_mcp_inventory().await
     }
-    pub(crate) async fn set_managed_mcp_tool_enabled(
+    pub async fn set_managed_mcp_tool_enabled(
         &self,
         app_id: &str,
         tool_name: &str,
@@ -559,8 +559,8 @@ impl LocalAppsHostBroker {
         };
         let layout = self.layout(app_id)?;
         let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
-        let active_build_id = crate::mobile::local_apps_build::active_build_id(&layout)
-            .map_err(|error| error.to_string())?;
+        let active_build_id =
+            crate::app_build::active_build_id(&layout).map_err(|error| error.to_string())?;
         match local_apps::derive_publication_state(&manifest, active_build_id.as_deref(), false) {
             Ok(local_apps::AppPublicationState::Draft) => {
                 publisher.unregister(app_id).await?;
@@ -612,7 +612,7 @@ impl LocalAppsHostBroker {
         }
         Ok(())
     }
-    pub(crate) async fn unregister_managed_local_app(&self, app_id: &str) -> Result<(), String> {
+    pub async fn unregister_managed_local_app(&self, app_id: &str) -> Result<(), String> {
         let Some(publisher) = self.publisher() else {
             return Ok(());
         };
@@ -629,7 +629,7 @@ impl LocalAppsHostBroker {
         let Some(active) = manifest.active_mcp_catalog.clone() else {
             return Ok(());
         };
-        let active_build_id = crate::mobile::local_apps_build::active_build_id(layout)
+        let active_build_id = crate::app_build::active_build_id(layout)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| {
                 "active_state_corrupt: published app is missing its active build".to_string()
@@ -697,7 +697,7 @@ impl LocalAppsHostBroker {
         self.emit_managed_mcp_inventory().await?;
         Ok(())
     }
-    pub(crate) async fn emit_managed_mcp_inventory(&self) -> Result<(), String> {
+    pub async fn emit_managed_mcp_inventory(&self) -> Result<(), String> {
         let service = self.service()?;
         let publisher = self.publisher();
         let active_conversation = self.active_mcp_conversation.lock().await.clone();
@@ -719,8 +719,8 @@ impl LocalAppsHostBroker {
         for record in service.list_apps().await {
             let layout = self.layout(&record.id)?;
             let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
-            let active_build_id = crate::mobile::local_apps_build::active_build_id(&layout)
-                .map_err(|error| error.to_string())?;
+            let active_build_id =
+                crate::app_build::active_build_id(&layout).map_err(|error| error.to_string())?;
             let ui_verification = self.qa_ui_verification_summary(&record.id).await;
             let publication = local_apps::derive_publication_state(
                 &manifest,

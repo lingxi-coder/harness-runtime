@@ -8,9 +8,9 @@
 //! that framing right.
 
 use super::{BridgeFailure, LocalAppsHostBroker};
+use crate::host::HostEvent;
 use async_trait::async_trait;
 use local_app_contracts::approvals::{AgentProfileProposal, CapabilityKind};
-use local_app_service::host::HostEvent;
 use local_apps::mailbox::{load_mailbox, save_mailbox};
 use local_apps::{
     AgentBudget, AgentSessionRecord, AgentSessionStatus, AppAgentProfile, AppAgentProfileProposal,
@@ -28,7 +28,7 @@ const REASON_AGENT_NOTIFY: &str = "应用请求向你的对话助手发送事件
 /// authorization, session state and cancellation; the injected executor owns
 /// the actual ConversationOrchestrator instance and its app-scoped tools.
 #[async_trait]
-pub(crate) trait LocalAppsAgentExecutor: Send + Sync {
+pub trait LocalAppsAgentExecutor: Send + Sync {
     async fn run(
         &self,
         app_id: &str,
@@ -45,7 +45,7 @@ pub(crate) trait LocalAppsAgentExecutor: Send + Sync {
 /// for one host-owned Agent turn. The broker snapshots this state after every
 /// outcome and persists the counters on the session record.
 #[derive(Debug, Default)]
-pub(crate) struct AgentTurnUsageState {
+pub struct AgentTurnUsageState {
     output_tokens: AtomicU64,
     bridge_calls: AtomicU32,
     mcp_calls: AtomicU32,
@@ -77,7 +77,7 @@ impl AgentTurnUsageState {
 }
 
 /// Host-owned cancellation handle for one app Agent turn.
-pub(crate) struct AgentTurnControl {
+pub struct AgentTurnControl {
     app_id: String,
     session_id: String,
     cancel: CancellationToken,
@@ -103,8 +103,8 @@ impl AgentTurnControl {
 
 /// Output adapter for the app Agent stream contract. It also collects the
 /// final text so `agent.send` can use the same executor as `agent.stream`.
-pub(crate) struct AgentOutputStream {
-    event_sink: Arc<dyn local_app_service::host::HostEventSink>,
+pub struct AgentOutputStream {
+    event_sink: Arc<dyn crate::host::HostEventSink>,
     app_id: String,
     request_id: String,
     stream_id: Option<String>,
@@ -117,7 +117,7 @@ pub(crate) struct AgentOutputStream {
 
 impl AgentOutputStream {
     pub(crate) fn new(
-        event_sink: Arc<dyn local_app_service::host::HostEventSink>,
+        event_sink: Arc<dyn crate::host::HostEventSink>,
         app_id: &str,
         request_id: &str,
         stream_id: Option<String>,
@@ -126,7 +126,7 @@ impl AgentOutputStream {
     }
 
     pub(crate) fn with_budget(
-        event_sink: Arc<dyn local_app_service::host::HostEventSink>,
+        event_sink: Arc<dyn crate::host::HostEventSink>,
         app_id: &str,
         request_id: &str,
         stream_id: Option<String>,
@@ -213,11 +213,11 @@ impl AgentOutputStream {
         self.text.lock().await.clone()
     }
 
-    pub(crate) fn is_streaming(&self) -> bool {
+    pub fn is_streaming(&self) -> bool {
         self.stream_id.is_some()
     }
 
-    pub(crate) fn usage_state(&self) -> Arc<AgentTurnUsageState> {
+    pub fn usage_state(&self) -> Arc<AgentTurnUsageState> {
         self.usage.clone()
     }
 
@@ -230,7 +230,7 @@ impl AgentOutputStream {
     /// One chunk of the agent's text: counts it against the turn's output
     /// budget (cancelling the turn when the budget runs out), keeps it for
     /// `agent.send`, and streams it as a frame when the request is streaming.
-    pub(crate) async fn emit_text(&self, text: &str) {
+    pub async fn emit_text(&self, text: &str) {
         if let Some(max_tokens) = self.max_tokens {
             let estimated = text.len().div_ceil(4) as u64;
             let max_tokens = u64::from(max_tokens);
@@ -436,7 +436,7 @@ impl LocalAppsHostBroker {
         }))
     }
 
-    pub(crate) async fn resolve_agent_profile_proposal(
+    pub async fn resolve_agent_profile_proposal(
         &self,
         app_id: &str,
         approval_token: &str,
@@ -1012,11 +1012,10 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{update_agent_session_after_turn, AgentOutputStream, LocalAppsAgentExecutor};
-    use crate::mobile::local_apps_host::LocalAppsHostBroker;
+    use crate::broker::LocalAppsHostBroker;
+    use crate::host::HostEvent;
+    use crate::test_support::RecordingSink;
     use async_trait::async_trait;
-    use client::adapter::{ClientEventSink, MockSink};
-    use client::protocol::events::ClientEvent;
-    use client::protocol::local_apps::AppEventDto;
     use local_app_contracts::approvals::{UiActionKind, UiRequest};
     use local_app_contracts::bridge::{BridgeOperation, BridgeRequest};
     use local_apps::mailbox::{load_mailbox, MAX_MAILBOX_EVENTS};
@@ -1036,7 +1035,7 @@ mod tests {
     struct Harness {
         _root: TempDir,
         broker: Arc<LocalAppsHostBroker>,
-        sink: Arc<MockSink>,
+        sink: Arc<RecordingSink>,
         app_id: String,
         layout: AppLayout,
     }
@@ -1071,10 +1070,10 @@ mod tests {
             .await
             .expect("load app service"),
         );
-        let sink = MockSink::arc();
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let sink = RecordingSink::arc();
+        let broker = crate::test_support::broker_with_sink(
             root.path().to_path_buf(),
-            sink.clone() as Arc<dyn ClientEventSink>,
+            sink.clone(),
             None,
             false,
             None,
@@ -1136,9 +1135,9 @@ mod tests {
             .into_iter()
             .rev()
             .find_map(|event| match event {
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppBridgeResponse { response },
-                } if response.request_id == request_id => Some(response),
+                HostEvent::BridgeResponse(response) if response.request_id == request_id => {
+                    Some(response)
+                }
                 _ => None,
             })
             .expect("a bridge response");
@@ -1171,9 +1170,7 @@ mod tests {
             .await
             .into_iter()
             .find_map(|event| match event {
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppAgentEventPosted { topic, seq, .. },
-                } => Some((topic, seq)),
+                HostEvent::AgentEventPosted { topic, seq, .. } => Some((topic, seq)),
                 _ => None,
             })
             .expect("a badge event");
@@ -1279,14 +1276,12 @@ mod tests {
         };
         // Wait until the UI request is actually parked.
         loop {
-            let parked = h.sink.events().await.into_iter().any(|event| {
-                matches!(
-                    event,
-                    ClientEvent::AppEvent {
-                        event: AppEventDto::AppUiRequest { .. }
-                    }
-                )
-            });
+            let parked = h
+                .sink
+                .events()
+                .await
+                .into_iter()
+                .any(|event| matches!(event, HostEvent::UiRequest(_)));
             if parked {
                 break;
             }
@@ -1433,12 +1428,12 @@ mod tests {
             .await
             .expect("stream Agent turn");
         assert_eq!(streamed["text"], "world");
-        assert!(h.sink.events().await.iter().any(|event| matches!(
-            event,
-            ClientEvent::AppEvent {
-                event: AppEventDto::AppBridgeStreamFrame { .. }
-            }
-        )));
+        assert!(h
+            .sink
+            .events()
+            .await
+            .iter()
+            .any(|event| matches!(event, HostEvent::BridgeStreamFrame(_))));
         assert_eq!(
             local_apps::load_sessions(&h.layout)
                 .expect("session catalog")
@@ -1552,9 +1547,9 @@ mod tests {
 
     #[tokio::test]
     async fn agent_stream_output_emits_ordered_frames_and_camel_case_json() {
-        let sink = MockSink::arc();
+        let sink = RecordingSink::arc();
         let output = AgentOutputStream::new(
-            crate::mobile::local_apps_wire::ClientSinkAdapter::new(sink.clone()),
+            sink.clone(),
             "abc12345",
             "request-1",
             Some("stream-1".into()),
@@ -1567,31 +1562,34 @@ mod tests {
         let frames: Vec<_> = events
             .into_iter()
             .filter_map(|event| match event {
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppBridgeStreamFrame { frame, frame_json },
-                } => Some((frame, frame_json)),
+                HostEvent::BridgeStreamFrame(frame) => {
+                    // The frame's JSON form is part of what a page receives:
+                    // camelCase, as the contract serializes it.
+                    let json = serde_json::to_string(&frame).expect("frame json");
+                    Some((frame, json))
+                }
                 _ => None,
             })
             .collect();
         assert_eq!(frames.len(), 3);
         assert!(matches!(
             frames[0].0,
-            client::protocol::local_apps::AppBridgeStreamFrameDto::Started { .. }
+            local_app_contracts::bridge::BridgeStreamFrame::Started { .. }
         ));
         assert!(frames[1].1.contains("dataJson"));
         assert!(!frames[1].1.contains("data_json"));
         assert!(matches!(
             frames[2].0,
-            client::protocol::local_apps::AppBridgeStreamFrameDto::Completed { seq: 1, .. }
+            local_app_contracts::bridge::BridgeStreamFrame::Completed { seq: 1, .. }
         ));
     }
 
     #[tokio::test]
     async fn agent_output_budget_cancels_after_the_allowed_output_tokens() {
-        let sink = MockSink::arc();
+        let sink = RecordingSink::arc();
         let cancel = CancellationToken::new();
         let output = AgentOutputStream::with_budget(
-            crate::mobile::local_apps_wire::ClientSinkAdapter::new(sink),
+            sink,
             "abc12345",
             "request-1",
             None,

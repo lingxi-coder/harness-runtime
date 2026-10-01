@@ -3,7 +3,7 @@
 //! Every operation runs the same ladder: parse+clamp the page payload →
 //! [`LocalAppsHostBroker::authorize_declared_capability`] (manifest-declared,
 //! then persisted → session → prompt) → dispatch into the live
-//! [`crate::mobile::local_apps_device::SharedDeviceCapabilities`] handle → envelope
+//! [`crate::device_capabilities::SharedDeviceCapabilities`] handle → envelope
 //! the result as JSON with media returned as base64 (the page turns it into
 //! a Blob URL; see `lib/lingxi-bridge.js`). Media responses are capped at
 //! [`MAX_DEVICE_MEDIA_RESULT_BYTES`] — `evaluateJavaScript` delivers the
@@ -875,9 +875,7 @@ fn valid_notification_tag(tag: &str) -> bool {
 }
 
 impl LocalAppsHostBroker {
-    fn devices(
-        &self,
-    ) -> Result<crate::mobile::local_apps_device::DeviceCapabilities, BridgeFailure> {
+    fn devices(&self) -> Result<crate::device_capabilities::DeviceCapabilities, BridgeFailure> {
         self.device
             .get()
             .map(|cell| cell.current())
@@ -1035,7 +1033,7 @@ impl LocalAppsHostBroker {
         let handle = self.media.put(
             app_id,
             self.request_id("media"),
-            crate::mobile::local_apps_device::MediaEntry {
+            crate::device_capabilities::MediaEntry {
                 media_type: media_type.to_string(),
                 bytes: std::sync::Arc::new(bytes),
             },
@@ -1058,7 +1056,7 @@ impl LocalAppsHostBroker {
         &self,
         app_id: &str,
         handle: &str,
-    ) -> Option<crate::mobile::local_apps_device::MediaEntry> {
+    ) -> Option<crate::device_capabilities::MediaEntry> {
         self.media.get(app_id, handle)
     }
 
@@ -2406,13 +2404,12 @@ mod tests {
         RecordingReplacement, RecordingReplacementGuard, FINISHED_RECORDING_TTL,
         LOCAL_APP_AUDIO_TIMEOUT, RECORD_FORMAT, RECORD_SAMPLE_RATE_HZ,
     };
-    use crate::mobile::local_apps_device::{DeviceCapabilities, SharedDeviceCapabilities};
-    use crate::mobile::local_apps_host::LocalAppsHostBroker;
+    use crate::broker::LocalAppsHostBroker;
+    use crate::device_capabilities::{DeviceCapabilities, SharedDeviceCapabilities};
+    use crate::host::HostEvent;
+    use crate::test_support::RecordingSink;
     use async_trait::async_trait;
     use base64::Engine as _;
-    use client::adapter::{ClientEventSink, MockSink};
-    use client::protocol::events::ClientEvent;
-    use client::protocol::local_apps::AppEventDto;
     use device_api::{
         AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioOperation, AudioOperationContext,
         AudioOperationId, AudioOperationKind, AudioOperationReadiness, AudioOperationSuccess,
@@ -2790,7 +2787,7 @@ mod tests {
     struct Harness {
         _root: TempDir,
         broker: Arc<LocalAppsHostBroker>,
-        sink: Arc<MockSink>,
+        sink: Arc<RecordingSink>,
         service: Arc<AppService>,
         app_id: String,
         layout: AppLayout,
@@ -2807,10 +2804,10 @@ mod tests {
             .await
             .expect("load app service"),
         );
-        let sink = MockSink::arc();
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let sink = RecordingSink::arc();
+        let broker = crate::test_support::broker_with_sink(
             root.path().to_path_buf(),
-            sink.clone() as Arc<dyn ClientEventSink>,
+            sink.clone(),
             None,
             false,
             None,
@@ -2827,7 +2824,7 @@ mod tests {
         let static_dist = root
             .path()
             .join(layout.build_rel(false))
-            .join(crate::mobile::local_apps_build::VITE_OUTPUT_DIR);
+            .join(crate::app_build::VITE_OUTPUT_DIR);
         std::fs::create_dir_all(&static_dist).expect("static dist");
         std::fs::write(static_dist.join("index.html"), "<html>ok</html>").expect("index");
         let record = prepare_launchable_runtime_fixture(&service, record, &layout).await;
@@ -2846,20 +2843,18 @@ mod tests {
         record: local_apps::AppRecord,
         layout: &AppLayout,
     ) -> local_apps::AppRecord {
-        let binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
-            AppRuntimeProfile::ReactDom,
-        )
-        .expect("react dom binding");
+        let binding =
+            crate::runtime_profiles::current_binding_for_family(AppRuntimeProfile::ReactDom)
+                .expect("react dom binding");
         let workspace = layout.root().join(layout.workspace_rel());
-        crate::mobile::local_apps_build::scaffold_workspace_initialized(
+        crate::app_build::scaffold_workspace_initialized(
             layout,
-            crate::mobile::local_apps_build::LocalAppBuildTarget::ReactDomR4,
+            crate::app_build::LocalAppBuildTarget::ReactDomR4,
             true,
         )
         .expect("scaffold workspace");
-        let scaffold =
-            crate::mobile::local_app_runtime_profiles::scaffold_artifacts_for_binding(&binding)
-                .expect("runtime profile scaffold");
+        let scaffold = crate::runtime_profiles::scaffold_artifacts_for_binding(&binding)
+            .expect("runtime profile scaffold");
         for (relative, bytes) in &scaffold.files {
             let path = workspace.join(relative);
             if let Some(parent) = path.parent() {
@@ -2868,18 +2863,15 @@ mod tests {
             std::fs::write(path, bytes).expect("write scaffold file");
         }
 
-        let requested_bytes = std::fs::read(
-            workspace.join(crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL),
-        )
-        .expect("read requested dependencies");
-        let package_bytes = std::fs::read(
-            workspace.join(crate::mobile::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL),
-        )
-        .expect("read effective package");
-        let lockfile_bytes = std::fs::read(
-            workspace.join(crate::mobile::local_app_runtime_profiles::LOCKFILE_FILE_REL),
-        )
-        .expect("read lockfile");
+        let requested_bytes =
+            std::fs::read(workspace.join(crate::runtime_profiles::REQUESTED_FILE_REL))
+                .expect("read requested dependencies");
+        let package_bytes =
+            std::fs::read(workspace.join(crate::runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL))
+                .expect("read effective package");
+        let lockfile_bytes =
+            std::fs::read(workspace.join(crate::runtime_profiles::LOCKFILE_FILE_REL))
+                .expect("read lockfile");
         let sbom_bytes = br#"{
   "spdxVersion": "SPDX-2.3",
   "SPDXID": "SPDXRef-DOCUMENT",
@@ -2888,12 +2880,12 @@ mod tests {
   "documentNamespace": "https://example.invalid/spdx/device-op-fixture"
 }
 "#;
-        let snapshot = crate::mobile::local_app_runtime_profiles::snapshot_artifacts_for_binding(
+        let snapshot = crate::runtime_profiles::snapshot_artifacts_for_binding(
             &binding,
-            crate::mobile::local_app_runtime_profiles::hash_bytes(&requested_bytes),
-            crate::mobile::local_app_runtime_profiles::hash_bytes(&package_bytes),
-            crate::mobile::local_app_runtime_profiles::hash_bytes(&lockfile_bytes),
-            crate::mobile::local_app_runtime_profiles::hash_bytes(b"device-op-fixture-tree"),
+            crate::runtime_profiles::hash_bytes(&requested_bytes),
+            crate::runtime_profiles::hash_bytes(&package_bytes),
+            crate::runtime_profiles::hash_bytes(&lockfile_bytes),
+            crate::runtime_profiles::hash_bytes(b"device-op-fixture-tree"),
             sbom_bytes,
         )
         .expect("dependency snapshot");
@@ -2942,7 +2934,7 @@ mod tests {
         .expect("save dependency record");
 
         let build_root = layout.root().join(layout.build_rel(false));
-        let output_root = build_root.join(crate::mobile::local_apps_build::VITE_OUTPUT_DIR);
+        let output_root = build_root.join(crate::app_build::VITE_OUTPUT_DIR);
         std::fs::create_dir_all(&output_root).expect("create fixture output");
         std::fs::write(output_root.join("index.html"), "<html>ok</html>")
             .expect("write fixture output");
@@ -3047,9 +3039,7 @@ mod tests {
             .into_iter()
             .rev()
             .find_map(|event| match event {
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppBridgeResponse { response },
-                } => Some(response),
+                HostEvent::BridgeResponse(response) => Some(response),
                 _ => None,
             })
             .expect("a bridge response event");
@@ -3289,10 +3279,7 @@ mod tests {
             tokio::spawn(async move {
                 loop {
                     for event in sink.events().await {
-                        if let ClientEvent::AppEvent {
-                            event: AppEventDto::AppCapabilityRequested { request },
-                        } = event
-                        {
+                        if let HostEvent::CapabilityRequested(request) = event {
                             assert!(
                                 broker
                                     .resolve_capability(
@@ -3696,7 +3683,7 @@ mod tests {
         // The detached native stop can finish after teardown. Its generation
         // and handle no longer match the registry, so it must not resurrect it.
         stop_gate.notify_one();
-        let _ = timeout(Duration::from_secs(2), stopping)
+        timeout(Duration::from_secs(2), stopping)
             .await
             .expect("in-flight stop settles after teardown")
             .expect("manual-stop request task joins");
@@ -3908,9 +3895,9 @@ mod tests {
             .into_iter()
             .rev()
             .find_map(|event| match event {
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppBridgeResponse { response },
-                } if response.request_id == "req-b" => Some(response),
+                HostEvent::BridgeResponse(response) if response.request_id == "req-b" => {
+                    Some(response)
+                }
                 _ => None,
             })
             .expect("second response");
@@ -4404,9 +4391,7 @@ mod tests {
                 .await
                 .into_iter()
                 .filter_map(|event| match event {
-                    ClientEvent::AppEvent {
-                        event: AppEventDto::AppCapabilityRequested { request },
-                    } => Some(request.request_id),
+                    HostEvent::CapabilityRequested(request) => Some(request.request_id),
                     _ => None,
                 })
                 .collect::<HashSet<_>>();
@@ -4431,10 +4416,7 @@ mod tests {
             let capability_request_id = timeout(Duration::from_secs(2), async {
                 loop {
                     for event in h.sink.events().await {
-                        if let ClientEvent::AppEvent {
-                            event: AppEventDto::AppCapabilityRequested { request },
-                        } = event
-                        {
+                        if let HostEvent::CapabilityRequested(request) = event {
                             if request.app_id == h.app_id
                                 && !previous_requests.contains(&request.request_id)
                             {
@@ -4484,9 +4466,9 @@ mod tests {
                 .into_iter()
                 .rev()
                 .find_map(|event| match event {
-                    ClientEvent::AppEvent {
-                        event: AppEventDto::AppBridgeResponse { response },
-                    } if response.request_id == request_id => Some(response),
+                    HostEvent::BridgeResponse(response) if response.request_id == request_id => {
+                        Some(response)
+                    }
                     _ => None,
                 })
                 .expect("bridge response");
@@ -4896,9 +4878,9 @@ mod tests {
             .into_iter()
             .rev()
             .find_map(|event| match event {
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppBridgeResponse { response },
-                } if response.request_id == "synth-late" => Some(response),
+                HostEvent::BridgeResponse(response) if response.request_id == "synth-late" => {
+                    Some(response)
+                }
                 _ => None,
             })
             .expect("synthesis response");

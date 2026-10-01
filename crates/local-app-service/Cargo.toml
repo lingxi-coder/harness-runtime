@@ -14,20 +14,34 @@ default = ["git-checkpoints"]
 git-checkpoints = ["local-apps/git-checkpoints"]
 
 [dependencies]
+device-api = { path = "../device-api" }
 local-app-contracts = { path = "../local-app-contracts" }
 # `default-features = false` is load-bearing: the feature above is the only way
 # the service reaches git2, so the consumer's choice is the one that applies.
 local-apps = { path = "../local-apps", default-features = false }
+mcp-wire = { path = "../mcp-wire" }
+rooted-fs = { path = "../rooted-fs" }
 async-trait.workspace = true
+base64 = "0.22"
 futures-core.workspace = true
+futures-util.workspace = true
+# The broker fetches on an app's behalf (`network.request`), so the service
+# brings its own HTTP client. TLS is rustls, as everywhere else in this tree.
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "stream"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "net"] }
+tokio-util.workspace = true
+tracing = "0.1"
+url = "2"
 uuid = { version = "1.10", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.13"
+# Tests build JSON from URLs.
+url = { version = "2", features = ["serde"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }
 
 [lints]
 workspace = true

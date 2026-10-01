@@ -64,12 +64,12 @@ impl LocalAppsHostBroker {
         let workspace = layout.root().join(layout.workspace_rel());
         let mut files = Vec::new();
         for relative in [
-            crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL,
-            crate::mobile::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
-            crate::mobile::local_app_runtime_profiles::LOCKFILE_FILE_REL,
-            crate::mobile::local_app_runtime_profiles::TREE_PROOF_FILE_REL,
-            crate::mobile::local_app_runtime_profiles::SBOM_FILE_REL,
-            crate::mobile::local_app_runtime_profiles::SNAPSHOT_FILE_REL,
+            crate::runtime_profiles::REQUESTED_FILE_REL,
+            crate::runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
+            crate::runtime_profiles::LOCKFILE_FILE_REL,
+            crate::runtime_profiles::TREE_PROOF_FILE_REL,
+            crate::runtime_profiles::SBOM_FILE_REL,
+            crate::runtime_profiles::SNAPSHOT_FILE_REL,
             "package.json",
             "pnpm-lock.yaml",
             WORKSPACE_DEPENDENCY_ATTESTATION_FILE,
@@ -197,12 +197,12 @@ impl LocalAppsHostBroker {
     pub(super) fn dependency_update_file_is_allowed(relative: &str) -> bool {
         matches!(
             relative,
-            crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL
-                | crate::mobile::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL
-                | crate::mobile::local_app_runtime_profiles::LOCKFILE_FILE_REL
-                | crate::mobile::local_app_runtime_profiles::TREE_PROOF_FILE_REL
-                | crate::mobile::local_app_runtime_profiles::SBOM_FILE_REL
-                | crate::mobile::local_app_runtime_profiles::SNAPSHOT_FILE_REL
+            crate::runtime_profiles::REQUESTED_FILE_REL
+                | crate::runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL
+                | crate::runtime_profiles::LOCKFILE_FILE_REL
+                | crate::runtime_profiles::TREE_PROOF_FILE_REL
+                | crate::runtime_profiles::SBOM_FILE_REL
+                | crate::runtime_profiles::SNAPSHOT_FILE_REL
                 | "package.json"
                 | "pnpm-lock.yaml"
                 | WORKSPACE_DEPENDENCY_ATTESTATION_FILE
@@ -378,12 +378,12 @@ impl LocalAppsHostBroker {
             }
         }
         for expected in [
-            crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL,
-            crate::mobile::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
-            crate::mobile::local_app_runtime_profiles::LOCKFILE_FILE_REL,
-            crate::mobile::local_app_runtime_profiles::TREE_PROOF_FILE_REL,
-            crate::mobile::local_app_runtime_profiles::SBOM_FILE_REL,
-            crate::mobile::local_app_runtime_profiles::SNAPSHOT_FILE_REL,
+            crate::runtime_profiles::REQUESTED_FILE_REL,
+            crate::runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
+            crate::runtime_profiles::LOCKFILE_FILE_REL,
+            crate::runtime_profiles::TREE_PROOF_FILE_REL,
+            crate::runtime_profiles::SBOM_FILE_REL,
+            crate::runtime_profiles::SNAPSHOT_FILE_REL,
             "package.json",
             "pnpm-lock.yaml",
             WORKSPACE_DEPENDENCY_ATTESTATION_FILE,
@@ -430,7 +430,7 @@ impl LocalAppsHostBroker {
             return Err("dependency update recovery journal is too large".into());
         }
         let workspace = Self::dependency_update_workspace(layout)?;
-        crate::mobile::local_apps_build::write_file(
+        crate::app_build::write_file(
             &workspace,
             DEPENDENCY_UPDATE_RECOVERY_FILE_REL,
             &bytes,
@@ -496,13 +496,10 @@ impl LocalAppsHostBroker {
         for file in &journal.files {
             let path = workspace.join(&file.relative);
             match &file.bytes {
-                Some(bytes) => crate::mobile::local_apps_build::write_file(
-                    &workspace,
-                    &file.relative,
-                    bytes,
-                    true,
-                )
-                .map_err(|error| error.to_string())?,
+                Some(bytes) => {
+                    crate::app_build::write_file(&workspace, &file.relative, bytes, true)
+                        .map_err(|error| error.to_string())?
+                }
                 None => {
                     if std::fs::symlink_metadata(&path).is_ok() {
                         Self::remove_owned_path(&path)?;
@@ -602,7 +599,7 @@ impl LocalAppsHostBroker {
         }
         Self::remove_dependency_update_recovery_journal(layout)
     }
-    pub(crate) fn recover_dependency_updates_on_boot(root: &Path) -> Result<(), String> {
+    pub fn recover_dependency_updates_on_boot(root: &Path) -> Result<(), String> {
         let apps_root = root.join("apps");
         let metadata = match std::fs::symlink_metadata(&apps_root) {
             Ok(metadata) => metadata,

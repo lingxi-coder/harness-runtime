@@ -866,7 +866,7 @@ pub(crate) struct ClientSinkAdapter {
 }
 
 impl ClientSinkAdapter {
-    pub(crate) fn new(sink: Arc<dyn ClientEventSink>) -> Arc<dyn HostEventSink> {
+    pub(crate) fn sink(sink: Arc<dyn ClientEventSink>) -> Arc<dyn HostEventSink> {
         Arc::new(Self { sink })
     }
 }
@@ -887,37 +887,14 @@ pub(crate) fn broker_with_client_sink(
     mobile_linux: Option<Arc<dyn mobile_linux_api::MobileLinuxRuntime>>,
     full_runtime: bool,
     runtime_root: Option<std::path::PathBuf>,
-) -> Arc<crate::mobile::local_apps_host::LocalAppsHostBroker> {
-    let broker = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
+) -> Arc<local_app_service::broker::LocalAppsHostBroker> {
+    let broker = local_app_service::broker::LocalAppsHostBroker::new_with_physical_memory(
         root,
-        ClientSinkAdapter::new(sink),
-        mobile_linux.map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new),
+        ClientSinkAdapter::sink(sink),
+        mobile_linux.map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::executor),
         full_runtime,
         runtime_root,
-    );
-    let _ = broker.attach_plugin_bundle(Arc::new(
-        crate::mobile::local_apps_adapters::CompiledPluginBundle,
-    ));
-    broker
-}
-
-/// [`broker_with_client_sink`] with the device's physical memory stated.
-#[cfg(test)]
-pub(crate) fn broker_with_client_sink_and_memory(
-    root: std::path::PathBuf,
-    sink: Arc<dyn ClientEventSink>,
-    mobile_linux: Option<Arc<dyn mobile_linux_api::MobileLinuxRuntime>>,
-    full_runtime: bool,
-    runtime_root: Option<std::path::PathBuf>,
-    physical_memory_bytes: u64,
-) -> Arc<crate::mobile::local_apps_host::LocalAppsHostBroker> {
-    let broker = crate::mobile::local_apps_host::LocalAppsHostBroker::new_with_physical_memory(
-        root,
-        ClientSinkAdapter::new(sink),
-        mobile_linux.map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new),
-        full_runtime,
-        runtime_root,
-        physical_memory_bytes,
+        0,
     );
     let _ = broker.attach_plugin_bundle(Arc::new(
         crate::mobile::local_apps_adapters::CompiledPluginBundle,

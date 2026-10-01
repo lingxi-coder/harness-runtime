@@ -53,8 +53,8 @@
         "docs/local-apps/harness/template-migration-manifest.json",
         "crates/plugins/lingxi-local-app/assets/templates",
         "crates/local-apps/templates/runtime-profiles",
-        "crates/runtime/src/mobile/local_app_runtime_profiles.rs",
-        "crates/runtime/src/mobile/local_apps_build.rs",
+        "crates/local-app-service/src/runtime_profiles.rs",
+        "crates/local-app-service/src/app_build.rs",
         "scripts/checks/check-phase2-plugin.py",
         "scripts/checks/check-phase2-plugin.sh"
       ],

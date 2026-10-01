@@ -1,6 +1,6 @@
-use crate::mobile::local_apps_host::{canonical_cwd_string, LocalAppsHostBroker};
 use crate::mobile::local_apps_sessions::remove_app_session_file;
 use client::protocol::listings::SessionModeDto;
+use local_app_service::broker::{canonical_cwd_string, LocalAppsHostBroker};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use super::MobileConfig;
@@ -205,9 +205,11 @@ pub(crate) async fn run_app_boot_backfill_sweep(
         // header, the create interview has nothing to read and the agent
         // sees an ordinary empty directory. Rewriting it is idempotent and
         // safe to retry every launch. The header literal below is the first
-        // line of `guided_workspace_contract` in `local_apps_host.rs`; the two
-        // must stay in lockstep, or this check calls a healthy contract
+        // line of `guided_workspace_contract` in the service's `broker.rs`; the
+        // two must stay in lockstep, or this check calls a healthy contract
         // malformed and rewrites it on every boot.
+        // `the_boot_sweep_recognises_the_guided_contract_the_service_writes`
+        // (local_apps_sessions/tests.rs) is what holds them together.
         if !record.scaffolded {
             let workspace = backfill_root.join(&record.workspace_rel);
             let lingxi_md = workspace.join("LINGXI.md");

@@ -100,16 +100,12 @@ mobile = [
     "workflow",
     "dep:provider-config",
     "dep:local-apps",
-    "dep:device-api",
     "dep:local-app-contracts",
     "dep:local-app-service",
-    "dep:mcp-wire",
     "dep:rooted-fs",
     "dep:jsonrpc",
     "dep:tool-mcp",
     "dep:futures-util",
-    "dep:reqwest",
-    "reqwest/rustls-tls",
     "dep:sha2",
     "dep:uuid",
     "dep:plugin",
@@ -197,14 +193,12 @@ futures-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 hooks = { path = "../hooks", optional = true }
 jsonrpc = { path = "../jsonrpc", optional = true }
-device-api = { path = "../device-api", optional = true }
 local-app-contracts = { path = "../local-app-contracts", optional = true }
 local-app-service = { path = "../local-app-service", optional = true }
 local-apps = { path = "../local-apps", optional = true }
 lsp = { path = "../lsp", optional = true }
 lsp-types = { version = "0.95", optional = true }
 mcp = { path = "../mcp", optional = true }
-mcp-wire = { path = "../mcp-wire", optional = true }
 memory = { path = "../memory", optional = true }
 migrations = { path = "../migrations", optional = true }
 llm-runtime = { path = "../llm-runtime" }
@@ -218,7 +212,6 @@ platform-posix = { path = "../platforms/posix", optional = true }
 platform-posix-minimal = { path = "../platforms/posix-minimal", optional = true }
 plugin = { path = "../plugin", optional = true }
 provider-config = { path = "../provider-config", optional = true }
-reqwest = { version = "=0.12.28", default-features = false, optional = true }
 rooted-fs = { path = "../rooted-fs", optional = true }
 sandbox = { path = "../sandbox", optional = true }
 sandbox-runtime = { path = "../sandbox-runtime", optional = true }

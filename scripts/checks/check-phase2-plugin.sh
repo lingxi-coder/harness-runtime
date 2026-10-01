@@ -3,9 +3,19 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 python3 scripts/checks/check-phase2-plugin.py
 
-if ! contract_output="$(cargo test --locked -q -p harness-runtime --features mobile --features uniffi contract_digest 2>&1)"; then
+# The catalog digests are checked by the tests that live with the runtime profiles,
+# which are in local-app-service (they were in harness-runtime until the profiles
+# moved there; a `contract_digest` filter over harness-runtime then selected nothing
+# and this step kept passing). A filter that matches nothing reports "0 passed" and
+# exits 0, so the step also requires the tests to have actually run.
+if ! contract_output="$(cargo test --locked -q -p local-app-service contract_digest 2>&1)"; then
     printf '%s\n' "$contract_output" >&2
     echo "PHASE2-CONTRACT FAIL: runtime profile catalog must match production and the pre-release r1 golden" >&2
+    exit 1
+fi
+if ! grep -Eq 'test result: ok\. ([3-9]|[1-9][0-9]+) passed' <<<"$contract_output"; then
+    printf '%s\n' "$contract_output" >&2
+    echo "PHASE2-CONTRACT FAIL: fewer than three contract_digest tests ran in local-app-service" >&2
     exit 1
 fi
 echo "PHASE2-CONTRACT OK: all five catalog digests match production and tampering each family is rejected"

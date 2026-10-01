@@ -1179,7 +1179,7 @@ impl AppService {
     /// Being impossible to skip is not the same as being supplied, and today
     /// it is supplied on one of those two paths: `handle_create_app` passes
     /// its connection cwd, while the agent's `LocalAppCreate` tool
-    /// (`runtime/src/mobile/local_apps_mcp.rs`) passes `None` even though
+    /// (`runtime/src/mobile/mcp_server.rs`) passes `None` even though
     /// it binds a `conversation_id`. An app created that way still records
     /// `None` and still degrades on the boot pin repair — the connection
     /// layer is the only place that knows that conversation's cwd, so closing

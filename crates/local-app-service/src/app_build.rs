@@ -2,24 +2,24 @@
 //! Vite build, extracted from the generation pipeline so that
 //! scaffold/build no longer belongs to the LLM-generation executor.
 
-use crate::mobile::local_app_runtime_profiles::{
+use crate::broker::LocalAppsHostBroker;
+use crate::runtime_profiles::{
     contract_for_binding as runtime_profile_contract_for_binding, CANVAS_2D_R4_EDITABLE_FILES,
     CANVAS_2D_R4_MANAGED_FILES, EFFECTIVE_PACKAGE_FILE_REL, LOCKFILE_FILE_REL,
     PHASER_2D_R4_EDITABLE_FILES, PHASER_2D_R4_MANAGED_FILES, REACT_DOM_R4_EDITABLE_FILES,
     REACT_DOM_R4_MANAGED_FILES, REQUESTED_FILE_REL, SBOM_FILE_REL, SNAPSHOT_FILE_REL,
     THREE_3D_R4_EDITABLE_FILES, THREE_3D_R4_MANAGED_FILES, TREE_PROOF_FILE_REL,
 };
-use crate::mobile::local_apps_host::LocalAppsHostBroker;
 use local_app_contracts::diagnostics::{DiagnosticSeverity, DiagnosticsSettleState};
 use local_apps::{
     AppDataStore, AppError, AppLayout, AppManifest, AppRecord, AppRuntimeProfile,
     AppRuntimeProfileBinding,
 };
 
+use crate::host::BuildExecutor;
 use local_app_contracts::execution::{
     IsolatedCommand, Mount, MountKind, NetworkPolicy, ResourceLimits,
 };
-use local_app_service::host::BuildExecutor;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -60,7 +60,7 @@ pub(crate) struct AuthoringCandidateIdentity {
 /// errors. The classifier below is read-only: it never repairs managed files,
 /// installs packages, scans app-owned source, or changes the manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AppRuntimeProfileStatus {
+pub enum AppRuntimeProfileStatus {
     Verified,
     DependenciesDirty,
     CoreDependencyDrift,
@@ -117,7 +117,7 @@ struct BuildProvenance {
     authoring_contract_sha256: Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LocalAppBuildTarget {
+pub enum LocalAppBuildTarget {
     ReactDomR4,
     Canvas2dR4,
     Three3dR4,
@@ -148,7 +148,7 @@ impl LocalAppBuildTarget {
         }
     }
 
-    pub(crate) fn template_id(self) -> &'static str {
+    pub fn template_id(self) -> &'static str {
         match self {
             Self::ReactDomR4 => "runtime-profile/react-dom/r4",
             Self::Canvas2dR4 => "runtime-profile/canvas-2d/r4",
@@ -367,7 +367,7 @@ fn save_record_mirror(layout: &AppLayout, record: &local_apps::AppRecord) -> Res
 /// because the shape it described can no longer load: `AppRecord.scaffolded`
 /// carries no serde default, so a store written before it fails at
 /// `storage::load_all` and never reaches a build.
-pub(crate) fn detect_build_target(layout: &AppLayout) -> Result<LocalAppBuildTarget, AppError> {
+pub fn detect_build_target(layout: &AppLayout) -> Result<LocalAppBuildTarget, AppError> {
     let workspace = layout.root().join(layout.workspace_rel());
     if workspace.join("next.config.mjs").is_file() {
         return Err(AppError::StorageCorrupt(
@@ -719,11 +719,10 @@ pub(crate) fn scaffold_workspace(
     // same thing on both sides.
     let mut manifest = local_apps::AppManifest::for_new_app(layout.app_id(), layout.app_id());
     manifest.surface = Some(target.surface());
-    manifest.runtime_profile =
-        crate::mobile::local_app_runtime_profiles::binding_for_family_revision(
-            target.runtime_profile(),
-            target.revision(),
-        );
+    manifest.runtime_profile = crate::runtime_profiles::binding_for_family_revision(
+        target.runtime_profile(),
+        target.revision(),
+    );
     if let Some(binding) = manifest.runtime_profile.as_ref() {
         manifest.template_origin = Some(local_apps::AppTemplateOrigin {
             plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
@@ -859,7 +858,7 @@ pub(crate) fn scaffold_workspace_initialized(
 /// no-op guard, not a live one: `install_dependencies` is absent from
 /// `SHELL_ALLOWED_OPERATIONS`, so nothing can install into an unscaffolded
 /// shell's workspace before this wipe runs, and every production first
-/// scaffold lands via `local_apps_host.rs`'s `land_scaffold` running BEFORE
+/// scaffold lands via `broker.rs`'s `land_scaffold` running BEFORE
 /// its own dependency install — there is nothing under `node_modules` here
 /// to preserve. The entry is kept defensively for the day a create path
 /// installs ahead of scaffold; re-installing a byte-identical locked tree
@@ -1338,8 +1337,7 @@ impl LocalAppBuilder<'_> {
         dependency: &local_apps::AppDependencyRecord,
         authoring_candidate: Option<&AuthoringCandidateIdentity>,
     ) -> Result<(), AppError> {
-        let _perf =
-            crate::mobile::local_apps_host::LocalAppPerfDiagnosticTimer::start("build_total");
+        let _perf = crate::broker::LocalAppPerfDiagnosticTimer::start("build_total");
         self.assert_build_runtime_available()?;
         if dependency.state != local_apps::AppDependencyState::Ready {
             return Err(AppError::NotYetAvailable(
@@ -1583,7 +1581,7 @@ fn validate_dependency_snapshot_files(
     )?;
     if root_package != effective || root_lock != lock {
         // WP8: this copy is reachable from the MODEL-callable `LocalAppBuild`
-        // (`local_apps_host.rs`'s `build_app` -> `build_workspace` ->
+        // (`broker.rs`'s `build_app` -> `build_workspace` ->
         // `build_workspace_locked` -> here), unlike the two sibling copies.
         //
         // Why the message says "report the drift" and NOT "go change the
@@ -1607,7 +1605,7 @@ fn validate_dependency_snapshot_files(
         // by `dependency_review_operations_are_wired_as_builtin_tools`), so
         // they are model-callable under their builtin `LocalApp*` names. The
         // MCP half was correct and stays correct — `call_tool` refuses every
-        // static host operation before dispatch (local_apps_mcp.rs:3156-3162,
+        // static host operation before dispatch (mcp_server.rs:3156-3162,
         // pinned by `the_mcp_surface_no_longer_serves_the_static_host_operations`);
         // `host_tool_catalog()` is the shared SCHEMA source the builtins are
         // built from, not a served surface. Either way the reason this message
@@ -1859,7 +1857,7 @@ fn validate_active_build_provenance(provenance: &BuildProvenance) -> Result<(), 
     Ok(())
 }
 
-pub(crate) fn active_build_id(layout: &AppLayout) -> Result<Option<String>, AppError> {
+pub fn active_build_id(layout: &AppLayout) -> Result<Option<String>, AppError> {
     let build_root = layout.root().join(layout.build_rel(false));
     let provenance_path = build_provenance_path(&build_root);
     let body = match std::fs::read_to_string(&provenance_path) {
@@ -1882,7 +1880,7 @@ pub(crate) fn active_build_id(layout: &AppLayout) -> Result<Option<String>, AppE
 /// provenance.  The build receipt is the selector; Host contract files are
 /// immutable content-addressed documents and are never selected by scanning
 /// the workspace.
-pub(crate) fn active_build_authoring_contract_sha256(
+pub fn active_build_authoring_contract_sha256(
     layout: &AppLayout,
 ) -> Result<Option<String>, AppError> {
     let build_root = layout.root().join(layout.build_rel(false));
@@ -1904,7 +1902,7 @@ pub(crate) fn active_build_authoring_contract_sha256(
 /// Resolve the effective immutable authoring contract selected by the active
 /// build receipt.  The receipt digest is the selector; Host never scans
 /// candidate files or picks the newest document.
-pub(crate) fn active_authoring_contract(
+pub fn active_authoring_contract(
     layout: &AppLayout,
 ) -> Result<Option<local_apps::authoring::AppAuthoringContract>, AppError> {
     let Some(digest) = active_build_authoring_contract_sha256(layout)? else {
@@ -1986,7 +1984,7 @@ pub(crate) fn validate_build_for_launch(layout: &AppLayout) -> Result<(), AppErr
 /// dependency-install, or migration path and never walks app-owned source.
 /// Every observable failure is represented by a stable status so details/MCP
 /// callers do not need to parse build error prose.
-pub(crate) fn derive_runtime_profile_status(
+pub fn derive_runtime_profile_status(
     root: &Path,
     record: &AppRecord,
 ) -> Option<AppRuntimeProfileStatus> {
@@ -2870,9 +2868,7 @@ mod tests {
             (AppRuntimeProfile::Three3d, LocalAppBuildTarget::Three3dR4),
             (AppRuntimeProfile::Phaser2d, LocalAppBuildTarget::Phaser2dR4),
         ] {
-            let binding =
-                crate::mobile::local_app_runtime_profiles::current_binding_for_family(family)
-                    .unwrap();
+            let binding = crate::runtime_profiles::current_binding_for_family(family).unwrap();
             let contract = runtime_profile_contract_for_binding(&binding).unwrap();
             let target = LocalAppBuildTarget::from_runtime_binding(&binding).unwrap();
             assert_eq!(target, expected);
@@ -2973,24 +2969,48 @@ mod tests {
             "head must land on a boundary"
         );
     }
+    use crate::host::BuildExecutor;
     use async_trait::async_trait;
-
-    use mobile_linux_api::{guest_paths, map_guest_path_to_host};
-    use mobile_linux_api::{
-        LinuxCommandRequest, LinuxCommandResult, MobileLinuxCapability, MobileLinuxError,
-        MobileLinuxRuntime, MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, PtyOpenRequest,
-        PtySessionHandle, PtySize, RootfsState, RootfsStatus, SandboxBackend,
+    use local_app_contracts::diagnostics::{
+        Diagnostic, DiagnosticSeverity, DiagnosticsSettleState, DiagnosticsSettleStatus,
+        FileDiagnostics,
     };
+    use local_app_contracts::execution::{CommandOutcome, Enforcement, IsolatedCommand, Mount};
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
 
-    struct RecordingIsolatedRuntime {
-        requests: Mutex<Vec<LinuxCommandRequest>>,
+    /// The host directory a guest path lands in, through the mount whose guest
+    /// path is its longest prefix; `None` when no mount holds it or the path
+    /// climbs out of the mount with `..`.
+    fn host_path_of(guest: &str, mounts: &[Mount]) -> Option<PathBuf> {
+        let mount = mounts
+            .iter()
+            .filter(|mount| {
+                let root = mount.guest_path.trim_end_matches('/');
+                guest == root || guest.starts_with(&format!("{root}/"))
+            })
+            .max_by_key(|mount| mount.guest_path.len())?;
+        let relative =
+            guest[mount.guest_path.trim_end_matches('/').len()..].trim_start_matches('/');
+        if relative.split('/').any(|segment| segment == "..") {
+            return None;
+        }
+        Some(if relative.is_empty() {
+            mount.host_path.clone()
+        } else {
+            mount.host_path.join(relative)
+        })
+    }
+
+    /// Answers a build the way the toolchain would — a promoted-looking output
+    /// tree under the requested `--outDir` — and keeps what it was asked.
+    struct RecordingExecutor {
+        requests: Mutex<Vec<IsolatedCommand>>,
         isolated_runs: AtomicUsize,
     }
 
-    impl RecordingIsolatedRuntime {
+    impl RecordingExecutor {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 requests: Mutex::new(Vec::new()),
@@ -2998,7 +3018,7 @@ mod tests {
             })
         }
 
-        async fn recorded_request(&self) -> LinuxCommandRequest {
+        async fn recorded_request(&self) -> IsolatedCommand {
             self.requests
                 .lock()
                 .await
@@ -3009,58 +3029,19 @@ mod tests {
     }
 
     #[async_trait]
-    impl MobileLinuxRuntime for RecordingIsolatedRuntime {
-        fn backend(&self) -> SandboxBackend {
-            SandboxBackend::IosIsh
-        }
-
-        fn mode(&self) -> MobileLinuxRuntimeMode {
-            MobileLinuxRuntimeMode::MobileLinux
-        }
-
-        async fn probe_capability(&self) -> MobileLinuxCapability {
-            MobileLinuxCapability {
-                available: true,
-                backend: self.backend(),
-                mode: self.mode(),
-                reason: None,
-                streaming_output: false,
-                background_processes: false,
-                pty: false,
-                bind_mounts: true,
-                rootfs_integrity: false,
-            }
-        }
-
-        async fn boot(&self) -> Result<RootfsStatus, MobileLinuxError> {
-            self.rootfs_status().await
-        }
-
-        async fn shutdown(&self) -> Result<(), MobileLinuxError> {
-            Ok(())
-        }
-
-        async fn run(
-            &self,
-            _request: LinuxCommandRequest,
-        ) -> Result<LinuxCommandResult, MobileLinuxError> {
-            Err(MobileLinuxError::Unsupported)
-        }
-
-        async fn run_isolated(
-            &self,
-            request: LinuxCommandRequest,
-        ) -> Result<LinuxCommandResult, MobileLinuxError> {
+    impl BuildExecutor for RecordingExecutor {
+        async fn run(&self, request: IsolatedCommand) -> Result<CommandOutcome, String> {
             self.isolated_runs.fetch_add(1, Ordering::SeqCst);
             self.requests.lock().await.push(request.clone());
-            let mount = request.mounts.first().ok_or_else(|| {
-                MobileLinuxError::InvalidRequest("missing LocalAppBuild mount".into())
-            })?;
+            let mount = request
+                .mounts
+                .first()
+                .ok_or_else(|| "invalid request: missing LocalAppBuild mount".to_string())?;
             let out_dir = request
                 .args
                 .windows(2)
                 .find_map(|window| (window[0] == "--outDir").then(|| window[1].clone()))
-                .ok_or_else(|| MobileLinuxError::InvalidRequest("missing --outDir".into()))?;
+                .ok_or_else(|| "invalid request: missing --outDir".to_string())?;
             let guest_output = format!(
                 "{}/{}",
                 request
@@ -3069,119 +3050,26 @@ mod tests {
                     .unwrap_or_else(|| mount.guest_path.clone()),
                 out_dir
             );
-            let host_output =
-                map_guest_path_to_host(&guest_output, &request.mounts).ok_or_else(|| {
-                    MobileLinuxError::InvalidRequest(
-                        "outDir is outside the mounted workspace".into(),
-                    )
-                })?;
-            fs::create_dir_all(host_output.join("assets")).map_err(|error| {
-                MobileLinuxError::Io(format!("create fake build output: {error}"))
+            let host_output = host_path_of(&guest_output, &request.mounts).ok_or_else(|| {
+                "invalid request: outDir is outside the mounted workspace".to_string()
             })?;
-            fs::write(host_output.join("index.html"), "<html>fresh</html>").map_err(|error| {
-                MobileLinuxError::Io(format!("write fake build output: {error}"))
-            })?;
+            fs::create_dir_all(host_output.join("assets"))
+                .map_err(|error| format!("io error: create fake build output: {error}"))?;
+            fs::write(host_output.join("index.html"), "<html>fresh</html>")
+                .map_err(|error| format!("io error: write fake build output: {error}"))?;
             fs::write(host_output.join("assets/app.js"), "console.log('ok');")
-                .map_err(|error| MobileLinuxError::Io(format!("write fake asset: {error}")))?;
-            Ok(LinuxCommandResult {
+                .map_err(|error| format!("io error: write fake asset: {error}"))?;
+            Ok(CommandOutcome {
                 stdout: "ok".into(),
                 stderr: String::new(),
                 exit_code: 0,
                 timed_out: false,
                 cancelled: false,
-
-                enforcement: mobile_linux_api::LinuxEnforcementReceipt {
+                enforcement: Enforcement {
                     network_policy_enforced: true,
                     memory_limit_enforced: true,
                 },
             })
-        }
-
-        async fn spawn_background(
-            &self,
-            _request: LinuxCommandRequest,
-        ) -> Result<mobile_linux_api::LinuxProcessHandle, MobileLinuxError> {
-            Err(MobileLinuxError::Unsupported)
-        }
-
-        async fn kill(
-            &self,
-
-            _handle: &mobile_linux_api::LinuxProcessHandle,
-        ) -> Result<(), MobileLinuxError> {
-            Err(MobileLinuxError::Unsupported)
-        }
-
-        async fn open_pty(
-            &self,
-            _request: PtyOpenRequest,
-        ) -> Result<PtySessionHandle, MobileLinuxError> {
-            Err(MobileLinuxError::Unsupported)
-        }
-
-        async fn write_pty(
-            &self,
-            _handle: &PtySessionHandle,
-            _input: Vec<u8>,
-        ) -> Result<(), MobileLinuxError> {
-            Err(MobileLinuxError::Unsupported)
-        }
-
-        async fn resize_pty(
-            &self,
-            _handle: &PtySessionHandle,
-            _size: PtySize,
-        ) -> Result<(), MobileLinuxError> {
-            Err(MobileLinuxError::Unsupported)
-        }
-
-        async fn close_pty(&self, _handle: &PtySessionHandle) -> Result<(), MobileLinuxError> {
-            Err(MobileLinuxError::Unsupported)
-        }
-
-        async fn rootfs_status(&self) -> Result<RootfsStatus, MobileLinuxError> {
-            Ok(RootfsStatus {
-                state: RootfsState::Ready,
-                backend: self.backend(),
-                mode: self.mode(),
-                platform: "ios".into(),
-                abi: "arm64".into(),
-                version: None,
-                managed_root: None,
-                active_root: None,
-                staged_root: None,
-                archive_sha256: None,
-                installed_size_bytes: None,
-                writable_guest_paths: guest_paths::writable_roots()
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-                last_error: None,
-            })
-        }
-
-        async fn verify_rootfs(&self) -> Result<RootfsStatus, MobileLinuxError> {
-            self.rootfs_status().await
-        }
-
-        async fn repair_rootfs(&self) -> Result<RootfsStatus, MobileLinuxError> {
-            self.rootfs_status().await
-        }
-
-        async fn reset_rootfs(&self) -> Result<RootfsStatus, MobileLinuxError> {
-            self.rootfs_status().await
-        }
-
-        async fn configure_mounts(
-            &self,
-
-            _mounts: Vec<mobile_linux_api::MountSpec>,
-        ) -> Result<(), MobileLinuxError> {
-            Ok(())
-        }
-
-        async fn list_tasks(&self) -> Result<Vec<MobileLinuxTaskSnapshot>, MobileLinuxError> {
-            Ok(Vec::new())
         }
     }
 
@@ -3227,7 +3115,7 @@ mod tests {
                     local_apps::AppSurface::Dom => AppRuntimeProfile::ReactDom,
                     local_apps::AppSurface::Canvas => AppRuntimeProfile::Canvas2d,
                 };
-                crate::mobile::local_app_runtime_profiles::current_binding_for_family(family).ok()
+                crate::runtime_profiles::current_binding_for_family(family).ok()
             });
             if let Some(binding) = manifest.runtime_profile.as_ref() {
                 manifest.template_origin = Some(local_apps::AppTemplateOrigin {
@@ -3246,9 +3134,8 @@ mod tests {
                     lockfile_sha256: "2".repeat(64),
                     dependency_tree_sha256: "3".repeat(64),
                     sbom_sha256: "4".repeat(64),
-                    toolchain_key:
-                        crate::mobile::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
-                            .to_string(),
+                    toolchain_key: crate::runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
+                        .to_string(),
                     verified_profile_contract_sha256: binding.contract_sha256.clone(),
                 });
             }
@@ -4426,10 +4313,9 @@ mod tests {
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
         layout.initialize().expect("initialize");
         let workspace = layout.root().join(layout.workspace_rel());
-        let binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
-            AppRuntimeProfile::ReactDom,
-        )
-        .expect("binding");
+        let binding =
+            crate::runtime_profiles::current_binding_for_family(AppRuntimeProfile::ReactDom)
+                .expect("binding");
         let mut manifest = local_apps::AppManifest::for_new_app("aaaa1111", "Fixture");
         manifest.surface = Some(local_apps::AppSurface::Dom);
         manifest.runtime_profile = Some(binding.clone());
@@ -4530,9 +4416,9 @@ mod tests {
         fs::create_dir_all(served_index.parent().expect("dist dir")).expect("dist dir");
         fs::write(&served_index, "<html>live</html>").expect("served index");
 
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let broker = crate::test_support::broker_with_sink(
             root.path().to_path_buf(),
-            client::adapter::MockSink::arc(),
+            crate::test_support::RecordingSink::arc(),
             None,
             false,
             None,
@@ -4598,24 +4484,16 @@ mod tests {
         )
         .expect("workspace vite");
 
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let broker = crate::test_support::broker_with_sink(
             root.path().to_path_buf(),
-            client::adapter::MockSink::arc(),
+            crate::test_support::RecordingSink::arc(),
             None,
             false,
             None,
         );
-        let runtime: Arc<dyn MobileLinuxRuntime> = Arc::new(
-            mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
-                mobile_linux_api::SandboxBackend::IosIsh,
-                mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
-                "ios",
-                "arm64",
-                "test runtime never executes node",
-            ),
-        );
+        let runtime: Arc<dyn BuildExecutor> = Arc::new(crate::test_support::UnavailableExecutor);
         let builder = LocalAppBuilder {
-            executor: Some(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new(runtime)),
+            executor: Some(runtime),
             host: broker.as_ref(),
         };
         let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
@@ -4661,7 +4539,7 @@ mod tests {
     /// This is the MODEL-reachable `dependencies_dirty` copy
     /// (`LocalAppBuild` -> `build_workspace` -> `build_workspace_locked` ->
     /// `validate_dependency_snapshot_files`), not the sibling copies in
-    /// `local_apps_host.rs`. Before this test, only the sibling copies had a
+    /// `broker.rs`. Before this test, only the sibling copies had a
     /// behavioural assertion; this one was pinned solely by a doc comment.
     /// A regression that dropped the wording entirely, or that reintroduced
     /// the dead `LocalAppConfirmDependencyChange`/`LocalAppUpdateDependencies`
@@ -4679,24 +4557,16 @@ mod tests {
         let tampered = br#"{"name":"tampered","dependencies":{"left-pad":"9.9.9"}}"#.to_vec();
         fs::write(workspace.join("package.json"), &tampered).expect("tamper package.json");
 
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let broker = crate::test_support::broker_with_sink(
             root.path().to_path_buf(),
-            client::adapter::MockSink::arc(),
+            crate::test_support::RecordingSink::arc(),
             None,
             false,
             None,
         );
-        let runtime: Arc<dyn MobileLinuxRuntime> = Arc::new(
-            mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
-                mobile_linux_api::SandboxBackend::IosIsh,
-                mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
-                "ios",
-                "arm64",
-                "test runtime never executes node",
-            ),
-        );
+        let runtime: Arc<dyn BuildExecutor> = Arc::new(crate::test_support::UnavailableExecutor);
         let builder = LocalAppBuilder {
-            executor: Some(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new(runtime)),
+            executor: Some(runtime),
             host: broker.as_ref(),
         };
         let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
@@ -4744,24 +4614,16 @@ mod tests {
         )
         .expect("workspace vite");
 
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let broker = crate::test_support::broker_with_sink(
             root.path().to_path_buf(),
-            client::adapter::MockSink::arc(),
+            crate::test_support::RecordingSink::arc(),
             None,
             false,
             None,
         );
-        let runtime: Arc<dyn MobileLinuxRuntime> = Arc::new(
-            mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
-                mobile_linux_api::SandboxBackend::IosIsh,
-                mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
-                "ios",
-                "arm64",
-                "test runtime never executes node",
-            ),
-        );
+        let runtime: Arc<dyn BuildExecutor> = Arc::new(crate::test_support::UnavailableExecutor);
         let builder = LocalAppBuilder {
-            executor: Some(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new(runtime)),
+            executor: Some(runtime),
             host: broker.as_ref(),
         };
 
@@ -4798,20 +4660,16 @@ mod tests {
             )
             .expect("old output");
 
-            let runtime = RecordingIsolatedRuntime::new();
-            let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+            let runtime = RecordingExecutor::new();
+            let broker = crate::test_support::broker_with_sink(
                 root.path().to_path_buf(),
-                client::adapter::MockSink::arc(),
-                Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
+                crate::test_support::RecordingSink::arc(),
+                Some(runtime.clone() as Arc<dyn BuildExecutor>),
                 false,
                 None,
             );
             let builder = LocalAppBuilder {
-                executor: Some(
-                    crate::mobile::local_apps_adapters::MobileLinuxExecutor::new(
-                        runtime.clone() as Arc<dyn MobileLinuxRuntime>
-                    ),
-                ),
+                executor: Some(runtime.clone() as Arc<dyn BuildExecutor>),
                 host: broker.as_ref(),
             };
             let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
@@ -4865,7 +4723,6 @@ mod tests {
         )
         .expect("workspace vite");
 
-        let diagnostics = lsp::LspDiagnosticRegistry::new();
         let host_path = workspace.join("components/generated-card.jsx");
         fs::create_dir_all(host_path.parent().expect("component parent")).expect("components dir");
         fs::write(
@@ -4873,59 +4730,37 @@ mod tests {
             "// @ts-check\nexport const GeneratedCard = () => oops;\n",
         )
         .expect("generated source");
-        let uri = lsp_types::Url::parse("file:///workspace/aaaa1111/components/generated-card.jsx")
-            .expect("uri");
-        diagnostics
-            .record_document_sync(
-                &host_path,
-                Path::new("/workspace/aaaa1111/components/generated-card.jsx"),
-                uri.clone(),
-                Some(3),
-                true,
-            )
-            .await;
-        diagnostics
-            .publish(
-                uri,
-                lsp::DiagnosticEntry {
-                    version: Some(3),
-                    diagnostics: vec![lsp_types::Diagnostic {
-                        range: lsp_types::Range::new(
-                            lsp_types::Position::new(1, 4),
-                            lsp_types::Position::new(1, 5),
-                        ),
-                        severity: Some(lsp_types::DiagnosticSeverity::ERROR),
-                        code: Some(lsp_types::NumberOrString::Number(2304)),
-                        message: "Cannot find name 'oops'.".into(),
-                        ..Default::default()
-                    }],
-                },
-            )
-            .await;
-        let lsp_registry = Arc::new(
-            lsp::LspRegistry::new(Arc::new(platform_posix_minimal::PosixLsp::new()))
-                .with_diagnostics(diagnostics),
-        );
+        let diagnostics = Arc::new(crate::test_support::FakeDiagnostics {
+            settle: Some(DiagnosticsSettleStatus {
+                state: DiagnosticsSettleState::Settled,
+                tracked_documents: 1,
+            }),
+            files: vec![FileDiagnostics {
+                path: host_path,
+                fresh: true,
+                diagnostics: vec![Diagnostic {
+                    severity: Some(DiagnosticSeverity::Error),
+                    code: Some("2304".into()),
+                    line: 1,
+                    character: 4,
+                    message: "Cannot find name 'oops'.".into(),
+                }],
+            }],
+        });
 
-        let runtime = RecordingIsolatedRuntime::new();
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let runtime = RecordingExecutor::new();
+        let broker = crate::test_support::broker_with_sink(
             root.path().to_path_buf(),
-            client::adapter::MockSink::arc(),
-            Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
+            crate::test_support::RecordingSink::arc(),
+            Some(runtime.clone() as Arc<dyn BuildExecutor>),
             false,
             None,
         );
         broker
-            .attach_diagnostics(crate::mobile::local_apps_adapters::LspDiagnostics::new(
-                Arc::downgrade(&lsp_registry),
-            ))
-            .unwrap_or_else(|_| panic!("attach lsp"));
+            .attach_diagnostics(diagnostics)
+            .unwrap_or_else(|_| panic!("attach diagnostics"));
         let builder = LocalAppBuilder {
-            executor: Some(
-                crate::mobile::local_apps_adapters::MobileLinuxExecutor::new(
-                    runtime.clone() as Arc<dyn MobileLinuxRuntime>
-                ),
-            ),
+            executor: Some(runtime.clone() as Arc<dyn BuildExecutor>),
             host: broker.as_ref(),
         };
         let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
@@ -4956,63 +4791,39 @@ mod tests {
         )
         .expect("workspace vite");
 
-        let diagnostics = lsp::LspDiagnosticRegistry::new();
-        let host_path = workspace.join("app/main.jsx");
-        let uri = lsp_types::Url::parse("file:///workspace/aaaa1111/app/main.jsx").expect("uri");
-        diagnostics
-            .record_document_sync(
-                &host_path,
-                Path::new("/workspace/aaaa1111/app/main.jsx"),
-                uri.clone(),
-                Some(3),
-                true,
-            )
-            .await;
-        diagnostics
-            .publish(
-                uri,
-                lsp::DiagnosticEntry {
-                    version: Some(2),
-                    diagnostics: vec![lsp_types::Diagnostic {
-                        range: lsp_types::Range::new(
-                            lsp_types::Position::new(0, 0),
-                            lsp_types::Position::new(0, 1),
-                        ),
-                        severity: Some(lsp_types::DiagnosticSeverity::ERROR),
-                        message: "stale".into(),
-                        ..Default::default()
-                    }],
-                },
-            )
-            .await;
-        let lsp_registry = Arc::new(
-            lsp::LspRegistry::new(Arc::new(platform_posix_minimal::PosixLsp::new()))
-                .with_diagnostics(diagnostics),
-        );
+        // The diagnostics describe an older version of the file than the one
+        // the tooling tracks, so they are advisory.
+        let diagnostics = Arc::new(crate::test_support::FakeDiagnostics {
+            settle: Some(DiagnosticsSettleStatus {
+                state: DiagnosticsSettleState::Settled,
+                tracked_documents: 1,
+            }),
+            files: vec![FileDiagnostics {
+                path: workspace.join("app/main.jsx"),
+                fresh: false,
+                diagnostics: vec![Diagnostic {
+                    severity: Some(DiagnosticSeverity::Error),
+                    code: None,
+                    line: 0,
+                    character: 0,
+                    message: "stale".into(),
+                }],
+            }],
+        });
 
-        let runtime: Arc<dyn MobileLinuxRuntime> = Arc::new(
-            mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
-                mobile_linux_api::SandboxBackend::IosIsh,
-                mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
-                "ios",
-                "arm64",
-                "test runtime never executes node",
-            ),
-        );
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let runtime: Arc<dyn BuildExecutor> = Arc::new(crate::test_support::UnavailableExecutor);
+        let broker = crate::test_support::broker_with_sink(
             root.path().to_path_buf(),
-            client::adapter::MockSink::arc(),
+            crate::test_support::RecordingSink::arc(),
             Some(runtime.clone()),
             false,
             None,
         );
         broker
-            .attach_diagnostics(crate::mobile::local_apps_adapters::LspDiagnostics::new(
-                Arc::downgrade(&lsp_registry),
-            ))
-            .unwrap_or_else(|_| panic!("attach lsp"));
+            .attach_diagnostics(diagnostics)
+            .unwrap_or_else(|_| panic!("attach diagnostics"));
         let builder = LocalAppBuilder {
-            executor: Some(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new(runtime)),
+            executor: Some(runtime),
             host: broker.as_ref(),
         };
         let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);

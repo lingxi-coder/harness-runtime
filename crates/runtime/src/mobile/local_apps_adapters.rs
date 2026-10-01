@@ -5,7 +5,6 @@
 //! never names them. [`local_apps_wire`](super::local_apps_wire) is the other
 //! half of the edge: it maps the service's vocabulary onto the client protocol.
 
-use crate::mobile::local_apps_host::AgentOutputStream;
 use async_trait::async_trait;
 use lingxi_core::host::{CostSnapshot, OutputStream};
 use local_app_contracts::diagnostics::{
@@ -15,6 +14,7 @@ use local_app_contracts::diagnostics::{
 use local_app_contracts::execution::{
     CommandOutcome, Enforcement, IsolatedCommand, Mount, MountKind, NetworkPolicy, ResourceLimits,
 };
+use local_app_service::broker::AgentOutputStream;
 use local_app_service::host::{BuildExecutor, DiagnosticsProvider};
 use local_app_service::publication::{
     Exposure, ManagedApp, ManagedRuntime, McpPublisher, Published, WidgetResource,
@@ -127,7 +127,7 @@ pub(crate) struct LspDiagnostics {
 }
 
 impl LspDiagnostics {
-    pub(crate) fn new(registry: Weak<lsp::LspRegistry>) -> Arc<dyn DiagnosticsProvider> {
+    pub(crate) fn provider(registry: Weak<lsp::LspRegistry>) -> Arc<dyn DiagnosticsProvider> {
         Arc::new(Self { registry })
     }
 }
@@ -201,7 +201,7 @@ pub(crate) struct RegistryPublisher {
 }
 
 impl RegistryPublisher {
-    pub(crate) fn new(registry: Weak<mcp::McpRegistry>) -> Arc<dyn McpPublisher> {
+    pub(crate) fn publisher(registry: Weak<mcp::McpRegistry>) -> Arc<dyn McpPublisher> {
         Arc::new(Self { registry })
     }
 
@@ -433,7 +433,7 @@ pub(crate) struct MobileLinuxExecutor {
 }
 
 impl MobileLinuxExecutor {
-    pub(crate) fn new(runtime: Arc<dyn MobileLinuxRuntime>) -> Arc<dyn BuildExecutor> {
+    pub(crate) fn executor(runtime: Arc<dyn MobileLinuxRuntime>) -> Arc<dyn BuildExecutor> {
         Arc::new(Self { runtime })
     }
 }
@@ -718,9 +718,129 @@ mod tests {
         assert_eq!(named.code.as_deref(), Some("TS2304"));
     }
 
+    /// The mapping from the mobile runtime's environment onto the service's host
+    /// vocabulary is the one place an iOS/Android or phone/tablet swap could hide:
+    /// the service tests its own table, the compiler checks the arms exist, and
+    /// only this test checks they point the right way.
+    #[test]
+    fn every_host_environment_maps_to_its_own_device_context() {
+        use lingxi_core::host::{MobileDeviceClass, MobileHostOs};
+        let expected = [
+            (
+                MobileHostOs::Ios,
+                MobileDeviceClass::Phone,
+                Some(("ios", "iphone")),
+            ),
+            (
+                MobileHostOs::Ios,
+                MobileDeviceClass::Tablet,
+                Some(("ios", "ipad")),
+            ),
+            (MobileHostOs::Ios, MobileDeviceClass::Unknown, None),
+            (
+                MobileHostOs::Android,
+                MobileDeviceClass::Phone,
+                Some(("android", "phone")),
+            ),
+            (
+                MobileHostOs::Android,
+                MobileDeviceClass::Tablet,
+                Some(("android", "tablet")),
+            ),
+            (MobileHostOs::Android, MobileDeviceClass::Unknown, None),
+        ];
+        for (os, class, pair) in expected {
+            // The host facts a native client reports for one device.
+            let environment = lingxi_core::host::MobileHostEnvironment::new(
+                os,
+                Some("19.0".into()),
+                class,
+                lingxi_core::host::MobileExecutionTarget::PhysicalDevice,
+                lingxi_core::host::MobileLaunchMode::Interactive,
+            );
+            let context =
+                device_context_of(&environment).map(|context| (context.os, context.form_factor));
+            assert_eq!(
+                context,
+                pair.map(|(os, form)| (os.to_string(), form.to_string())),
+                "{os:?} + {class:?}"
+            );
+        }
+    }
+
+    /// One tracked document at `tracked_version`, with an error published
+    /// against `published_version` of it, read back through the adapter.
+    async fn held_for(tracked_version: i32, published_version: i32) -> Vec<FileDiagnostics> {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host_path = workspace.path().join("app/main.jsx");
+        let uri = lsp_types::Url::parse("file:///workspace/aaaa1111/app/main.jsx").expect("uri");
+        let diagnostics = lsp::LspDiagnosticRegistry::new();
+        diagnostics
+            .record_document_sync(
+                &host_path,
+                Path::new("/workspace/aaaa1111/app/main.jsx"),
+                uri.clone(),
+                Some(tracked_version),
+                true,
+            )
+            .await;
+        diagnostics
+            .publish(
+                uri,
+                lsp::DiagnosticEntry {
+                    version: Some(published_version),
+                    diagnostics: vec![lsp_types::Diagnostic {
+                        range: lsp_types::Range::new(
+                            lsp_types::Position::new(1, 4),
+                            lsp_types::Position::new(1, 5),
+                        ),
+                        severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                        code: Some(lsp_types::NumberOrString::Number(2304)),
+                        message: "Cannot find name 'oops'.".into(),
+                        ..Default::default()
+                    }],
+                },
+            )
+            .await;
+        let registry = Arc::new(
+            lsp::LspRegistry::new(Arc::new(platform_posix_minimal::PosixLsp::new()))
+                .with_diagnostics(diagnostics),
+        );
+        LspDiagnostics::provider(Arc::downgrade(&registry))
+            .latest(workspace.path())
+            .await
+    }
+
+    #[tokio::test]
+    async fn diagnostics_for_the_current_version_of_a_file_are_reported_fresh() {
+        let held = held_for(3, 3).await;
+        assert_eq!(held.len(), 1);
+        assert!(held[0].fresh);
+        assert!(held[0].path.ends_with("app/main.jsx"));
+        assert_eq!(
+            held[0].diagnostics,
+            vec![Diagnostic {
+                severity: Some(DiagnosticSeverity::Error),
+                code: Some("2304".into()),
+                line: 1,
+                character: 4,
+                message: "Cannot find name 'oops'.".into(),
+            }]
+        );
+    }
+
+    /// A stale error is advisory: the service never blocks a build on one, so
+    /// the adapter must not let an older version's diagnostics pass as current.
+    #[tokio::test]
+    async fn diagnostics_for_an_older_version_of_a_file_are_reported_stale() {
+        let held = held_for(3, 2).await;
+        assert_eq!(held.len(), 1);
+        assert!(!held[0].fresh);
+    }
+
     fn registry() -> Arc<mcp::McpRegistry> {
         Arc::new(mcp::McpRegistry::new(Arc::new(
-            crate::mobile::local_apps_mcp::LocalAppsMcpTransport::new(std::path::PathBuf::from(
+            local_app_service::mcp_server::LocalAppsMcpTransport::new(std::path::PathBuf::from(
                 "/nonexistent-local-apps-root",
             )),
         )))
@@ -745,7 +865,7 @@ mod tests {
     #[tokio::test]
     async fn a_publisher_is_available_exactly_as_long_as_its_registry() {
         let registry = registry();
-        let publisher = RegistryPublisher::new(Arc::downgrade(&registry));
+        let publisher = RegistryPublisher::publisher(Arc::downgrade(&registry));
         assert!(publisher.available());
         drop(registry);
         assert!(!publisher.available());
@@ -762,7 +882,7 @@ mod tests {
     #[tokio::test]
     async fn publishing_records_the_server_and_its_live_tools_and_unregistering_forgets_them() {
         let registry = registry();
-        let publisher = RegistryPublisher::new(Arc::downgrade(&registry));
+        let publisher = RegistryPublisher::publisher(Arc::downgrade(&registry));
         assert_eq!(publisher.published("abc12345").await, Published::default());
 
         publisher
@@ -804,7 +924,7 @@ mod tests {
     #[tokio::test]
     async fn a_published_widget_comes_back_with_what_the_host_holds() {
         let registry = registry();
-        let publisher = RegistryPublisher::new(Arc::downgrade(&registry));
+        let publisher = RegistryPublisher::publisher(Arc::downgrade(&registry));
         let widget = WidgetResource {
             uri: "ui://local-app/abc12345/widget".into(),
             name: "Habits".into(),
@@ -829,7 +949,7 @@ mod tests {
     #[tokio::test]
     async fn a_call_lease_needs_an_exposure_and_releasing_twice_is_harmless() {
         let registry = registry();
-        let publisher = RegistryPublisher::new(Arc::downgrade(&registry));
+        let publisher = RegistryPublisher::publisher(Arc::downgrade(&registry));
         publisher
             .publish(&managed_app("abc12345"), runtime(true, &["read_value"]))
             .await
@@ -854,7 +974,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_catalog_that_is_not_a_digest_is_refused() {
-        let publisher = RegistryPublisher::new(Arc::downgrade(&registry()));
+        let publisher = RegistryPublisher::publisher(Arc::downgrade(&registry()));
         let mut app = managed_app("abc12345");
         app.catalog_sha256 = "not-a-digest".into();
         assert!(publisher.publish(&app, runtime(true, &[])).await.is_err());
@@ -863,7 +983,7 @@ mod tests {
     #[tokio::test]
     async fn exposures_are_listed_and_unpinning_an_unexposed_app_is_not_an_error() {
         let registry = registry();
-        let publisher = RegistryPublisher::new(Arc::downgrade(&registry));
+        let publisher = RegistryPublisher::publisher(Arc::downgrade(&registry));
         publisher
             .publish(&managed_app("abc12345"), runtime(true, &["read_value"]))
             .await
@@ -893,7 +1013,7 @@ mod tests {
     #[tokio::test]
     async fn disconnecting_with_nothing_connected_succeeds() {
         let registry = registry();
-        let publisher = RegistryPublisher::new(Arc::downgrade(&registry));
+        let publisher = RegistryPublisher::publisher(Arc::downgrade(&registry));
         publisher
             .publish(&managed_app("abc12345"), runtime(true, &["read_value"]))
             .await
@@ -906,7 +1026,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_registry_that_is_gone_reports_nothing() {
-        let provider = LspDiagnostics::new(Weak::new());
+        let provider = LspDiagnostics::provider(Weak::new());
         assert!(provider
             .settle(Path::new("/workspace"), Duration::from_millis(1))
             .await

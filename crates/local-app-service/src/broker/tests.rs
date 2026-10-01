@@ -1,12 +1,6 @@
 use super::*;
-use crate::mobile::local_apps_adapters::device_context_of;
-use crate::mobile::local_apps_sessions::{
-    latest_custom_title, latest_custom_title_is_mobile_placeholder,
-    reconcile_app_init_session_title, SessionCatalog, SessionTitles,
-};
 use local_app_contracts::events::PluginErrorCode;
 use local_apps::AppRuntimeProfile;
-use mobile_linux_api::{MobileLinuxRuntime, MountSpec};
 
 /// r1-prompt-layer-20: the backticked-tool-name scanner used to be declared
 /// INSIDE the one test that ran it, so no other model-facing text could be put
@@ -56,7 +50,7 @@ fn assert_only_real_tool_names(contract: &str, label: &str) {
     // planted bad name behind an innocuous one. Fail loudly and specifically
     // instead of scanning a text this gate cannot actually parse.
     assert!(
-        contract.matches('`').count() % 2 == 0,
+        contract.matches('`').count().is_multiple_of(2),
         "{label} has an ODD number of backticks, so this scanner cannot pair them \
          into spans without silently shifting every one after the stray mark: {contract}"
     );
@@ -82,7 +76,7 @@ fn assert_only_real_tool_names(contract: &str, label: &str) {
         if let Some(rest) = name.strip_prefix("LocalApp") {
             if !rest.is_empty() {
                 assert!(
-                    crate::mobile::local_apps_tools::LOCAL_APP_TOOLS
+                    crate::tool_names::LOCAL_APP_TOOLS
                         .iter()
                         .any(|&(tool_name, _, _)| tool_name == name),
                     "{label} names backticked tool `{name}`, which is not in \
@@ -104,7 +98,7 @@ fn assert_only_real_tool_names(contract: &str, label: &str) {
             && contract[end + 1..].starts_with(" tool");
         if is_bare_tool_name {
             assert!(
-                crate::mobile::local_apps_tools::LOCAL_APP_TOOLS
+                crate::tool_names::LOCAL_APP_TOOLS
                     .iter()
                     .any(|&(tool_name, _, _)| tool_name == span)
                     || KNOWN_NON_LOCAL_APP_TOOL_NAMES.contains(&span),
@@ -169,7 +163,7 @@ fn assert_only_real_local_app_tool_tokens(text: &str, label: &str) {
         }
         checked += 1;
         assert!(
-            crate::mobile::local_apps_tools::LOCAL_APP_TOOLS
+            crate::tool_names::LOCAL_APP_TOOLS
                 .iter()
                 .any(|&(tool_name, _, _)| tool_name == token),
             "{label} names `{token}`, which is not in LOCAL_APP_TOOLS and cannot be called"
@@ -181,17 +175,13 @@ fn assert_only_real_local_app_tool_tokens(text: &str, label: &str) {
          reading the wrong file or the file stopped naming tools"
     );
 }
+use crate::test_support::{DiscardSink, RecordingSink};
 use async_trait::async_trait;
-use client::adapter::{ClientEventSink, MockSink};
 use futures_util::stream;
+use local_app_contracts::events::{ManagedMcpStatus, PublicationState};
+use local_app_contracts::execution::{CommandOutcome, Enforcement, IsolatedCommand};
 use local_apps::test_support::FixedClock;
 use local_apps::{storage, AppState, NoopAppEventObserver};
-use mobile_linux_api::{
-    LinuxCommandRequest, LinuxEnforcementReceipt, LinuxProcessHandle, MobileLinuxCapability,
-    MobileLinuxError, MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus,
-    NetworkPolicy, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState, RootfsStatus,
-    SandboxBackend,
-};
 use serde_json::json;
 use std::fs;
 use std::future::Future;
@@ -219,14 +209,6 @@ fn canonical_cwd_string_keeps_the_same_spelling_after_the_leaf_directory_is_dele
     );
 }
 
-#[derive(Default)]
-struct NoopClientEventSink;
-
-#[async_trait]
-impl ClientEventSink for NoopClientEventSink {
-    async fn emit(&self, _event: ClientEvent) {}
-}
-
 fn mock_pnpm_lockfile(package_json: &[u8]) -> Result<Vec<u8>, String> {
     let dependencies = effective_package_dependency_specifiers(package_json)?;
     let mut lockfile = String::from(
@@ -245,50 +227,44 @@ fn mock_pnpm_lockfile(package_json: &[u8]) -> Result<Vec<u8>, String> {
     Ok(lockfile.into_bytes())
 }
 
-struct MockTask {
-    snapshot: Mutex<MobileLinuxTaskSnapshot>,
-    shutdown: Mutex<Option<oneshot::Sender<()>>>,
-}
-
-struct MockMobileLinuxRuntime {
-    spawn_delay: Duration,
-    spawn_count: AtomicUsize,
-    next_task_id: AtomicU64,
-    tasks: Mutex<HashMap<String, Arc<MockTask>>>,
-    last_request: Mutex<Option<LinuxCommandRequest>>,
-    isolated_requests: Mutex<Vec<LinuxCommandRequest>>,
+/// Answers the commands a build runs the way the real toolchain would, and
+/// keeps what it was asked.
+struct MockBuildExecutor {
+    run_count: AtomicUsize,
+    commands: Mutex<Vec<IsolatedCommand>>,
     pnpm_node_modules_entries: Mutex<Vec<Vec<String>>>,
     resolved_pnpm_lockfile: Mutex<Option<Vec<u8>>>,
     enforcement_receipt: AtomicBool,
-    fail_kill: AtomicBool,
     fail_build: AtomicBool,
     fail_frozen_install: AtomicBool,
     inject_lifecycle_script: AtomicBool,
     omit_staged_vite_marker: AtomicBool,
 }
 
-impl MockMobileLinuxRuntime {
-    fn new(spawn_delay: Duration) -> Arc<Self> {
+/// What a failure to run a command at all reads like, as the MobileLinux
+/// executor words it: the broker's own checks and the tests that pin their
+/// text were written against these spellings.
+fn invalid_request(message: &str) -> String {
+    format!("invalid request: {message}")
+}
+
+fn io_error(message: String) -> String {
+    format!("io error: {message}")
+}
+
+impl MockBuildExecutor {
+    fn new() -> Arc<Self> {
         Arc::new(Self {
-            spawn_delay,
-            spawn_count: AtomicUsize::new(0),
-            next_task_id: AtomicU64::new(1),
-            tasks: Mutex::new(HashMap::new()),
-            last_request: Mutex::new(None),
-            isolated_requests: Mutex::new(Vec::new()),
+            run_count: AtomicUsize::new(0),
+            commands: Mutex::new(Vec::new()),
             pnpm_node_modules_entries: Mutex::new(Vec::new()),
             resolved_pnpm_lockfile: Mutex::new(None),
             enforcement_receipt: AtomicBool::new(true),
-            fail_kill: AtomicBool::new(false),
             fail_build: AtomicBool::new(false),
             fail_frozen_install: AtomicBool::new(false),
             inject_lifecycle_script: AtomicBool::new(false),
             omit_staged_vite_marker: AtomicBool::new(false),
         })
-    }
-
-    fn set_fail_kill(&self, fail: bool) {
-        self.fail_kill.store(fail, Ordering::SeqCst);
     }
 
     fn set_enforcement_receipt(&self, enforced: bool) {
@@ -315,135 +291,62 @@ impl MockMobileLinuxRuntime {
         self.inject_lifecycle_script.store(inject, Ordering::SeqCst);
     }
 
-    async fn isolated_requests(&self) -> Vec<LinuxCommandRequest> {
-        self.isolated_requests.lock().await.clone()
+    async fn isolated_requests(&self) -> Vec<IsolatedCommand> {
+        self.commands.lock().await.clone()
     }
 
     async fn pnpm_node_modules_entries(&self) -> Vec<Vec<String>> {
         self.pnpm_node_modules_entries.lock().await.clone()
     }
 
-    async fn recorded_request(&self) -> LinuxCommandRequest {
-        self.last_request
+    async fn recorded_request(&self) -> IsolatedCommand {
+        self.commands
             .lock()
             .await
-            .clone()
-            .expect("spawn request recorded")
-    }
-
-    fn enforce_network_policy(request: &LinuxCommandRequest) -> Result<(), MobileLinuxError> {
-        if matches!(request.network, NetworkPolicy::LoopbackOnly)
-            && request.resource_limits.max_memory_mb == Some(800)
-        {
-            Ok(())
-        } else {
-            Err(MobileLinuxError::InvalidRequest(
-                "full local-app runtime requires loopback-only networking and 800 MiB".into(),
-            ))
-        }
-    }
-
-    fn spawn_count(&self) -> usize {
-        self.spawn_count.load(Ordering::SeqCst)
-    }
-
-    async fn first_task_id(&self) -> String {
-        timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some(task_id) = self.tasks.lock().await.keys().next().cloned() {
-                    return task_id;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("task created")
-    }
-
-    async fn complete_task(&self, task_id: &str, status: MobileLinuxTaskStatus, detail: &str) {
-        let task = self
-            .tasks
-            .lock()
-            .await
-            .get(task_id)
+            .last()
             .cloned()
-            .expect("task exists");
-        {
-            let mut snapshot = task.snapshot.lock().await;
-            snapshot.status = status;
-            snapshot.finished_at_ms = Some(2);
-            snapshot.detail = Some(detail.to_string());
-            snapshot.exit_code = Some(match status {
-                MobileLinuxTaskStatus::Completed => 0,
-                _ => 1,
-            });
-        }
-        let shutdown = { task.shutdown.lock().await.take() };
-        if let Some(shutdown) = shutdown {
-            let _ = shutdown.send(());
+            .expect("command recorded")
+    }
+
+    /// How many commands the broker has asked this executor to run.
+    fn run_count(&self) -> usize {
+        self.run_count.load(Ordering::SeqCst)
+    }
+
+    fn outcome(&self, stdout: &str, stderr: &str, exit_code: i32) -> CommandOutcome {
+        let enforced = self.enforcement_receipt.load(Ordering::SeqCst);
+        CommandOutcome {
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            exit_code,
+            timed_out: false,
+            cancelled: false,
+            enforcement: Enforcement {
+                network_policy_enforced: enforced,
+                memory_limit_enforced: enforced,
+            },
         }
     }
 }
 
 #[async_trait]
-impl MobileLinuxRuntime for MockMobileLinuxRuntime {
-    fn backend(&self) -> SandboxBackend {
-        SandboxBackend::IosIsh
-    }
-
-    fn mode(&self) -> MobileLinuxRuntimeMode {
-        MobileLinuxRuntimeMode::MobileLinux
-    }
-
-    async fn probe_capability(&self) -> MobileLinuxCapability {
-        MobileLinuxCapability {
-            available: true,
-            backend: self.backend(),
-            mode: self.mode(),
-            reason: None,
-            streaming_output: false,
-            background_processes: true,
-            pty: false,
-            bind_mounts: true,
-            rootfs_integrity: false,
-        }
-    }
-
-    async fn boot(&self) -> Result<RootfsStatus, MobileLinuxError> {
-        Ok(self.rootfs_status().await?)
-    }
-
-    async fn shutdown(&self) -> Result<(), MobileLinuxError> {
-        Ok(())
-    }
-
-    async fn run(
-        &self,
-        request: LinuxCommandRequest,
-    ) -> Result<mobile_linux_api::LinuxCommandResult, MobileLinuxError> {
-        Self::enforce_network_policy(&request)?;
-        Err(MobileLinuxError::Unsupported)
-    }
-
-    async fn run_isolated(
-        &self,
-        request: LinuxCommandRequest,
-    ) -> Result<mobile_linux_api::LinuxCommandResult, MobileLinuxError> {
-        *self.last_request.lock().await = Some(request.clone());
-        self.isolated_requests.lock().await.push(request.clone());
-        let build_mount = request.mounts.first().ok_or_else(|| {
-            MobileLinuxError::InvalidRequest("missing LocalAppBuild mount".into())
-        })?;
-        let guest_cwd = request.cwd.clone().ok_or_else(|| {
-            MobileLinuxError::InvalidRequest("missing dependency staging cwd".into())
-        })?;
+impl BuildExecutor for MockBuildExecutor {
+    async fn run(&self, request: IsolatedCommand) -> Result<CommandOutcome, String> {
+        self.run_count.fetch_add(1, Ordering::SeqCst);
+        self.commands.lock().await.push(request.clone());
+        let build_mount = request
+            .mounts
+            .first()
+            .ok_or_else(|| invalid_request("missing LocalAppBuild mount"))?;
+        let guest_cwd = request
+            .cwd
+            .clone()
+            .ok_or_else(|| invalid_request("missing dependency staging cwd"))?;
         let relative = guest_cwd
             .strip_prefix(&build_mount.guest_path)
             .map(|suffix| suffix.trim_start_matches('/'))
             .ok_or_else(|| {
-                MobileLinuxError::InvalidRequest(
-                    "dependency staging cwd is outside the mounted workspace".into(),
-                )
+                invalid_request("dependency staging cwd is outside the mounted workspace")
             })?;
         let host_cwd = if relative.is_empty() {
             build_mount.host_path.clone()
@@ -464,17 +367,7 @@ impl MobileLinuxRuntime for MockMobileLinuxRuntime {
             && request.args.iter().any(|arg| arg == "--frozen-lockfile")
             && self.fail_frozen_install.load(Ordering::SeqCst)
         {
-            return Ok(mobile_linux_api::LinuxCommandResult {
-                stdout: String::new(),
-                stderr: "synthetic frozen install failure".into(),
-                exit_code: 1,
-                timed_out: false,
-                cancelled: false,
-                enforcement: mobile_linux_api::LinuxEnforcementReceipt {
-                    network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
-                    memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
-                },
-            });
+            return Ok(self.outcome("", "synthetic frozen install failure", 1));
         }
         if matches!(request.command.as_str(), "/usr/bin/pnpm")
             && request.args.iter().any(|arg| arg == "--no-frozen-lockfile")
@@ -483,92 +376,56 @@ impl MobileLinuxRuntime for MockMobileLinuxRuntime {
                 Some(lockfile) => lockfile,
                 None => {
                     let package = fs::read(host_cwd.join("package.json")).map_err(|error| {
-                        MobileLinuxError::Io(format!("read fake resolution input package: {error}"))
+                        io_error(format!("read fake resolution input package: {error}"))
                     })?;
-                    mock_pnpm_lockfile(&package).map_err(MobileLinuxError::Io)?
+                    mock_pnpm_lockfile(&package).map_err(io_error)?
                 }
             };
-            fs::write(host_cwd.join("pnpm-lock.yaml"), lockfile).map_err(|error| {
-                MobileLinuxError::Io(format!("write fake resolved lockfile: {error}"))
-            })?;
+            fs::write(host_cwd.join("pnpm-lock.yaml"), lockfile)
+                .map_err(|error| io_error(format!("write fake resolved lockfile: {error}")))?;
         }
         if matches!(request.command.as_str(), "/usr/bin/pnpm")
             && request.args.iter().any(|arg| arg == "--lockfile-only")
         {
-            return Ok(mobile_linux_api::LinuxCommandResult {
-                stdout: "lockfile resolved".into(),
-                stderr: String::new(),
-                exit_code: 0,
-                timed_out: false,
-                cancelled: false,
-                enforcement: mobile_linux_api::LinuxEnforcementReceipt {
-                    network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
-                    memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
-                },
-            });
+            return Ok(self.outcome("lockfile resolved", "", 0));
         }
         if matches!(request.command.as_str(), "/usr/bin/node") {
             if self.fail_build.load(Ordering::SeqCst) {
-                return Ok(mobile_linux_api::LinuxCommandResult {
-                    stdout: String::new(),
-                    stderr: "synthetic build failure".into(),
-                    exit_code: 1,
-                    timed_out: false,
-                    cancelled: false,
-                    enforcement: mobile_linux_api::LinuxEnforcementReceipt {
-                        network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
-                        memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
-                    },
-                });
+                return Ok(self.outcome("", "synthetic build failure", 1));
             }
             let output_rel = request
                 .args
                 .windows(2)
                 .find_map(|pair| (pair[0] == "--outDir").then_some(pair[1].as_str()))
-                .ok_or_else(|| MobileLinuxError::InvalidRequest("missing Vite --outDir".into()))?;
+                .ok_or_else(|| invalid_request("missing Vite --outDir"))?;
             let output = host_cwd.join(output_rel);
-            fs::create_dir_all(&output).map_err(|error| {
-                MobileLinuxError::Io(format!("create fake build output: {error}"))
-            })?;
+            fs::create_dir_all(&output)
+                .map_err(|error| io_error(format!("create fake build output: {error}")))?;
             fs::write(
                 output.join("index.html"),
                 b"<!doctype html><title>built</title>",
             )
-            .map_err(|error| MobileLinuxError::Io(format!("write fake build output: {error}")))?;
-            return Ok(mobile_linux_api::LinuxCommandResult {
-                stdout: "built".into(),
-                stderr: String::new(),
-                exit_code: 0,
-                timed_out: false,
-                cancelled: false,
-                enforcement: mobile_linux_api::LinuxEnforcementReceipt {
-                    network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
-                    memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
-                },
-            });
+            .map_err(|error| io_error(format!("write fake build output: {error}")))?;
+            return Ok(self.outcome("built", "", 0));
         }
-        fs::create_dir_all(host_cwd.join("node_modules")).map_err(|error| {
-            MobileLinuxError::Io(format!("create fake node_modules root: {error}"))
-        })?;
+        fs::create_dir_all(host_cwd.join("node_modules"))
+            .map_err(|error| io_error(format!("create fake node_modules root: {error}")))?;
         if !self.omit_staged_vite_marker.load(Ordering::SeqCst) {
             let vite = host_cwd.join("node_modules/vite/bin/vite.js");
-            fs::create_dir_all(vite.parent().expect("vite parent")).map_err(|error| {
-                MobileLinuxError::Io(format!("create fake install tree: {error}"))
-            })?;
-            fs::write(&vite, b"#!/usr/bin/env node\n").map_err(|error| {
-                MobileLinuxError::Io(format!("write fake vite binary: {error}"))
-            })?;
+            fs::create_dir_all(vite.parent().expect("vite parent"))
+                .map_err(|error| io_error(format!("create fake install tree: {error}")))?;
+            fs::write(&vite, b"#!/usr/bin/env node\n")
+                .map_err(|error| io_error(format!("write fake vite binary: {error}")))?;
             fs::write(
                 host_cwd.join("node_modules/vite/package.json"),
                 r#"{"name":"vite","version":"8.2.1","license":"MIT"}"#,
             )
-            .map_err(|error| MobileLinuxError::Io(format!("write fake vite manifest: {error}")))?;
+            .map_err(|error| io_error(format!("write fake vite manifest: {error}")))?;
         }
         fs::write(host_cwd.join("node_modules/react.js"), b"react")
-            .map_err(|error| MobileLinuxError::Io(format!("write fake dependency: {error}")))?;
-        fs::create_dir_all(host_cwd.join("node_modules/react")).map_err(|error| {
-            MobileLinuxError::Io(format!("create fake react package dir: {error}"))
-        })?;
+            .map_err(|error| io_error(format!("write fake dependency: {error}")))?;
+        fs::create_dir_all(host_cwd.join("node_modules/react"))
+            .map_err(|error| io_error(format!("create fake react package dir: {error}")))?;
         let react_manifest = if self.inject_lifecycle_script.load(Ordering::SeqCst) {
             r#"{"name":"react","version":"19.2.8","license":"MIT","scripts":{"install":"echo unsafe"}}"#
         } else {
@@ -578,14 +435,12 @@ impl MobileLinuxRuntime for MockMobileLinuxRuntime {
             host_cwd.join("node_modules/react/package.json"),
             react_manifest,
         )
-        .map_err(|error| MobileLinuxError::Io(format!("write fake react manifest: {error}")))?;
-        let effective_package: Value =
-            serde_json::from_slice(&fs::read(host_cwd.join("package.json")).map_err(|error| {
-                MobileLinuxError::Io(format!("read fake install package: {error}"))
-            })?)
-            .map_err(|error| {
-                MobileLinuxError::Io(format!("parse fake install package: {error}"))
-            })?;
+        .map_err(|error| io_error(format!("write fake react manifest: {error}")))?;
+        let effective_package: Value = serde_json::from_slice(
+            &fs::read(host_cwd.join("package.json"))
+                .map_err(|error| io_error(format!("read fake install package: {error}")))?,
+        )
+        .map_err(|error| io_error(format!("parse fake install package: {error}")))?;
         for (package, version) in effective_package
             .get("dependencies")
             .and_then(Value::as_object)
@@ -602,9 +457,8 @@ impl MobileLinuxRuntime for MockMobileLinuxRuntime {
             if package_manifest.is_file() {
                 continue;
             }
-            fs::create_dir_all(&package_root).map_err(|error| {
-                MobileLinuxError::Io(format!("create fake installed package: {error}"))
-            })?;
+            fs::create_dir_all(&package_root)
+                .map_err(|error| io_error(format!("create fake installed package: {error}")))?;
             fs::write(
                 &package_manifest,
                 serde_json::to_vec(&json!({
@@ -614,188 +468,9 @@ impl MobileLinuxRuntime for MockMobileLinuxRuntime {
                 }))
                 .expect("serialize fake installed package"),
             )
-            .map_err(|error| {
-                MobileLinuxError::Io(format!("write fake installed package: {error}"))
-            })?;
+            .map_err(|error| io_error(format!("write fake installed package: {error}")))?;
         }
-        Ok(mobile_linux_api::LinuxCommandResult {
-            stdout: "ok".into(),
-            stderr: String::new(),
-            exit_code: 0,
-            timed_out: false,
-            cancelled: false,
-            enforcement: mobile_linux_api::LinuxEnforcementReceipt {
-                network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
-                memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
-            },
-        })
-    }
-
-    async fn spawn_background(
-        &self,
-        request: LinuxCommandRequest,
-    ) -> Result<LinuxProcessHandle, MobileLinuxError> {
-        Self::enforce_network_policy(&request)?;
-        *self.last_request.lock().await = Some(request.clone());
-        self.spawn_count.fetch_add(1, Ordering::SeqCst);
-        if !self.spawn_delay.is_zero() {
-            sleep(self.spawn_delay).await;
-        }
-        let port = request
-            .args
-            .windows(2)
-            .find_map(|window| (window[0] == "--port").then(|| window[1].parse::<u16>().ok()))
-            .flatten()
-            .ok_or_else(|| MobileLinuxError::InvalidRequest("missing --port".into()))?;
-        let listener = TcpListener::bind(("127.0.0.1", port))
-            .await
-            .map_err(|error| {
-                MobileLinuxError::Io(format!("bind test runtime loopback: {error}"))
-            })?;
-        let (shutdown, mut receiver) = oneshot::channel();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = &mut receiver => break,
-                    accepted = listener.accept() => {
-                        match accepted {
-                            Ok((mut stream, _)) => {
-                                let _ = stream.shutdown().await;
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                }
-            }
-        });
-        let task_id = format!("task-{}", self.next_task_id.fetch_add(1, Ordering::SeqCst));
-        self.tasks.lock().await.insert(
-            task_id.clone(),
-            Arc::new(MockTask {
-                snapshot: Mutex::new(MobileLinuxTaskSnapshot {
-                    task_id: task_id.clone(),
-                    status: MobileLinuxTaskStatus::Backgrounded,
-                    command: request.command,
-                    started_at_ms: Some(1),
-                    finished_at_ms: None,
-                    exit_code: None,
-                    detail: None,
-                }),
-                shutdown: Mutex::new(Some(shutdown)),
-            }),
-        );
-        Ok(LinuxProcessHandle {
-            id: task_id,
-            enforcement: LinuxEnforcementReceipt {
-                network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
-                memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
-            },
-        })
-    }
-
-    async fn kill(&self, handle: &LinuxProcessHandle) -> Result<(), MobileLinuxError> {
-        if let Some(task) = self.tasks.lock().await.get(&handle.id).cloned() {
-            {
-                let mut snapshot = task.snapshot.lock().await;
-                snapshot.status = MobileLinuxTaskStatus::Cancelled;
-                snapshot.finished_at_ms = Some(2);
-                snapshot.exit_code = Some(1);
-                snapshot.detail = Some("killed".into());
-            }
-            if let Some(shutdown) = task.shutdown.lock().await.take() {
-                let _ = shutdown.send(());
-            }
-        }
-        if self.fail_kill.load(Ordering::SeqCst) {
-            // Models the iSH `BACKGROUND_REAP_BUDGET` miss: the kill was
-            // issued, only the exit confirmation timed out.
-            return Err(MobileLinuxError::Io(format!(
-                "background task {} did not reap within 3 seconds",
-                handle.id
-            )));
-        }
-        Ok(())
-    }
-
-    async fn open_pty(
-        &self,
-        _request: PtyOpenRequest,
-    ) -> Result<PtySessionHandle, MobileLinuxError> {
-        Err(MobileLinuxError::Unsupported)
-    }
-
-    async fn write_pty(
-        &self,
-        _handle: &PtySessionHandle,
-        _input: Vec<u8>,
-    ) -> Result<(), MobileLinuxError> {
-        Err(MobileLinuxError::Unsupported)
-    }
-
-    async fn resize_pty(
-        &self,
-        _handle: &PtySessionHandle,
-        _size: PtySize,
-    ) -> Result<(), MobileLinuxError> {
-        Err(MobileLinuxError::Unsupported)
-    }
-
-    async fn close_pty(&self, _handle: &PtySessionHandle) -> Result<(), MobileLinuxError> {
-        Err(MobileLinuxError::Unsupported)
-    }
-
-    async fn rootfs_status(&self) -> Result<RootfsStatus, MobileLinuxError> {
-        Ok(RootfsStatus {
-            state: RootfsState::Ready,
-            backend: self.backend(),
-            mode: self.mode(),
-            platform: "test".into(),
-            abi: "test".into(),
-            version: None,
-            managed_root: None,
-            active_root: None,
-            staged_root: None,
-            archive_sha256: None,
-            installed_size_bytes: None,
-            writable_guest_paths: vec![],
-            last_error: None,
-        })
-    }
-
-    async fn verify_rootfs(&self) -> Result<RootfsStatus, MobileLinuxError> {
-        self.rootfs_status().await
-    }
-
-    async fn repair_rootfs(&self) -> Result<RootfsStatus, MobileLinuxError> {
-        self.rootfs_status().await
-    }
-
-    async fn reset_rootfs(&self) -> Result<RootfsStatus, MobileLinuxError> {
-        self.rootfs_status().await
-    }
-
-    async fn configure_mounts(&self, _mounts: Vec<MountSpec>) -> Result<(), MobileLinuxError> {
-        Ok(())
-    }
-
-    async fn list_tasks(&self) -> Result<Vec<MobileLinuxTaskSnapshot>, MobileLinuxError> {
-        let tasks = self.tasks.lock().await;
-        let mut snapshots = Vec::with_capacity(tasks.len());
-        for task in tasks.values() {
-            snapshots.push(task.snapshot.lock().await.clone());
-        }
-        Ok(snapshots)
-    }
-
-    async fn task_status(
-        &self,
-        task_id: &str,
-    ) -> Result<Option<MobileLinuxTaskSnapshot>, MobileLinuxError> {
-        let task = self.tasks.lock().await.get(task_id).cloned();
-        Ok(match task {
-            Some(task) => Some(task.snapshot.lock().await.clone()),
-            None => None,
-        })
+        Ok(self.outcome("ok", "", 0))
     }
 }
 
@@ -850,9 +525,9 @@ fn create_runtime_root(root: &TempDir) -> PathBuf {
 async fn await_fixed_runtime_root_waits_for_a_configured_seed_to_finish_staging() {
     let root = TempDir::new().expect("tempdir");
     let runtime_root = create_configured_digest_runtime_root(&root);
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        Arc::new(NoopClientEventSink),
+        Arc::new(DiscardSink),
         None,
         false,
         Some(runtime_root.clone()),
@@ -879,9 +554,9 @@ async fn await_fixed_runtime_root_waits_for_a_configured_seed_to_finish_staging(
 async fn await_fixed_runtime_root_times_out_when_the_seed_never_becomes_ready() {
     let root = TempDir::new().expect("tempdir");
     let runtime_root = create_configured_digest_runtime_root(&root);
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        Arc::new(NoopClientEventSink),
+        Arc::new(DiscardSink),
         None,
         false,
         Some(runtime_root.clone()),
@@ -900,9 +575,9 @@ async fn await_fixed_runtime_root_times_out_when_the_seed_never_becomes_ready() 
 async fn await_fixed_runtime_root_accepts_an_immutable_bundle_root_without_a_ready_marker() {
     let root = TempDir::new().expect("tempdir");
     let runtime_root = create_runtime_root(&root);
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        Arc::new(NoopClientEventSink),
+        Arc::new(DiscardSink),
         None,
         false,
         Some(runtime_root.clone()),
@@ -929,9 +604,9 @@ async fn await_fixed_runtime_root_fails_fast_when_staging_wrote_a_failure_marker
         "runtime seed inventory validation failed before publish",
     )
     .expect("write failure marker");
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        Arc::new(NoopClientEventSink),
+        Arc::new(DiscardSink),
         None,
         false,
         Some(runtime_root.clone()),
@@ -966,9 +641,9 @@ async fn await_fixed_runtime_root_rejects_a_corrupt_ready_marker() {
         .expect("runtime root parent")
         .join(".0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.ready");
     fs::write(&marker, "wrong-digest").expect("write corrupt ready marker");
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        Arc::new(NoopClientEventSink),
+        Arc::new(DiscardSink),
         None,
         false,
         Some(runtime_root.clone()),
@@ -987,9 +662,9 @@ async fn await_fixed_runtime_root_rejects_a_corrupt_ready_marker() {
 
 async fn create_broker(
     full_runtime: bool,
-    mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    executor: Option<Arc<dyn BuildExecutor>>,
 ) -> (TempDir, Arc<AppService>, Arc<LocalAppsHostBroker>) {
-    create_broker_over(TempDir::new().expect("tempdir"), full_runtime, mobile_linux).await
+    create_broker_over(TempDir::new().expect("tempdir"), full_runtime, executor).await
 }
 
 /// [`create_broker`] over a root somebody else prepared — the seam
@@ -998,14 +673,14 @@ async fn create_broker(
 async fn create_broker_over(
     root: TempDir,
     full_runtime: bool,
-    mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    executor: Option<Arc<dyn BuildExecutor>>,
 ) -> (TempDir, Arc<AppService>, Arc<LocalAppsHostBroker>) {
     let service = test_service(&root).await;
     let runtime_root = full_runtime.then(|| create_runtime_root(&root));
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        Arc::new(NoopClientEventSink),
-        mobile_linux,
+        Arc::new(DiscardSink),
+        executor,
         full_runtime,
         runtime_root,
     );
@@ -1052,7 +727,7 @@ fn publish_fixture_build(root: &TempDir, app_id: &str, build_id: &str) -> AppLay
 struct HostQaFixture {
     _root: TempDir,
     broker: Arc<LocalAppsHostBroker>,
-    sink: Arc<MockSink>,
+    sink: Arc<RecordingSink>,
     app_id: String,
     workflow_run_id: String,
     qa_handle: String,
@@ -1060,28 +735,26 @@ struct HostQaFixture {
 }
 
 async fn host_qa_fixture() -> HostQaFixture {
-    host_qa_fixture_with_mobile_linux(None).await
+    host_qa_fixture_with_executor(None).await
 }
 
-async fn host_qa_fixture_with_mobile_linux(
-    mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
-) -> HostQaFixture {
+async fn host_qa_fixture_with_executor(executor: Option<Arc<dyn BuildExecutor>>) -> HostQaFixture {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
-        mobile_linux,
+        executor,
         false,
         None,
     );
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
-        .attach_device_context(device_context_of(&host_environment(
-            lingxi_core::host::MobileHostOs::Ios,
-            lingxi_core::host::MobileDeviceClass::Phone,
-        )))
+        .attach_device_context(local_apps::DeviceContext::from_host_facts(
+            local_apps::HostOs::Ios,
+            local_apps::HostDeviceClass::Phone
+        ))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Host QA").await;
     let layout = AppLayout::new(root.path(), &app_id).expect("layout");
@@ -1119,7 +792,7 @@ async fn host_qa_fixture_with_mobile_linux(
     })
     .expect("bind QA database to manifest");
     let spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
-        "../../../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+        "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
     ))
     .expect("authoring fixture");
     let contract = local_apps::AppAuthoringContract {
@@ -1222,7 +895,7 @@ async fn host_qa_terminal_rejects_current_device_scope_changes_before_publicatio
     let fixture = host_qa_fixture().await;
     let candidate = finalize_passing_host_qa(&fixture).await;
     let original_contract_sha256 =
-        crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&fixture.layout)
+        crate::app_build::active_build_authoring_contract_sha256(&fixture.layout)
             .expect("active authoring selector")
             .expect("active authoring contract");
     let mut changed_contract =
@@ -1349,12 +1022,7 @@ async fn qa_requests_reject_out_of_scope_targets_before_native_or_data_side_effe
             .events()
             .await
             .into_iter()
-            .all(|event| !matches!(
-                event,
-                ClientEvent::AppEvent {
-                    event: AppEventDto::AppUiRequest { .. }
-                }
-            )),
+            .all(|event| !matches!(event, HostEvent::UiRequest(_))),
         "rejected QA requests must not dispatch native UI"
     );
 }
@@ -1584,18 +1252,17 @@ async fn publish_passing_host_qa_and_emit(fixture: &HostQaFixture) {
 fn sync_fixture_dependency_roots(broker: &LocalAppsHostBroker, layout: &AppLayout) {
     let workspace = layout.root().join(layout.workspace_rel());
     fs::copy(
-        workspace.join(crate::mobile::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL),
+        workspace.join(crate::runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL),
         workspace.join("package.json"),
     )
     .expect("restore fixture package.json from its trusted snapshot");
     fs::copy(
-        workspace.join(crate::mobile::local_app_runtime_profiles::LOCKFILE_FILE_REL),
+        workspace.join(crate::runtime_profiles::LOCKFILE_FILE_REL),
         workspace.join("pnpm-lock.yaml"),
     )
     .expect("restore fixture lockfile from its trusted snapshot");
-    let target =
-        crate::mobile::local_apps_build::detect_build_target(layout).expect("fixture build target");
-    crate::mobile::local_apps_build::restore_host_managed_files(&workspace, target)
+    let target = crate::app_build::detect_build_target(layout).expect("fixture build target");
+    crate::app_build::restore_host_managed_files(&workspace, target)
         .expect("restore fixture host-managed dependency roots");
     assert!(
         LocalAppsHostBroker::dependency_inputs_match(layout)
@@ -1760,27 +1427,24 @@ async fn host_qa_roundtrip_publishes_only_after_terminal_commit_and_survives_sto
         .await
         .into_iter()
         .find_map(|event| match event {
-            ClientEvent::AppEvent {
-                event:
-                    AppEventDto::VerificationSummaryChanged {
-                        app_id,
-                        publication_state,
-                        ui_verification,
-                        ..
-                    },
+            HostEvent::VerificationSummaryChanged {
+                app_id,
+                publication_state,
+                ui_verification,
+                ..
             } if app_id == fixture.app_id => Some((publication_state, ui_verification)),
             _ => None,
         })
         .expect("postcommit emits this app's verification summary");
-    assert_eq!(emitted.0, AppWorkflowStateDto::PublishedVerified);
-    assert_eq!(emitted.1.status, LocalAppVerificationStatusDto::Passed);
+    assert_eq!(emitted.0, PublicationState::PublishedVerified);
+    assert_eq!(emitted.1.status, VerificationStatus::Passed);
     assert_eq!(emitted.1.code.as_deref(), Some("ui_verification_passed"));
 }
 
 #[tokio::test]
 async fn rebuilding_a_verified_no_mcp_app_emits_unverified_only_after_build_commit() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-    let fixture = host_qa_fixture_with_mobile_linux(Some(runtime.clone())).await;
+    let runtime = MockBuildExecutor::new();
+    let fixture = host_qa_fixture_with_executor(Some(runtime.clone())).await;
     assert!(
         load_manifest(&fixture.layout)
             .expect("manifest")
@@ -1789,7 +1453,7 @@ async fn rebuilding_a_verified_no_mcp_app_emits_unverified_only_after_build_comm
         "the regression must exercise the usual no-MCP app path"
     );
     publish_passing_host_qa_and_emit(&fixture).await;
-    let old_build_id = crate::mobile::local_apps_build::active_build_id(&fixture.layout)
+    let old_build_id = crate::app_build::active_build_id(&fixture.layout)
         .expect("active build")
         .expect("published build id");
     let passed_event_count = fixture
@@ -1800,9 +1464,7 @@ async fn rebuilding_a_verified_no_mcp_app_emits_unverified_only_after_build_comm
         .filter(|event| {
             matches!(
                 event,
-                ClientEvent::AppEvent {
-                    event: AppEventDto::VerificationSummaryChanged { app_id, .. }
-                } if app_id == &fixture.app_id
+                HostEvent::VerificationSummaryChanged { app_id, .. } if app_id == &fixture.app_id
             )
         })
         .count();
@@ -1815,7 +1477,7 @@ async fn rebuilding_a_verified_no_mcp_app_emits_unverified_only_after_build_comm
         .await
         .expect_err("synthetic build failure");
     assert_eq!(
-        crate::mobile::local_apps_build::active_build_id(&fixture.layout)
+        crate::app_build::active_build_id(&fixture.layout)
             .expect("active build after failure")
             .as_deref(),
         Some(old_build_id.as_str()),
@@ -1839,9 +1501,7 @@ async fn rebuilding_a_verified_no_mcp_app_emits_unverified_only_after_build_comm
             .filter(|event| {
                 matches!(
                     event,
-                    ClientEvent::AppEvent {
-                        event: AppEventDto::VerificationSummaryChanged { app_id, .. }
-                    } if app_id == &fixture.app_id
+                    HostEvent::VerificationSummaryChanged { app_id, .. } if app_id == &fixture.app_id
                 )
             })
             .count(),
@@ -1856,7 +1516,7 @@ async fn rebuilding_a_verified_no_mcp_app_emits_unverified_only_after_build_comm
         .await
         .expect("commit replacement build");
     assert_ne!(
-        crate::mobile::local_apps_build::active_build_id(&fixture.layout)
+        crate::app_build::active_build_id(&fixture.layout)
             .expect("replacement active build")
             .as_deref(),
         Some(old_build_id.as_str()),
@@ -1869,23 +1529,17 @@ async fn rebuilding_a_verified_no_mcp_app_emits_unverified_only_after_build_comm
         .into_iter()
         .rev()
         .find_map(|event| match event {
-            ClientEvent::AppEvent {
-                event:
-                    AppEventDto::VerificationSummaryChanged {
-                        app_id,
-                        publication_state,
-                        ui_verification,
-                        ..
-                    },
+            HostEvent::VerificationSummaryChanged {
+                app_id,
+                publication_state,
+                ui_verification,
+                ..
             } if app_id == fixture.app_id => Some((publication_state, ui_verification)),
             _ => None,
         })
         .expect("a committed no-MCP rebuild must refresh this app's summary");
-    assert_eq!(publication_state, AppWorkflowStateDto::PublishedUnverified);
-    assert_eq!(
-        ui_verification.status,
-        LocalAppVerificationStatusDto::Unverified
-    );
+    assert_eq!(publication_state, PublicationState::PublishedUnverified);
+    assert_eq!(ui_verification.status, VerificationStatus::Unverified);
     assert_eq!(
         ui_verification.code.as_deref(),
         Some("ui_verification_required")
@@ -2228,9 +1882,9 @@ async fn real_qa_ui_roundtrip_returns_only_callable_host_evidence_ids() {
                     .await
                     .into_iter()
                     .find_map(|event| match event {
-                        ClientEvent::AppEvent {
-                            event: AppEventDto::AppUiRequest { request },
-                        } if request.app_id == fixture.app_id => Some(request.request_id),
+                        HostEvent::UiRequest(request) if request.app_id == fixture.app_id => {
+                            Some(request.request_id)
+                        }
                         _ => None,
                     })
             {
@@ -2470,9 +2124,9 @@ async fn dropped_real_act_on_ui_future_deactivates_attribution_and_keeps_page_wr
                     .await
                     .into_iter()
                     .find_map(|event| match event {
-                        ClientEvent::AppEvent {
-                            event: AppEventDto::AppUiRequest { request },
-                        } if request.app_id == fixture.app_id => Some(request.request_id),
+                        HostEvent::UiRequest(request) if request.app_id == fixture.app_id => {
+                            Some(request.request_id)
+                        }
                         _ => None,
                     })
             {
@@ -2832,12 +2486,11 @@ async fn qa_action_waits_for_a_page_write_issued_after_native_success() {
 #[tokio::test]
 async fn authoring_candidate_run_and_base_are_rechecked_at_the_build_lock_boundary() {
     let fixture = host_qa_fixture().await;
-    let base =
-        crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&fixture.layout)
-            .expect("active authoring selector")
-            .expect("active contract digest");
+    let base = crate::app_build::active_build_authoring_contract_sha256(&fixture.layout)
+        .expect("active authoring selector")
+        .expect("active contract digest");
     let spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
-        "../../../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+        "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
     ))
     .expect("authoring fixture");
     let staged = fixture
@@ -2892,7 +2545,7 @@ async fn authoring_candidate_run_and_base_are_rechecked_at_the_build_lock_bounda
     );
 }
 
-/// r3-never-wired-05: `LocalAppVerificationStatusDto::Failed` had zero
+/// r3-never-wired-05: `VerificationStatus::Failed` had zero
 /// producers while both clients carried localized copy for it, and the
 /// condition that should have produced it — an active MCP catalog whose
 /// recorded identity does not match the app and build pointing at it —
@@ -2903,8 +2556,8 @@ async fn authoring_candidate_run_and_base_are_rechecked_at_the_build_lock_bounda
 async fn a_corrupt_active_mcp_catalog_fails_only_that_app_and_still_lists_the_others() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
         None,
@@ -2956,9 +2609,7 @@ async fn a_corrupt_active_mcp_catalog_fails_only_that_app_and_still_lists_the_ot
         .into_iter()
         .rev()
         .find_map(|event| match event {
-            ClientEvent::AppEvent {
-                event: AppEventDto::ManagedMcpInventoryChanged { servers },
-            } => Some(servers),
+            HostEvent::ManagedMcpInventoryChanged { servers } => Some(servers),
             _ => None,
         })
         .expect("a managed MCP inventory event");
@@ -2974,7 +2625,7 @@ async fn a_corrupt_active_mcp_catalog_fails_only_that_app_and_still_lists_the_ot
         .expect("the corrupt app is listed");
     assert_eq!(
         corrupt_row.mcp_verification.status,
-        LocalAppVerificationStatusDto::Failed,
+        VerificationStatus::Failed,
         "the corrupt app must be reported Failed -- this is the production producer for a \
          variant both clients render: {:?}",
         corrupt_row.mcp_verification
@@ -2992,7 +2643,7 @@ async fn a_corrupt_active_mcp_catalog_fails_only_that_app_and_still_lists_the_ot
     );
     assert_eq!(
         corrupt_row.status,
-        ManagedLocalAppMcpStatusDto::Error,
+        ManagedMcpStatus::Error,
         "the corrupt app's MCP status: {corrupt_row:?}"
     );
     let healthy_row = servers
@@ -3001,7 +2652,7 @@ async fn a_corrupt_active_mcp_catalog_fails_only_that_app_and_still_lists_the_ot
         .expect("the healthy app is listed");
     assert_eq!(
         healthy_row.mcp_verification.status,
-        LocalAppVerificationStatusDto::Unverified,
+        VerificationStatus::Unverified,
         "the healthy app keeps its own (no-catalog) summary: {healthy_row:?}"
     );
 }
@@ -3077,9 +2728,9 @@ async fn failed_native_qa_action_is_authenticated_and_persisted_without_roundtri
                     .await
                     .into_iter()
                     .find_map(|event| match event {
-                        ClientEvent::AppEvent {
-                            event: AppEventDto::AppUiRequest { request },
-                        } if request.app_id == fixture.app_id => Some(request.request_id),
+                        HostEvent::UiRequest(request) if request.app_id == fixture.app_id => {
+                            Some(request.request_id)
+                        }
                         _ => None,
                     })
             {
@@ -3164,8 +2815,8 @@ async fn failed_native_qa_action_is_authenticated_and_persisted_without_roundtri
 #[tokio::test]
 async fn a_pending_native_approval_is_re_announced_verbatim_to_a_reattaching_client() {
     let root = TempDir::new().expect("tempdir");
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
         None,
@@ -3180,18 +2831,13 @@ async fn a_pending_native_approval_is_re_announced_verbatim_to_a_reattaching_cli
         message: "r3-failure-paths-02 fixture event; only its request_id is under test".into(),
         request_id: Some(request_id.to_string()),
     };
-    let announcements = |events: Vec<ClientEvent>| {
+    let announcements = |events: Vec<HostEvent>| {
         events
             .into_iter()
             .filter(|emitted| {
                 matches!(
                     emitted,
-                    ClientEvent::AppEvent {
-                        event: AppEventDto::LocalAppOperationFailed {
-                            request_id: Some(request_id),
-                            ..
-                        },
-                    } if request_id == "req-reattach"
+                    HostEvent::PluginOperationFailed { request_id: Some(request_id), .. } if request_id == "req-reattach"
                 )
             })
             .count()
@@ -3254,8 +2900,7 @@ async fn a_pending_native_approval_is_re_announced_verbatim_to_a_reattaching_cli
 async fn host_authored_model_facing_text_names_no_tool_outside_local_app_tools() {
     let (root, service, broker) = create_broker(false, None).await;
     let shell = shell_app_fixture(&broker, &service).await;
-    let transport =
-        crate::mobile::local_apps_mcp::LocalAppsMcpTransport::new(root.path().to_path_buf());
+    let transport = crate::mcp_server::LocalAppsMcpTransport::new(root.path().to_path_buf());
     assert!(transport.attach_service(Arc::clone(&service)).is_ok());
     let refused = transport
         .call_host_operation("build", json!({ "app_id": shell.id }))
@@ -3287,7 +2932,7 @@ async fn host_authored_model_facing_text_names_no_tool_outside_local_app_tools()
 
     // The static host-operation catalog: this is the description text the
     // model is shown for every builtin LocalApp* tool.
-    let catalog = crate::mobile::local_apps_mcp::LocalAppsMcpTransport::host_tool_catalog();
+    let catalog = crate::mcp_server::LocalAppsMcpTransport::host_tool_catalog();
     assert!(
         !catalog.is_empty(),
         "read an empty host tool catalog, so nothing below was scanned"
@@ -3339,8 +2984,7 @@ async fn the_scanners_reject_a_dead_tool_name_planted_in_each_new_source() {
 
     let (root, service, broker) = create_broker(false, None).await;
     let shell = shell_app_fixture(&broker, &service).await;
-    let transport =
-        crate::mobile::local_apps_mcp::LocalAppsMcpTransport::new(root.path().to_path_buf());
+    let transport = crate::mcp_server::LocalAppsMcpTransport::new(root.path().to_path_buf());
     assert!(transport.attach_service(Arc::clone(&service)).is_ok());
     let refusal = transport
         .call_host_operation("build", json!({ "app_id": shell.id }))
@@ -3379,7 +3023,7 @@ async fn the_scanners_reject_a_dead_tool_name_planted_in_each_new_source() {
         "the backtick scan of the refusal rejected the plant without naming it: {message}"
     );
 
-    let catalog = crate::mobile::local_apps_mcp::LocalAppsMcpTransport::host_tool_catalog();
+    let catalog = crate::mcp_server::LocalAppsMcpTransport::host_tool_catalog();
     let described = catalog
         .iter()
         .find(|tool| tool.description.contains("LocalAppPrepare"))
@@ -3713,7 +3357,7 @@ fn write_fixture_package_manifest(node_modules: &Path, package: &str, version: &
 fn seed_launchable_runtime_fixture(root: &Path, record: &local_apps::AppRecord, name: &str) {
     let layout = AppLayout::new(root.to_path_buf(), record.id.clone()).expect("layout");
     let workspace = root.join(layout.workspace_rel());
-    let binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
+    let binding = crate::runtime_profiles::current_binding_for_family(
         local_apps::AppRuntimeProfile::ReactDom,
     )
     .expect("published react-dom runtime profile");
@@ -3729,11 +3373,11 @@ fn seed_launchable_runtime_fixture(root: &Path, record: &local_apps::AppRecord, 
     persist_runtime_profile_files(&workspace, &artifacts)
         .expect("persist fixture runtime profile files");
 
-    let contract = crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
+    let contract = crate::runtime_profiles::contract_for_binding(&binding)
         .expect("react-dom runtime contract");
     for &(relative, bytes) in contract.editable_files {
         if relative == "app/mcp-widget/package.json" {
-            crate::mobile::local_apps_build::write_file(&workspace, relative, bytes, true)
+            crate::app_build::write_file(&workspace, relative, bytes, true)
                 .expect("seed fixture widget importer");
         }
     }
@@ -3775,7 +3419,7 @@ fn seed_launchable_runtime_fixture(root: &Path, record: &local_apps::AppRecord, 
 
     let static_dist = root
         .join(layout.build_rel(false))
-        .join(crate::mobile::local_apps_build::VITE_OUTPUT_DIR);
+        .join(crate::app_build::VITE_OUTPUT_DIR);
     fs::create_dir_all(&static_dist).expect("create static dist");
     fs::write(static_dist.join("index.html"), "<html>ok</html>").expect("write index.html");
     let full_build = root.join(layout.build_rel(true));
@@ -3802,7 +3446,7 @@ fn seed_launchable_runtime_fixture(root: &Path, record: &local_apps::AppRecord, 
 /// install, which none of the LINGXI.md / device-context assertions below
 /// look at.
 async fn land_test_scaffold(broker: &Arc<LocalAppsHostBroker>, record: &local_apps::AppRecord) {
-    let binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
+    let binding = crate::runtime_profiles::current_binding_for_family(
         local_apps::AppRuntimeProfile::ReactDom,
     )
     .expect("published react-dom runtime profile");
@@ -3817,9 +3461,9 @@ async fn land_test_scaffold(broker: &Arc<LocalAppsHostBroker>, record: &local_ap
 
 async fn scaffolded_lingxi(
     full_runtime: bool,
-    mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    executor: Option<Arc<dyn BuildExecutor>>,
 ) -> (String, String) {
-    let (root, service, broker) = create_broker(full_runtime, mobile_linux).await;
+    let (root, service, broker) = create_broker(full_runtime, executor).await;
     let record = service
         .create_app(Some("Tracker"), "a test app", None)
         .await
@@ -3836,13 +3480,13 @@ async fn scaffolded_lingxi(
 /// agent never declares a manifest for still knows what it was built on.
 #[tokio::test]
 async fn scaffold_records_the_host_device_context() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     assert!(broker
-        .attach_device_context(device_context_of(&host_environment(
-            lingxi_core::host::MobileHostOs::Ios,
-            lingxi_core::host::MobileDeviceClass::Tablet,
-        )))
+        .attach_device_context(local_apps::DeviceContext::from_host_facts(
+            local_apps::HostOs::Ios,
+            local_apps::HostDeviceClass::Tablet
+        ))
         .is_ok());
     let record = service
         .create_app(Some("Scaffolded"), "a test app", None)
@@ -3859,51 +3503,9 @@ async fn scaffold_records_the_host_device_context() {
     assert_eq!(recorded.form_factor, "ipad");
 }
 
-/// The mapping from the mobile runtime's environment onto the service's host
-/// vocabulary is the one place an iOS/Android or phone/tablet swap could hide:
-/// the service tests its own table, the compiler checks the arms exist, and
-/// only this test checks they point the right way.
-#[test]
-fn every_host_environment_maps_to_its_own_device_context() {
-    use lingxi_core::host::{MobileDeviceClass, MobileHostOs};
-    let expected = [
-        (
-            MobileHostOs::Ios,
-            MobileDeviceClass::Phone,
-            Some(("ios", "iphone")),
-        ),
-        (
-            MobileHostOs::Ios,
-            MobileDeviceClass::Tablet,
-            Some(("ios", "ipad")),
-        ),
-        (MobileHostOs::Ios, MobileDeviceClass::Unknown, None),
-        (
-            MobileHostOs::Android,
-            MobileDeviceClass::Phone,
-            Some(("android", "phone")),
-        ),
-        (
-            MobileHostOs::Android,
-            MobileDeviceClass::Tablet,
-            Some(("android", "tablet")),
-        ),
-        (MobileHostOs::Android, MobileDeviceClass::Unknown, None),
-    ];
-    for (os, class, pair) in expected {
-        let context = device_context_of(&host_environment(os, class))
-            .map(|context| (context.os, context.form_factor));
-        assert_eq!(
-            context,
-            pair.map(|(os, form)| (os.to_string(), form.to_string())),
-            "{os:?} + {class:?}"
-        );
-    }
-}
-
 #[tokio::test]
 async fn scaffold_writes_capability_neutral_lingxi_when_toolchain_is_available() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (_app_id, lingxi) = scaffolded_lingxi(true, Some(runtime)).await;
     assert!(lingxi.contains("Do not run `npm create vite`"), "{lingxi}");
     // The contract is READ BY A MODEL as a set of examples to copy. An
@@ -3976,7 +3578,7 @@ async fn scaffold_writes_capability_neutral_lingxi_when_toolchain_is_available()
 
 #[tokio::test]
 async fn scaffold_writes_capability_neutral_lingxi_when_shell_is_missing() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (_app_id, lingxi) = scaffolded_lingxi(true, Some(runtime)).await;
     assert!(
         lingxi.contains("repository-verified Vite + Ionic foundation"),
@@ -3989,7 +3591,7 @@ async fn scaffold_writes_capability_neutral_lingxi_when_shell_is_missing() {
 
 #[tokio::test]
 async fn persisted_lingxi_does_not_bake_in_toolchain_availability() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(true, Some(runtime)).await;
     let record = service
         .create_app(Some("Tracker"), "a test app", None)
@@ -4103,7 +3705,7 @@ async fn stage_react_dom_authoring_contract(
     validated_selection_handle: &str,
 ) -> String {
     let spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
-        "../../../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+        "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
     ))
     .expect("authoring fixture");
     broker
@@ -4146,16 +3748,11 @@ async fn approved_create_receipt_with_design(
     brief: &str,
 ) -> (String, String) {
     let workflow_run_id = format!("wf_create_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
-        &broker.root,
-        app_id,
-        &workflow_run_id,
-    )
-    .expect("selector capability");
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability =
+        crate::template_catalog::issue_selector_capability(&broker.root, app_id, &workflow_run_id)
+            .expect("selector capability");
     let selection = broker
         .validate_template_selection(json!({
             "app_id": app_id,
@@ -4172,7 +3769,7 @@ async fn approved_create_receipt_with_design(
         .as_str()
         .expect("selection handle");
     let mut authoring_value: Value = serde_json::from_str(include_str!(
-        "../../../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+        "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
     ))
     .expect("authoring fixture");
     if surface == "canvas" {
@@ -4225,7 +3822,7 @@ async fn approved_create_receipt_with_design(
     assert_eq!(
         stage
             .get("design_spec_sha256")
-            .map_or(false, |v| !v.is_null()),
+            .is_some_and(|v| !v.is_null()),
         has_design_spec,
         "design_spec_sha256 presence must track whether a design spec was staged: {stage}"
     );
@@ -4470,8 +4067,7 @@ fn persist_initial_mcp_candidate_fixture(
         app_id: app_id.to_string(),
         workflow_run_id: workflow_run_id.to_string(),
         stage: local_apps::McpAuthoringStage::Prepared,
-        previous_build_id: crate::mobile::local_apps_build::active_build_id(&layout)
-            .expect("active build id"),
+        previous_build_id: crate::app_build::active_build_id(&layout).expect("active build id"),
         previous_catalog_sha256: manifest
             .active_mcp_catalog
             .as_ref()
@@ -4658,8 +4254,7 @@ async fn scaffold_requires_a_unified_create_receipt() {
 async fn authoring_dispatch_preserves_validation_errors() {
     let (root, service, broker) = create_broker(false, None).await;
     let shell = shell_app_fixture(&broker, &service).await;
-    let transport =
-        crate::mobile::local_apps_mcp::LocalAppsMcpTransport::new(root.path().to_path_buf());
+    let transport = crate::mcp_server::LocalAppsMcpTransport::new(root.path().to_path_buf());
     assert!(transport.attach_service(Arc::clone(&service)).is_ok());
     assert!(transport.attach_host(broker.clone()).is_ok());
     let result = transport
@@ -4693,15 +4288,13 @@ async fn authoring_dispatch_preserves_validation_errors() {
 
 #[tokio::test]
 async fn staged_create_approval_does_not_author_or_enable_mcp() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let workflow_run_id = format!("wf_plain_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability = crate::template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
         &workflow_run_id,
@@ -4723,11 +4316,10 @@ async fn staged_create_approval_does_not_author_or_enable_mcp() {
         .as_str()
         .expect("selection handle");
     let authoring_spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
-        "../../../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+        "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
     ))
     .expect("authoring fixture");
-    let transport =
-        crate::mobile::local_apps_mcp::LocalAppsMcpTransport::new(root.path().to_path_buf());
+    let transport = crate::mcp_server::LocalAppsMcpTransport::new(root.path().to_path_buf());
     assert!(transport.attach_service(Arc::clone(&service)).is_ok());
     assert!(transport.attach_host(broker.clone()).is_ok());
     let result = transport
@@ -4761,7 +4353,7 @@ async fn staged_create_approval_does_not_author_or_enable_mcp() {
 
     // The native create-confirmation sheet is retired. The plan approval is
     // the only producer of `CreateApprovalAuthority::ApprovedPlan` in
-    // production (`local_apps_prepare::finish_create_scaffold`), so this
+    // production (`broker::prepare::finish_create_scaffold`), so this
     // fixture takes exactly the authority the Host takes once the user has
     // approved a plan; a bare `approve_mcp_proposal` (NativeSheet) is now
     // refused with `create_requires_approved_plan`.
@@ -4828,7 +4420,7 @@ async fn staged_create_approval_does_not_author_or_enable_mcp() {
 /// again in any run.
 #[tokio::test]
 async fn stage_create_after_approval_is_refused_and_cannot_rewrite_the_approved_bytes() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (_root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let (first_workflow_run_id, _receipt_id) =
@@ -4900,11 +4492,9 @@ async fn stage_create_after_approval_is_refused_and_cannot_rewrite_the_approved_
     // still allowed, because it writes its own staging tree and cannot
     // touch the approved run's bytes.
     let second_workflow_run_id = format!("wf_restage_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability = crate::template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
         &second_workflow_run_id,
@@ -4964,17 +4554,14 @@ async fn staged_evidence_missing_name_or_brief_is_a_named_hard_fail() {
             "wf_evidence_gap_{drop_key}_{}",
             uuid::Uuid::new_v4().simple()
         );
-        let catalog =
-            crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-        let selector_capability =
-            crate::mobile::local_app_template_catalog::issue_selector_capability(
-                &broker.root,
-                app_id,
-                &workflow_run_id,
-            )
-            .expect("selector capability");
+        let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+            .expect("template catalog");
+        let selector_capability = crate::template_catalog::issue_selector_capability(
+            &broker.root,
+            app_id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
         let selection = broker
             .validate_template_selection(json!({
                 "app_id": app_id,
@@ -5020,7 +4607,7 @@ async fn staged_evidence_missing_name_or_brief_is_a_named_hard_fail() {
         workflow_run_id
     }
 
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (_root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
 
@@ -5059,15 +4646,13 @@ async fn staged_evidence_missing_name_or_brief_is_a_named_hard_fail() {
 /// (including the `.lingxi` poison) survives, which is what this pins.
 #[tokio::test]
 async fn a_failed_stage_create_reclaims_its_partial_staging_tree() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (_root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let workflow_run_id = format!("wf_partial_stage_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability = crate::template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
         &workflow_run_id,
@@ -5131,15 +4716,13 @@ async fn a_failed_stage_create_reclaims_its_partial_staging_tree() {
 /// not-yet-approved run is explicitly allowed.
 #[tokio::test]
 async fn a_committed_staging_tree_survives_a_later_failed_stage_create() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (_root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let workflow_run_id = format!("wf_committed_stage_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability = crate::template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
         &workflow_run_id,
@@ -5207,15 +4790,13 @@ async fn a_committed_staging_tree_survives_a_later_failed_stage_create() {
 /// directory was adopted silently as this run's confirmed design.
 #[tokio::test]
 async fn a_design_spec_that_does_not_match_its_recorded_digest_is_a_named_hard_fail() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (_root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let workflow_run_id = format!("wf_design_digest_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability = crate::template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
         &workflow_run_id,
@@ -5322,15 +4903,13 @@ async fn a_design_spec_that_does_not_match_its_recorded_digest_is_a_named_hard_f
 #[tokio::test]
 async fn approve_mcp_proposal_reuses_an_already_approved_create_journal_without_a_second_native_sheet(
 ) {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (_root, _service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &_service).await;
     let workflow_run_id = format!("wf_reuse_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability = crate::template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
         &workflow_run_id,
@@ -5501,7 +5080,7 @@ async fn approve_mcp_proposal_reuses_an_already_approved_create_journal_without_
 
 #[tokio::test]
 async fn invalid_workflow_model_releases_the_unified_create_receipt_claim() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (_root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let (workflow_run_id, receipt_id) = approved_create_receipt(&broker, &shell.id, "dom").await;
@@ -5537,11 +5116,9 @@ async fn create_review_surface_binds_staged_design_spec_digest() {
     let (_root, service, broker) = create_broker(false, None).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let workflow_run_id = format!("wf_design_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability = crate::template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
         &workflow_run_id,
@@ -5607,11 +5184,11 @@ async fn create_review_surface_binds_staged_design_spec_digest() {
 
 #[tokio::test]
 async fn unscaffolded_create_scaffolds_builds_and_promotes_from_a_staged_candidate() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
         Some(runtime.clone()),
@@ -5622,11 +5199,9 @@ async fn unscaffolded_create_scaffolds_builds_and_promotes_from_a_staged_candida
     let shell = shell_app_fixture(&broker, &service).await;
 
     let workflow_run_id = format!("wf_e2e_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability = crate::template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
         &workflow_run_id,
@@ -5823,20 +5398,17 @@ async fn unscaffolded_create_scaffolds_builds_and_promotes_from_a_staged_candida
         .into_iter()
         .rev()
         .find_map(|event| match event {
-            ClientEvent::AppEvent {
-                event:
-                    AppEventDto::VerificationSummaryChanged {
-                        app_id,
-                        publication_state,
-                        ..
-                    },
+            HostEvent::VerificationSummaryChanged {
+                app_id,
+                publication_state,
+                ..
             } if app_id == shell.id => Some(publication_state),
             _ => None,
         })
         .expect("promoting an MCP candidate must emit VerificationSummaryChanged for the app");
     assert_eq!(
         verification_publication_state,
-        AppWorkflowStateDto::PublishedUnverified
+        PublicationState::PublishedUnverified
     );
     let promoted_manifest = load_manifest(&layout).expect("promoted manifest");
     assert!(promoted_manifest.active_mcp_catalog.is_some());
@@ -5872,11 +5444,11 @@ async fn unscaffolded_create_scaffolds_builds_and_promotes_from_a_staged_candida
 /// WP5 gate for name/brief, but for the new field.
 #[tokio::test]
 async fn staged_mcp_intent_survives_create_and_reaches_the_formal_contract() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
         Some(runtime.clone()),
@@ -5887,11 +5459,9 @@ async fn staged_mcp_intent_survives_create_and_reaches_the_formal_contract() {
     let shell = shell_app_fixture(&broker, &service).await;
 
     let workflow_run_id = format!("wf_mcp_intent_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability = crate::template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
         &workflow_run_id,
@@ -6071,11 +5641,11 @@ fn mcp_intent_contract_line_covers_every_shape() {
 /// seed → record → contract half.
 #[tokio::test]
 async fn a_staged_declined_mcp_intent_survives_the_staging_seam() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
         Some(runtime.clone()),
@@ -6086,11 +5656,9 @@ async fn a_staged_declined_mcp_intent_survives_the_staging_seam() {
     let shell = shell_app_fixture(&broker, &service).await;
 
     let workflow_run_id = format!("wf_mcp_declined_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability = crate::template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
         &workflow_run_id,
@@ -6157,11 +5725,9 @@ async fn create_scaffold_seed_rejects_a_staged_template_file_tampered_after_stag
     let shell = shell_app_fixture(&broker, &service).await;
 
     let workflow_run_id = format!("wf_tamper_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability = crate::template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
         &workflow_run_id,
@@ -6230,7 +5796,7 @@ async fn create_scaffold_seed_rejects_a_staged_template_file_tampered_after_stag
 
 #[tokio::test]
 async fn qa_mcp_candidate_rejects_tampered_active_contexts() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let layout = broker.layout(&shell.id).expect("layout");
@@ -6345,20 +5911,18 @@ async fn runtime_profiles_report_availability_cache_download_and_migrations() {
 #[tokio::test]
 async fn runtime_profile_dependency_status_distinguishes_seed_and_shared_cache() {
     let root = TempDir::new().expect("tempdir");
-    let binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
-        AppRuntimeProfile::ReactDom,
-    )
-    .expect("react profile binding");
-    let contract = crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
-        .expect("react profile contract");
-    let lock_digest = crate::mobile::local_app_runtime_profiles::lockfile_sha256(contract);
+    let binding = crate::runtime_profiles::current_binding_for_family(AppRuntimeProfile::ReactDom)
+        .expect("react profile binding");
+    let contract =
+        crate::runtime_profiles::contract_for_binding(&binding).expect("react profile contract");
+    let lock_digest = crate::runtime_profiles::lockfile_sha256(contract);
 
     // A configured seed with the exact lock is bundled, even though its
     // dependency tree has not been copied into the shared cache.
     let runtime_root = create_bundled_seed(root.path(), &lock_digest);
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        Arc::new(NoopClientEventSink),
+        Arc::new(DiscardSink),
         None,
         false,
         Some(runtime_root.clone()),
@@ -6393,7 +5957,7 @@ async fn runtime_profile_dependency_status_distinguishes_seed_and_shared_cache()
 
 #[tokio::test]
 async fn a_failed_scaffold_releases_the_receipt_claim_for_retry() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let original_manifest = load_manifest(
@@ -6451,7 +6015,7 @@ async fn a_failed_scaffold_releases_the_receipt_claim_for_retry() {
 
 #[tokio::test]
 async fn scaffold_failure_after_dependency_snapshot_restores_shell_before_record_commit() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
@@ -6523,9 +6087,9 @@ async fn scaffold_failure_after_dependency_snapshot_restores_shell_before_record
 async fn cold_start_recovers_a_partial_scaffold_before_loading_the_app() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        Arc::new(NoopClientEventSink),
+        Arc::new(DiscardSink),
         None,
         false,
         None,
@@ -6536,16 +6100,14 @@ async fn cold_start_recovers_a_partial_scaffold_before_loading_the_app() {
     let original_manifest = load_manifest(&layout).expect("shell manifest");
     let original_guided =
         fs::read(workspace_of(&root, &shell.id).join("LINGXI.md")).expect("guided contract");
-    let binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
+    let binding = crate::runtime_profiles::current_binding_for_family(
         local_apps::AppRuntimeProfile::Canvas2d,
     )
     .expect("published canvas profile");
     let artifacts = scaffold_runtime_profile(Some(binding), local_apps::AppSurface::Canvas)
         .expect("scaffold artifacts");
-    let target = crate::mobile::local_apps_build::LocalAppBuildTarget::from_runtime_binding(
-        &artifacts.binding,
-    )
-    .expect("build target");
+    let target = crate::app_build::LocalAppBuildTarget::from_runtime_binding(&artifacts.binding)
+        .expect("build target");
     let build_lock =
         local_apps::storage::lock_app_build(root.path(), &shell.id).expect("build lock");
     let recovery = local_apps::storage::begin_scaffold_recovery(
@@ -6562,7 +6124,7 @@ async fn cold_start_recovers_a_partial_scaffold_before_loading_the_app() {
         builtin_template_origin(&artifacts.binding),
     )
     .expect("stamp partial identity");
-    crate::mobile::local_apps_build::scaffold_workspace_initialized(&layout, target, true)
+    crate::app_build::scaffold_workspace_initialized(&layout, target, true)
         .expect("land partial workspace");
     persist_runtime_profile_files(&workspace_of(&root, &shell.id), &artifacts)
         .expect("persist partial runtime files");
@@ -6597,7 +6159,7 @@ async fn cold_start_recovers_a_partial_scaffold_before_loading_the_app() {
 
 #[tokio::test]
 async fn runtime_profile_apps_fail_closed_on_dependency_input_drift() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -6647,7 +6209,7 @@ async fn runtime_profile_apps_fail_closed_on_dependency_input_drift() {
 /// `Ready` -- not merely that no error is returned.
 #[tokio::test]
 async fn ensure_dependency_install_runs_the_install_its_worker_owns() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (_root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -6664,7 +6226,7 @@ async fn ensure_dependency_install_runs_the_install_its_worker_owns() {
     assert_eq!(after_scaffold.state, AppDependencyState::Ready);
 
     // The same requeue `ensure_dependency_install` performs itself when it
-    // detects a stale snapshot (local_apps_host.rs:3611-3616). This is the
+    // detects a stale snapshot (broker.rs:3611-3616). This is the
     // route this test simulates; a `Queued` or `Failed` record reaches the
     // very same `start_dependency_install` at :3617 with no requeue at all.
     service
@@ -6783,7 +6345,7 @@ fn a_dropped_receipt_claim_guard_leaves_the_slot_re_issuable() {
 /// clause cannot be what lets the new receipt through.
 #[tokio::test]
 async fn dropping_the_scaffold_future_releases_the_claim_it_took() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let input = confirmed_scaffold_input(&broker, &shell.id, "打飞机", "b", "canvas").await;
@@ -6844,15 +6406,13 @@ async fn dropping_the_scaffold_future_releases_the_claim_it_took() {
 /// journal/candidate, so its drop is exactly the cleanup under test.
 #[tokio::test]
 async fn a_refused_native_create_approval_cleans_up_the_candidate_state() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let workflow_run_id = format!("wf_drop_create_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability = crate::template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
         &workflow_run_id,
@@ -6938,9 +6498,9 @@ fn dummy_native_approval_event() -> HostEvent {
 #[tokio::test]
 async fn wait_for_native_approval_refuses_a_second_concurrent_wait_for_the_same_app() {
     let root = TempDir::new().expect("tempdir");
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        MockSink::arc(),
+        RecordingSink::arc(),
         None,
         false,
         None,
@@ -6993,9 +6553,9 @@ async fn wait_for_native_approval_refuses_a_second_concurrent_wait_for_the_same_
 #[tokio::test]
 async fn wait_for_native_approval_timeout_arm_names_the_timeout_and_clears_the_pending_entry() {
     let root = TempDir::new().expect("tempdir");
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        MockSink::arc(),
+        RecordingSink::arc(),
         None,
         false,
         None,
@@ -7038,8 +6598,8 @@ async fn wait_for_native_approval_timeout_arm_names_the_timeout_and_clears_the_p
 #[tokio::test]
 async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_operation_failed() {
     let root = TempDir::new().expect("tempdir");
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
         None,
@@ -7076,14 +6636,11 @@ async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_op
     let cancel_failures: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
-            ClientEvent::AppEvent {
-                event:
-                    AppEventDto::LocalAppOperationFailed {
-                        app_id,
-                        message,
-                        request_id: Some(request_id),
-                        ..
-                    },
+            HostEvent::PluginOperationFailed {
+                app_id,
+                message,
+                request_id: Some(request_id),
+                ..
             } if request_id == "req-cancel" => Some((app_id.clone(), message.clone())),
             _ => None,
         })
@@ -7120,14 +6677,11 @@ async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_op
     let timeout_failures: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
-            ClientEvent::AppEvent {
-                event:
-                    AppEventDto::LocalAppOperationFailed {
-                        app_id,
-                        message,
-                        request_id: Some(request_id),
-                        ..
-                    },
+            HostEvent::PluginOperationFailed {
+                app_id,
+                message,
+                request_id: Some(request_id),
+                ..
             } if request_id == "req-timeout-emit" => Some((app_id.clone(), message.clone())),
             _ => None,
         })
@@ -7147,7 +6701,7 @@ async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_op
 
 /// WP8 (corrector): the behavioural test above pins ONE of the three host
 /// copies that used to send an agent to a tool name it cannot call. The
-/// copy that mattered most was a different one — `local_apps_build.rs`'s
+/// copy that mattered most was a different one — `app_build.rs`'s
 /// `validate_dependency_snapshot_files`, reachable from the MODEL-callable
 /// `LocalAppBuild` (`build_app` -> `build_workspace` ->
 /// `build_workspace_locked`) — and a gate that covers only the copy that
@@ -7181,7 +6735,7 @@ async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_op
 /// not.
 #[test]
 fn no_host_error_copy_tells_the_model_to_call_an_operation_with_no_tool_row() {
-    let wired: std::collections::HashSet<&str> = crate::mobile::local_apps_tools::LOCAL_APP_TOOLS
+    let wired: std::collections::HashSet<&str> = crate::tool_names::LOCAL_APP_TOOLS
         .iter()
         .map(|&(_, operation, _)| operation)
         .collect();
@@ -7189,7 +6743,7 @@ fn no_host_error_copy_tells_the_model_to_call_an_operation_with_no_tool_row() {
     // operation that has no tool row: the provider-side operation name and
     // the `LocalApp*` name it WOULD have had.
     let mut dead: Vec<String> = Vec::new();
-    for tool in crate::mobile::local_apps_mcp::LocalAppsMcpTransport::host_tool_catalog() {
+    for tool in crate::mcp_server::LocalAppsMcpTransport::host_tool_catalog() {
         let operation = tool.tool_name().to_string();
         if wired.contains(operation.as_str()) {
             continue;
@@ -7209,50 +6763,38 @@ fn no_host_error_copy_tells_the_model_to_call_an_operation_with_no_tool_row() {
     }
     let verbs = ["use ", "run ", "call ", "retry ", "invoke "];
     let sources = [
+        ("broker.rs", include_str!("../broker.rs")),
+        ("broker/approvals.rs", include_str!("approvals.rs")),
         (
-            "local_apps_host.rs",
-            include_str!("../../local_apps_host.rs"),
+            "broker/bridge_operations.rs",
+            include_str!("bridge_operations.rs"),
         ),
         (
-            "local_apps_host/approvals.rs",
-            include_str!("../approvals.rs"),
+            "broker/data_operations.rs",
+            include_str!("data_operations.rs"),
         ),
         (
-            "local_apps_host/bridge_operations.rs",
-            include_str!("../bridge_operations.rs"),
+            "broker/dependency_install.rs",
+            include_str!("dependency_install.rs"),
         ),
         (
-            "local_apps_host/data_operations.rs",
-            include_str!("../data_operations.rs"),
+            "dependency_integrity.rs",
+            include_str!("../dependency_integrity.rs"),
         ),
         (
-            "local_apps_host/dependency_install.rs",
-            include_str!("../dependency_install.rs"),
+            "broker/dependency_recovery.rs",
+            include_str!("dependency_recovery.rs"),
         ),
         (
-            "local-app-service/src/dependency_integrity.rs",
-            include_str!("../../../../../local-app-service/src/dependency_integrity.rs"),
+            "broker/mcp_publication.rs",
+            include_str!("mcp_publication.rs"),
         ),
         (
-            "local_apps_host/dependency_recovery.rs",
-            include_str!("../dependency_recovery.rs"),
+            "broker/runtime_lifecycle.rs",
+            include_str!("runtime_lifecycle.rs"),
         ),
-        (
-            "local_apps_host/mcp_publication.rs",
-            include_str!("../mcp_publication.rs"),
-        ),
-        (
-            "local_apps_host/runtime_lifecycle.rs",
-            include_str!("../runtime_lifecycle.rs"),
-        ),
-        (
-            "local_apps_host/static_server.rs",
-            include_str!("../static_server.rs"),
-        ),
-        (
-            "local_apps_build.rs",
-            include_str!("../../local_apps_build.rs"),
-        ),
+        ("broker/static_server.rs", include_str!("static_server.rs")),
+        ("app_build.rs", include_str!("../app_build.rs")),
     ];
     let mut hits: Vec<String> = Vec::new();
     for (name, src) in sources {
@@ -7286,7 +6828,7 @@ fn no_host_error_copy_tells_the_model_to_call_an_operation_with_no_tool_row() {
 
 #[tokio::test]
 async fn remove_only_dependency_change_skips_native_confirmation() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -7301,8 +6843,8 @@ async fn remove_only_dependency_change_skips_native_confirmation() {
         .expect("manifest")
         .runtime_profile
         .expect("runtime profile");
-    let contract = crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
-        .expect("runtime contract");
+    let contract =
+        crate::runtime_profiles::contract_for_binding(&binding).expect("runtime contract");
     let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
         .expect("requested dependencies");
     requested.insert("dayjs".into(), "1.11.13".into());
@@ -7374,7 +6916,7 @@ async fn remove_only_dependency_change_skips_native_confirmation() {
 /// straight-line `remove` arm can ever run on.
 #[tokio::test]
 async fn dropping_the_dependency_confirmation_future_clears_the_pending_entry() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (_root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -7418,7 +6960,7 @@ async fn dropping_the_dependency_confirmation_future_clears_the_pending_entry() 
 
 #[tokio::test]
 async fn dependency_change_confirmation_fails_closed_on_tampered_requested_baseline() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -7429,7 +6971,7 @@ async fn dependency_change_confirmation_fails_closed_on_tampered_requested_basel
         .expect("scaffold");
     let workspace = workspace_of(&root, &shell.id);
     fs::write(
-        workspace.join(crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL),
+        workspace.join(crate::runtime_profiles::REQUESTED_FILE_REL),
         "{\n  \"dependencies\": {\n    \"dayjs\": \"1.11.13\"\n  }\n}\n",
     )
     .expect("tamper requested dependency baseline");
@@ -7450,11 +6992,11 @@ async fn dependency_change_confirmation_fails_closed_on_tampered_requested_basel
 
 #[tokio::test]
 async fn dependency_add_uses_dedicated_native_confirmation_before_receipt() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
         Some(runtime.clone()),
@@ -7491,10 +7033,7 @@ async fn dependency_add_uses_dedicated_native_confirmation_before_receipt() {
     let confirmation = timeout(Duration::from_secs(2), async {
         loop {
             if let Some(request) = sink.events().await.into_iter().find_map(|event| {
-                if let ClientEvent::AppEvent {
-                    event: AppEventDto::AppDependencyChangeConfirmationRequested { request },
-                } = event
-                {
+                if let HostEvent::DependencyChangeConfirmationRequested(request) = event {
                     Some(request)
                 } else {
                     None
@@ -7552,11 +7091,11 @@ async fn dependency_add_uses_dedicated_native_confirmation_before_receipt() {
 
 #[tokio::test]
 async fn dependency_confirmation_does_not_wait_on_unrelated_global_build_lock() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
         Some(runtime),
@@ -7593,10 +7132,7 @@ async fn dependency_confirmation_does_not_wait_on_unrelated_global_build_lock() 
     let confirmation = timeout(Duration::from_secs(2), async {
         loop {
             if let Some(request) = sink.events().await.into_iter().find_map(|event| {
-                if let ClientEvent::AppEvent {
-                    event: AppEventDto::AppDependencyChangeConfirmationRequested { request },
-                } = event
-                {
+                if let HostEvent::DependencyChangeConfirmationRequested(request) = event {
                     Some(request)
                 } else {
                     None
@@ -7624,11 +7160,11 @@ async fn dependency_confirmation_does_not_wait_on_unrelated_global_build_lock() 
 
 #[tokio::test]
 async fn dependency_add_denial_does_not_issue_receipt() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
         Some(runtime),
@@ -7663,10 +7199,7 @@ async fn dependency_add_denial_does_not_issue_receipt() {
     let request_id = timeout(Duration::from_secs(2), async {
         loop {
             if let Some(request_id) = sink.events().await.into_iter().find_map(|event| {
-                if let ClientEvent::AppEvent {
-                    event: AppEventDto::AppDependencyChangeConfirmationRequested { request },
-                } = event
-                {
+                if let HostEvent::DependencyChangeConfirmationRequested(request) = event {
                     Some(request.request_id)
                 } else {
                     None
@@ -7702,7 +7235,7 @@ async fn dependency_add_denial_does_not_issue_receipt() {
 
 #[tokio::test]
 async fn dependency_update_resolves_then_verifies_with_frozen_network_denied_install() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -7721,8 +7254,8 @@ async fn dependency_update_resolves_then_verifies_with_frozen_network_denied_ins
         .expect("manifest")
         .runtime_profile
         .expect("runtime profile");
-    let contract = crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
-        .expect("runtime contract");
+    let contract =
+        crate::runtime_profiles::contract_for_binding(&binding).expect("runtime contract");
     let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
         .expect("requested dependency map");
     requested.insert("dayjs".into(), "1.11.13".into());
@@ -7839,7 +7372,7 @@ async fn dependency_update_resolves_then_verifies_with_frozen_network_denied_ins
         "the resolver fixture must not let a changed package reuse the baseline lock"
     );
     let sbom: Value = serde_json::from_slice(
-        &fs::read(workspace.join(crate::mobile::local_app_runtime_profiles::SBOM_FILE_REL))
+        &fs::read(workspace.join(crate::runtime_profiles::SBOM_FILE_REL))
             .expect("updated dependency SBOM"),
     )
     .expect("updated dependency SBOM JSON");
@@ -7862,7 +7395,7 @@ async fn dependency_update_resolves_then_verifies_with_frozen_network_denied_ins
 
 #[tokio::test]
 async fn dependency_update_warm_snapshot_skips_frozen_install() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -7880,8 +7413,8 @@ async fn dependency_update_warm_snapshot_skips_frozen_install() {
         .expect("manifest")
         .runtime_profile
         .expect("runtime profile");
-    let contract = crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
-        .expect("runtime contract");
+    let contract =
+        crate::runtime_profiles::contract_for_binding(&binding).expect("runtime contract");
     let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
         .expect("requested dependency map");
     requested.insert("dayjs".into(), "1.11.13".into());
@@ -7977,7 +7510,7 @@ async fn dependency_update_warm_snapshot_skips_frozen_install() {
         "the committed dependency record must bind the resolved lock digest"
     );
     let sbom: Value = serde_json::from_slice(
-        &fs::read(workspace.join(crate::mobile::local_app_runtime_profiles::SBOM_FILE_REL))
+        &fs::read(workspace.join(crate::runtime_profiles::SBOM_FILE_REL))
             .expect("updated dependency SBOM"),
     )
     .expect("updated dependency SBOM JSON");
@@ -7993,7 +7526,7 @@ async fn dependency_update_warm_snapshot_skips_frozen_install() {
 
 #[tokio::test]
 async fn stale_dependency_receipt_cannot_overwrite_a_newer_committed_baseline() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -8009,8 +7542,8 @@ async fn stale_dependency_receipt_cannot_overwrite_a_newer_committed_baseline() 
         .expect("manifest")
         .runtime_profile
         .expect("runtime profile");
-    let contract = crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
-        .expect("runtime contract");
+    let contract =
+        crate::runtime_profiles::contract_for_binding(&binding).expect("runtime contract");
     let baseline_a_record = service
         .dependency_record(&shell.id)
         .await
@@ -8099,7 +7632,7 @@ async fn stale_dependency_receipt_cannot_overwrite_a_newer_committed_baseline() 
 
 #[tokio::test]
 async fn frozen_dependency_install_failure_rolls_back_and_releases_receipt_claim() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -8119,8 +7652,8 @@ async fn frozen_dependency_install_failure_rolls_back_and_releases_receipt_claim
         .expect("manifest")
         .runtime_profile
         .expect("runtime profile");
-    let contract = crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
-        .expect("runtime contract");
+    let contract =
+        crate::runtime_profiles::contract_for_binding(&binding).expect("runtime contract");
     let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
         .expect("requested dependency map");
     requested.insert("dayjs".into(), "1.11.13".into());
@@ -8185,7 +7718,7 @@ async fn frozen_dependency_install_failure_rolls_back_and_releases_receipt_claim
 
 #[tokio::test]
 async fn dependency_update_rejects_lifecycle_scripts_before_snapshot_and_releases_receipt() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -8205,8 +7738,8 @@ async fn dependency_update_rejects_lifecycle_scripts_before_snapshot_and_release
         .expect("manifest")
         .runtime_profile
         .expect("runtime profile");
-    let contract = crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
-        .expect("runtime contract");
+    let contract =
+        crate::runtime_profiles::contract_for_binding(&binding).expect("runtime contract");
     let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
         .expect("requested dependency map");
     requested.insert("dayjs".into(), "1.11.13".into());
@@ -8266,7 +7799,7 @@ async fn dependency_update_rejects_lifecycle_scripts_before_snapshot_and_release
 
 #[tokio::test]
 async fn dependency_update_rolls_back_authoritative_files_when_finalize_fails() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -8280,9 +7813,8 @@ async fn dependency_update_rolls_back_authoritative_files_when_finalize_fails() 
     let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
     let workspace = root.path().join(layout.workspace_rel());
     let previous_package = fs::read(workspace.join("package.json")).expect("package.json");
-    let previous_requested =
-        fs::read(workspace.join(crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL))
-            .expect("requested.json");
+    let previous_requested = fs::read(workspace.join(crate::runtime_profiles::REQUESTED_FILE_REL))
+        .expect("requested.json");
     let previous_dependency = service
         .dependency_record(&shell.id)
         .await
@@ -8292,8 +7824,8 @@ async fn dependency_update_rolls_back_authoritative_files_when_finalize_fails() 
         .expect("manifest")
         .runtime_profile
         .expect("runtime profile");
-    let contract = crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
-        .expect("runtime contract");
+    let contract =
+        crate::runtime_profiles::contract_for_binding(&binding).expect("runtime contract");
     let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
         .expect("requested dependency map");
     requested.insert("dayjs".into(), "1.11.13".into());
@@ -8330,7 +7862,7 @@ async fn dependency_update_rolls_back_authoritative_files_when_finalize_fails() 
         previous_package
     );
     assert_eq!(
-        fs::read(workspace.join(crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL))
+        fs::read(workspace.join(crate::runtime_profiles::REQUESTED_FILE_REL))
             .expect("restored requested"),
         previous_requested
     );
@@ -8355,7 +7887,7 @@ async fn dependency_update_rolls_back_authoritative_files_when_finalize_fails() 
 
 #[tokio::test]
 async fn dependency_update_builds_before_consuming_and_restores_the_old_build_on_failure() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -8365,7 +7897,7 @@ async fn dependency_update_builds_before_consuming_and_restores_the_old_build_on
         .await
         .expect("scaffold");
     let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
-    let builder = crate::mobile::local_apps_build::LocalAppBuilder {
+    let builder = crate::app_build::LocalAppBuilder {
         executor: broker.build_executor(),
         host: &broker,
     };
@@ -8376,7 +7908,7 @@ async fn dependency_update_builds_before_consuming_and_restores_the_old_build_on
     let built_index = layout
         .root()
         .join(layout.build_rel(false))
-        .join(crate::mobile::local_apps_build::VITE_OUTPUT_DIR)
+        .join(crate::app_build::VITE_OUTPUT_DIR)
         .join("index.html");
     let old_index = fs::read(&built_index).expect("old build output");
 
@@ -8385,8 +7917,8 @@ async fn dependency_update_builds_before_consuming_and_restores_the_old_build_on
         .expect("manifest")
         .runtime_profile
         .expect("runtime profile");
-    let contract = crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
-        .expect("runtime contract");
+    let contract =
+        crate::runtime_profiles::contract_for_binding(&binding).expect("runtime contract");
     let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
         .expect("requested dependency map");
     requested.insert("dayjs".into(), "1.11.13".into());
@@ -8424,7 +7956,7 @@ async fn dependency_update_builds_before_consuming_and_restores_the_old_build_on
         fs::read(&built_index).expect("restored old build"),
         old_index
     );
-    crate::mobile::local_apps_build::validate_build_for_launch(&layout)
+    crate::app_build::validate_build_for_launch(&layout)
         .expect("restored build receipt remains launchable");
 
     runtime.set_fail_build(false);
@@ -8436,7 +7968,7 @@ async fn dependency_update_builds_before_consuming_and_restores_the_old_build_on
         .await
         .expect("failed build releases the receipt claim for retry");
     assert_eq!(retried["ok"], true);
-    crate::mobile::local_apps_build::validate_build_for_launch(&layout)
+    crate::app_build::validate_build_for_launch(&layout)
         .expect("successful dependency update writes a launchable build receipt");
     let replay = broker
         .update_dependencies(json!({
@@ -8453,7 +7985,7 @@ async fn dependency_update_builds_before_consuming_and_restores_the_old_build_on
 
 #[tokio::test]
 async fn dependency_update_cold_start_recovers_an_in_progress_journal() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -8463,7 +7995,7 @@ async fn dependency_update_cold_start_recovers_an_in_progress_journal() {
         .await
         .expect("scaffold");
     let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
-    let builder = crate::mobile::local_apps_build::LocalAppBuilder {
+    let builder = crate::app_build::LocalAppBuilder {
         executor: broker.build_executor(),
         host: &broker,
     };
@@ -8479,7 +8011,7 @@ async fn dependency_update_cold_start_recovers_an_in_progress_journal() {
     let build_index = root
         .path()
         .join(layout.build_rel(false))
-        .join(crate::mobile::local_apps_build::VITE_OUTPUT_DIR)
+        .join(crate::app_build::VITE_OUTPUT_DIR)
         .join("index.html");
     let old_build_index = fs::read(&build_index).expect("old build output");
     let old_dependency = service
@@ -8531,9 +8063,9 @@ async fn dependency_update_cold_start_recovers_an_in_progress_journal() {
 
     // The broker constructor runs recovery before AppService::load, so the
     // service observes the same exact old dependency record as disk.
-    let restarted = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let restarted = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        Arc::new(NoopClientEventSink),
+        Arc::new(DiscardSink),
         Some(runtime),
         false,
         None,
@@ -8577,7 +8109,7 @@ async fn dependency_update_cold_start_recovers_an_in_progress_journal() {
 
 #[tokio::test]
 async fn dependency_update_cold_start_cleans_a_committed_journal_without_rollback() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -8587,7 +8119,7 @@ async fn dependency_update_cold_start_cleans_a_committed_journal_without_rollbac
         .await
         .expect("scaffold");
     let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
-    let builder = crate::mobile::local_apps_build::LocalAppBuilder {
+    let builder = crate::app_build::LocalAppBuilder {
         executor: broker.build_executor(),
         host: &broker,
     };
@@ -8639,7 +8171,7 @@ async fn dependency_update_cold_start_cleans_a_committed_journal_without_rollbac
     let build_index = root
         .path()
         .join(layout.build_rel(false))
-        .join(crate::mobile::local_apps_build::VITE_OUTPUT_DIR)
+        .join(crate::app_build::VITE_OUTPUT_DIR)
         .join("index.html");
     fs::write(&build_index, b"committed-new-build").expect("committed build");
     fs::create_dir_all(
@@ -8656,9 +8188,9 @@ async fn dependency_update_cold_start_cleans_a_committed_journal_without_rollbac
     drop(broker);
     drop(service);
 
-    let restarted = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let restarted = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        Arc::new(NoopClientEventSink),
+        Arc::new(DiscardSink),
         Some(runtime),
         false,
         None,
@@ -8708,7 +8240,7 @@ async fn dependency_update_cold_start_cleans_a_committed_journal_without_rollbac
 /// above still passes.
 #[tokio::test]
 async fn scaffold_commits_all_four_fields_and_writes_the_formal_contract() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let guided = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
@@ -8768,11 +8300,7 @@ async fn scaffold_commits_all_four_fields_and_writes_the_formal_contract() {
         contract.contains("This app's surface is `canvas`"),
         "the contract must be the one for the CONFIRMED surface: {contract}"
     );
-    for workflow in [
-        crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID,
-        crate::mobile::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID,
-        crate::mobile::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID,
-    ] {
+    for workflow in crate::test_support::RESERVED_WORKFLOW_IDS {
         assert!(
             !contract.contains(workflow),
             "the contract must not name a build workflow: the host authorizes one and \
@@ -8833,11 +8361,7 @@ async fn lingxi_md_contract_prose_names_no_workflow() {
     // The needle set is derived from the PRODUCTION registry, never a
     // pair of names typed in here. Phase 9's live source is the plugin
     // workflow inventory rather than the removed built-in registry.
-    let workflows = vec![
-        crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID,
-        crate::mobile::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID,
-        crate::mobile::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID,
-    ];
+    let workflows = crate::test_support::RESERVED_WORKFLOW_IDS.to_vec();
     // An empty needle set would make every assertion below vacuously
     // true, which is the failure mode this whole test exists to prevent.
     assert!(
@@ -8847,7 +8371,7 @@ async fn lingxi_md_contract_prose_names_no_workflow() {
     );
 
     for surface in ["dom", "canvas"] {
-        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let runtime = MockBuildExecutor::new();
         let (root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
 
@@ -8930,7 +8454,7 @@ async fn lingxi_md_contract_prose_names_no_workflow() {
 /// every `lib/` file the profile's OWN `.lingxi/source-policy.json`
 /// reserves. That policy is the same set
 /// `permission::workspace_lease::host_owned_relative` and
-/// `local_apps_build::restore_host_managed_files` enforce, so a file the
+/// `app_build::restore_host_managed_files` enforce, so a file the
 /// prose leaves out is a file the agent is never told it may not edit:
 /// the lease accepts the `Edit`, the next build silently reverts it, and
 /// the only trace is a `tracing::warn!` while the model loops against a
@@ -8957,14 +8481,11 @@ async fn the_formal_contract_names_every_host_managed_helper_its_profile_reserve
         // `babylon_3d` is deliberately gated out of this host build
         // (`UNAVAILABLE_PROFILES`), so it has no current binding to
         // render. Skipping it is why `checked` is asserted below.
-        let Ok(binding) =
-            crate::mobile::local_app_runtime_profiles::current_binding_for_family(family)
-        else {
+        let Ok(binding) = crate::runtime_profiles::current_binding_for_family(family) else {
             continue;
         };
-        let profile_contract =
-            crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
-                .expect("the current binding resolves to its contract");
+        let profile_contract = crate::runtime_profiles::contract_for_binding(&binding)
+            .expect("the current binding resolves to its contract");
         let policy_bytes = profile_contract
             .managed_files
             .iter()
@@ -9062,7 +8583,7 @@ async fn workspace_contracts_name_no_local_app_tool_outside_local_app_tools() {
     assert_only_real_tool_names(&guided, "the guided contract");
 
     for surface in ["dom", "canvas"] {
-        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let runtime = MockBuildExecutor::new();
         let (root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
         let input =
@@ -9092,8 +8613,7 @@ async fn workspace_contracts_name_no_local_app_tool_outside_local_app_tools() {
 /// scanning one scans both.
 #[test]
 fn shipped_prompt_files_name_no_tool_outside_local_app_tools() {
-    let skill =
-        include_str!("../../../../../plugins/lingxi-local-app/skills/create-local-app/SKILL.md");
+    let skill = include_str!("../../../plugins/lingxi-local-app/skills/create-local-app/SKILL.md");
     // Vacuity guard: a gate that scans the wrong file, or a file that
     // stopped naming tools at all, must not read as "all clear".
     assert!(
@@ -9291,7 +8811,7 @@ async fn the_production_landing_wipes_what_the_interview_wrote() {
         "src/stores/premature-store.js",
         "notes.md",
     ];
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let workspace = workspace_of(&root, &shell.id);
@@ -9347,7 +8867,7 @@ async fn the_production_landing_wipes_what_the_interview_wrote() {
 /// drop the user's choice.
 #[tokio::test]
 async fn omitting_the_workflow_model_preserves_the_one_the_create_chose() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (_root, service, broker) = create_broker(false, Some(runtime)).await;
     let record = service
         .create_app_with_git_and_workflow_model_and_initializer(
@@ -9386,7 +8906,7 @@ async fn omitting_the_workflow_model_preserves_the_one_the_create_chose() {
 /// finished-looking app in the library that still opens the interview.
 #[tokio::test]
 async fn a_failed_landing_persists_none_of_the_four_fields() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     break_the_final_landing_step(&root, &shell.id);
@@ -9423,7 +8943,7 @@ async fn a_failed_landing_persists_none_of_the_four_fields() {
 /// retry would be refused forever and the draft would be bricked.
 #[tokio::test]
 async fn the_reservation_is_released_on_the_failure_path_so_a_retry_can_land() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     break_the_final_landing_step(&root, &shell.id);
@@ -9450,7 +8970,7 @@ async fn the_reservation_is_released_on_the_failure_path_so_a_retry_can_land() {
 /// call failed for some unrelated reason.
 #[tokio::test]
 async fn two_concurrent_scaffolds_reject_the_second_at_the_in_process_reservation() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (_root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let input = confirmed_scaffold_input(&broker, &shell.id, "A", "b", "dom").await;
@@ -9483,7 +9003,7 @@ async fn two_concurrent_scaffolds_reject_the_second_at_the_in_process_reservatio
 /// [`the_landing_takes_the_build_lock_first_and_hands_it_back_held`].
 #[tokio::test]
 async fn a_concurrent_delete_cannot_orphan_a_scaffold_in_flight() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let app_dir = root.path().join("apps").join(&shell.id);
@@ -9519,7 +9039,7 @@ async fn the_landing_takes_the_build_lock_first_and_hands_it_back_held() {
     let mut proposed = shell.clone();
     proposed.name = "A".into();
     proposed.brief = "b".into();
-    let binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
+    let binding = crate::runtime_profiles::current_binding_for_family(
         local_apps::AppRuntimeProfile::ReactDom,
     )
     .expect("published react-dom runtime profile");
@@ -9593,7 +9113,7 @@ async fn the_landing_takes_the_build_lock_first_and_hands_it_back_held() {
 /// refusal is what stands between a stray tool call and the user's work.
 #[tokio::test]
 async fn scaffolding_a_formed_app_is_rejected() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     broker
@@ -9610,11 +9130,9 @@ async fn scaffolding_a_formed_app_is_rejected() {
     .expect("write user source");
 
     let workflow_run_id = format!("wf_rescaffold_{}", uuid::Uuid::new_v4().simple());
-    let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-    let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
+    let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+        .expect("template catalog");
+    let selector_capability = crate::template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
         &workflow_run_id,
@@ -9717,17 +9235,14 @@ async fn stage_create_rejects_an_over_long_name_or_brief() {
         brief: &str,
     ) -> Value {
         let workflow_run_id = format!("wf_bound_{}", uuid::Uuid::new_v4().simple());
-        let catalog =
-            crate::mobile::local_app_template_catalog::catalog_view(
-            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-        ).expect("template catalog");
-        let selector_capability =
-            crate::mobile::local_app_template_catalog::issue_selector_capability(
-                &broker.root,
-                app_id,
-                &workflow_run_id,
-            )
-            .expect("selector capability");
+        let catalog = crate::template_catalog::catalog_view(&crate::test_support::CheckedInBundle)
+            .expect("template catalog");
+        let selector_capability = crate::template_catalog::issue_selector_capability(
+            &broker.root,
+            app_id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
         let selection = broker
             .validate_template_selection(json!({
                 "app_id": app_id,
@@ -9796,7 +9311,7 @@ async fn stage_create_rejects_an_over_long_name_or_brief() {
 /// and why renaming an app is not offered at all.
 #[tokio::test]
 async fn the_manifest_name_may_only_be_written_before_any_database_exists() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(false, Some(runtime)).await;
     let shell = shell_app_fixture(&broker, &service).await;
     let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
@@ -9822,7 +9337,7 @@ async fn the_manifest_name_may_only_be_written_before_any_database_exists() {
 
     let artifacts = scaffold_runtime_profile(
         Some(
-            crate::mobile::local_app_runtime_profiles::current_binding_for_family(
+            crate::runtime_profiles::current_binding_for_family(
                 local_apps::AppRuntimeProfile::ReactDom,
             )
             .expect("published react-dom runtime profile"),
@@ -10155,7 +9670,7 @@ fn dependency_snapshot_inventory_is_verified_and_reused_for_sbom() {
         dependency_snapshot_inventory_path(&snapshot).is_file(),
         "verified snapshots carry their package inventory beside the immutable tree"
     );
-    let binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
+    let binding = crate::runtime_profiles::current_binding_for_family(
         local_apps::AppRuntimeProfile::ReactDom,
     )
     .expect("published react-dom runtime profile");
@@ -10176,7 +9691,7 @@ fn dependency_snapshot_inventory_is_verified_and_reused_for_sbom() {
             .any(|package| package["name"] == "vite"),
         "the cached package inventory must feed the profile SBOM"
     );
-    let canvas_binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
+    let canvas_binding = crate::runtime_profiles::current_binding_for_family(
         local_apps::AppRuntimeProfile::Canvas2d,
     )
     .expect("published canvas runtime profile");
@@ -10514,7 +10029,7 @@ fn dependency_versions_reject_non_registry_and_alias_protocols() {
 
 #[tokio::test]
 async fn dependency_install_preserves_current_toolchain_and_cache_identity() {
-    use crate::mobile::local_apps_build::{scaffold_workspace, LocalAppBuildTarget};
+    use crate::app_build::{scaffold_workspace, LocalAppBuildTarget};
     for target in [
         LocalAppBuildTarget::ReactDomR4,
         LocalAppBuildTarget::Canvas2dR4,
@@ -10522,10 +10037,10 @@ async fn dependency_install_preserves_current_toolchain_and_cache_identity() {
         let toolchain = RuntimeToolchain::Current;
         let root = TempDir::new().unwrap();
         let service = test_service(&root).await;
-        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let runtime = MockBuildExecutor::new();
+        let broker = crate::test_support::broker_with_sink(
             root.path().to_path_buf(),
-            MockSink::arc(),
+            RecordingSink::arc(),
             Some(runtime.clone()),
             false,
             None,
@@ -10609,10 +10124,10 @@ async fn dependency_install_preserves_current_toolchain_and_cache_identity() {
 async fn dependency_staging_preserves_the_pinned_widget_importer() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        MockSink::arc(),
-        Some(MockMobileLinuxRuntime::new(Duration::ZERO)),
+        RecordingSink::arc(),
+        Some(MockBuildExecutor::new()),
         false,
         None,
     );
@@ -10650,18 +10165,18 @@ async fn dependency_staging_preserves_the_pinned_widget_importer() {
 #[test]
 fn pnpm_lock_documents_preserve_legacy_and_reject_ambiguous_graphs() {
     let legacy = include_bytes!(
-        "../../../../../plugins/lingxi-local-app/assets/templates/react-dom/r4/pnpm-lock.yaml"
+        "../../../plugins/lingxi-local-app/assets/templates/react-dom/r4/pnpm-lock.yaml"
     );
     let legacy_package = include_bytes!(
-        "../../../../../plugins/lingxi-local-app/assets/templates/react-dom/r4/package.json"
+        "../../../plugins/lingxi-local-app/assets/templates/react-dom/r4/package.json"
     );
     validate_resolved_dependency_lock(legacy_package, legacy)
         .expect("pnpm 11 single-document lock");
     let current = include_str!(
-        "../../../../../plugins/lingxi-local-app/assets/templates/react-dom/r4/pnpm-lock.yaml"
+        "../../../plugins/lingxi-local-app/assets/templates/react-dom/r4/pnpm-lock.yaml"
     );
     let package = include_bytes!(
-        "../../../../../plugins/lingxi-local-app/assets/templates/react-dom/r4/package.json"
+        "../../../plugins/lingxi-local-app/assets/templates/react-dom/r4/package.json"
     );
     validate_resolved_dependency_lock(package, current.as_bytes())
         .expect("pnpm 12 configuration plus dependency documents");
@@ -10710,12 +10225,11 @@ fn pnpm_lock_documents_preserve_legacy_and_reject_ambiguous_graphs() {
 
 #[test]
 fn resolved_dependency_lock_must_match_effective_root_specifiers() {
-    let binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
+    let binding = crate::runtime_profiles::current_binding_for_family(
         local_apps::AppRuntimeProfile::ReactDom,
     )
     .expect("react binding");
-    let contract = crate::mobile::local_app_runtime_profiles::contract_for_binding(&binding)
-        .expect("react contract");
+    let contract = crate::runtime_profiles::contract_for_binding(&binding).expect("react contract");
     let package =
         LocalAppsHostBroker::dependency_manifest_bytes(contract).expect("profile package.json");
     let lockfile = contract
@@ -10889,7 +10403,7 @@ fn dependency_sbom_spdx_ids_are_collision_free_for_punctuation_variants() {
     fs::create_dir_all(&node_modules).expect("node_modules");
     write_fixture_package_manifest(&node_modules, "a.b", "1_0");
     write_fixture_package_manifest(&node_modules, "a-b", "1.0");
-    let binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
+    let binding = crate::runtime_profiles::current_binding_for_family(
         local_apps::AppRuntimeProfile::ReactDom,
     )
     .expect("binding");
@@ -11289,7 +10803,7 @@ async fn response_limit_is_enforced_while_streaming() {
 
 #[tokio::test]
 async fn concurrent_starts_reuse_one_static_runtime() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::from_millis(40));
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(true, Some(runtime.clone())).await;
     let app_id = create_app_fixture(&root, &service, "Concurrent").await;
 
@@ -11311,7 +10825,7 @@ async fn concurrent_starts_reuse_one_static_runtime() {
         })
         .collect();
     assert!(urls.windows(2).all(|pair| pair[0] == pair[1]));
-    assert_eq!(runtime.spawn_count(), 0);
+    assert_eq!(runtime.run_count(), 0);
     assert_eq!(broker.runtimes.lock().await.len(), 1);
     assert_eq!(
         service
@@ -11343,8 +10857,8 @@ async fn static_runtimes_are_not_counted_against_the_node_quota() {
 
 #[tokio::test]
 async fn vite_apps_use_the_static_runtime_even_in_a_full_build() {
-    let mobile_linux = MockMobileLinuxRuntime::new(Duration::ZERO);
-    let (root, service, broker) = create_broker(true, Some(mobile_linux.clone())).await;
+    let executor = MockBuildExecutor::new();
+    let (root, service, broker) = create_broker(true, Some(executor.clone())).await;
     let app_id = create_app_fixture(&root, &service, "Vite Static").await;
 
     broker
@@ -11352,7 +10866,7 @@ async fn vite_apps_use_the_static_runtime_even_in_a_full_build() {
         .await
         .expect("Vite static runtime starts");
 
-    assert_eq!(mobile_linux.spawn_count(), 0);
+    assert_eq!(executor.run_count(), 0);
     assert_eq!(
         service
             .runtime_record(&app_id)
@@ -11365,8 +10879,8 @@ async fn vite_apps_use_the_static_runtime_even_in_a_full_build() {
 
 #[tokio::test]
 async fn legacy_next_runtime_mode_is_migrated_on_start() {
-    let mobile_linux = MockMobileLinuxRuntime::new(Duration::ZERO);
-    let (root, service, broker) = create_broker(true, Some(mobile_linux.clone())).await;
+    let executor = MockBuildExecutor::new();
+    let (root, service, broker) = create_broker(true, Some(executor.clone())).await;
     let app_id = create_app_fixture(&root, &service, "Legacy Mode").await;
     service
         .set_runtime_mode(&app_id, AppRuntimeMode::NextProduction)
@@ -11378,7 +10892,7 @@ async fn legacy_next_runtime_mode_is_migrated_on_start() {
         .await
         .expect("legacy runtime mode starts through static export");
 
-    assert_eq!(mobile_linux.spawn_count(), 0);
+    assert_eq!(executor.run_count(), 0);
     assert_eq!(
         service
             .runtime_record(&app_id)
@@ -11441,7 +10955,7 @@ async fn derived_app_ports_stay_below_every_shipped_platform_ephemeral_floor() {
 /// stopped -> failed for app <id>".
 #[tokio::test]
 async fn a_squatted_app_port_reports_the_squat_not_a_bookkeeping_rejection() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(true, Some(runtime)).await;
     let app_id = create_app_fixture(&root, &service, "Squatted").await;
     let squatter = TcpListener::bind(("127.0.0.1", 0))
@@ -12052,7 +11566,7 @@ async fn the_pinned_app_port_can_never_be_reassigned() {
 
 #[tokio::test]
 async fn explicit_stop_remains_stopped() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(true, Some(runtime)).await;
     let app_id = create_app_fixture(&root, &service, "Stop").await;
 
@@ -12121,7 +11635,7 @@ async fn abandoned_runtime_reservation_is_released_for_the_next_start() {
 
 #[tokio::test]
 async fn stop_during_start_keeps_the_reservation_intact() {
-    let runtime = MockMobileLinuxRuntime::new(Duration::from_millis(40));
+    let runtime = MockBuildExecutor::new();
     let (root, service, broker) = create_broker(true, Some(runtime)).await;
     let app_id = create_app_fixture(&root, &service, "Race").await;
 
@@ -12148,20 +11662,6 @@ fn declare_capability(root: &TempDir, app_id: &str, capability: AppCapability) {
     local_apps::save_manifest(&layout, &manifest).expect("declare capability");
 }
 
-/// Build the host facts a native client reports for one device.
-fn host_environment(
-    host_os: lingxi_core::host::MobileHostOs,
-    device_class: lingxi_core::host::MobileDeviceClass,
-) -> lingxi_core::host::MobileHostEnvironment {
-    lingxi_core::host::MobileHostEnvironment::new(
-        host_os,
-        Some("19.0".into()),
-        device_class,
-        lingxi_core::host::MobileExecutionTarget::PhysicalDevice,
-        lingxi_core::host::MobileLaunchMode::Interactive,
-    )
-}
-
 /// The reported iPhone failure: the agent was asked to declare the native
 /// device context, but the only device facts it can see are the runtime
 /// reminder's `Host OS: iOS` plus `Device class: phone` — and
@@ -12172,19 +11672,19 @@ fn host_environment(
 async fn the_host_stamps_the_iphone_device_context_the_agent_cannot_name() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        MockSink::arc(),
+        RecordingSink::arc(),
         None,
         false,
         None,
     );
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
-        .attach_device_context(device_context_of(&host_environment(
-            lingxi_core::host::MobileHostOs::Ios,
-            lingxi_core::host::MobileDeviceClass::Phone,
-        )))
+        .attach_device_context(local_apps::DeviceContext::from_host_facts(
+            local_apps::HostOs::Ios,
+            local_apps::HostDeviceClass::Phone
+        ))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Device").await;
 
@@ -12210,19 +11710,19 @@ async fn the_host_stamps_the_iphone_device_context_the_agent_cannot_name() {
 async fn the_host_stamps_the_android_tablet_device_context() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        MockSink::arc(),
+        RecordingSink::arc(),
         None,
         false,
         None,
     );
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
-        .attach_device_context(device_context_of(&host_environment(
-            lingxi_core::host::MobileHostOs::Android,
-            lingxi_core::host::MobileDeviceClass::Tablet,
-        )))
+        .attach_device_context(local_apps::DeviceContext::from_host_facts(
+            local_apps::HostOs::Android,
+            local_apps::HostDeviceClass::Tablet
+        ))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Tablet").await;
 
@@ -12241,19 +11741,19 @@ async fn the_host_stamps_the_android_tablet_device_context() {
 async fn an_unclassified_host_records_no_device_context() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        MockSink::arc(),
+        RecordingSink::arc(),
         None,
         false,
         None,
     );
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
-        .attach_device_context(device_context_of(&host_environment(
-            lingxi_core::host::MobileHostOs::Ios,
-            lingxi_core::host::MobileDeviceClass::Unknown,
-        )))
+        .attach_device_context(local_apps::DeviceContext::from_host_facts(
+            local_apps::HostOs::Ios,
+            local_apps::HostDeviceClass::Unknown
+        ))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Unclassified").await;
 
@@ -12271,19 +11771,19 @@ async fn an_unclassified_host_records_no_device_context() {
 async fn an_agent_supplied_device_context_never_overrides_the_host() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        MockSink::arc(),
+        RecordingSink::arc(),
         None,
         false,
         None,
     );
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
-        .attach_device_context(device_context_of(&host_environment(
-            lingxi_core::host::MobileHostOs::Ios,
-            lingxi_core::host::MobileDeviceClass::Tablet,
-        )))
+        .attach_device_context(local_apps::DeviceContext::from_host_facts(
+            local_apps::HostOs::Ios,
+            local_apps::HostDeviceClass::Tablet
+        ))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Ignored").await;
 
@@ -12299,7 +11799,7 @@ async fn an_agent_supplied_device_context_never_overrides_the_host() {
 
 /// The surface is fixed at creation, and `update_manifest` is the one
 /// mutation path an agent can reach after that. Its refusal was the only
-/// member of the family without a test — `create` (`local_apps_mcp.rs`:
+/// member of the family without a test — `create` (`mcp_server.rs`:
 /// `create_rejects_runtime_profile_and_surface_overrides`), `scaffold`
 /// (`scaffold_rejects_an_empty_brief_and_an_unknown_surface`) and the
 /// shell-mode create (`host.rs`:
@@ -12314,9 +11814,9 @@ async fn an_agent_supplied_device_context_never_overrides_the_host() {
 async fn update_manifest_rejects_a_caller_supplied_surface() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
-        MockSink::arc(),
+        RecordingSink::arc(),
         None,
         false,
         None,
@@ -12349,8 +11849,8 @@ async fn update_manifest_rejects_a_caller_supplied_surface() {
 async fn an_undeclared_capability_is_refused_without_prompting() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
         None,
@@ -12383,8 +11883,8 @@ async fn an_undeclared_capability_is_refused_without_prompting() {
 async fn a_declared_capability_with_a_persisted_grant_passes_silently() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
         None,
@@ -12418,8 +11918,8 @@ async fn a_declared_capability_with_a_persisted_grant_passes_silently() {
 async fn a_declared_capability_denial_carries_the_permission_denied_code() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
         None,
@@ -12436,11 +11936,8 @@ async fn a_declared_capability_denial_carries_the_permission_denied_code() {
         tokio::spawn(async move {
             loop {
                 for event in sink.events().await {
-                    if let ClientEvent::AppEvent {
-                        event: AppEventDto::AppCapabilityRequested { request },
-                    } = event
-                    {
-                        assert_eq!(request.capability, AppCapabilityKindDto::Camera);
+                    if let HostEvent::CapabilityRequested(request) = event {
+                        assert_eq!(request.capability, CapabilityKind::Camera);
                         assert!(
                             broker
                                 .resolve_capability(
@@ -12554,7 +12051,7 @@ fn static_accept_errors_are_retried_but_not_forever() {
     // Held for the whole test: a dropped sender would end the loop through
     // the SHUTDOWN arm and prove nothing about the error bound.
     let (_shutdown, receiver) = oneshot::channel();
-    let join = crate::mobile::local_apps_profile::worker_runtime().spawn(run_static_server(
+    let join = crate::worker::worker_runtime().spawn(run_static_server(
         listener,
         root.path().to_path_buf(),
         receiver,
@@ -12624,7 +12121,7 @@ fn a_dead_static_server_fails_the_runtime_record_and_frees_the_entry() {
             listener,
             root.path()
                 .join(layout.build_rel(false))
-                .join(crate::mobile::local_apps_build::VITE_OUTPUT_DIR),
+                .join(crate::app_build::VITE_OUTPUT_DIR),
             receiver,
         );
 
@@ -12670,499 +12167,110 @@ fn a_dead_static_server_fails_the_runtime_record_and_frees_the_entry() {
     });
 }
 
-// ------------------------------------------------------------------
-// Task 9: the pinned init session's title.
-//
-// A shell app's init session is minted while `record.name` is still the
-// `untitled` placeholder, and that title lands in a PERSISTED session
-// directory. Scaffolding renames it — but only when the user has not
-// renamed it first, and the boot sweep must apply the SAME rule.
-// ------------------------------------------------------------------
-
-/// A shell app with a pinned init session, plus everything needed to read
-/// and rewrite that session's title.
-struct PinnedShell {
-    root: TempDir,
-    service: Arc<AppService>,
-    broker: Arc<LocalAppsHostBroker>,
-    lingxi_home: PathBuf,
-    fs: Arc<dyn lingxi_core::host::FileSystem>,
-    app_id: String,
-    init_session_id: String,
-    /// Captured at creation so the transcript path is derived exactly the
-    /// way production derives it, from the record's own workspace.
-    workspace_rel: String,
+/// What the broker tells its conversation host about a scaffold, and how the
+/// host answers. The host is the seam: the runtime's real one renames the app's
+/// pinned session, and the runtime's own tests run that against real files.
+struct RecordingConversations {
+    reported: std::sync::Mutex<Vec<local_apps::AppRecord>>,
+    answer: Result<bool, String>,
 }
 
-impl PinnedShell {
-    fn transcript(&self) -> PathBuf {
-        self.lingxi_home
-            .join("projects")
-            .join(session::jsonl::path::project_dir_name(
-                &canonical_cwd_string(&self.root.path().join(&self.workspace_rel)),
-            ))
-            .join(format!("{}.jsonl", self.init_session_id))
+impl RecordingConversations {
+    fn answering(answer: Result<bool, String>) -> Arc<Self> {
+        Arc::new(Self {
+            reported: std::sync::Mutex::new(Vec::new()),
+            answer,
+        })
     }
 
-    /// The title the session catalog would resolve for this session.
-    fn title(&self) -> String {
-        let transcript = fs::read_to_string(self.transcript()).expect("read the pinned transcript");
-        latest_custom_title(&transcript, &self.init_session_id)
-            .expect("the pinned session always carries a custom-title")
-            .0
-    }
-
-    /// The user renaming the session themselves — `/rename`'s channel
-    /// (`append_custom_title`), which carries NO `mobileEmptySession`.
-    async fn user_rename(&self, title: &str) {
-        session::jsonl::writer::JsonlWriter::new(self.transcript(), self.fs.clone())
-            .append_custom_title(&self.init_session_id, title)
-            .await
-            .expect("user rename");
-    }
-
-    /// Run the transcript past `JsonlWriter`'s REAL 32 KiB metadata
-    /// backstop, which is what an interview of any length does to this
-    /// transcript.
-    ///
-    /// Deliberately NOT a hand-written unmarked `custom-title` line: the
-    /// record has to come out of `plan_re_append` itself, so the test
-    /// keeps pinning the production behaviour if that rebuild ever changes
-    /// shape. `append_file_history_snapshot` accounts its bytes against
-    /// the backstop counter without polling it; the next side-record
-    /// append is what fires the poll. Both are ordinary public writer
-    /// calls — no test-only hook.
-    async fn trip_the_metadata_backstop(&self) {
-        let writer = session::jsonl::writer::JsonlWriter::new(self.transcript(), self.fs.clone());
-        writer
-            .append_file_history_snapshot(&json!({
-                "type": "file-history-snapshot",
-                "sessionId": self.init_session_id,
-                "messageId": "interview",
-                "snapshot": "x".repeat(
-                    session::jsonl::re_append::METADATA_REAPPEND_BACKSTOP_BYTES,
-                ),
-            }))
-            .await
-            .expect("bulk interview transcript");
-        writer
-            .append_permission_mode("default")
-            .await
-            .expect("the append that polls the backstop");
-        assert!(
-            !self.latest_title_record_carries_the_marker(),
-            "the backstop must really have re-emitted the title UNMARKED — without \
-             that this test proves nothing"
-        );
-    }
-
-    /// Whether the LAST `custom-title` on disk still carries
-    /// `mobileEmptySession`. Only a probe: nothing in production may
-    /// decide anything from the last record alone.
-    fn latest_title_record_carries_the_marker(&self) -> bool {
-        let transcript = fs::read_to_string(self.transcript()).expect("read the pinned transcript");
-        let mut marked = false;
-        for line in transcript.lines() {
-            let Ok(value) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if value.get("type").and_then(Value::as_str) != Some("custom-title")
-                || value.get("sessionId").and_then(Value::as_str)
-                    != Some(self.init_session_id.as_str())
-            {
-                continue;
-            }
-            marked = value.get("mobileEmptySession").and_then(Value::as_u64) == Some(1);
-        }
-        marked
-    }
-
-    async fn scaffold(&self, name: &str) -> Result<Value, String> {
-        let input = confirmed_scaffold_input(
-            &self.broker,
-            &self.app_id,
-            name,
-            "a confirmed brief",
-            "canvas",
-        )
-        .await;
-        self.broker.scaffold_shell_app_value(input).await
-    }
-
-    async fn run_boot_backfill_sweep(&self) {
-        crate::mobile::host::run_app_boot_backfill_sweep(
-            self.lingxi_home.clone(),
-            self.root.path().to_string_lossy().to_string(),
-            self.root.path().to_path_buf(),
-            self.fs.clone(),
-            self.service.clone(),
-            self.broker.clone(),
-        )
-        .await;
+    fn reported(&self) -> Vec<local_apps::AppRecord> {
+        self.reported.lock().expect("reported").clone()
     }
 }
 
-/// The "+" button's state: an unscaffolded shell whose pinned init session
-/// is titled with the `untitled` placeholder.
-async fn pinned_shell() -> PinnedShell {
-    let root = TempDir::new().expect("tempdir");
-    let lingxi_home = root.path().join(".lingxi");
-    fs::create_dir_all(&lingxi_home).expect("create lingxi home");
-    let fs_impl: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
-        platform_posix_minimal::PosixFileSystem::new(root.path().to_path_buf()),
-    );
-    let service = test_service(&root).await;
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
-        root.path().to_path_buf(),
-        Arc::new(NoopClientEventSink),
-        Some(MockMobileLinuxRuntime::new(Duration::ZERO)),
-        false,
-        None,
-    );
-    assert!(broker.attach_service(service.clone()).is_ok());
-    assert!(broker
-        .attach_conversations(SessionTitles::new(
-            SessionCatalog {
-                lingxi_home: lingxi_home.clone(),
-                fs: fs_impl.clone(),
-            },
-            root.path().to_path_buf(),
-        ))
-        .is_ok());
+#[async_trait]
+impl crate::host::ConversationHost for RecordingConversations {
+    async fn app_scaffolded(&self, record: &local_apps::AppRecord) -> Result<bool, String> {
+        self.reported.lock().expect("reported").push(record.clone());
+        self.answer.clone()
+    }
+}
 
-    let record = service
-        .create_app_with_mode(None, "", None, local_apps::CreateMode::Shell, None)
+#[tokio::test]
+async fn a_committed_scaffold_is_reported_to_the_conversation_host_once() {
+    let (_root, service, broker) = create_broker(false, Some(MockBuildExecutor::new())).await;
+    let conversations = RecordingConversations::answering(Ok(true));
+    assert!(broker.attach_conversations(conversations.clone()).is_ok());
+    let shell = shell_app_fixture(&broker, &service).await;
+    assert!(
+        conversations.reported().is_empty(),
+        "creating the shell is not a scaffold, so nothing is reported yet"
+    );
+
+    let input =
+        confirmed_scaffold_input(&broker, &shell.id, "打飞机", "一个竖版射击小游戏", "canvas")
+            .await;
+    broker
+        .scaffold_shell_app_value(input)
         .await
-        .expect("create the shell app");
-    assert!(!record.scaffolded);
-    assert_eq!(record.name, local_apps::PLACEHOLDER_APP_NAME);
+        .expect("scaffold");
 
-    let init_session_id = crate::mobile::host::mint_app_init_session(
-        &lingxi_home,
-        &root.path().to_string_lossy(),
-        root.path(),
-        fs_impl.clone(),
-        &record,
-    )
-    .await
-    .expect("mint the pinned init session");
-    service
-        .set_init_session(&record.id, &init_session_id)
+    let reported = conversations.reported();
+    assert_eq!(reported.len(), 1, "exactly one report per scaffold");
+    assert_eq!(reported[0].id, shell.id);
+    assert_eq!(reported[0].name, "打飞机");
+    assert!(
+        reported[0].scaffolded,
+        "the host is told about the COMMITTED record, not the shell it started as"
+    );
+}
+
+/// The rename is cosmetic: the scaffold has already committed and the host
+/// repairs a title it could not write on its own schedule, so a host that says
+/// it failed must not cost the person their app.
+#[tokio::test]
+async fn a_conversation_host_that_cannot_rename_does_not_undo_the_scaffold() {
+    let (_root, service, broker) = create_broker(false, Some(MockBuildExecutor::new())).await;
+    let conversations =
+        RecordingConversations::answering(Err("the transcript is read-only".to_string()));
+    assert!(broker.attach_conversations(conversations.clone()).is_ok());
+    let shell = shell_app_fixture(&broker, &service).await;
+
+    let input =
+        confirmed_scaffold_input(&broker, &shell.id, "打飞机", "一个竖版射击小游戏", "canvas")
+            .await;
+    broker
+        .scaffold_shell_app_value(input)
         .await
-        .expect("pin the init session");
+        .expect("a host that could not rename must not fail the scaffold");
 
-    let shell = PinnedShell {
-        root,
-        service,
-        broker,
-        lingxi_home,
-        fs: fs_impl,
-        app_id: record.id,
-        init_session_id,
-        workspace_rel: record.workspace_rel.clone(),
-    };
-    // The defect this task exists for: the placeholder is already on disk.
-    assert_eq!(shell.title(), local_apps::PLACEHOLDER_APP_NAME);
-    shell
+    assert_eq!(conversations.reported().len(), 1, "the host was asked");
+    let record = service.record(&shell.id).await.expect("record");
+    assert!(record.scaffolded, "the scaffold stays committed");
+    assert_eq!(record.name, "打飞机");
 }
 
 #[tokio::test]
-async fn scaffold_renames_the_pinned_session_when_the_user_never_renamed_it() {
-    let shell = pinned_shell().await;
+async fn a_scaffold_that_fails_is_not_reported_to_the_conversation_host() {
+    let (root, service, broker) = create_broker(false, Some(MockBuildExecutor::new())).await;
+    let conversations = RecordingConversations::answering(Ok(true));
+    assert!(broker.attach_conversations(conversations.clone()).is_ok());
+    let shell = shell_app_fixture(&broker, &service).await;
+    let input =
+        confirmed_scaffold_input(&broker, &shell.id, "打飞机", "一个竖版射击小游戏", "canvas")
+            .await;
+    break_the_final_landing_step(&root, &shell.id);
 
-    shell.scaffold("打飞机").await.expect("scaffold");
-
-    assert_eq!(shell.title(), "打飞机");
-}
-
-/// A rename that fails is only "retryable" if something actually retries
-/// it. The scaffold has already committed by then and is NOT rolled back,
-/// so the boot sweep is the whole of that guarantee.
-#[cfg(unix)]
-#[tokio::test]
-async fn the_boot_sweep_reconciles_a_title_a_failed_rename_left_behind() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let shell = pinned_shell().await;
-    // Make the append genuinely fail: a read-only transcript cannot be
-    // opened for append. This is the real failure path, not a skipped one.
-    let transcript = shell.transcript();
-    fs::set_permissions(&transcript, fs::Permissions::from_mode(0o444))
-        .expect("make the transcript read-only");
-
-    shell
-        .scaffold("打飞机")
+    broker
+        .scaffold_shell_app_value(input)
         .await
-        .expect("a failed rename must not roll the scaffold back");
+        .expect_err("broken landing must fail");
 
-    fs::set_permissions(&transcript, fs::Permissions::from_mode(0o644))
-        .expect("restore the transcript");
-    assert_eq!(
-        shell.title(),
-        local_apps::PLACEHOLDER_APP_NAME,
-        "the rename really did fail, so the retry has something to repair"
-    );
     assert!(
-        shell
-            .service
-            .record(&shell.app_id)
-            .await
-            .expect("record")
-            .scaffolded,
-        "the scaffold itself committed"
+        conversations.reported().is_empty(),
+        "a scaffold that never committed has nothing to rename a conversation after"
     );
-
-    shell.run_boot_backfill_sweep().await;
-
-    assert_eq!(
-        shell.title(),
-        "打飞机",
-        "a failed rename must have a real trigger that fixes it later"
-    );
-}
-
-/// The real flow, not the shortest one: an interview long enough to trip
-/// the transcript writer's 32 KiB metadata backstop still gets its title.
-///
-/// This is the test whose absence made the whole reconciliation invisible.
-/// The backstop re-emits the title as a PLAIN `custom-title`, so a
-/// predicate that read the marker off the LAST record declined for every
-/// app created through this flow and they all kept `untitled` forever —
-/// with `scaffold_renames_the_pinned_session_when_the_user_never_renamed_it`
-/// (a transcript of two lines) staying green throughout.
-#[tokio::test]
-async fn the_rename_survives_the_metadata_backstop_a_real_interview_trips() {
-    let shell = pinned_shell().await;
-    shell.trip_the_metadata_backstop().await;
-
-    shell.scaffold("打飞机").await.expect("scaffold");
-
-    assert_eq!(
-        shell.title(),
-        "打飞机",
-        "an interview longer than 32 KiB must not cost the app its name"
-    );
-}
-
-/// The other half, and the one that must never regress: tolerating the
-/// backstop's unmarked echo must not make a real `/rename` overwritable.
-///
-/// After `/rename`, the backstop echoes the USER'S title unmarked — text
-/// the anchor never carried — so the predicate declines, immediately and
-/// on every later boot sweep.
-#[tokio::test]
-async fn a_user_rename_still_wins_after_the_backstop_echoes_it() {
-    let shell = pinned_shell().await;
-    shell.user_rename("我的宝贝项目").await;
-    shell.trip_the_metadata_backstop().await;
-    assert_eq!(
-        shell.title(),
-        "我的宝贝项目",
-        "the backstop echoes the user's title, so that is what the scaffold sees"
-    );
-
-    shell.scaffold("打飞机").await.expect("scaffold");
-    shell.run_boot_backfill_sweep().await;
-
-    assert_eq!(shell.title(), "我的宝贝项目");
-}
-
-#[tokio::test]
-async fn an_immediate_rename_never_clobbers_a_user_rename() {
-    let shell = pinned_shell().await;
-    shell.user_rename("我的宝贝项目").await;
-
-    shell.scaffold("打飞机").await.expect("scaffold");
-
-    assert_eq!(shell.title(), "我的宝贝项目");
-}
-
-#[tokio::test]
-async fn the_boot_sweep_never_clobbers_a_user_rename_either() {
-    let shell = pinned_shell().await;
-    shell.user_rename("我的宝贝项目").await;
-    shell.scaffold("打飞机").await.expect("scaffold");
-
-    shell.run_boot_backfill_sweep().await;
-
-    assert_eq!(shell.title(), "我的宝贝项目");
-}
-
-/// `workspace/LINGXI.md` is the ONE channel that reaches the model for an
-/// unscaffolded shell (`r3-e2e-trace-01`). Nothing in the create
-/// transaction ever revisits it after the initial write, so if it is ever
-/// lost — a partial restore, a wiped workspace mount — the boot sweep must
-/// be the thing that notices and rewrites it; otherwise the interview
-/// never restarts and the agent sees an ordinary empty directory.
-#[tokio::test]
-async fn boot_sweep_repairs_a_missing_guided_workspace_contract() {
-    let shell = pinned_shell().await;
-    let lingxi_md = workspace_of(&shell.root, &shell.app_id).join("LINGXI.md");
-    // `pinned_shell()` builds its record straight off `AppService`,
-    // bypassing the broker's create-time initializer hook (the one that
-    // normally writes the guided contract) — so this fixture's workspace
-    // starts with no `LINGXI.md` at all, which is exactly the "lost"
-    // state this test needs. Removing it too makes that starting point
-    // explicit regardless of what the fixture happens to do.
-    let _ = fs::remove_file(&lingxi_md);
-    assert!(
-        !lingxi_md.exists(),
-        "the guided contract must be absent before the sweep runs"
-    );
-
-    shell.run_boot_backfill_sweep().await;
-
-    let repaired = fs::read_to_string(&lingxi_md)
-        .expect("the boot sweep must rewrite a missing guided workspace contract");
-    assert!(
-        repaired.contains("has no shape yet"),
-        "the repaired file must be the real guided contract, not a stub: {repaired}"
-    );
-}
-
-/// Same repair, but for a TRUNCATED file rather than an absent one — an
-/// interrupted write can leave bytes on disk that are not the contract.
-#[tokio::test]
-async fn boot_sweep_repairs_a_truncated_guided_workspace_contract() {
-    let shell = pinned_shell().await;
-    let lingxi_md = workspace_of(&shell.root, &shell.app_id).join("LINGXI.md");
-    fs::write(&lingxi_md, "").expect("truncate the guided contract to simulate a partial write");
-
-    shell.run_boot_backfill_sweep().await;
-
-    let repaired =
-        fs::read_to_string(&lingxi_md).expect("guided contract still present after repair");
-    assert!(
-        repaired.contains("has no shape yet"),
-        "a truncated guided contract must be rewritten, not left empty: {repaired}"
-    );
-}
-
-/// The repair must be scoped to UNSCAFFOLDED shells: once an app is
-/// formed, `workspace/LINGXI.md` carries the FORMAL contract, and step 0
-/// rewriting it back to the guided text on every boot would erase the
-/// surface-specific rules the formal contract exists to state.
-#[tokio::test]
-async fn boot_sweep_never_rewrites_a_formed_apps_formal_contract() {
-    let shell = pinned_shell().await;
-    shell.scaffold("打飞机").await.expect("scaffold");
-    let lingxi_md = workspace_of(&shell.root, &shell.app_id).join("LINGXI.md");
-    let formal_before = fs::read_to_string(&lingxi_md).expect("formal contract");
-    assert!(
-        !formal_before.contains("has no shape yet"),
-        "a formed app's contract must already be the FORMAL one: {formal_before}"
-    );
-
-    shell.run_boot_backfill_sweep().await;
-
-    let formal_after = fs::read_to_string(&lingxi_md).expect("formal contract after sweep");
-    assert_eq!(
-        formal_before, formal_after,
-        "step 0 must never overwrite a formed app's formal contract with the guided one"
-    );
-}
-
-/// Clause 1 of the predicate, pinned directly: an app still in its
-/// interview keeps the placeholder title even when its record already
-/// carries a real name. Driven through `reconcile_app_init_session_title`
-/// rather than a whole scaffold, because the app paths cannot currently
-/// produce this state — the point is that the rule survives a refactor
-/// that lets them.
-#[tokio::test]
-async fn reconciliation_waits_for_the_scaffold_commit_before_renaming() {
-    let shell = pinned_shell().await;
-    let mut record = shell.service.record(&shell.app_id).await.expect("record");
-    record.name = "打飞机".into();
-    assert!(!record.scaffolded);
-
-    let renamed = reconcile_app_init_session_title(
-        &shell.lingxi_home,
-        shell.root.path(),
-        shell.fs.clone(),
-        &record,
-    )
-    .await
-    .expect("reconcile");
-
-    assert!(!renamed, "an unscaffolded shell is not renamed");
-    assert_eq!(shell.title(), local_apps::PLACEHOLDER_APP_NAME);
-
-    // The same record, one field later: the commit is the only thing that
-    // was missing.
-    record.scaffolded = true;
-    assert!(reconcile_app_init_session_title(
-        &shell.lingxi_home,
-        shell.root.path(),
-        shell.fs.clone(),
-        &record,
-    )
-    .await
-    .expect("reconcile"));
-    assert_eq!(shell.title(), "打飞机");
-}
-
-/// The discriminator, stated as a unit. Three writers share the
-/// `custom-title` channel, only one of them marks its records, and a
-/// fourth — the writer's own 32 KiB metadata backstop — re-emits whatever
-/// the title currently is, UNMARKED. So the question is never "is the last
-/// record marked" but "did anyone write text mobile did not".
-#[test]
-fn a_placeholder_is_told_from_a_user_rename_by_text_against_the_anchor() {
-    let session = "11111111-2222-3333-4444-555555555555";
-    let anchor = format!(
-        r#"{{"type":"custom-title","customTitle":"untitled","sessionId":"{session}","mobileEmptySession":1}}"#
-    );
-    // What `plan_re_append` writes when the backstop fires: the anchor's
-    // own text, rebuilt without the marker.
-    let backstop_echo =
-        format!(r#"{{"type":"custom-title","customTitle":"untitled","sessionId":"{session}"}}"#);
-    let user_rename = format!(
-        r#"{{"type":"custom-title","customTitle":"我的宝贝项目","sessionId":"{session}"}}"#
-    );
-    let other_session = r#"{"type":"custom-title","customTitle":"elsewhere","sessionId":"99999999-2222-3333-4444-555555555555"}"#;
-
-    assert!(latest_custom_title_is_mobile_placeholder(&anchor, session));
-    // An unmarked record echoing the anchor's text is the backstop, not a
-    // user. Reading the marker off the last record here is what made
-    // `reconcile_app_init_session_title` unreachable in production.
-    assert!(latest_custom_title_is_mobile_placeholder(
-        &format!("{anchor}\n{backstop_echo}"),
-        session
-    ));
-    // Text mobile never wrote, after the anchor: a user rename, and it
-    // stays one however many times the backstop echoes it afterwards.
-    assert!(!latest_custom_title_is_mobile_placeholder(
-        &format!("{anchor}\n{user_rename}"),
-        session
-    ));
-    assert!(!latest_custom_title_is_mobile_placeholder(
-        &format!("{anchor}\n{user_rename}\n{user_rename}"),
-        session
-    ));
-    // An unmarked record with no anchor before it — a `session::branch`
-    // fork's title — is superseded by an anchor that follows it.
-    assert!(!latest_custom_title_is_mobile_placeholder(
-        &user_rename,
-        session
-    ));
-    assert!(latest_custom_title_is_mobile_placeholder(
-        &format!("{user_rename}\n{anchor}"),
-        session
-    ));
-    // A record for another session never decides this one.
-    assert!(latest_custom_title_is_mobile_placeholder(
-        &format!("{anchor}\n{other_session}"),
-        session
-    ));
-    // Nothing this host anchored: leave it alone.
-    assert!(!latest_custom_title_is_mobile_placeholder("", session));
-    // The effective title is still the LAST record's, marked or not.
-    assert_eq!(
-        latest_custom_title(&format!("{anchor}\n{user_rename}"), session)
-            .expect("a title")
-            .0,
-        "我的宝贝项目"
-    );
+    assert!(!service.record(&shell.id).await.expect("record").scaffolded);
 }
 
 /// A publisher that records what the broker asks of it, so the tests can pin
@@ -13170,7 +12278,7 @@ fn a_placeholder_is_told_from_a_user_rename_by_text_against_the_anchor() {
 #[derive(Default)]
 struct RecordingPublisher {
     calls: std::sync::Mutex<Vec<String>>,
-    exposures: std::sync::Mutex<Vec<local_app_service::publication::Exposure>>,
+    exposures: std::sync::Mutex<Vec<crate::publication::Exposure>>,
 }
 
 impl RecordingPublisher {
@@ -13184,14 +12292,14 @@ impl RecordingPublisher {
 }
 
 #[async_trait::async_trait]
-impl local_app_service::publication::McpPublisher for RecordingPublisher {
+impl crate::publication::McpPublisher for RecordingPublisher {
     fn available(&self) -> bool {
         true
     }
     async fn publish(
         &self,
-        app: &local_app_service::publication::ManagedApp,
-        runtime: local_app_service::publication::ManagedRuntime,
+        app: &crate::publication::ManagedApp,
+        runtime: crate::publication::ManagedRuntime,
     ) -> Result<(), String> {
         self.record(format!(
             "publish {} enabled={} tools={:?}",
@@ -13214,7 +12322,7 @@ impl local_app_service::publication::McpPublisher for RecordingPublisher {
     async fn expose(
         &self,
         conversation_id: &str,
-        app: &local_app_service::publication::ManagedApp,
+        app: &crate::publication::ManagedApp,
         pin: bool,
     ) -> Result<(), String> {
         self.record(format!("expose {conversation_id} {} pin={pin}", app.app_id));
@@ -13224,9 +12332,9 @@ impl local_app_service::publication::McpPublisher for RecordingPublisher {
         self.record(format!("unpin {conversation_id} {app_id}"));
         Ok(())
     }
-    async fn published(&self, app_id: &str) -> local_app_service::publication::Published {
+    async fn published(&self, app_id: &str) -> crate::publication::Published {
         self.record(format!("published {app_id}"));
-        local_app_service::publication::Published {
+        crate::publication::Published {
             server_name: Some(format!("host_named_{app_id}")),
             enabled: Some(true),
             enabled_tools: Some(vec!["host_tool".into()]),
@@ -13240,10 +12348,7 @@ impl local_app_service::publication::McpPublisher for RecordingPublisher {
     async fn end_call(&self, conversation_id: &str, app_id: &str) {
         self.record(format!("end_call {conversation_id} {app_id}"));
     }
-    async fn exposures(
-        &self,
-        conversation_id: &str,
-    ) -> Vec<local_app_service::publication::Exposure> {
+    async fn exposures(&self, conversation_id: &str) -> Vec<crate::publication::Exposure> {
         self.record(format!("exposures {conversation_id}"));
         self.exposures.lock().expect("exposures").clone()
     }
@@ -13317,8 +12422,8 @@ async fn unregistering_withdraws_the_app_then_tells_the_client_the_inventory_cha
 async fn unpinning_reaches_the_publisher_and_the_inventory_reports_what_the_host_holds() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let sink = MockSink::arc();
-    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+    let sink = RecordingSink::arc();
+    let broker = crate::test_support::broker_with_sink(
         root.path().to_path_buf(),
         sink.clone(),
         None,
@@ -13335,7 +12440,7 @@ async fn unpinning_reaches_the_publisher_and_the_inventory_reports_what_the_host
         .exposures
         .lock()
         .expect("exposures")
-        .push(local_app_service::publication::Exposure {
+        .push(crate::publication::Exposure {
             app_id: app_id.clone(),
             pinned: true,
             last_used: 1,
@@ -13354,9 +12459,7 @@ async fn unpinning_reaches_the_publisher_and_the_inventory_reports_what_the_host
         .into_iter()
         .rev()
         .find_map(|event| match event {
-            ClientEvent::AppEvent {
-                event: AppEventDto::ManagedMcpInventoryChanged { servers },
-            } => Some(servers),
+            HostEvent::ManagedMcpInventoryChanged { servers } => Some(servers),
             _ => None,
         })
         .expect("the client is told the inventory changed");
@@ -13385,7 +12488,7 @@ async fn activating_a_conversation_drops_connections_before_reading_its_exposure
         .exposures
         .lock()
         .expect("exposures")
-        .push(local_app_service::publication::Exposure {
+        .push(crate::publication::Exposure {
             app_id: app_id.clone(),
             pinned: false,
             last_used: 7,
@@ -13407,7 +12510,7 @@ async fn activating_a_conversation_drops_connections_before_reading_its_exposure
 /// so the publication paths that need a catalog have one.
 fn seed_enabled_mcp_catalog(root: &TempDir, app_id: &str, tool: &str, enabled: bool) -> String {
     let layout = AppLayout::new(root.path().to_path_buf(), app_id.to_string()).expect("layout");
-    let build_id = crate::mobile::local_apps_build::active_build_id(&layout)
+    let build_id = crate::app_build::active_build_id(&layout)
         .expect("active build")
         .expect("the fixture has an active build");
     let definition = mcp_wire::McpToolDefinitionDto::new(

@@ -205,17 +205,17 @@ async fn end_mobile_audio_owner(
 
 use crate::mobile::{
     local_apps_adapters::AgentOutputRouter,
-    local_apps_host::{
-        canonical_cwd_string, AgentOutputStream, AgentTurnUsageState, LocalAppsAgentExecutor,
-        LocalAppsHostBroker,
-    },
     local_apps_llm::LocalAppsLlm,
-    local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
     local_apps_profile::ProfileApps,
     local_apps_sessions::{app_session_dir, remove_app_session_file},
     skill_loader::command_visible_in_session_mode,
     turn_durability::{DurableTurnStore, DurableTurnStoreError, ResumeDisposition},
 };
+use local_app_service::broker::{
+    canonical_cwd_string, AgentOutputStream, AgentTurnUsageState, LocalAppsAgentExecutor,
+    LocalAppsHostBroker,
+};
+use local_app_service::mcp_server::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY};
 
 /// Everything a mobile host needs to drive a conversation, built deterministically
 /// by [`build_mobile`] from a [`MobileConfig`] + an `Arc<dyn Platform>`.
@@ -457,7 +457,7 @@ struct MobileAppAgentExecutor {
             (
                 Arc<ConversationOrchestrator>,
                 Arc<AgentOutputRouter>,
-                Arc<crate::mobile::local_apps_mcp::AgentCallBudget>,
+                Arc<local_app_service::mcp_server::AgentCallBudget>,
             ),
         >,
     >,
@@ -501,7 +501,7 @@ impl MobileAppAgentExecutor {
     ) -> Result<
         (
             Arc<ToolRegistry>,
-            Arc<crate::mobile::local_apps_mcp::AgentCallBudget>,
+            Arc<local_app_service::mcp_server::AgentCallBudget>,
         ),
         String,
     > {
@@ -555,7 +555,7 @@ impl MobileAppAgentExecutor {
         (
             Arc<ConversationOrchestrator>,
             Arc<AgentOutputRouter>,
-            Arc<crate::mobile::local_apps_mcp::AgentCallBudget>,
+            Arc<local_app_service::mcp_server::AgentCallBudget>,
         ),
         String,
     > {
@@ -4265,10 +4265,10 @@ impl MobileEngineHandle {
                     None,
                     &local_apps::AppError::NotYetAvailable(
                         // One sentence, one definition: the agent-facing
-                        // `LocalAppCreate` gate in `local_apps_mcp.rs` raises
+                        // `LocalAppCreate` gate in `mcp_server.rs` raises
                         // the SAME constant, so the two create entry points
                         // cannot drift into two explanations of one condition.
-                        crate::mobile::local_apps_mcp::LOCAL_APP_PLUGIN_UNAVAILABLE.into(),
+                        local_app_service::mcp_server::LOCAL_APP_PLUGIN_UNAVAILABLE.into(),
                     ),
                     request_id,
                 )
@@ -6686,7 +6686,7 @@ impl MobileEngineHandle {
                 // a wrong one is strictly worse, because Android DOES render
                 // it (`LocalAppsViewModel.localizedPluginError`) and would
                 // show confidently wrong copy. See the same four-file recipe
-                // written out at `local_apps_host.rs`'s
+                // written out at `broker.rs`'s
                 // `wait_for_native_approval_with_timeout`: append (never
                 // insert — UniFFI encodes by declaration ordinal) a member,
                 // add its string to the five `clients/translations/*.json`

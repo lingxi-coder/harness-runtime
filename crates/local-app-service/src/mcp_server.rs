@@ -5,8 +5,8 @@
 //! fixed `local_apps` registry key, never reads `.mcp.json`, and exposes no
 //! stdio or remote transport surface.
 
+use crate::publication::{McpPublisher, WidgetResource};
 use async_trait::async_trait;
-use local_app_service::publication::{McpPublisher, WidgetResource};
 use local_apps::{AppError, AppService};
 use mcp_wire::export::ConversationExport;
 use mcp_wire::transport::{
@@ -94,7 +94,7 @@ pub trait LocalAppsMcpHost: Send + Sync {
     ///
     /// The approving authority is NOT this input — the transport resolves the
     /// plan approval and rebuilds the request from it (see
-    /// [`LocalAppsMcpTransport::call_prepare`]). A caller that reaches this
+    /// `LocalAppsMcpTransport::call_prepare`). A caller that reaches this
     /// directly with made-up values changes nothing it can observe.
     async fn prepare(&self, input: Value) -> Result<Value, String> {
         let _ = input;
@@ -539,12 +539,12 @@ pub struct LocalAppsMcpTransport {
     /// See [`PluginAvailabilityProbe`]: absent means "refuse `create`".
     plugin_available: OnceLock<Arc<PluginAvailabilityProbe>>,
     /// The Host's record of plan approvals the USER granted in this process
-    /// (see [`crate::mobile::plan_approval`]). `prepare` reads it so a plan cannot be
+    /// (see [`crate::plan_approval`]). `prepare` reads it so a plan cannot be
     /// landed on a model-authored claim of approval. Deliberately NOT copied
     /// into app-scoped transports: an app's own Agent session never plans a
     /// Local App, so a scoped transport has no approval source and `prepare`
     /// fails closed there.
-    plan_approval: OnceLock<Arc<local_app_service::plan_approval::PlanApprovalLog>>,
+    plan_approval: OnceLock<Arc<crate::plan_approval::PlanApprovalLog>>,
     agent_session_id: Option<String>,
     call_budget: Option<Arc<AgentCallBudget>>,
     connections: StdMutex<HashSet<McpConnectionId>>,
@@ -559,12 +559,12 @@ pub struct LocalAppsMcpTransport {
 /// one MCP call and one host bridge call at this boundary. The current turn's
 /// increments are mirrored into a separate usage state for persistence.
 #[derive(Debug)]
-pub(crate) struct AgentCallBudget {
+pub struct AgentCallBudget {
     max_bridge_calls: u32,
     max_mcp_calls: u32,
     bridge_calls: AtomicU32,
     mcp_calls: AtomicU32,
-    turn_usage: StdMutex<Option<Arc<crate::mobile::local_apps_host::AgentTurnUsageState>>>,
+    turn_usage: StdMutex<Option<Arc<crate::broker::AgentTurnUsageState>>>,
 }
 
 impl AgentCallBudget {
@@ -587,10 +587,7 @@ impl AgentCallBudget {
         }
     }
 
-    pub(crate) fn start_turn(
-        &self,
-        usage: Arc<crate::mobile::local_apps_host::AgentTurnUsageState>,
-    ) {
+    pub fn start_turn(&self, usage: Arc<crate::broker::AgentTurnUsageState>) {
         if let Ok(mut current) = self.turn_usage.lock() {
             *current = Some(usage);
         }
@@ -740,7 +737,7 @@ impl LocalAppsMcpTransport {
     /// Create an app-scoped transport whose Agent event inbox is bound to one
     /// host-owned session. The session id is never supplied by the model tool
     /// input, preventing one app Agent from reading a sibling session.
-    pub(crate) fn scoped_for_app_with_budget_and_session(
+    pub fn scoped_for_app_with_budget_and_session(
         &self,
         app_id: &str,
         session_id: &str,
@@ -761,7 +758,7 @@ impl LocalAppsMcpTransport {
         )
     }
 
-    pub(crate) fn call_budget(&self) -> Option<Arc<AgentCallBudget>> {
+    pub fn call_budget(&self) -> Option<Arc<AgentCallBudget>> {
         self.call_budget.clone()
     }
 
@@ -883,10 +880,10 @@ impl LocalAppsMcpTransport {
     /// Attach the Host's plan-approval record (engine host boot). Fail-closed:
     /// with no record attached, `prepare` cannot prove the user approved a plan
     /// and refuses.
-    pub(crate) fn attach_plan_approval_log(
+    pub fn attach_plan_approval_log(
         &self,
-        log: Arc<local_app_service::plan_approval::PlanApprovalLog>,
-    ) -> Result<(), Arc<local_app_service::plan_approval::PlanApprovalLog>> {
+        log: Arc<crate::plan_approval::PlanApprovalLog>,
+    ) -> Result<(), Arc<crate::plan_approval::PlanApprovalLog>> {
         self.plan_approval.set(log)
     }
 
@@ -2830,34 +2827,31 @@ impl LocalAppsMcpTransport {
                     McpError::Internal(format!("failed to list checkpoints: {error}"))
                 })?;
                 let runtime_profile_status =
-                    crate::mobile::local_apps_build::derive_runtime_profile_status(
-                        &self.root, &record,
-                    )
-                    .map(|status| status.as_str());
+                    crate::app_build::derive_runtime_profile_status(&self.root, &record)
+                        .map(|status| status.as_str());
                 let layout = local_apps::AppLayout::new(&self.root, app_id)
                     .map_err(|error| McpError::Internal(error.to_string()))?;
-                let authoring =
-                    match crate::mobile::local_apps_build::active_authoring_contract(&layout) {
-                        Ok(Some(contract)) => {
-                            let contract_sha256 = contract
-                                .sha256()
-                                .map_err(|error| McpError::Internal(error.to_string()))?;
-                            let acceptance_checks = contract.spec.acceptance_checks.clone();
-                            json!({
-                                "contract_sha256": contract_sha256,
-                                "revision": contract.revision,
-                                "identity": {
-                                    "version": contract.version,
-                                    "app_id": contract.app_id.clone(),
-                                    "runtime_profile": contract.runtime_profile.clone(),
-                                },
-                                "acceptance_checks": acceptance_checks,
-                                "contract": contract,
-                            })
-                        }
-                        Ok(None) => Value::Null,
-                        Err(error) => return Ok(Self::app_error(error)),
-                    };
+                let authoring = match crate::app_build::active_authoring_contract(&layout) {
+                    Ok(Some(contract)) => {
+                        let contract_sha256 = contract
+                            .sha256()
+                            .map_err(|error| McpError::Internal(error.to_string()))?;
+                        let acceptance_checks = contract.spec.acceptance_checks.clone();
+                        json!({
+                            "contract_sha256": contract_sha256,
+                            "revision": contract.revision,
+                            "identity": {
+                                "version": contract.version,
+                                "app_id": contract.app_id.clone(),
+                                "runtime_profile": contract.runtime_profile.clone(),
+                            },
+                            "acceptance_checks": acceptance_checks,
+                            "contract": contract,
+                        })
+                    }
+                    Ok(None) => Value::Null,
+                    Err(error) => return Ok(Self::app_error(error)),
+                };
                 Self::result(json!({
                     "app": record,
                     "runtime": runtime,
@@ -3651,6 +3645,8 @@ impl McpTransport for LocalAppsMcpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::publication::Published;
+    use crate::test_support::ScriptedPublisher;
     use local_apps::mailbox::{load_mailbox, save_mailbox, AppMailbox};
     use local_apps::test_support::FixedClock;
     use local_apps::{
@@ -3824,7 +3820,7 @@ mod tests {
     #[test]
     fn app_agent_call_budget_resumes_from_persisted_usage() {
         let budget = AgentCallBudget::with_used(2, 2, 1, 1);
-        let usage = Arc::new(crate::mobile::local_apps_host::AgentTurnUsageState::default());
+        let usage = Arc::new(crate::broker::AgentTurnUsageState::default());
         budget.start_turn(usage.clone());
         assert!(budget.reserve().is_ok());
         assert_eq!(usage.snapshot().bridge_calls, 1);
@@ -3883,9 +3879,9 @@ mod tests {
         // The REAL broker, not a stub: mailbox reads go through it now
         // precisely so they take the same lock `agent.post` does, and a stub
         // here would test the delegation away again.
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let broker = crate::test_support::broker_with_sink(
             root.path().to_path_buf(),
-            Arc::new(client::adapter::MockSink::new()),
+            Arc::new(crate::test_support::RecordingSink::default()),
             None,
             false,
             None,
@@ -3989,8 +3985,7 @@ mod tests {
     #[tokio::test]
     async fn scoped_registry_key_connects_on_global_transport() {
         let transport = LocalAppsMcpTransport::new(PathBuf::from("/tmp/local-apps"));
-        let scope =
-            mcp::registry::ConversationExport::new("abc12345", "0".repeat(64)).expect("scope");
+        let scope = ConversationExport::new("abc12345", "0".repeat(64)).expect("scope");
         let connection = transport
             .connect(&McpTransportSpec::InProcess {
                 registry_key: scope.scoped_registry_key("conversation-1").unwrap(),
@@ -4029,7 +4024,7 @@ mod tests {
             "flow": {"flowId":"flow","inputs":{},"result":{"literal":{"ok":true}}},
             "ceiling": "allow"
         });
-        let (record, _layout, catalog_sha256) = publish_export_app(
+        let (record, _layout, _catalog_sha256) = publish_export_app(
             root.path(),
             &service,
             vec![tool],
@@ -4037,35 +4032,21 @@ mod tests {
             &active_tool_surface_sha256,
         )
         .await;
-        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(LocalAppsMcpTransport::new(
-            root.path().to_path_buf(),
-        ))));
-        registry
-            .register_managed_local_app(
-                mcp::registry::ConversationExport::new(
-                    record.id.clone(),
-                    active_tool_surface_sha256.clone(),
-                )
-                .unwrap(),
-                catalog_sha256,
-                false,
-            )
-            .await
-            .unwrap();
-        registry
-            .expose_managed_local_app("conversation-1", &record.id, false)
-            .await
-            .expect("expose app to the scoped conversation");
-        assert!(transport
-            .attach_publisher(crate::mobile::local_apps_adapters::RegistryPublisher::new(
-                Arc::downgrade(&registry)
-            ))
-            .is_ok());
+        let publisher = ScriptedPublisher::arc();
+        publisher.holds(
+            &record.id,
+            Published {
+                server_name: Some(format!("local_app_{}", record.id)),
+                ..Published::default()
+            },
+        );
+        publisher.expose_to("conversation-1", &record.id);
+        assert!(transport.attach_publisher(publisher).is_ok());
         assert!(transport.attach_host(Arc::new(ExportFlowHost)).is_ok());
 
         let connection = transport
             .connect(&McpTransportSpec::InProcess {
-                registry_key: mcp::registry::ConversationExport::new(
+                registry_key: ConversationExport::new(
                     record.id.clone(),
                     active_tool_surface_sha256.clone(),
                 )
@@ -4130,7 +4111,7 @@ mod tests {
                 "ceiling": "allow"
             }),
         ];
-        let (record, _layout, catalog_sha256) = publish_export_app(
+        let (record, _layout, _catalog_sha256) = publish_export_app(
             root.path(),
             &service,
             tools,
@@ -4138,39 +4119,23 @@ mod tests {
             &active_tool_surface_sha256,
         )
         .await;
-        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(LocalAppsMcpTransport::new(
-            root.path().to_path_buf(),
-        ))));
-        registry
-            .register_managed_local_app(
-                mcp::registry::ConversationExport::new(
-                    record.id.clone(),
-                    active_tool_surface_sha256.clone(),
-                )
-                .unwrap(),
-                catalog_sha256,
-                false,
-            )
-            .await
-            .unwrap();
-        registry
-            .set_managed_local_app_runtime(&record.id, true, Some(vec!["read_value".into()]), None)
-            .await
-            .unwrap();
-        registry
-            .expose_managed_local_app("conversation-1", &record.id, false)
-            .await
-            .expect("expose app to the scoped conversation");
-        assert!(transport
-            .attach_publisher(crate::mobile::local_apps_adapters::RegistryPublisher::new(
-                Arc::downgrade(&registry)
-            ))
-            .is_ok());
+        let publisher = ScriptedPublisher::arc();
+        publisher.holds(
+            &record.id,
+            Published {
+                server_name: Some(format!("local_app_{}", record.id)),
+                enabled: Some(true),
+                enabled_tools: Some(vec!["read_value".into()]),
+                widget: None,
+            },
+        );
+        publisher.expose_to("conversation-1", &record.id);
+        assert!(transport.attach_publisher(publisher).is_ok());
         assert!(transport.attach_host(Arc::new(ExportFlowHost)).is_ok());
 
         let stale_connection = transport
             .connect(&McpTransportSpec::InProcess {
-                registry_key: mcp::registry::ConversationExport::new(
+                registry_key: ConversationExport::new(
                     record.id.clone(),
                     active_tool_surface_sha256.clone(),
                 )
@@ -4227,7 +4192,7 @@ mod tests {
             .expect("create widget app");
         let record = prepare_formed_runtime_fixture(&service, &shell, root.path()).await;
         let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
-        let build_id = crate::mobile::local_apps_build::active_build_id(&layout)
+        let build_id = crate::app_build::active_build_id(&layout)
             .expect("active build id")
             .expect("formed widget fixture has a build");
         let widget_uri = format!(
@@ -4282,30 +4247,19 @@ mod tests {
             widget_body,
         )
         .expect("widget html");
-        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(LocalAppsMcpTransport::new(
-            root.path().to_path_buf(),
-        ))));
-        registry
-            .register_managed_local_app(
-                mcp::registry::ConversationExport::new(
-                    record.id.clone(),
-                    active_tool_surface_sha256.clone(),
-                )
-                .unwrap(),
-                catalog_sha256,
-                false,
-            )
-            .await
-            .unwrap();
-        assert!(transport
-            .attach_publisher(crate::mobile::local_apps_adapters::RegistryPublisher::new(
-                Arc::downgrade(&registry)
-            ))
-            .is_ok());
+        let publisher = ScriptedPublisher::arc();
+        publisher.holds(
+            &record.id,
+            Published {
+                server_name: Some(format!("local_app_{}", record.id)),
+                ..Published::default()
+            },
+        );
+        assert!(transport.attach_publisher(publisher).is_ok());
 
         let connection = transport
             .connect(&McpTransportSpec::InProcess {
-                registry_key: mcp::registry::ConversationExport::new(
+                registry_key: ConversationExport::new(
                     record.id.clone(),
                     active_tool_surface_sha256.clone(),
                 )
@@ -4923,9 +4877,9 @@ mod tests {
         permissions.grant(AppCapability::Llm);
         save_permissions(&layout, &permissions).expect("save permissions");
 
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let broker = crate::test_support::broker_with_sink(
             root.path().to_path_buf(),
-            client::adapter::MockSink::arc() as Arc<dyn client::adapter::ClientEventSink>,
+            crate::test_support::RecordingSink::arc(),
             None,
             false,
             None,
@@ -5351,7 +5305,7 @@ mod tests {
             .expect("create export app");
         let record = prepare_formed_runtime_fixture(service, &shell, root).await;
         let layout = AppLayout::new(root.to_path_buf(), record.id.clone()).expect("layout");
-        let build_id = crate::mobile::local_apps_build::active_build_id(&layout)
+        let build_id = crate::app_build::active_build_id(&layout)
             .expect("active build id")
             .expect("formed export fixture has a build");
         let mut catalog = json!({
@@ -5911,12 +5865,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_removes_the_losing_minted_session_when_init_pin_races() {
+    async fn create_discards_the_losing_minted_session_when_init_pin_races() {
         const PINNED_INIT_ID: &str = "pinned-init";
         const ORPHAN_INIT_ID: &str = "orphan-init";
 
         let root = tempfile::tempdir().unwrap();
-        let lingxi_home = root.path().join(".lingxi-home");
         let (transport, service) = attached_transport(root.path()).await;
         assert!(transport
             .attach_host(Arc::new(RecordingScaffoldHost {
@@ -5924,44 +5877,28 @@ mod tests {
                 failure: None,
             }))
             .is_ok());
-        let discard_home = lingxi_home.clone();
-        let discard_root = root.path().to_path_buf();
+        let discarded = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let discarded_by_hook = Arc::clone(&discarded);
         assert!(transport
-            .attach_init_session_discarder(Arc::new(move |record, session_id| {
-                crate::mobile::local_apps_sessions::remove_app_session_file(
-                    &discard_home,
-                    &discard_root,
-                    record,
-                    session_id,
-                )
+            .attach_init_session_discarder(Arc::new(move |_record, session_id| {
+                discarded_by_hook
+                    .lock()
+                    .expect("lock")
+                    .push(session_id.to_string());
+                true
             }))
             .is_ok());
-
-        let orphan_path = Arc::new(StdMutex::new(None::<std::path::PathBuf>));
-        let orphan_path_for_minter = Arc::clone(&orphan_path);
         let service_for_minter = Arc::clone(&service);
-        let data_root = root.path().to_path_buf();
         assert!(transport
             .attach_init_session_minter(Arc::new(move |record| {
-                let orphan_path = Arc::clone(&orphan_path_for_minter);
                 let service = Arc::clone(&service_for_minter);
-                let lingxi_home = lingxi_home.clone();
-                let data_root = data_root.clone();
                 Box::pin(async move {
+                    // Another create wins the set-once pin while this one is
+                    // still minting; the id this one mints is the orphan.
                     service
                         .set_init_session(&record.id, PINNED_INIT_ID)
                         .await
                         .expect("pre-pin the winner");
-                    let workspace_cwd = crate::mobile::local_apps_host::canonical_cwd_string(
-                        &data_root.join(&record.workspace_rel),
-                    );
-                    let orphan = lingxi_home
-                        .join("projects")
-                        .join(session::jsonl::path::project_dir_name(&workspace_cwd))
-                        .join(format!("{ORPHAN_INIT_ID}.jsonl"));
-                    std::fs::create_dir_all(orphan.parent().expect("orphan parent")).unwrap();
-                    std::fs::write(&orphan, "").unwrap();
-                    *orphan_path.lock().expect("lock") = Some(orphan);
                     Ok(ORPHAN_INIT_ID.to_string())
                 })
             }))
@@ -5983,15 +5920,10 @@ mod tests {
                 .as_deref(),
             Some(PINNED_INIT_ID)
         );
-        let orphan = orphan_path
-            .lock()
-            .expect("lock")
-            .clone()
-            .expect("orphan path");
-        assert!(
-            !orphan.exists(),
-            "the losing minted session must be deleted: {}",
-            orphan.display()
+        assert_eq!(
+            *discarded.lock().expect("lock"),
+            vec![ORPHAN_INIT_ID.to_string()],
+            "the losing minted session — and only it — must be handed back to be discarded"
         );
     }
 
@@ -6153,21 +6085,20 @@ mod tests {
         shell: &local_apps::AppRecord,
         root: &Path,
     ) -> local_apps::AppRecord {
-        let binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
+        let binding = crate::runtime_profiles::current_binding_for_family(
             local_apps::AppRuntimeProfile::ReactDom,
         )
         .expect("react dom binding");
         let layout = AppLayout::new(root.to_path_buf(), shell.id.clone()).expect("layout");
         let workspace = root.join(layout.workspace_rel());
-        crate::mobile::local_apps_build::scaffold_workspace_initialized(
+        crate::app_build::scaffold_workspace_initialized(
             &layout,
-            crate::mobile::local_apps_build::LocalAppBuildTarget::ReactDomR4,
+            crate::app_build::LocalAppBuildTarget::ReactDomR4,
             true,
         )
         .expect("scaffold workspace");
-        let scaffold =
-            crate::mobile::local_app_runtime_profiles::scaffold_artifacts_for_binding(&binding)
-                .expect("runtime profile scaffold");
+        let scaffold = crate::runtime_profiles::scaffold_artifacts_for_binding(&binding)
+            .expect("runtime profile scaffold");
         for (relative, bytes) in &scaffold.files {
             let path = workspace.join(relative);
             if let Some(parent) = path.parent() {
@@ -6175,18 +6106,15 @@ mod tests {
             }
             std::fs::write(path, bytes).expect("write scaffold file");
         }
-        let requested_bytes = std::fs::read(
-            workspace.join(crate::mobile::local_app_runtime_profiles::REQUESTED_FILE_REL),
-        )
-        .expect("read requested dependencies");
-        let package_bytes = std::fs::read(
-            workspace.join(crate::mobile::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL),
-        )
-        .expect("read effective package");
-        let lockfile_bytes = std::fs::read(
-            workspace.join(crate::mobile::local_app_runtime_profiles::LOCKFILE_FILE_REL),
-        )
-        .expect("read lockfile");
+        let requested_bytes =
+            std::fs::read(workspace.join(crate::runtime_profiles::REQUESTED_FILE_REL))
+                .expect("read requested dependencies");
+        let package_bytes =
+            std::fs::read(workspace.join(crate::runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL))
+                .expect("read effective package");
+        let lockfile_bytes =
+            std::fs::read(workspace.join(crate::runtime_profiles::LOCKFILE_FILE_REL))
+                .expect("read lockfile");
         let sbom_bytes = br#"{
   "spdxVersion": "SPDX-2.3",
   "SPDXID": "SPDXRef-DOCUMENT",
@@ -6195,12 +6123,12 @@ mod tests {
   "documentNamespace": "https://example.invalid/spdx/mcp-fixture"
 }
 "#;
-        let snapshot = crate::mobile::local_app_runtime_profiles::snapshot_artifacts_for_binding(
+        let snapshot = crate::runtime_profiles::snapshot_artifacts_for_binding(
             &binding,
-            crate::mobile::local_app_runtime_profiles::hash_bytes(&requested_bytes),
-            crate::mobile::local_app_runtime_profiles::hash_bytes(&package_bytes),
-            crate::mobile::local_app_runtime_profiles::hash_bytes(&lockfile_bytes),
-            crate::mobile::local_app_runtime_profiles::hash_bytes(b"mcp-fixture-tree"),
+            crate::runtime_profiles::hash_bytes(&requested_bytes),
+            crate::runtime_profiles::hash_bytes(&package_bytes),
+            crate::runtime_profiles::hash_bytes(&lockfile_bytes),
+            crate::runtime_profiles::hash_bytes(b"mcp-fixture-tree"),
             sbom_bytes,
         )
         .expect("dependency snapshot");
@@ -6244,7 +6172,7 @@ mod tests {
         .expect("save dependency record");
 
         let build_root = root.join(layout.build_rel(false));
-        let output_root = build_root.join(crate::mobile::local_apps_build::VITE_OUTPUT_DIR);
+        let output_root = build_root.join(crate::app_build::VITE_OUTPUT_DIR);
         std::fs::create_dir_all(&output_root).expect("dist");
         std::fs::write(output_root.join("index.html"), "<html>ok</html>").expect("index");
         let output_sha256 = digest_tree(&output_root);
@@ -6313,9 +6241,9 @@ mod tests {
         root: &TempDir,
         service: Arc<AppService>,
     ) {
-        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        let broker = crate::test_support::broker_with_sink(
             root.path().to_path_buf(),
-            client::adapter::MockSink::arc(),
+            crate::test_support::RecordingSink::arc(),
             None,
             false,
             None,
@@ -6344,7 +6272,7 @@ mod tests {
     /// stale silently — the test keeps passing while the new operation runs
     /// ungated on an empty workspace.
     fn gated_operations() -> Vec<&'static str> {
-        crate::mobile::local_apps_tools::LOCAL_APP_TOOLS
+        crate::tool_names::LOCAL_APP_TOOLS
             .iter()
             .map(|&(_, operation, _)| operation)
             .filter(|operation| !SHELL_ALLOWED_OPERATIONS.contains(operation))
@@ -6466,7 +6394,7 @@ mod tests {
     #[tokio::test]
     async fn a_formed_app_passes_the_gate_for_every_operation() {
         let (_root, transport, _service, app_id) = transport_with_app(AppFixture::Formed).await;
-        for &(_, operation, _) in crate::mobile::local_apps_tools::LOCAL_APP_TOOLS {
+        for &(_, operation, _) in crate::tool_names::LOCAL_APP_TOOLS {
             let outcome = transport
                 .call(operation, json!({"app_id": app_id.clone()}))
                 .await;
@@ -6523,7 +6451,7 @@ mod tests {
         let layout = AppLayout::new(root.path(), &formed_id).expect("layout");
         let manifest = load_manifest(&layout).expect("manifest");
         let spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
-            "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+            "../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
         ))
         .expect("checked-in authoring fixture");
         let contract = local_apps::AppAuthoringContract {

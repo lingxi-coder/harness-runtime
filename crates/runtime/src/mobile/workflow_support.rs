@@ -752,9 +752,8 @@ pub(crate) struct MobileWorkflowStatusSink {
     active_session_uuid: Arc<std::sync::Mutex<String>>,
     /// Host-owned broker used to validate verified Local App build/use-test
     /// workflows. A weak reference avoids a broker↔workflow ownership cycle.
-    local_apps_host: Arc<
-        std::sync::OnceLock<std::sync::Weak<crate::mobile::local_apps_host::LocalAppsHostBroker>>,
-    >,
+    local_apps_host:
+        Arc<std::sync::OnceLock<std::sync::Weak<local_app_service::broker::LocalAppsHostBroker>>>,
     /// The bound registry is needed to resolve verified launch metadata and
     /// the handler-owned spool path without trusting workflow result JSON.
     task_registry: Arc<std::sync::OnceLock<Arc<tasks::registry::TaskRegistry>>>,
@@ -765,12 +764,12 @@ pub(crate) struct MobileWorkflowStatusSink {
 /// prepared value prevents the sink from reconstructing publication identity
 /// out of model-authored result JSON.
 struct PreparedMobileQaCommit {
-    host: Arc<crate::mobile::local_apps_host::LocalAppsHostBroker>,
-    publication: crate::mobile::local_apps_host::PreparedWorkflowQaPublication,
+    host: Arc<local_app_service::broker::LocalAppsHostBroker>,
+    publication: local_app_service::broker::PreparedWorkflowQaPublication,
 }
 
 struct MobileQaCleanup {
-    host: Arc<crate::mobile::local_apps_host::LocalAppsHostBroker>,
+    host: Arc<local_app_service::broker::LocalAppsHostBroker>,
     app_id: String,
     workflow_run_id: String,
 }
@@ -875,8 +874,8 @@ impl MobileWorkflowStatusSink {
     /// verified app/run scope from the task registry.
     pub(crate) fn attach_local_apps_host(
         &self,
-        host: std::sync::Weak<crate::mobile::local_apps_host::LocalAppsHostBroker>,
-    ) -> Result<(), std::sync::Weak<crate::mobile::local_apps_host::LocalAppsHostBroker>> {
+        host: std::sync::Weak<local_app_service::broker::LocalAppsHostBroker>,
+    ) -> Result<(), std::sync::Weak<local_app_service::broker::LocalAppsHostBroker>> {
         self.local_apps_host.set(host)
     }
 
@@ -2120,7 +2119,7 @@ fn apply_materialized_local_app_collections_with_identity(
     // binding as a consistent pair, and resolves the binding against the exact
     // published catalog (including its contract hash and availability).
     let build_target =
-        crate::mobile::local_apps_build::detect_build_target(&layout).map_err(|error| {
+        local_app_service::app_build::detect_build_target(&layout).map_err(|error| {
             tool_workflow::WorkflowLaunchError(format!(
                 "cannot validate local-app runtime profile for app {app_id:?}: {error}"
             ))
@@ -2141,13 +2140,13 @@ fn apply_materialized_local_app_collections_with_identity(
         )));
     }
     let active_authoring_contract =
-        crate::mobile::local_apps_build::active_authoring_contract(&layout).map_err(|error| {
+        local_app_service::app_build::active_authoring_contract(&layout).map_err(|error| {
             tool_workflow::WorkflowLaunchError(format!(
                 "cannot load active Local App authoring contract: {error}"
             ))
         })?;
     let active_authoring_contract_sha256 =
-        crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&layout).map_err(
+        local_app_service::app_build::active_build_authoring_contract_sha256(&layout).map_err(
             |error| {
                 tool_workflow::WorkflowLaunchError(format!(
                     "cannot load active Local App authoring contract digest: {error}"
@@ -2254,15 +2253,14 @@ fn apply_materialized_local_app_collections_with_identity(
             false
         };
         let schemas = checked_in_local_app_schemas()?;
-        let catalog =
-            crate::mobile::local_app_template_catalog::catalog_view(
-                &crate::mobile::local_apps_adapters::CompiledPluginBundle,
-            )
-            .map_err(|error| {
-                tool_workflow::WorkflowLaunchError(format!(
-                    "cannot read verified template catalog: {error}"
-                ))
-            })?;
+        let catalog = crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        )
+        .map_err(|error| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "cannot read verified template catalog: {error}"
+            ))
+        })?;
         object.insert(
             "host_context".into(),
             serde_json::json!({
@@ -2369,7 +2367,7 @@ fn resolve_adopted_local_app_build_scope(
         return None;
     }
     let layout = local_apps::AppLayout::new(app_data_root, app_id).ok()?;
-    let build_target = crate::mobile::local_apps_build::detect_build_target(&layout).ok()?;
+    let build_target = local_app_service::app_build::detect_build_target(&layout).ok()?;
     let manifest = local_apps::load_manifest(&layout).ok()?;
     let binding = manifest.runtime_profile.as_ref()?;
     manifest.dependency_snapshot.as_ref()?;
@@ -2419,7 +2417,7 @@ fn resolve_adopted_local_app_scope(
         .and_then(serde_json::Value::as_str)
         .filter(|app_id| !app_id.trim().is_empty())?;
     let layout = local_apps::AppLayout::new(app_data_root, app_id).ok()?;
-    let _build_target = crate::mobile::local_apps_build::detect_build_target(&layout).ok()?;
+    let _build_target = local_app_service::app_build::detect_build_target(&layout).ok()?;
     let manifest = local_apps::load_manifest(&layout).ok()?;
     manifest.runtime_profile.as_ref()?;
     manifest.dependency_snapshot.as_ref()?;
@@ -2427,13 +2425,13 @@ fn resolve_adopted_local_app_scope(
     // contract; this also prevents a torn/scaffold-only app from borrowing
     // the QA gate during restart adoption.
     let active_digest =
-        crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&layout)
+        local_app_service::app_build::active_build_authoring_contract_sha256(&layout)
             .ok()
             .flatten()?;
     if active_digest.is_empty() {
         return None;
     }
-    crate::mobile::local_apps_build::active_authoring_contract(&layout)
+    local_app_service::app_build::active_authoring_contract(&layout)
         .ok()
         .flatten()?;
     tasks::scope::LocalAppWorkflowTaskScope::for_use_test(app_id).ok()
@@ -3026,19 +3024,19 @@ fn enrich_persisted_plugin_workflow_context(
     // plugin workflow can mint an app scope. A valid-looking app_id and
     // manifest alone must not authorize a custom/torn shell.
     let _build_target =
-        crate::mobile::local_apps_build::detect_build_target(&layout).map_err(|error| {
+        local_app_service::app_build::detect_build_target(&layout).map_err(|error| {
             tool_workflow::WorkflowLaunchError(format!(
                 "cannot validate persisted Local App runtime profile: {error}"
             ))
         })?;
     let active_authoring_contract =
-        crate::mobile::local_apps_build::active_authoring_contract(&layout).map_err(|error| {
+        local_app_service::app_build::active_authoring_contract(&layout).map_err(|error| {
             tool_workflow::WorkflowLaunchError(format!(
                 "cannot load active Local App authoring contract: {error}"
             ))
         })?;
     let active_authoring_contract_sha256 =
-        crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&layout).map_err(
+        local_app_service::app_build::active_build_authoring_contract_sha256(&layout).map_err(
             |error| {
                 tool_workflow::WorkflowLaunchError(format!(
                     "cannot load active Local App authoring contract digest: {error}"
@@ -3282,7 +3280,7 @@ mod plugin_args_tests {
             version: local_apps::AUTHORING_SCHEMA_VERSION,
             revision: 1,
             app_id: "impact123".into(),
-            runtime_profile: crate::mobile::local_app_runtime_profiles::current_binding_for_family(
+            runtime_profile: local_app_service::runtime_profiles::current_binding_for_family(
                 local_apps::AppRuntimeProfile::ReactDom,
             )
             .expect("runtime profile"),
@@ -3646,7 +3644,7 @@ mod run_id_tests {
         manifest: &mut local_apps::AppManifest,
         family: local_apps::AppRuntimeProfile,
     ) {
-        let binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(family)
+        let binding = local_app_service::runtime_profiles::current_binding_for_family(family)
             .expect("published runtime profile");
         manifest.surface = Some(family.surface());
         manifest.runtime_profile = Some(binding.clone());
@@ -3666,7 +3664,7 @@ mod run_id_tests {
             lockfile_sha256: "2".repeat(64),
             dependency_tree_sha256: "3".repeat(64),
             sbom_sha256: "4".repeat(64),
-            toolchain_key: crate::mobile::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
+            toolchain_key: local_app_service::runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
                 .to_string(),
             verified_profile_contract_sha256: binding.contract_sha256,
         });
@@ -4018,7 +4016,7 @@ mod run_id_tests {
         )
         .expect("materialized manifest should still resolve through a hostile args block");
 
-        let pinned = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
+        let pinned = local_app_service::runtime_profiles::current_binding_for_family(
             local_apps::AppRuntimeProfile::ReactDom,
         )
         .expect("published runtime profile");
@@ -4533,7 +4531,7 @@ mod run_id_tests {
             lockfile_sha256: "2".repeat(64),
             dependency_tree_sha256: "3".repeat(64),
             sbom_sha256: "4".repeat(64),
-            toolchain_key: crate::mobile::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
+            toolchain_key: local_app_service::runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
                 .to_string(),
             verified_profile_contract_sha256: "a".repeat(64),
         });
@@ -5564,7 +5562,7 @@ mod run_id_tests {
         let layout = local_apps::AppLayout::new(root, app_id).expect("layout");
         let manifest = local_apps::load_manifest(&layout).expect("manifest");
         let authoring_contract_sha256 =
-            crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&layout)
+            local_app_service::app_build::active_build_authoring_contract_sha256(&layout)
                 .expect("active build receipt")
                 .expect("active authoring contract digest");
         let runtime_profile = manifest.runtime_profile.clone().expect("runtime profile");
@@ -6346,11 +6344,9 @@ mod run_id_tests {
             );
             if operation == "update" {
                 let expected_digest =
-                    crate::mobile::local_apps_build::active_build_authoring_contract_sha256(
-                        &layout,
-                    )
-                    .expect("active build receipt")
-                    .expect("active authoring contract digest");
+                    local_app_service::app_build::active_build_authoring_contract_sha256(&layout)
+                        .expect("active build receipt")
+                        .expect("active authoring contract digest");
                 assert_eq!(
                     after_object
                         .get("host_context")
@@ -6461,7 +6457,7 @@ mod run_id_tests {
         };
 
         let old_digest =
-            crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&layout)
+            local_app_service::app_build::active_build_authoring_contract_sha256(&layout)
                 .expect("old receipt")
                 .expect("old digest");
         let old_seen = launch_context_digest(fixture_authoring_spec_value(

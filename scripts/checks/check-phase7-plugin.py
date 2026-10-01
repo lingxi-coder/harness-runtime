@@ -17,7 +17,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 REGISTRY = REPO / "crates" / "mcp" / "src" / "registry.rs"
 REGISTRY_LOCAL_APPS = REPO / "crates" / "mcp" / "src" / "registry" / "local_apps.rs"
-TRANSPORT = REPO / "crates" / "runtime" / "src" / "mobile" / "local_apps_mcp.rs"
+# `ConversationExport` (the scoped identity and its registry-key grammar) lives in
+# `mcp-wire` so the in-process transport can be written without the engine.
+CONVERSATION_EXPORT = REPO / "crates" / "mcp-wire" / "src" / "export.rs"
+TRANSPORT = REPO / "crates" / "local-app-service" / "src" / "mcp_server.rs"
 TASKS = REPO / "docs" / "local-apps" / "harness" / "tasks-phase-7.json"
 
 
@@ -47,7 +50,13 @@ def main() -> None:
 
     registry_root = REGISTRY.read_text(encoding="utf-8")
     require(registry_root, "mod local_apps;", "McpRegistry module wiring")
-    registry = registry_root + "\n" + REGISTRY_LOCAL_APPS.read_text(encoding="utf-8")
+    registry = (
+        registry_root
+        + "\n"
+        + REGISTRY_LOCAL_APPS.read_text(encoding="utf-8")
+        + "\n"
+        + CONVERSATION_EXPORT.read_text(encoding="utf-8")
+    )
     for needle in [
         "pub struct ConversationExport",
         "local_apps:conversation-export:",

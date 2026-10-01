@@ -2,7 +2,7 @@
 //!
 //! Replaces the fixed workflow's mandatory template-selection stage, five-part
 //! design stages and quality tier. The user approves a PLAN (see
-//! [`crate::mobile::plan_approval`]); this operation turns that approval into the two
+//! [`crate::plan_approval`]); this operation turns that approval into the two
 //! things the rest of the engine already understands:
 //!
 //! * CREATE — the template is landed through the EXISTING scaffold transaction
@@ -232,7 +232,7 @@ impl LocalAppsHostBroker {
         // may have edited it in the approval dialog, or the model may have
         // rewritten it; either way this approval no longer describes what is
         // there, and the only correct answer is to plan again.
-        local_app_service::plan_approval::verify_plan_unchanged(&plan_path, &plan_sha256)?;
+        crate::plan_approval::verify_plan_unchanged(&plan_path, &plan_sha256)?;
 
         let service = self.service()?;
         let record = service
@@ -331,15 +331,14 @@ impl LocalAppsHostBroker {
                 // A template that disappeared or changed since the plan was
                 // written is refused by name instead of being swapped for a
                 // similar one.
-                let (handle, selection) =
-                    crate::mobile::local_app_template_catalog::journal_plan_selection(
-                        self.plugin_bundle()?.as_ref(),
-                        &self.root,
-                        &app_id,
-                        &execution_id,
-                        &template_id,
-                        "the user approved this template in the plan",
-                    )?;
+                let (handle, selection) = crate::template_catalog::journal_plan_selection(
+                    self.plugin_bundle()?.as_ref(),
+                    &self.root,
+                    &app_id,
+                    &execution_id,
+                    &template_id,
+                    "the user approved this template in the plan",
+                )?;
                 let staged = self
                     .local_app_contract(json!({
                         "operation": "stage",
@@ -411,7 +410,7 @@ impl LocalAppsHostBroker {
                     "workflow_run_id": state.execution_id,
                     "create_without_mcp": true,
                 }),
-                local_app_service::plan_approval::CreateApprovalAuthority::ApprovedPlan,
+                crate::plan_approval::CreateApprovalAuthority::ApprovedPlan,
             )
             .await?;
         let receipt_id = approval

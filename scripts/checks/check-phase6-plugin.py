@@ -12,6 +12,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CORE = ROOT / "crates" / "local-apps" / "src"
+# The id grammar has its own dependency-free crate; `local-apps` re-exports it.
+CONTRACTS = ROOT / "crates" / "local-app-contracts" / "src"
 WORKFLOW = ROOT / "crates" / "plugins" / "lingxi-local-app" / "workflows" / "local-app-mcp-authoring.js"
 
 
@@ -23,7 +25,7 @@ def main() -> None:
     types = (CORE / "types.rs").read_text(encoding="utf-8")
     if not re.search(r"APPS_SCHEMA_VERSION:\s*u32\s*=\s*4", types):
         fail("APPS_SCHEMA_VERSION must be 4")
-    ids = (CORE / "ids.rs").read_text(encoding="utf-8")
+    ids = (CONTRACTS / "lib.rs").read_text(encoding="utf-8")
     if "APP_ID_MAX_LEN: usize = 54" not in ids or "{0,53}" not in ids:
         fail("app id grammar must be the v3 54-character form")
     manifest = (CORE / "manifest.rs").read_text(encoding="utf-8")
