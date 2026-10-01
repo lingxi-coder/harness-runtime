@@ -1265,6 +1265,7 @@ dependencies = [
  "indexmap",
  "jsonrpc",
  "libc",
+ "mcp-wire",
  "mobile-linux-api",
  "rustix 0.38.44",
  "schemars",
@@ -3291,6 +3292,7 @@ dependencies = [
  "async-trait",
  "core",
  "git2",
+ "mcp-wire",
  "rand 0.9.4",
  "rusqlite",
  "serde",
@@ -3469,6 +3471,15 @@ dependencies = [
  "unicode-normalization",
  "url",
  "urlencoding",
+]
+
+[[package]]
+name = "mcp-wire"
+version = "0.12.0"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

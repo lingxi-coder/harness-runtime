@@ -4,7 +4,7 @@ use crate::{
     allowed_for_synchronous_flow, AppError, AppLayout, CapabilityId, CapabilityRegistry,
     CapabilityTransport, FlowDefinition, APPS_SCHEMA_VERSION,
 };
-use lingxi_core::host::{McpPermissionCeiling, McpToolDefinitionDto};
+use mcp_wire::{McpPermissionCeiling, McpToolDefinitionDto};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -1628,7 +1628,7 @@ mod tests {
     use crate::{
         AppLayout, CapabilityId, CapabilityRegistry, FlowDefinition, FlowStep, APPS_SCHEMA_VERSION,
     };
-    use lingxi_core::host::{McpPermissionCeiling, McpToolDefinitionDto};
+    use mcp_wire::{McpPermissionCeiling, McpToolDefinitionDto};
     use serde_json::json;
     use std::collections::BTreeMap;
 

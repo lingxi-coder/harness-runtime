@@ -17,6 +17,14 @@ use std::fmt;
 use std::pin::Pin;
 use thiserror::Error;
 
+// The MCP `Tool` wire shapes and the per-tool permission ceiling are defined in
+// `mcp-wire` so the Local App service can name them without depending on this
+// crate; they are re-exported here so every existing path keeps resolving.
+pub use mcp_wire::{
+    McpIconDto, McpPermissionCeiling, McpToolAnnotationsDto, McpToolDefinitionDto,
+    McpToolExecutionDto, McpToolTaskSupportDto,
+};
+
 /// Insertion-order-preserving header map for remote MCP transports.
 ///
 /// claude-code's `getServerKey` hashes `JSON.stringify({type,url,headers})`
@@ -447,155 +455,6 @@ impl McpToolPermissionPolicy {
             (Self::AlwaysDeny, _) | (_, Self::AlwaysDeny) => Self::AlwaysDeny,
             (Self::AlwaysAsk, _) | (_, Self::AlwaysAsk) => Self::AlwaysAsk,
             (Self::AlwaysAllow, Self::AlwaysAllow) => Self::AlwaysAllow,
-        }
-    }
-}
-
-/// Tighten-only per-tool ceiling supplied by host/org policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum McpPermissionCeiling {
-    /// No additional restriction.
-    Allow,
-    /// Require interactive approval at minimum.
-    Ask,
-    /// Block the tool.
-    Deny,
-}
-
-impl McpPermissionCeiling {
-    /// Parse `toolPermissions`/org-policy values (`blocked` maps to `deny`).
-    #[must_use]
-    pub fn from_policy_str(value: &str) -> Option<Self> {
-        match value {
-            "allow" => Some(Self::Allow),
-            "ask" => Some(Self::Ask),
-            "blocked" | "deny" => Some(Self::Deny),
-            _ => None,
-        }
-    }
-
-    /// Return the stricter of two ceilings (`deny` > `ask` > `allow`).
-    #[must_use]
-    pub const fn strictest(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Deny, _) | (_, Self::Deny) => Self::Deny,
-            (Self::Ask, _) | (_, Self::Ask) => Self::Ask,
-            (Self::Allow, Self::Allow) => Self::Allow,
-        }
-    }
-}
-
-/// Standard MCP icon descriptor for a tool.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpIconDto {
-    /// Verified icon source URI.
-    pub src: String,
-    /// Optional MIME type for the icon.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mime_type: Option<String>,
-    /// Declared size labels.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sizes: Vec<String>,
-    /// Optional theme discriminator.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub theme: Option<String>,
-    /// Unrecognized extension members preserved across transport/cache hops.
-    #[serde(flatten, default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
-    pub extra: indexmap::IndexMap<String, Value>,
-}
-
-/// Optional MCP tool annotations.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpToolAnnotationsDto {
-    /// Optional user-facing title override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// Whether the tool is host-proven read-only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub read_only_hint: Option<bool>,
-    /// Whether the tool may be destructive.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub destructive_hint: Option<bool>,
-    /// Whether the host can prove the tool is idempotent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idempotent_hint: Option<bool>,
-    /// Whether the tool touches the outside world.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub open_world_hint: Option<bool>,
-    /// Unrecognized annotation hints preserved across transport/cache hops.
-    #[serde(flatten, default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
-    pub extra: indexmap::IndexMap<String, Value>,
-}
-
-/// MCP task-support declaration for one tool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum McpToolTaskSupportDto {
-    /// This tool does not participate in MCP Tasks.
-    Forbidden,
-    /// This tool may opt into MCP Tasks.
-    Optional,
-    /// This tool requires MCP Tasks.
-    Required,
-}
-
-/// Optional execution metadata for one tool.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpToolExecutionDto {
-    /// Declared MCP Tasks support level for this tool.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_support: Option<McpToolTaskSupportDto>,
-}
-
-/// Standard MCP 2025-11-25 `Tool` wire definition used by Local App catalogs.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpToolDefinitionDto {
-    /// Raw tool name exposed by the server.
-    pub name: String,
-    /// Optional user-facing title.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// Optional user-facing description.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Input JSON Schema.
-    pub input_schema: Value,
-    /// Optional structured output JSON Schema.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_schema: Option<Value>,
-    /// Optional derived annotations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub annotations: Option<McpToolAnnotationsDto>,
-    /// Optional execution metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution: Option<McpToolExecutionDto>,
-    /// Optional icon list.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub icons: Vec<McpIconDto>,
-    /// Opaque vendor metadata preserved byte-for-byte.
-    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>,
-}
-
-impl McpToolDefinitionDto {
-    /// Construct a minimal wire `Tool` definition.
-    #[must_use]
-    pub fn new(name: impl Into<String>, input_schema: Value) -> Self {
-        Self {
-            name: name.into(),
-            title: None,
-            description: None,
-            input_schema,
-            output_schema: None,
-            annotations: None,
-            execution: None,
-            icons: Vec::new(),
-            meta: None,
         }
     }
 }

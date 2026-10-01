@@ -20,6 +20,12 @@ LEAVES = {"app", "example"}
 # concrete `tool-shell` would defeat the whole composition-root design.
 API_CRATES = {"tool-api", "skill-api", "command-api"}
 
+# Primitive crates both the engine (`core` re-exports them) and the Local App
+# service name directly. They are the bottom of the graph: a workspace
+# dependency here would drag the engine into whatever else depends on them,
+# which is exactly what they exist to prevent.
+SHARED_PRIMITIVES = {"mcp-wire"}
+
 # The SDK assembles existing components; components must never reach back into
 # its product profiles or depend on a concrete UI to describe an interaction.
 HARNESS_COMPONENT_CRATES = {"llm-runtime", "harness-runtime", "tool-api", "permission"}
@@ -97,7 +103,12 @@ def main():
             if d == "harness-runtime" and c not in LEAVES:
                 violations.append("%s depends on the Harness composition root" % n)
                 continue
-            if n == "core" and d not in {"branding", "jsonrpc"}:
+            if n in SHARED_PRIMITIVES:
+                violations.append(
+                    "%s depends on %s — shared primitives have no workspace dependencies" % (n, d)
+                )
+                continue
+            if n == "core" and d not in {"branding", "jsonrpc"} | SHARED_PRIMITIVES:
                 violations.append(
                     "core depends on %s — shared contracts must stay below domain and telemetry crates" % d
                 )

@@ -32,6 +32,18 @@ class DependencyRules(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("core depends on the Harness composition root", result.stderr)
 
+    def test_shared_core_may_depend_on_a_shared_primitive(self):
+        result = self.run_gate({"core": "crates/core", "mcp-wire": "crates/mcp-wire"},
+                               {"core": ["mcp-wire"]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_shared_primitive_cannot_depend_on_the_engine(self):
+        result = self.run_gate({"core": "crates/core", "mcp-wire": "crates/mcp-wire"},
+                               {"mcp-wire": ["core"]})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("mcp-wire depends on core — shared primitives have no workspace dependencies",
+                      result.stderr)
+
     def test_shared_core_cannot_depend_on_telemetry(self):
         result = self.run_gate({"core": "crates/core", "telemetry": "crates/telemetry"},
                                {"core": ["telemetry"]})
