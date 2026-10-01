@@ -1265,6 +1265,7 @@ dependencies = [
  "indexmap",
  "jsonrpc",
  "libc",
+ "local-app-contracts",
  "mcp-wire",
  "mobile-linux-api",
  "rooted-fs",
@@ -3303,6 +3304,7 @@ name = "local-app-service"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "futures-core",
  "local-app-contracts",
  "local-apps",
  "serde",

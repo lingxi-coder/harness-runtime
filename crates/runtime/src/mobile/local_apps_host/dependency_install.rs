@@ -646,7 +646,7 @@ impl LocalAppsHostBroker {
         args.extend([
             "--prefer-offline".into(),
             "--store-dir".into(),
-            lingxi_core::host::local_app_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
+            local_app_contracts::guest_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
             "--reporter=append-only".into(),
         ]);
 
@@ -1370,7 +1370,7 @@ impl LocalAppsHostBroker {
         };
         let build_mount = MountSpec {
             host_path: workspace.clone(),
-            guest_path: lingxi_core::host::local_app_paths::local_app_build_project(
+            guest_path: local_app_contracts::guest_paths::local_app_build_project(
                 app_id, "store",
             ),
             read_only: false,
@@ -1384,7 +1384,7 @@ impl LocalAppsHostBroker {
         }
         let store_mount = MountSpec {
             host_path: dependency_store,
-            guest_path: lingxi_core::host::local_app_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
+            guest_path: local_app_contracts::guest_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
             read_only: false,
             purpose: MountPurpose::Shared,
         };

@@ -16,6 +16,7 @@ async-trait.workspace = true
 branding.workspace = true
 mobile-linux-api.workspace = true
 jsonrpc = { path = "../jsonrpc" }
+local-app-contracts = { path = "../local-app-contracts" }
 mcp-wire = { path = "../mcp-wire" }
 rooted-fs = { path = "../rooted-fs" }
 secrecy = { version = "0.10", features = ["serde"] }

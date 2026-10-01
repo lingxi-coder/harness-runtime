@@ -19,6 +19,7 @@ local-app-contracts = { path = "../local-app-contracts" }
 # the service reaches git2, so the consumer's choice is the one that applies.
 local-apps = { path = "../local-apps", default-features = false }
 async-trait.workspace = true
+futures-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

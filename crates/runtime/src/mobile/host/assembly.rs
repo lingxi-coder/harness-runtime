@@ -3073,7 +3073,9 @@ pub fn build_mobile_engine_inner(
     // so an agent reading it could only produce a rejected pair.
     if let Some(host_environment) = firer_cfg.host_environment.clone() {
         if local_apps_host
-            .attach_host_environment(host_environment)
+            .attach_device_context(crate::mobile::local_apps_adapters::device_context_of(
+                &host_environment,
+            ))
             .is_err()
         {
             tracing::warn!("local-apps host environment was already attached");

@@ -670,7 +670,7 @@ fn local_app_build_mount(app_id: &str, channel: &str, build_root: &Path) -> Moun
     MountSpec {
         host_path: build_root.to_path_buf(),
 
-        guest_path: lingxi_core::host::local_app_paths::local_app_build_project(app_id, channel),
+        guest_path: local_app_contracts::guest_paths::local_app_build_project(app_id, channel),
 
         read_only: false,
         purpose: MountPurpose::LocalAppBuild,
@@ -4827,7 +4827,7 @@ mod tests {
             assert_eq!(request.mounts[0].host_path, workspace);
             assert_eq!(
                 request.mounts[0].guest_path,
-                lingxi_core::host::local_app_paths::local_app_build_project("aaaa1111", "store")
+                local_app_contracts::guest_paths::local_app_build_project("aaaa1111", "store")
             );
             assert_eq!(
                 request.cwd.as_deref(),

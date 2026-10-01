@@ -5,16 +5,97 @@
 //! never names them. [`local_apps_wire`](super::local_apps_wire) is the other
 //! half of the edge: it maps the service's vocabulary onto the client protocol.
 
+use crate::mobile::local_apps_host::AgentOutputStream;
 use async_trait::async_trait;
+use lingxi_core::host::{CostSnapshot, OutputStream};
 use local_app_contracts::diagnostics::{
     Diagnostic, DiagnosticSeverity, DiagnosticsSettleState, DiagnosticsSettleStatus,
     FileDiagnostics,
 };
 use local_app_service::host::DiagnosticsProvider;
 use lsp::diagnostic_registry::{DiagnosticFreshness, DiagnosticSettleState};
+use serde_json::Value;
 use std::path::Path;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
+use tokio::sync::RwLock;
+
+/// The confirmed native target for the host facts the client reported.
+///
+/// The Local App service names its own host vocabulary ([`local_apps::HostOs`],
+/// [`local_apps::HostDeviceClass`]); this is the one place that maps the
+/// mobile runtime's environment onto it. Both matches are exhaustive on
+/// purpose: a new OS or class in the environment must be decided here, not
+/// fall through to a platform nobody chose.
+pub(crate) fn device_context_of(
+    environment: &lingxi_core::host::MobileHostEnvironment,
+) -> Option<local_apps::DeviceContext> {
+    use lingxi_core::host::{MobileDeviceClass, MobileHostOs};
+    let os = match environment.host_os {
+        MobileHostOs::Ios => local_apps::HostOs::Ios,
+        MobileHostOs::Android => local_apps::HostOs::Android,
+    };
+    let class = match environment.device_class {
+        MobileDeviceClass::Phone => local_apps::HostDeviceClass::Phone,
+        MobileDeviceClass::Tablet => local_apps::HostDeviceClass::Tablet,
+        MobileDeviceClass::Unknown => local_apps::HostDeviceClass::Unknown,
+    };
+    local_apps::DeviceContext::from_host_facts(os, class)
+}
+
+/// Stable output sink owned by one live app Agent orchestrator. The broker
+/// swaps the request-specific stream target before each serialized turn.
+///
+/// The engine's agent loop reports text, tool calls and the end of a turn; the
+/// app's stream only ever carried the text, so the rest are accepted and
+/// dropped here.
+pub(crate) struct AgentOutputRouter {
+    target: RwLock<Option<Arc<AgentOutputStream>>>,
+}
+
+impl AgentOutputRouter {
+    pub(crate) fn new() -> Self {
+        Self {
+            target: RwLock::new(None),
+        }
+    }
+
+    pub(crate) async fn set_target(&self, output: Arc<AgentOutputStream>) {
+        *self.target.write().await = Some(output);
+    }
+
+    async fn target(&self) -> Option<Arc<AgentOutputStream>> {
+        self.target.read().await.clone()
+    }
+}
+
+#[async_trait]
+impl OutputStream for AgentOutputRouter {
+    async fn emit_text(&self, text: &str) {
+        if let Some(target) = self.target().await {
+            target.emit_text(text).await;
+        }
+    }
+
+    async fn emit_tool_call(
+        &self,
+        _id: &lingxi_core::types::ToolUseId,
+        _tool: &str,
+        _input: &Value,
+    ) {
+    }
+
+    async fn emit_tool_result(
+        &self,
+        _id: &lingxi_core::types::ToolUseId,
+        _tool: &str,
+        _model_text: &str,
+        _result: &Value,
+    ) {
+    }
+
+    async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
+}
 
 /// Diagnostics from the engine's language-server registry.
 ///

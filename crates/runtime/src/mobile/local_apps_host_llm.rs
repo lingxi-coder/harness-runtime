@@ -14,13 +14,11 @@
 //! Small app-generated images (a canvas export) may still be sent inline.
 
 use super::{AgentOutputStream, BridgeFailure, LocalAppsHostBroker};
-use crate::mobile::local_apps_llm::{ChatMessage, ChatPart, ChatRequest, ChatRole};
 use base64::Engine as _;
 use futures_util::StreamExt;
-use lingxi_core::host::OutputStream;
-use llm_runtime::{HistoryContentDelta, HistoryEvent};
 use local_app_contracts::approvals::CapabilityKind;
 use local_app_service::host::HostEvent;
+use local_app_service::llm::{ChatMessage, ChatPart, ChatRequest, ChatRole, ChatStreamEvent};
 use local_apps::AppCapability;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -466,22 +464,8 @@ impl LocalAppsHostBroker {
             let mut stop_reason = None;
             while let Some(event) = events.next().await {
                 match event.map_err(|error| error.to_string())? {
-                    HistoryEvent::ContentBlockDelta {
-                        delta: HistoryContentDelta::TextDelta { text },
-                        ..
-                    } => output.emit_text(&text).await,
-                    HistoryEvent::MessageDelta { delta, .. } => {
-                        stop_reason = delta.stop_reason.or(stop_reason);
-                    }
-                    HistoryEvent::Completed { response } => {
-                        stop_reason = response.stop_reason.clone().or(stop_reason);
-                    }
-                    HistoryEvent::WebSearch { .. }
-                    | HistoryEvent::MessageStart { .. }
-                    | HistoryEvent::ContentBlockStart { .. }
-                    | HistoryEvent::ContentBlockDelta { .. }
-                    | HistoryEvent::ContentBlockStop { .. }
-                    | HistoryEvent::MessageStop => {}
+                    ChatStreamEvent::TextDelta(text) => output.emit_text(&text).await,
+                    ChatStreamEvent::StopReason(reason) => stop_reason = Some(reason),
                 }
             }
             Ok::<_, String>((output.text_snapshot().await, stop_reason))
@@ -519,18 +503,18 @@ impl LocalAppsHostBroker {
 mod tests {
     use crate::mobile::local_apps_host::LocalAppsHostBroker;
     use crate::mobile::local_apps_llm::{
-        ChatOutcome, ChatPart, ChatRequest, LocalAppsLlm, LocalAppsModel, LocalAppsModelStream,
+        ChatOutcome, ChatPart, ChatRequest, ChatStreamEvent, LocalAppsLlm, LocalAppsModel,
+        ModelStream,
     };
-    use crate::mobile::local_apps_profile::SharedLlm;
     use async_trait::async_trait;
     use base64::Engine as _;
     use client::adapter::{ClientEventSink, MockSink};
     use client::protocol::events::ClientEvent;
     use client::protocol::local_apps::AppEventDto;
     use futures_util::stream;
-    use llm_runtime::{HistoryContentDelta, HistoryEvent, HistoryMessageDelta};
     use local_app_contracts::approvals::AuthorizationDecision;
     use local_app_contracts::bridge::{BridgeOperation, BridgeRequest};
+    use local_app_service::llm::SharedLlm;
     use local_apps::error::AppError;
     use local_apps::test_support::FixedClock;
     use local_apps::{
@@ -546,7 +530,7 @@ mod tests {
     /// A model whose `chat` answers from a script, recording what it saw.
     struct ChatModel {
         outcome: std::sync::Mutex<Vec<Result<ChatOutcome, AppError>>>,
-        stream_events: std::sync::Mutex<Option<Vec<Result<HistoryEvent, AppError>>>>,
+        stream_events: std::sync::Mutex<Option<Vec<Result<ChatStreamEvent, AppError>>>>,
         seen: std::sync::Mutex<Vec<ChatRequest>>,
         /// When set, `chat` never returns — for the timeout test.
         hang: bool,
@@ -574,7 +558,7 @@ mod tests {
             })
         }
 
-        fn streaming(events: Vec<Result<HistoryEvent, AppError>>) -> Arc<Self> {
+        fn streaming(events: Vec<Result<ChatStreamEvent, AppError>>) -> Arc<Self> {
             Arc::new(Self {
                 outcome: std::sync::Mutex::new(Vec::new()),
                 stream_events: std::sync::Mutex::new(Some(events)),
@@ -598,7 +582,7 @@ mod tests {
             outcome.remove(0)
         }
 
-        async fn stream(&self, _request: ChatRequest) -> Result<LocalAppsModelStream, AppError> {
+        async fn stream(&self, _request: ChatRequest) -> Result<ModelStream, AppError> {
             let events = self
                 .stream_events
                 .lock()
@@ -984,26 +968,9 @@ mod tests {
     #[tokio::test]
     async fn llm_stream_emits_ordered_text_frames_and_final_response() {
         let model = ChatModel::streaming(vec![
-            Ok(HistoryEvent::ContentBlockDelta {
-                index: 0,
-                delta: HistoryContentDelta::TextDelta {
-                    text: "第一段".into(),
-                },
-            }),
-            Ok(HistoryEvent::ContentBlockDelta {
-                index: 0,
-                delta: HistoryContentDelta::TextDelta {
-                    text: "第二段".into(),
-                },
-            }),
-            Ok(HistoryEvent::MessageDelta {
-                delta: HistoryMessageDelta {
-                    stop_reason: Some("end_turn".into()),
-                    stop_details: None,
-                },
-                usage: None,
-            }),
-            Ok(HistoryEvent::MessageStop),
+            Ok(ChatStreamEvent::TextDelta("第一段".into())),
+            Ok(ChatStreamEvent::TextDelta("第二段".into())),
+            Ok(ChatStreamEvent::StopReason("end_turn".into())),
         ]);
         let h = harness(model).await;
         declare_and_grant(&h);

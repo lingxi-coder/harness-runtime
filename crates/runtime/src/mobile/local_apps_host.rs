@@ -286,29 +286,6 @@ struct DependencyBaselineIdentity {
     contract_sha256: String,
 }
 
-/// The confirmed native target for the host facts the client reported.
-///
-/// The Local App service names its own host vocabulary ([`local_apps::HostOs`],
-/// [`local_apps::HostDeviceClass`]); this is the one place that maps the
-/// mobile runtime's environment onto it. Both matches are exhaustive on
-/// purpose: a new OS or class in the environment must be decided here, not
-/// fall through to a platform nobody chose.
-fn device_context_of(
-    environment: &lingxi_core::host::MobileHostEnvironment,
-) -> Option<local_apps::DeviceContext> {
-    use lingxi_core::host::{MobileDeviceClass, MobileHostOs};
-    let os = match environment.host_os {
-        MobileHostOs::Ios => local_apps::HostOs::Ios,
-        MobileHostOs::Android => local_apps::HostOs::Android,
-    };
-    let class = match environment.device_class {
-        MobileDeviceClass::Phone => local_apps::HostDeviceClass::Phone,
-        MobileDeviceClass::Tablet => local_apps::HostDeviceClass::Tablet,
-        MobileDeviceClass::Unknown => local_apps::HostDeviceClass::Unknown,
-    };
-    local_apps::DeviceContext::from_host_facts(os, class)
-}
-
 fn value_sha256(value: &Value) -> Result<String, String> {
     local_apps::approval_contract_sha256(value.clone()).map_err(|issue| issue.message)
 }
@@ -826,7 +803,7 @@ mod llm_ops;
 #[path = "local_apps_host_agent.rs"]
 mod agent_ops;
 pub(crate) use agent_ops::{
-    AgentOutputRouter, AgentOutputStream, AgentTurnControl, AgentTurnUsageState,
+    AgentOutputStream, AgentTurnControl, AgentTurnUsageState,
     LocalAppsAgentExecutor,
 };
 
@@ -950,7 +927,7 @@ pub(crate) struct LocalAppsHostBroker {
     diagnostics: OnceLock<Arc<dyn DiagnosticsProvider>>,
     /// Set once at profile load (same call site as `attach_service`), so the
     /// broker's `llm.chat` bridge operation reaches the live model.
-    llm: OnceLock<Arc<crate::mobile::local_apps_profile::SharedLlm>>,
+    llm: OnceLock<Arc<local_app_service::llm::SharedLlm>>,
     /// Set at the same profile-load site as `llm` — live per-connection
     /// device handles behind a swap cell (see `local_apps_device`).
     device: OnceLock<Arc<crate::mobile::local_apps_device::SharedDeviceCapabilities>>,
@@ -991,7 +968,7 @@ pub(crate) struct LocalAppsHostBroker {
     /// supply one: the reminder is all it sees, and the reminder's device
     /// vocabulary (`phone`/`tablet`) does not name an iOS form factor.
     /// Unattached — desktop embedders and host tests — means no context.
-    host_environment: OnceLock<lingxi_core::host::MobileHostEnvironment>,
+    device_context: OnceLock<Option<local_apps::DeviceContext>>,
     /// Host-owned app Agent execution seam, attached by the mobile composition
     /// root after the app service and MCP host are ready.
     agent_executor: OnceLock<Arc<dyn LocalAppsAgentExecutor>>,
@@ -1170,7 +1147,7 @@ impl LocalAppsHostBroker {
             agent_session_writes: Mutex::new(()),
             mcp_settings_writes: Mutex::new(()),
             active_mcp_conversation: Mutex::new(None),
-            host_environment: OnceLock::new(),
+            device_context: OnceLock::new(),
             agent_executor: OnceLock::new(),
             agent_turns: Arc::new(Mutex::new(HashMap::new())),
             pending_profile_proposals: Mutex::new(HashMap::new()),
@@ -1289,23 +1266,24 @@ impl LocalAppsHostBroker {
 
     pub(crate) fn attach_llm(
         &self,
-        llm: Arc<crate::mobile::local_apps_profile::SharedLlm>,
-    ) -> Result<(), Arc<crate::mobile::local_apps_profile::SharedLlm>> {
+        llm: Arc<local_app_service::llm::SharedLlm>,
+    ) -> Result<(), Arc<local_app_service::llm::SharedLlm>> {
         self.llm.set(llm)
     }
 
-    /// Bind the native host facts. Set once, at the same composition-root
+    /// Bind the confirmed native target of this host: `None` when the client
+    /// could not classify the device. Set once, at the same composition-root
     /// call site as [`Self::attach_agent_executor`].
-    pub(crate) fn attach_host_environment(
+    pub(crate) fn attach_device_context(
         &self,
-        environment: lingxi_core::host::MobileHostEnvironment,
-    ) -> Result<(), lingxi_core::host::MobileHostEnvironment> {
-        self.host_environment.set(environment)
+        context: Option<local_apps::DeviceContext>,
+    ) -> Result<(), Option<local_apps::DeviceContext>> {
+        self.device_context.set(context)
     }
 
     /// Bind the session catalog the scaffold commit renames the pinned init
     /// session in. Set once, at the same composition-root call site as
-    /// [`Self::attach_host_environment`].
+    /// [`Self::attach_device_context`].
     pub(crate) fn attach_conversations(
         &self,
         conversations: Arc<dyn ConversationHost>,
@@ -1319,7 +1297,7 @@ impl LocalAppsHostBroker {
     /// the device — an absent context already means unknown, so neither case
     /// invents a platform.
     fn host_device_context(&self) -> Option<local_apps::DeviceContext> {
-        self.host_environment.get().and_then(device_context_of)
+        self.device_context.get().cloned().flatten()
     }
 
     pub(crate) fn attach_agent_executor(
@@ -5266,7 +5244,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 .map_err(|error| format!("create pnpm dependency store: {error}"))?;
             let build_mount = MountSpec {
                 host_path: workspace.clone(),
-                guest_path: lingxi_core::host::local_app_paths::local_app_build_project(
+                guest_path: local_app_contracts::guest_paths::local_app_build_project(
                     &app_id, "store",
                 ),
                 read_only: false,
@@ -5274,7 +5252,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             };
             let store_mount = MountSpec {
                 host_path: dependency_store,
-                guest_path: lingxi_core::host::local_app_paths::LOCAL_APP_DEPENDENCY_STORE
+                guest_path: local_app_contracts::guest_paths::LOCAL_APP_DEPENDENCY_STORE
                     .to_string(),
                 read_only: false,
                 purpose: MountPurpose::Shared,

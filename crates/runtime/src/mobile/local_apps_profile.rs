@@ -5,13 +5,14 @@ use crate::mobile::local_apps_llm::LocalAppsLlm;
 use async_trait::async_trait;
 use client::adapter::ClientEventSink;
 use client::protocol::events::ClientEvent;
+use local_app_service::llm::SharedLlm;
 use local_apps::{AppError, AppEventFanout, AppService, Clock};
 use mobile_linux_api::MobileLinuxRuntime;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::OnceCell;
 
 /// The engine's platform clock, seen through the clock `local-apps` is written
@@ -119,51 +120,6 @@ impl ClientEventSink for ClientEventFanout {
         for sink in sinks {
             sink.emit(event.clone()).await;
         }
-    }
-}
-
-/// Swappable holder for a profile's [`LocalAppsLlm`].
-///
-/// `ProfileApps` is cached process-wide (see [`profile_apps`]'s `OnceCell`),
-/// but its `llm` is NOT — every consumer that reaches the model (the
-/// broker's `llm.chat` bridge operation) reads through this cell instead of
-/// holding its own `Arc<LocalAppsLlm>`. `clock` / `mobile_linux` stay
-/// genuinely pinned to whichever connection first loaded the profile (their
-/// doc above explains why); the model is different: it carries auth, and a
-/// RECONNECT (a fresh `MobileEngineHandle` — possibly rotated credentials,
-/// possibly a different `ApiService`) hits this exact cache-hit path with a
-/// brand-new `LocalAppsLlm`. Pinning that silently would mean app-initiated
-/// calls keep authenticating as a rotated-out credential with no error and
-/// no log — so [`profile_apps`] refreshes this cell on every call, cached
-/// hit or not.
-///
-/// This does NOT cover a live `/model` switch — `ClientCommand::SetModel`
-/// never rebuilds the engine, so it never reaches `profile_apps` at all.
-/// That path is fixed separately and more narrowly: `ApiServiceModel`
-/// (`local_apps_llm.rs`) holds its own model/profile behind a lock and
-/// `SetModel`'s handler mutates it in place via
-/// [`crate::mobile::local_apps_llm::LocalAppsModel::set_model`] — the SAME
-/// `Arc<LocalAppsLlm>` this cell holds for the connection's lifetime, no
-/// swap needed.
-pub(crate) struct SharedLlm(RwLock<Arc<LocalAppsLlm>>);
-
-impl SharedLlm {
-    pub(crate) fn new(llm: Arc<LocalAppsLlm>) -> Self {
-        Self(RwLock::new(llm))
-    }
-
-    /// The current model. Read fresh on every use (not cached by the
-    /// caller) so a swap takes effect for the very next LLM call, including
-    /// one already in flight when the swap lands but that has not yet
-    /// reached the model.
-    pub(crate) fn current(&self) -> Arc<LocalAppsLlm> {
-        self.0.read().expect("shared llm poisoned").clone()
-    }
-
-    /// Swap in a new model — called by [`profile_apps`] with the calling
-    /// connection's own `ApiService`-backed model.
-    pub(crate) fn replace(&self, llm: Arc<LocalAppsLlm>) {
-        *self.0.write().expect("shared llm poisoned") = llm;
     }
 }
 

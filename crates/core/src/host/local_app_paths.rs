@@ -1,17 +1,11 @@
 //! Product-specific guest paths for Local Apps build profiles.
-/// Root of the local-app build channels.
-pub const LOCAL_APP_BUILD_ROOT: &str = "/var/lingxi/local-app-build";
-/// Host-owned pnpm content-addressable store used only during dependency
-/// installation. It is never mounted for Vite builds or generated code.
-pub const LOCAL_APP_DEPENDENCY_STORE: &str = "/var/lingxi/local-app-dependency-store";
-/// The project-root leaf below a local-app build channel.
-pub const LOCAL_APP_BUILD_PROJECT_DIR: &str = "project";
-
-/// The isolated project root used by a local-app build.
-#[must_use]
-pub fn local_app_build_project(app_id: &str, channel: &str) -> String {
-    format!("{LOCAL_APP_BUILD_ROOT}/{app_id}/{channel}/{LOCAL_APP_BUILD_PROJECT_DIR}")
-}
+//!
+//! The literals live in `local-app-contracts`, which the build host and the
+//! guest both name; the engine keeps its old module path for them.
+pub use local_app_contracts::guest_paths::{
+    local_app_build_project, LOCAL_APP_BUILD_PROJECT_DIR, LOCAL_APP_BUILD_ROOT,
+    LOCAL_APP_DEPENDENCY_STORE,
+};
 
 #[cfg(test)]
 mod tests {

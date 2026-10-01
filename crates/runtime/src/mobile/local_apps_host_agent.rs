@@ -9,7 +9,6 @@
 
 use super::{BridgeFailure, LocalAppsHostBroker};
 use async_trait::async_trait;
-use lingxi_core::host::{CostSnapshot, OutputStream};
 use local_app_contracts::approvals::{AgentProfileProposal, CapabilityKind};
 use local_app_service::host::HostEvent;
 use local_apps::mailbox::{load_mailbox, save_mailbox};
@@ -21,7 +20,6 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 const REASON_AGENT_NOTIFY: &str = "应用请求向你的对话助手发送事件与数据。";
@@ -228,9 +226,11 @@ impl AgentOutputStream {
     }
 }
 
-#[async_trait]
-impl OutputStream for AgentOutputStream {
-    async fn emit_text(&self, text: &str) {
+impl AgentOutputStream {
+    /// One chunk of the agent's text: counts it against the turn's output
+    /// budget (cancelling the turn when the budget runs out), keeps it for
+    /// `agent.send`, and streams it as a frame when the request is streaming.
+    pub(crate) async fn emit_text(&self, text: &str) {
         if let Some(max_tokens) = self.max_tokens {
             let estimated = text.len().div_ceil(4) as u64;
             let max_tokens = u64::from(max_tokens);
@@ -272,80 +272,6 @@ impl OutputStream for AgentOutputStream {
             data_json: serde_json::json!({"text": text}).to_string(),
         })
         .await;
-    }
-
-    async fn emit_tool_call(
-        &self,
-        _id: &lingxi_core::types::ToolUseId,
-        _tool: &str,
-        _input: &Value,
-    ) {
-    }
-
-    async fn emit_tool_result(
-        &self,
-        _id: &lingxi_core::types::ToolUseId,
-        _tool: &str,
-        _model_text: &str,
-        _result: &Value,
-    ) {
-    }
-
-    async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
-}
-
-/// Stable output sink owned by one live app Agent orchestrator. The broker
-/// swaps the request-specific stream target before each serialized turn.
-pub(crate) struct AgentOutputRouter {
-    target: RwLock<Option<Arc<AgentOutputStream>>>,
-}
-
-impl AgentOutputRouter {
-    pub(crate) fn new() -> Self {
-        Self {
-            target: RwLock::new(None),
-        }
-    }
-
-    pub(crate) async fn set_target(&self, output: Arc<AgentOutputStream>) {
-        *self.target.write().await = Some(output);
-    }
-
-    async fn target(&self) -> Option<Arc<AgentOutputStream>> {
-        self.target.read().await.clone()
-    }
-}
-
-#[async_trait]
-impl OutputStream for AgentOutputRouter {
-    async fn emit_text(&self, text: &str) {
-        if let Some(target) = self.target().await {
-            target.emit_text(text).await;
-        }
-    }
-
-    async fn emit_tool_call(&self, id: &lingxi_core::types::ToolUseId, tool: &str, input: &Value) {
-        if let Some(target) = self.target().await {
-            target.emit_tool_call(id, tool, input).await;
-        }
-    }
-
-    async fn emit_tool_result(
-        &self,
-        id: &lingxi_core::types::ToolUseId,
-        tool: &str,
-        model_text: &str,
-        result: &Value,
-    ) {
-        if let Some(target) = self.target().await {
-            target.emit_tool_result(id, tool, model_text, result).await;
-        }
-    }
-
-    async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {
-        if let Some(target) = self.target().await {
-            target.emit_end_turn(stop_reason, cost).await;
-        }
     }
 }
 
@@ -1091,7 +1017,6 @@ mod tests {
     use client::adapter::{ClientEventSink, MockSink};
     use client::protocol::events::ClientEvent;
     use client::protocol::local_apps::AppEventDto;
-    use lingxi_core::host::OutputStream;
     use local_app_contracts::approvals::{UiActionKind, UiRequest};
     use local_app_contracts::bridge::{BridgeOperation, BridgeRequest};
     use local_apps::mailbox::{load_mailbox, MAX_MAILBOX_EVENTS};

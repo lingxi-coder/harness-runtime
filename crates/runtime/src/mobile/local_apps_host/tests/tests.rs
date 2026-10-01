@@ -3,6 +3,7 @@ use crate::mobile::local_apps_sessions::{
     latest_custom_title, latest_custom_title_is_mobile_placeholder,
     reconcile_app_init_session_title, SessionCatalog, SessionTitles,
 };
+use crate::mobile::local_apps_adapters::device_context_of;
 use local_app_contracts::events::PluginErrorCode;
 use local_apps::AppRuntimeProfile;
 
@@ -1076,10 +1077,10 @@ async fn host_qa_fixture_with_mobile_linux(
     );
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
-        .attach_host_environment(host_environment(
+        .attach_device_context(device_context_of(&host_environment(
             lingxi_core::host::MobileHostOs::Ios,
             lingxi_core::host::MobileDeviceClass::Phone,
-        ))
+        )))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Host QA").await;
     let layout = AppLayout::new(root.path(), &app_id).expect("layout");
@@ -3840,10 +3841,10 @@ async fn scaffold_records_the_host_device_context() {
     let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
     let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
     assert!(broker
-        .attach_host_environment(host_environment(
+        .attach_device_context(device_context_of(&host_environment(
             lingxi_core::host::MobileHostOs::Ios,
             lingxi_core::host::MobileDeviceClass::Tablet,
-        ))
+        )))
         .is_ok());
     let record = service
         .create_app(Some("Scaffolded"), "a test app", None)
@@ -12150,10 +12151,10 @@ async fn the_host_stamps_the_iphone_device_context_the_agent_cannot_name() {
     );
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
-        .attach_host_environment(host_environment(
+        .attach_device_context(device_context_of(&host_environment(
             lingxi_core::host::MobileHostOs::Ios,
             lingxi_core::host::MobileDeviceClass::Phone,
-        ))
+        )))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Device").await;
 
@@ -12188,10 +12189,10 @@ async fn the_host_stamps_the_android_tablet_device_context() {
     );
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
-        .attach_host_environment(host_environment(
+        .attach_device_context(device_context_of(&host_environment(
             lingxi_core::host::MobileHostOs::Android,
             lingxi_core::host::MobileDeviceClass::Tablet,
-        ))
+        )))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Tablet").await;
 
@@ -12219,10 +12220,10 @@ async fn an_unclassified_host_records_no_device_context() {
     );
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
-        .attach_host_environment(host_environment(
+        .attach_device_context(device_context_of(&host_environment(
             lingxi_core::host::MobileHostOs::Ios,
             lingxi_core::host::MobileDeviceClass::Unknown,
-        ))
+        )))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Unclassified").await;
 
@@ -12249,10 +12250,10 @@ async fn an_agent_supplied_device_context_never_overrides_the_host() {
     );
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
-        .attach_host_environment(host_environment(
+        .attach_device_context(device_context_of(&host_environment(
             lingxi_core::host::MobileHostOs::Ios,
             lingxi_core::host::MobileDeviceClass::Tablet,
-        ))
+        )))
         .is_ok());
     let app_id = create_app_fixture(&root, &service, "Ignored").await;
 
