@@ -105,7 +105,7 @@ impl Tool for ContactsTool {
         "Searching device contacts by name".into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Search native contacts by a non-empty display-name query of at most 200 characters. Returns contacts with id, display_name, phones and emails. Limit is 1..50 (default 20). Use the specific person requested; this tool cannot modify contacts or list the entire address book.".into()
+        "Search native contacts by a non-empty display-name query of at most 200 characters. Returns contacts with id, display_name, phones and emails. Limit is 1..50 (default 20). A true truncated flag means the native result reached the requested limit (more contacts may exist), or returned data was shortened or omitted. It does not prove that more contacts exist. Use the specific person requested; this tool cannot modify contacts or list the entire address book.".into()
     }
     async fn validate_input(
         &self,
@@ -130,7 +130,9 @@ impl Tool for ContactsTool {
         };
         Ok(match execute(&ctx, provider.search(request)).await? {
             Ok(mut contacts) => {
-                let mut truncated = contacts.len() > limit;
+                // Native providers cap their Vec at limit without reporting has_more.
+                // Treat a full page as potentially incomplete, even at an exact match.
+                let mut truncated = contacts.len() >= limit;
                 contacts.truncate(limit);
                 for contact in &mut contacts {
                     truncated |= bound_text(&mut contact.id, 512);

@@ -168,6 +168,7 @@ impl Tool for CameraTool {
         // validates bytes and enforces the model image budget for backends
         // whose default sized implementation returns the original image.
         let processed = process_image(image.jpeg_bytes).map_err(ToolError::Internal)?;
+        let (width, height) = processed.dimensions;
         let mut file = json!({
             "base64": processed.base64,
             "type": processed.media_type,
@@ -190,8 +191,8 @@ impl Tool for CameraTool {
                 "file": file,
                 "captured": true,
                 "cancelled": false,
-                "width": image.width,
-                "height": image.height,
+                "width": width,
+                "height": height,
                 "jpeg_bytes_len": original_size,
             }),
             // Both main and subagent dispatch convert the image data shape

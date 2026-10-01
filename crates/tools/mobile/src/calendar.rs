@@ -110,7 +110,7 @@ impl Tool for CalendarTool {
         "Reading calendar events in a time range".into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Read native calendar events intersecting [start_ms, end_ms), expressed in Unix epoch milliseconds. The range is at most 366 days and limit is 1..100 (default 50). Returns events with id, title, start_ms, end_ms, all_day and optional location, notes, calendar. Use a narrow range for the user's request; this tool cannot create or modify events.".into()
+        "Read native calendar events intersecting [start_ms, end_ms), expressed in Unix epoch milliseconds. The range is at most 366 days and limit is 1..100 (default 50). Returns events with id, title, start_ms, end_ms, all_day and optional location, notes, calendar. A true truncated flag means the native result reached the requested limit (more events may exist), or returned data was shortened or omitted. It does not prove that more events exist. Use a narrow range for the user's request; this tool cannot create or modify events.".into()
     }
     async fn validate_input(
         &self,
@@ -135,7 +135,9 @@ impl Tool for CalendarTool {
         };
         Ok(match execute(&ctx, provider.list_events(request)).await? {
             Ok(mut events) => {
-                let mut truncated = events.len() > limit;
+                // Native providers cap their Vec at limit without reporting has_more.
+                // Treat a full page as potentially incomplete, even at an exact match.
+                let mut truncated = events.len() >= limit;
                 events.truncate(limit);
                 for event in &mut events {
                     truncated |= bound_text(&mut event.id, 512);

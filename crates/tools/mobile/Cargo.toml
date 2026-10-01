@@ -23,6 +23,7 @@ once_cell = "1"
 url = "2"
 
 [dev-dependencies]
+base64 = "=0.22.1"
 image = { version = "=0.24.9", default-features = false, features = ["jpeg"] }
 tool-api = { path = "../../tool-api", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

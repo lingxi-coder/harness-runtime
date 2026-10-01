@@ -1,4 +1,6 @@
 use super::*;
+use base64::Engine;
+use image::GenericImageView;
 use lingxi_core::host::camera::{CameraControl, CapturedImage};
 use std::sync::{Arc, Mutex};
 
@@ -124,7 +126,86 @@ async fn oversized_native_images_are_bounded_before_model_delivery() {
     let file = &result.data["file"];
     assert_eq!(file["dimensions"]["originalWidth"], 4000);
     assert_eq!(file["dimensions"]["displayWidth"], IMAGE_MAX_DIM);
+    assert_eq!(result.data["width"], IMAGE_MAX_DIM);
+    assert_eq!(result.data["height"], file["dimensions"]["displayHeight"]);
     assert!(file["base64"].as_str().unwrap().len() <= 5_242_880);
+}
+
+/// Like Android's bridge, this provider implements only the original methods:
+/// the trait's sized fallback still hands Rust the untouched library JPEG.
+struct OriginalLibraryCamera(CapturedImage);
+
+#[async_trait]
+impl CameraControl for OriginalLibraryCamera {
+    async fn capture_photo(&self, _: CapturePhotoOpts) -> Result<CapturedImage, CameraError> {
+        Ok(self.0.clone())
+    }
+
+    async fn pick_from_library(&self) -> Result<CapturedImage, CameraError> {
+        Ok(self.0.clone())
+    }
+}
+
+fn portrait_library_jpeg(width: u32, height: u32) -> CapturedImage {
+    // The stored raster is horizontal. EXIF 6 displays its red left half at
+    // the top and its blue right half at the bottom after a clockwise turn.
+    let pixels = image::RgbImage::from_fn(width, height, |x, _| {
+        image::Rgb(if x < width / 2 {
+            [240, 0, 0]
+        } else {
+            [0, 0, 240]
+        })
+    });
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&pixels)
+        .unwrap();
+    // Big-endian TIFF IFD0 containing one SHORT Orientation tag with value 6.
+    let exif = [
+        b'E', b'x', b'i', b'f', 0, 0, b'M', b'M', 0, 42, 0, 0, 0, 8, 0, 1, 1, 18, 0, 3, 0, 0, 0, 1,
+        0, 6, 0, 0, 0, 0, 0, 0,
+    ];
+    let mut segment = vec![0xff, 0xe1];
+    segment.extend_from_slice(&u16::try_from(exif.len() + 2).unwrap().to_be_bytes());
+    segment.extend_from_slice(&exif);
+    jpeg.splice(2..2, segment);
+    CapturedImage {
+        jpeg_bytes: jpeg,
+        width,
+        height,
+    }
+}
+
+#[tokio::test]
+async fn original_library_photos_reach_the_model_upright_with_matching_dimensions() {
+    // Exercise both the native-sized fallback and the small-image path: EXIF
+    // must be normalized even when the source needs no dimension reduction.
+    for (width, height) in [(2100, 800), (210, 80)] {
+        let source = portrait_library_jpeg(width, height);
+        let tool = CameraTool::new(ctx_with(Some(Arc::new(OriginalLibraryCamera(source)))));
+        let result = call(&tool, "pick_from_library").await.unwrap();
+        let blocks = tool_api::tool_result_media::media_content_blocks(&result.data).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(blocks[0]["source"]["data"].as_str().unwrap())
+            .unwrap();
+        let delivered = image::load_from_memory(&bytes).unwrap();
+        let (dw, dh) = delivered.dimensions();
+        assert!(
+            dw < dh,
+            "portrait must stay upright in the model image block"
+        );
+        assert!(dh <= IMAGE_MAX_DIM);
+        assert_eq!(result.data["width"], dw);
+        assert_eq!(result.data["height"], dh);
+        let top = delivered.get_pixel(dw / 2, dh / 4);
+        let bottom = delivered.get_pixel(dw / 2, 3 * dh / 4);
+        assert!(top[0] > 200 && top[2] < 30, "top must be red: {top:?}");
+        assert!(
+            bottom[2] > 200 && bottom[0] < 30,
+            "bottom must be blue: {bottom:?}"
+        );
+        assert!(!result.is_error);
+    }
 }
 
 #[tokio::test]

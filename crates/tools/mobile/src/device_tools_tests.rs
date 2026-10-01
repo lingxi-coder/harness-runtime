@@ -26,6 +26,8 @@ use tool_api::{
 struct FakeDevices {
     failure: Option<&'static str>,
     large_records: bool,
+    record_count: Option<usize>,
+    ignore_record_limit: bool,
     pending_location: bool,
     location_dropped: AtomicBool,
     calls: AtomicUsize,
@@ -113,13 +115,21 @@ impl DeepLinkOpener for FakeDevices {
 impl CalendarProvider for FakeDevices {
     async fn list_events(&self, query: CalendarQuery) -> Result<Vec<CalendarEvent>, CalendarError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        let limit = query.limit as usize;
         self.calendar_queries.lock().unwrap().push(query);
         match self.failure {
             Some("permission_denied") => Err(CalendarError::PermissionDenied),
             Some("unavailable") => Err(CalendarError::Unavailable),
             Some("invalid_request") => Err(CalendarError::Invalid("native query policy".into())),
             Some(_) => Err(CalendarError::Other("native failure".into())),
-            None => Ok((0..if self.large_records { 100 } else { 3 })
+            None => Ok((0..self
+                .record_count
+                .unwrap_or(if self.large_records { 100 } else { 3 }))
+                .take(if self.ignore_record_limit {
+                    usize::MAX
+                } else {
+                    limit
+                })
                 .map(|id| CalendarEvent {
                     id: id.to_string(),
                     title: "Meeting".into(),
@@ -139,13 +149,21 @@ impl CalendarProvider for FakeDevices {
 impl ContactsProvider for FakeDevices {
     async fn search(&self, query: ContactsQuery) -> Result<Vec<Contact>, ContactsError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        let limit = query.limit as usize;
         self.contacts_queries.lock().unwrap().push(query);
         match self.failure {
             Some("permission_denied") => Err(ContactsError::PermissionDenied),
             Some("unavailable") => Err(ContactsError::Unavailable),
             Some("invalid_request") => Err(ContactsError::Invalid("native query policy".into())),
             Some(_) => Err(ContactsError::Other("native failure".into())),
-            None => Ok((0..if self.large_records { 50 } else { 3 })
+            None => Ok((0..self
+                .record_count
+                .unwrap_or(if self.large_records { 50 } else { 3 }))
+                .take(if self.ignore_record_limit {
+                    usize::MAX
+                } else {
+                    limit
+                })
                 .map(|id| Contact {
                     id: id.to_string(),
                     display_name: if self.large_records {
@@ -284,6 +302,100 @@ async fn typed_tools_dispatch_and_return_structured_results() {
         }]
     );
     assert_eq!(fake.calls.load(Ordering::SeqCst), 6);
+}
+
+#[tokio::test]
+async fn native_capped_results_report_potential_truncation() {
+    for (kind, max_limit) in [("events", 100), ("contacts", 50)] {
+        for limit in [2, max_limit] {
+            for record_count in [0, limit - 1, limit, limit + 1] {
+                let fake = Arc::new(FakeDevices {
+                    record_count: Some(record_count),
+                    ..Default::default()
+                });
+                let ctx = with_devices(fake.clone());
+                let result = if kind == "events" {
+                    call(
+                        &CalendarTool::new(ctx),
+                        json!({ "start_ms": 1000, "end_ms": 2000, "limit": limit }),
+                    )
+                    .await
+                } else {
+                    call(
+                        &ContactsTool::new(ctx),
+                        json!({ "query": "Alice", "limit": limit }),
+                    )
+                    .await
+                };
+                assert!(!result.is_error);
+                assert_eq!(
+                    result.data[kind].as_array().unwrap().len(),
+                    record_count.min(limit)
+                );
+                assert_eq!(
+                    result.data["truncated"],
+                    record_count >= limit,
+                    "{kind}: {record_count} matches with native limit {limit}"
+                );
+                let forwarded_limit = if kind == "events" {
+                    fake.calendar_queries.lock().unwrap()[0].limit
+                } else {
+                    fake.contacts_queries.lock().unwrap()[0].limit
+                };
+                assert_eq!(forwarded_limit as usize, limit);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn over_limit_native_results_are_bounded_and_report_truncation() {
+    for (kind, limit) in [("events", 100), ("contacts", 50)] {
+        let ctx = with_devices(Arc::new(FakeDevices {
+            record_count: Some(limit + 1),
+            ignore_record_limit: true,
+            ..Default::default()
+        }));
+        let result = if kind == "events" {
+            call(
+                &CalendarTool::new(ctx),
+                json!({ "start_ms": 1000, "end_ms": 2000, "limit": limit }),
+            )
+            .await
+        } else {
+            call(
+                &ContactsTool::new(ctx),
+                json!({ "query": "Alice", "limit": limit }),
+            )
+            .await
+        };
+        assert!(!result.is_error);
+        assert_eq!(result.data[kind].as_array().unwrap().len(), limit);
+        assert_eq!(result.data["truncated"], true);
+    }
+}
+
+#[tokio::test]
+async fn shortened_native_fields_report_truncation_below_result_limit() {
+    let ctx = with_devices(Arc::new(FakeDevices {
+        large_records: true,
+        record_count: Some(1),
+        ..Default::default()
+    }));
+    let calendar = call(
+        &CalendarTool::new(ctx.clone()),
+        json!({ "start_ms": 0, "end_ms": 1, "limit": 100 }),
+    )
+    .await;
+    assert_eq!(calendar.data["events"].as_array().unwrap().len(), 1);
+    assert_eq!(calendar.data["truncated"], true);
+    let contacts = call(
+        &ContactsTool::new(ctx),
+        json!({ "query": "王", "limit": 50 }),
+    )
+    .await;
+    assert_eq!(contacts.data["contacts"].as_array().unwrap().len(), 1);
+    assert_eq!(contacts.data["truncated"], true);
 }
 
 #[tokio::test]
