@@ -11,11 +11,11 @@ use super::UI_TIMEOUT;
 use crate::mobile::local_apps_mcp::LocalAppsMcpHost;
 use client::protocol::events::ClientEvent;
 use client::protocol::local_apps::AppAuthorizationDecisionDto;
-use client::protocol::local_apps::AppBridgeOperationDto;
-use client::protocol::local_apps::AppBridgeRequestDto;
-use client::protocol::local_apps::AppBridgeResponseDto;
 use client::protocol::local_apps::AppEventDto;
 use client::protocol::local_apps::AppUiRequestDto;
+use local_app_contracts::bridge::BridgeOperation;
+use local_app_contracts::bridge::BridgeRequest;
+use local_app_contracts::bridge::BridgeResponse;
 use local_apps::load_manifest;
 use local_apps::load_permissions;
 use serde_json::json;
@@ -84,10 +84,10 @@ impl LocalAppsHostBroker {
         serde_json::from_str(&result)
             .map_err(|error| format!("invalid WebView result JSON: {error}"))
     }
-    pub(crate) async fn execute_bridge(&self, request: AppBridgeRequestDto) {
+    pub(crate) async fn execute_bridge(&self, request: BridgeRequest) {
         let result = self.execute_bridge_inner(&request).await;
         let response = match result {
-            Ok(value) => AppBridgeResponseDto {
+            Ok(value) => BridgeResponse {
                 request_id: request.request_id,
                 app_id: request.app_id,
                 ok: true,
@@ -95,7 +95,7 @@ impl LocalAppsHostBroker {
                 error: None,
                 error_code: None,
             },
-            Err(failure) => AppBridgeResponseDto {
+            Err(failure) => BridgeResponse {
                 request_id: request.request_id,
                 app_id: request.app_id,
                 ok: false,
@@ -104,15 +104,21 @@ impl LocalAppsHostBroker {
                 error_code: failure.code.map(str::to_string),
             },
         };
+        self.emit_bridge_response(response).await;
+    }
+    /// Deliver the answer to a bridge request to the client that holds the page.
+    pub(crate) async fn emit_bridge_response(&self, response: BridgeResponse) {
         self.event_sink
             .emit(ClientEvent::AppEvent {
-                event: AppEventDto::AppBridgeResponse { response },
+                event: AppEventDto::AppBridgeResponse {
+                    response: crate::mobile::local_apps_wire::bridge_response_to_dto(response),
+                },
             })
             .await;
     }
     pub(super) async fn execute_bridge_inner(
         &self,
-        request: &AppBridgeRequestDto,
+        request: &BridgeRequest,
     ) -> Result<Value, BridgeFailure> {
         // Track every page request, not just the eventual mutation: an async
         // click handler may await a query/device bridge before issuing its
@@ -121,7 +127,7 @@ impl LocalAppsHostBroker {
         let qa_action_event_id = qa_bridge_guard
             .as_ref()
             .map(|guard| guard.event_id().to_string());
-        let qa_bridge_event_id = matches!(request.operation, AppBridgeOperationDto::MutateData)
+        let qa_bridge_event_id = matches!(request.operation, BridgeOperation::MutateData)
             .then_some(qa_action_event_id.as_deref())
             .flatten();
         let result = self
@@ -134,18 +140,18 @@ impl LocalAppsHostBroker {
     }
     pub(super) async fn execute_bridge_inner_scoped(
         &self,
-        request: &AppBridgeRequestDto,
+        request: &BridgeRequest,
         qa_bridge_event_id: Option<&str>,
     ) -> Result<Value, BridgeFailure> {
         let payload_json = request.payload_json.as_deref().unwrap_or("{}");
         let payload_limit = if matches!(
             request.operation,
-            AppBridgeOperationDto::LlmChat | AppBridgeOperationDto::LlmStream
+            BridgeOperation::LlmChat | BridgeOperation::LlmStream
         ) {
             LOCAL_APP_BRIDGE_LLM_BYTES
         } else if matches!(
             request.operation,
-            AppBridgeOperationDto::FileRead | AppBridgeOperationDto::FileWrite
+            BridgeOperation::FileRead | BridgeOperation::FileWrite
         ) {
             LOCAL_APP_BRIDGE_FILE_BYTES
         } else {
@@ -178,17 +184,17 @@ impl LocalAppsHostBroker {
         })?;
         input.insert("app_id".into(), Value::String(request.app_id.clone()));
         match request.operation {
-            AppBridgeOperationDto::QueryData => self
+            BridgeOperation::QueryData => self
                 .query_data_value(Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
             // The page is acting for the foreground user, not an agent.  Its
             // app id is host-bound and the manifest still constrains writes.
-            AppBridgeOperationDto::MutateData => self
+            BridgeOperation::MutateData => self
                 .mutate_data_value(Value::Object(input), false, qa_bridge_event_id)
                 .await
                 .map_err(BridgeFailure::from),
-            AppBridgeOperationDto::RuntimeStatus => {
+            BridgeOperation::RuntimeStatus => {
                 let runtime = self
                     .service()?
                     .runtime_record(&request.app_id)
@@ -196,191 +202,171 @@ impl LocalAppsHostBroker {
                     .map_err(|error| error.to_string())?;
                 Ok(json!(runtime))
             }
-            AppBridgeOperationDto::NetworkRequest => self
+            BridgeOperation::NetworkRequest => self
                 .network_request(&request.app_id, Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
-            AppBridgeOperationDto::CapturePhoto => {
+            BridgeOperation::CapturePhoto => {
                 self.capture_photo_value(&request.app_id, &payload).await
             }
-            AppBridgeOperationDto::PickImage => {
-                self.pick_image_value(&request.app_id, &payload).await
-            }
-            AppBridgeOperationDto::RecordAudioStart => {
+            BridgeOperation::PickImage => self.pick_image_value(&request.app_id, &payload).await,
+            BridgeOperation::RecordAudioStart => {
                 let runtime_generation = self.audio_runtime_generation(&invocation_context).await?;
                 self.record_audio_start_value(&invocation_context, runtime_generation, &payload)
                     .await
             }
-            AppBridgeOperationDto::RecordAudioStop => {
+            BridgeOperation::RecordAudioStop => {
                 let runtime_generation = self.audio_runtime_generation(&invocation_context).await?;
                 self.record_audio_stop_value(&invocation_context, runtime_generation)
                     .await
             }
-            AppBridgeOperationDto::GetLocation => self.get_location_value(&request.app_id).await,
-            AppBridgeOperationDto::PostNotification => {
+            BridgeOperation::GetLocation => self.get_location_value(&request.app_id).await,
+            BridgeOperation::PostNotification => {
                 self.post_notification_value(&request.app_id, &payload)
                     .await
             }
-            AppBridgeOperationDto::TranscribeSpeech => {
+            BridgeOperation::TranscribeSpeech => {
                 let runtime_generation = self.audio_runtime_generation(&invocation_context).await?;
                 self.transcribe_speech_value(&invocation_context, runtime_generation, &payload)
                     .await
             }
-            AppBridgeOperationDto::ClipboardGetText => {
+            BridgeOperation::ClipboardGetText => {
                 self.clipboard_get_text_value(&request.app_id).await
             }
-            AppBridgeOperationDto::ClipboardSetText => {
+            BridgeOperation::ClipboardSetText => {
                 self.clipboard_set_text_value(&request.app_id, &payload)
                     .await
             }
-            AppBridgeOperationDto::Share => self.share_value(&request.app_id, &payload).await,
-            AppBridgeOperationDto::SynthesizeSpeech => {
+            BridgeOperation::Share => self.share_value(&request.app_id, &payload).await,
+            BridgeOperation::SynthesizeSpeech => {
                 let runtime_generation = self.audio_runtime_generation(&invocation_context).await?;
                 self.synthesize_speech_value(&invocation_context, runtime_generation, &payload)
                     .await
             }
-            AppBridgeOperationDto::FileRead => {
-                self.file_read_value(&request.app_id, &payload).await
-            }
-            AppBridgeOperationDto::FileWrite => {
-                self.file_write_value(&request.app_id, &payload).await
-            }
-            AppBridgeOperationDto::DeviceStatus => self.device_status_value(&request.app_id).await,
-            AppBridgeOperationDto::Haptics => self.haptics_value(&request.app_id, &payload).await,
-            AppBridgeOperationDto::DeepLink => {
-                self.deep_link_value(&request.app_id, &payload).await
-            }
-            AppBridgeOperationDto::CalendarListEvents => {
+            BridgeOperation::FileRead => self.file_read_value(&request.app_id, &payload).await,
+            BridgeOperation::FileWrite => self.file_write_value(&request.app_id, &payload).await,
+            BridgeOperation::DeviceStatus => self.device_status_value(&request.app_id).await,
+            BridgeOperation::Haptics => self.haptics_value(&request.app_id, &payload).await,
+            BridgeOperation::DeepLink => self.deep_link_value(&request.app_id, &payload).await,
+            BridgeOperation::CalendarListEvents => {
                 self.calendar_list_events_value(&request.app_id, &payload)
                     .await
             }
-            AppBridgeOperationDto::ContactsSearch => {
+            BridgeOperation::ContactsSearch => {
                 self.contacts_search_value(&request.app_id, &payload).await
             }
-            AppBridgeOperationDto::MediaGet => self.media_value(&request.app_id, &payload).await,
-            AppBridgeOperationDto::LlmChat => self.llm_chat_value(&request.app_id, &payload).await,
-            AppBridgeOperationDto::LlmStream => {
+            BridgeOperation::MediaGet => self.media_value(&request.app_id, &payload).await,
+            BridgeOperation::LlmChat => self.llm_chat_value(&request.app_id, &payload).await,
+            BridgeOperation::LlmStream => {
                 self.llm_stream_value(&request.app_id, &request.request_id, &payload)
                     .await
             }
-            AppBridgeOperationDto::AgentPost => {
-                self.agent_post_value(&request.app_id, &payload).await
-            }
-            AppBridgeOperationDto::AgentSessionCreate => self
+            BridgeOperation::AgentPost => self.agent_post_value(&request.app_id, &payload).await,
+            BridgeOperation::AgentSessionCreate => self
                 .agent_session_create_value(Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
-            AppBridgeOperationDto::AgentSessionList => self
+            BridgeOperation::AgentSessionList => self
                 .agent_session_list_value(Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
-            AppBridgeOperationDto::AgentSessionResume => {
+            BridgeOperation::AgentSessionResume => {
                 input.insert("action".into(), Value::String("resume".into()));
                 self.agent_session_update_value(Value::Object(input))
                     .await
                     .map_err(BridgeFailure::from)
             }
-            AppBridgeOperationDto::AgentSessionClose => {
+            BridgeOperation::AgentSessionClose => {
                 input.insert("action".into(), Value::String("close".into()));
                 self.agent_session_update_value(Value::Object(input))
                     .await
                     .map_err(BridgeFailure::from)
             }
-            AppBridgeOperationDto::AgentSend => {
+            BridgeOperation::AgentSend => {
                 self.agent_send_value(&request.app_id, &request.request_id, &payload)
                     .await
             }
-            AppBridgeOperationDto::AgentStream => {
+            BridgeOperation::AgentStream => {
                 self.agent_stream_value(&request.app_id, &request.request_id, &payload)
                     .await
             }
-            AppBridgeOperationDto::AgentCancel => {
+            BridgeOperation::AgentCancel => {
                 self.agent_cancel_value(&request.app_id, &payload).await
             }
-            AppBridgeOperationDto::AgentProfileProposeUpdate => self
+            BridgeOperation::AgentProfileProposeUpdate => self
                 .agent_profile_propose_value(Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
-            AppBridgeOperationDto::BackgroundSchedule => self
+            BridgeOperation::BackgroundSchedule => self
                 .background_schedule_value(Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
-            AppBridgeOperationDto::BackgroundList => self
+            BridgeOperation::BackgroundList => self
                 .background_list_value(Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
-            AppBridgeOperationDto::BackgroundStatus => self
+            BridgeOperation::BackgroundStatus => self
                 .background_status_value(Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
-            AppBridgeOperationDto::BackgroundCancel => self
+            BridgeOperation::BackgroundCancel => self
                 .background_cancel_value(Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
-            AppBridgeOperationDto::BackgroundRetry => self
+            BridgeOperation::BackgroundRetry => self
                 .background_retry_value(Value::Object(input))
                 .await
                 .map_err(BridgeFailure::from),
-            _ => Err("unsupported bridge operation for this engine version".into()),
         }
     }
     pub(super) fn build_bridge_invocation_context(
         &self,
-        request: &AppBridgeRequestDto,
+        request: &BridgeRequest,
     ) -> Result<local_apps::InvocationContext, String> {
         let capability = match request.operation {
-            AppBridgeOperationDto::QueryData => local_apps::CapabilityId::DataQuery,
-            AppBridgeOperationDto::MutateData => local_apps::CapabilityId::DataMutate,
-            AppBridgeOperationDto::NetworkRequest => local_apps::CapabilityId::NetworkRequest,
-            AppBridgeOperationDto::RuntimeStatus => local_apps::CapabilityId::RuntimeStatus,
-            AppBridgeOperationDto::CapturePhoto => local_apps::CapabilityId::Camera,
-            AppBridgeOperationDto::PickImage => local_apps::CapabilityId::PhotoLibrary,
-            AppBridgeOperationDto::RecordAudioStart | AppBridgeOperationDto::RecordAudioStop => {
+            BridgeOperation::QueryData => local_apps::CapabilityId::DataQuery,
+            BridgeOperation::MutateData => local_apps::CapabilityId::DataMutate,
+            BridgeOperation::NetworkRequest => local_apps::CapabilityId::NetworkRequest,
+            BridgeOperation::RuntimeStatus => local_apps::CapabilityId::RuntimeStatus,
+            BridgeOperation::CapturePhoto => local_apps::CapabilityId::Camera,
+            BridgeOperation::PickImage => local_apps::CapabilityId::PhotoLibrary,
+            BridgeOperation::RecordAudioStart | BridgeOperation::RecordAudioStop => {
                 local_apps::CapabilityId::Microphone
             }
-            AppBridgeOperationDto::GetLocation => local_apps::CapabilityId::Location,
-            AppBridgeOperationDto::TranscribeSpeech => local_apps::CapabilityId::SpeechToText,
-            AppBridgeOperationDto::PostNotification => local_apps::CapabilityId::Notifications,
-            AppBridgeOperationDto::ClipboardGetText | AppBridgeOperationDto::ClipboardSetText => {
+            BridgeOperation::GetLocation => local_apps::CapabilityId::Location,
+            BridgeOperation::TranscribeSpeech => local_apps::CapabilityId::SpeechToText,
+            BridgeOperation::PostNotification => local_apps::CapabilityId::Notifications,
+            BridgeOperation::ClipboardGetText | BridgeOperation::ClipboardSetText => {
                 local_apps::CapabilityId::Clipboard
             }
-            AppBridgeOperationDto::Share => local_apps::CapabilityId::Share,
-            AppBridgeOperationDto::SynthesizeSpeech => local_apps::CapabilityId::TextToSpeech,
-            AppBridgeOperationDto::FileRead => local_apps::CapabilityId::FilesRead,
-            AppBridgeOperationDto::FileWrite => local_apps::CapabilityId::FilesWrite,
-            AppBridgeOperationDto::DeviceStatus => local_apps::CapabilityId::DeviceStatus,
-            AppBridgeOperationDto::Haptics => local_apps::CapabilityId::Haptics,
-            AppBridgeOperationDto::DeepLink => local_apps::CapabilityId::DeepLink,
-            AppBridgeOperationDto::CalendarListEvents => local_apps::CapabilityId::Calendar,
-            AppBridgeOperationDto::ContactsSearch => local_apps::CapabilityId::Contacts,
-            AppBridgeOperationDto::MediaGet => local_apps::CapabilityId::Media,
-            AppBridgeOperationDto::LlmChat => local_apps::CapabilityId::LlmComplete,
-            AppBridgeOperationDto::LlmStream => local_apps::CapabilityId::LlmStream,
-            AppBridgeOperationDto::AgentPost => local_apps::CapabilityId::AgentEmit,
-            AppBridgeOperationDto::AgentSessionCreate => {
-                local_apps::CapabilityId::AgentSessionCreate
-            }
-            AppBridgeOperationDto::AgentSessionList => local_apps::CapabilityId::AgentSessionList,
-            AppBridgeOperationDto::AgentSessionResume => {
-                local_apps::CapabilityId::AgentSessionResume
-            }
-            AppBridgeOperationDto::AgentSessionClose => local_apps::CapabilityId::AgentSessionClose,
-            AppBridgeOperationDto::AgentSend => local_apps::CapabilityId::AgentSend,
-            AppBridgeOperationDto::AgentStream => local_apps::CapabilityId::AgentStream,
-            AppBridgeOperationDto::AgentCancel => local_apps::CapabilityId::AgentCancel,
-            AppBridgeOperationDto::AgentProfileProposeUpdate => {
+            BridgeOperation::Share => local_apps::CapabilityId::Share,
+            BridgeOperation::SynthesizeSpeech => local_apps::CapabilityId::TextToSpeech,
+            BridgeOperation::FileRead => local_apps::CapabilityId::FilesRead,
+            BridgeOperation::FileWrite => local_apps::CapabilityId::FilesWrite,
+            BridgeOperation::DeviceStatus => local_apps::CapabilityId::DeviceStatus,
+            BridgeOperation::Haptics => local_apps::CapabilityId::Haptics,
+            BridgeOperation::DeepLink => local_apps::CapabilityId::DeepLink,
+            BridgeOperation::CalendarListEvents => local_apps::CapabilityId::Calendar,
+            BridgeOperation::ContactsSearch => local_apps::CapabilityId::Contacts,
+            BridgeOperation::MediaGet => local_apps::CapabilityId::Media,
+            BridgeOperation::LlmChat => local_apps::CapabilityId::LlmComplete,
+            BridgeOperation::LlmStream => local_apps::CapabilityId::LlmStream,
+            BridgeOperation::AgentPost => local_apps::CapabilityId::AgentEmit,
+            BridgeOperation::AgentSessionCreate => local_apps::CapabilityId::AgentSessionCreate,
+            BridgeOperation::AgentSessionList => local_apps::CapabilityId::AgentSessionList,
+            BridgeOperation::AgentSessionResume => local_apps::CapabilityId::AgentSessionResume,
+            BridgeOperation::AgentSessionClose => local_apps::CapabilityId::AgentSessionClose,
+            BridgeOperation::AgentSend => local_apps::CapabilityId::AgentSend,
+            BridgeOperation::AgentStream => local_apps::CapabilityId::AgentStream,
+            BridgeOperation::AgentCancel => local_apps::CapabilityId::AgentCancel,
+            BridgeOperation::AgentProfileProposeUpdate => {
                 local_apps::CapabilityId::AgentProfilePropose
             }
-            AppBridgeOperationDto::BackgroundSchedule => {
-                local_apps::CapabilityId::BackgroundSchedule
-            }
-            AppBridgeOperationDto::BackgroundList
-            | AppBridgeOperationDto::BackgroundStatus
-            | AppBridgeOperationDto::BackgroundCancel
-            | AppBridgeOperationDto::BackgroundRetry => {
-                local_apps::CapabilityId::BackgroundSchedule
-            }
-            _ => return Err("unsupported bridge operation for runtime v2 context".into()),
+            BridgeOperation::BackgroundSchedule => local_apps::CapabilityId::BackgroundSchedule,
+            BridgeOperation::BackgroundList
+            | BridgeOperation::BackgroundStatus
+            | BridgeOperation::BackgroundCancel
+            | BridgeOperation::BackgroundRetry => local_apps::CapabilityId::BackgroundSchedule,
         };
         let layout = self.layout(&request.app_id)?;
         let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;

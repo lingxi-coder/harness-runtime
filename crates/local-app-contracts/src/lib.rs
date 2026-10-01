@@ -1,13 +1,19 @@
 //! `local-app-contracts` — the part of the Local App vocabulary that clients
 //! share with the service without depending on it.
 //!
-//! Today that is the id grammar: the product's iOS and Android bridges and the
-//! task scope check need to know whether a string is a well-formed app id, and
-//! none of them should compile a service with bundled SQLite to find out. The
-//! crate has no dependencies, so the grammar cannot drift between the service
-//! that mints ids and the code that validates them.
+//! The id grammar: the product's iOS and Android bridges and the task scope
+//! check need to know whether a string is a well-formed app id, and none of
+//! them should compile a service with bundled SQLite to find out. The crate
+//! depends on nothing of the workspace, so the grammar cannot drift between
+//! the service that mints ids and the code that validates them.
+//!
+//! The page bridge ([`bridge`]): the operations an app's page may request and
+//! the shapes of the answers, which the service interprets and every host that
+//! serves a page carries.
 
 #![forbid(unsafe_code)]
+
+pub mod bridge;
 
 pub mod ids {
     //! Id grammars for local apps and the Host-issued handles.

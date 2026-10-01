@@ -148,8 +148,9 @@ impl AgentOutputStream {
         }
     }
 
-    async fn emit_frame(&self, frame: client::protocol::local_apps::AppBridgeStreamFrameDto) {
+    async fn emit_frame(&self, frame: local_app_contracts::bridge::BridgeStreamFrame) {
         let frame_json = serde_json::to_string(&frame).unwrap_or_else(|_| "{}".into());
+        let frame = crate::mobile::local_apps_wire::bridge_frame_to_dto(frame);
         self.event_sink
             .emit(ClientEvent::AppEvent {
                 event: AppEventDto::AppBridgeStreamFrame { frame, frame_json },
@@ -161,13 +162,11 @@ impl AgentOutputStream {
         let Some(stream_id) = &self.stream_id else {
             return;
         };
-        self.emit_frame(
-            client::protocol::local_apps::AppBridgeStreamFrameDto::Started {
-                app_id: self.app_id.clone(),
-                request_id: self.request_id.clone(),
-                stream_id: stream_id.clone(),
-            },
-        )
+        self.emit_frame(local_app_contracts::bridge::BridgeStreamFrame::Started {
+            app_id: self.app_id.clone(),
+            request_id: self.request_id.clone(),
+            stream_id: stream_id.clone(),
+        })
         .await;
     }
 
@@ -176,14 +175,12 @@ impl AgentOutputStream {
             return;
         };
         let seq = self.next_seq.load(Ordering::Relaxed);
-        self.emit_frame(
-            client::protocol::local_apps::AppBridgeStreamFrameDto::Completed {
-                app_id: self.app_id.clone(),
-                request_id: self.request_id.clone(),
-                stream_id: stream_id.clone(),
-                seq,
-            },
-        )
+        self.emit_frame(local_app_contracts::bridge::BridgeStreamFrame::Completed {
+            app_id: self.app_id.clone(),
+            request_id: self.request_id.clone(),
+            stream_id: stream_id.clone(),
+            seq,
+        })
         .await;
     }
 
@@ -192,15 +189,13 @@ impl AgentOutputStream {
             return;
         };
         let seq = self.next_seq.load(Ordering::Relaxed);
-        self.emit_frame(
-            client::protocol::local_apps::AppBridgeStreamFrameDto::Cancelled {
-                app_id: self.app_id.clone(),
-                request_id: self.request_id.clone(),
-                stream_id: stream_id.clone(),
-                seq,
-                reason: reason.into(),
-            },
-        )
+        self.emit_frame(local_app_contracts::bridge::BridgeStreamFrame::Cancelled {
+            app_id: self.app_id.clone(),
+            request_id: self.request_id.clone(),
+            stream_id: stream_id.clone(),
+            seq,
+            reason: reason.into(),
+        })
         .await;
     }
 
@@ -209,16 +204,14 @@ impl AgentOutputStream {
             return;
         };
         let seq = self.next_seq.load(Ordering::Relaxed);
-        self.emit_frame(
-            client::protocol::local_apps::AppBridgeStreamFrameDto::Error {
-                app_id: self.app_id.clone(),
-                request_id: self.request_id.clone(),
-                stream_id: stream_id.clone(),
-                seq,
-                code: code.into(),
-                message: message.into(),
-            },
-        )
+        self.emit_frame(local_app_contracts::bridge::BridgeStreamFrame::Error {
+            app_id: self.app_id.clone(),
+            request_id: self.request_id.clone(),
+            stream_id: stream_id.clone(),
+            seq,
+            code: code.into(),
+            message: message.into(),
+        })
         .await;
     }
 
@@ -275,15 +268,13 @@ impl OutputStream for AgentOutputStream {
             return;
         };
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        self.emit_frame(
-            client::protocol::local_apps::AppBridgeStreamFrameDto::Data {
-                app_id: self.app_id.clone(),
-                request_id: self.request_id.clone(),
-                stream_id: stream_id.clone(),
-                seq,
-                data_json: serde_json::json!({"text": text}).to_string(),
-            },
-        )
+        self.emit_frame(local_app_contracts::bridge::BridgeStreamFrame::Data {
+            app_id: self.app_id.clone(),
+            request_id: self.request_id.clone(),
+            stream_id: stream_id.clone(),
+            seq,
+            data_json: serde_json::json!({"text": text}).to_string(),
+        })
         .await;
     }
 
@@ -1109,11 +1100,9 @@ mod tests {
     use async_trait::async_trait;
     use client::adapter::{ClientEventSink, MockSink};
     use client::protocol::events::ClientEvent;
-    use client::protocol::local_apps::{
-        AppBridgeOperationDto, AppBridgeRequestDto, AppEventDto, AppUiActionKindDto,
-        AppUiRequestDto,
-    };
+    use client::protocol::local_apps::{AppEventDto, AppUiActionKindDto, AppUiRequestDto};
     use lingxi_core::host::OutputStream;
+    use local_app_contracts::bridge::{BridgeOperation, BridgeRequest};
     use local_apps::mailbox::{load_mailbox, MAX_MAILBOX_EVENTS};
     use local_apps::test_support::FixedClock;
     use local_apps::{
@@ -1217,10 +1206,10 @@ mod tests {
         payload: Value,
     ) -> (bool, Value, Option<String>, Option<String>) {
         h.broker
-            .execute_bridge(AppBridgeRequestDto {
+            .execute_bridge(BridgeRequest {
                 request_id: request_id.to_string(),
                 app_id: h.app_id.clone(),
-                operation: AppBridgeOperationDto::AgentPost,
+                operation: BridgeOperation::AgentPost,
                 payload_json: Some(payload.to_string()),
             })
             .await;

@@ -2412,9 +2412,7 @@ mod tests {
     use base64::Engine as _;
     use client::adapter::{ClientEventSink, MockSink};
     use client::protocol::events::ClientEvent;
-    use client::protocol::local_apps::{
-        AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppEventDto,
-    };
+    use client::protocol::local_apps::{AppAuthorizationDecisionDto, AppEventDto};
     use lingxi_core::host::audio::{
         AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioOperation, AudioOperationContext,
         AudioOperationId, AudioOperationKind, AudioOperationReadiness, AudioOperationSuccess,
@@ -2427,6 +2425,7 @@ mod tests {
         NotificationError, NotificationRequest, NotificationService, ShareError, SharePayload,
         ShareResult, SharingService, SttTranscript, TtsAudio, VoiceRecording,
     };
+    use local_app_contracts::bridge::{BridgeOperation, BridgeRequest};
     use local_apps::test_support::FixedClock;
     use local_apps::{
         load_manifest, load_permissions, save_manifest, save_permissions, AppCapability,
@@ -3029,11 +3028,11 @@ mod tests {
 
     async fn execute(
         h: &Harness,
-        operation: AppBridgeOperationDto,
+        operation: BridgeOperation,
         payload: Value,
     ) -> (bool, Value, Option<String>, Option<String>) {
         h.broker
-            .execute_bridge(AppBridgeRequestDto {
+            .execute_bridge(BridgeRequest {
                 request_id: "req-1".into(),
                 app_id: h.app_id.clone(),
                 operation,
@@ -3073,8 +3072,7 @@ mod tests {
         .await;
         declare_and_grant(&h, AppCapability::Camera);
 
-        let (ok, result, error, code) =
-            execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})).await;
+        let (ok, result, error, code) = execute(&h, BridgeOperation::CapturePhoto, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
         assert_eq!(result["mimeType"], "image/jpeg");
         assert_eq!(result["width"], 640);
@@ -3102,7 +3100,7 @@ mod tests {
 
         let (ok, _, _, _) = execute(
             &h,
-            AppBridgeOperationDto::CapturePhoto,
+            BridgeOperation::CapturePhoto,
             json!({"maxDimension": 99_999, "quality": 0.1}),
         )
         .await;
@@ -3123,7 +3121,7 @@ mod tests {
         .await;
         declare_and_grant(&h, AppCapability::Camera);
 
-        let (ok, _, _, code) = execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})).await;
+        let (ok, _, _, code) = execute(&h, BridgeOperation::CapturePhoto, json!({})).await;
         assert!(!ok);
         assert_eq!(code.as_deref(), Some("media_too_large"));
     }
@@ -3140,7 +3138,7 @@ mod tests {
         // OS authorization surface, so it must still be refused.
         declare_and_grant(&h, AppCapability::Camera);
 
-        let (ok, _, _, code) = execute(&h, AppBridgeOperationDto::PickImage, json!({})).await;
+        let (ok, _, _, code) = execute(&h, BridgeOperation::PickImage, json!({})).await;
         assert!(!ok);
         assert_eq!(code.as_deref(), Some("capability_not_declared"));
     }
@@ -3150,7 +3148,7 @@ mod tests {
         let h = harness(DeviceCapabilities::default()).await;
         declare_and_grant(&h, AppCapability::Camera);
 
-        let (ok, _, _, code) = execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})).await;
+        let (ok, _, _, code) = execute(&h, BridgeOperation::CapturePhoto, json!({})).await;
         assert!(!ok);
         assert_eq!(code.as_deref(), Some("capability_unavailable"));
     }
@@ -3178,7 +3176,7 @@ mod tests {
 
         let (ok, _, _, code) = execute(
             &h,
-            AppBridgeOperationDto::CalendarListEvents,
+            BridgeOperation::CalendarListEvents,
             json!({"startMs": 0, "endMs": 86_400_000}),
         )
         .await;
@@ -3188,7 +3186,7 @@ mod tests {
         declare_and_grant(&h, AppCapability::Calendar);
         let (ok, result, error, code) = execute(
             &h,
-            AppBridgeOperationDto::CalendarListEvents,
+            BridgeOperation::CalendarListEvents,
             json!({"startMs": 0, "endMs": 86_400_000, "limit": 10_000}),
         )
         .await;
@@ -3217,7 +3215,7 @@ mod tests {
 
         let (ok, result, error, code) = execute(
             &h,
-            AppBridgeOperationDto::ContactsSearch,
+            BridgeOperation::ContactsSearch,
             json!({"query": "  林夕 ", "limit": 500}),
         )
         .await;
@@ -3238,24 +3236,20 @@ mod tests {
         .await;
         declare_and_grant(&h, AppCapability::Camera);
         let (ok, capture, error, code) =
-            execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})).await;
+            execute(&h, BridgeOperation::CapturePhoto, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
         let media_id = capture["mediaId"].as_str().expect("media id").to_string();
 
         declare_and_grant(&h, AppCapability::Media);
-        let (ok, media, error, code) = execute(
-            &h,
-            AppBridgeOperationDto::MediaGet,
-            json!({"mediaId": media_id}),
-        )
-        .await;
+        let (ok, media, error, code) =
+            execute(&h, BridgeOperation::MediaGet, json!({"mediaId": media_id})).await;
         assert!(ok, "{error:?} {code:?}");
         assert_eq!(media["mimeType"], "image/jpeg");
         assert_eq!(media["bytes"], 3);
 
         let (ok, _, _, code) = execute(
             &h,
-            AppBridgeOperationDto::MediaGet,
+            BridgeOperation::MediaGet,
             json!({"mediaId": "other-app-handle"}),
         )
         .await;
@@ -3273,7 +3267,7 @@ mod tests {
         .await;
         declare_and_grant(&h, AppCapability::Camera);
 
-        let (ok, _, _, code) = execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})).await;
+        let (ok, _, _, code) = execute(&h, BridgeOperation::CapturePhoto, json!({})).await;
         assert!(!ok);
         assert_eq!(code.as_deref(), Some("permission_denied"));
     }
@@ -3316,7 +3310,7 @@ mod tests {
 
         let (ok, result, error, code) = timeout(
             Duration::from_secs(5),
-            execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})),
+            execute(&h, BridgeOperation::CapturePhoto, json!({})),
         )
         .await
         .expect("prompt resolves");
@@ -3338,14 +3332,13 @@ mod tests {
         declare_and_grant(&h, AppCapability::Microphone);
         start_runtime(&h).await;
 
-        let (ok, started, _, _) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, started, _, _) = execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
         assert!(ok);
         assert_eq!(started["started"], true);
         assert_eq!(started["maxDurationMs"], 120_000);
 
         let (ok, result, error, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
+            execute(&h, BridgeOperation::RecordAudioStop, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
         assert_eq!(result["mimeType"], "audio/m4a");
         assert!(result["durationMs"].is_u64());
@@ -3378,10 +3371,10 @@ mod tests {
             let app_id = h.app_id.clone();
             tokio::spawn(async move {
                 broker
-                    .execute_bridge(AppBridgeRequestDto {
+                    .execute_bridge(BridgeRequest {
                         request_id: "rejected-start".into(),
                         app_id,
-                        operation: AppBridgeOperationDto::RecordAudioStart,
+                        operation: BridgeOperation::RecordAudioStart,
                         payload_json: Some("{}".into()),
                     })
                     .await
@@ -3498,8 +3491,7 @@ mod tests {
             audio,
             scope: Arc::new(LocalAppAudioScope::new()),
         });
-        let (ok, _, error, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, error, code) = execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
         assert!(
             ok,
             "new epoch should not inherit a stale busy reservation: {error:?} {code:?}"
@@ -3532,10 +3524,10 @@ mod tests {
             let app_id = h.app_id.clone();
             tokio::spawn(async move {
                 broker
-                    .execute_bridge(AppBridgeRequestDto {
+                    .execute_bridge(BridgeRequest {
                         request_id: "cancelled-pending-start".into(),
                         app_id,
-                        operation: AppBridgeOperationDto::RecordAudioStart,
+                        operation: BridgeOperation::RecordAudioStart,
                         payload_json: Some("{}".into()),
                     })
                     .await
@@ -3588,18 +3580,17 @@ mod tests {
         declare_and_grant(&h, AppCapability::Microphone);
         start_runtime(&h).await;
 
-        let (ok, _, error, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, error, code) = execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
         let stopping = {
             let broker = h.broker.clone();
             let app_id = h.app_id.clone();
             tokio::spawn(async move {
                 broker
-                    .execute_bridge(AppBridgeRequestDto {
+                    .execute_bridge(BridgeRequest {
                         request_id: "cancelled-manual-stop".into(),
                         app_id,
-                        operation: AppBridgeOperationDto::RecordAudioStop,
+                        operation: BridgeOperation::RecordAudioStop,
                         payload_json: Some("{}".into()),
                     })
                     .await;
@@ -3643,7 +3634,7 @@ mod tests {
         .expect("detached stop task caches the native result");
 
         let (ok, result, error, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
+            execute(&h, BridgeOperation::RecordAudioStop, json!({})).await;
         assert!(
             ok,
             "cached stop result remains collectible: {error:?} {code:?}"
@@ -3673,8 +3664,7 @@ mod tests {
         declare_and_grant(&h, AppCapability::Microphone);
         start_runtime(&h).await;
 
-        let (ok, _, error, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, error, code) = execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
 
         let stopping = {
@@ -3682,10 +3672,10 @@ mod tests {
             let app_id = h.app_id.clone();
             tokio::spawn(async move {
                 broker
-                    .execute_bridge(AppBridgeRequestDto {
+                    .execute_bridge(BridgeRequest {
                         request_id: "manual-stop-racing-runtime-teardown".into(),
                         app_id,
-                        operation: AppBridgeOperationDto::RecordAudioStop,
+                        operation: BridgeOperation::RecordAudioStop,
                         payload_json: Some("{}".into()),
                     })
                     .await
@@ -3725,8 +3715,7 @@ mod tests {
         declare_and_grant(&h, AppCapability::Microphone);
         start_runtime(&h).await;
 
-        let (ok, _, error, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, error, code) = execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
         let stop = {
             let mut slot = h.broker.recording.lock().await;
@@ -3791,10 +3780,10 @@ mod tests {
             let app_id = h.app_id.clone();
             tokio::spawn(async move {
                 broker
-                    .execute_bridge(AppBridgeRequestDto {
+                    .execute_bridge(BridgeRequest {
                         request_id: "start-1".into(),
                         app_id,
-                        operation: AppBridgeOperationDto::RecordAudioStart,
+                        operation: BridgeOperation::RecordAudioStart,
                         payload_json: Some("{}".into()),
                     })
                     .await;
@@ -3862,7 +3851,7 @@ mod tests {
         declare_and_grant(&h, AppCapability::Microphone);
         start_runtime(&h).await;
 
-        let (ok, _, _, code) = execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
+        let (ok, _, _, code) = execute(&h, BridgeOperation::RecordAudioStop, json!({})).await;
         assert!(!ok);
         assert_eq!(code.as_deref(), Some("not_recording"));
     }
@@ -3878,7 +3867,7 @@ mod tests {
         declare_and_grant(&h, AppCapability::Microphone);
         start_runtime(&h).await;
 
-        let (ok, _, _, _) = execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, _, _) = execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
         assert!(ok);
 
         // A second app on the same broker. Declared+granted so only the
@@ -3904,10 +3893,10 @@ mod tests {
             .expect("second runtime starts");
         assert_eq!(second_started["state"], "running");
         h.broker
-            .execute_bridge(AppBridgeRequestDto {
+            .execute_bridge(BridgeRequest {
                 request_id: "req-b".into(),
                 app_id: record.id,
-                operation: AppBridgeOperationDto::RecordAudioStart,
+                operation: BridgeOperation::RecordAudioStart,
                 payload_json: Some("{}".into()),
             })
             .await;
@@ -3939,15 +3928,15 @@ mod tests {
         declare_and_grant(&h, AppCapability::Microphone);
         start_runtime(&h).await;
 
-        let (ok, _, _, _) = execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, _, _) = execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
         assert!(ok);
         // A reloaded page starts again: the orphan is reclaimed, not fatal.
         let (ok, restarted, error, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+            execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
         assert_eq!(restarted["replacedActive"], true);
         // The replaced session's bytes are discarded; the new one still stops.
-        let (ok, _, _, _) = execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
+        let (ok, _, _, _) = execute(&h, BridgeOperation::RecordAudioStop, json!({})).await;
         assert!(ok);
     }
 
@@ -3967,7 +3956,7 @@ mod tests {
             start_runtime(&h).await;
 
             let (ok, _, error, code) =
-                execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+                execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
             assert!(ok, "{error:?} {code:?}");
             let old_handle = audio
                 .active
@@ -3980,7 +3969,7 @@ mod tests {
             *audio.fail_next_stop.lock().unwrap() = Some(kind);
 
             let (ok, _, error, code) =
-                execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+                execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
             assert!(!ok, "replacement should report the failed native stop");
             assert_eq!(code.as_deref(), Some(expected_code), "{error:?}");
 
@@ -3999,7 +3988,7 @@ mod tests {
                 .any(|handle| handle == &old_handle));
 
             let (ok, _, error, code) =
-                execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
+                execute(&h, BridgeOperation::RecordAudioStop, json!({})).await;
             assert!(
                 ok,
                 "the preserved handle remains stoppable: {error:?} {code:?}"
@@ -4026,8 +4015,7 @@ mod tests {
         declare_and_grant(&h, AppCapability::Microphone);
         start_runtime(&h).await;
 
-        let (ok, _, error, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, error, code) = execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
         let old_handle = audio
             .active
@@ -4043,10 +4031,10 @@ mod tests {
             let app_id = h.app_id.clone();
             tokio::spawn(async move {
                 broker
-                    .execute_bridge(AppBridgeRequestDto {
+                    .execute_bridge(BridgeRequest {
                         request_id: "cancelled-replacement".into(),
                         app_id,
-                        operation: AppBridgeOperationDto::RecordAudioStart,
+                        operation: BridgeOperation::RecordAudioStart,
                         payload_json: Some("{}".into()),
                     })
                     .await;
@@ -4074,8 +4062,7 @@ mod tests {
         );
 
         stop_gate.notify_one();
-        let (ok, _, error, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
+        let (ok, _, error, code) = execute(&h, BridgeOperation::RecordAudioStop, json!({})).await;
         assert!(
             ok,
             "the original handle remains stoppable: {error:?} {code:?}"
@@ -4095,8 +4082,7 @@ mod tests {
         declare_and_grant(&h, AppCapability::Microphone);
         start_runtime(&h).await;
 
-        let (ok, _, error, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, error, code) = execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
 
         let mut slot = h.broker.recording.lock().await;
@@ -4159,7 +4145,7 @@ mod tests {
 
         let (ok, _, _, _) = execute(
             &h,
-            AppBridgeOperationDto::RecordAudioStart,
+            BridgeOperation::RecordAudioStart,
             json!({"maxDurationMs": 1_000}),
         )
         .await;
@@ -4172,7 +4158,7 @@ mod tests {
         );
 
         let (ok, result, error, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
+            execute(&h, BridgeOperation::RecordAudioStop, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
         assert_eq!(result["autoStopped"], true);
         assert!(result["base64"].is_string());
@@ -4190,7 +4176,7 @@ mod tests {
         start_runtime(&h).await;
         let (ok, _, error, code) = execute(
             &h,
-            AppBridgeOperationDto::RecordAudioStart,
+            BridgeOperation::RecordAudioStart,
             json!({"maxDurationMs": 1_000}),
         )
         .await;
@@ -4227,7 +4213,7 @@ mod tests {
         start_runtime(&h).await;
         let (ok, _, error, code) = execute(
             &h,
-            AppBridgeOperationDto::RecordAudioStart,
+            BridgeOperation::RecordAudioStart,
             json!({"maxDurationMs": 1_000}),
         )
         .await;
@@ -4270,7 +4256,7 @@ mod tests {
         declare_and_grant(&h, AppCapability::Microphone);
 
         start_runtime(&h).await;
-        let (ok, _, _, _) = execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, _, _) = execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
         assert!(ok);
 
         h.broker
@@ -4302,8 +4288,7 @@ mod tests {
             .await
             .expect("runtime lookup")
             .expect("old runtime is active");
-        let (ok, _, error, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, error, code) = execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
         h.broker
             .manage_runtime_value(json!({"app_id": h.app_id, "action": "stop"}))
@@ -4319,8 +4304,7 @@ mod tests {
             .expect("runtime lookup")
             .expect("new runtime is active");
         assert_ne!(old_generation, new_generation);
-        let (ok, _, error, code) =
-            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        let (ok, _, error, code) = execute(&h, BridgeOperation::RecordAudioStart, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
 
         h.broker
@@ -4365,7 +4349,7 @@ mod tests {
 
         let (ok, result, error, code) = execute(
             &h,
-            AppBridgeOperationDto::TranscribeSpeech,
+            BridgeOperation::TranscribeSpeech,
             json!({"language": "zh-CN"}),
         )
         .await;
@@ -4396,17 +4380,17 @@ mod tests {
 
         let operations = [
             (
-                AppBridgeOperationDto::RecordAudioStart,
+                BridgeOperation::RecordAudioStart,
                 json!({}),
                 "recordAudioStart",
             ),
             (
-                AppBridgeOperationDto::TranscribeSpeech,
+                BridgeOperation::TranscribeSpeech,
                 json!({ "language": "en-US" }),
                 "transcribeSpeech",
             ),
             (
-                AppBridgeOperationDto::SynthesizeSpeech,
+                BridgeOperation::SynthesizeSpeech,
                 json!({ "text": "late approval" }),
                 "synthesizeSpeech",
             ),
@@ -4433,7 +4417,7 @@ mod tests {
                 let bridge_request_id = request_id.clone();
                 tokio::spawn(async move {
                     broker
-                        .execute_bridge(AppBridgeRequestDto {
+                        .execute_bridge(BridgeRequest {
                             request_id: bridge_request_id,
                             app_id,
                             operation,
@@ -4543,8 +4527,7 @@ mod tests {
         .await;
         start_runtime(&h).await;
 
-        let (ok, _, _, code) =
-            execute(&h, AppBridgeOperationDto::TranscribeSpeech, json!({})).await;
+        let (ok, _, _, code) = execute(&h, BridgeOperation::TranscribeSpeech, json!({})).await;
         assert!(!ok);
         assert_eq!(code.as_deref(), Some("capability_not_declared"));
     }
@@ -4561,7 +4544,7 @@ mod tests {
         .await;
         declare_and_grant(&h, AppCapability::Camera);
 
-        let (ok, result, _, _) = execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})).await;
+        let (ok, result, _, _) = execute(&h, BridgeOperation::CapturePhoto, json!({})).await;
         assert!(ok);
         let media_id = result["mediaId"].as_str().expect("mediaId").to_string();
         let entry = h
@@ -4607,7 +4590,7 @@ mod tests {
         // The grant is live: no prompt, straight through.
         let (ok, _, error, code) = timeout(
             Duration::from_secs(2),
-            execute(&h, AppBridgeOperationDto::CapturePhoto, json!({})),
+            execute(&h, BridgeOperation::CapturePhoto, json!({})),
         )
         .await
         .expect("a session grant answers without a prompt");
@@ -4644,8 +4627,7 @@ mod tests {
         .await;
         declare_and_grant(&h, AppCapability::Location);
 
-        let (ok, result, error, code) =
-            execute(&h, AppBridgeOperationDto::GetLocation, json!({})).await;
+        let (ok, result, error, code) = execute(&h, BridgeOperation::GetLocation, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
         assert_eq!(result["latitude"], 31.2304);
         assert_eq!(result["longitude"], 121.4737);
@@ -4665,7 +4647,7 @@ mod tests {
         .await;
         declare_and_grant(&h, AppCapability::Location);
 
-        let (ok, _, _, code) = execute(&h, AppBridgeOperationDto::GetLocation, json!({})).await;
+        let (ok, _, _, code) = execute(&h, BridgeOperation::GetLocation, json!({})).await;
         assert!(!ok);
         assert_eq!(code.as_deref(), Some("timeout"));
     }
@@ -4682,7 +4664,7 @@ mod tests {
 
         let (ok, result, error, code) = execute(
             &h,
-            AppBridgeOperationDto::PostNotification,
+            BridgeOperation::PostNotification,
             json!({"title": "提醒", "body": "该喝水了", "tag": "hydrate"}),
         )
         .await;
@@ -4710,7 +4692,7 @@ mod tests {
         assert_eq!(result["tag"], "hydrate");
         let (ok, second, error, code) = execute(
             &h,
-            AppBridgeOperationDto::PostNotification,
+            BridgeOperation::PostNotification,
             json!({
                 "title": "提醒",
                 "body": "还是该喝水了",
@@ -4743,7 +4725,7 @@ mod tests {
 
         let (ok, _, _, code) = execute(
             &h,
-            AppBridgeOperationDto::PostNotification,
+            BridgeOperation::PostNotification,
             json!({"title": "t", "body": "b", "tag": "../escape"}),
         )
         .await;
@@ -4752,7 +4734,7 @@ mod tests {
 
         let (ok, _, _, code) = execute(
             &h,
-            AppBridgeOperationDto::PostNotification,
+            BridgeOperation::PostNotification,
             json!({"title": "字".repeat(101), "body": "b"}),
         )
         .await;
@@ -4780,7 +4762,7 @@ mod tests {
 
         let (ok, result, error, code) = execute(
             &h,
-            AppBridgeOperationDto::ClipboardSetText,
+            BridgeOperation::ClipboardSetText,
             json!({"text": "copied"}),
         )
         .await;
@@ -4789,13 +4771,13 @@ mod tests {
         assert_eq!(clipboard.text.lock().unwrap().as_deref(), Some("copied"));
 
         let (ok, result, error, code) =
-            execute(&h, AppBridgeOperationDto::ClipboardGetText, json!({})).await;
+            execute(&h, BridgeOperation::ClipboardGetText, json!({})).await;
         assert!(ok, "{error:?} {code:?}");
         assert_eq!(result["text"], "copied");
 
         let (ok, result, error, code) = execute(
             &h,
-            AppBridgeOperationDto::Share,
+            BridgeOperation::Share,
             json!({"text": "share me", "url": "https://example.com"}),
         )
         .await;
@@ -4815,7 +4797,7 @@ mod tests {
             .expect("runtime is active");
         let (ok, result, error, code) = execute(
             &h,
-            AppBridgeOperationDto::SynthesizeSpeech,
+            BridgeOperation::SynthesizeSpeech,
             json!({
                 "text": "speech",
                 "voice": "default",
@@ -4888,10 +4870,10 @@ mod tests {
             .expect("runtime lookup")
             .expect("runtime is active");
 
-        let request = AppBridgeRequestDto {
+        let request = BridgeRequest {
             request_id: "synth-late".into(),
             app_id: h.app_id.clone(),
-            operation: AppBridgeOperationDto::SynthesizeSpeech,
+            operation: BridgeOperation::SynthesizeSpeech,
             payload_json: Some(r#"{"text":"hello"}"#.into()),
         };
         let pending = tokio::spawn({

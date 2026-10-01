@@ -12,9 +12,9 @@ use client::adapter::ClientEventSink;
 use client::protocol::events::ClientEvent;
 use client::protocol::local_apps::{
     AppAuthorizationDecisionDto, AppCapabilityKindDto, AppDependencyChangeConfirmationRequestDto,
-    AppDependencyChangeDto, AppDependencyChangeKindDto, AppEventDto, AppRuntimeProfileDto, AppSurfaceDto, AppUiActionKindDto,
-    AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto, LocalAppGateStatusDto,
-    LocalAppMcpProposalApprovalRequestDto, LocalAppVerificationStatusDto,
+    AppDependencyChangeDto, AppDependencyChangeKindDto, AppEventDto, AppRuntimeProfileDto,
+    AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto,
+    LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppVerificationStatusDto,
     LocalAppVerificationSummaryDto,
 };
 use futures_util::StreamExt;
@@ -835,7 +835,7 @@ pub(crate) use agent_ops::{
 mod background_ops;
 
 /// A bridge failure: human-readable message plus an optional stable machine
-/// code the page can branch on (`AppBridgeResponseDto::error_code`). Every
+/// code the page can branch on (`BridgeResponse::error_code`). Every
 /// legacy `Result<_, String>` site lowers through `From<String>` into a
 /// code-less failure; only paths that deliberately publish a contract code
 /// construct one with [`BridgeFailure::coded`].
@@ -6686,7 +6686,6 @@ mod mcp_publication;
 mod runtime_lifecycle;
 mod static_server;
 
-use local_app_service::dependency_integrity;
 use dependency_integrity::dependency_change_cache_status;
 use dependency_integrity::installed_dependency_sbom_with_inventory;
 #[cfg(not(unix))]
@@ -6695,6 +6694,7 @@ use dependency_integrity::validate_dependency_lifecycle_scripts;
 use dependency_integrity::validate_resolved_dependency_lock;
 use dependency_integrity::DependencyChange;
 use dependency_integrity::DependencyChangeKind;
+use local_app_service::dependency_integrity;
 
 /// The wire name of a dependency change kind. The service owns the kind; the
 /// client protocol owns the DTO, so the mapping lives on this side of the seam.
@@ -6778,10 +6778,6 @@ use static_server::STATIC_ACCEPT_RETRY;
 #[cfg(test)]
 use crate::mobile::local_app_runtime_profiles::RuntimeToolchain;
 #[cfg(test)]
-use client::protocol::local_apps::AppBridgeOperationDto;
-#[cfg(test)]
-use client::protocol::local_apps::AppBridgeRequestDto;
-#[cfg(test)]
 use client::protocol::local_apps::ManagedLocalAppMcpStatusDto;
 #[cfg(test)]
 use dependency_integrity::clone_or_copy_tree;
@@ -6793,6 +6789,10 @@ use dependency_integrity::dependency_tree_digest;
 use dependency_integrity::validate_dependency_tree;
 #[cfg(test)]
 use dependency_integrity::DEPENDENCY_SNAPSHOT_READY_FILE;
+#[cfg(test)]
+use local_app_contracts::bridge::BridgeOperation;
+#[cfg(test)]
+use local_app_contracts::bridge::BridgeRequest;
 #[cfg(test)]
 use local_apps::save_permissions;
 #[cfg(test)]

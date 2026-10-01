@@ -1366,10 +1366,10 @@ async fn finalize_passing_host_qa(fixture: &HostQaFixture) -> Value {
         .expect("QA event id");
     let bridge_result = fixture
         .broker
-        .execute_bridge_inner(&AppBridgeRequestDto {
+        .execute_bridge_inner(&BridgeRequest {
             request_id: "qa-fixture-write".into(),
             app_id: fixture.app_id.clone(),
-            operation: AppBridgeOperationDto::MutateData,
+            operation: BridgeOperation::MutateData,
             payload_json: Some(
                 json!({
                     "collection": "chores",
@@ -1384,10 +1384,10 @@ async fn finalize_passing_host_qa(fixture: &HostQaFixture) -> Value {
     assert_eq!(bridge_result["results"][0]["revision"], 1);
     let second_bridge_result = fixture
         .broker
-        .execute_bridge_inner(&AppBridgeRequestDto {
+        .execute_bridge_inner(&BridgeRequest {
             request_id: "qa-fixture-write-notes".into(),
             app_id: fixture.app_id.clone(),
-            operation: AppBridgeOperationDto::MutateData,
+            operation: BridgeOperation::MutateData,
             payload_json: Some(
                 json!({
                     "collection": "notes",
@@ -2237,10 +2237,10 @@ async fn real_qa_ui_roundtrip_returns_only_callable_host_evidence_ids() {
 
     let bridge_result = fixture
         .broker
-        .execute_bridge_inner(&AppBridgeRequestDto {
+        .execute_bridge_inner(&BridgeRequest {
             request_id: "real-roundtrip-write".into(),
             app_id: fixture.app_id.clone(),
-            operation: AppBridgeOperationDto::MutateData,
+            operation: BridgeOperation::MutateData,
             payload_json: Some(
                 json!({
                     "collection": "chores",
@@ -2489,10 +2489,10 @@ async fn dropped_real_act_on_ui_future_deactivates_attribution_and_keeps_page_wr
 
     let bridge_result = fixture
         .broker
-        .execute_bridge_inner(&AppBridgeRequestDto {
+        .execute_bridge_inner(&BridgeRequest {
             request_id: "cancelled-tool-write".into(),
             app_id: fixture.app_id.clone(),
-            operation: AppBridgeOperationDto::MutateData,
+            operation: BridgeOperation::MutateData,
             payload_json: Some(
                 json!({
                     "collection": "chores",
@@ -2597,10 +2597,10 @@ async fn qa_attribution_overflow_does_not_change_page_write_results_or_errors() 
 
     let bridge_result = fixture
         .broker
-        .execute_bridge_inner(&AppBridgeRequestDto {
+        .execute_bridge_inner(&BridgeRequest {
             request_id: "overflow-write".into(),
             app_id: fixture.app_id.clone(),
-            operation: AppBridgeOperationDto::MutateData,
+            operation: BridgeOperation::MutateData,
             payload_json: Some(
                 json!({
                     "collection": "chores",
@@ -2626,10 +2626,10 @@ async fn qa_attribution_overflow_does_not_change_page_write_results_or_errors() 
 
     let invalid = fixture
         .broker
-        .execute_bridge_inner(&AppBridgeRequestDto {
+        .execute_bridge_inner(&BridgeRequest {
             request_id: "overflow-invalid".into(),
             app_id: fixture.app_id.clone(),
-            operation: AppBridgeOperationDto::MutateData,
+            operation: BridgeOperation::MutateData,
             payload_json: Some(
                 json!({
                     "collection": "missing",
@@ -2710,10 +2710,10 @@ async fn qa_action_waits_for_a_page_write_issued_after_native_success() {
     sleep(Duration::from_millis(75)).await;
     let first_bridge = fixture
         .broker
-        .execute_bridge_inner(&AppBridgeRequestDto {
+        .execute_bridge_inner(&BridgeRequest {
             request_id: "late-ui-read".into(),
             app_id: fixture.app_id.clone(),
-            operation: AppBridgeOperationDto::QueryData,
+            operation: BridgeOperation::QueryData,
             payload_json: Some(json!({"collection": "chores"}).to_string()),
         })
         .await
@@ -2724,10 +2724,10 @@ async fn qa_action_waits_for_a_page_write_issued_after_native_success() {
     sleep(Duration::from_millis(75)).await;
     let bridge_result = fixture
         .broker
-        .execute_bridge_inner(&AppBridgeRequestDto {
+        .execute_bridge_inner(&BridgeRequest {
             request_id: "late-ui-write".into(),
             app_id: fixture.app_id.clone(),
-            operation: AppBridgeOperationDto::MutateData,
+            operation: BridgeOperation::MutateData,
             payload_json: Some(
                 json!({
                     "collection": "chores",

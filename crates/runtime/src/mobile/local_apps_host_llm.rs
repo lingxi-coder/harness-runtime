@@ -532,11 +532,10 @@ mod tests {
     use base64::Engine as _;
     use client::adapter::{ClientEventSink, MockSink};
     use client::protocol::events::ClientEvent;
-    use client::protocol::local_apps::{
-        AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppEventDto,
-    };
+    use client::protocol::local_apps::{AppAuthorizationDecisionDto, AppEventDto};
     use futures_util::stream;
     use llm_runtime::{HistoryContentDelta, HistoryEvent, HistoryMessageDelta};
+    use local_app_contracts::bridge::{BridgeOperation, BridgeRequest};
     use local_apps::error::AppError;
     use local_apps::test_support::FixedClock;
     use local_apps::{
@@ -728,10 +727,10 @@ mod tests {
         payload: Value,
     ) -> (bool, Value, Option<String>, Option<String>) {
         h.broker
-            .execute_bridge(AppBridgeRequestDto {
+            .execute_bridge(BridgeRequest {
                 request_id: request_id.to_string(),
                 app_id: h.app_id.clone(),
-                operation: AppBridgeOperationDto::LlmChat,
+                operation: BridgeOperation::LlmChat,
                 payload_json: Some(payload.to_string()),
             })
             .await;
@@ -943,10 +942,10 @@ mod tests {
             let app_id = h.app_id.clone();
             tokio::spawn(async move {
                 broker
-                    .execute_bridge(AppBridgeRequestDto {
+                    .execute_bridge(BridgeRequest {
                         request_id: "req-hang".into(),
                         app_id,
-                        operation: AppBridgeOperationDto::LlmChat,
+                        operation: BridgeOperation::LlmChat,
                         payload_json: Some(one_turn().to_string()),
                     })
                     .await;
@@ -1015,10 +1014,10 @@ mod tests {
         declare_and_grant(&h);
         let request_id = "stream-request";
         h.broker
-            .execute_bridge(AppBridgeRequestDto {
+            .execute_bridge(BridgeRequest {
                 request_id: request_id.into(),
                 app_id: h.app_id.clone(),
-                operation: AppBridgeOperationDto::LlmStream,
+                operation: BridgeOperation::LlmStream,
                 payload_json: Some(
                     json!({
                         "messages": [{"role": "user", "content": "流式回答"}],
@@ -1136,10 +1135,10 @@ mod tests {
         save_permissions(&h.layout, &permissions).expect("grant camera");
 
         h.broker
-            .execute_bridge(AppBridgeRequestDto {
+            .execute_bridge(BridgeRequest {
                 request_id: "cap-1".into(),
                 app_id: h.app_id.clone(),
-                operation: AppBridgeOperationDto::CapturePhoto,
+                operation: BridgeOperation::CapturePhoto,
                 payload_json: Some("{}".into()),
             })
             .await;

@@ -6180,7 +6180,12 @@ impl MobileEngineHandle {
                 Ok(())
             }
             ClientCommand::ExecuteAppBridgeRequest { request } => {
-                self.local_apps_host.execute_bridge(request).await;
+                match crate::mobile::local_apps_wire::bridge_request_from_dto(request) {
+                    Ok(request) => self.local_apps_host.execute_bridge(request).await,
+                    Err(response) => {
+                        self.local_apps_host.emit_bridge_response(response).await;
+                    }
+                }
                 Ok(())
             }
             ClientCommand::ResolveAppProfileProposal {
