@@ -3048,7 +3048,9 @@ pub fn build_mobile_engine_inner(
         tracing::warn!("local-apps workflow status sink was already attached");
     }
     if local_apps_host
-        .attach_mcp_registry(Arc::downgrade(&inner.mcp_registry))
+        .attach_publisher(crate::mobile::local_apps_adapters::RegistryPublisher::new(
+            Arc::downgrade(&inner.mcp_registry),
+        ))
         .is_err()
     {
         tracing::warn!("local-apps MCP registry was already attached");

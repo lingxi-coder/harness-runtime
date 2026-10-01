@@ -18,6 +18,7 @@ use local_app_service::host::ConversationHost;
 use local_app_service::host::DiagnosticsProvider;
 use local_app_service::host::HostEvent;
 use local_app_service::host::HostEventSink;
+use local_app_service::publication::McpPublisher;
 use local_apps::{
     load_manifest, load_mcp_settings, load_permissions, mcp_catalog_tool_names, save_mcp_settings,
     AppCapability, AppDependencyState, AppLayout, AppMcpSettings, AppRuntimeState, AppService,
@@ -803,8 +804,7 @@ mod llm_ops;
 #[path = "local_apps_host_agent.rs"]
 mod agent_ops;
 pub(crate) use agent_ops::{
-    AgentOutputStream, AgentTurnControl, AgentTurnUsageState,
-    LocalAppsAgentExecutor,
+    AgentOutputStream, AgentTurnControl, AgentTurnUsageState, LocalAppsAgentExecutor,
 };
 
 #[path = "local_apps_host_background.rs"]
@@ -920,7 +920,7 @@ pub(crate) struct LocalAppsHostBroker {
     event_sink: Arc<dyn HostEventSink>,
     runtime_configuration: RwLock<LocalAppsRuntimeConfiguration>,
     service: OnceLock<Arc<AppService>>,
-    mcp_registry: OnceLock<std::sync::Weak<mcp::McpRegistry>>,
+    publisher: OnceLock<Arc<dyn McpPublisher>>,
     /// The same mobile LSP registry used by plugin materialization and file
     /// tools. A weak reference avoids keeping language-server processes alive
     /// after the owning engine connection is torn down.
@@ -1136,7 +1136,7 @@ impl LocalAppsHostBroker {
                 runtime_root,
             }),
             service: OnceLock::new(),
-            mcp_registry: OnceLock::new(),
+            publisher: OnceLock::new(),
             diagnostics: OnceLock::new(),
             llm: OnceLock::new(),
             device: OnceLock::new(),
@@ -1208,15 +1208,19 @@ impl LocalAppsHostBroker {
         self.service.set(service)
     }
 
-    pub(crate) fn attach_mcp_registry(
+    pub(crate) fn attach_publisher(
         &self,
-        registry: std::sync::Weak<mcp::McpRegistry>,
-    ) -> Result<(), std::sync::Weak<mcp::McpRegistry>> {
-        self.mcp_registry.set(registry)
+        publisher: Arc<dyn McpPublisher>,
+    ) -> Result<(), Arc<dyn McpPublisher>> {
+        self.publisher.set(publisher)
     }
 
-    fn upgraded_mcp_registry(&self) -> Option<Arc<mcp::McpRegistry>> {
-        self.mcp_registry.get().and_then(std::sync::Weak::upgrade)
+    /// Where this host publishes apps' MCP tools, when it can right now.
+    fn publisher(&self) -> Option<Arc<dyn McpPublisher>> {
+        self.publisher
+            .get()
+            .filter(|publisher| publisher.available())
+            .cloned()
     }
 
     pub(crate) fn attach_diagnostics(

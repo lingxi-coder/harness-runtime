@@ -1370,9 +1370,7 @@ impl LocalAppsHostBroker {
         };
         let build_mount = MountSpec {
             host_path: workspace.clone(),
-            guest_path: local_app_contracts::guest_paths::local_app_build_project(
-                app_id, "store",
-            ),
+            guest_path: local_app_contracts::guest_paths::local_app_build_project(app_id, "store"),
             read_only: false,
             purpose: MountPurpose::LocalAppBuild,
         };

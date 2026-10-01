@@ -6,15 +6,13 @@ use super::PersistedMcpCandidate;
 use super::LOCAL_APP_WIDGET_DIR;
 use super::LOCAL_APP_WIDGET_FILE;
 use super::LOCAL_APP_WIDGET_MIME;
-use lingxi_core::host::McpError;
 use local_app_contracts::approvals::{
     McpToolChangeKind, McpToolDiff, McpToolField, McpToolSurface, VerificationStatus,
     VerificationSummary,
 };
-use local_app_contracts::events::{
-    ManagedMcpServer, ManagedMcpStatus, McpAppWidget, PublicationState,
-};
+use local_app_contracts::events::{ManagedMcpServer, ManagedMcpStatus, McpAppWidget};
 use local_app_service::host::HostEvent;
+use local_app_service::publication::{Exposure, ManagedApp, ManagedRuntime, WidgetResource};
 use local_apps::derive_mcp_status;
 use local_apps::effective_tool_surface_sha256;
 use local_apps::load_manifest;
@@ -118,7 +116,7 @@ pub(super) fn managed_mcp_widget_resource(
     layout: &AppLayout,
     app_name: &str,
     catalog: &Value,
-) -> Result<Option<(McpAppWidget, mcp::registry::ManagedLocalAppResource)>, String> {
+) -> Result<Option<(McpAppWidget, WidgetResource)>, String> {
     let app_id = layout.app_id();
     if let Some(resources) = catalog.get("resources").and_then(Value::as_array) {
         for resource in resources {
@@ -150,7 +148,7 @@ pub(super) fn managed_mcp_widget_resource(
                     mime_type: mime_type.clone(),
                     resource_sha256: resource_sha256.clone(),
                 },
-                mcp::registry::ManagedLocalAppResource {
+                WidgetResource {
                     uri: uri.to_string(),
                     name,
                     description,
@@ -187,7 +185,7 @@ pub(super) fn managed_mcp_widget_resource(
                 mime_type: LOCAL_APP_WIDGET_MIME.into(),
                 resource_sha256: resource_sha256.clone(),
             },
-            mcp::registry::ManagedLocalAppResource {
+            WidgetResource {
                 uri,
                 name,
                 description: definition.description.clone(),
@@ -357,28 +355,6 @@ pub(super) fn mcp_tool_diffs(
 }
 
 impl LocalAppsHostBroker {
-    pub(super) fn managed_mcp_config(
-        scope: &mcp::registry::ConversationExport,
-        conversation_id: &str,
-    ) -> Result<mcp::McpServerConfig, String> {
-        Ok(mcp::McpServerConfig {
-            name: scope.server_name(),
-            spec: lingxi_core::host::McpTransportSpec::InProcess {
-                registry_key: scope
-                    .scoped_registry_key(conversation_id)
-                    .map_err(|error| error.to_string())?,
-            },
-            scope: mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
-            disabled: false,
-            timeout_ms: Some(crate::mobile::host::LOCAL_APPS_MCP_TIMEOUT_MS),
-            always_load: true,
-            discovery_cache: None,
-            tools: Vec::new(),
-            tool_permissions: BTreeMap::new(),
-            config_error: None,
-            metadata: Default::default(),
-        })
-    }
     /// Make one enabled Local App MCP visible to one conversation and create
     /// the real logical MCP connection whose discovered tools are registered
     /// into that conversation's shared ToolRegistry.
@@ -388,7 +364,7 @@ impl LocalAppsHostBroker {
         app_id: &str,
         pin: bool,
     ) -> Result<bool, String> {
-        let Some(registry) = self.upgraded_mcp_registry() else {
+        let Some(publisher) = self.publisher() else {
             return Ok(false);
         };
         let layout = self.layout(app_id)?;
@@ -408,66 +384,23 @@ impl LocalAppsHostBroker {
         let effective_surface =
             effective_tool_surface_sha256(&active.tool_surface_sha256, &settings.enabled_tools)
                 .map_err(|error| error.to_string())?;
-        let scope = mcp::registry::ConversationExport::new(app_id, effective_surface)
-            .map_err(|error| error.to_string())?;
-        registry
-            .register_managed_local_app(scope.clone(), active.catalog_sha256.clone(), false)
-            .await
-            .map_err(|error| error.to_string())?;
-        registry
-            .set_managed_local_app_runtime(
-                app_id,
-                true,
-                Some(settings.enabled_tools.clone()),
-                managed_mcp_widget_resource(&layout, &manifest.name, &catalog)?
-                    .map(|(_, resource)| resource),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-
-        let update = registry
-            .expose_managed_local_app_with_diff(conversation_id, app_id, pin)
-            .await
-            .map_err(|error| error.to_string())?;
-        if let Some(evicted_app_id) = update.evicted_app_id {
-            registry
-                .disconnect(&format!("local_app_{evicted_app_id}"))
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-
-        let desired = Self::managed_mcp_config(&scope, conversation_id)?;
-        let desired_registry_key = match &desired.spec {
-            lingxi_core::host::McpTransportSpec::InProcess { registry_key } => registry_key,
-            _ => unreachable!("managed Local App MCP is always in-process"),
+        let app = ManagedApp {
+            app_id: app_id.to_string(),
+            catalog_sha256: active.catalog_sha256.clone(),
+            effective_surface_sha256: effective_surface,
         };
-        let existing = registry.get_config(&scope.server_name()).await;
-        let same_conversation_route =
-            existing
-                .as_ref()
-                .is_some_and(|current| match &current.spec {
-                    lingxi_core::host::McpTransportSpec::InProcess { registry_key } => {
-                        let current_route = registry_key.rsplit_once(':').map(|(route, _)| route);
-                        let desired_route = desired_registry_key
-                            .rsplit_once(':')
-                            .map(|(route, _)| route);
-                        current_route == desired_route
-                    }
-                    _ => false,
-                });
-        if same_conversation_route {
-            return Ok(true);
-        }
-        if existing.is_some() {
-            registry
-                .disconnect(&scope.server_name())
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        registry
-            .connect(desired)
-            .await
-            .map_err(|error| error.to_string())?;
+        publisher
+            .publish(
+                &app,
+                ManagedRuntime {
+                    enabled: true,
+                    enabled_tools: settings.enabled_tools.clone(),
+                    widget: managed_mcp_widget_resource(&layout, &manifest.name, &catalog)?
+                        .map(|(_, resource)| resource),
+                },
+            )
+            .await?;
+        publisher.expose(conversation_id, &app, pin).await?;
         Ok(true)
     }
     pub(crate) async fn set_managed_mcp_conversation_pinned(
@@ -484,14 +417,8 @@ impl LocalAppsHostBroker {
             {
                 return Err("mcp_not_enabled: Local App MCP is not enabled".into());
             }
-        } else if let Some(registry) = self.upgraded_mcp_registry() {
-            match registry
-                .pin_local_app_exposure(conversation_id, app_id, false)
-                .await
-            {
-                Ok(_) | Err(McpError::ToolNotFound(_)) => {}
-                Err(error) => return Err(error.to_string()),
-            }
+        } else if let Some(publisher) = self.publisher() {
+            publisher.unpin(conversation_id, app_id).await?;
         }
         self.emit_managed_mcp_inventory().await
     }
@@ -505,17 +432,12 @@ impl LocalAppsHostBroker {
         cwd: &str,
     ) -> Result<(), String> {
         *self.active_mcp_conversation.lock().await = Some(conversation_id.to_string());
-        let Some(registry) = self.upgraded_mcp_registry() else {
+        let Some(publisher) = self.publisher() else {
             return Ok(());
         };
-        for managed in registry.managed_local_apps().await {
-            registry
-                .disconnect(&managed.scope.server_name())
-                .await
-                .map_err(|error| error.to_string())?;
-        }
+        publisher.disconnect_all().await?;
 
-        let mut desired = registry.local_app_exposures(conversation_id).await;
+        let mut desired = publisher.exposures(conversation_id).await;
         let canonical_cwd = canonical_cwd_string(Path::new(cwd));
         if let Ok(service) = self.service() {
             for record in service.list_apps().await {
@@ -523,12 +445,10 @@ impl LocalAppsHostBroker {
                 if workspace == canonical_cwd
                     && !desired.iter().any(|entry| entry.app_id == record.id)
                 {
-                    desired.push(mcp::registry::LocalAppExposure {
+                    desired.push(Exposure {
                         app_id: record.id,
                         pinned: false,
-                        in_flight: 0,
                         last_used: u64::MAX,
-                        exposure_generation: 0,
                     });
                     break;
                 }
@@ -634,7 +554,7 @@ impl LocalAppsHostBroker {
         &self,
         app_id: &str,
     ) -> Result<(), String> {
-        let Some(registry) = self.upgraded_mcp_registry() else {
+        let Some(publisher) = self.publisher() else {
             return Ok(());
         };
         let layout = self.layout(app_id)?;
@@ -643,28 +563,16 @@ impl LocalAppsHostBroker {
             .map_err(|error| error.to_string())?;
         match local_apps::derive_publication_state(&manifest, active_build_id.as_deref(), false) {
             Ok(local_apps::AppPublicationState::Draft) => {
-                registry
-                    .unregister_managed_local_app(app_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                registry
-                    .disconnect(&format!("local_app_{app_id}"))
-                    .await
-                    .map_err(|error| error.to_string())?;
+                publisher.unregister(app_id).await?;
+                publisher.disconnect_app(app_id).await?;
             }
             Ok(
                 local_apps::AppPublicationState::PublishedUnverified
                 | local_apps::AppPublicationState::PublishedVerified,
             ) => {
                 let Some(active) = manifest.active_mcp_catalog.as_ref() else {
-                    registry
-                        .unregister_managed_local_app(app_id)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    registry
-                        .disconnect(&format!("local_app_{app_id}"))
-                        .await
-                        .map_err(|error| error.to_string())?;
+                    publisher.unregister(app_id).await?;
+                    publisher.disconnect_app(app_id).await?;
                     return Ok(());
                 };
                 let catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
@@ -678,44 +586,37 @@ impl LocalAppsHostBroker {
                     &settings.enabled_tools,
                 )
                 .map_err(|error| error.to_string())?;
-                let scope = mcp::registry::ConversationExport::new(app_id, effective_surface)
-                    .map_err(|error| error.to_string())?;
-                registry
-                    .register_managed_local_app(scope, active.catalog_sha256.clone(), false)
-                    .await
-                    .map_err(|error| error.to_string())?;
                 let runtime_enabled = settings.enabled
                     && !settings.enabled_tools.is_empty()
                     && active_build_id.as_deref() == Some(active.build_id.as_str());
-                registry
-                    .set_managed_local_app_runtime(
-                        app_id,
-                        runtime_enabled,
-                        Some(settings.enabled_tools),
-                        managed_mcp_widget_resource(&layout, &manifest.name, &catalog)?
-                            .map(|(_, resource)| resource),
+                publisher
+                    .publish(
+                        &ManagedApp {
+                            app_id: app_id.to_string(),
+                            catalog_sha256: active.catalog_sha256.clone(),
+                            effective_surface_sha256: effective_surface,
+                        },
+                        ManagedRuntime {
+                            enabled: runtime_enabled,
+                            enabled_tools: settings.enabled_tools,
+                            widget: managed_mcp_widget_resource(&layout, &manifest.name, &catalog)?
+                                .map(|(_, resource)| resource),
+                        },
                     )
-                    .await
-                    .map_err(|error| error.to_string())?;
+                    .await?;
             }
             Err(error) => {
-                registry
-                    .unregister_managed_local_app(app_id)
-                    .await
-                    .map_err(|registry_error| registry_error.to_string())?;
+                publisher.unregister(app_id).await?;
                 return Err(error.to_string());
             }
         }
         Ok(())
     }
     pub(crate) async fn unregister_managed_local_app(&self, app_id: &str) -> Result<(), String> {
-        let Some(registry) = self.upgraded_mcp_registry() else {
+        let Some(publisher) = self.publisher() else {
             return Ok(());
         };
-        registry
-            .unregister_managed_local_app(app_id)
-            .await
-            .map_err(|error| error.to_string())?;
+        publisher.unregister(app_id).await?;
         self.emit_managed_mcp_inventory().await?;
         Ok(())
     }
@@ -798,14 +699,14 @@ impl LocalAppsHostBroker {
     }
     pub(crate) async fn emit_managed_mcp_inventory(&self) -> Result<(), String> {
         let service = self.service()?;
-        let registry = self.upgraded_mcp_registry();
+        let publisher = self.publisher();
         let active_conversation = self.active_mcp_conversation.lock().await.clone();
         let pinned_apps: std::collections::HashSet<String> =
-            if let (Some(registry), Some(conversation_id)) =
-                (registry.as_ref(), active_conversation.as_deref())
+            if let (Some(publisher), Some(conversation_id)) =
+                (publisher.as_ref(), active_conversation.as_deref())
             {
-                registry
-                    .local_app_exposures(conversation_id)
+                publisher
+                    .exposures(conversation_id)
                     .await
                     .into_iter()
                     .filter(|entry| entry.pinned)
@@ -946,15 +847,16 @@ impl LocalAppsHostBroker {
                 }
             }
 
-            if let Some(registry) = registry.as_ref() {
-                if let Some(managed) = registry.managed_local_app(&record.id).await {
-                    server_name = managed.scope.server_name();
+            if let Some(publisher) = publisher.as_ref() {
+                let published = publisher.published(&record.id).await;
+                if let Some(published_name) = published.server_name {
+                    server_name = published_name;
                 }
-                if let Some(runtime) = registry.managed_local_app_runtime(&record.id).await {
-                    enabled = runtime.enabled;
-                    if let Some(runtime_enabled_tools) = runtime.enabled_tools {
-                        enabled_tools = runtime_enabled_tools;
-                    }
+                if let Some(published_enabled) = published.enabled {
+                    enabled = published_enabled;
+                }
+                if let Some(published_tools) = published.enabled_tools {
+                    enabled_tools = published_tools;
                 }
             }
             let pinned_to_current_conversation = pinned_apps.contains(&record.id);
@@ -972,15 +874,7 @@ impl LocalAppsHostBroker {
                 tool_surface_sha256,
                 tool_count,
                 authoring_revision,
-                publication_state: match publication {
-                    local_apps::AppPublicationState::Draft => PublicationState::Draft,
-                    local_apps::AppPublicationState::PublishedUnverified => {
-                        PublicationState::PublishedUnverified
-                    }
-                    local_apps::AppPublicationState::PublishedVerified => {
-                        PublicationState::PublishedVerified
-                    }
-                },
+                publication_state: publication,
                 mcp_verification,
                 ui_verification,
                 widget,

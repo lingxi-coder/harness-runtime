@@ -1,9 +1,9 @@
 use super::*;
+use crate::mobile::local_apps_adapters::device_context_of;
 use crate::mobile::local_apps_sessions::{
     latest_custom_title, latest_custom_title_is_mobile_placeholder,
     reconcile_app_init_session_title, SessionCatalog, SessionTitles,
 };
-use crate::mobile::local_apps_adapters::device_context_of;
 use local_app_contracts::events::PluginErrorCode;
 use local_apps::AppRuntimeProfile;
 
@@ -13133,4 +13133,346 @@ fn a_placeholder_is_told_from_a_user_rename_by_text_against_the_anchor() {
             .0,
         "我的宝贝项目"
     );
+}
+
+/// A publisher that records what the broker asks of it, so the tests can pin
+/// the sequence of calls without an engine behind it.
+#[derive(Default)]
+struct RecordingPublisher {
+    calls: std::sync::Mutex<Vec<String>>,
+    exposures: std::sync::Mutex<Vec<local_app_service::publication::Exposure>>,
+}
+
+impl RecordingPublisher {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().expect("calls").clone()
+    }
+
+    fn record(&self, call: String) {
+        self.calls.lock().expect("calls").push(call);
+    }
+}
+
+#[async_trait::async_trait]
+impl local_app_service::publication::McpPublisher for RecordingPublisher {
+    fn available(&self) -> bool {
+        true
+    }
+    async fn publish(
+        &self,
+        app: &local_app_service::publication::ManagedApp,
+        runtime: local_app_service::publication::ManagedRuntime,
+    ) -> Result<(), String> {
+        self.record(format!(
+            "publish {} enabled={} tools={:?}",
+            app.app_id, runtime.enabled, runtime.enabled_tools
+        ));
+        Ok(())
+    }
+    async fn unregister(&self, app_id: &str) -> Result<(), String> {
+        self.record(format!("unregister {app_id}"));
+        Ok(())
+    }
+    async fn disconnect_app(&self, app_id: &str) -> Result<(), String> {
+        self.record(format!("disconnect_app {app_id}"));
+        Ok(())
+    }
+    async fn disconnect_all(&self) -> Result<(), String> {
+        self.record("disconnect_all".into());
+        Ok(())
+    }
+    async fn expose(
+        &self,
+        conversation_id: &str,
+        app: &local_app_service::publication::ManagedApp,
+        pin: bool,
+    ) -> Result<(), String> {
+        self.record(format!("expose {conversation_id} {} pin={pin}", app.app_id));
+        Ok(())
+    }
+    async fn unpin(&self, conversation_id: &str, app_id: &str) -> Result<(), String> {
+        self.record(format!("unpin {conversation_id} {app_id}"));
+        Ok(())
+    }
+    async fn published(&self, app_id: &str) -> local_app_service::publication::Published {
+        self.record(format!("published {app_id}"));
+        local_app_service::publication::Published {
+            server_name: Some(format!("host_named_{app_id}")),
+            enabled: Some(true),
+            enabled_tools: Some(vec!["host_tool".into()]),
+        }
+    }
+    async fn exposures(
+        &self,
+        conversation_id: &str,
+    ) -> Vec<local_app_service::publication::Exposure> {
+        self.record(format!("exposures {conversation_id}"));
+        self.exposures.lock().expect("exposures").clone()
+    }
+}
+
+/// A broker with no publisher has nothing to publish to: every operation that
+/// would touch one is a quiet no-op, and exposing reports "not exposed".
+#[tokio::test]
+async fn without_a_publisher_publication_is_a_quiet_no_op() {
+    let (root, service, broker) = create_broker(false, None).await;
+    let app_id = create_app_fixture(&root, &service, "No publisher").await;
+    broker
+        .sync_managed_local_app_publication(&app_id)
+        .await
+        .expect("sync with no publisher");
+    broker
+        .unregister_managed_local_app(&app_id)
+        .await
+        .expect("unregister with no publisher");
+    assert!(!broker
+        .expose_managed_mcp_for_conversation("conversation-1", &app_id, false)
+        .await
+        .expect("expose with no publisher"));
+}
+
+/// An app with no approved MCP catalog is not publishable: the broker withdraws
+/// it and drops its connection, in that order.
+#[tokio::test]
+async fn syncing_an_app_with_no_catalog_withdraws_it_and_drops_its_connection() {
+    let (root, service, broker) = create_broker(false, None).await;
+    let publisher = Arc::new(RecordingPublisher::default());
+    assert!(broker.attach_publisher(publisher.clone()).is_ok());
+    let app_id = create_app_fixture(&root, &service, "No catalog").await;
+
+    broker
+        .sync_managed_local_app_publication(&app_id)
+        .await
+        .expect("sync");
+    assert_eq!(
+        publisher.calls(),
+        vec![
+            format!("unregister {app_id}"),
+            format!("disconnect_app {app_id}")
+        ]
+    );
+    // Nothing is exposed for an app without a catalog.
+    assert!(!broker
+        .expose_managed_mcp_for_conversation("conversation-1", &app_id, true)
+        .await
+        .expect("expose"));
+    assert_eq!(publisher.calls().len(), 2, "no publish and no expose");
+}
+
+#[tokio::test]
+async fn unregistering_withdraws_the_app_then_tells_the_client_the_inventory_changed() {
+    let (root, service, broker) = create_broker(false, None).await;
+    let publisher = Arc::new(RecordingPublisher::default());
+    assert!(broker.attach_publisher(publisher.clone()).is_ok());
+    let app_id = create_app_fixture(&root, &service, "Unregistered").await;
+    broker
+        .unregister_managed_local_app(&app_id)
+        .await
+        .expect("unregister");
+    let calls = publisher.calls();
+    assert_eq!(calls[0], format!("unregister {app_id}"));
+}
+
+/// Unpinning goes to the publisher, and the inventory the client sees takes
+/// the server name, live state and tools from what the host says it holds.
+#[tokio::test]
+async fn unpinning_reaches_the_publisher_and_the_inventory_reports_what_the_host_holds() {
+    let root = TempDir::new().expect("tempdir");
+    let service = test_service(&root).await;
+    let sink = MockSink::arc();
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        root.path().to_path_buf(),
+        sink.clone(),
+        None,
+        false,
+        None,
+    );
+    assert!(broker.attach_service(service.clone()).is_ok());
+    let publisher = Arc::new(RecordingPublisher::default());
+    assert!(broker.attach_publisher(publisher.clone()).is_ok());
+    let app_id = create_app_fixture(&root, &service, "Inventory").await;
+    // Publish the app so the inventory lists it: it needs an active build
+    // receipt, which the fixture gives it, and no MCP catalog.
+    publisher
+        .exposures
+        .lock()
+        .expect("exposures")
+        .push(local_app_service::publication::Exposure {
+            app_id: app_id.clone(),
+            pinned: true,
+            last_used: 1,
+        });
+
+    broker
+        .set_managed_mcp_conversation_pinned("conversation-1", &app_id, false)
+        .await
+        .expect("unpin");
+    let calls = publisher.calls();
+    assert_eq!(calls[0], format!("unpin conversation-1 {app_id}"));
+
+    let inventory = sink
+        .events()
+        .await
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            ClientEvent::AppEvent {
+                event: AppEventDto::ManagedMcpInventoryChanged { servers },
+            } => Some(servers),
+            _ => None,
+        })
+        .expect("the client is told the inventory changed");
+    let server = inventory
+        .iter()
+        .find(|server| server.app_id == app_id)
+        .expect("the published app is listed");
+    assert_eq!(server.server_name, format!("host_named_{app_id}"));
+    assert!(server.enabled);
+    assert_eq!(server.enabled_tools, vec!["host_tool".to_string()]);
+    assert!(
+        server.pinned_to_current_conversation,
+        "pinning comes from the publisher's exposures for the active conversation"
+    );
+}
+
+/// Activating a conversation drops every live connection first, then reads
+/// what is exposed to it. An exposed app with no catalog stays unexposed.
+#[tokio::test]
+async fn activating_a_conversation_drops_connections_before_reading_its_exposures() {
+    let (root, service, broker) = create_broker(false, None).await;
+    let publisher = Arc::new(RecordingPublisher::default());
+    assert!(broker.attach_publisher(publisher.clone()).is_ok());
+    let app_id = create_app_fixture(&root, &service, "Activated").await;
+    publisher
+        .exposures
+        .lock()
+        .expect("exposures")
+        .push(local_app_service::publication::Exposure {
+            app_id: app_id.clone(),
+            pinned: false,
+            last_used: 7,
+        });
+    broker
+        .activate_managed_mcp_conversation("conversation-9", "/somewhere/else")
+        .await
+        .expect("activate");
+    let calls = publisher.calls();
+    assert_eq!(calls[0], "disconnect_all");
+    assert_eq!(calls[1], "exposures conversation-9");
+    assert!(
+        !calls.iter().any(|call| call.starts_with("expose ")),
+        "an app with no approved catalog is not exposed: {calls:?}"
+    );
+}
+
+/// Seed an approved MCP catalog with one tool and the settings that turn it on,
+/// so the publication paths that need a catalog have one.
+fn seed_enabled_mcp_catalog(root: &TempDir, app_id: &str, tool: &str, enabled: bool) -> String {
+    let layout = AppLayout::new(root.path().to_path_buf(), app_id.to_string()).expect("layout");
+    let build_id = crate::mobile::local_apps_build::active_build_id(&layout)
+        .expect("active build")
+        .expect("the fixture has an active build");
+    let definition = mcp_wire::McpToolDefinitionDto::new(
+        tool,
+        json!({"type": "object", "additionalProperties": false}),
+    );
+    let catalog = json!({
+        "appId": app_id,
+        "buildId": build_id,
+        "tools": [{
+            "definition": definition,
+            "flow": {"flowId": "f", "inputs": {}, "result": {"literal": {"ok": true}}},
+            "ceiling": "allow",
+        }],
+        "execution": [],
+    });
+    let catalog_sha256 =
+        local_apps::approval_contract_sha256(catalog.clone()).expect("catalog digest");
+    local_apps::save_mcp_catalog(&layout, &catalog_sha256, &catalog).expect("save catalog");
+    let mut manifest = load_manifest(&layout).expect("manifest");
+    if manifest.revision == 0 {
+        manifest.revision = 1;
+    }
+    manifest.active_mcp_catalog = Some(local_apps::AppMcpCatalogRef {
+        build_id,
+        manifest_revision: manifest.revision,
+        authoring_revision: 1,
+        user_goal_sha256: "0".repeat(64),
+        proposal_sha256: "0".repeat(64),
+        approval_contract_sha256: "0".repeat(64),
+        tool_surface_sha256: "1".repeat(64),
+        catalog_sha256: catalog_sha256.clone(),
+        mcp_verification_sha256: "0".repeat(64),
+    });
+    local_apps::save_manifest(&layout, &manifest).expect("publish the catalog pointer");
+    let mut settings = local_apps::load_mcp_settings(&layout).expect("settings");
+    let expected = settings.revision;
+    settings.enabled = enabled;
+    settings.enabled_tools = vec![tool.to_string()];
+    local_apps::save_mcp_settings(&layout, &settings, Some(expected)).expect("save settings");
+    catalog_sha256
+}
+
+/// A published app whose tools are on is registered with what the person
+/// enabled, and exposing it publishes first and then offers it to the
+/// conversation, pinned as asked.
+#[tokio::test]
+async fn an_enabled_catalog_is_published_and_then_exposed_to_the_conversation() {
+    let (root, service, broker) = create_broker(false, None).await;
+    let publisher = Arc::new(RecordingPublisher::default());
+    assert!(broker.attach_publisher(publisher.clone()).is_ok());
+    let app_id = create_app_fixture(&root, &service, "Enabled catalog").await;
+    seed_enabled_mcp_catalog(&root, &app_id, "read_value", true);
+
+    broker
+        .sync_managed_local_app_publication(&app_id)
+        .await
+        .expect("sync");
+    assert_eq!(
+        publisher.calls(),
+        vec![format!(
+            "publish {app_id} enabled=true tools={:?}",
+            vec!["read_value"]
+        )]
+    );
+
+    assert!(broker
+        .expose_managed_mcp_for_conversation("conversation-1", &app_id, true)
+        .await
+        .expect("expose"));
+    assert_eq!(
+        publisher.calls()[1..],
+        [
+            format!("publish {app_id} enabled=true tools=[\"read_value\"]"),
+            format!("expose conversation-1 {app_id} pin=true"),
+        ]
+    );
+}
+
+/// Turned off, the app is still published (the host keeps its record) but not
+/// live, and it is not exposed to a conversation.
+#[tokio::test]
+async fn a_disabled_catalog_is_published_as_not_live_and_never_exposed() {
+    let (root, service, broker) = create_broker(false, None).await;
+    let publisher = Arc::new(RecordingPublisher::default());
+    assert!(broker.attach_publisher(publisher.clone()).is_ok());
+    let app_id = create_app_fixture(&root, &service, "Disabled catalog").await;
+    seed_enabled_mcp_catalog(&root, &app_id, "read_value", false);
+
+    broker
+        .sync_managed_local_app_publication(&app_id)
+        .await
+        .expect("sync");
+    assert_eq!(
+        publisher.calls(),
+        vec![format!(
+            "publish {app_id} enabled=false tools={:?}",
+            vec!["read_value"]
+        )]
+    );
+    assert!(!broker
+        .expose_managed_mcp_for_conversation("conversation-1", &app_id, false)
+        .await
+        .expect("expose"));
+    assert_eq!(publisher.calls().len(), 1, "nothing was exposed");
 }
