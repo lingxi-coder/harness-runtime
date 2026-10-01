@@ -2,8 +2,8 @@
 
 use crate::error::AppError;
 use crate::manifest::{AppLayout, AppManifest};
-use lingxi_core::host::rooted_fs::{self, AtomicWriteOptions};
-use lingxi_core::host::FsError;
+use rooted_fs::AtomicWriteOptions;
+use rooted_fs::FsError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};

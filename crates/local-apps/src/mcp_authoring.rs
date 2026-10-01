@@ -987,24 +987,24 @@ pub fn save_candidate_journal(
     let mut body = serde_json::to_vec_pretty(journal)
         .map_err(|error| AppError::Io(format!("serialize candidate journal: {error}")))?;
     body.push(b'\n');
-    lingxi_core::host::rooted_fs::atomic_write(
+    rooted_fs::atomic_write(
         layout.root(),
         &layout.mcp_authoring_journal_rel(),
         &body,
-        lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
+        rooted_fs::AtomicWriteOptions::default(),
     )
     .map_err(|error| AppError::from_fs("write candidate journal", &error))
 }
 
 /// Load and authenticate the durable authoring journal before resume.
 pub fn load_candidate_journal(layout: &AppLayout) -> Result<McpCandidateJournal, AppError> {
-    let body = lingxi_core::host::rooted_fs::read_to_string_limited(
+    let body = rooted_fs::read_to_string_limited(
         layout.root(),
         &layout.mcp_authoring_journal_rel(),
         256 * 1024,
     )
     .map_err(|error| match error {
-        lingxi_core::host::FsError::NotFound(_) => {
+        rooted_fs::FsError::NotFound(_) => {
             AppError::StorageCorrupt("candidate journal is missing".into())
         }
         other => AppError::from_fs("read candidate journal", &other),
@@ -1025,11 +1025,8 @@ pub fn load_candidate_journal(layout: &AppLayout) -> Result<McpCandidateJournal,
 /// Remove a completed create-only candidate journal. Missing files are a
 /// successful no-op so crash-recovery cleanup is idempotent.
 pub fn delete_candidate_journal(layout: &AppLayout) -> Result<(), AppError> {
-    match lingxi_core::host::rooted_fs::remove_file(
-        layout.root(),
-        &layout.mcp_authoring_journal_rel(),
-    ) {
-        Ok(()) | Err(lingxi_core::host::FsError::NotFound(_)) => Ok(()),
+    match rooted_fs::remove_file(layout.root(), &layout.mcp_authoring_journal_rel()) {
+        Ok(()) | Err(rooted_fs::FsError::NotFound(_)) => Ok(()),
         Err(error) => Err(AppError::from_fs("delete candidate journal", &error)),
     }
 }

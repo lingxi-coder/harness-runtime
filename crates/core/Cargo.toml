@@ -17,6 +17,7 @@ branding.workspace = true
 mobile-linux-api.workspace = true
 jsonrpc = { path = "../jsonrpc" }
 mcp-wire = { path = "../mcp-wire" }
+rooted-fs = { path = "../rooted-fs" }
 secrecy = { version = "0.10", features = ["serde"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 zeroize = "1.8"

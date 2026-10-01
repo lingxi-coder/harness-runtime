@@ -3,13 +3,29 @@
 //! These helpers are synchronous because callers hold an advisory lock across
 //! an entire read-modify-write transaction. Unix uses directory file
 //! descriptors and `*at` syscalls. Windows uses handle-relative NT file APIs.
+//!
+//! The crate depends on nothing in the workspace, so both the engine
+//! (`lingxi-core` re-exports it as `host::rooted_fs`) and the Local App
+//! service can use the same audited implementation.
+
+// Platform filesystem primitives are safe by default. The Windows rooted-file
+// implementation is the sole exception: the standard library has no
+// handle-relative open/rename API, so that module wraps a small audited set of
+// `ntdll` calls. Everywhere else the workspace's `unsafe_code = "deny"` stands.
+#![cfg_attr(windows, allow(unsafe_code))]
+// Documentation debt carried over from `lingxi-core`, whose `host` module this
+// code lived in and allowed `missing_docs` for. It can be repaid here, one item
+// at a time, by deleting this line.
+#![allow(missing_docs)]
+
+mod types;
 
 use fs2::FileExt;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::host::{FlockGuard, FsError};
+pub use types::{FileAppendError, FileAppendStage, FlockGuard, FsError};
 
 fn read_opened_to_string_limited(
     file: std::fs::File,
@@ -1969,8 +1985,7 @@ pub fn append_file_staged(
     relative: &Path,
     content: &str,
     expected: Option<&RootIdentity>,
-) -> Result<(), crate::host::filesystem::FileAppendError> {
-    use crate::host::filesystem::{FileAppendError, FileAppendStage};
+) -> Result<(), FileAppendError> {
     use std::io::Write;
     let mut file =
         open_append_file_pinned(root, relative, expected).map_err(|error| FileAppendError {

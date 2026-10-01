@@ -44,6 +44,23 @@ class DependencyRules(unittest.TestCase):
         self.assertIn("mcp-wire depends on core — shared primitives have no workspace dependencies",
                       result.stderr)
 
+    def test_a_standalone_service_may_use_the_shared_primitives(self):
+        result = self.run_gate(
+            {"local-apps": "crates/local-apps", "mcp-wire": "crates/mcp-wire",
+             "rooted-fs": "crates/rooted-fs"},
+            {"local-apps": ["mcp-wire", "rooted-fs"]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_standalone_service_cannot_depend_on_the_engine(self):
+        for engine in ("core", "tasks", "branding"):
+            with self.subTest(engine=engine):
+                result = self.run_gate(
+                    {"local-apps": "crates/local-apps", engine: f"crates/{engine}"},
+                    {"local-apps": [engine]})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"local-apps depends on {engine} — a standalone service may reach",
+                              result.stderr)
+
     def test_shared_core_cannot_depend_on_telemetry(self):
         result = self.run_gate({"core": "crates/core", "telemetry": "crates/telemetry"},
                                {"core": ["telemetry"]})

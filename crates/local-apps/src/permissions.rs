@@ -8,8 +8,8 @@
 use crate::error::AppError;
 use crate::manifest::{validate_domain, AppLayout};
 use crate::types::APPS_SCHEMA_VERSION;
-use lingxi_core::host::rooted_fs::{self, AtomicWriteOptions};
-use lingxi_core::host::FsError;
+use rooted_fs::AtomicWriteOptions;
+use rooted_fs::FsError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 

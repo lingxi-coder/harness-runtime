@@ -7,8 +7,8 @@
 use crate::error::AppError;
 use crate::manifest::AppLayout;
 use crate::runtime_v2::{AgentSessionRecord, AppAgentProfile, RUNTIME_CONTRACT_SCHEMA_VERSION};
-use lingxi_core::host::rooted_fs::{self, AtomicWriteOptions};
-use lingxi_core::host::FsError;
+use rooted_fs::AtomicWriteOptions;
+use rooted_fs::FsError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

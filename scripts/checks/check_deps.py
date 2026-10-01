@@ -24,7 +24,13 @@ API_CRATES = {"tool-api", "skill-api", "command-api"}
 # service name directly. They are the bottom of the graph: a workspace
 # dependency here would drag the engine into whatever else depends on them,
 # which is exactly what they exist to prevent.
-SHARED_PRIMITIVES = {"mcp-wire"}
+SHARED_PRIMITIVES = {"mcp-wire", "rooted-fs"}
+
+# The Local App service is being extracted into its own repository, so its
+# production graph may reach the workspace only through the shared primitives.
+# Anything else (core, client, mcp, tasks, permission, ...) would have to come
+# along or be cut again at the move.
+STANDALONE_SERVICES = {"local-apps": SHARED_PRIMITIVES}
 
 # The SDK assembles existing components; components must never reach back into
 # its product profiles or depend on a concrete UI to describe an interaction.
@@ -106,6 +112,12 @@ def main():
             if n in SHARED_PRIMITIVES:
                 violations.append(
                     "%s depends on %s — shared primitives have no workspace dependencies" % (n, d)
+                )
+                continue
+            if n in STANDALONE_SERVICES and d not in STANDALONE_SERVICES[n]:
+                violations.append(
+                    "%s depends on %s — a standalone service may reach the workspace only through %s"
+                    % (n, d, ", ".join(sorted(STANDALONE_SERVICES[n])))
                 )
                 continue
             if n == "core" and d not in {"branding", "jsonrpc"} | SHARED_PRIMITIVES:

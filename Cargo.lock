@@ -1267,6 +1267,7 @@ dependencies = [
  "libc",
  "mcp-wire",
  "mobile-linux-api",
+ "rooted-fs",
  "rustix 0.38.44",
  "schemars",
  "secrecy",
@@ -3290,10 +3291,10 @@ name = "local-apps"
 version = "0.12.0"
 dependencies = [
  "async-trait",
- "core",
  "git2",
  "mcp-wire",
  "rand 0.9.4",
+ "rooted-fs",
  "rusqlite",
  "serde",
  "serde_json",
@@ -5519,6 +5520,18 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rooted-fs"
+version = "0.12.0"
+dependencies = [
+ "fs2",
+ "rustix 0.38.44",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

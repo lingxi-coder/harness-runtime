@@ -149,8 +149,9 @@ pub mod process;
 pub mod prompting_gate;
 pub mod read_auto_allow;
 pub mod repo_root_reload;
-#[cfg_attr(windows, allow(unsafe_code))]
-pub mod rooted_fs;
+// The rooted filesystem primitives live in the `rooted-fs` crate; re-exporting
+// the crate keeps `host::rooted_fs::…` resolving for every caller.
+pub use ::rooted_fs;
 pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;
@@ -182,6 +183,10 @@ pub use session_retention::{
 };
 pub mod worktree;
 
+pub use ::rooted_fs::{
+    atomic_write_pinned, lock_exclusive_pinned, open_read_file_pinned, sync_parent_pinned,
+    truncate_file_pinned, AtomicWriteOptions, RootIdentity, RootedFileLock,
+};
 pub use android_ui::{
     AndroidAccessRequest, AndroidAccessTier, AndroidAction, AndroidActionResult, AndroidAppInfo,
     AndroidAudioListenRequest, AndroidAudioSpeakRequest, AndroidAudioSpeakResult,
@@ -306,10 +311,6 @@ pub use prompting_gate::{
     PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
 };
 pub use repo_root_reload::{RepoRootReloadOutcome, RepoRootReloadRequest, RepoRootReloader};
-pub use rooted_fs::{
-    atomic_write_pinned, lock_exclusive_pinned, open_read_file_pinned, sync_parent_pinned,
-    truncate_file_pinned, AtomicWriteOptions, RootIdentity, RootedFileLock,
-};
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use sandbox::{
     BackendPlanHandle, ProcessCommand, Sandbox, SandboxCapability, SandboxError, SandboxFeatures,

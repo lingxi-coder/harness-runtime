@@ -151,7 +151,6 @@ G1	crates/core/src/host/live_sessions.rs	LINGXI
 G1	crates/core/src/host/live_sessions.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/core/src/host/mobile_runtime_environment.rs	LingXi
 G1	crates/core/src/host/plan_files.rs	\.claude(?![A-Za-z0-9_.\-])
-G1	crates/core/src/host/rooted_fs.rs	\.lingxi
 G1	crates/core/src/host/shell_support.rs	LINGXI
 G1	crates/core/src/host/subagent_output_guard.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/core/src/host/subagent_output_guard.rs	\.claude\.json
@@ -496,6 +495,7 @@ G1	crates/plugins/lingxi-local-app/skills/frontend-qa/agents/openai.yaml	LingXi
 G1	crates/plugins/lingxi-local-app/skills/ionic-react-local-app/agents/openai.yaml	LingXi
 G1	crates/plugins/lingxi-local-app/skills/phaser-2d-local-app/agents/openai.yaml	LingXi
 G1	crates/plugins/lingxi-local-app/skills/threejs-local-app/agents/openai.yaml	LingXi
+G1	crates/rooted-fs/src/lib.rs	\.lingxi
 G1	crates/runtime/build.rs	\.lingxi
 G1	crates/runtime/src/desktop/agent_skill_loader.rs	LINGXI
 G1	crates/runtime/src/desktop/assembly.rs	LINGXI
@@ -874,8 +874,6 @@ G3	crates/configuration-admin/src/skills_admin.rs	.lingxi-*
 G3	crates/coordinator/src/team_file.rs	.lingxi
 G3	crates/core/src/host/live_sessions.rs	LINGXI_CONFIG_DIR
 G3	crates/core/src/host/mobile_runtime_environment.rs	MANAGED_DIR_MACOS
-G3	crates/core/src/host/rooted_fs.rs	.lingxi
-G3	crates/core/src/host/rooted_fs.rs	.lingxi-*
 G3	crates/core/src/host/subagent_output_guard.rs	.lingxi
 G3	crates/core/src/host/subagent_output_guard.rs	.lingxi.json
 G3	crates/core/src/host/worktree.rs	.lingxi
@@ -1085,6 +1083,8 @@ G3	crates/plugins/lingxi-local-app/skills/device/SKILL.md	.lingxi
 G3	crates/plugins/lingxi-local-app/skills/local-app-data/SKILL.md	LINGXI.md
 G3	crates/plugins/lingxi-local-app/skills/local-app-test/SKILL.md	LINGXI.md
 G3	crates/plugins/lingxi-local-app/skills/local-app-use/SKILL.md	LINGXI.md
+G3	crates/rooted-fs/src/lib.rs	.lingxi
+G3	crates/rooted-fs/src/lib.rs	.lingxi-*
 G3	crates/runtime/build.rs	.lingxi-plugin
 G3	crates/runtime/builtin-plugin-inventory.txt	.lingxi
 G3	crates/runtime/builtin-plugin-inventory.txt	.lingxi-plugin
