@@ -24,6 +24,7 @@
 //! executor threads.
 
 use crate::checkpoints::AppCheckpointStore;
+use crate::clock::Clock;
 use crate::data;
 use crate::error::AppError;
 use crate::events::{AppEvent, AppEventObserver};
@@ -38,7 +39,6 @@ use crate::types::{
     AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppMcpIntent,
     AppRecord, AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, APPS_SCHEMA_VERSION,
 };
-use lingxi_core::host::Clock;
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};

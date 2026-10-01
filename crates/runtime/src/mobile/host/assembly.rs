@@ -2968,7 +2968,9 @@ pub fn build_mobile_engine_inner(
     );
     let loaded_profile = runtime.block_on(profile_apps(
         mobile_apps_data_root(&firer_cfg),
-        firer_platform.clock(),
+        Arc::new(crate::mobile::local_apps_profile::PlatformClock(
+            firer_platform.clock(),
+        )),
         inner.mobile_linux.clone(),
         firer_cfg.local_apps_full_runtime,
         firer_cfg.local_apps_runtime_root.clone(),

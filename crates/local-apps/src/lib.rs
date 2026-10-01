@@ -34,6 +34,7 @@ pub mod agent_sessions;
 pub mod authoring;
 pub mod background;
 pub mod checkpoints;
+pub mod clock;
 pub mod data;
 pub mod error;
 pub mod events;
@@ -68,6 +69,7 @@ pub use authoring::{
     AUTHORING_SCHEMA_VERSION, MAX_AUTHORING_BYTES,
 };
 pub use checkpoints::AppCheckpointStore;
+pub use clock::{Clock, SystemClock};
 pub use data::{
     AppDataStore, DataFilter, DataFilterOperator, DataMigrationPreview, DataMigrationResult,
     DataMutation, DataMutationResult, DataPage, DataQuery, DataRecord, DataSchemaState,

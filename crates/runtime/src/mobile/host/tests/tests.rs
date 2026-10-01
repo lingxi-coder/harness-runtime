@@ -9599,7 +9599,9 @@ fn initial_app_cold_boot_exposes_only_its_enabled_managed_mcp() {
     let (app_id, workspace) = seed_runtime.block_on(async {
         let service = local_apps::AppService::load(
             tmp.path().to_path_buf(),
-            Arc::new(platform_posix_minimal::PosixClock::new()),
+            Arc::new(crate::mobile::local_apps_profile::PlatformClock(Arc::new(
+                platform_posix_minimal::PosixClock::new(),
+            ))),
             Arc::new(local_apps::NoopAppEventObserver),
         )
         .await

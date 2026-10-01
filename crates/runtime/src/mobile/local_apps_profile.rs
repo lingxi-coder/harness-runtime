@@ -5,8 +5,7 @@ use crate::mobile::local_apps_llm::LocalAppsLlm;
 use async_trait::async_trait;
 use client::adapter::ClientEventSink;
 use client::protocol::events::ClientEvent;
-use lingxi_core::host::Clock;
-use local_apps::{AppError, AppEventFanout, AppService};
+use local_apps::{AppError, AppEventFanout, AppService, Clock};
 use mobile_linux_api::MobileLinuxRuntime;
 
 use std::collections::HashMap;
@@ -14,6 +13,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use tokio::sync::OnceCell;
+
+/// The engine's platform clock, seen through the clock `local-apps` is written
+/// against (that crate does not depend on the engine's core).
+pub(crate) struct PlatformClock(pub(crate) Arc<dyn lingxi_core::host::Clock>);
+
+impl Clock for PlatformClock {
+    fn now(&self) -> std::time::SystemTime {
+        self.0.now()
+    }
+}
 
 type ProfileCell = Arc<OnceCell<Arc<ProfileApps>>>;
 

@@ -118,8 +118,11 @@ pub const RUNTIME_FILE: &str = "runtime.json";
 pub const DEPENDENCY_FILE: &str = "dependencies.json";
 /// Per-app workspace directory (the Next.js project root).
 pub const WORKSPACE_DIR: &str = "workspace";
-/// App-scoped state directory inside the workspace (`.lingxi`).
-pub const APP_STATE_DIR: &str = branding::DOT_DIR;
+/// App-scoped state directory inside the workspace.
+///
+/// A persisted-format name: it is written into every app workspace, so it is
+/// a constant of this crate and does not follow the host's brand settings.
+pub const APP_STATE_DIR: &str = ".lingxi";
 /// App-scoped metadata mirror inside `workspace/.lingxi/`.
 pub const APP_METADATA_FILE: &str = "app.json";
 /// Sibling directory holding temporary, durable first-scaffold snapshots.
@@ -2125,6 +2128,14 @@ fn sweep_trash(root: &Path) {
 mod tests {
     use super::*;
     use crate::error::AppErrorCode;
+
+    /// Every existing workspace carries this directory; changing the name
+    /// strands them, so it is pinned here rather than derived from anything.
+    #[test]
+    fn the_app_state_directory_name_is_the_persisted_one() {
+        assert_eq!(APP_STATE_DIR, ".lingxi");
+    }
+
     fn new_app(id: &str) -> AppState {
         AppState::create(
             id.into(),

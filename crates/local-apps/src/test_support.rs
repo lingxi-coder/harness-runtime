@@ -1,7 +1,7 @@
 //! Deterministic helpers for local-apps tests (unit, integration, and the
 //! engine's wiring tests).
 
-use lingxi_core::host::Clock;
+use crate::clock::Clock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
