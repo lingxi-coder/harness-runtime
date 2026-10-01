@@ -24,7 +24,7 @@ API_CRATES = {"tool-api", "skill-api", "command-api"}
 # service name directly. They are the bottom of the graph: a workspace
 # dependency here would drag the engine into whatever else depends on them,
 # which is exactly what they exist to prevent.
-SHARED_PRIMITIVES = {"local-app-contracts", "mcp-wire", "rooted-fs"}
+SHARED_PRIMITIVES = {"device-api", "local-app-contracts", "mcp-wire", "rooted-fs"}
 
 # The Local App crates are being extracted into their own repository, so their
 # production graphs may reach the workspace only through the shared primitives

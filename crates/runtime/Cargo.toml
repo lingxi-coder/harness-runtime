@@ -100,6 +100,7 @@ mobile = [
     "workflow",
     "dep:provider-config",
     "dep:local-apps",
+    "dep:device-api",
     "dep:local-app-contracts",
     "dep:local-app-service",
     "dep:mcp-wire",
@@ -196,6 +197,7 @@ futures-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 hooks = { path = "../hooks", optional = true }
 jsonrpc = { path = "../jsonrpc", optional = true }
+device-api = { path = "../device-api", optional = true }
 local-app-contracts = { path = "../local-app-contracts", optional = true }
 local-app-service = { path = "../local-app-service", optional = true }
 local-apps = { path = "../local-apps", optional = true }

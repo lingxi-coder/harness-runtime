@@ -11,12 +11,12 @@
 
 use super::{BridgeFailure, LocalAppsHostBroker};
 use base64::Engine as _;
-use lingxi_core::host::audio::{
+use device_api::{
     AudioError, AudioErrorKind, AudioInitiator, AudioOperation, AudioOperationContext,
     AudioOperationId, AudioOperationKind, AudioOperationSuccess, AudioOwner, AudioRecordingHandle,
     AudioService,
 };
-use lingxi_core::host::{
+use device_api::{
     CalendarError, CalendarEvent, CalendarQuery, CameraError, CameraPosition, CapturePhotoOpts,
     ClipboardError, ContactsError, ContactsQuery, DeepLinkError, DeviceStatusError, HapticError,
     HapticStyle, LocationError, NotificationError, NotificationRequest, ShareError, SharePayload,
@@ -1170,7 +1170,7 @@ impl LocalAppsHostBroker {
         if !audio
             .capabilities()
             .supported_operations
-            .contains(&lingxi_core::host::audio::AudioOperationKind::Record)
+            .contains(&device_api::audio::AudioOperationKind::Record)
         {
             return Err(BridgeFailure::coded(
                 "unsupported",
@@ -2413,12 +2413,12 @@ mod tests {
     use client::adapter::{ClientEventSink, MockSink};
     use client::protocol::events::ClientEvent;
     use client::protocol::local_apps::AppEventDto;
-    use lingxi_core::host::audio::{
+    use device_api::{
         AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioOperation, AudioOperationContext,
         AudioOperationId, AudioOperationKind, AudioOperationReadiness, AudioOperationSuccess,
         AudioOwner, AudioReadinessState, AudioRecordingHandle, AudioService, AudioStatus,
     };
-    use lingxi_core::host::{
+    use device_api::{
         CalendarError, CalendarEvent, CalendarProvider, CalendarQuery, CameraControl, CameraError,
         CapturePhotoOpts, CapturedImage, Clipboard, ClipboardError, Contact, ContactsError,
         ContactsProvider, ContactsQuery, LocationError, LocationFix, LocationProvider,

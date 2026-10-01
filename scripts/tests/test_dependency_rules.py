@@ -90,6 +90,20 @@ class DependencyRules(unittest.TestCase):
                     f"local-app-service depends on {engine} — a standalone service may reach",
                     result.stderr)
 
+    def test_the_device_api_is_a_shared_primitive_the_service_and_core_may_use(self):
+        ok = self.run_gate(
+            {"local-app-service": "crates/local-app-service", "local-apps": "crates/local-apps",
+             "device-api": "crates/device-api", "core": "crates/core"},
+            {"local-app-service": [{"name": "local-apps", "uses_default_features": False},
+                                   "device-api"],
+             "core": ["device-api"]})
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        bad = self.run_gate({"device-api": "crates/device-api", "core": "crates/core"},
+                            {"device-api": ["core"]})
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("device-api depends on core — shared primitives have no workspace dependencies",
+                      bad.stderr)
+
     def test_the_core_cannot_depend_on_the_service_above_it(self):
         result = self.run_gate(
             {"local-apps": "crates/local-apps", "local-app-service": "crates/local-app-service"},

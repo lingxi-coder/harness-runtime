@@ -4,7 +4,9 @@
 //! status, cancellation, and owner teardown. The native service resolves
 //! device configuration and provider routing.
 
-use crate::host::{SttTranscript, TtsAudio, VoiceRecording};
+use crate::stt::SttTranscript;
+use crate::tts::TtsAudio;
+use crate::voice::VoiceRecording;
 use async_trait::async_trait;
 use std::fmt;
 use thiserror::Error;

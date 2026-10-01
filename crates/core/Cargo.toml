@@ -15,6 +15,7 @@ name = "lingxi_core"
 async-trait.workspace = true
 branding.workspace = true
 mobile-linux-api.workspace = true
+device-api = { path = "../device-api" }
 jsonrpc = { path = "../jsonrpc" }
 local-app-contracts = { path = "../local-app-contracts" }
 mcp-wire = { path = "../mcp-wire" }

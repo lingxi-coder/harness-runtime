@@ -1258,6 +1258,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "branding",
+ "device-api",
  "figment",
  "fs2",
  "futures-core",
@@ -1528,6 +1529,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "device-api"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2405,6 +2418,7 @@ dependencies = [
  "core",
  "cost",
  "cron",
+ "device-api",
  "dirs",
  "fusion",
  "futures",
