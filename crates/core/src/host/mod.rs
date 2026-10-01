@@ -129,7 +129,9 @@ pub mod live_sessions;
 pub mod local_app_paths;
 pub mod lsp;
 pub mod mailbox;
-pub mod mcp;
+// MCP's wire DTOs and the `McpTransport` interface live in `mcp-wire` so the Local App
+// service can implement a transport without the engine; the old path stays.
+pub use mcp_wire::transport as mcp;
 pub mod mobile_runtime_environment;
 pub mod model_attempt;
 pub mod model_capabilities;

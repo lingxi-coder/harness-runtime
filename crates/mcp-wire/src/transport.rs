@@ -1,13 +1,14 @@
 //! MCP (Model Context Protocol) transport abstraction.
 //!
-//! The `McpTransport` trait is the boundary between the engine's MCP layer
-//! (`lingxi-mcp`) and platform-specific transport implementations. Engine
+//! The `McpTransport` trait is the boundary between an MCP client (the engine's
+//! registry) and the transport implementations behind it, including the
+//! in-process ones such as the Local App server. Engine
 //! code receives an `Arc<dyn McpTransport>` and never speaks the wire
 //! protocol directly.
 //!
 //! See spec §7 (MCP) and D17 (Runtime boundary).
 
-use crate::types::McpConnectionId;
+use crate::ids::McpConnectionId;
 use async_trait::async_trait;
 use futures_core::stream::Stream;
 use futures_util::FutureExt;
@@ -17,10 +18,10 @@ use std::fmt;
 use std::pin::Pin;
 use thiserror::Error;
 
-// The MCP `Tool` wire shapes and the per-tool permission ceiling are defined in
-// `mcp-wire` so the Local App service can name them without depending on this
-// crate; they are re-exported here so every existing path keeps resolving.
-pub use mcp_wire::{
+// The MCP `Tool` wire shapes and the per-tool permission ceiling are defined at
+// the crate root; they are re-exported here so every path the engine used when
+// this module lived in `core::host::mcp` keeps resolving.
+pub use crate::{
     McpIconDto, McpPermissionCeiling, McpToolAnnotationsDto, McpToolDefinitionDto,
     McpToolExecutionDto, McpToolTaskSupportDto,
 };

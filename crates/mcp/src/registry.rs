@@ -18,6 +18,11 @@ use lingxi_core::host::{
     McpTransportSpec, SecureStorage, ServerCapabilitiesDto,
 };
 use lingxi_core::types::{AgentId, McpConnectionId};
+// The scope of a Local App conversation export (and the grammar of its names and keys)
+// is defined in `mcp-wire` so the Local App service can bind one without this crate;
+// the old path stays.
+pub use mcp_wire::export::ConversationExport;
+use mcp_wire::export::{is_local_app_id, is_local_app_tool_name, is_sha256};
 use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::OnceLock;
@@ -202,146 +207,6 @@ pub struct McpCatalogChanged {
     /// emitted after a successful re-fetch. Recovery snapshots, connect
     /// publishes, and retire notifications leave this `None`.
     pub telemetry_cause: Option<&'static str>,
-}
-
-/// Scope for a Local App conversation-export connection. The scope is bound
-/// when the Host creates the connection; it is never taken from a tool input.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConversationExport {
-    /// Stable Local App identity.
-    pub app_id: String,
-    /// Digest of the tool surface last exposed to the conversation.
-    pub listed_tool_surface_sha256: String,
-}
-
-impl ConversationExport {
-    /// Validate the schema-v3 App ID and the connection's last-listed surface.
-    pub fn new(
-        app_id: impl Into<String>,
-        listed_tool_surface_sha256: impl Into<String>,
-    ) -> Result<Self, McpError> {
-        let app_id = app_id.into();
-        let digest = listed_tool_surface_sha256.into();
-        if !is_local_app_id(&app_id) {
-            return Err(McpError::Internal("invalid Local App identity".into()));
-        }
-        if !is_sha256(&digest) {
-            return Err(McpError::Internal(
-                "invalid Local App tool surface identity".into(),
-            ));
-        }
-        Ok(Self {
-            app_id,
-            listed_tool_surface_sha256: digest,
-        })
-    }
-
-    /// Logical MCP server name for this app.
-    #[must_use]
-    pub fn server_name(&self) -> String {
-        format!("local_app_{}", self.app_id)
-    }
-
-    /// Registry key for this logical server.
-    #[must_use]
-    pub fn registry_key(&self) -> String {
-        format!("local_apps:conversation-export:{}", self.app_id)
-    }
-
-    /// Build the transport registry key for one conversation-scoped export.
-    pub fn scoped_registry_key(&self, conversation_id: &str) -> Result<String, McpError> {
-        if !is_conversation_scope_id(conversation_id) {
-            return Err(McpError::Internal(
-                "invalid Local App conversation scope".into(),
-            ));
-        }
-        Ok(format!(
-            "local_apps:conversation-export:{conversation_id}:{}:{}",
-            self.app_id, self.listed_tool_surface_sha256
-        ))
-    }
-
-    /// Parse a conversation-scoped Local App transport registry key.
-    pub fn parse_scoped_registry_key(
-        key: &str,
-    ) -> Result<Option<(String, ConversationExport)>, McpError> {
-        let Some(rest) = key.strip_prefix("local_apps:conversation-export:") else {
-            return Ok(None);
-        };
-        let mut parts = rest.splitn(3, ':');
-        let (Some(conversation_id), Some(app_id), Some(surface)) =
-            (parts.next(), parts.next(), parts.next())
-        else {
-            return Ok(None);
-        };
-        if !is_conversation_scope_id(conversation_id) {
-            return Err(McpError::Internal(
-                "invalid Local App conversation scope".into(),
-            ));
-        }
-        Ok(Some((
-            conversation_id.to_string(),
-            Self::new(app_id.to_string(), surface.to_string())?,
-        )))
-    }
-
-    /// Stable wire identity shared by every logical Local App server.
-    #[must_use]
-    pub const fn server_info_name(&self) -> &'static str {
-        "lingxi-local-app"
-    }
-
-    /// Build and validate one model-facing tool name.
-    pub fn tool_full_name(&self, tool_name: &str) -> Result<String, McpError> {
-        if tool_name.is_empty()
-            || tool_name.len() > 64
-            || !tool_name.bytes().enumerate().all(|(index, byte)| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || (byte == b'_' && index > 0)
-            })
-            || tool_name.starts_with('_')
-            || tool_name.ends_with('_')
-            || tool_name.contains("__")
-        {
-            return Err(McpError::ToolNotFound(tool_name.into()));
-        }
-        Ok(format!("mcp__{}__{}", self.server_name(), tool_name))
-    }
-}
-
-fn is_local_app_id(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= 54
-        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
-        && bytes[1..]
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
-}
-
-fn is_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-}
-
-fn is_conversation_scope_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-}
-
-fn is_local_app_tool_name(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && !value.starts_with('_')
-        && !value.ends_with('_')
-        && !value.contains("__")
-        && value.bytes().enumerate().all(|(index, byte)| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || (byte == b'_' && index > 0)
-        })
 }
 
 /// Host-managed logical Local App server metadata.

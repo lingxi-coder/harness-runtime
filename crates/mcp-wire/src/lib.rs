@@ -1,13 +1,23 @@
-//! `mcp-wire` — the MCP `Tool` wire shapes and the per-tool permission ceiling.
+//! `mcp-wire` — MCP as data and as an interface: the `Tool` wire shapes and the
+//! per-tool permission ceiling, the rest of the wire DTOs and the
+//! [`transport::McpTransport`] trait, the connection id, and the scope of a
+//! Local App conversation export ([`export`]).
 //!
-//! These types describe a tool the way the MCP specification does
-//! (`name`, `inputSchema`, `annotations`, `icons`, `_meta`, ...) and the
-//! tighten-only ceiling a host puts on one. They hold no behaviour beyond
-//! parsing and ordering, and they depend on nothing but `serde`, so the engine
-//! (`lingxi-core` re-exports them) and the Local App service can both name
-//! them without either depending on the other.
+//! The types describe a tool, a resource or a result the way the MCP
+//! specification does (`name`, `inputSchema`, `annotations`, `icons`, `_meta`,
+//! ...) and the tighten-only ceiling a host puts on one. They hold no behaviour
+//! beyond parsing and ordering, and nothing here depends on the engine, so the
+//! engine (`lingxi-core` re-exports them) and the Local App service can both
+//! name them, and the service can implement a transport, without either
+//! depending on the other.
 
 #![forbid(unsafe_code)]
+
+pub mod export;
+mod ids;
+pub mod transport;
+
+pub use ids::McpConnectionId;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
