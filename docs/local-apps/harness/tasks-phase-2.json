@@ -88,7 +88,7 @@
       "gate": "§7.1 / §7.2 / §19.2: build-time packing includes the manifest, 27 skills, 7 agents, 3 workflows, schemas, and all template inventories/assets; undeclared or missing package files fail closed",
       "owns": [
         "crates/runtime/build.rs",
-        "crates/runtime/builtin-plugin-inventory.txt",
+        "crates/plugins/lingxi-local-app.inventory.txt",
         "crates/runtime/src/mobile/builtin_bundle.rs",
         "crates/plugins/lingxi-local-app/assets/templates/catalog.json",
         "scripts/checks/check-phase2-plugin.py"

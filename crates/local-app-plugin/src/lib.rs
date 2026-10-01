@@ -27,7 +27,7 @@ pub fn root() -> &'static Path {
 pub fn inventory_path() -> &'static Path {
     Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../runtime/builtin-plugin-inventory.txt"
+        "/../plugins/lingxi-local-app.inventory.txt"
     ))
 }
 

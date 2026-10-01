@@ -1066,6 +1066,8 @@ G3	crates/plugin/src/manager.rs	.lingxi-plugin
 G3	crates/plugin/tests/discovery_bootstrap.rs	.lingxi-plugin
 G3	crates/plugin/tests/enabled_discovery.rs	.lingxi-plugin
 G3	crates/plugin/tests/materialize.rs	.lingxi-plugin
+G3	crates/plugins/lingxi-local-app.inventory.txt	.lingxi
+G3	crates/plugins/lingxi-local-app.inventory.txt	.lingxi-plugin
 G3	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/.gitignore	.lingxi-*
 G3	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/.lingxi/source-policy.json	.lingxi
 G3	crates/plugins/lingxi-local-app/assets/templates/babylon-3d/r4/.lingxi/source-policy.json	LINGXI.md
@@ -1105,8 +1107,6 @@ G3	crates/plugins/lingxi-local-app/skills/local-app-use/SKILL.md	LINGXI.md
 G3	crates/rooted-fs/src/lib.rs	.lingxi
 G3	crates/rooted-fs/src/lib.rs	.lingxi-*
 G3	crates/runtime/build.rs	.lingxi-plugin
-G3	crates/runtime/builtin-plugin-inventory.txt	.lingxi
-G3	crates/runtime/builtin-plugin-inventory.txt	.lingxi-plugin
 G3	crates/runtime/src/desktop/auto_mode_propose.rs	LINGXI.md
 G3	crates/runtime/src/desktop/cron_management.rs	.lingxi
 G3	crates/runtime/src/desktop/fusion_implement_e2e_test.rs	.lingxi
