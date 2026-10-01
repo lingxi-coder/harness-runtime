@@ -33,6 +33,8 @@
 pub mod agent_sessions;
 pub mod authoring;
 pub mod background;
+pub mod checkpoint_backend;
+#[cfg(feature = "git-checkpoints")]
 pub mod checkpoints;
 pub mod clock;
 pub mod data;
@@ -68,6 +70,10 @@ pub use authoring::{
     AppPresentationSpec, AppProductSpec, AppStyleSpec, AppTarget, AppThemeSpec,
     AUTHORING_SCHEMA_VERSION, MAX_AUTHORING_BYTES,
 };
+#[cfg(feature = "git-checkpoints")]
+pub use checkpoint_backend::GitCheckpoints;
+pub use checkpoint_backend::{CheckpointBackend, NoCheckpoints};
+#[cfg(feature = "git-checkpoints")]
 pub use checkpoints::AppCheckpointStore;
 pub use clock::{Clock, SystemClock};
 pub use data::{

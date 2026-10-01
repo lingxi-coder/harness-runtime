@@ -23,7 +23,7 @@
 //! blocking pool (`spawn_blocking`) over owned clones, never on the async
 //! executor threads.
 
-use crate::checkpoints::AppCheckpointStore;
+use crate::checkpoint_backend::{self, CheckpointBackend};
 use crate::clock::Clock;
 use crate::data;
 use crate::error::AppError;
@@ -216,6 +216,8 @@ pub struct AppService {
     /// sections, never across an await.
     retired_ids: Arc<std::sync::Mutex<BTreeSet<String>>>,
     dependencies: Arc<Mutex<HashMap<String, AppDependencyRecord>>>,
+    /// Where checkpoints are kept; see [`CheckpointBackend`].
+    checkpoints: Arc<dyn CheckpointBackend>,
 }
 
 impl AppService {
@@ -269,7 +271,16 @@ impl AppService {
             emit_order: Arc::new(Mutex::new(())),
             retired_ids: Arc::new(std::sync::Mutex::new(BTreeSet::new())),
             dependencies: Arc::new(Mutex::new(dependencies)),
+            checkpoints: checkpoint_backend::default_backend(),
         })
+    }
+
+    /// Keep checkpoints somewhere other than the default backend (Git when
+    /// the `git-checkpoints` feature is on, none otherwise).
+    #[must_use]
+    pub fn with_checkpoint_backend(mut self, backend: Arc<dyn CheckpointBackend>) -> Self {
+        self.checkpoints = backend;
+        self
     }
 
     /// Run one blocking storage closure on the blocking pool. A join failure
@@ -779,7 +790,8 @@ impl AppService {
             return Ok(Vec::new());
         }
         let layout = AppLayout::new(self.root.clone(), app_id.to_string())?;
-        Self::run_blocking(move || AppCheckpointStore::new(&layout).list()).await
+        let backend = Arc::clone(&self.checkpoints);
+        Self::run_blocking(move || backend.list(&layout)).await
     }
 
     /// Whether this app opted into Git-backed source version control.
@@ -968,9 +980,10 @@ impl AppService {
         let layout = AppLayout::new(self.root.clone(), app_id.to_string())?;
         let label = label.to_string();
         let now = self.now_ms();
+        let backend = Arc::clone(&self.checkpoints);
         let checkpoint = Self::run_blocking(move || {
             let _build_lock = storage::lock_app_build(layout.root(), layout.app_id())?;
-            AppCheckpointStore::new(&layout).create(kind, &label, now)
+            backend.create(&layout, kind, &label, now)
         })
         .await?;
         Self::spawn_emission(
@@ -1005,9 +1018,10 @@ impl AppService {
         let layout = AppLayout::new(self.root.clone(), app_id.to_string())?;
         let checkpoint_id = checkpoint_id.to_string();
         let now = self.now_ms();
+        let backend = Arc::clone(&self.checkpoints);
         let safety = Self::run_blocking(move || {
             let _build_lock = storage::lock_app_build(layout.root(), layout.app_id())?;
-            AppCheckpointStore::new(&layout).restore(&checkpoint_id, now)
+            backend.restore(&layout, &checkpoint_id, now)
         })
         .await?;
         Self::spawn_emission(
@@ -2339,6 +2353,157 @@ mod tests {
             .is_empty());
     }
 
+    /// Stands in for Git: records what the service asked of it and answers
+    /// with fixed checkpoints, so the seam is tested without any repository.
+    #[derive(Default)]
+    struct RecordingCheckpoints {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingCheckpoints {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn canned(kind: AppCheckpointKind, label: &str, created_at_ms: u64) -> AppCheckpoint {
+            AppCheckpoint {
+                id: format!("{created_at_ms:040x}"),
+                label: label.into(),
+                kind,
+                created_at_ms,
+            }
+        }
+    }
+
+    impl CheckpointBackend for RecordingCheckpoints {
+        fn list(&self, layout: &AppLayout) -> Result<Vec<AppCheckpoint>, AppError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("list {}", layout.app_id()));
+            Ok(vec![Self::canned(
+                AppCheckpointKind::UserApproved,
+                "kept",
+                7,
+            )])
+        }
+
+        fn create(
+            &self,
+            layout: &AppLayout,
+            kind: AppCheckpointKind,
+            label: &str,
+            created_at_ms: u64,
+        ) -> Result<AppCheckpoint, AppError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("create {} {label}", layout.app_id()));
+            Ok(Self::canned(kind, label, created_at_ms))
+        }
+
+        fn restore(
+            &self,
+            layout: &AppLayout,
+            checkpoint_id: &str,
+            created_at_ms: u64,
+        ) -> Result<AppCheckpoint, AppError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("restore {} {checkpoint_id}", layout.app_id()));
+            Ok(Self::canned(
+                AppCheckpointKind::PreRestore,
+                "safety",
+                created_at_ms,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoints_go_through_the_backend_the_service_was_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(RecordingCheckpoints::default());
+        let observer = Arc::new(RecordingAppEventObserver::new());
+        let service = AppService::load(
+            dir.path(),
+            Arc::new(FixedClock::new(1_700_000_000_000)),
+            Arc::clone(&observer) as Arc<dyn AppEventObserver>,
+        )
+        .await
+        .unwrap()
+        .with_checkpoint_backend(Arc::clone(&backend) as Arc<dyn CheckpointBackend>);
+        let record = service
+            .create_app(Some("Seam"), "a test app", None)
+            .await
+            .unwrap();
+
+        let created = service
+            .create_checkpoint(&record.id, AppCheckpointKind::UserApproved, "first")
+            .await
+            .unwrap();
+        assert_eq!(created.label, "first");
+        assert_eq!(
+            created.created_at_ms, 1_700_000_000_000,
+            "the service stamps the time; the backend only records it"
+        );
+        let listed = service.list_checkpoints(&record.id).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        let safety = service
+            .restore_checkpoint(&record.id, &listed[0].id)
+            .await
+            .unwrap();
+        assert_eq!(safety.kind, AppCheckpointKind::PreRestore);
+
+        assert_eq!(
+            backend.calls(),
+            vec![
+                format!("create {} first", record.id),
+                format!("list {}", record.id),
+                format!("restore {} {}", record.id, listed[0].id),
+            ]
+        );
+        service.flush_events().await;
+        let events = observer.take();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AppEvent::CheckpointCreated { checkpoint, .. } if checkpoint.label == "first"
+            )),
+            "the event follows the backend's write: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_backend_there_is_no_history_and_no_new_checkpoint() {
+        use crate::checkpoint_backend::NoCheckpoints;
+        let dir = tempfile::tempdir().unwrap();
+        let service = harness(dir.path())
+            .await
+            .service
+            .with_checkpoint_backend(Arc::new(NoCheckpoints));
+        let record = service
+            .create_app(Some("Bare"), "a test app", None)
+            .await
+            .unwrap();
+        assert!(service
+            .list_checkpoints(&record.id)
+            .await
+            .unwrap()
+            .is_empty());
+        let error = service
+            .create_checkpoint(&record.id, AppCheckpointKind::UserApproved, "x")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::NotYetAvailable(_)), "{error:?}");
+        let error = service
+            .restore_checkpoint(&record.id, &"0".repeat(40))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::NotYetAvailable(_)), "{error:?}");
+    }
+
+    #[cfg(feature = "git-checkpoints")]
     #[tokio::test]
     async fn git_version_control_choice_persists_and_disables_checkpoints() {
         let dir = tempfile::tempdir().unwrap();
@@ -2383,6 +2548,7 @@ mod tests {
     /// is invisible to it — which is why the restore must not be able to
     /// rewind it in the first place. Asserted through a real reload from
     /// disk (mirror-wins repair would adopt a rewound mirror).
+    #[cfg(feature = "git-checkpoints")]
     #[tokio::test]
     async fn restore_checkpoint_does_not_rewind_the_record_mirror_on_disk() {
         let dir = tempfile::tempdir().unwrap();
@@ -2434,6 +2600,7 @@ mod tests {
     /// nothing rewrites the mirror afterwards, so the loss would be silent
     /// and permanent. The fixture commits the documents with the pre-fix
     /// `add_all(["*"])` semantics, which is the only way to reach the state.
+    #[cfg(feature = "git-checkpoints")]
     #[tokio::test]
     async fn restoring_a_legacy_checkpoint_does_not_rewind_the_record_mirror() {
         let dir = tempfile::tempdir().unwrap();

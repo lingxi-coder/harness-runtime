@@ -32,6 +32,12 @@ SHARED_PRIMITIVES = {"mcp-wire", "rooted-fs"}
 # along or be cut again at the move.
 STANDALONE_SERVICES = {"local-apps": SHARED_PRIMITIVES}
 
+# Native libraries a standalone service may only reach through a feature.
+# libgit2 links C code and one dependency graph may link it once, so the
+# service core cannot demand it: the final binary chooses where git2 comes
+# from, or supplies a checkpoint backend of its own.
+FEATURE_GATED_DEPENDENCIES = {"local-apps": {"git2"}}
+
 # The SDK assembles existing components; components must never reach back into
 # its product profiles or depend on a concrete UI to describe an interaction.
 HARNESS_COMPONENT_CRATES = {"llm-runtime", "harness-runtime", "tool-api", "permission"}
@@ -154,6 +160,16 @@ def main():
             if c in FORBIDDEN and dc in FORBIDDEN[c]:
                 violations.append(
                     "%s (%s) depends on %s (%s) — forbidden by §8.1" % (n, c, d, dc)
+                )
+
+    for n, gated in sorted(FEATURE_GATED_DEPENDENCIES.items()):
+        if n not in pkgs:
+            continue
+        for dep in pkgs[n]["dependencies"]:
+            if dep["name"] in gated and dep.get("kind") != "dev" and not dep.get("optional", False):
+                violations.append(
+                    "%s depends on %s unconditionally — it must stay behind its feature"
+                    % (n, dep["name"])
                 )
 
     for root_name in sorted(HARNESS_COMPONENT_CRATES):

@@ -15,7 +15,8 @@ class DependencyRules(unittest.TestCase):
                    ("llm-runtime", "harness-runtime", "tool-api", "permission")}, **paths}
         metadata = {"workspace_root": "/runtime", "packages": [
             {"name": name, "manifest_path": f"/runtime/{path}/Cargo.toml",
-             "dependencies": [{"name": dep} for dep in edges.get(name, [])]}
+             "dependencies": [dep if isinstance(dep, dict) else {"name": dep}
+                              for dep in edges.get(name, [])]}
             for name, path in paths.items()
         ]}
         return subprocess.run([sys.executable, str(ENGINE)], input=json.dumps(metadata),
@@ -60,6 +61,15 @@ class DependencyRules(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(f"local-apps depends on {engine} — a standalone service may reach",
                               result.stderr)
+
+    def test_a_standalone_service_keeps_libgit2_behind_its_feature(self):
+        gated = self.run_gate({"local-apps": "crates/local-apps"},
+                              {"local-apps": [{"name": "git2", "optional": True}]})
+        self.assertEqual(gated.returncode, 0, gated.stderr)
+        unconditional = self.run_gate({"local-apps": "crates/local-apps"},
+                                      {"local-apps": [{"name": "git2", "optional": False}]})
+        self.assertEqual(unconditional.returncode, 1)
+        self.assertIn("local-apps depends on git2 unconditionally", unconditional.stderr)
 
     def test_shared_core_cannot_depend_on_telemetry(self):
         result = self.run_gate({"core": "crates/core", "telemetry": "crates/telemetry"},

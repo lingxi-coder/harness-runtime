@@ -5,6 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = ["git-checkpoints"]
+# Git-backed source checkpoints (libgit2). libgit2 links native code and one
+# dependency graph may link it once, so a consumer that brings its own
+# `CheckpointBackend` turns this off and the final binary decides where git2
+# comes from.
+git-checkpoints = ["dep:git2"]
+
 [dependencies]
 mcp-wire = { path = "../mcp-wire" }
 rooted-fs = { path = "../rooted-fs" }
@@ -16,7 +24,7 @@ tokio = { workspace = true }
 tracing.workspace = true
 rusqlite = { version = "0.32.1", features = ["backup", "bundled"] }
 sha2 = "0.10"
-git2 = { path = "../../third_party/git2-rs/git2", default-features = false, features = ["vendored-libgit2"] }
+git2 = { path = "../../third_party/git2-rs/git2", optional = true, default-features = false, features = ["vendored-libgit2"] }
 # Feature-scoped persisted ids (8 lowercase hex chars), same generator family as
 # `tools/cron::generate_cron_task_id`.
 rand = "0.9"
