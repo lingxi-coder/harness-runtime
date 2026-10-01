@@ -24,5 +24,7 @@
 pub mod dependency_integrity;
 pub mod host;
 pub mod llm;
+pub mod plan_approval;
 pub mod publication;
 pub mod runtime_profiles;
+pub mod worker;

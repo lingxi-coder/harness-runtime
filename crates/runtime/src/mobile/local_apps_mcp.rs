@@ -293,6 +293,12 @@ pub type InitSessionMinter = dyn Fn(
     + Send
     + Sync;
 
+/// Removes the session file an init-session minter created when pinning it to
+/// the app failed (another create won the race), so it does not linger as a
+/// phantom conversation. Attached by the engine host, which knows where
+/// transcripts live. Returns whether a file was removed.
+pub type InitSessionDiscarder = dyn Fn(&local_apps::AppRecord, &str) -> bool + Send + Sync;
+
 /// Built-in Local App plugin availability probe, attached by the mobile
 /// composition root (`build_mobile_inner`, beside the plugin manager that
 /// answers it).
@@ -515,7 +521,7 @@ fn rate_limited(retry_after_ms: u64) -> McpToolResultDto {
 pub struct LocalAppsMcpTransport {
     root: PathBuf,
     scope: LocalAppsMcpScope,
-    lingxi_home: OnceLock<PathBuf>,
+    init_session_discarder: OnceLock<Arc<InitSessionDiscarder>>,
     service: OnceLock<Arc<AppService>>,
     host: OnceLock<Arc<dyn LocalAppsMcpHost>>,
     publisher: OnceLock<Arc<dyn McpPublisher>>,
@@ -538,7 +544,7 @@ pub struct LocalAppsMcpTransport {
     /// into app-scoped transports: an app's own Agent session never plans a
     /// Local App, so a scoped transport has no approval source and `prepare`
     /// fails closed there.
-    plan_approval: OnceLock<Arc<crate::mobile::plan_approval::PlanApprovalLog>>,
+    plan_approval: OnceLock<Arc<local_app_service::plan_approval::PlanApprovalLog>>,
     agent_session_id: Option<String>,
     call_budget: Option<Arc<AgentCallBudget>>,
     connections: StdMutex<HashSet<McpConnectionId>>,
@@ -648,8 +654,8 @@ impl LocalAppsMcpTransport {
             self.root.clone(),
             LocalAppsMcpScope::ConversationExport(scope),
         );
-        if let Some(value) = self.lingxi_home.get() {
-            let _ = scoped.lingxi_home.set(value.clone());
+        if let Some(value) = self.init_session_discarder.get() {
+            let _ = scoped.init_session_discarder.set(value.clone());
         }
         if let Some(value) = self.service.get() {
             let _ = scoped.service.set(value.clone());
@@ -683,7 +689,7 @@ impl LocalAppsMcpTransport {
         Self {
             root,
             scope,
-            lingxi_home: OnceLock::new(),
+            init_session_discarder: OnceLock::new(),
             service: OnceLock::new(),
             host: OnceLock::new(),
             publisher: OnceLock::new(),
@@ -774,8 +780,8 @@ impl LocalAppsMcpTransport {
             agent_session_id,
             ..scoped
         };
-        if let Some(value) = self.lingxi_home.get() {
-            let _ = scoped.lingxi_home.set(value.clone());
+        if let Some(value) = self.init_session_discarder.get() {
+            let _ = scoped.init_session_discarder.set(value.clone());
         }
         if let Some(value) = self.service.get() {
             let _ = scoped.service.set(value.clone());
@@ -824,8 +830,11 @@ impl LocalAppsMcpTransport {
             .unwrap_or_default()
     }
 
-    pub fn attach_lingxi_home(&self, lingxi_home: PathBuf) -> Result<(), PathBuf> {
-        self.lingxi_home.set(lingxi_home)
+    pub fn attach_init_session_discarder(
+        &self,
+        discarder: Arc<InitSessionDiscarder>,
+    ) -> Result<(), Arc<InitSessionDiscarder>> {
+        self.init_session_discarder.set(discarder)
     }
 
     /// Attach the connection-scoped init-session minter (engine host boot).
@@ -876,8 +885,8 @@ impl LocalAppsMcpTransport {
     /// and refuses.
     pub(crate) fn attach_plan_approval_log(
         &self,
-        log: Arc<crate::mobile::plan_approval::PlanApprovalLog>,
-    ) -> Result<(), Arc<crate::mobile::plan_approval::PlanApprovalLog>> {
+        log: Arc<local_app_service::plan_approval::PlanApprovalLog>,
+    ) -> Result<(), Arc<local_app_service::plan_approval::PlanApprovalLog>> {
         self.plan_approval.set(log)
     }
 
@@ -2943,14 +2952,10 @@ impl LocalAppsMcpTransport {
                         Ok(init_id) => match service.set_init_session(&record.id, &init_id).await {
                             Ok(()) => init_session_id = Some(init_id),
                             Err(error) => {
-                                let removed = self.lingxi_home.get().is_some_and(|lingxi_home| {
-                                    crate::mobile::local_apps_sessions::remove_app_session_file(
-                                        lingxi_home,
-                                        &self.root,
-                                        &record,
-                                        &init_id,
-                                    )
-                                });
+                                let removed = self
+                                    .init_session_discarder
+                                    .get()
+                                    .is_some_and(|discard| discard(&record, &init_id));
                                 tracing::warn!(
                                     app_id = %record.id,
                                     error = %error,
@@ -5919,7 +5924,18 @@ mod tests {
                 failure: None,
             }))
             .is_ok());
-        assert!(transport.attach_lingxi_home(lingxi_home.clone()).is_ok());
+        let discard_home = lingxi_home.clone();
+        let discard_root = root.path().to_path_buf();
+        assert!(transport
+            .attach_init_session_discarder(Arc::new(move |record, session_id| {
+                crate::mobile::local_apps_sessions::remove_app_session_file(
+                    &discard_home,
+                    &discard_root,
+                    record,
+                    session_id,
+                )
+            }))
+            .is_ok());
 
         let orphan_path = Arc::new(StdMutex::new(None::<std::path::PathBuf>));
         let orphan_path_for_minter = Arc::clone(&orphan_path);

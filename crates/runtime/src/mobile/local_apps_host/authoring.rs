@@ -1547,7 +1547,8 @@ impl LocalAppsHostBroker {
         if record.port.is_none() {
             return Err("qa_stale_runtime: runtime has no pinned port".into());
         }
-        let runtime_url = crate::mobile::local_apps_bridge::runtime_preview_url(&record)
+        let runtime_url = record
+            .preview_url()
             .ok_or_else(|| "qa_stale_runtime: runtime has no preview URL".to_string())?;
         let parsed_runtime = Url::parse(&runtime_url)
             .map_err(|error| format!("qa_stale_runtime: invalid preview URL: {error}"))?;
@@ -1624,7 +1625,8 @@ impl LocalAppsHostBroker {
         if record.port.is_none() {
             return Err("qa_stale_runtime: runtime has no pinned port".into());
         }
-        let expected = crate::mobile::local_apps_bridge::runtime_preview_url(&record)
+        let expected = record
+            .preview_url()
             .ok_or_else(|| "qa_stale_runtime: runtime has no preview URL".to_string())?;
         let expected_url = Url::parse(&expected)
             .map_err(|error| format!("qa_stale_runtime: expected URL: {error}"))?;

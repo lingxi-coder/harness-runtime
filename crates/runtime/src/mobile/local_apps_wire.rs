@@ -739,6 +739,20 @@ pub(crate) fn plugin_error_code_from_dto(
     })
 }
 
+/// The record the native scheduler adapters receive for one background task.
+pub(crate) fn background_run_to_dto(
+    outcome: local_app_contracts::events::BackgroundRunOutcome,
+) -> crate::mobile::host::LocalAppBackgroundRunDto {
+    crate::mobile::host::LocalAppBackgroundRunDto {
+        app_id: outcome.app_id,
+        task_id: outcome.task_id,
+        status: outcome.status,
+        result_json: outcome.result_json,
+        error: outcome.error,
+        retryable: outcome.retryable,
+    }
+}
+
 /// What the native client is told for an event the service emitted.
 pub(crate) fn host_event_to_client(event: HostEvent) -> ClientEvent {
     let event = match event {

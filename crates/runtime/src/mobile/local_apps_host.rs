@@ -4,9 +4,7 @@
 //! WebView handles.  This broker is the single trust boundary for those
 //! operations and is also used by the native client command surface.
 
-use crate::mobile::host::LocalAppBackgroundRunDto;
 use crate::mobile::local_apps_mcp::LocalAppsMcpHost;
-use crate::mobile::plan_approval::CreateApprovalAuthority;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use local_app_contracts::approvals::{
@@ -14,18 +12,20 @@ use local_app_contracts::approvals::{
     DependencyChangeReview, GateStatus, McpProposalApprovalRequest, UiActionKind, UiRequest,
     UiTarget, VerificationStatus,
 };
+use local_app_contracts::events::BackgroundRunOutcome;
+use local_app_contracts::execution::{Mount, MountKind, NetworkPolicy};
+use local_app_service::host::BuildExecutor;
 use local_app_service::host::ConversationHost;
 use local_app_service::host::DiagnosticsProvider;
 use local_app_service::host::HostEvent;
 use local_app_service::host::HostEventSink;
+use local_app_service::plan_approval::CreateApprovalAuthority;
 use local_app_service::publication::McpPublisher;
 use local_apps::{
     load_manifest, load_mcp_settings, load_permissions, mcp_catalog_tool_names, save_mcp_settings,
     AppCapability, AppDependencyState, AppLayout, AppMcpSettings, AppRuntimeState, AppService,
     BackgroundTaskStatus, DataMigrationPreview, PermissionDecision, SessionPermissions,
 };
-use local_app_contracts::execution::{Mount, MountKind, NetworkPolicy};
-use local_app_service::host::BuildExecutor;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -5994,7 +5994,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         local_apps::background::save_state(&layout, &tasks, &journal).map_err(|e| e.to_string())?;
         drop(_guard);
         drop(_process_lock);
-        self.emit_background_task_changed(&LocalAppBackgroundRunDto {
+        self.emit_background_task_changed(&BackgroundRunOutcome {
             app_id: app_id.clone(),
             task_id: task_id.clone(),
             status: "scheduled".into(),
@@ -6054,7 +6054,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .map_err(|e| e.to_string())?;
         self.background_management_layout(&app_id)?;
         let cancelled = self.cancel_background_task(&app_id, &task_id).await;
-        self.emit_background_task_changed(&LocalAppBackgroundRunDto {
+        self.emit_background_task_changed(&BackgroundRunOutcome {
             app_id: app_id.clone(),
             task_id: task_id.clone(),
             status: if cancelled { "cancelled" } else { "unchanged" }.into(),
@@ -6075,7 +6075,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .map_err(|e| e.to_string())?;
         self.background_management_layout(&app_id)?;
         let retried = self.retry_background_task(&app_id, &task_id).await?;
-        self.emit_background_task_changed(&LocalAppBackgroundRunDto {
+        self.emit_background_task_changed(&BackgroundRunOutcome {
             app_id: app_id.clone(),
             task_id: task_id.clone(),
             status: if retried { "scheduled" } else { "unchanged" }.into(),

@@ -498,7 +498,7 @@ pub(crate) fn lower_runtime_details(runtime: &AppRuntimeRecord) -> AppRuntimeDet
             local_apps::AppRuntimeMode::StaticExport => AppRuntimeModeDto::StaticExport,
             local_apps::AppRuntimeMode::NextProduction => AppRuntimeModeDto::NextProduction,
         }),
-        loopback_url: runtime_preview_url(runtime),
+        loopback_url: runtime.preview_url(),
         // Unconditionally `None` in this phase, and NOT an oversight: the core
         // `AppRuntimeRecord` records no reason for a non-user-initiated stop
         // (state / mode / port / pid / last_error / updated_at_ms), and
@@ -515,21 +515,6 @@ pub(crate) fn lower_runtime_details(runtime: &AppRuntimeRecord) -> AppRuntimeDet
         }),
         last_error: runtime.last_error.clone(),
     }
-}
-
-/// Return the runtime URL used by a native preview to identify the exact
-/// runtime generation.  The marker is query-only: the loopback origin remains
-/// unchanged, so WebKit/WebView keep the same persistent website-data store.
-/// `updated_at_ms` is the core runtime generation clock and is included in the
-/// URL rather than relying on a port change (ports are intentionally stable
-/// across rebuilds and restarts).
-pub(crate) fn runtime_preview_url(runtime: &AppRuntimeRecord) -> Option<String> {
-    runtime.port.map(|port| {
-        format!(
-            "http://127.0.0.1:{port}/?lingxi_runtime={}",
-            runtime.updated_at_ms
-        )
-    })
 }
 
 pub(crate) fn lower_manifest(manifest: AppManifest) -> AppManifestDto {
@@ -872,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_preview_url_marks_generation_without_changing_origin() {
+    fn the_native_details_carry_the_runtime_preview_url() {
         let runtime = AppRuntimeRecord {
             schema_version: local_apps::APPS_SCHEMA_VERSION,
             app_id: "app00001".into(),
@@ -883,31 +868,15 @@ mod tests {
             last_error: None,
             updated_at_ms: 42,
         };
-
-        assert_eq!(
-            runtime_preview_url(&runtime).as_deref(),
-            Some("http://127.0.0.1:43123/?lingxi_runtime=42")
-        );
         assert_eq!(
             lower_runtime_details(&runtime).loopback_url.as_deref(),
             Some("http://127.0.0.1:43123/?lingxi_runtime=42")
         );
-    }
-
-    #[test]
-    fn runtime_preview_url_is_absent_without_a_bound_port() {
-        let runtime = AppRuntimeRecord {
-            schema_version: local_apps::APPS_SCHEMA_VERSION,
-            app_id: "app00001".into(),
-            state: AppRuntimeState::Stopped,
-            mode: None,
+        let unbound = AppRuntimeRecord {
             port: None,
-            pid: None,
-            last_error: None,
-            updated_at_ms: 99,
+            ..runtime
         };
-
-        assert_eq!(runtime_preview_url(&runtime), None);
+        assert_eq!(lower_runtime_details(&unbound).loopback_url, None);
     }
 
     /// W4: exact field mapping for EVERY `lower_app_event` arm (one pair per

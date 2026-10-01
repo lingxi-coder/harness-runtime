@@ -44,27 +44,7 @@ fn next_registry_stamp() -> u64 {
     STAMP.fetch_add(1, Ordering::Relaxed)
 }
 
-/// The long-lived runtime every `ProfileApps`-owned task runs on.
-///
-/// `ProfileApps` is cached process-wide, but the tasks it owns are `tokio::spawn`ed
-/// onto the AMBIENT runtime — the static server and the full-runtime exit
-/// watch in the broker. For the first engine that ambient runtime is the
-/// `MobileEngineHandle`-owned one, which the next reconnect or project switch
-/// drops while the cached profile survives: a `Running` entry would outlive
-/// the socket it describes. Anchoring the load here anchors them all.
-pub(crate) fn worker_runtime() -> &'static tokio::runtime::Handle {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .thread_name("lingxi-local-apps")
-                .build()
-                .expect("build the local-app worker runtime")
-        })
-        .handle()
-}
+pub(crate) use local_app_service::worker::worker_runtime;
 
 pub(crate) struct ClientEventFanout {
     next_id: AtomicU64,

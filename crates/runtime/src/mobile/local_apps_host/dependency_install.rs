@@ -1,5 +1,3 @@
-use local_app_contracts::execution::{IsolatedCommand, Mount, MountKind, NetworkPolicy, ResourceLimits};
-use local_app_service::host::BuildExecutor;
 use super::dependency_integrity::clone_or_copy_tree;
 use super::dependency_integrity::collect_installed_packages;
 use super::dependency_integrity::dependency_attestation;
@@ -28,6 +26,10 @@ use super::RUNTIME_SEED_POLL_INTERVAL;
 use super::WORKSPACE_DEPENDENCY_ATTESTATION_FILE;
 use crate::mobile::local_app_runtime_profiles::toolchain_for_binding;
 use crate::mobile::local_app_runtime_profiles::RuntimeToolchain;
+use local_app_contracts::execution::{
+    IsolatedCommand, Mount, MountKind, NetworkPolicy, ResourceLimits,
+};
+use local_app_service::host::BuildExecutor;
 use local_apps::load_manifest;
 use local_apps::AppDependencyState;
 use local_apps::AppLayout;

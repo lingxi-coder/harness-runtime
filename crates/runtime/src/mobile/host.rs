@@ -204,14 +204,14 @@ async fn end_mobile_audio_owner(
 }
 
 use crate::mobile::{
+    local_apps_adapters::AgentOutputRouter,
     local_apps_host::{
-        canonical_cwd_string, AgentOutputStream, AgentTurnUsageState,
-        LocalAppsAgentExecutor, LocalAppsHostBroker,
+        canonical_cwd_string, AgentOutputStream, AgentTurnUsageState, LocalAppsAgentExecutor,
+        LocalAppsHostBroker,
     },
     local_apps_llm::LocalAppsLlm,
     local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
     local_apps_profile::ProfileApps,
-    local_apps_adapters::AgentOutputRouter,
     local_apps_sessions::{app_session_dir, remove_app_session_file},
     skill_loader::command_visible_in_session_mode,
     turn_durability::{DurableTurnStore, DurableTurnStoreError, ResumeDisposition},
@@ -7960,7 +7960,12 @@ impl MobileEngineHandle {
         &self,
         now_ms: u64,
     ) -> Vec<LocalAppBackgroundRunDto> {
-        self.local_apps_host.run_due_background_tasks(now_ms).await
+        self.local_apps_host
+            .run_due_background_tasks(now_ms)
+            .await
+            .into_iter()
+            .map(crate::mobile::local_apps_wire::background_run_to_dto)
+            .collect()
     }
 
     pub async fn next_local_app_background_wake_ms(&self, now_ms: u64) -> Option<u64> {

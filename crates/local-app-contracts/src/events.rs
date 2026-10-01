@@ -93,3 +93,22 @@ pub enum PluginErrorCode {
     RepairBudgetExhausted,
     ExposureCapacityReached,
 }
+
+/// One durable background task outcome, as a host's scheduler needs it: an app
+/// and task identity and a bounded terminal or retry classification, never a
+/// host path or a capability handle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BackgroundRunOutcome {
+    /// The app the task belongs to.
+    pub app_id: String,
+    /// The task.
+    pub task_id: String,
+    /// Where the task ended up (`succeeded`, `failed`, `cancelled`, ...).
+    pub status: String,
+    /// The bounded result, if the task produced one.
+    pub result_json: Option<String>,
+    /// Why it failed, if it did.
+    pub error: Option<String>,
+    /// Whether running it again may help.
+    pub retryable: bool,
+}

@@ -1,12 +1,12 @@
 use super::*;
 use crate::mobile::local_apps_adapters::device_context_of;
-use mobile_linux_api::{MobileLinuxRuntime, MountSpec};
 use crate::mobile::local_apps_sessions::{
     latest_custom_title, latest_custom_title_is_mobile_placeholder,
     reconcile_app_init_session_title, SessionCatalog, SessionTitles,
 };
 use local_app_contracts::events::PluginErrorCode;
 use local_apps::AppRuntimeProfile;
+use mobile_linux_api::{MobileLinuxRuntime, MountSpec};
 
 /// r1-prompt-layer-20: the backticked-tool-name scanner used to be declared
 /// INSIDE the one test that ran it, so no other model-facing text could be put
@@ -1425,8 +1425,7 @@ async fn finalize_passing_host_qa(fixture: &HostQaFixture) -> Value {
         .runtime_record(&fixture.app_id)
         .await
         .expect("runtime record");
-    let runtime_url = crate::mobile::local_apps_bridge::runtime_preview_url(&runtime)
-        .expect("runtime preview URL");
+    let runtime_url = runtime.preview_url().expect("runtime preview URL");
     let result = fixture
         .broker
         .qa_ui_response_value(
@@ -2274,8 +2273,7 @@ async fn real_qa_ui_roundtrip_returns_only_callable_host_evidence_ids() {
         .runtime_record(&fixture.app_id)
         .await
         .expect("runtime record");
-    let runtime_url = crate::mobile::local_apps_bridge::runtime_preview_url(&runtime)
-        .expect("runtime preview URL");
+    let runtime_url = runtime.preview_url().expect("runtime preview URL");
     let mut loaded_url = url::Url::parse(&runtime_url).expect("runtime URL");
     loaded_url.set_path("/business/chores");
     loaded_url
@@ -3099,8 +3097,7 @@ async fn failed_native_qa_action_is_authenticated_and_persisted_without_roundtri
         .runtime_record(&fixture.app_id)
         .await
         .expect("runtime record");
-    let runtime_url = crate::mobile::local_apps_bridge::runtime_preview_url(&runtime)
-        .expect("runtime preview URL");
+    let runtime_url = runtime.preview_url().expect("runtime preview URL");
     assert!(
         fixture
             .broker

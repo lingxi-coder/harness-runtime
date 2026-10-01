@@ -146,7 +146,18 @@ pub(super) async fn build_mobile_inner_with_ask(
     let oauth_supported = lingxi_core::host::SecureStorage::is_encrypted(storage.as_ref());
 
     let local_apps_mcp = Arc::new(LocalAppsMcpTransport::new(mobile_apps_data_root(&cfg)));
-    let _ = local_apps_mcp.attach_lingxi_home(cfg.lingxi_home.clone());
+    let _ = local_apps_mcp.attach_init_session_discarder({
+        let lingxi_home = cfg.lingxi_home.clone();
+        let data_root = mobile_apps_data_root(&cfg);
+        Arc::new(move |record, session_id| {
+            crate::mobile::local_apps_sessions::remove_app_session_file(
+                &lingxi_home,
+                &data_root,
+                record,
+                session_id,
+            )
+        })
+    });
     let remote_mcp = Arc::new(platform_common::RemoteMcpTransport::new());
     let mobile_mcp = Arc::new(MobileMcpTransport::new(local_apps_mcp.clone(), remote_mcp));
     let mcp_auth_url = Arc::new(StdMutex::new(None::<String>));
@@ -296,7 +307,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // `ToolUseResult`, so the observation rides the same connection-scoped
     // listener the adapter sinks already use — no permission-gate decorator, no
     // second session read. See `crate::mobile::plan_approval`.
-    let plan_approval_log = Arc::new(crate::mobile::plan_approval::PlanApprovalLog::default());
+    let plan_approval_log = Arc::new(local_app_service::plan_approval::PlanApprovalLog::default());
     let observed_listener: Arc<dyn ClientEventListener> =
         Arc::new(crate::mobile::plan_approval::PlanApprovalWatcher::new(
             listener.clone(),

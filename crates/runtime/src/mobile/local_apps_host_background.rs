@@ -6,8 +6,8 @@
 //! same Host boundary used by the foreground bridge.
 
 use super::LocalAppsHostBroker;
-use crate::mobile::host::LocalAppBackgroundRunDto;
 use local_app_contracts::approvals::CapabilityKind;
+use local_app_contracts::events::BackgroundRunOutcome;
 use local_app_service::host::HostEvent;
 use local_apps::{AppCapability, BackgroundTaskStatus, CapabilityId};
 use serde_json::{json, Map, Value};
@@ -38,10 +38,7 @@ impl LocalAppsHostBroker {
     /// wake-ups are harmless: the in-memory claim set covers one process, the
     /// per-app file lock covers concurrent engine instances, and the persisted
     /// `Running`/journal state covers process death.
-    pub(crate) async fn run_due_background_tasks(
-        &self,
-        now_ms: u64,
-    ) -> Vec<LocalAppBackgroundRunDto> {
+    pub(crate) async fn run_due_background_tasks(&self, now_ms: u64) -> Vec<BackgroundRunOutcome> {
         let Some(service) = self.service().ok() else {
             return Vec::new();
         };
@@ -258,7 +255,7 @@ impl LocalAppsHostBroker {
         &self,
         app_id: &str,
         reason: &str,
-    ) -> Result<Vec<LocalAppBackgroundRunDto>, String> {
+    ) -> Result<Vec<BackgroundRunOutcome>, String> {
         let layout = self.layout(app_id)?;
         let _process_lock = self.acquire_background_process_lock(app_id).await?;
         let _guard = self.background_task_writes.lock().await;
@@ -310,7 +307,7 @@ impl LocalAppsHostBroker {
         Ok(outcomes)
     }
 
-    pub(crate) async fn emit_background_task_changed(&self, outcome: &LocalAppBackgroundRunDto) {
+    pub(crate) async fn emit_background_task_changed(&self, outcome: &BackgroundRunOutcome) {
         self.event_sink
             .emit(HostEvent::BackgroundTaskChanged {
                 app_id: outcome.app_id.clone(),
@@ -412,7 +409,7 @@ impl LocalAppsHostBroker {
         task_id: &str,
         now_ms: u64,
         force: bool,
-    ) -> LocalAppBackgroundRunDto {
+    ) -> BackgroundRunOutcome {
         let key = format!("{app_id}:{task_id}");
         {
             let mut inflight = self.background_inflight.lock().await;
@@ -441,7 +438,7 @@ impl LocalAppsHostBroker {
         task_id: &str,
         now_ms: u64,
         force: bool,
-    ) -> LocalAppBackgroundRunDto {
+    ) -> BackgroundRunOutcome {
         let claimed = match self
             .claim_background_task(app_id, task_id, now_ms, force)
             .await
@@ -638,7 +635,7 @@ impl LocalAppsHostBroker {
         mut journal: local_apps::BackgroundJournalEntry,
         outputs: Map<String, Value>,
         now_ms: u64,
-    ) -> LocalAppBackgroundRunDto {
+    ) -> BackgroundRunOutcome {
         if self
             .background_cancellation_requested(app_id, &task.task_id)
             .await
@@ -699,7 +696,7 @@ impl LocalAppsHostBroker {
         mut task: local_apps::BackgroundTaskRecord,
         mut journal: local_apps::BackgroundJournalEntry,
         task_id: &str,
-    ) -> LocalAppBackgroundRunDto {
+    ) -> BackgroundRunOutcome {
         let now_ms = super::now_ms();
         task.status = BackgroundTaskStatus::Cancelled;
         task.updated_at_ms = now_ms;
@@ -748,7 +745,7 @@ impl LocalAppsHostBroker {
         step_id: String,
         error: String,
         retryable: bool,
-    ) -> LocalAppBackgroundRunDto {
+    ) -> BackgroundRunOutcome {
         if self
             .background_cancellation_requested(app_id, task_id)
             .await
@@ -1122,8 +1119,8 @@ fn outcome(
     result_json: Option<String>,
     error: Option<String>,
     retryable: bool,
-) -> LocalAppBackgroundRunDto {
-    LocalAppBackgroundRunDto {
+) -> BackgroundRunOutcome {
+    BackgroundRunOutcome {
         app_id: app_id.to_string(),
         task_id: task_id.to_string(),
         status: status.to_string(),

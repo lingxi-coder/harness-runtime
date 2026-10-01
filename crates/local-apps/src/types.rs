@@ -348,6 +348,25 @@ pub struct AppRuntimeRecord {
     pub updated_at_ms: u64,
 }
 
+impl AppRuntimeRecord {
+    /// The runtime URL a native preview uses to identify the exact runtime
+    /// generation. The marker is query-only: the loopback origin remains
+    /// unchanged, so WebKit/WebView keep the same persistent website-data
+    /// store. `updated_at_ms` is the core runtime generation clock and is
+    /// included in the URL rather than relying on a port change (ports are
+    /// intentionally stable across rebuilds and restarts). `None` while no
+    /// port is bound.
+    #[must_use]
+    pub fn preview_url(&self) -> Option<String> {
+        self.port.map(|port| {
+            format!(
+                "http://127.0.0.1:{port}/?lingxi_runtime={}",
+                self.updated_at_ms
+            )
+        })
+    }
+}
+
 /// Per-app dependency-install record persisted at `apps/<id>/dependencies.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -520,5 +539,41 @@ mod tests {
         }"#;
         let record: AppRecord = serde_json::from_str(json).unwrap();
         assert!(record.git_enabled, "missing gitEnabled defaults to true");
+    }
+}
+
+#[cfg(test)]
+mod preview_url_tests {
+    use super::*;
+
+    fn record(state: AppRuntimeState, port: Option<u16>, updated_at_ms: u64) -> AppRuntimeRecord {
+        AppRuntimeRecord {
+            schema_version: APPS_SCHEMA_VERSION,
+            app_id: "app00001".into(),
+            state,
+            mode: Some(AppRuntimeMode::StaticExport),
+            port,
+            pid: None,
+            last_error: None,
+            updated_at_ms,
+        }
+    }
+
+    #[test]
+    fn the_preview_url_marks_the_generation_without_changing_the_origin() {
+        assert_eq!(
+            record(AppRuntimeState::Running, Some(43123), 42)
+                .preview_url()
+                .as_deref(),
+            Some("http://127.0.0.1:43123/?lingxi_runtime=42")
+        );
+    }
+
+    #[test]
+    fn the_preview_url_is_absent_without_a_bound_port() {
+        assert_eq!(
+            record(AppRuntimeState::Stopped, None, 99).preview_url(),
+            None
+        );
     }
 }

@@ -232,7 +232,7 @@ impl LocalAppsHostBroker {
         // may have edited it in the approval dialog, or the model may have
         // rewritten it; either way this approval no longer describes what is
         // there, and the only correct answer is to plan again.
-        crate::mobile::plan_approval::verify_plan_unchanged(&plan_path, &plan_sha256)?;
+        local_app_service::plan_approval::verify_plan_unchanged(&plan_path, &plan_sha256)?;
 
         let service = self.service()?;
         let record = service
@@ -410,7 +410,7 @@ impl LocalAppsHostBroker {
                     "workflow_run_id": state.execution_id,
                     "create_without_mcp": true,
                 }),
-                crate::mobile::plan_approval::CreateApprovalAuthority::ApprovedPlan,
+                local_app_service::plan_approval::CreateApprovalAuthority::ApprovedPlan,
             )
             .await?;
         let receipt_id = approval
