@@ -287,6 +287,29 @@ struct DependencyBaselineIdentity {
     contract_sha256: String,
 }
 
+/// The confirmed native target for the host facts the client reported.
+///
+/// The Local App service names its own host vocabulary ([`local_apps::HostOs`],
+/// [`local_apps::HostDeviceClass`]); this is the one place that maps the
+/// mobile runtime's environment onto it. Both matches are exhaustive on
+/// purpose: a new OS or class in the environment must be decided here, not
+/// fall through to a platform nobody chose.
+fn device_context_of(
+    environment: &lingxi_core::host::MobileHostEnvironment,
+) -> Option<local_apps::DeviceContext> {
+    use lingxi_core::host::{MobileDeviceClass, MobileHostOs};
+    let os = match environment.host_os {
+        MobileHostOs::Ios => local_apps::HostOs::Ios,
+        MobileHostOs::Android => local_apps::HostOs::Android,
+    };
+    let class = match environment.device_class {
+        MobileDeviceClass::Phone => local_apps::HostDeviceClass::Phone,
+        MobileDeviceClass::Tablet => local_apps::HostDeviceClass::Tablet,
+        MobileDeviceClass::Unknown => local_apps::HostDeviceClass::Unknown,
+    };
+    local_apps::DeviceContext::from_host_facts(os, class)
+}
+
 fn value_sha256(value: &Value) -> Result<String, String> {
     local_apps::approval_contract_sha256(value.clone()).map_err(|issue| issue.message)
 }
@@ -1552,9 +1575,7 @@ impl LocalAppsHostBroker {
     /// the device — an absent context already means unknown, so neither case
     /// invents a platform.
     fn host_device_context(&self) -> Option<local_apps::DeviceContext> {
-        self.host_environment
-            .get()
-            .and_then(local_apps::DeviceContext::from_host_environment)
+        self.host_environment.get().and_then(device_context_of)
     }
 
     pub(crate) fn attach_agent_executor(

@@ -89,7 +89,7 @@ pub use manifest::{
     derive_publication_state, hash_mcp_catalog, load_manifest, load_mcp_catalog, save_manifest,
     save_mcp_catalog, AppDependencySnapshot, AppLayout, AppManifest, AppMcpCatalogRef,
     AppPublicationState, AppRuntimeProfileBinding, AppSurface, AppTemplateOrigin,
-    DataCollectionSchema, DataFieldKind, DataFieldSchema, DeviceContext,
+    DataCollectionSchema, DataFieldKind, DataFieldSchema, DeviceContext, HostDeviceClass, HostOs,
     WORKSPACE_SETTINGS_LOCAL_FILE,
 };
 pub use mcp_authoring::{

@@ -3845,6 +3845,48 @@ async fn scaffold_records_the_host_device_context() {
     assert_eq!(recorded.form_factor, "ipad");
 }
 
+/// The mapping from the mobile runtime's environment onto the service's host
+/// vocabulary is the one place an iOS/Android or phone/tablet swap could hide:
+/// the service tests its own table, the compiler checks the arms exist, and
+/// only this test checks they point the right way.
+#[test]
+fn every_host_environment_maps_to_its_own_device_context() {
+    use lingxi_core::host::{MobileDeviceClass, MobileHostOs};
+    let expected = [
+        (
+            MobileHostOs::Ios,
+            MobileDeviceClass::Phone,
+            Some(("ios", "iphone")),
+        ),
+        (
+            MobileHostOs::Ios,
+            MobileDeviceClass::Tablet,
+            Some(("ios", "ipad")),
+        ),
+        (MobileHostOs::Ios, MobileDeviceClass::Unknown, None),
+        (
+            MobileHostOs::Android,
+            MobileDeviceClass::Phone,
+            Some(("android", "phone")),
+        ),
+        (
+            MobileHostOs::Android,
+            MobileDeviceClass::Tablet,
+            Some(("android", "tablet")),
+        ),
+        (MobileHostOs::Android, MobileDeviceClass::Unknown, None),
+    ];
+    for (os, class, pair) in expected {
+        let context = device_context_of(&host_environment(os, class))
+            .map(|context| (context.os, context.form_factor));
+        assert_eq!(
+            context,
+            pair.map(|(os, form)| (os.to_string(), form.to_string())),
+            "{os:?} + {class:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn scaffold_writes_capability_neutral_lingxi_when_toolchain_is_available() {
     let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
