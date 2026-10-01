@@ -1,5 +1,10 @@
 use super::*;
+use crate::mobile::local_apps_sessions::{
+    latest_custom_title, latest_custom_title_is_mobile_placeholder,
+    reconcile_app_init_session_title, SessionCatalog, SessionTitles,
+};
 use local_app_contracts::events::PluginErrorCode;
+use local_apps::AppRuntimeProfile;
 
 /// r1-prompt-layer-20: the backticked-tool-name scanner used to be declared
 /// INSIDE the one test that ran it, so no other model-facing text could be put
@@ -12785,10 +12790,13 @@ async fn pinned_shell() -> PinnedShell {
     );
     assert!(broker.attach_service(service.clone()).is_ok());
     assert!(broker
-        .attach_session_catalog(SessionCatalog {
-            lingxi_home: lingxi_home.clone(),
-            fs: fs_impl.clone(),
-        })
+        .attach_conversations(SessionTitles::new(
+            SessionCatalog {
+                lingxi_home: lingxi_home.clone(),
+                fs: fs_impl.clone(),
+            },
+            root.path().to_path_buf(),
+        ))
         .is_ok());
 
     let record = service

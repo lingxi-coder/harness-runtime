@@ -11,8 +11,11 @@ use local_app_contracts::approvals::{
     McpProposalApprovalRequest, UiRequest, VerificationSummary,
 };
 use local_app_contracts::bridge::{BridgeResponse, BridgeStreamFrame};
+use local_app_contracts::diagnostics::{DiagnosticsSettleStatus, FileDiagnostics};
 use local_app_contracts::events::{ManagedMcpServer, PluginErrorCode, PublicationState};
-use local_apps::AppErrorCode;
+use local_apps::{AppErrorCode, AppRecord};
+use std::path::Path;
+use std::time::Duration;
 
 /// One thing the service reports to its host.
 ///
@@ -98,4 +101,34 @@ pub enum HostEvent {
 pub trait HostEventSink: Send + Sync {
     /// Deliver one event. Events are delivered in the order they are emitted.
     async fn emit(&self, event: HostEvent);
+}
+
+/// Source diagnostics for an app's workspace, from whatever language tooling
+/// the host runs.
+///
+/// A host without any simply does not provide one, and the service builds
+/// without the check; a provider that cannot answer says so with `None` or an
+/// empty list. Neither blocks a build, so an unavailable tool never stops one.
+#[async_trait]
+pub trait DiagnosticsProvider: Send + Sync {
+    /// Wait up to `timeout` for the diagnostics under `workspace` to catch up
+    /// with the files they describe. `None` when the provider tracks nothing
+    /// for that workspace.
+    async fn settle(&self, workspace: &Path, timeout: Duration) -> Option<DiagnosticsSettleStatus>;
+
+    /// The diagnostics currently held for the files under `workspace`.
+    async fn latest(&self, workspace: &Path) -> Vec<FileDiagnostics>;
+}
+
+/// The conversation an app's creation happens in, as the host keeps it.
+#[async_trait]
+pub trait ConversationHost: Send + Sync {
+    /// A scaffold committed: the app is formed and its record carries its name,
+    /// so the conversation opened for it should show that name instead of a
+    /// placeholder. `Ok(true)` when a rename was made, `Ok(false)` when nothing
+    /// needed to change.
+    ///
+    /// A failure is cosmetic and the service does not undo the scaffold for it:
+    /// the host repairs a title it could not write on its own schedule.
+    async fn app_scaffolded(&self, record: &AppRecord) -> Result<bool, String>;
 }

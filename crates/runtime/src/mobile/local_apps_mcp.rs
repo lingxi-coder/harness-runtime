@@ -2937,7 +2937,7 @@ impl LocalAppsMcpTransport {
                             Ok(()) => init_session_id = Some(init_id),
                             Err(error) => {
                                 let removed = self.lingxi_home.get().is_some_and(|lingxi_home| {
-                                    crate::mobile::local_apps_host::remove_app_session_file(
+                                    crate::mobile::local_apps_sessions::remove_app_session_file(
                                         lingxi_home,
                                         &self.root,
                                         &record,

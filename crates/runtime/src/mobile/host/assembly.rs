@@ -3054,7 +3054,9 @@ pub fn build_mobile_engine_inner(
         tracing::warn!("local-apps MCP registry was already attached");
     }
     if local_apps_host
-        .attach_lsp_registry(Arc::downgrade(&inner.lsp_registry))
+        .attach_diagnostics(crate::mobile::local_apps_adapters::LspDiagnostics::new(
+            Arc::downgrade(&inner.lsp_registry),
+        ))
         .is_err()
     {
         tracing::warn!("local-apps LSP registry was already attached");
@@ -3082,10 +3084,13 @@ pub fn build_mobile_engine_inner(
     // The broker already knows the apps data root; `lingxi_home` and the
     // filesystem are the composition root's to hand over.
     if local_apps_host
-        .attach_session_catalog(crate::mobile::local_apps_host::SessionCatalog {
-            lingxi_home: firer_cfg.lingxi_home.clone(),
-            fs: fs.clone(),
-        })
+        .attach_conversations(crate::mobile::local_apps_sessions::SessionTitles::new(
+            crate::mobile::local_apps_sessions::SessionCatalog {
+                lingxi_home: firer_cfg.lingxi_home.clone(),
+                fs: fs.clone(),
+            },
+            mobile_apps_data_root(&firer_cfg),
+        ))
         .is_err()
     {
         tracing::warn!("local-apps session catalog was already attached");

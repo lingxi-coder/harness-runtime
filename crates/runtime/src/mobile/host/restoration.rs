@@ -1,6 +1,5 @@
-use crate::mobile::local_apps_host::{
-    canonical_cwd_string, remove_app_session_file, LocalAppsHostBroker,
-};
+use crate::mobile::local_apps_host::{canonical_cwd_string, LocalAppsHostBroker};
+use crate::mobile::local_apps_sessions::remove_app_session_file;
 use client::protocol::listings::SessionModeDto;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -401,7 +400,7 @@ pub(crate) async fn run_app_boot_backfill_sweep(
         // It shares one predicate with the immediate rename
         // (`reconcile_app_init_session_title`), so neither can decide
         // differently about whether the user renamed the session themselves.
-        match crate::mobile::local_apps_host::reconcile_app_init_session_title(
+        match crate::mobile::local_apps_sessions::reconcile_app_init_session_title(
             &backfill_home,
             &backfill_root,
             backfill_fs.clone(),

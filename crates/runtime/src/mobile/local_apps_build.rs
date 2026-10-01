@@ -10,11 +10,11 @@ use crate::mobile::local_app_runtime_profiles::{
     THREE_3D_R4_EDITABLE_FILES, THREE_3D_R4_MANAGED_FILES, TREE_PROOF_FILE_REL,
 };
 use crate::mobile::local_apps_host::LocalAppsHostBroker;
+use local_app_contracts::diagnostics::{DiagnosticSeverity, DiagnosticsSettleState};
 use local_apps::{
     AppDataStore, AppError, AppLayout, AppManifest, AppRecord, AppRuntimeProfile,
     AppRuntimeProfileBinding,
 };
-use lsp_types::{DiagnosticSeverity, NumberOrString};
 
 use mobile_linux_api::{
     LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
@@ -1156,19 +1156,16 @@ impl LocalAppBuilder<'_> {
     }
 
     async fn gate_lsp_diagnostics_before_build(&self, workspace: &Path) -> Result<(), AppError> {
-        let Some(registry) = self.host.upgraded_lsp_registry() else {
+        let Some(provider) = self.host.diagnostics_provider() else {
             return Ok(());
         };
-        let Some(settle) = registry
-            .settle_diagnostics_under_host_root(workspace, LSP_DIAGNOSTIC_SETTLE_TIMEOUT)
+        let Some(settle) = provider
+            .settle(workspace, LSP_DIAGNOSTIC_SETTLE_TIMEOUT)
             .await
         else {
             return Ok(());
         };
-        if !matches!(
-            settle.state,
-            lsp::diagnostic_registry::DiagnosticSettleState::Settled
-        ) {
+        if !matches!(settle.state, DiagnosticsSettleState::Settled) {
             tracing::info!(
                 root = %workspace.display(),
                 tracked_documents = settle.tracked_documents,
@@ -1180,40 +1177,33 @@ impl LocalAppBuilder<'_> {
         let mut blocking = Vec::new();
         let mut degraded = false;
         let mut advisory = 0_usize;
-        for snapshot in registry.latest_diagnostics_under_host_root(workspace).await {
-            let Ok(relative) = snapshot.host_path.strip_prefix(workspace) else {
+        for snapshot in provider.latest(workspace).await {
+            let Ok(relative) = snapshot.path.strip_prefix(workspace) else {
                 continue;
             };
             let relative = relative.to_string_lossy().replace('\\', "/");
             if !is_app_managed_javascript_file(&relative) {
                 continue;
             }
-            if !matches!(
-                snapshot.freshness,
-                lsp::diagnostic_registry::DiagnosticFreshness::Fresh
-            ) {
+            if !snapshot.fresh {
                 degraded = true;
                 advisory = advisory.saturating_add(snapshot.diagnostics.len());
                 continue;
             }
             for diagnostic in snapshot.diagnostics {
-                if diagnostic.severity != Some(DiagnosticSeverity::ERROR) {
+                if diagnostic.severity != Some(DiagnosticSeverity::Error) {
                     advisory = advisory.saturating_add(1);
                     continue;
                 }
                 let code = diagnostic
                     .code
                     .as_ref()
-                    .map(|code| match code {
-                        NumberOrString::Number(number) => number.to_string(),
-                        NumberOrString::String(text) => text.clone(),
-                    })
                     .map(|code| format!(" [{code}]"))
                     .unwrap_or_default();
                 blocking.push(format!(
                     "{relative}:{}:{}{} {}",
-                    diagnostic.range.start.line + 1,
-                    diagnostic.range.start.character + 1,
+                    diagnostic.line + 1,
+                    diagnostic.character + 1,
                     code,
                     bounded_lsp_diagnostic_message(&diagnostic.message)
                 ));
@@ -4922,8 +4912,10 @@ mod tests {
             None,
         );
         broker
-            .attach_lsp_registry(Arc::downgrade(&lsp_registry))
-            .expect("attach lsp");
+            .attach_diagnostics(crate::mobile::local_apps_adapters::LspDiagnostics::new(
+                Arc::downgrade(&lsp_registry),
+            ))
+            .unwrap_or_else(|_| panic!("attach lsp"));
         let builder = LocalAppBuilder {
             mobile_linux: Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
             host: broker.as_ref(),
@@ -5007,8 +4999,10 @@ mod tests {
             None,
         );
         broker
-            .attach_lsp_registry(Arc::downgrade(&lsp_registry))
-            .expect("attach lsp");
+            .attach_diagnostics(crate::mobile::local_apps_adapters::LspDiagnostics::new(
+                Arc::downgrade(&lsp_registry),
+            ))
+            .unwrap_or_else(|_| panic!("attach lsp"));
         let builder = LocalAppBuilder {
             mobile_linux: Some(runtime),
             host: broker.as_ref(),

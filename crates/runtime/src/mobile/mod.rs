@@ -109,6 +109,10 @@ mod local_apps_profile;
 // The edge between the Local App service's vocabulary (`local_app_contracts`)
 // and the client protocol DTOs. Every crossing goes through it.
 #[cfg(feature = "mobile")]
+mod local_apps_adapters;
+#[cfg(feature = "mobile")]
+mod local_apps_sessions;
+#[cfg(feature = "mobile")]
 mod local_apps_wire;
 #[cfg(feature = "mobile")]
 mod mcp_transport;

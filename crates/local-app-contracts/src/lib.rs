@@ -15,6 +15,7 @@
 
 pub mod approvals;
 pub mod bridge;
+pub mod diagnostics;
 pub mod events;
 
 pub mod ids {

@@ -205,12 +205,13 @@ async fn end_mobile_audio_owner(
 
 use crate::mobile::{
     local_apps_host::{
-        app_session_dir, canonical_cwd_string, remove_app_session_file, AgentOutputRouter,
-        AgentOutputStream, AgentTurnUsageState, LocalAppsAgentExecutor, LocalAppsHostBroker,
+        canonical_cwd_string, AgentOutputRouter, AgentOutputStream, AgentTurnUsageState,
+        LocalAppsAgentExecutor, LocalAppsHostBroker,
     },
     local_apps_llm::LocalAppsLlm,
     local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
     local_apps_profile::ProfileApps,
+    local_apps_sessions::{app_session_dir, remove_app_session_file},
     skill_loader::command_visible_in_session_mode,
     turn_durability::{DurableTurnStore, DurableTurnStoreError, ResumeDisposition},
 };
