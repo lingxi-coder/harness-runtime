@@ -39,19 +39,25 @@ import sys
 import unicodedata
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from local_app_checkout import local_app_root  # noqa: E402
+
+# The plugin's skills and agents are the Local App project's; the device skills are this repository's.
+LOCAL_APP = local_app_root(Path(__file__).resolve().parents[2])
+
 # packer 的硬上限（设计文档 §7.2.1）。超限时 packer 点名 skill/FQN 拒绝。
 MAX_DESCRIPTION_COLUMNS = 180
 
 # 门要扫的 skill 根目录，相对仓库根。
 SKILL_ROOTS = [
-    "crates/plugins/lingxi-local-app/skills",
+    str(LOCAL_APP / "crates/plugins/lingxi-local-app/skills"),
     "crates/runtime/src/mobile/device_skills",
 ]
 
 # Agent 用同一套 frontmatter 判据,但形状不同:agent 是 `agents/<name>.md`
 # 单文件,identity 来自**文件名**;skill 是 `skills/<name>/SKILL.md`,identity
 # 来自**目录名**。两者都由 `plugin/src/discovery.rs` 的 `glob_md()` 递归发现。
-AGENT_ROOTS = ["crates/plugins/lingxi-local-app/agents"]
+AGENT_ROOTS = [str(LOCAL_APP / "crates/plugins/lingxi-local-app/agents")]
 
 # Prose that asserts a tool does not exist. Matched per SENTENCE against the
 # agent's own granted tool names, so "no `LocalAppActOnUi` — that is operator's

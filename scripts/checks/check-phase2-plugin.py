@@ -18,7 +18,13 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[2]
-CODE = REPO / "crates"
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from local_app_checkout import local_app_root  # noqa: E402
+# The plugin tree and the crates it ships with are the Local App project's; the task descriptors under
+# docs/local-apps/harness are this repository's own bookkeeping.
+LOCAL_APP = local_app_root(REPO)
+CODE = LOCAL_APP / "crates"
 PLUGIN = CODE / "plugins" / "lingxi-local-app"
 MANIFEST = REPO / "docs" / "local-apps" / "harness" / "template-migration-manifest.json"
 INVENTORY = CODE / "plugins" / "lingxi-local-app.inventory.txt"
@@ -235,7 +241,7 @@ def check_migration(manifest: dict) -> None:
         expected_source = (
             CODE / "local-apps" / "templates" / "runtime-profiles" / family / "r4" / relative
         )
-        source = REPO / entry.get("source", "")
+        source = LOCAL_APP / entry.get("source", "")
         if source != expected_source:
             fail(
                 f"template migration source must be the current production asset for "
@@ -385,6 +391,8 @@ def check_phase2_task_evidence() -> None:
         owned_sources: set[Path] = set()
         for owned in task.get("owns", []):
             path = REPO / owned
+            if not path.exists():
+                path = LOCAL_APP / owned
             if path.is_file() and path.suffix == ".rs":
                 owned_sources.add(path)
             elif path.is_dir():

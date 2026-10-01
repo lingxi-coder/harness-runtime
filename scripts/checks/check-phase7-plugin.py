@@ -15,12 +15,16 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[2]
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from local_app_checkout import local_app_root  # noqa: E402
+LOCAL_APP = local_app_root(REPO)
 REGISTRY = REPO / "crates" / "mcp" / "src" / "registry.rs"
 REGISTRY_LOCAL_APPS = REPO / "crates" / "mcp" / "src" / "registry" / "local_apps.rs"
 # `ConversationExport` (the scoped identity and its registry-key grammar) lives in
 # `mcp-wire` so the in-process transport can be written without the engine.
-CONVERSATION_EXPORT = REPO / "crates" / "mcp-wire" / "src" / "export.rs"
-TRANSPORT = REPO / "crates" / "local-app-service" / "src" / "mcp_server.rs"
+CONVERSATION_EXPORT = LOCAL_APP / "crates" / "mcp-wire" / "src" / "export.rs"
+TRANSPORT = LOCAL_APP / "crates" / "local-app-service" / "src" / "mcp_server.rs"
 TASKS = REPO / "docs" / "local-apps" / "harness" / "tasks-phase-7.json"
 
 

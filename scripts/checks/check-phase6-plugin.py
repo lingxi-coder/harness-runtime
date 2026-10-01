@@ -10,7 +10,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[2]
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from local_app_checkout import local_app_root  # noqa: E402
+ROOT = local_app_root(REPO)
 CORE = ROOT / "crates" / "local-apps" / "src"
 # The id grammar has its own dependency-free crate; `local-apps` re-exports it.
 CONTRACTS = ROOT / "crates" / "local-app-contracts" / "src"

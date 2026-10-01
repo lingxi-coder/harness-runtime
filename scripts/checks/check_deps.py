@@ -48,6 +48,22 @@ FEATURE_GATED_DEPENDENCIES = {"local-apps": {"git2"}}
 # FEATURE_GATED_DEPENDENCIES) would be unreachable. It forwards the feature.
 DEFAULT_FEATURES_OFF = {"local-app-service": {"local-apps"}}
 
+# Who may name the Local App project's crates, by NAME. Rules written for workspace members cannot see an edge onto a
+# crate that lives in another repository; this table does not care where a crate lives. A crate may name one only if it
+# is listed here, which keeps the engine's use of the project to the shared primitives it re-exports and to the one
+# composition root that assembles it. While the project's crates are still members of this workspace they are not subject
+# to the table (their own directions are the member rules above).
+LOCAL_APP_PRIMITIVES = {"device-api", "local-app-contracts", "mcp-wire", "rooted-fs"}
+LOCAL_APP_CRATES = LOCAL_APP_PRIMITIVES | {"local-app-plugin", "local-app-service", "local-apps"}
+LOCAL_APP_CONSUMERS = {
+    "core": LOCAL_APP_PRIMITIVES,  # re-exports the primitives; names nothing above them
+    "mcp": {"mcp-wire"},
+    "tasks": {"local-app-contracts", "local-app-plugin"},  # (dev) id-grammar mirror, plugin agent roster
+    "agent": {"local-app-plugin"},  # (dev) the role schemas
+    "workflow": {"local-app-plugin"},  # (dev) the plugin workflow scripts
+    "harness-runtime": LOCAL_APP_CRATES,  # the composition root: adapters, build script, bundle
+}
+
 # The SDK assembles existing components; components must never reach back into
 # its product profiles or depend on a concrete UI to describe an interaction.
 HARNESS_COMPONENT_CRATES = {"llm-runtime", "harness-runtime", "tool-api", "permission"}
@@ -194,6 +210,18 @@ def main():
                 violations.append(
                     "%s depends on %s with its default features — a consumer could not turn them off"
                     % (n, dep["name"])
+                )
+
+    for n in sorted(pkgs):
+        if n in EXEMPT or n in LOCAL_APP_CRATES:
+            continue
+        allowed = LOCAL_APP_CONSUMERS.get(n, set())
+        for dep in pkgs[n]["dependencies"]:
+            if dep["name"] in LOCAL_APP_CRATES and dep["name"] not in allowed:
+                violations.append(
+                    "%s depends on %s — only %s may name the Local App project's crates%s"
+                    % (n, dep["name"], ", ".join(sorted(LOCAL_APP_CONSUMERS)),
+                       "" if not allowed else " (and %s may name only %s)" % (n, ", ".join(sorted(allowed))))
                 )
 
     for root_name in sorted(HARNESS_COMPONENT_CRATES):

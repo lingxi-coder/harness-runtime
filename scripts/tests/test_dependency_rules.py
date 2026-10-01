@@ -120,6 +120,47 @@ class DependencyRules(unittest.TestCase):
         self.assertIn("local-app-service depends on local-apps with its default features",
                       result.stderr)
 
+    def test_core_may_name_the_primitives_of_the_local_app_project(self):
+        result = self.run_gate({"core": "crates/core"},
+                               {"core": ["mcp-wire", "rooted-fs", "device-api", "local-app-contracts"]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_core_cannot_name_the_crates_above_the_primitives(self):
+        for crate in ("local-apps", "local-app-service", "local-app-plugin"):
+            with self.subTest(crate=crate):
+                result = self.run_gate({"core": "crates/core"}, {"core": [crate]})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"core depends on {crate} — only", result.stderr)
+
+    def test_no_other_engine_crate_may_name_the_local_app_crates(self):
+        for engine in ("permission", "client", "lsp", "session"):
+            with self.subTest(engine=engine):
+                result = self.run_gate({engine: f"crates/{engine}"}, {engine: ["rooted-fs"]})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"{engine} depends on rooted-fs — only", result.stderr)
+
+    def test_the_consumers_the_table_lists_are_let_through(self):
+        for consumer, crate in (("mcp", "mcp-wire"), ("tasks", "local-app-contracts"),
+                                ("tasks", "local-app-plugin"), ("agent", "local-app-plugin"),
+                                ("workflow", "local-app-plugin")):
+            with self.subTest(consumer=consumer, crate=crate):
+                result = self.run_gate({consumer: f"crates/{consumer}"}, {consumer: [crate]})
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_composition_root_may_name_every_local_app_crate(self):
+        result = self.run_gate({}, {"harness-runtime": ["local-apps", "local-app-service",
+                                                         "local-app-plugin", "local-app-contracts",
+                                                         "rooted-fs"]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_rule_by_name_holds_when_the_crates_are_not_workspace_members(self):
+        # After the move the project's crates are not in `paths`: the member-based rules cannot see these edges, this one can.
+        result = self.run_gate({"core": "crates/core", "tasks": "crates/tasks"},
+                               {"core": ["local-app-service"], "tasks": ["local-app-contracts"]})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("core depends on local-app-service — only", result.stderr)
+        self.assertNotIn("tasks depends on", result.stderr)
+
     def test_shared_core_cannot_depend_on_telemetry(self):
         result = self.run_gate({"core": "crates/core", "telemetry": "crates/telemetry"},
                                {"core": ["telemetry"]})
