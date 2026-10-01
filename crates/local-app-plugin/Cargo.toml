@@ -1,0 +1,13 @@
+[package]
+name = "local-app-plugin"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# No dependencies on purpose: a consumer's build script and its tests depend on this crate
+# only to learn where the plugin tree is, and must not pay for the rest of the Local App crates.
+[dependencies]
+
+[lints]
+workspace = true

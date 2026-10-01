@@ -3311,6 +3311,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "local-app-plugin"
+version = "0.12.0"
+
+[[package]]
 name = "local-app-service"
 version = "0.12.0"
 dependencies = [
