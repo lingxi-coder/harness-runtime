@@ -13,6 +13,7 @@ use local_app_contracts::approvals::{
 use local_app_contracts::bridge::{BridgeResponse, BridgeStreamFrame};
 use local_app_contracts::diagnostics::{DiagnosticsSettleStatus, FileDiagnostics};
 use local_app_contracts::events::{ManagedMcpServer, PluginErrorCode, PublicationState};
+use local_app_contracts::execution::{CommandOutcome, IsolatedCommand};
 use local_apps::{AppErrorCode, AppRecord};
 use std::path::Path;
 use std::time::Duration;
@@ -131,4 +132,20 @@ pub trait ConversationHost: Send + Sync {
     /// A failure is cosmetic and the service does not undo the scaffold for it:
     /// the host repairs a title it could not write on its own schedule.
     async fn app_scaffolded(&self, record: &AppRecord) -> Result<bool, String>;
+}
+
+/// Where the service runs the commands a build needs: the dependency install
+/// and the app's own build.
+///
+/// The service says what must be isolated and how; the host provides the
+/// isolation and reports what it actually enforced, which the service checks
+/// ([`local_app_contracts::execution::Enforcement::ensure_for`]) before it
+/// trusts the result. A host without an executor cannot build, and the service
+/// says so rather than running anything unisolated.
+#[async_trait]
+pub trait BuildExecutor: Send + Sync {
+    /// Run one command to completion. `Err` is a failure to run it at all,
+    /// worded for the person; a command that ran and failed is an `Ok` outcome
+    /// with its exit code.
+    async fn run(&self, command: IsolatedCommand) -> Result<CommandOutcome, String>;
 }

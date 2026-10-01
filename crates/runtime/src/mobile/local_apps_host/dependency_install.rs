@@ -1,3 +1,5 @@
+use local_app_contracts::execution::{IsolatedCommand, Mount, MountKind, NetworkPolicy, ResourceLimits};
+use local_app_service::host::BuildExecutor;
 use super::dependency_integrity::clone_or_copy_tree;
 use super::dependency_integrity::collect_installed_packages;
 use super::dependency_integrity::dependency_attestation;
@@ -31,12 +33,6 @@ use local_apps::AppDependencyState;
 use local_apps::AppLayout;
 use local_apps::AppRuntimeProfile;
 use local_apps::AppService;
-use mobile_linux_api::LinuxCommandRequest;
-use mobile_linux_api::MobileLinuxRuntime;
-use mobile_linux_api::MountPurpose;
-use mobile_linux_api::MountSpec;
-use mobile_linux_api::NetworkPolicy;
-use mobile_linux_api::ResourceLimits;
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
@@ -594,8 +590,8 @@ impl LocalAppsHostBroker {
         })
     }
     pub(super) fn dependency_install_request(
-        build_mount: &MountSpec,
-        store_mount: &MountSpec,
+        build_mount: &Mount,
+        store_mount: &Mount,
         dependency_staging_guest_path: String,
         build_state_root: &str,
         memory_mb: u32,
@@ -604,7 +600,7 @@ impl LocalAppsHostBroker {
         lockfile_only: bool,
         no_runtime: bool,
         toolchain: RuntimeToolchain,
-    ) -> LinuxCommandRequest {
+    ) -> IsolatedCommand {
         let mut env = BTreeMap::new();
         env.insert("PATH".into(), toolchain.path().into());
         env.insert("CI".into(), "1".into());
@@ -650,15 +646,14 @@ impl LocalAppsHostBroker {
             "--reporter=append-only".into(),
         ]);
 
-        LinuxCommandRequest {
+        IsolatedCommand {
             command: toolchain.pnpm_command().into(),
             args,
             cwd: Some(dependency_staging_guest_path),
             env,
-            stdin: None,
             timeout_ms: Some(DEPENDENCY_INSTALL_TIMEOUT.as_millis() as u64),
             network,
-            resource_limits: ResourceLimits {
+            limits: ResourceLimits {
                 max_memory_mb: Some(memory_mb),
                 ..ResourceLimits::default()
             },
@@ -666,11 +661,11 @@ impl LocalAppsHostBroker {
         }
     }
     pub(super) async fn run_dependency_install_command(
-        runtime: &dyn MobileLinuxRuntime,
-        request: LinuxCommandRequest,
+        runtime: &dyn BuildExecutor,
+        request: IsolatedCommand,
     ) -> Result<(), String> {
         let network = request.network;
-        let resource_limits = request.resource_limits;
+        let resource_limits = request.limits;
         let frozen_lockfile = request.args.iter().any(|arg| arg == "--frozen-lockfile");
         let install_span = tracing::debug_span!(
             "local_app_dependency_install",
@@ -682,7 +677,7 @@ impl LocalAppsHostBroker {
         } else {
             "dependency_pnpm_resolve"
         });
-        match runtime.run_isolated(request).instrument(install_span).await {
+        match runtime.run(request).instrument(install_span).await {
             Ok(result) => {
                 result
                     .enforcement
@@ -1362,17 +1357,17 @@ impl LocalAppsHostBroker {
                 .finalize_dependency_install(layout, &dependency_staging, &lock_digest)
                 .await;
         }
-        let Some(runtime) = self.mobile_linux() else {
+        let Some(runtime) = self.build_executor() else {
             let _ = Self::remove_owned_path(&dependency_staging);
             return Err(
                 "the mobile Node runtime is unavailable for dependency installation".into(),
             );
         };
-        let build_mount = MountSpec {
+        let build_mount = Mount {
             host_path: workspace.clone(),
             guest_path: local_app_contracts::guest_paths::local_app_build_project(app_id, "store"),
             read_only: false,
-            purpose: MountPurpose::LocalAppBuild,
+            kind: MountKind::Project,
         };
         let dependency_store = self.dependency_store_root(toolchain_key);
         if let Err(error) = std::fs::create_dir_all(&dependency_store) {
@@ -1380,11 +1375,11 @@ impl LocalAppsHostBroker {
             let _ = Self::remove_owned_path(&dependency_staging);
             return Err(message);
         }
-        let store_mount = MountSpec {
+        let store_mount = Mount {
             host_path: dependency_store,
             guest_path: local_app_contracts::guest_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
             read_only: false,
-            purpose: MountPurpose::Shared,
+            kind: MountKind::DependencyStore,
         };
         let project_guest_path = build_mount.guest_path.clone();
         let dependency_staging_guest_path =

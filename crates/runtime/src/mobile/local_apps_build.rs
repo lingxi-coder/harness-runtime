@@ -16,9 +16,10 @@ use local_apps::{
     AppRuntimeProfileBinding,
 };
 
-use mobile_linux_api::{
-    LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
+use local_app_contracts::execution::{
+    IsolatedCommand, Mount, MountKind, NetworkPolicy, ResourceLimits,
 };
+use local_app_service::host::BuildExecutor;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -666,14 +667,14 @@ fn fixed_vite_build_args(build_memory_mb: u32, executable: String, out_dir: Stri
     ]
 }
 
-fn local_app_build_mount(app_id: &str, channel: &str, build_root: &Path) -> MountSpec {
-    MountSpec {
+fn local_app_build_mount(app_id: &str, channel: &str, build_root: &Path) -> Mount {
+    Mount {
         host_path: build_root.to_path_buf(),
 
         guest_path: local_app_contracts::guest_paths::local_app_build_project(app_id, channel),
 
         read_only: false,
-        purpose: MountPurpose::LocalAppBuild,
+        kind: MountKind::Project,
     }
 }
 
@@ -681,7 +682,7 @@ fn local_app_build_mount(app_id: &str, channel: &str, build_root: &Path) -> Moun
 /// to lay down the template workspace and run the fixed offline build, with
 /// no dependency on the LLM pipeline.
 pub(crate) struct LocalAppBuilder<'a> {
-    pub(crate) mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    pub(crate) executor: Option<Arc<dyn BuildExecutor>>,
     pub(crate) host: &'a LocalAppsHostBroker,
 }
 
@@ -993,7 +994,7 @@ fn wipe_editable_surface(workspace: &Path) -> Result<(), AppError> {
 impl LocalAppBuilder<'_> {
     /// The build cannot start without the mobile Node runtime.
     fn assert_build_runtime_available(&self) -> Result<(), AppError> {
-        if self.mobile_linux.is_none() {
+        if self.executor.is_none() {
             return Err(AppError::NotYetAvailable(
                 "the verified mobile Node runtime is unavailable in this build".into(),
             ));
@@ -1007,7 +1008,7 @@ impl LocalAppBuilder<'_> {
         workspace: &Path,
         output_rel: &str,
     ) -> Result<(), AppError> {
-        let runtime = self.mobile_linux.as_ref().ok_or_else(|| {
+        let runtime = self.executor.as_ref().ok_or_else(|| {
             AppError::NotYetAvailable(
                 "the verified mobile Node runtime is unavailable in this build".into(),
             )
@@ -1101,19 +1102,18 @@ impl LocalAppBuilder<'_> {
             ..ResourceLimits::default()
         };
         let mounts = vec![build_mount];
-        let request = LinuxCommandRequest {
+        let request = IsolatedCommand {
             command: toolchain.node_command().into(),
             args: fixed_vite_build_args(build_memory_mb, executable, output_rel.to_string()),
             cwd: Some(project_guest_path),
             env: environment,
-            stdin: None,
             timeout_ms: Some(BUILD_TIMEOUT_MS),
             network: NetworkPolicy::Disabled,
-            resource_limits,
+            limits: resource_limits,
             mounts,
         };
         let result = runtime
-            .run_isolated(request)
+            .run(request)
             .await
             .map_err(|error| AppError::Io(format!("fixed {tool_name} build failed: {error}")))?;
         // Record BEFORE judging. The enforcement receipt and the exit check both
@@ -2977,9 +2977,9 @@ mod tests {
 
     use mobile_linux_api::{guest_paths, map_guest_path_to_host};
     use mobile_linux_api::{
-        LinuxCommandResult, MobileLinuxCapability, MobileLinuxError, MobileLinuxRuntimeMode,
-        MobileLinuxTaskSnapshot, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState,
-        RootfsStatus, SandboxBackend,
+        LinuxCommandRequest, LinuxCommandResult, MobileLinuxCapability, MobileLinuxError,
+        MobileLinuxRuntime, MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, PtyOpenRequest,
+        PtySessionHandle, PtySize, RootfsState, RootfsStatus, SandboxBackend,
     };
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4086,7 +4086,7 @@ mod tests {
             "/var/lingxi/local-app-build/aaaa1111/store/project"
         );
         assert!(!mount.read_only);
-        assert_eq!(mount.purpose, MountPurpose::LocalAppBuild);
+        assert_eq!(mount.kind, MountKind::Project);
     }
 
     #[test]
@@ -4538,7 +4538,7 @@ mod tests {
             None,
         );
         let builder = LocalAppBuilder {
-            mobile_linux: None,
+            executor: None,
             host: broker.as_ref(),
         };
 
@@ -4615,7 +4615,7 @@ mod tests {
             ),
         );
         let builder = LocalAppBuilder {
-            mobile_linux: Some(runtime),
+            executor: Some(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new(runtime)),
             host: broker.as_ref(),
         };
         let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
@@ -4696,7 +4696,7 @@ mod tests {
             ),
         );
         let builder = LocalAppBuilder {
-            mobile_linux: Some(runtime),
+            executor: Some(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new(runtime)),
             host: broker.as_ref(),
         };
         let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
@@ -4761,7 +4761,7 @@ mod tests {
             ),
         );
         let builder = LocalAppBuilder {
-            mobile_linux: Some(runtime),
+            executor: Some(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new(runtime)),
             host: broker.as_ref(),
         };
 
@@ -4807,7 +4807,11 @@ mod tests {
                 None,
             );
             let builder = LocalAppBuilder {
-                mobile_linux: Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
+                executor: Some(
+                    crate::mobile::local_apps_adapters::MobileLinuxExecutor::new(
+                        runtime.clone() as Arc<dyn MobileLinuxRuntime>
+                    ),
+                ),
                 host: broker.as_ref(),
             };
             let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
@@ -4917,7 +4921,11 @@ mod tests {
             ))
             .unwrap_or_else(|_| panic!("attach lsp"));
         let builder = LocalAppBuilder {
-            mobile_linux: Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
+            executor: Some(
+                crate::mobile::local_apps_adapters::MobileLinuxExecutor::new(
+                    runtime.clone() as Arc<dyn MobileLinuxRuntime>
+                ),
+            ),
             host: broker.as_ref(),
         };
         let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
@@ -5004,7 +5012,7 @@ mod tests {
             ))
             .unwrap_or_else(|_| panic!("attach lsp"));
         let builder = LocalAppBuilder {
-            mobile_linux: Some(runtime),
+            executor: Some(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new(runtime)),
             host: broker.as_ref(),
         };
         let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);

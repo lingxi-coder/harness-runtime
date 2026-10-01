@@ -17,6 +17,7 @@ pub mod approvals;
 pub mod bridge;
 pub mod diagnostics;
 pub mod events;
+pub mod execution;
 pub mod guest_paths;
 
 pub mod ids {

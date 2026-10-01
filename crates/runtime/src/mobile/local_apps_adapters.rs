@@ -12,11 +12,15 @@ use local_app_contracts::diagnostics::{
     Diagnostic, DiagnosticSeverity, DiagnosticsSettleState, DiagnosticsSettleStatus,
     FileDiagnostics,
 };
-use local_app_service::host::DiagnosticsProvider;
+use local_app_contracts::execution::{
+    CommandOutcome, Enforcement, IsolatedCommand, Mount, MountKind, NetworkPolicy, ResourceLimits,
+};
+use local_app_service::host::{BuildExecutor, DiagnosticsProvider};
 use local_app_service::publication::{
     Exposure, ManagedApp, ManagedRuntime, McpPublisher, Published,
 };
 use lsp::diagnostic_registry::{DiagnosticFreshness, DiagnosticSettleState};
+use mobile_linux_api::MobileLinuxRuntime;
 use serde_json::Value;
 use std::path::Path;
 use std::sync::{Arc, Weak};
@@ -379,6 +383,90 @@ impl McpPublisher for RegistryPublisher {
     }
 }
 
+/// The mobile Linux runtime (the isolated guest the engine builds apps in) as
+/// the place the service runs a build's commands.
+///
+/// A faithful translation in both directions: the service's command becomes the
+/// runtime's request field for field, and what the runtime reports (including
+/// what it enforced) comes back unchanged.
+pub(crate) struct MobileLinuxExecutor {
+    runtime: Arc<dyn MobileLinuxRuntime>,
+}
+
+impl MobileLinuxExecutor {
+    pub(crate) fn new(runtime: Arc<dyn MobileLinuxRuntime>) -> Arc<dyn BuildExecutor> {
+        Arc::new(Self { runtime })
+    }
+}
+
+fn network_to_sdk(network: NetworkPolicy) -> mobile_linux_api::NetworkPolicy {
+    match network {
+        NetworkPolicy::Disabled => mobile_linux_api::NetworkPolicy::Disabled,
+        NetworkPolicy::LoopbackOnly => mobile_linux_api::NetworkPolicy::LoopbackOnly,
+        NetworkPolicy::Allowed => mobile_linux_api::NetworkPolicy::Allowed,
+    }
+}
+
+fn limits_to_sdk(limits: ResourceLimits) -> mobile_linux_api::ResourceLimits {
+    mobile_linux_api::ResourceLimits {
+        max_cpu_seconds: limits.max_cpu_seconds,
+        max_memory_mb: limits.max_memory_mb,
+        max_processes: limits.max_processes,
+        max_open_files: limits.max_open_files,
+    }
+}
+
+fn mount_to_sdk(mount: Mount) -> mobile_linux_api::MountSpec {
+    mobile_linux_api::MountSpec {
+        host_path: mount.host_path,
+        guest_path: mount.guest_path,
+        read_only: mount.read_only,
+        purpose: match mount.kind {
+            MountKind::Project => mobile_linux_api::MountPurpose::LocalAppBuild,
+            MountKind::DependencyStore => mobile_linux_api::MountPurpose::Shared,
+        },
+    }
+}
+
+fn command_to_sdk(command: IsolatedCommand) -> mobile_linux_api::LinuxCommandRequest {
+    mobile_linux_api::LinuxCommandRequest {
+        command: command.command,
+        args: command.args,
+        cwd: command.cwd,
+        env: command.env,
+        stdin: None,
+        timeout_ms: command.timeout_ms,
+        network: network_to_sdk(command.network),
+        resource_limits: limits_to_sdk(command.limits),
+        mounts: command.mounts.into_iter().map(mount_to_sdk).collect(),
+    }
+}
+
+fn outcome_of_sdk(result: mobile_linux_api::LinuxCommandResult) -> CommandOutcome {
+    CommandOutcome {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        timed_out: result.timed_out,
+        cancelled: result.cancelled,
+        enforcement: Enforcement {
+            network_policy_enforced: result.enforcement.network_policy_enforced,
+            memory_limit_enforced: result.enforcement.memory_limit_enforced,
+        },
+    }
+}
+
+#[async_trait]
+impl BuildExecutor for MobileLinuxExecutor {
+    async fn run(&self, command: IsolatedCommand) -> Result<CommandOutcome, String> {
+        self.runtime
+            .run_isolated(command_to_sdk(command))
+            .await
+            .map(outcome_of_sdk)
+            .map_err(|error| error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +485,154 @@ mod tests {
             message: "boom".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_command_reaches_the_runtime_field_for_field() {
+        let command = IsolatedCommand {
+            command: "/usr/bin/node".into(),
+            args: vec!["build".into(), "--flag".into()],
+            cwd: Some("/var/lingxi/local-app-build/abc/store/project".into()),
+            env: [("PATH".to_string(), "/usr/bin".to_string())].into(),
+            timeout_ms: Some(1234),
+            network: NetworkPolicy::LoopbackOnly,
+            limits: ResourceLimits {
+                max_cpu_seconds: Some(1),
+                max_memory_mb: Some(2),
+                max_processes: Some(3),
+                max_open_files: Some(4),
+            },
+            mounts: vec![
+                Mount {
+                    host_path: "/host/workspace".into(),
+                    guest_path: "/guest/project".into(),
+                    read_only: false,
+                    kind: MountKind::Project,
+                },
+                Mount {
+                    host_path: "/host/store".into(),
+                    guest_path: "/guest/store".into(),
+                    read_only: true,
+                    kind: MountKind::DependencyStore,
+                },
+            ],
+        };
+        let sdk = command_to_sdk(command);
+        assert_eq!(sdk.command, "/usr/bin/node");
+        assert_eq!(sdk.args, ["build", "--flag"]);
+        assert_eq!(
+            sdk.cwd.as_deref(),
+            Some("/var/lingxi/local-app-build/abc/store/project")
+        );
+        assert_eq!(sdk.env.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(sdk.stdin, None);
+        assert_eq!(sdk.timeout_ms, Some(1234));
+        assert_eq!(sdk.network, mobile_linux_api::NetworkPolicy::LoopbackOnly);
+        assert_eq!(sdk.resource_limits.max_cpu_seconds, Some(1));
+        assert_eq!(sdk.resource_limits.max_memory_mb, Some(2));
+        assert_eq!(sdk.resource_limits.max_processes, Some(3));
+        assert_eq!(sdk.resource_limits.max_open_files, Some(4));
+        assert_eq!(sdk.mounts.len(), 2);
+        assert_eq!(
+            sdk.mounts[0].purpose,
+            mobile_linux_api::MountPurpose::LocalAppBuild
+        );
+        assert!(!sdk.mounts[0].read_only);
+        assert_eq!(
+            sdk.mounts[1].purpose,
+            mobile_linux_api::MountPurpose::Shared
+        );
+        assert!(sdk.mounts[1].read_only);
+        assert_eq!(sdk.mounts[1].guest_path, "/guest/store");
+    }
+
+    #[test]
+    fn every_network_policy_maps_to_its_own() {
+        for (ours, theirs) in [
+            (
+                NetworkPolicy::Disabled,
+                mobile_linux_api::NetworkPolicy::Disabled,
+            ),
+            (
+                NetworkPolicy::LoopbackOnly,
+                mobile_linux_api::NetworkPolicy::LoopbackOnly,
+            ),
+            (
+                NetworkPolicy::Allowed,
+                mobile_linux_api::NetworkPolicy::Allowed,
+            ),
+        ] {
+            assert_eq!(network_to_sdk(ours), theirs);
+            // The receipt check words the policy by name, so the names agree.
+            assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
+        }
+    }
+
+    /// The service checks a receipt itself, so its verdict and its words must
+    /// be the runtime's own for every combination of policy, ceiling and proof.
+    #[test]
+    fn the_service_judges_a_receipt_exactly_as_the_runtime_does() {
+        let networks = [
+            NetworkPolicy::Disabled,
+            NetworkPolicy::LoopbackOnly,
+            NetworkPolicy::Allowed,
+        ];
+        for network in networks {
+            for memory in [None, Some(512)] {
+                for network_proof in [false, true] {
+                    for memory_proof in [false, true] {
+                        let limits = ResourceLimits {
+                            max_memory_mb: memory,
+                            ..ResourceLimits::default()
+                        };
+                        let ours = Enforcement {
+                            network_policy_enforced: network_proof,
+                            memory_limit_enforced: memory_proof,
+                        }
+                        .ensure_for(network, limits);
+                        let theirs = mobile_linux_api::LinuxEnforcementReceipt {
+                            network_policy_enforced: network_proof,
+                            memory_limit_enforced: memory_proof,
+                        }
+                        .ensure_for(network_to_sdk(network), limits_to_sdk(limits))
+                        .map_err(|error| error.to_string());
+                        assert_eq!(
+                            ours, theirs,
+                            "{network:?} memory={memory:?} proof=({network_proof},{memory_proof})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_result_comes_back_with_what_the_runtime_enforced() {
+        let outcome = outcome_of_sdk(mobile_linux_api::LinuxCommandResult {
+            stdout: "out".into(),
+            stderr: "err".into(),
+            exit_code: 3,
+            timed_out: true,
+            cancelled: true,
+            enforcement: mobile_linux_api::LinuxEnforcementReceipt {
+                network_policy_enforced: true,
+                memory_limit_enforced: false,
+            },
+        });
+        assert_eq!(
+            outcome,
+            CommandOutcome {
+                stdout: "out".into(),
+                stderr: "err".into(),
+                exit_code: 3,
+                timed_out: true,
+                cancelled: true,
+                enforcement: Enforcement {
+                    network_policy_enforced: true,
+                    memory_limit_enforced: false,
+                },
+            }
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use super::*;
 use crate::mobile::local_apps_adapters::device_context_of;
+use mobile_linux_api::{MobileLinuxRuntime, MountSpec};
 use crate::mobile::local_apps_sessions::{
     latest_custom_title, latest_custom_title_is_mobile_placeholder,
     reconcile_app_init_session_title, SessionCatalog, SessionTitles,
@@ -8340,7 +8341,7 @@ async fn dependency_update_builds_before_consuming_and_restores_the_old_build_on
         .expect("scaffold");
     let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
     let builder = crate::mobile::local_apps_build::LocalAppBuilder {
-        mobile_linux: broker.mobile_linux(),
+        executor: broker.build_executor(),
         host: &broker,
     };
     builder
@@ -8438,7 +8439,7 @@ async fn dependency_update_cold_start_recovers_an_in_progress_journal() {
         .expect("scaffold");
     let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
     let builder = crate::mobile::local_apps_build::LocalAppBuilder {
-        mobile_linux: broker.mobile_linux(),
+        executor: broker.build_executor(),
         host: &broker,
     };
     builder
@@ -8562,7 +8563,7 @@ async fn dependency_update_cold_start_cleans_a_committed_journal_without_rollbac
         .expect("scaffold");
     let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
     let builder = crate::mobile::local_apps_build::LocalAppBuilder {
-        mobile_linux: broker.mobile_linux(),
+        executor: broker.build_executor(),
         host: &broker,
     };
     builder

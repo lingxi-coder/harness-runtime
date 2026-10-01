@@ -24,7 +24,8 @@ use local_apps::{
     AppCapability, AppDependencyState, AppLayout, AppMcpSettings, AppRuntimeState, AppService,
     BackgroundTaskStatus, DataMigrationPreview, PermissionDecision, SessionPermissions,
 };
-use mobile_linux_api::{MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy};
+use local_app_contracts::execution::{Mount, MountKind, NetworkPolicy};
+use local_app_service::host::BuildExecutor;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -908,7 +909,7 @@ pub(crate) fn create_next_step_guidance() -> String {
 }
 
 struct LocalAppsRuntimeConfiguration {
-    mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+    build_executor: Option<Arc<dyn BuildExecutor>>,
     physical_memory_bytes: u64,
     runtime_root: Option<PathBuf>,
 }
@@ -1105,17 +1106,17 @@ impl LocalAppsHostBroker {
     pub(crate) fn new(
         root: PathBuf,
         event_sink: Arc<dyn HostEventSink>,
-        mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+        build_executor: Option<Arc<dyn BuildExecutor>>,
         _full_runtime: bool,
         runtime_root: Option<PathBuf>,
     ) -> Arc<Self> {
-        Self::new_with_physical_memory(root, event_sink, mobile_linux, false, runtime_root, 0)
+        Self::new_with_physical_memory(root, event_sink, build_executor, false, runtime_root, 0)
     }
 
     pub(crate) fn new_with_physical_memory(
         root: PathBuf,
         event_sink: Arc<dyn HostEventSink>,
-        mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+        build_executor: Option<Arc<dyn BuildExecutor>>,
         _full_runtime: bool,
         runtime_root: Option<PathBuf>,
         physical_memory_bytes: u64,
@@ -1131,7 +1132,7 @@ impl LocalAppsHostBroker {
             root,
             event_sink,
             runtime_configuration: RwLock::new(LocalAppsRuntimeConfiguration {
-                mobile_linux,
+                build_executor,
                 physical_memory_bytes,
                 runtime_root,
             }),
@@ -1236,7 +1237,7 @@ impl LocalAppsHostBroker {
 
     pub(crate) fn refresh_runtime_configuration(
         &self,
-        mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
+        build_executor: Option<Arc<dyn BuildExecutor>>,
         runtime_root: Option<PathBuf>,
         physical_memory_bytes: u64,
     ) {
@@ -1244,17 +1245,17 @@ impl LocalAppsHostBroker {
             .runtime_configuration
             .write()
             .expect("local-app runtime configuration poisoned") = LocalAppsRuntimeConfiguration {
-            mobile_linux,
+            build_executor,
             physical_memory_bytes,
             runtime_root,
         };
     }
 
-    fn mobile_linux(&self) -> Option<Arc<dyn MobileLinuxRuntime>> {
+    fn build_executor(&self) -> Option<Arc<dyn BuildExecutor>> {
         self.runtime_configuration
             .read()
             .expect("local-app runtime configuration poisoned")
-            .mobile_linux
+            .build_executor
             .clone()
     }
 
@@ -2060,7 +2061,7 @@ impl LocalAppsHostBroker {
             .map_err(|error| error.to_string())?;
         // Rebuild the restored source so the served output matches it.
         let builder = crate::mobile::local_apps_build::LocalAppBuilder {
-            mobile_linux: self.mobile_linux(),
+            executor: self.build_executor(),
             host: self,
         };
         if let Err(error) = builder.build_workspace(&layout).await {
@@ -4922,7 +4923,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             }
         }
         let builder = crate::mobile::local_apps_build::LocalAppBuilder {
-            mobile_linux: self.mobile_linux(),
+            executor: self.build_executor(),
             host: self,
         };
         builder
@@ -5222,7 +5223,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 ));
             }
             let workspace = layout.root().join(layout.workspace_rel());
-            let runtime = self.mobile_linux().ok_or_else(|| {
+            let runtime = self.build_executor().ok_or_else(|| {
                 "the mobile Node runtime is unavailable for dependency updates".to_string()
             })?;
             let dependency_staging = Self::prepare_dependency_staging(&layout)?;
@@ -5246,20 +5247,20 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             let dependency_store = self.dependency_store_root(toolchain_key);
             std::fs::create_dir_all(&dependency_store)
                 .map_err(|error| format!("create pnpm dependency store: {error}"))?;
-            let build_mount = MountSpec {
+            let build_mount = Mount {
                 host_path: workspace.clone(),
                 guest_path: local_app_contracts::guest_paths::local_app_build_project(
                     &app_id, "store",
                 ),
                 read_only: false,
-                purpose: MountPurpose::LocalAppBuild,
+                kind: MountKind::Project,
             };
-            let store_mount = MountSpec {
+            let store_mount = Mount {
                 host_path: dependency_store,
                 guest_path: local_app_contracts::guest_paths::LOCAL_APP_DEPENDENCY_STORE
                     .to_string(),
                 read_only: false,
-                purpose: MountPurpose::Shared,
+                kind: MountKind::DependencyStore,
             };
             let project_guest_path = build_mount.guest_path.clone();
             let dependency_staging_guest_path =
@@ -5477,7 +5478,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 .await
                 .map_err(|error| error.to_string())?;
             let builder = crate::mobile::local_apps_build::LocalAppBuilder {
-                mobile_linux: self.mobile_linux(),
+                executor: self.build_executor(),
                 host: self,
             };
             builder

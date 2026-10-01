@@ -173,7 +173,9 @@ impl ProfileApps {
         let host = LocalAppsHostBroker::new_with_physical_memory(
             root.clone(),
             crate::mobile::local_apps_wire::ClientSinkAdapter::new(client_events.clone()),
-            mobile_linux.clone(),
+            mobile_linux
+                .clone()
+                .map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new),
             full_runtime,
             runtime_root,
             physical_memory_bytes,
@@ -279,7 +281,7 @@ pub(crate) async fn profile_apps(
         }
     };
     profile.host.refresh_runtime_configuration(
-        refresh_mobile_linux,
+        refresh_mobile_linux.map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new),
         refresh_runtime_root,
         physical_memory_bytes,
     );

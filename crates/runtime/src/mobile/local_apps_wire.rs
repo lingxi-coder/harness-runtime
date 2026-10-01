@@ -877,7 +877,7 @@ pub(crate) fn broker_with_client_sink(
     crate::mobile::local_apps_host::LocalAppsHostBroker::new(
         root,
         ClientSinkAdapter::new(sink),
-        mobile_linux,
+        mobile_linux.map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new),
         full_runtime,
         runtime_root,
     )
@@ -896,7 +896,7 @@ pub(crate) fn broker_with_client_sink_and_memory(
     crate::mobile::local_apps_host::LocalAppsHostBroker::new_with_physical_memory(
         root,
         ClientSinkAdapter::new(sink),
-        mobile_linux,
+        mobile_linux.map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new),
         full_runtime,
         runtime_root,
         physical_memory_bytes,
