@@ -198,6 +198,9 @@ G1	crates/llm-runtime/src/service.rs	LINGXI
 G1	crates/llm-runtime/src/service.rs	LingXi
 G1	crates/llm-runtime/src/service_test.rs	LINGXI
 G1	crates/llm-runtime/src/service_test.rs	LingXi
+G1	crates/local-app-service/src/dependency_integrity.rs	LingXi
+G1	crates/local-app-service/src/dependency_integrity.rs	\.lingxi
+G1	crates/local-app-service/src/runtime_profiles.rs	\.lingxi
 G1	crates/local-apps/assets/default-workspace-settings.local.json	LINGXI
 G1	crates/local-apps/assets/default-workspace-settings.local.json	\.lingxi
 G1	crates/local-apps/src/checkpoints.rs	Lingxi
@@ -523,15 +526,12 @@ G1	crates/runtime/src/mobile/host/tests/cron_automation_tests.rs	\.lingxi
 G1	crates/runtime/src/mobile/host/tests/tests.rs	LINGXI
 G1	crates/runtime/src/mobile/host/tests/tests.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/runtime/src/mobile/host/tests/tests.rs	\.lingxi
-G1	crates/runtime/src/mobile/local_app_runtime_profiles.rs	\.lingxi
 G1	crates/runtime/src/mobile/local_app_template_catalog.rs	\.lingxi
 G1	crates/runtime/src/mobile/local_apps_build.rs	LINGXI
 G1	crates/runtime/src/mobile/local_apps_build.rs	\.lingxi
 G1	crates/runtime/src/mobile/local_apps_host.rs	LINGXI
 G1	crates/runtime/src/mobile/local_apps_host.rs	\.lingxi
 G1	crates/runtime/src/mobile/local_apps_host/dependency_install.rs	\.lingxi
-G1	crates/runtime/src/mobile/local_apps_host/dependency_integrity.rs	LingXi
-G1	crates/runtime/src/mobile/local_apps_host/dependency_integrity.rs	\.lingxi
 G1	crates/runtime/src/mobile/local_apps_host/dependency_recovery.rs	\.lingxi
 G1	crates/runtime/src/mobile/local_apps_host/tests/tests.rs	LINGXI
 G1	crates/runtime/src/mobile/local_apps_host/tests/tests.rs	\.lingxi
@@ -889,6 +889,8 @@ G3	crates/cron/src/tasks_file.rs	.lingxi
 G3	crates/hooks/src/executor_test.rs	.lingxi
 G3	crates/hooks/src/executor_test.rs	LINGXI.md
 G3	crates/hooks/src/hook_payload_test.rs	LINGXI.md
+G3	crates/local-app-service/src/dependency_integrity.rs	.lingxi-*
+G3	crates/local-app-service/src/runtime_profiles.rs	.lingxi
 G3	crates/local-apps/assets/default-workspace-settings.local.json	.lingxi
 G3	crates/local-apps/assets/default-workspace-settings.local.json	LINGXI.md
 G3	crates/local-apps/src/checkpoints.rs	.lingxi
@@ -1103,7 +1105,6 @@ G3	crates/runtime/src/mobile/host/tests/cron_automation_tests.rs	.lingxi
 G3	crates/runtime/src/mobile/host/tests/tests.rs	.lingxi
 G3	crates/runtime/src/mobile/host/tests/tests.rs	.lingxi-plugin
 G3	crates/runtime/src/mobile/host/tests/tests.rs	LINGXI.md
-G3	crates/runtime/src/mobile/local_app_runtime_profiles.rs	.lingxi
 G3	crates/runtime/src/mobile/local_app_template_catalog.rs	.lingxi-*
 G3	crates/runtime/src/mobile/local_apps_build.rs	.lingxi
 G3	crates/runtime/src/mobile/local_apps_build.rs	.lingxi-*
@@ -1112,7 +1113,6 @@ G3	crates/runtime/src/mobile/local_apps_host.rs	.lingxi
 G3	crates/runtime/src/mobile/local_apps_host.rs	.lingxi-*
 G3	crates/runtime/src/mobile/local_apps_host.rs	LINGXI.md
 G3	crates/runtime/src/mobile/local_apps_host/dependency_install.rs	.lingxi-*
-G3	crates/runtime/src/mobile/local_apps_host/dependency_integrity.rs	.lingxi-*
 G3	crates/runtime/src/mobile/local_apps_host/dependency_recovery.rs	.lingxi-*
 G3	crates/runtime/src/mobile/local_apps_host/tests/tests.rs	.lingxi
 G3	crates/runtime/src/mobile/local_apps_host/tests/tests.rs	.lingxi-*

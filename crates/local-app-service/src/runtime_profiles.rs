@@ -6,36 +6,36 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-pub(crate) const RUNTIME_PROFILE_TOOLCHAIN_KEY: &str = "pnpm@12.5.1/node@26.9.0";
+pub const RUNTIME_PROFILE_TOOLCHAIN_KEY: &str = "pnpm@12.5.1/node@26.9.0";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RuntimeToolchain {
+pub enum RuntimeToolchain {
     Current,
 }
 
 impl RuntimeToolchain {
-    pub(crate) fn key(self) -> &'static str {
+    pub fn key(self) -> &'static str {
         match self {
             Self::Current => RUNTIME_PROFILE_TOOLCHAIN_KEY,
         }
     }
-    pub(crate) fn node_command(self) -> &'static str {
+    pub fn node_command(self) -> &'static str {
         match self {
             Self::Current => "/usr/bin/node",
         }
     }
-    pub(crate) fn pnpm_command(self) -> &'static str {
+    pub fn pnpm_command(self) -> &'static str {
         match self {
             Self::Current => "/usr/bin/pnpm",
         }
     }
-    pub(crate) fn path(self) -> &'static str {
+    pub fn path(self) -> &'static str {
         match self {
             Self::Current => "/usr/bin:/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin",
         }
     }
 }
 
-pub(crate) fn toolchain_for_binding(
+pub fn toolchain_for_binding(
     binding: &AppRuntimeProfileBinding,
 ) -> Result<RuntimeToolchain, AppError> {
     let contract = contract_for_binding(binding)?;
@@ -47,12 +47,12 @@ pub(crate) fn toolchain_for_binding(
     }
 }
 
-pub(crate) const REQUESTED_FILE_REL: &str = ".lingxi/dependencies/requested.json";
-pub(crate) const EFFECTIVE_PACKAGE_FILE_REL: &str = ".lingxi/dependencies/effective-package.json";
-pub(crate) const LOCKFILE_FILE_REL: &str = ".lingxi/dependencies/pnpm-lock.yaml";
-pub(crate) const TREE_PROOF_FILE_REL: &str = ".lingxi/dependencies/tree-proof.json";
-pub(crate) const SBOM_FILE_REL: &str = ".lingxi/dependencies/sbom.spdx.json";
-pub(crate) const SNAPSHOT_FILE_REL: &str = ".lingxi/dependencies/snapshot.json";
+pub const REQUESTED_FILE_REL: &str = ".lingxi/dependencies/requested.json";
+pub const EFFECTIVE_PACKAGE_FILE_REL: &str = ".lingxi/dependencies/effective-package.json";
+pub const LOCKFILE_FILE_REL: &str = ".lingxi/dependencies/pnpm-lock.yaml";
+pub const TREE_PROOF_FILE_REL: &str = ".lingxi/dependencies/tree-proof.json";
+pub const SBOM_FILE_REL: &str = ".lingxi/dependencies/sbom.spdx.json";
+pub const SNAPSHOT_FILE_REL: &str = ".lingxi/dependencies/snapshot.json";
 const EMPTY_REQUESTED_JSON: &[u8] = b"{\n  \"dependencies\": {}\n}\n";
 
 macro_rules! profile_file {
@@ -81,7 +81,7 @@ macro_rules! widget_file {
         )
     };
 }
-pub(crate) const REACT_DOM_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
+pub const REACT_DOM_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("react-dom", ".gitignore"),
     profile_file!("react-dom", "package.json"),
     profile_file!("react-dom", "pnpm-lock.yaml"),
@@ -97,7 +97,7 @@ pub(crate) const REACT_DOM_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("react-dom", "styles/foundation.css"),
 ];
 
-pub(crate) const REACT_DOM_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
+pub const REACT_DOM_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("react-dom", "app/main.jsx"),
     profile_file!("react-dom", "app/app.jsx"),
     profile_file!("react-dom", "app/providers.jsx"),
@@ -115,7 +115,7 @@ pub(crate) const REACT_DOM_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     widget_file!("src/widget.jsx"),
 ];
 
-pub(crate) const CANVAS_2D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
+pub const CANVAS_2D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("canvas-2d", ".gitignore"),
     profile_file!("canvas-2d", "package.json"),
     profile_file!("canvas-2d", "pnpm-lock.yaml"),
@@ -132,7 +132,7 @@ pub(crate) const CANVAS_2D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("canvas-2d", "styles/foundation.css"),
 ];
 
-pub(crate) const CANVAS_2D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
+pub const CANVAS_2D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("canvas-2d", "app/main.jsx"),
     profile_file!("canvas-2d", "app/app.jsx"),
     profile_file!("canvas-2d", "app/providers.jsx"),
@@ -149,7 +149,7 @@ pub(crate) const CANVAS_2D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     widget_file!("src/widget.jsx"),
 ];
 
-pub(crate) const THREE_3D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
+pub const THREE_3D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("three-3d", ".gitignore"),
     profile_file!("three-3d", "package.json"),
     profile_file!("three-3d", "pnpm-lock.yaml"),
@@ -166,7 +166,7 @@ pub(crate) const THREE_3D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("three-3d", "styles/foundation.css"),
 ];
 
-pub(crate) const THREE_3D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
+pub const THREE_3D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("three-3d", "app/main.jsx"),
     profile_file!("three-3d", "app/app.jsx"),
     profile_file!("three-3d", "app/providers.jsx"),
@@ -183,7 +183,7 @@ pub(crate) const THREE_3D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     widget_file!("src/widget.jsx"),
 ];
 
-pub(crate) const PHASER_2D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
+pub const PHASER_2D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("phaser-2d", ".gitignore"),
     profile_file!("phaser-2d", "package.json"),
     profile_file!("phaser-2d", "pnpm-lock.yaml"),
@@ -201,7 +201,7 @@ pub(crate) const PHASER_2D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("phaser-2d", "styles/foundation.css"),
 ];
 
-pub(crate) const PHASER_2D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
+pub const PHASER_2D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("phaser-2d", "app/main.jsx"),
     profile_file!("phaser-2d", "app/app.jsx"),
     profile_file!("phaser-2d", "app/providers.jsx"),
@@ -218,7 +218,7 @@ pub(crate) const PHASER_2D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     widget_file!("src/widget.jsx"),
 ];
 
-pub(crate) const BABYLON_3D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
+pub const BABYLON_3D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("babylon-3d", ".gitignore"),
     profile_file!("babylon-3d", "package.json"),
     profile_file!("babylon-3d", "pnpm-lock.yaml"),
@@ -236,7 +236,7 @@ pub(crate) const BABYLON_3D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("babylon-3d", "styles/foundation.css"),
 ];
 
-pub(crate) const BABYLON_3D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
+pub const BABYLON_3D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("babylon-3d", "app/main.jsx"),
     profile_file!("babylon-3d", "app/app.jsx"),
     profile_file!("babylon-3d", "app/providers.jsx"),
@@ -254,15 +254,15 @@ pub(crate) const BABYLON_3D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
 ];
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RuntimeProfileContract {
-    pub(crate) family: AppRuntimeProfile,
-    pub(crate) revision: u32,
-    pub(crate) surface: AppSurface,
-    pub(crate) source_seed_id: &'static str,
-    pub(crate) toolchain_key: &'static str,
-    pub(crate) core_packages: &'static [(&'static str, &'static str)],
-    pub(crate) managed_files: &'static [(&'static str, &'static [u8])],
-    pub(crate) editable_files: &'static [(&'static str, &'static [u8])],
+pub struct RuntimeProfileContract {
+    pub family: AppRuntimeProfile,
+    pub revision: u32,
+    pub surface: AppSurface,
+    pub source_seed_id: &'static str,
+    pub toolchain_key: &'static str,
+    pub core_packages: &'static [(&'static str, &'static str)],
+    pub managed_files: &'static [(&'static str, &'static [u8])],
+    pub editable_files: &'static [(&'static str, &'static [u8])],
 }
 
 #[derive(Clone, Copy)]
@@ -272,25 +272,25 @@ struct RuntimeProfileUnavailable {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RuntimeProfileCatalogEntry {
-    pub(crate) family: AppRuntimeProfile,
-    pub(crate) revision: u32,
-    pub(crate) surface: AppSurface,
-    pub(crate) toolchain_key: &'static str,
-    pub(crate) core_packages: BTreeMap<&'static str, &'static str>,
-    pub(crate) contract_sha256: String,
-    pub(crate) available: bool,
-    pub(crate) availability_reason: Option<&'static str>,
+pub struct RuntimeProfileCatalogEntry {
+    pub family: AppRuntimeProfile,
+    pub revision: u32,
+    pub surface: AppSurface,
+    pub toolchain_key: &'static str,
+    pub core_packages: BTreeMap<&'static str, &'static str>,
+    pub contract_sha256: String,
+    pub available: bool,
+    pub availability_reason: Option<&'static str>,
 }
 
-pub(crate) struct RuntimeProfileScaffoldArtifacts {
-    pub(crate) binding: AppRuntimeProfileBinding,
-    pub(crate) files: Vec<(&'static str, Vec<u8>)>,
+pub struct RuntimeProfileScaffoldArtifacts {
+    pub binding: AppRuntimeProfileBinding,
+    pub files: Vec<(&'static str, Vec<u8>)>,
 }
 
-pub(crate) struct RuntimeProfileSnapshotArtifacts {
-    pub(crate) snapshot: AppDependencySnapshot,
-    pub(crate) files: Vec<(&'static str, Vec<u8>)>,
+pub struct RuntimeProfileSnapshotArtifacts {
+    pub snapshot: AppDependencySnapshot,
+    pub files: Vec<(&'static str, Vec<u8>)>,
 }
 
 const REACT_DOM_R4_PACKAGES: &[(&str, &str)] = &[
@@ -432,7 +432,7 @@ fn current_catalog_contracts() -> &'static [RuntimeProfileContract] {
     &[REACT_DOM_R4, CANVAS_2D_R4, THREE_3D_R4, PHASER_2D_R4]
 }
 
-pub(crate) fn contract_for_binding(
+pub fn contract_for_binding(
     binding: &AppRuntimeProfileBinding,
 ) -> Result<&'static RuntimeProfileContract, AppError> {
     let contract = published_available_contracts()
@@ -454,7 +454,7 @@ pub(crate) fn contract_for_binding(
     Ok(contract)
 }
 
-pub(crate) fn current_binding_for_family(
+pub fn current_binding_for_family(
     family: AppRuntimeProfile,
 ) -> Result<AppRuntimeProfileBinding, AppError> {
     let contract = published_available_contracts()
@@ -474,8 +474,11 @@ pub(crate) fn current_binding_for_family(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn binding_for_family_revision(
+/// The binding a published, available contract carries for `family` at
+/// `revision`, or `None` when no such contract is published. Fixtures that need
+/// a workspace stamped the way creation stamps it use this instead of going
+/// through a scaffold.
+pub fn binding_for_family_revision(
     family: AppRuntimeProfile,
     revision: u32,
 ) -> Option<AppRuntimeProfileBinding> {
@@ -489,7 +492,7 @@ pub(crate) fn binding_for_family_revision(
         })
 }
 
-pub(crate) fn list_runtime_profiles() -> Vec<RuntimeProfileCatalogEntry> {
+pub fn list_runtime_profiles() -> Vec<RuntimeProfileCatalogEntry> {
     let mut entries = Vec::new();
     for contract in current_catalog_contracts() {
         entries.push(RuntimeProfileCatalogEntry {
@@ -520,7 +523,7 @@ pub(crate) fn list_runtime_profiles() -> Vec<RuntimeProfileCatalogEntry> {
     entries
 }
 
-pub(crate) fn contract_sha256(contract: &RuntimeProfileContract) -> Result<String, AppError> {
+pub fn contract_sha256(contract: &RuntimeProfileContract) -> Result<String, AppError> {
     let descriptor = contract_descriptor(
         contract.family,
         contract.revision,
@@ -617,7 +620,7 @@ fn contract_descriptor(
     ])))
 }
 
-pub(crate) fn lockfile_sha256(contract: &RuntimeProfileContract) -> String {
+pub fn lockfile_sha256(contract: &RuntimeProfileContract) -> String {
     let lockfile = contract
         .managed_files
         .iter()
@@ -627,7 +630,7 @@ pub(crate) fn lockfile_sha256(contract: &RuntimeProfileContract) -> String {
     format!("{:x}", Sha256::digest(lockfile))
 }
 
-pub(crate) fn hash_bytes(bytes: &[u8]) -> String {
+pub fn hash_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
@@ -704,7 +707,7 @@ fn tree_proof_json(tree_sha256: &str, toolchain_key: &str) -> Result<Vec<u8>, Ap
     Ok(bytes)
 }
 
-pub(crate) fn scaffold_artifacts_for_binding(
+pub fn scaffold_artifacts_for_binding(
     binding: &AppRuntimeProfileBinding,
 ) -> Result<RuntimeProfileScaffoldArtifacts, AppError> {
     let contract = contract_for_binding(binding)?;
@@ -724,7 +727,7 @@ pub(crate) fn scaffold_artifacts_for_binding(
     })
 }
 
-pub(crate) fn snapshot_artifacts_for_binding(
+pub fn snapshot_artifacts_for_binding(
     binding: &AppRuntimeProfileBinding,
     requested_sha256: String,
     package_sha256: String,

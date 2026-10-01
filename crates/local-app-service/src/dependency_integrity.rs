@@ -1,5 +1,4 @@
-use crate::mobile::local_app_runtime_profiles::toolchain_for_binding;
-use client::protocol::local_apps::AppDependencyChangeKindDto;
+use crate::runtime_profiles::toolchain_for_binding;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Map;
@@ -12,21 +11,21 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
-pub(super) const DEPENDENCY_SNAPSHOT_VERSION: u8 = 2;
+pub const DEPENDENCY_SNAPSHOT_VERSION: u8 = 2;
 
-pub(super) const DEPENDENCY_SNAPSHOT_READY_FILE: &str = ".lingxi-dependency-ready";
+pub const DEPENDENCY_SNAPSHOT_READY_FILE: &str = ".lingxi-dependency-ready";
 
-pub(super) const MAX_DEPENDENCY_SNAPSHOT_READY_BYTES: u64 = 4 * 1024;
+pub const MAX_DEPENDENCY_SNAPSHOT_READY_BYTES: u64 = 4 * 1024;
 
-pub(super) const DEPENDENCY_SNAPSHOT_INVENTORY_FILE: &str = ".lingxi-dependency-inventory.json";
+pub const DEPENDENCY_SNAPSHOT_INVENTORY_FILE: &str = ".lingxi-dependency-inventory.json";
 
-pub(super) const DEPENDENCY_SNAPSHOT_INVENTORY_SCHEMA_VERSION: u8 = 1;
+pub const DEPENDENCY_SNAPSHOT_INVENTORY_SCHEMA_VERSION: u8 = 1;
 
-pub(super) const MAX_DEPENDENCY_SNAPSHOT_INVENTORY_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_DEPENDENCY_SNAPSHOT_INVENTORY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum DependencyChangeKind {
+pub enum DependencyChangeKind {
     Add,
     Update,
     Remove,
@@ -34,24 +33,14 @@ pub(super) enum DependencyChangeKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct DependencyChange {
-    pub(super) kind: DependencyChangeKind,
-    pub(super) package: String,
+pub struct DependencyChange {
+    pub kind: DependencyChangeKind,
+    pub package: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) version: Option<String>,
+    pub version: Option<String>,
 }
 
-pub(super) fn dependency_change_kind_dto(
-    kind: &DependencyChangeKind,
-) -> AppDependencyChangeKindDto {
-    match kind {
-        DependencyChangeKind::Add => AppDependencyChangeKindDto::Add,
-        DependencyChangeKind::Update => AppDependencyChangeKindDto::Update,
-        DependencyChangeKind::Remove => AppDependencyChangeKindDto::Remove,
-    }
-}
-
-pub(super) fn dependency_change_cache_status(kind: &DependencyChangeKind) -> String {
+pub fn dependency_change_cache_status(kind: &DependencyChangeKind) -> String {
     match kind {
         DependencyChangeKind::Remove => "not_needed".into(),
         DependencyChangeKind::Add | DependencyChangeKind::Update => {
@@ -63,31 +52,31 @@ pub(super) fn dependency_change_cache_status(kind: &DependencyChangeKind) -> Str
     }
 }
 
-pub(super) struct DependencyInstallCompletion {
-    pub(super) lockfile_sha256: String,
-    pub(super) toolchain_key: String,
+pub struct DependencyInstallCompletion {
+    pub lockfile_sha256: String,
+    pub toolchain_key: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct InstalledDependencyPackage {
-    pub(super) name: String,
-    pub(super) version: String,
-    pub(super) license: Option<String>,
+pub struct InstalledDependencyPackage {
+    pub name: String,
+    pub version: String,
+    pub license: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct VerifiedDependencyInventory {
-    pub(super) schema_version: u8,
-    pub(super) toolchain_key: String,
-    pub(super) lock_digest: String,
-    pub(super) tree_digest: String,
-    pub(super) inventory_digest: String,
-    pub(super) packages: Vec<InstalledDependencyPackage>,
+pub struct VerifiedDependencyInventory {
+    pub schema_version: u8,
+    pub toolchain_key: String,
+    pub lock_digest: String,
+    pub tree_digest: String,
+    pub inventory_digest: String,
+    pub packages: Vec<InstalledDependencyPackage>,
 }
 
-pub(super) fn canonicalize_json(value: Value) -> Value {
+pub fn canonicalize_json(value: Value) -> Value {
     match value {
         Value::Object(object) => {
             let ordered = object
@@ -101,7 +90,7 @@ pub(super) fn canonicalize_json(value: Value) -> Value {
     }
 }
 
-pub(super) fn dependency_yaml_scalar(value: &str) -> Result<String, String> {
+pub fn dependency_yaml_scalar(value: &str) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() {
         return Err("dependency lock contains an empty YAML scalar".into());
@@ -128,7 +117,7 @@ pub(super) fn dependency_yaml_scalar(value: &str) -> Result<String, String> {
 /// Host-minted effective package. It does not use package-resolution entries
 /// as proof: the same package can occur there transitively without being a
 /// requested root dependency.
-pub(super) fn pnpm_root_dependency_specifiers(
+pub fn pnpm_root_dependency_specifiers(
     lockfile: &[u8],
 ) -> Result<BTreeMap<String, String>, String> {
     let lockfile = std::str::from_utf8(lockfile)
@@ -175,7 +164,7 @@ pub(super) fn pnpm_root_dependency_specifiers(
     })
 }
 
-pub(super) fn pnpm_document_dependency_specifiers(
+pub fn pnpm_document_dependency_specifiers(
     lockfile: &str,
 ) -> Result<Option<BTreeMap<String, String>>, String> {
     let mut in_importers = false;
@@ -325,7 +314,7 @@ pub(super) fn pnpm_document_dependency_specifiers(
     Ok(Some(specifiers))
 }
 
-pub(super) fn effective_package_dependency_specifiers(
+pub fn effective_package_dependency_specifiers(
     package_json: &[u8],
 ) -> Result<BTreeMap<String, String>, String> {
     let package: Value = serde_json::from_slice(package_json)
@@ -345,7 +334,7 @@ pub(super) fn effective_package_dependency_specifiers(
         .collect()
 }
 
-pub(super) fn validate_resolved_dependency_lock(
+pub fn validate_resolved_dependency_lock(
     package_json: &[u8],
     lockfile: &[u8],
 ) -> Result<(), String> {
@@ -370,7 +359,7 @@ pub(super) fn validate_resolved_dependency_lock(
     ))
 }
 
-pub(super) fn installed_package_manifest(path: &Path) -> bool {
+pub fn installed_package_manifest(path: &Path) -> bool {
     if path.file_name().and_then(|name| name.to_str()) != Some("package.json") {
         return false;
     }
@@ -393,7 +382,7 @@ pub(super) fn installed_package_manifest(path: &Path) -> bool {
             .is_some_and(|name| name.starts_with('@'))
 }
 
-pub(super) fn package_license_string(value: &Value) -> Option<String> {
+pub fn package_license_string(value: &Value) -> Option<String> {
     match value {
         Value::String(value) => Some(value.trim().to_string()).filter(|value| !value.is_empty()),
         Value::Object(object) => object
@@ -406,7 +395,7 @@ pub(super) fn package_license_string(value: &Value) -> Option<String> {
     }
 }
 
-pub(super) fn collect_installed_packages(
+pub fn collect_installed_packages(
     root: &Path,
     packages: &mut BTreeMap<(String, String), Option<String>>,
 ) -> Result<(), String> {
@@ -470,11 +459,11 @@ pub(super) fn collect_installed_packages(
     Ok(())
 }
 
-pub(super) fn dependency_snapshot_inventory_path(snapshot_root: &Path) -> PathBuf {
+pub fn dependency_snapshot_inventory_path(snapshot_root: &Path) -> PathBuf {
     snapshot_root.join(DEPENDENCY_SNAPSHOT_INVENTORY_FILE)
 }
 
-pub(super) fn dependency_inventory_digest(
+pub fn dependency_inventory_digest(
     inventory: &VerifiedDependencyInventory,
 ) -> Result<String, String> {
     let mut unsigned = inventory.clone();
@@ -484,7 +473,7 @@ pub(super) fn dependency_inventory_digest(
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
-pub(super) fn write_verified_dependency_inventory(
+pub fn write_verified_dependency_inventory(
     snapshot_root: &Path,
     lock_digest: &str,
     tree_digest: &str,
@@ -532,7 +521,7 @@ pub(super) fn write_verified_dependency_inventory(
 /// Read only an inventory whose provenance and content digest match the
 /// immutable snapshot it sits beside.  A malformed or stale sidecar is a
 /// cache miss, never permission to trust a tree or an invented ready state.
-pub(super) fn read_verified_dependency_inventory(
+pub fn read_verified_dependency_inventory(
     snapshot_root: &Path,
     lock_digest: &str,
     tree_digest: &str,
@@ -594,7 +583,7 @@ pub(super) fn read_verified_dependency_inventory(
     Ok(Some(packages))
 }
 
-pub(super) fn spdx_ref_for_package(name: &str, version: &str) -> String {
+pub fn spdx_ref_for_package(name: &str, version: &str) -> String {
     let normalized = format!("{name}-{version}")
         .chars()
         .map(|ch| match ch {
@@ -607,7 +596,7 @@ pub(super) fn spdx_ref_for_package(name: &str, version: &str) -> String {
     format!("SPDXRef-Package-{normalized}-{digest}")
 }
 
-pub(super) fn installed_dependency_sbom(
+pub fn installed_dependency_sbom(
     node_modules_root: &Path,
     binding: &local_apps::AppRuntimeProfileBinding,
     tree_sha256: &str,
@@ -615,7 +604,7 @@ pub(super) fn installed_dependency_sbom(
     installed_dependency_sbom_with_inventory(node_modules_root, binding, tree_sha256, None)
 }
 
-pub(super) fn installed_dependency_sbom_with_inventory(
+pub fn installed_dependency_sbom_with_inventory(
     node_modules_root: &Path,
     binding: &local_apps::AppRuntimeProfileBinding,
     tree_sha256: &str,
@@ -777,7 +766,7 @@ pub(super) fn installed_dependency_sbom_with_inventory(
     Ok(bytes)
 }
 
-pub(super) fn validate_dependency_tree(root: &Path) -> Result<(), String> {
+pub fn validate_dependency_tree(root: &Path) -> Result<(), String> {
     let metadata = std::fs::symlink_metadata(root)
         .map_err(|error| format!("inspect dependency tree {}: {error}", root.display()))?;
     if metadata.file_type().is_symlink() {
@@ -795,10 +784,10 @@ pub(super) fn validate_dependency_tree(root: &Path) -> Result<(), String> {
     validate_dependency_lifecycle_scripts(root)
 }
 
-pub(super) const FORBIDDEN_DEPENDENCY_LIFECYCLE_SCRIPTS: [&str; 4] =
+pub const FORBIDDEN_DEPENDENCY_LIFECYCLE_SCRIPTS: [&str; 4] =
     ["preinstall", "install", "postinstall", "prepare"];
 
-pub(super) const TRUSTED_TOOLCHAIN_NATIVE_BINDINGS: &[(&str, &str, &str)] = &[
+pub const TRUSTED_TOOLCHAIN_NATIVE_BINDINGS: &[(&str, &str, &str)] = &[
     (
         "@rolldown/binding-linux-arm64-musl",
         "1.2.6",
@@ -841,7 +830,7 @@ pub(super) const TRUSTED_TOOLCHAIN_NATIVE_BINDINGS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-pub(super) const TRUSTED_TOOLCHAIN_LIFECYCLE_SCRIPTS: &[(&str, &str, &[&str])] = &[
+pub const TRUSTED_TOOLCHAIN_LIFECYCLE_SCRIPTS: &[(&str, &str, &[&str])] = &[
     ("@modelcontextprotocol/ext-apps", "2.0.0", &["prepare"]),
     ("balanced-match", "4.0.4", &["prepare"]),
     ("brace-expansion", "5.0.9", &["prepare"]),
@@ -863,7 +852,7 @@ pub(super) const TRUSTED_TOOLCHAIN_LIFECYCLE_SCRIPTS: &[(&str, &str, &[&str])] =
     ("vite-plugin-singlefile", "2.3.3", &["prepare"]),
 ];
 
-pub(super) fn trusted_toolchain_lifecycle_scripts(
+pub fn trusted_toolchain_lifecycle_scripts(
     package: &str,
     version: &str,
 ) -> Option<&'static [&'static str]> {
@@ -874,7 +863,7 @@ pub(super) fn trusted_toolchain_lifecycle_scripts(
     )
 }
 
-pub(super) fn dependency_package_path(package: &str) -> PathBuf {
+pub fn dependency_package_path(package: &str) -> PathBuf {
     let mut path = PathBuf::new();
     for part in package.split('/') {
         path.push(part);
@@ -882,7 +871,7 @@ pub(super) fn dependency_package_path(package: &str) -> PathBuf {
     path
 }
 
-pub(super) fn validate_trusted_dependency_manifest(
+pub fn validate_trusted_dependency_manifest(
     dependency_root: &Path,
     package: &str,
     version: &str,
@@ -927,7 +916,7 @@ pub(super) fn validate_trusted_dependency_manifest(
     Ok(())
 }
 
-pub(super) fn trusted_dependency_lifecycle_script_path(
+pub fn trusted_dependency_lifecycle_script_path(
     dependency_root: &Path,
     manifest_path: &Path,
     package: &str,
@@ -958,7 +947,7 @@ pub(super) fn trusted_dependency_lifecycle_script_path(
         .is_some_and(|allowed| allowed.contains(&script)))
 }
 
-pub(super) fn trusted_dependency_native_binding_path(
+pub fn trusted_dependency_native_binding_path(
     path: &Path,
     dependency_root: &Path,
 ) -> Result<bool, String> {
@@ -995,14 +984,14 @@ pub(super) fn trusted_dependency_native_binding_path(
 /// resolver runs with scripts disabled, but retaining a hook in the snapshot
 /// would let a later package-manager invocation execute it. Only explicitly
 /// reviewed fixed-toolchain metadata is exempted.
-pub(super) fn validate_dependency_lifecycle_scripts(root: &Path) -> Result<(), String> {
+pub fn validate_dependency_lifecycle_scripts(root: &Path) -> Result<(), String> {
     let dependency_root = root
         .canonicalize()
         .map_err(|error| format!("canonicalize dependency tree {}: {error}", root.display()))?;
     validate_dependency_lifecycle_scripts_from_root(&dependency_root, &dependency_root)
 }
 
-pub(super) fn validate_dependency_lifecycle_scripts_from_root(
+pub fn validate_dependency_lifecycle_scripts_from_root(
     dependency_root: &Path,
     current: &Path,
 ) -> Result<(), String> {
@@ -1079,7 +1068,7 @@ pub(super) fn validate_dependency_lifecycle_scripts_from_root(
     Ok(())
 }
 
-pub(super) fn validate_dependency_entry(path: &Path, canonical_root: &Path) -> Result<(), String> {
+pub fn validate_dependency_entry(path: &Path, canonical_root: &Path) -> Result<(), String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| format!("inspect dependency tree {}: {error}", path.display()))?;
     if metadata.file_type().is_symlink() {
@@ -1126,7 +1115,7 @@ pub(super) fn validate_dependency_entry(path: &Path, canonical_root: &Path) -> R
     Ok(())
 }
 
-pub(super) fn dependency_attestation(
+pub fn dependency_attestation(
     lock_digest: &str,
     tree_digest: &str,
     toolchain_key: &str,
@@ -1134,7 +1123,7 @@ pub(super) fn dependency_attestation(
     format!("{DEPENDENCY_SNAPSHOT_VERSION}\n{lock_digest}\n{toolchain_key}\n{tree_digest}\n")
 }
 
-pub(super) fn dependency_tree_digest_from_marker(marker: &Path) -> Result<Option<String>, String> {
+pub fn dependency_tree_digest_from_marker(marker: &Path) -> Result<Option<String>, String> {
     let contents = match std::fs::read_to_string(marker) {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -1152,7 +1141,7 @@ pub(super) fn dependency_tree_digest_from_marker(marker: &Path) -> Result<Option
     Ok(Some(lines[3].to_string()))
 }
 
-pub(super) fn dependency_tree_digest(root: &Path) -> Result<String, String> {
+pub fn dependency_tree_digest(root: &Path) -> Result<String, String> {
     let mut files = Vec::new();
     collect_dependency_files(root, Path::new(""), &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1186,7 +1175,7 @@ pub(super) fn dependency_tree_digest(root: &Path) -> Result<String, String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-pub(super) fn collect_dependency_files(
+pub fn collect_dependency_files(
     root: &Path,
     relative: &Path,
     files: &mut Vec<(String, PathBuf)>,
@@ -1221,7 +1210,7 @@ pub(super) fn collect_dependency_files(
     Ok(())
 }
 
-pub(super) fn make_dependency_files_read_only(root: &Path) -> io::Result<()> {
+pub fn make_dependency_files_read_only(root: &Path) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(root)?;
     if metadata.file_type().is_symlink() {
         // Leave the link alone: `set_permissions` FOLLOWS it, so chmod-ing here
@@ -1259,7 +1248,7 @@ pub(super) fn make_dependency_files_read_only(root: &Path) -> io::Result<()> {
 /// Resolution is strict: a shim whose target does not exist is rejected rather
 /// than copied forward as a dangling entry that fails later at `vite` spawn
 /// time with an unrelated message.
-pub(super) fn dependency_symlink_target(
+pub fn dependency_symlink_target(
     path: &Path,
     canonical_root: &Path,
 ) -> Result<PathBuf, String> {
@@ -1279,7 +1268,7 @@ pub(super) fn dependency_symlink_target(
     Ok(resolved)
 }
 
-pub(super) fn clone_or_copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
+pub fn clone_or_copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(source)?;
     if metadata.file_type().is_symlink() {
         // The ROOT being a link is still refused: it would make the whole tree
@@ -1314,19 +1303,19 @@ pub(super) fn clone_or_copy_tree(source: &Path, destination: &Path) -> io::Resul
 }
 
 #[cfg(unix)]
-pub(super) fn recreate_dependency_symlink(target: &Path, destination: &Path) -> io::Result<()> {
+pub fn recreate_dependency_symlink(target: &Path, destination: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, destination)
 }
 
 #[cfg(not(unix))]
-pub(super) fn recreate_dependency_symlink(_target: &Path, _destination: &Path) -> io::Result<()> {
+pub fn recreate_dependency_symlink(_target: &Path, _destination: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "dependency tree symlinks are unsupported on this platform",
     ))
 }
 
-pub(super) fn copy_dependency_tree(
+pub fn copy_dependency_tree(
     source: &Path,
     destination: &Path,
     canonical_source_root: &Path,
@@ -1374,7 +1363,7 @@ pub(super) fn copy_dependency_tree(
     Ok(())
 }
 
-pub(super) fn try_clone_tree(source: &Path, destination: &Path) -> io::Result<()> {
+pub fn try_clone_tree(source: &Path, destination: &Path) -> io::Result<()> {
     use std::process::{Command, Stdio};
 
     let mut command = Command::new("cp");

@@ -2414,6 +2414,7 @@ dependencies = [
  "jsonrpc",
  "lingxi-llm-client",
  "llm-runtime",
+ "local-app-service",
  "local-apps",
  "lsp",
  "lsp-types",
@@ -3291,6 +3292,16 @@ dependencies = [
 [[package]]
 name = "local-app-contracts"
 version = "0.12.0"
+
+[[package]]
+name = "local-app-service"
+version = "0.12.0"
+dependencies = [
+ "local-apps",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "local-apps"

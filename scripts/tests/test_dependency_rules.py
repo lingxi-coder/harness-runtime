@@ -71,6 +71,41 @@ class DependencyRules(unittest.TestCase):
         self.assertEqual(unconditional.returncode, 1)
         self.assertIn("local-apps depends on git2 unconditionally", unconditional.stderr)
 
+    def test_the_service_may_sit_on_the_core_with_its_default_features_off(self):
+        result = self.run_gate(
+            {"local-app-service": "crates/local-app-service", "local-apps": "crates/local-apps",
+             "mcp-wire": "crates/mcp-wire"},
+            {"local-app-service": [{"name": "local-apps", "uses_default_features": False},
+                                   "mcp-wire"]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_service_cannot_depend_on_the_engine(self):
+        for engine in ("core", "client", "mcp", "lsp", "tasks", "permission"):
+            with self.subTest(engine=engine):
+                result = self.run_gate(
+                    {"local-app-service": "crates/local-app-service", engine: f"crates/{engine}"},
+                    {"local-app-service": [engine]})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    f"local-app-service depends on {engine} — a standalone service may reach",
+                    result.stderr)
+
+    def test_the_core_cannot_depend_on_the_service_above_it(self):
+        result = self.run_gate(
+            {"local-apps": "crates/local-apps", "local-app-service": "crates/local-app-service"},
+            {"local-apps": ["local-app-service"]})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("local-apps depends on local-app-service — a standalone service may reach",
+                      result.stderr)
+
+    def test_the_service_cannot_pull_the_core_in_with_its_default_features(self):
+        result = self.run_gate(
+            {"local-app-service": "crates/local-app-service", "local-apps": "crates/local-apps"},
+            {"local-app-service": [{"name": "local-apps", "uses_default_features": True}]})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("local-app-service depends on local-apps with its default features",
+                      result.stderr)
+
     def test_shared_core_cannot_depend_on_telemetry(self):
         result = self.run_gate({"core": "crates/core", "telemetry": "crates/telemetry"},
                                {"core": ["telemetry"]})

@@ -85,7 +85,7 @@ pub mod builtin_bundle;
 #[cfg(feature = "mobile")]
 mod local_app_plugin_binding;
 #[cfg(feature = "mobile")]
-mod local_app_runtime_profiles;
+use local_app_service::runtime_profiles as local_app_runtime_profiles;
 #[cfg(feature = "mobile")]
 mod local_app_template_catalog;
 #[cfg(feature = "mobile")]

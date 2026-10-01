@@ -12,7 +12,7 @@ use client::adapter::ClientEventSink;
 use client::protocol::events::ClientEvent;
 use client::protocol::local_apps::{
     AppAuthorizationDecisionDto, AppCapabilityKindDto, AppDependencyChangeConfirmationRequestDto,
-    AppDependencyChangeDto, AppEventDto, AppRuntimeProfileDto, AppSurfaceDto, AppUiActionKindDto,
+    AppDependencyChangeDto, AppDependencyChangeKindDto, AppEventDto, AppRuntimeProfileDto, AppSurfaceDto, AppUiActionKindDto,
     AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto, LocalAppGateStatusDto,
     LocalAppMcpProposalApprovalRequestDto, LocalAppVerificationStatusDto,
     LocalAppVerificationSummaryDto,
@@ -6681,14 +6681,13 @@ mod approvals;
 mod bridge_operations;
 mod data_operations;
 mod dependency_install;
-mod dependency_integrity;
 mod dependency_recovery;
 mod mcp_publication;
 mod runtime_lifecycle;
 mod static_server;
 
+use local_app_service::dependency_integrity;
 use dependency_integrity::dependency_change_cache_status;
-use dependency_integrity::dependency_change_kind_dto;
 use dependency_integrity::installed_dependency_sbom_with_inventory;
 #[cfg(not(unix))]
 use dependency_integrity::recreate_dependency_symlink;
@@ -6696,6 +6695,17 @@ use dependency_integrity::validate_dependency_lifecycle_scripts;
 use dependency_integrity::validate_resolved_dependency_lock;
 use dependency_integrity::DependencyChange;
 use dependency_integrity::DependencyChangeKind;
+
+/// The wire name of a dependency change kind. The service owns the kind; the
+/// client protocol owns the DTO, so the mapping lives on this side of the seam.
+fn dependency_change_kind_dto(kind: &DependencyChangeKind) -> AppDependencyChangeKindDto {
+    match kind {
+        DependencyChangeKind::Add => AppDependencyChangeKindDto::Add,
+        DependencyChangeKind::Update => AppDependencyChangeKindDto::Update,
+        DependencyChangeKind::Remove => AppDependencyChangeKindDto::Remove,
+    }
+}
+
 use dependency_recovery::DependencyUpdateRecoveryStatus;
 use mcp_publication::mcp_tool_diffs;
 use mcp_publication::mcp_tool_surfaces_from_candidate;

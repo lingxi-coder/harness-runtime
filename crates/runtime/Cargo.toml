@@ -100,6 +100,7 @@ mobile = [
     "workflow",
     "dep:provider-config",
     "dep:local-apps",
+    "dep:local-app-service",
     "dep:mcp-wire",
     "dep:rooted-fs",
     "dep:jsonrpc",
@@ -194,6 +195,7 @@ futures-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 hooks = { path = "../hooks", optional = true }
 jsonrpc = { path = "../jsonrpc", optional = true }
+local-app-service = { path = "../local-app-service", optional = true }
 local-apps = { path = "../local-apps", optional = true }
 lsp = { path = "../lsp", optional = true }
 lsp-types = { version = "0.95", optional = true }

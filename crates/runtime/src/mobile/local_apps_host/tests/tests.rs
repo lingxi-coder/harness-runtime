@@ -7182,8 +7182,8 @@ fn no_host_error_copy_tells_the_model_to_call_an_operation_with_no_tool_row() {
             include_str!("../dependency_install.rs"),
         ),
         (
-            "local_apps_host/dependency_integrity.rs",
-            include_str!("../dependency_integrity.rs"),
+            "local-app-service/src/dependency_integrity.rs",
+            include_str!("../../../../../local-app-service/src/dependency_integrity.rs"),
         ),
         (
             "local_apps_host/dependency_recovery.rs",

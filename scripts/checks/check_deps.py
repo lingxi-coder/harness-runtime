@@ -26,17 +26,27 @@ API_CRATES = {"tool-api", "skill-api", "command-api"}
 # which is exactly what they exist to prevent.
 SHARED_PRIMITIVES = {"local-app-contracts", "mcp-wire", "rooted-fs"}
 
-# The Local App service is being extracted into its own repository, so its
-# production graph may reach the workspace only through the shared primitives.
-# Anything else (core, client, mcp, tasks, permission, ...) would have to come
-# along or be cut again at the move.
-STANDALONE_SERVICES = {"local-apps": SHARED_PRIMITIVES}
+# The Local App crates are being extracted into their own repository, so their
+# production graphs may reach the workspace only through the shared primitives
+# and the layer beneath them. Anything else (core, client, mcp, tasks,
+# permission, ...) would have to come along or be cut again at the move.
+# `local-apps` is the core and sits directly on the primitives;
+# `local-app-service` is the orchestration on top of it.
+STANDALONE_SERVICES = {
+    "local-apps": SHARED_PRIMITIVES,
+    "local-app-service": SHARED_PRIMITIVES | {"local-apps"},
+}
 
 # Native libraries a standalone service may only reach through a feature.
 # libgit2 links C code and one dependency graph may link it once, so the
 # service core cannot demand it: the final binary chooses where git2 comes
 # from, or supplies a checkpoint backend of its own.
 FEATURE_GATED_DEPENDENCIES = {"local-apps": {"git2"}}
+
+# A crate built on one that gates a native library behind a feature must not
+# switch that feature on through default features: the consumer's choice (see
+# FEATURE_GATED_DEPENDENCIES) would be unreachable. It forwards the feature.
+DEFAULT_FEATURES_OFF = {"local-app-service": {"local-apps"}}
 
 # The SDK assembles existing components; components must never reach back into
 # its product profiles or depend on a concrete UI to describe an interaction.
@@ -169,6 +179,20 @@ def main():
             if dep["name"] in gated and dep.get("kind") != "dev" and not dep.get("optional", False):
                 violations.append(
                     "%s depends on %s unconditionally — it must stay behind its feature"
+                    % (n, dep["name"])
+                )
+
+    for n, off in sorted(DEFAULT_FEATURES_OFF.items()):
+        if n not in pkgs:
+            continue
+        for dep in pkgs[n]["dependencies"]:
+            if (
+                dep["name"] in off
+                and dep.get("kind") != "dev"
+                and dep.get("uses_default_features", True)
+            ):
+                violations.append(
+                    "%s depends on %s with its default features — a consumer could not turn them off"
                     % (n, dep["name"])
                 )
 

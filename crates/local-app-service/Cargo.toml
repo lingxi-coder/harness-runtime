@@ -1,0 +1,25 @@
+[package]
+name = "local-app-service"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["git-checkpoints"]
+# Forwards `local-apps`' libgit2 checkpoints. libgit2 links native code and one
+# dependency graph may link it once, so a consumer that brings its own
+# `CheckpointBackend` turns this off (`default-features = false`) and the final
+# binary decides where git2 comes from.
+git-checkpoints = ["local-apps/git-checkpoints"]
+
+[dependencies]
+# `default-features = false` is load-bearing: the feature above is the only way
+# the service reaches git2, so the consumer's choice is the one that applies.
+local-apps = { path = "../local-apps", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+
+[lints]
+workspace = true
