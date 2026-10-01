@@ -193,9 +193,9 @@ futures-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 hooks = { path = "../hooks", optional = true }
 jsonrpc = { path = "../jsonrpc", optional = true }
-local-app-contracts = { path = "../local-app-contracts", optional = true }
-local-app-service = { path = "../local-app-service", optional = true }
-local-apps = { path = "../local-apps", optional = true }
+local-app-contracts = { workspace = true, optional = true }
+local-app-service = { workspace = true, optional = true }
+local-apps = { workspace = true, optional = true }
 lsp = { path = "../lsp", optional = true }
 lsp-types = { version = "0.95", optional = true }
 mcp = { path = "../mcp", optional = true }
@@ -212,7 +212,7 @@ platform-posix = { path = "../platforms/posix", optional = true }
 platform-posix-minimal = { path = "../platforms/posix-minimal", optional = true }
 plugin = { path = "../plugin", optional = true }
 provider-config = { path = "../provider-config", optional = true }
-rooted-fs = { path = "../rooted-fs", optional = true }
+rooted-fs = { workspace = true, optional = true }
 sandbox = { path = "../sandbox", optional = true }
 sandbox-runtime = { path = "../sandbox-runtime", optional = true }
 secret = { path = "../secret", optional = true }
@@ -255,7 +255,7 @@ uuid = { version = "1.10", optional = true }
 workflow = { path = "../workflow", optional = true }
 
 [build-dependencies]
-local-apps = { path = "../local-apps", optional = true }
+local-apps = { workspace = true, optional = true }
 serde_json = { workspace = true }
 
 [target."cfg(unix)".dependencies]

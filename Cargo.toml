@@ -174,6 +174,17 @@ platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git
 # prefix, brand name). Path is workspace-root-relative so every member uses
 # `branding.workspace = true` regardless of its own depth.
 branding = { path = "crates/branding" }
+
+# The Local App project's crates. They are about to leave for a repository of their own; everything outside them names
+# them through this table, so that move is a change to these lines and to nothing else. Paths are workspace-root-relative,
+# as for `branding`.
+device-api = { path = "crates/device-api" }
+local-app-contracts = { path = "crates/local-app-contracts" }
+local-app-plugin = { path = "crates/local-app-plugin" }
+local-app-service = { path = "crates/local-app-service" }
+local-apps = { path = "crates/local-apps" }
+mcp-wire = { path = "crates/mcp-wire" }
+rooted-fs = { path = "crates/rooted-fs" }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps `serde_json::Map` keys in insertion order across
 # Value round-trips. Required for claude-code wire-byte fidelity: outbound

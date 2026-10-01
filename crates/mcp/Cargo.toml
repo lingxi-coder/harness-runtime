@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 core = { path = "../core" }
-mcp-wire = { path = "../mcp-wire" }
+mcp-wire = { workspace = true }
 jsonrpc = { path = "../jsonrpc" }
 # Local-scope MCP servers live in `~/.claude.json` projects[<cwd-key>].mcpServers;
 # the canonical project key is resolved by migrations::global_config.

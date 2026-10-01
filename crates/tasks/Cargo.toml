@@ -37,7 +37,7 @@ tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
 # mirrors from a copied corpus -- see that module's `MIRRORED GRAMMAR` docs).
 # The crate has no dependencies, so unlike the service it used to name here it
 # adds nothing to the test build.
-local-app-contracts = { path = "../local-app-contracts" }
+local-app-contracts = { workspace = true }
 
 [lints]
 workspace = true
