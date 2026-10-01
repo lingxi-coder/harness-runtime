@@ -2255,7 +2255,10 @@ fn apply_materialized_local_app_collections_with_identity(
         };
         let schemas = checked_in_local_app_schemas()?;
         let catalog =
-            crate::mobile::local_app_template_catalog::catalog_view().map_err(|error| {
+            crate::mobile::local_app_template_catalog::catalog_view(
+                &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+            )
+            .map_err(|error| {
                 tool_workflow::WorkflowLaunchError(format!(
                     "cannot read verified template catalog: {error}"
                 ))
@@ -3042,7 +3045,10 @@ fn enrich_persisted_plugin_workflow_context(
                 ))
             },
         )?;
-    let catalog = crate::mobile::local_app_template_catalog::catalog_view().map_err(|error| {
+    let catalog = crate::mobile::local_app_template_catalog::catalog_view(
+        &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+    )
+    .map_err(|error| {
         tool_workflow::WorkflowLaunchError(format!(
             "cannot read verified template catalog: {error}"
         ))

@@ -4147,7 +4147,9 @@ async fn approved_create_receipt_with_design(
 ) -> (String, String) {
     let workflow_run_id = format!("wf_create_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         app_id,
@@ -4696,7 +4698,9 @@ async fn staged_create_approval_does_not_author_or_enable_mcp() {
     let shell = shell_app_fixture(&broker, &service).await;
     let workflow_run_id = format!("wf_plain_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
@@ -4897,7 +4901,9 @@ async fn stage_create_after_approval_is_refused_and_cannot_rewrite_the_approved_
     // touch the approved run's bytes.
     let second_workflow_run_id = format!("wf_restage_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
@@ -4959,7 +4965,9 @@ async fn staged_evidence_missing_name_or_brief_is_a_named_hard_fail() {
             uuid::Uuid::new_v4().simple()
         );
         let catalog =
-            crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+            crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
         let selector_capability =
             crate::mobile::local_app_template_catalog::issue_selector_capability(
                 &broker.root,
@@ -5056,7 +5064,9 @@ async fn a_failed_stage_create_reclaims_its_partial_staging_tree() {
     let shell = shell_app_fixture(&broker, &service).await;
     let workflow_run_id = format!("wf_partial_stage_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
@@ -5126,7 +5136,9 @@ async fn a_committed_staging_tree_survives_a_later_failed_stage_create() {
     let shell = shell_app_fixture(&broker, &service).await;
     let workflow_run_id = format!("wf_committed_stage_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
@@ -5200,7 +5212,9 @@ async fn a_design_spec_that_does_not_match_its_recorded_digest_is_a_named_hard_f
     let shell = shell_app_fixture(&broker, &service).await;
     let workflow_run_id = format!("wf_design_digest_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
@@ -5313,7 +5327,9 @@ async fn approve_mcp_proposal_reuses_an_already_approved_create_journal_without_
     let shell = shell_app_fixture(&broker, &_service).await;
     let workflow_run_id = format!("wf_reuse_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
@@ -5522,7 +5538,9 @@ async fn create_review_surface_binds_staged_design_spec_digest() {
     let shell = shell_app_fixture(&broker, &service).await;
     let workflow_run_id = format!("wf_design_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
@@ -5605,7 +5623,9 @@ async fn unscaffolded_create_scaffolds_builds_and_promotes_from_a_staged_candida
 
     let workflow_run_id = format!("wf_e2e_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
@@ -5868,7 +5888,9 @@ async fn staged_mcp_intent_survives_create_and_reaches_the_formal_contract() {
 
     let workflow_run_id = format!("wf_mcp_intent_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
@@ -6065,7 +6087,9 @@ async fn a_staged_declined_mcp_intent_survives_the_staging_seam() {
 
     let workflow_run_id = format!("wf_mcp_declined_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
@@ -6134,7 +6158,9 @@ async fn create_scaffold_seed_rejects_a_staged_template_file_tampered_after_stag
 
     let workflow_run_id = format!("wf_tamper_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
@@ -6823,7 +6849,9 @@ async fn a_refused_native_create_approval_cleans_up_the_candidate_state() {
     let shell = shell_app_fixture(&broker, &service).await;
     let workflow_run_id = format!("wf_drop_create_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
@@ -9583,7 +9611,9 @@ async fn scaffolding_a_formed_app_is_rejected() {
 
     let workflow_run_id = format!("wf_rescaffold_{}", uuid::Uuid::new_v4().simple());
     let catalog =
-        crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+        crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
     let selector_capability = crate::mobile::local_app_template_catalog::issue_selector_capability(
         &broker.root,
         &shell.id,
@@ -9688,7 +9718,9 @@ async fn stage_create_rejects_an_over_long_name_or_brief() {
     ) -> Value {
         let workflow_run_id = format!("wf_bound_{}", uuid::Uuid::new_v4().simple());
         let catalog =
-            crate::mobile::local_app_template_catalog::catalog_view().expect("template catalog");
+            crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ).expect("template catalog");
         let selector_capability =
             crate::mobile::local_app_template_catalog::issue_selector_capability(
                 &broker.root,

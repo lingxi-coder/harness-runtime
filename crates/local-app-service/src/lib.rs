@@ -27,4 +27,5 @@ pub mod llm;
 pub mod plan_approval;
 pub mod publication;
 pub mod runtime_profiles;
+pub mod template_catalog;
 pub mod worker;

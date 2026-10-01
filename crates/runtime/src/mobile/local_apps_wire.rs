@@ -888,13 +888,17 @@ pub(crate) fn broker_with_client_sink(
     full_runtime: bool,
     runtime_root: Option<std::path::PathBuf>,
 ) -> Arc<crate::mobile::local_apps_host::LocalAppsHostBroker> {
-    crate::mobile::local_apps_host::LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
         root,
         ClientSinkAdapter::new(sink),
         mobile_linux.map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new),
         full_runtime,
         runtime_root,
-    )
+    );
+    let _ = broker.attach_plugin_bundle(Arc::new(
+        crate::mobile::local_apps_adapters::CompiledPluginBundle,
+    ));
+    broker
 }
 
 /// [`broker_with_client_sink`] with the device's physical memory stated.
@@ -907,14 +911,18 @@ pub(crate) fn broker_with_client_sink_and_memory(
     runtime_root: Option<std::path::PathBuf>,
     physical_memory_bytes: u64,
 ) -> Arc<crate::mobile::local_apps_host::LocalAppsHostBroker> {
-    crate::mobile::local_apps_host::LocalAppsHostBroker::new_with_physical_memory(
+    let broker = crate::mobile::local_apps_host::LocalAppsHostBroker::new_with_physical_memory(
         root,
         ClientSinkAdapter::new(sink),
         mobile_linux.map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::new),
         full_runtime,
         runtime_root,
         physical_memory_bytes,
-    )
+    );
+    let _ = broker.attach_plugin_bundle(Arc::new(
+        crate::mobile::local_apps_adapters::CompiledPluginBundle,
+    ));
+    broker
 }
 
 #[cfg(test)]

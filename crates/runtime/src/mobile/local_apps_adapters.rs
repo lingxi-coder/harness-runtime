@@ -19,6 +19,7 @@ use local_app_service::host::{BuildExecutor, DiagnosticsProvider};
 use local_app_service::publication::{
     Exposure, ManagedApp, ManagedRuntime, McpPublisher, Published, WidgetResource,
 };
+use local_app_service::template_catalog::PluginBundle;
 use lsp::diagnostic_registry::{DiagnosticFreshness, DiagnosticSettleState};
 use mobile_linux_api::MobileLinuxRuntime;
 use serde_json::Value;
@@ -102,6 +103,19 @@ impl OutputStream for AgentOutputRouter {
     }
 
     async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
+}
+
+/// The plugin bundle compiled into this build, as the template catalog reads it.
+pub(crate) struct CompiledPluginBundle;
+
+impl PluginBundle for CompiledPluginBundle {
+    fn catalog_bytes(&self) -> &[u8] {
+        crate::mobile::builtin_bundle::compiled_plugin_catalog_bytes()
+    }
+
+    fn bundle_sha256(&self) -> &str {
+        crate::mobile::builtin_bundle::compiled_plugin_bundle_digest()
+    }
 }
 
 /// Diagnostics from the engine's language-server registry.

@@ -3042,6 +3042,9 @@ pub fn build_mobile_engine_inner(
                 firer_cfg.local_apps_runtime_root.clone(),
                 firer_cfg.physical_memory_bytes,
             );
+            let _ = host.attach_plugin_bundle(Arc::new(
+                crate::mobile::local_apps_adapters::CompiledPluginBundle,
+            ));
             (Err(error), host, None, None, None, None)
         }
     };

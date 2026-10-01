@@ -21,6 +21,7 @@ use local_app_service::host::HostEvent;
 use local_app_service::host::HostEventSink;
 use local_app_service::plan_approval::CreateApprovalAuthority;
 use local_app_service::publication::McpPublisher;
+use local_app_service::template_catalog::PluginBundle;
 use local_apps::{
     load_manifest, load_mcp_settings, load_permissions, mcp_catalog_tool_names, save_mcp_settings,
     AppCapability, AppDependencyState, AppLayout, AppMcpSettings, AppRuntimeState, AppService,
@@ -922,6 +923,7 @@ pub(crate) struct LocalAppsHostBroker {
     runtime_configuration: RwLock<LocalAppsRuntimeConfiguration>,
     service: OnceLock<Arc<AppService>>,
     publisher: OnceLock<Arc<dyn McpPublisher>>,
+    plugin_bundle: OnceLock<Arc<dyn PluginBundle>>,
     /// The same mobile LSP registry used by plugin materialization and file
     /// tools. A weak reference avoids keeping language-server processes alive
     /// after the owning engine connection is torn down.
@@ -1138,6 +1140,7 @@ impl LocalAppsHostBroker {
             }),
             service: OnceLock::new(),
             publisher: OnceLock::new(),
+            plugin_bundle: OnceLock::new(),
             diagnostics: OnceLock::new(),
             llm: OnceLock::new(),
             device: OnceLock::new(),
@@ -1214,6 +1217,21 @@ impl LocalAppsHostBroker {
         publisher: Arc<dyn McpPublisher>,
     ) -> Result<(), Arc<dyn McpPublisher>> {
         self.publisher.set(publisher)
+    }
+
+    pub(crate) fn attach_plugin_bundle(
+        &self,
+        bundle: Arc<dyn PluginBundle>,
+    ) -> Result<(), Arc<dyn PluginBundle>> {
+        self.plugin_bundle.set(bundle)
+    }
+
+    /// The verified plugin bundle the template catalog is read from.
+    fn plugin_bundle(&self) -> Result<Arc<dyn PluginBundle>, String> {
+        self.plugin_bundle
+            .get()
+            .cloned()
+            .ok_or_else(|| "the Local App plugin bundle is not available".to_string())
     }
 
     /// Where this host publishes apps' MCP tools, when it can right now.
@@ -1545,6 +1563,7 @@ impl LocalAppsHostBroker {
     ) -> Result<crate::mobile::local_app_template_catalog::ValidatedTemplateSelection, String> {
         let handle = self.create_selection_handle_for_run(app_id, workflow_run_id)?;
         crate::mobile::local_app_template_catalog::resolve_typed(
+            self.plugin_bundle()?.as_ref(),
             &self.root,
             app_id,
             workflow_run_id,
@@ -4069,7 +4088,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
     }
 
     async fn template_catalog(&self, _input: Value) -> Result<Value, String> {
-        let view = crate::mobile::local_app_template_catalog::catalog_view()?;
+        let view =
+            crate::mobile::local_app_template_catalog::catalog_view(self.plugin_bundle()?.as_ref())?;
         serde_json::to_value(view).map_err(|error| format!("serialize template catalog: {error}"))
     }
 
@@ -4091,6 +4111,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             return Err("template_selection_rejected: app is already scaffolded; update/verify must use its persisted profile".into());
         }
         crate::mobile::local_app_template_catalog::validate_and_journal(
+            self.plugin_bundle()?.as_ref(),
             &self.root,
             app_id,
             workflow_run_id,
@@ -4107,6 +4128,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             .await
             .map_err(|error| error.to_string())?;
         crate::mobile::local_app_template_catalog::resolve(
+            self.plugin_bundle()?.as_ref(),
             &self.root,
             app_id,
             workflow_run_id,
@@ -4203,6 +4225,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             }
         }
         let selection = crate::mobile::local_app_template_catalog::resolve_typed(
+            self.plugin_bundle()?.as_ref(),
             &self.root,
             app_id,
             workflow_run_id,

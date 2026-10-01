@@ -663,6 +663,7 @@ fn qa_scope_for_contract(
 }
 
 fn checked_binding(
+    bundle: &dyn local_app_service::template_catalog::PluginBundle,
     manifest: &local_apps::AppManifest,
     app_id: &str,
     workflow_run_id: &str,
@@ -673,7 +674,13 @@ fn checked_binding(
         return Ok(binding);
     }
     let handle = required_string(input, "validated_selection_handle")?;
-    crate::mobile::local_app_template_catalog::resolve_typed(root, app_id, workflow_run_id, handle)
+    crate::mobile::local_app_template_catalog::resolve_typed(
+        bundle,
+        root,
+        app_id,
+        workflow_run_id,
+        handle,
+    )
         .map(|selection| selection.runtime_profile)
         .map_err(|error| error.to_string())
 }
@@ -1129,7 +1136,14 @@ impl LocalAppsHostBroker {
                 .map_err(|error| format!("authoring spec invalid: {error}"))?;
                 let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
                 let binding =
-                    checked_binding(&manifest, &app_id, workflow_run_id, &self.root, &input)?;
+                    checked_binding(
+                        self.plugin_bundle()?.as_ref(),
+                        &manifest,
+                        &app_id,
+                        workflow_run_id,
+                        &self.root,
+                        &input,
+                    )?;
                 let revision = active_contract_optional(&layout)?
                     .map(|(_, contract)| contract.revision.saturating_add(1))
                     .unwrap_or(1);

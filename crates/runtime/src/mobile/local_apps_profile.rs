@@ -160,6 +160,9 @@ impl ProfileApps {
             runtime_root,
             physical_memory_bytes,
         );
+        let _ = host.attach_plugin_bundle(Arc::new(
+            crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        ));
         let domain_events = Arc::new(AppEventFanout::new());
         let service = Arc::new(AppService::load(root, clock, domain_events.clone()).await?);
         host.attach_service(service.clone())

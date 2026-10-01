@@ -333,6 +333,7 @@ impl LocalAppsHostBroker {
                 // similar one.
                 let (handle, selection) =
                     crate::mobile::local_app_template_catalog::journal_plan_selection(
+                        self.plugin_bundle()?.as_ref(),
                         &self.root,
                         &app_id,
                         &execution_id,

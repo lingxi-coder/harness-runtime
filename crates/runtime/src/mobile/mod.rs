@@ -87,7 +87,7 @@ mod local_app_plugin_binding;
 #[cfg(feature = "mobile")]
 use local_app_service::runtime_profiles as local_app_runtime_profiles;
 #[cfg(feature = "mobile")]
-mod local_app_template_catalog;
+use local_app_service::template_catalog as local_app_template_catalog;
 #[cfg(feature = "mobile")]
 mod local_apps_build;
 #[cfg(feature = "mobile")]
