@@ -54,18 +54,12 @@ where
 
 /// 签入的 plugin workflow 脚本目录。
 fn workflow_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../plugins/lingxi-local-app/workflows")
+    local_app_plugin::root().join("workflows")
 }
 
 fn authoring_spec() -> serde_json::Value {
-    serde_json::from_str(
-        &std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"),
-        )
-        .expect("read the Host-valid checked-in AuthoringSpec fixture"),
-    )
-    .expect("parse the Host-valid checked-in AuthoringSpec fixture")
+    serde_json::from_str(local_app_plugin::fixtures::AUTHORING_SPEC_VALID_NULL_CANVAS)
+        .expect("parse the Host-valid checked-in AuthoringSpec fixture")
 }
 
 fn workflow_schemas() -> serde_json::Value {
@@ -220,14 +214,9 @@ fn qa_candidate_report(
             "resolved_by_evidence_ids": []
         }])
     };
-    let mut result: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../local-apps/tests/fixtures/qa-result.valid.json"),
-        )
-        .expect("read the Host-valid checked-in QA result fixture"),
-    )
-    .expect("parse the Host-valid checked-in QA result fixture");
+    let mut result: serde_json::Value =
+        serde_json::from_str(local_app_plugin::fixtures::QA_RESULT_VALID)
+            .expect("parse the Host-valid checked-in QA result fixture");
     result["identity"]["app_id"] = serde_json::Value::String("aaaa1111".into());
     result["identity"]["workflow_run_id"] = serde_json::Value::String(workflow_run_id.into());
     result["identity"]["qa_handle"] = serde_json::Value::String(qa_handle.into());
@@ -326,14 +315,9 @@ fn stage_label(options: &str) -> String {
 fn verification_scope_schema_rejects_empty_required_target_lists() {
     let workflow_root = workflow_dir();
     let plugin_root = workflow_root.parent().expect("plugin root");
-    let invalid_fixture: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../local-apps/tests/fixtures/qa-result.invalid-empty-scope.json"),
-        )
-        .expect("read the negative empty verification scope fixture"),
-    )
-    .expect("parse the negative empty verification scope fixture");
+    let invalid_fixture: serde_json::Value =
+        serde_json::from_str(local_app_plugin::fixtures::QA_RESULT_INVALID_EMPTY_SCOPE)
+            .expect("parse the negative empty verification scope fixture");
     let fixture_scope = invalid_fixture["verification_scope"]
         .as_object()
         .expect("negative fixture verification scope");
@@ -1187,8 +1171,7 @@ fn mcp_promotion_uses_a_dedicated_tools_only_agent() {
         "verifier must not own MCP promotion"
     );
     let inventory =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime/builtin-plugin-inventory.txt");
-    let inventory = std::fs::read_to_string(inventory).expect("plugin inventory");
+        std::fs::read_to_string(local_app_plugin::inventory_path()).expect("plugin inventory");
     assert!(
         inventory
             .lines()

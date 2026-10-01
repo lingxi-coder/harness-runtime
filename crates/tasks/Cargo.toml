@@ -38,6 +38,7 @@ tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
 # The crate has no dependencies, so unlike the service it used to name here it
 # adds nothing to the test build.
 local-app-contracts = { workspace = true }
+local-app-plugin = { workspace = true }
 
 [lints]
 workspace = true

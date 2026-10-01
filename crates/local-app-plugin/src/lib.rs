@@ -31,6 +31,18 @@ pub fn inventory_path() -> &'static Path {
     ))
 }
 
+/// The ids the plugin's workflows run under: the plugin's name, a colon, the script's name.
+///
+/// `local-app-build` has no script any more (the main session drives a build through the service's operations), but its id
+/// stays in the list: a host that still receives it must refuse it, and prose that names it would send a model to a
+/// workflow that does not exist. A host keeps its own registry of these ids and tests it against this list; a service tests
+/// that its prose names none of them.
+pub const WORKFLOW_IDS: [&str; 3] = [
+    "lingxi-local-app:local-app-build",
+    "lingxi-local-app:local-app-use-test",
+    "lingxi-local-app:local-app-mcp-authoring",
+];
+
 /// JSON Schemas the plugin owns.
 pub mod schemas {
     /// `authoring-spec.schema.json`.
@@ -89,6 +101,24 @@ mod tests {
     fn the_tree_and_its_inventory_are_where_the_paths_say() {
         assert!(root().join(".lingxi-plugin/plugin.json").is_file());
         assert!(inventory_path().is_file());
+    }
+
+    /// The two workflows that have a script declare the id the list gives them.
+    #[test]
+    fn the_workflow_ids_are_the_ones_the_scripts_declare() {
+        for (script, id) in [
+            (workflows::USE_TEST, WORKFLOW_IDS[1]),
+            (workflows::MCP_AUTHORING, WORKFLOW_IDS[2]),
+        ] {
+            assert!(
+                script.contains(&format!("const WORKFLOW_ID = '{id}';")),
+                "{id} is not what its script declares"
+            );
+        }
+        assert_eq!(WORKFLOW_IDS.len(), 3);
+        assert!(WORKFLOW_IDS
+            .iter()
+            .all(|id| id.starts_with("lingxi-local-app:")));
     }
 
     /// An `include_str!` that names the wrong (but existing) file would still compile; compare each

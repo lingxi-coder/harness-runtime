@@ -3,10 +3,8 @@
 use serde_json::{json, Value};
 
 fn role_schema(role: &str) -> Value {
-    let document: Value = serde_json::from_str(include_str!(
-        "../../plugins/lingxi-local-app/schemas/workflow-agent-results.schema.json"
-    ))
-    .expect("valid checked-in role schemas");
+    let document: Value = serde_json::from_str(local_app_plugin::schemas::WORKFLOW_AGENT_RESULTS)
+        .expect("valid checked-in role schemas");
     let mut schema = document["$defs"][role].clone();
     schema["$defs"] = document["$defs"].clone();
     schema

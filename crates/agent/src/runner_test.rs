@@ -2247,10 +2247,9 @@ fn structured_output_validation_and_cap_helpers() {
 
 #[test]
 fn local_app_operator_schema_requires_complete_host_qa_projection() {
-    let document: serde_json::Value = serde_json::from_str(include_str!(
-        "../../plugins/lingxi-local-app/schemas/workflow-agent-results.schema.json"
-    ))
-    .expect("parse checked-in Local App workflow role schemas");
+    let document: serde_json::Value =
+        serde_json::from_str(local_app_plugin::schemas::WORKFLOW_AGENT_RESULTS)
+            .expect("parse checked-in Local App workflow role schemas");
     let mut schema = document["$defs"]["operator_result"].clone();
     schema["$defs"] = document["$defs"].clone();
     let schema = serde_json::to_string(&schema).expect("serialize operator role schema");

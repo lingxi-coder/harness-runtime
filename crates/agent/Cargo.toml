@@ -37,6 +37,7 @@ tokio = { version = "1", features = ["sync", "fs"] }
 tracing.workspace = true
 
 [dev-dependencies]
+local-app-plugin = { workspace = true }
 test-harness = { path = "../test-harness" }
 tempfile = "3"
 platform-posix = { path = "../platforms/posix" }

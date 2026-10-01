@@ -1727,16 +1727,11 @@ pub(crate) const MCP_AUTHORING_EXTERNAL_ARG_KEYS: &[&str] = &["app_id", "user_go
 // These schemas are Plugin-owned inputs. Embed the checked-in JSON at build
 // time so a workflow launch never reads a workspace-provided schema or lets a
 // caller replace the contract after Plugin verification.
-const AUTHORING_SPEC_SCHEMA_JSON: &str =
-    include_str!("../../../plugins/lingxi-local-app/schemas/authoring-spec.schema.json");
-const QA_REPORT_SCHEMA_JSON: &str =
-    include_str!("../../../plugins/lingxi-local-app/schemas/qa-report.schema.json");
-const USE_TEST_REPORT_SCHEMA_JSON: &str =
-    include_str!("../../../plugins/lingxi-local-app/schemas/use-test-report.schema.json");
-const MCP_PROPOSAL_SCHEMA_JSON: &str =
-    include_str!("../../../plugins/lingxi-local-app/schemas/mcp-proposal.schema.json");
-const WORKFLOW_AGENT_RESULTS_SCHEMA_JSON: &str =
-    include_str!("../../../plugins/lingxi-local-app/schemas/workflow-agent-results.schema.json");
+const AUTHORING_SPEC_SCHEMA_JSON: &str = local_app_plugin::schemas::AUTHORING_SPEC;
+const QA_REPORT_SCHEMA_JSON: &str = local_app_plugin::schemas::QA_REPORT;
+const USE_TEST_REPORT_SCHEMA_JSON: &str = local_app_plugin::schemas::USE_TEST_REPORT;
+const MCP_PROPOSAL_SCHEMA_JSON: &str = local_app_plugin::schemas::MCP_PROPOSAL;
+const WORKFLOW_AGENT_RESULTS_SCHEMA_JSON: &str = local_app_plugin::schemas::WORKFLOW_AGENT_RESULTS;
 
 fn checked_in_local_app_schemas() -> Result<Value, tool_workflow::WorkflowLaunchError> {
     let parse = |name: &str, source: &str| {
@@ -3569,15 +3564,13 @@ mod plugin_args_tests {
         let cases: [(&str, &str, &str, &[&str]); 2] = [
             (
                 crate::mobile::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID,
-                include_str!("../../../plugins/lingxi-local-app/workflows/local-app-use-test.js"),
+                local_app_plugin::workflows::USE_TEST,
                 "const ALLOWED =",
                 USE_TEST_EXTERNAL_ARG_KEYS,
             ),
             (
                 crate::mobile::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID,
-                include_str!(
-                    "../../../plugins/lingxi-local-app/workflows/local-app-mcp-authoring.js"
-                ),
+                local_app_plugin::workflows::MCP_AUTHORING,
                 "const EXTERNAL_KEYS =",
                 MCP_AUTHORING_EXTERNAL_ARG_KEYS,
             ),
@@ -3673,10 +3666,9 @@ mod run_id_tests {
     fn fixture_authoring_spec(
         family: local_apps::AppRuntimeProfile,
     ) -> local_apps::AppAuthoringSpec {
-        let mut spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
-            "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
-        ))
-        .expect("checked-in authoring fixture");
+        let mut spec: local_apps::AppAuthoringSpec =
+            serde_json::from_str(local_app_plugin::fixtures::AUTHORING_SPEC_VALID_NULL_CANVAS)
+                .expect("checked-in authoring fixture");
         if family != local_apps::AppRuntimeProfile::ReactDom {
             spec.design.canvas = Some(local_apps::AppCanvasDesign {
                 scene: "A deterministic fixture scene".into(),

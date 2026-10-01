@@ -101,6 +101,7 @@ mobile = [
     "dep:provider-config",
     "dep:local-apps",
     "dep:local-app-contracts",
+    "dep:local-app-plugin",
     "dep:local-app-service",
     "dep:rooted-fs",
     "dep:jsonrpc",
@@ -194,6 +195,7 @@ futures-util = { workspace = true, optional = true }
 hooks = { path = "../hooks", optional = true }
 jsonrpc = { path = "../jsonrpc", optional = true }
 local-app-contracts = { workspace = true, optional = true }
+local-app-plugin = { workspace = true, optional = true }
 local-app-service = { workspace = true, optional = true }
 local-apps = { workspace = true, optional = true }
 lsp = { path = "../lsp", optional = true }
@@ -255,6 +257,7 @@ uuid = { version = "1.10", optional = true }
 workflow = { path = "../workflow", optional = true }
 
 [build-dependencies]
+local-app-plugin = { workspace = true, optional = true }
 local-apps = { workspace = true, optional = true }
 serde_json = { workspace = true }
 

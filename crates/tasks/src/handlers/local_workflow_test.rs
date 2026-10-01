@@ -4948,12 +4948,7 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
 /// or if any extracted `agentType` has no matching roster file.
 #[test]
 fn plugin_workflow_agent_types_match_shipped_agent_roster() {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let plugin_root = manifest_dir
-        .parent()
-        .expect("tasks/ has a parent")
-        .join("plugins")
-        .join("lingxi-local-app");
+    let plugin_root = local_app_plugin::root().to_path_buf();
     let workflows_dir = plugin_root.join("workflows");
     let agents_dir = plugin_root.join("agents");
 

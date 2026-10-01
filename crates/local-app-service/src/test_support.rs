@@ -203,17 +203,10 @@ impl PluginBundle for CheckedInBundle {
     }
 }
 
-/// The plugin workflow ids the host reserves for its own authority. The
-/// service's prose must never tell the model to launch one of them: the host
-/// authorizes the one workflow a build needs and refuses any other.
-///
-/// The registry these mirror is the host's (`local_app_plugin_binding` in the
-/// runtime); the runtime holds this copy to it with a test of its own.
-pub(crate) const RESERVED_WORKFLOW_IDS: [&str; 3] = [
-    "lingxi-local-app:local-app-build",
-    "lingxi-local-app:local-app-use-test",
-    "lingxi-local-app:local-app-mcp-authoring",
-];
+// The plugin workflow ids the host reserves for its own authority. The service's prose must never tell the model to
+// launch one of them: the host authorizes the one workflow a build needs and refuses any other. The list is the plugin
+// crate's; the host holds its own registry of these ids to that list with a test of its own.
+pub(crate) use local_app_plugin::WORKFLOW_IDS as RESERVED_WORKFLOW_IDS;
 
 /// A broker that reports to `sink` and builds through `executor`, with the
 /// checked-in catalog attached as its plugin bundle.

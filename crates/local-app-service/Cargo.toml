@@ -38,6 +38,8 @@ url = "2"
 uuid = { version = "1.10", features = ["v4"] }
 
 [dev-dependencies]
+# The ids of the plugin's workflows, which the service's prose must not name.
+local-app-plugin = { path = "../local-app-plugin" }
 tempfile = "3.13"
 # Tests build JSON from URLs.
 url = { version = "2", features = ["serde"] }

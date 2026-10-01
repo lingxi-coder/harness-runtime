@@ -307,33 +307,24 @@ mod tests {
         );
     }
     /// The service tests that its prose names none of the workflows the host
-    /// reserves, against a list of its own (`local-app-service`'s
-    /// `test_support::RESERVED_WORKFLOW_IDS`). That list is a copy of this
-    /// module's registry, so a workflow added here and not there would be a
-    /// name the service's prose could start using without any test noticing.
+    /// reserves, against a list of its own
+    /// (`local_app_plugin::WORKFLOW_IDS`, the plugin crate's list of its workflow
+    /// ids). That list mirrors this module's registry, so a workflow added here
+    /// and not there would be a name the service's prose could start using
+    /// without any test noticing.
     #[test]
     fn the_service_test_list_of_reserved_workflow_ids_is_this_registry() {
-        let service_copy = include_str!("../../../local-app-service/src/test_support.rs");
-        let registry = [
+        let mut registry = vec![
             PLUGIN_BUILD_WORKFLOW_ID,
             PLUGIN_USE_TEST_WORKFLOW_ID,
             PLUGIN_MCP_AUTHORING_WORKFLOW_ID,
         ];
-        for id in registry {
-            assert!(
-                service_copy.contains(&format!("\"{id}\"")),
-                "{id} is reserved here but missing from the service's \
-                 RESERVED_WORKFLOW_IDS in local-app-service/src/test_support.rs"
-            );
-        }
-        let listed = service_copy
-            .lines()
-            .filter(|line| line.trim_start().starts_with("\"lingxi-local-app:"))
-            .count();
+        let mut listed = local_app_plugin::WORKFLOW_IDS.to_vec();
+        registry.sort_unstable();
+        listed.sort_unstable();
         assert_eq!(
-            listed,
-            registry.len(),
-            "the service's list names a workflow this registry does not reserve"
+            listed, registry,
+            "the service's list must name exactly the workflows this registry reserves"
         );
     }
 }
