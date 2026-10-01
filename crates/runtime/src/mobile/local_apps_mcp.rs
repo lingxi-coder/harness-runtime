@@ -6,13 +6,15 @@
 //! stdio or remote transport surface.
 
 use async_trait::async_trait;
-use lingxi_core::host::{
+use local_app_service::publication::{McpPublisher, WidgetResource};
+use local_apps::{AppError, AppService};
+use mcp_wire::export::ConversationExport;
+use mcp_wire::transport::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
-use lingxi_core::types::McpConnectionId;
-use local_apps::{AppError, AppService};
+use mcp_wire::McpConnectionId;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -389,7 +391,7 @@ enum LocalAppsMcpScope {
     App(String),
     /// One conversation's exported view of one app. The last-listed surface
     /// is bound at connection creation and checked before each call.
-    ConversationExport(mcp::registry::ConversationExport),
+    ConversationExport(ConversationExport),
 }
 
 impl LocalAppsMcpScope {
@@ -405,7 +407,7 @@ impl LocalAppsMcpScope {
         matches!(self, Self::App(_) | Self::ConversationExport(_))
     }
 
-    fn export(&self) -> Option<&mcp::registry::ConversationExport> {
+    fn export(&self) -> Option<&ConversationExport> {
         match self {
             Self::ConversationExport(scope) => Some(scope),
             _ => None,
@@ -428,7 +430,7 @@ pub struct LocalAppAuditEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExportConnectionScope {
     conversation_id: String,
-    scope: mcp::registry::ConversationExport,
+    scope: ConversationExport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,7 +438,7 @@ struct ExportManagedState {
     registry_attached: bool,
     visible: bool,
     enabled_tools: Option<HashSet<String>>,
-    resource: Option<mcp::registry::ManagedLocalAppResource>,
+    resource: Option<WidgetResource>,
 }
 
 impl Default for ExportManagedState {
@@ -516,7 +518,7 @@ pub struct LocalAppsMcpTransport {
     lingxi_home: OnceLock<PathBuf>,
     service: OnceLock<Arc<AppService>>,
     host: OnceLock<Arc<dyn LocalAppsMcpHost>>,
-    registry: OnceLock<std::sync::Weak<mcp::McpRegistry>>,
+    publisher: OnceLock<Arc<dyn McpPublisher>>,
     session_id: OnceLock<Arc<SessionIdProvider>>,
     /// The connection's working directory, remembered at boot. Unlike
     /// [`SessionIdProvider`] this needs no closure: a connection's cwd is fixed
@@ -640,7 +642,7 @@ impl LocalAppsMcpTransport {
         app_id: &str,
         listed_tool_surface_sha256: &str,
     ) -> Result<Self, String> {
-        let scope = mcp::registry::ConversationExport::new(app_id, listed_tool_surface_sha256)
+        let scope = ConversationExport::new(app_id, listed_tool_surface_sha256)
             .map_err(|error| error.to_string())?;
         let mut scoped = Self::with_scope(
             self.root.clone(),
@@ -655,8 +657,8 @@ impl LocalAppsMcpTransport {
         if let Some(value) = self.host.get() {
             let _ = scoped.host.set(value.clone());
         }
-        if let Some(value) = self.registry.get() {
-            let _ = scoped.registry.set(value.clone());
+        if let Some(value) = self.publisher.get() {
+            let _ = scoped.publisher.set(value.clone());
         }
         if let Some(value) = self.session_id.get() {
             let _ = scoped.session_id.set(value.clone());
@@ -684,7 +686,7 @@ impl LocalAppsMcpTransport {
             lingxi_home: OnceLock::new(),
             service: OnceLock::new(),
             host: OnceLock::new(),
-            registry: OnceLock::new(),
+            publisher: OnceLock::new(),
             session_id: OnceLock::new(),
             origin_cwd: OnceLock::new(),
             init_session_minter: OnceLock::new(),
@@ -781,8 +783,8 @@ impl LocalAppsMcpTransport {
         if let Some(value) = self.host.get() {
             let _ = scoped.host.set(value.clone());
         }
-        if let Some(value) = self.registry.get() {
-            let _ = scoped.registry.set(value.clone());
+        if let Some(value) = self.publisher.get() {
+            let _ = scoped.publisher.set(value.clone());
         }
         if let Some(value) = self.session_id.get() {
             let _ = scoped.session_id.set(value.clone());
@@ -890,11 +892,11 @@ impl LocalAppsMcpTransport {
         self.host.set(host)
     }
 
-    pub fn attach_registry(
+    pub fn attach_publisher(
         &self,
-        registry: std::sync::Weak<mcp::McpRegistry>,
-    ) -> Result<(), std::sync::Weak<mcp::McpRegistry>> {
-        self.registry.set(registry)
+        publisher: Arc<dyn McpPublisher>,
+    ) -> Result<(), Arc<dyn McpPublisher>> {
+        self.publisher.set(publisher)
     }
 
     fn service(&self) -> Result<&Arc<AppService>, McpError> {
@@ -964,25 +966,28 @@ impl LocalAppsMcpTransport {
     }
 
     async fn export_managed_state(&self, app_id: &str) -> Result<ExportManagedState, McpError> {
-        let Some(registry) = self.registry.get().and_then(std::sync::Weak::upgrade) else {
+        let Some(publisher) = self
+            .publisher
+            .get()
+            .filter(|publisher| publisher.available())
+        else {
             return Ok(ExportManagedState::default());
         };
-        let Some(_server) = registry.managed_local_app(app_id).await else {
+        let published = publisher.published(app_id).await;
+        if published.server_name.is_none() {
             return Ok(ExportManagedState {
                 registry_attached: true,
                 visible: false,
                 ..ExportManagedState::default()
             });
-        };
-        let runtime = registry.managed_local_app_runtime(app_id).await;
+        }
         Ok(ExportManagedState {
             registry_attached: true,
-            visible: runtime.as_ref().is_none_or(|runtime| runtime.enabled),
-            enabled_tools: runtime
-                .as_ref()
-                .and_then(|runtime| runtime.enabled_tools.as_ref())
-                .map(|tools| tools.iter().cloned().collect()),
-            resource: runtime.and_then(|runtime| runtime.resource),
+            visible: published.enabled.is_none_or(|enabled| enabled),
+            enabled_tools: published
+                .enabled_tools
+                .map(|tools| tools.into_iter().collect()),
+            resource: published.widget,
         })
     }
 
@@ -1943,7 +1948,7 @@ impl LocalAppsMcpTransport {
 
     fn active_catalog_tools(
         &self,
-        scope: &mcp::registry::ConversationExport,
+        scope: &ConversationExport,
         managed: &ExportManagedState,
         manifest: &local_apps::AppManifest,
         layout: &local_apps::AppLayout,
@@ -2023,7 +2028,7 @@ impl LocalAppsMcpTransport {
 
     fn active_catalog_entry(
         &self,
-        scope: &mcp::registry::ConversationExport,
+        scope: &ConversationExport,
         managed: &ExportManagedState,
         manifest: &local_apps::AppManifest,
         layout: &local_apps::AppLayout,
@@ -2280,10 +2285,14 @@ impl LocalAppsMcpTransport {
         // not strand an app at a non-zero in-flight count.
         let cancellation = self.cancellation_for(conn.connection_id)?;
         let host = Arc::clone(self.host()?);
-        let registry = self.registry.get().and_then(std::sync::Weak::upgrade);
-        if let Some(registry) = registry.as_ref() {
-            registry
-                .begin_local_app_call(&conversation_id, &scope.app_id)
+        let publisher = self
+            .publisher
+            .get()
+            .filter(|publisher| publisher.available())
+            .cloned();
+        if let Some(publisher) = publisher.as_ref() {
+            publisher
+                .begin_call(&conversation_id, &scope.app_id)
                 .await
                 .map_err(|error| {
                     McpError::Internal(format!("local app exposure invalid: {error}"))
@@ -2342,10 +2351,8 @@ impl LocalAppsMcpTransport {
                 true,
             ),
         };
-        if let Some(registry) = registry.as_ref() {
-            registry
-                .end_local_app_call(&conversation_id, &scope.app_id)
-                .await;
+        if let Some(publisher) = publisher.as_ref() {
+            publisher.end_call(&conversation_id, &scope.app_id).await;
         }
         self.append_export_audit(LocalAppAuditEntry {
             app_id: scope.app_id.clone(),
@@ -3318,7 +3325,7 @@ impl McpTransport for LocalAppsMcpTransport {
                 } else if registry_key == LOCAL_APPS_REGISTRY_KEY {
                     None
                 } else {
-                    mcp::registry::ConversationExport::parse_scoped_registry_key(registry_key)?.map(
+                    ConversationExport::parse_scoped_registry_key(registry_key)?.map(
                         |(conversation_id, scope)| ExportConnectionScope {
                             conversation_id,
                             scope,
@@ -3334,7 +3341,7 @@ impl McpTransport for LocalAppsMcpTransport {
                     spec,
                     McpTransportSpec::InProcess { registry_key }
                         if registry_key == LOCAL_APPS_REGISTRY_KEY
-                            || mcp::registry::ConversationExport::parse_scoped_registry_key(registry_key)
+                            || ConversationExport::parse_scoped_registry_key(registry_key)
                                 .ok()
                                 .flatten()
                                 .is_some()
@@ -4044,7 +4051,11 @@ mod tests {
             .expose_managed_local_app("conversation-1", &record.id, false)
             .await
             .expect("expose app to the scoped conversation");
-        assert!(transport.attach_registry(Arc::downgrade(&registry)).is_ok());
+        assert!(transport
+            .attach_publisher(crate::mobile::local_apps_adapters::RegistryPublisher::new(
+                Arc::downgrade(&registry)
+            ))
+            .is_ok());
         assert!(transport.attach_host(Arc::new(ExportFlowHost)).is_ok());
 
         let connection = transport
@@ -4145,7 +4156,11 @@ mod tests {
             .expose_managed_local_app("conversation-1", &record.id, false)
             .await
             .expect("expose app to the scoped conversation");
-        assert!(transport.attach_registry(Arc::downgrade(&registry)).is_ok());
+        assert!(transport
+            .attach_publisher(crate::mobile::local_apps_adapters::RegistryPublisher::new(
+                Arc::downgrade(&registry)
+            ))
+            .is_ok());
         assert!(transport.attach_host(Arc::new(ExportFlowHost)).is_ok());
 
         let stale_connection = transport
@@ -4277,7 +4292,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(transport.attach_registry(Arc::downgrade(&registry)).is_ok());
+        assert!(transport
+            .attach_publisher(crate::mobile::local_apps_adapters::RegistryPublisher::new(
+                Arc::downgrade(&registry)
+            ))
+            .is_ok());
 
         let connection = transport
             .connect(&McpTransportSpec::InProcess {

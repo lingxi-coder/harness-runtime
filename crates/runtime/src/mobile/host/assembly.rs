@@ -171,7 +171,9 @@ pub(super) async fn build_mobile_inner_with_ask(
     }
     let mcp_registry = Arc::new(mcp_registry);
     local_apps_mcp
-        .attach_registry(Arc::downgrade(&mcp_registry))
+        .attach_publisher(crate::mobile::local_apps_adapters::RegistryPublisher::new(
+            Arc::downgrade(&mcp_registry),
+        ))
         .map_err(|_| {
             MobileBuildError::Orchestrator(
                 "local apps MCP registry was already attached during bootstrap".into(),

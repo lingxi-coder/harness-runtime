@@ -17,7 +17,7 @@ use local_app_contracts::execution::{
 };
 use local_app_service::host::{BuildExecutor, DiagnosticsProvider};
 use local_app_service::publication::{
-    Exposure, ManagedApp, ManagedRuntime, McpPublisher, Published,
+    Exposure, ManagedApp, ManagedRuntime, McpPublisher, Published, WidgetResource,
 };
 use lsp::diagnostic_registry::{DiagnosticFreshness, DiagnosticSettleState};
 use mobile_linux_api::MobileLinuxRuntime;
@@ -362,7 +362,32 @@ impl McpPublisher for RegistryPublisher {
                 .await
                 .map(|managed| managed.scope.server_name()),
             enabled: runtime.as_ref().map(|runtime| runtime.enabled),
-            enabled_tools: runtime.and_then(|runtime| runtime.enabled_tools),
+            enabled_tools: runtime
+                .as_ref()
+                .and_then(|runtime| runtime.enabled_tools.clone()),
+            widget: runtime
+                .and_then(|runtime| runtime.resource)
+                .map(|resource| WidgetResource {
+                    uri: resource.uri,
+                    name: resource.name,
+                    description: resource.description,
+                    mime_type: resource.mime_type,
+                    meta: resource.meta,
+                }),
+        }
+    }
+
+    async fn begin_call(&self, conversation_id: &str, app_id: &str) -> Result<(), String> {
+        self.registry()?
+            .begin_local_app_call(conversation_id, app_id)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    async fn end_call(&self, conversation_id: &str, app_id: &str) {
+        if let Ok(registry) = self.registry() {
+            registry.end_local_app_call(conversation_id, app_id).await;
         }
     }
 
@@ -760,6 +785,57 @@ mod tests {
             .unregister("abc12345")
             .await
             .expect("unregister again");
+    }
+
+    #[tokio::test]
+    async fn a_published_widget_comes_back_with_what_the_host_holds() {
+        let registry = registry();
+        let publisher = RegistryPublisher::new(Arc::downgrade(&registry));
+        let widget = WidgetResource {
+            uri: "ui://local-app/abc12345/widget".into(),
+            name: "Habits".into(),
+            description: Some("Today's habits".into()),
+            mime_type: Some("text/html;profile=mcp-app".into()),
+            meta: Some(serde_json::json!({"ui": {"csp": "none"}})),
+        };
+        publisher
+            .publish(
+                &managed_app("abc12345"),
+                ManagedRuntime {
+                    enabled: true,
+                    enabled_tools: vec!["read_value".into()],
+                    widget: Some(widget.clone()),
+                },
+            )
+            .await
+            .expect("publish");
+        assert_eq!(publisher.published("abc12345").await.widget, Some(widget));
+    }
+
+    #[tokio::test]
+    async fn a_call_lease_needs_an_exposure_and_releasing_twice_is_harmless() {
+        let registry = registry();
+        let publisher = RegistryPublisher::new(Arc::downgrade(&registry));
+        publisher
+            .publish(&managed_app("abc12345"), runtime(true, &["read_value"]))
+            .await
+            .expect("publish");
+        // Published but not exposed to this conversation: no lease.
+        assert!(publisher
+            .begin_call("conversation-1", "abc12345")
+            .await
+            .is_err());
+        registry
+            .expose_managed_local_app("conversation-1", "abc12345", false)
+            .await
+            .expect("expose");
+        publisher
+            .begin_call("conversation-1", "abc12345")
+            .await
+            .expect("lease");
+        publisher.end_call("conversation-1", "abc12345").await;
+        publisher.end_call("conversation-1", "abc12345").await;
+        publisher.end_call("conversation-9", "zzzz9999").await;
     }
 
     #[tokio::test]

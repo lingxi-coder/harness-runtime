@@ -24,7 +24,7 @@ pub struct ManagedApp {
 }
 
 /// A widget the app's tools ask the client to render beside their results.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WidgetResource {
     /// Where the widget is addressed.
     pub uri: String,
@@ -70,6 +70,8 @@ pub struct Published {
     pub enabled: Option<bool>,
     /// The tools live now, if the host has runtime state that names them.
     pub enabled_tools: Option<Vec<String>>,
+    /// The widget its tools use, if the host has runtime state that carries one.
+    pub widget: Option<WidgetResource>,
 }
 
 /// Where the service publishes an app's MCP tools.
@@ -114,6 +116,16 @@ pub trait McpPublisher: Send + Sync {
     /// rather than what the service intended, because it is the truth about
     /// the process.
     async fn published(&self, app_id: &str) -> Published;
+
+    /// Take a call lease on an app exposed to a conversation. The host rejects
+    /// a call it has no room for rather than queueing it without bound, and
+    /// every lease taken must be released with [`end_call`](Self::end_call).
+    async fn begin_call(&self, conversation_id: &str, app_id: &str) -> Result<(), String>;
+
+    /// Release a lease taken by [`begin_call`](Self::begin_call). Releasing one
+    /// that is not held is harmless, so cleanup on a timeout or a cancellation
+    /// cannot become a second failure.
+    async fn end_call(&self, conversation_id: &str, app_id: &str);
 
     /// The apps exposed to a conversation, in no particular order.
     async fn exposures(&self, conversation_id: &str) -> Vec<Exposure>;

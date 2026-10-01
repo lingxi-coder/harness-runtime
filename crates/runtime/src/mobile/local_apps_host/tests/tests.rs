@@ -13201,7 +13201,15 @@ impl local_app_service::publication::McpPublisher for RecordingPublisher {
             server_name: Some(format!("host_named_{app_id}")),
             enabled: Some(true),
             enabled_tools: Some(vec!["host_tool".into()]),
+            widget: None,
         }
+    }
+    async fn begin_call(&self, conversation_id: &str, app_id: &str) -> Result<(), String> {
+        self.record(format!("begin_call {conversation_id} {app_id}"));
+        Ok(())
+    }
+    async fn end_call(&self, conversation_id: &str, app_id: &str) {
+        self.record(format!("end_call {conversation_id} {app_id}"));
     }
     async fn exposures(
         &self,
