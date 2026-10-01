@@ -2,6 +2,9 @@
 
 use super::*;
 use base64::Engine;
+use local_app_contracts::approvals::{VerificationStatus, VerificationSummary};
+use local_app_contracts::events::PublicationState;
+use local_app_service::host::HostEvent;
 use rooted_fs::AtomicWriteOptions;
 use serde::Deserialize;
 use serde_json::Value;
@@ -2022,7 +2025,7 @@ impl LocalAppsHostBroker {
     fn checked_qa_ui_verification_summary(
         &self,
         app_id: &str,
-    ) -> Result<Option<LocalAppVerificationSummaryDto>, String> {
+    ) -> Result<Option<VerificationSummary>, String> {
         let layout = self.layout(app_id)?;
         let pointer_path = qa_active_receipt_path(&layout);
         let pointer =
@@ -2083,17 +2086,14 @@ impl LocalAppsHostBroker {
         {
             return Ok(Some(partial_ui_summary(&result.verification_scope)));
         }
-        Ok(Some(LocalAppVerificationSummaryDto {
-            status: LocalAppVerificationStatusDto::Passed,
+        Ok(Some(VerificationSummary {
+            status: VerificationStatus::Passed,
             summary: "Host UI/data verification evidence passed.".into(),
             code: Some("ui_verification_passed".into()),
         }))
     }
 
-    pub(crate) async fn qa_ui_verification_summary(
-        &self,
-        app_id: &str,
-    ) -> LocalAppVerificationSummaryDto {
+    pub(crate) async fn qa_ui_verification_summary(&self, app_id: &str) -> VerificationSummary {
         match self.checked_qa_ui_verification_summary(app_id) {
             Ok(Some(summary)) => summary,
             Ok(None) => unverified_ui_summary(),
@@ -2120,16 +2120,16 @@ impl LocalAppsHostBroker {
             let publication = local_apps::derive_publication_state(
                 &manifest,
                 active_build_id.as_deref(),
-                ui_verification.status == LocalAppVerificationStatusDto::Passed,
+                ui_verification.status == VerificationStatus::Passed,
             )
             .map_err(|error| error.to_string())?;
             let publication_state = match publication {
-                local_apps::AppPublicationState::Draft => AppWorkflowStateDto::Draft,
+                local_apps::AppPublicationState::Draft => PublicationState::Draft,
                 local_apps::AppPublicationState::PublishedUnverified => {
-                    AppWorkflowStateDto::PublishedUnverified
+                    PublicationState::PublishedUnverified
                 }
                 local_apps::AppPublicationState::PublishedVerified => {
-                    AppWorkflowStateDto::PublishedVerified
+                    PublicationState::PublishedVerified
                 }
             };
             let mcp_verification = if let Some(active) = manifest.active_mcp_catalog.as_ref() {
@@ -2139,28 +2139,28 @@ impl LocalAppsHostBroker {
                     || catalog.get("buildId").and_then(Value::as_str)
                         != Some(active.build_id.as_str())
                 {
-                    LocalAppVerificationSummaryDto {
-                        status: LocalAppVerificationStatusDto::Failed,
+                    VerificationSummary {
+                        status: VerificationStatus::Failed,
                         summary: "The approved MCP catalog does not match this app and build."
                             .into(),
                         code: Some("active_state_corrupt".into()),
                     }
                 } else if active_build_id.as_deref() != Some(active.build_id.as_str()) {
-                    LocalAppVerificationSummaryDto {
-                        status: LocalAppVerificationStatusDto::Unverified,
+                    VerificationSummary {
+                        status: VerificationStatus::Unverified,
                         summary: "The approved MCP catalog no longer matches the active build and must be revalidated.".into(),
                         code: Some("needs_revalidation".into()),
                     }
                 } else {
-                    LocalAppVerificationSummaryDto {
-                        status: LocalAppVerificationStatusDto::Passed,
+                    VerificationSummary {
+                        status: VerificationStatus::Passed,
                         summary: "MCP schema, Flow, call and isolation verification passed.".into(),
                         code: None,
                     }
                 }
             } else {
-                LocalAppVerificationSummaryDto {
-                    status: LocalAppVerificationStatusDto::Unverified,
+                VerificationSummary {
+                    status: VerificationStatus::Unverified,
                     summary: "No approved Local App MCP catalog is active yet.".into(),
                     code: Some("needs_setup".into()),
                 }
@@ -2170,13 +2170,11 @@ impl LocalAppsHostBroker {
         match summary {
             Ok((publication_state, mcp_verification)) => {
                 self.event_sink
-                    .emit(ClientEvent::AppEvent {
-                        event: AppEventDto::VerificationSummaryChanged {
-                            app_id: app_id.to_string(),
-                            publication_state,
-                            mcp_verification,
-                            ui_verification,
-                        },
+                    .emit(HostEvent::VerificationSummaryChanged {
+                        app_id: app_id.to_string(),
+                        publication_state,
+                        mcp_verification,
+                        ui_verification,
                     })
                     .await;
             }
@@ -2261,15 +2259,15 @@ impl LocalAppsHostBroker {
     }
 }
 
-fn unverified_ui_summary() -> LocalAppVerificationSummaryDto {
-    LocalAppVerificationSummaryDto {
-        status: LocalAppVerificationStatusDto::Unverified,
+fn unverified_ui_summary() -> VerificationSummary {
+    VerificationSummary {
+        status: VerificationStatus::Unverified,
         summary: "UI verification has not completed on the active app.".into(),
         code: Some("ui_verification_required".into()),
     }
 }
 
-fn partial_ui_summary(scope: &local_apps::QaVerificationScope) -> LocalAppVerificationSummaryDto {
+fn partial_ui_summary(scope: &local_apps::QaVerificationScope) -> VerificationSummary {
     let mut surfaces = Vec::new();
     if !scope.unverified_target_ids.is_empty() {
         surfaces.push(format!(
@@ -2283,8 +2281,8 @@ fn partial_ui_summary(scope: &local_apps::QaVerificationScope) -> LocalAppVerifi
             scope.unverified_scenario_ids.join(", ")
         ));
     }
-    LocalAppVerificationSummaryDto {
-        status: LocalAppVerificationStatusDto::Unverified,
+    VerificationSummary {
+        status: VerificationStatus::Unverified,
         summary: format!(
             "Host UI/data verification passed on the current device; {} remain unverified.",
             surfaces.join(" and ")
@@ -2293,9 +2291,9 @@ fn partial_ui_summary(scope: &local_apps::QaVerificationScope) -> LocalAppVerifi
     }
 }
 
-fn failed_ui_summary(error: String) -> LocalAppVerificationSummaryDto {
-    LocalAppVerificationSummaryDto {
-        status: LocalAppVerificationStatusDto::Failed,
+fn failed_ui_summary(error: String) -> VerificationSummary {
+    VerificationSummary {
+        status: VerificationStatus::Failed,
         summary: format!("Stored UI verification evidence is corrupt: {error}"),
         code: Some("ui_verification_corrupt".into()),
     }

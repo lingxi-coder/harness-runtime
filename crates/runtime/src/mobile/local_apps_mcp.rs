@@ -3871,7 +3871,7 @@ mod tests {
         // The REAL broker, not a stub: mailbox reads go through it now
         // precisely so they take the same lock `agent.post` does, and a stub
         // here would test the delegation away again.
-        let broker = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
+        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             Arc::new(client::adapter::MockSink::new()),
             None,
@@ -4899,7 +4899,7 @@ mod tests {
         permissions.grant(AppCapability::Llm);
         save_permissions(&layout, &permissions).expect("save permissions");
 
-        let broker = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
+        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::MockSink::arc() as Arc<dyn client::adapter::ClientEventSink>,
             None,
@@ -6278,7 +6278,7 @@ mod tests {
         root: &TempDir,
         service: Arc<AppService>,
     ) {
-        let broker = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
+        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::MockSink::arc(),
             None,

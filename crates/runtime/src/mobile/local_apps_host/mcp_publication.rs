@@ -6,19 +6,15 @@ use super::PersistedMcpCandidate;
 use super::LOCAL_APP_WIDGET_DIR;
 use super::LOCAL_APP_WIDGET_FILE;
 use super::LOCAL_APP_WIDGET_MIME;
-use client::protocol::events::ClientEvent;
-use client::protocol::local_apps::AppEventDto;
-use client::protocol::local_apps::AppWorkflowStateDto;
-use client::protocol::local_apps::LocalAppMcpToolChangeKindDto;
-use client::protocol::local_apps::LocalAppMcpToolDiffDto;
-use client::protocol::local_apps::LocalAppMcpToolFieldDto;
-use client::protocol::local_apps::LocalAppMcpToolSurfaceDto;
-use client::protocol::local_apps::LocalAppVerificationStatusDto;
-use client::protocol::local_apps::LocalAppVerificationSummaryDto;
-use client::protocol::local_apps::ManagedLocalAppMcpServerDto;
-use client::protocol::local_apps::ManagedLocalAppMcpStatusDto;
-use client::protocol::local_apps::McpAppWidgetDto;
 use lingxi_core::host::McpError;
+use local_app_contracts::approvals::{
+    McpToolChangeKind, McpToolDiff, McpToolField, McpToolSurface, VerificationStatus,
+    VerificationSummary,
+};
+use local_app_contracts::events::{
+    ManagedMcpServer, ManagedMcpStatus, McpAppWidget, PublicationState,
+};
+use local_app_service::host::HostEvent;
 use local_apps::derive_mcp_status;
 use local_apps::effective_tool_surface_sha256;
 use local_apps::load_manifest;
@@ -34,14 +30,14 @@ use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub(super) fn lower_managed_mcp_status(status: AppMcpStatus) -> ManagedLocalAppMcpStatusDto {
+pub(super) fn lower_managed_mcp_status(status: AppMcpStatus) -> ManagedMcpStatus {
     match status {
-        AppMcpStatus::Disabled => ManagedLocalAppMcpStatusDto::Disabled,
-        AppMcpStatus::NeedsSetup => ManagedLocalAppMcpStatusDto::NeedsSetup,
-        AppMcpStatus::Authoring => ManagedLocalAppMcpStatusDto::Authoring,
-        AppMcpStatus::Enabled => ManagedLocalAppMcpStatusDto::Enabled,
-        AppMcpStatus::NeedsRevalidation => ManagedLocalAppMcpStatusDto::NeedsRevalidation,
-        AppMcpStatus::Error => ManagedLocalAppMcpStatusDto::Error,
+        AppMcpStatus::Disabled => ManagedMcpStatus::Disabled,
+        AppMcpStatus::NeedsSetup => ManagedMcpStatus::NeedsSetup,
+        AppMcpStatus::Authoring => ManagedMcpStatus::Authoring,
+        AppMcpStatus::Enabled => ManagedMcpStatus::Enabled,
+        AppMcpStatus::NeedsRevalidation => ManagedMcpStatus::NeedsRevalidation,
+        AppMcpStatus::Error => ManagedMcpStatus::Error,
     }
 }
 
@@ -122,7 +118,7 @@ pub(super) fn managed_mcp_widget_resource(
     layout: &AppLayout,
     app_name: &str,
     catalog: &Value,
-) -> Result<Option<(McpAppWidgetDto, mcp::registry::ManagedLocalAppResource)>, String> {
+) -> Result<Option<(McpAppWidget, mcp::registry::ManagedLocalAppResource)>, String> {
     let app_id = layout.app_id();
     if let Some(resources) = catalog.get("resources").and_then(Value::as_array) {
         for resource in resources {
@@ -149,7 +145,7 @@ pub(super) fn managed_mcp_widget_resource(
                 .to_string();
             validate_managed_mcp_widget_file(layout, &resource_sha256, &mime_type)?;
             return Ok(Some((
-                McpAppWidgetDto {
+                McpAppWidget {
                     resource_uri: uri.to_string(),
                     mime_type: mime_type.clone(),
                     resource_sha256: resource_sha256.clone(),
@@ -186,7 +182,7 @@ pub(super) fn managed_mcp_widget_resource(
             .unwrap_or_else(|| format!("{app_name} widget"));
         validate_managed_mcp_widget_file(layout, &resource_sha256, LOCAL_APP_WIDGET_MIME)?;
         return Ok(Some((
-            McpAppWidgetDto {
+            McpAppWidget {
                 resource_uri: uri.clone(),
                 mime_type: LOCAL_APP_WIDGET_MIME.into(),
                 resource_sha256: resource_sha256.clone(),
@@ -208,8 +204,8 @@ pub(super) fn mcp_tool_surface(
     definition: mcp_wire::McpToolDefinitionDto,
     flow: Value,
     ceiling: mcp_wire::McpPermissionCeiling,
-) -> Result<LocalAppMcpToolSurfaceDto, String> {
-    Ok(LocalAppMcpToolSurfaceDto {
+) -> Result<McpToolSurface, String> {
+    Ok(McpToolSurface {
         name: definition.name,
         title: definition.title,
         description: definition.description,
@@ -231,7 +227,7 @@ pub(super) fn mcp_tool_surface(
 
 pub(super) fn mcp_tool_surfaces_from_catalog(
     catalog: &Value,
-) -> Result<Vec<LocalAppMcpToolSurfaceDto>, String> {
+) -> Result<Vec<McpToolSurface>, String> {
     let entries = catalog
         .get("tools")
         .and_then(Value::as_array)
@@ -258,7 +254,7 @@ pub(super) fn mcp_tool_surfaces_from_catalog(
 
 pub(super) fn mcp_tool_surfaces_from_candidate(
     candidate: &PersistedMcpCandidate,
-) -> Result<Vec<LocalAppMcpToolSurfaceDto>, String> {
+) -> Result<Vec<McpToolSurface>, String> {
     let mut tools = candidate
         .validated
         .tools
@@ -276,44 +272,44 @@ pub(super) fn mcp_tool_surfaces_from_candidate(
 }
 
 pub(super) fn changed_mcp_fields(
-    before: &LocalAppMcpToolSurfaceDto,
-    after: &LocalAppMcpToolSurfaceDto,
-) -> Vec<LocalAppMcpToolFieldDto> {
+    before: &McpToolSurface,
+    after: &McpToolSurface,
+) -> Vec<McpToolField> {
     let mut fields = Vec::new();
     if before.title != after.title {
-        fields.push(LocalAppMcpToolFieldDto::Title);
+        fields.push(McpToolField::Title);
     }
     if before.description != after.description {
-        fields.push(LocalAppMcpToolFieldDto::Description);
+        fields.push(McpToolField::Description);
     }
     if before.input_schema_json != after.input_schema_json {
-        fields.push(LocalAppMcpToolFieldDto::InputSchema);
+        fields.push(McpToolField::InputSchema);
     }
     if before.output_schema_json != after.output_schema_json {
-        fields.push(LocalAppMcpToolFieldDto::OutputSchema);
+        fields.push(McpToolField::OutputSchema);
     }
     if before.annotations_json != after.annotations_json {
-        fields.push(LocalAppMcpToolFieldDto::Annotations);
+        fields.push(McpToolField::Annotations);
     }
     if before.execution_json != after.execution_json {
-        fields.push(LocalAppMcpToolFieldDto::Execution);
+        fields.push(McpToolField::Execution);
     }
     if before.visible_meta_json != after.visible_meta_json {
-        fields.push(LocalAppMcpToolFieldDto::VisibleMeta);
+        fields.push(McpToolField::VisibleMeta);
     }
     if before.semantic_flow_json != after.semantic_flow_json {
-        fields.push(LocalAppMcpToolFieldDto::SemanticFlow);
+        fields.push(McpToolField::SemanticFlow);
     }
     if before.permission_ceiling != after.permission_ceiling {
-        fields.push(LocalAppMcpToolFieldDto::PermissionCeiling);
+        fields.push(McpToolField::PermissionCeiling);
     }
     fields
 }
 
 pub(super) fn mcp_tool_diffs(
-    before: Vec<LocalAppMcpToolSurfaceDto>,
-    after: Vec<LocalAppMcpToolSurfaceDto>,
-) -> Vec<LocalAppMcpToolDiffDto> {
+    before: Vec<McpToolSurface>,
+    after: Vec<McpToolSurface>,
+) -> Vec<McpToolDiff> {
     let mut before = before
         .into_iter()
         .map(|tool| (tool.name.clone(), tool))
@@ -330,15 +326,15 @@ pub(super) fn mcp_tool_diffs(
     let mut diffs = Vec::new();
     for name in names {
         match (before.remove(&name), after.remove(&name)) {
-            (None, Some(after)) => diffs.push(LocalAppMcpToolDiffDto {
-                kind: LocalAppMcpToolChangeKindDto::Added,
+            (None, Some(after)) => diffs.push(McpToolDiff {
+                kind: McpToolChangeKind::Added,
                 name,
                 before: None,
                 after: Some(after),
                 changed_fields: Vec::new(),
             }),
-            (Some(before), None) => diffs.push(LocalAppMcpToolDiffDto {
-                kind: LocalAppMcpToolChangeKindDto::Removed,
+            (Some(before), None) => diffs.push(McpToolDiff {
+                kind: McpToolChangeKind::Removed,
                 name,
                 before: Some(before),
                 after: None,
@@ -346,8 +342,8 @@ pub(super) fn mcp_tool_diffs(
             }),
             (Some(before), Some(after)) if before != after => {
                 let changed_fields = changed_mcp_fields(&before, &after);
-                diffs.push(LocalAppMcpToolDiffDto {
-                    kind: LocalAppMcpToolChangeKindDto::Changed,
+                diffs.push(McpToolDiff {
+                    kind: McpToolChangeKind::Changed,
                     name,
                     before: Some(before),
                     after: Some(after),
@@ -828,7 +824,7 @@ impl LocalAppsHostBroker {
             let publication = local_apps::derive_publication_state(
                 &manifest,
                 active_build_id.as_deref(),
-                ui_verification.status == LocalAppVerificationStatusDto::Passed,
+                ui_verification.status == VerificationStatus::Passed,
             )
             .map_err(|error| error.to_string())?;
             if matches!(publication, local_apps::AppPublicationState::Draft) {
@@ -856,8 +852,8 @@ impl LocalAppsHostBroker {
             let mut authoring_revision = 0u64;
             let mut widget = None;
             let mut tools = Vec::new();
-            let mut mcp_verification = LocalAppVerificationSummaryDto {
-                status: LocalAppVerificationStatusDto::Unverified,
+            let mut mcp_verification = VerificationSummary {
+                status: VerificationStatus::Unverified,
                 summary: "No approved Local App MCP catalog is active yet.".into(),
                 code: Some("needs_setup".into()),
             };
@@ -871,7 +867,7 @@ impl LocalAppsHostBroker {
                 // other app vanished from both clients because ONE app's state
                 // was corrupt. Mark this one app `Failed` and keep listing.
                 // This is also the production producer for
-                // `LocalAppVerificationStatusDto::Failed`, which both clients
+                // `VerificationStatus::Failed`, which both clients
                 // already render (`local_apps_verification_status_failed`) and
                 // which had none.
                 let identity_matches = catalog.get("appId").and_then(Value::as_str)
@@ -887,8 +883,8 @@ impl LocalAppsHostBroker {
                     // from the live registry — that reflects what is actually
                     // registered, which is a fact about the process, not a claim
                     // about this catalog.)
-                    mcp_verification = LocalAppVerificationSummaryDto {
-                        status: LocalAppVerificationStatusDto::Failed,
+                    mcp_verification = VerificationSummary {
+                        status: VerificationStatus::Failed,
                         summary:
                             "The approved MCP catalog does not match this app and build, so it \
                              cannot be trusted. Re-run MCP authoring to rebuild it."
@@ -934,14 +930,14 @@ impl LocalAppsHostBroker {
                     widget = managed_mcp_widget_resource(&layout, &record.name, &catalog)?
                         .map(|(widget, _)| widget);
                     mcp_verification = if needs_revalidation {
-                        LocalAppVerificationSummaryDto {
-                            status: LocalAppVerificationStatusDto::Unverified,
+                        VerificationSummary {
+                            status: VerificationStatus::Unverified,
                             summary: "The approved MCP catalog no longer matches the active build and must be revalidated.".into(),
                             code: Some("needs_revalidation".into()),
                         }
                     } else {
-                        LocalAppVerificationSummaryDto {
-                            status: LocalAppVerificationStatusDto::Passed,
+                        VerificationSummary {
+                            status: VerificationStatus::Passed,
                             summary: "MCP schema, Flow, call and isolation verification passed."
                                 .into(),
                             code: None,
@@ -962,7 +958,7 @@ impl LocalAppsHostBroker {
                 }
             }
             let pinned_to_current_conversation = pinned_apps.contains(&record.id);
-            servers.push(ManagedLocalAppMcpServerDto {
+            servers.push(ManagedMcpServer {
                 server_name,
                 app_id: record.id,
                 app_name: record.name,
@@ -977,12 +973,12 @@ impl LocalAppsHostBroker {
                 tool_count,
                 authoring_revision,
                 publication_state: match publication {
-                    local_apps::AppPublicationState::Draft => AppWorkflowStateDto::Draft,
+                    local_apps::AppPublicationState::Draft => PublicationState::Draft,
                     local_apps::AppPublicationState::PublishedUnverified => {
-                        AppWorkflowStateDto::PublishedUnverified
+                        PublicationState::PublishedUnverified
                     }
                     local_apps::AppPublicationState::PublishedVerified => {
-                        AppWorkflowStateDto::PublishedVerified
+                        PublicationState::PublishedVerified
                     }
                 },
                 mcp_verification,
@@ -1000,20 +996,16 @@ impl LocalAppsHostBroker {
         // two events can never disagree.
         for server in &servers {
             self.event_sink
-                .emit(ClientEvent::AppEvent {
-                    event: AppEventDto::VerificationSummaryChanged {
-                        app_id: server.app_id.clone(),
-                        publication_state: server.publication_state,
-                        mcp_verification: server.mcp_verification.clone(),
-                        ui_verification: server.ui_verification.clone(),
-                    },
+                .emit(HostEvent::VerificationSummaryChanged {
+                    app_id: server.app_id.clone(),
+                    publication_state: server.publication_state,
+                    mcp_verification: server.mcp_verification.clone(),
+                    ui_verification: server.ui_verification.clone(),
                 })
                 .await;
         }
         self.event_sink
-            .emit(ClientEvent::AppEvent {
-                event: AppEventDto::ManagedMcpInventoryChanged { servers },
-            })
+            .emit(HostEvent::ManagedMcpInventoryChanged { servers })
             .await;
         Ok(())
     }

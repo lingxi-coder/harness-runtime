@@ -7,7 +7,8 @@
 
 use super::LocalAppsHostBroker;
 use crate::mobile::host::LocalAppBackgroundRunDto;
-use client::protocol::local_apps::{AppCapabilityKindDto, AppEventDto};
+use local_app_contracts::approvals::CapabilityKind;
+use local_app_service::host::HostEvent;
 use local_apps::{AppCapability, BackgroundTaskStatus, CapabilityId};
 use serde_json::{json, Map, Value};
 use std::time::Duration;
@@ -311,15 +312,13 @@ impl LocalAppsHostBroker {
 
     pub(crate) async fn emit_background_task_changed(&self, outcome: &LocalAppBackgroundRunDto) {
         self.event_sink
-            .emit(client::protocol::events::ClientEvent::AppEvent {
-                event: AppEventDto::AppBackgroundTaskChanged {
-                    app_id: outcome.app_id.clone(),
-                    task_id: outcome.task_id.clone(),
-                    status: outcome.status.clone(),
-                    result_json: outcome.result_json.clone(),
-                    error: outcome.error.clone(),
-                    retryable: outcome.retryable,
-                },
+            .emit(HostEvent::BackgroundTaskChanged {
+                app_id: outcome.app_id.clone(),
+                task_id: outcome.task_id.clone(),
+                status: outcome.status.clone(),
+                result_json: outcome.result_json.clone(),
+                error: outcome.error.clone(),
+                retryable: outcome.retryable,
             })
             .await;
     }
@@ -953,12 +952,12 @@ impl LocalAppsHostBroker {
         let (grant, wire, reason) = match capability {
             CapabilityId::DataMutate => (
                 Some(AppCapability::DataMutation),
-                Some(AppCapabilityKindDto::DataMutation),
+                Some(CapabilityKind::DataMutation),
                 "后台流程请求修改应用数据。",
             ),
             CapabilityId::Notifications => (
                 Some(AppCapability::Notifications),
-                Some(AppCapabilityKindDto::Notifications),
+                Some(CapabilityKind::Notifications),
                 "后台流程请求发送应用通知。",
             ),
             CapabilityId::LlmComplete
@@ -968,12 +967,12 @@ impl LocalAppsHostBroker {
             | CapabilityId::AgentSessionClose
             | CapabilityId::AgentSend => (
                 Some(AppCapability::Llm),
-                Some(AppCapabilityKindDto::Llm),
+                Some(CapabilityKind::Llm),
                 "后台流程请求使用应用 Agent/LLM。",
             ),
             CapabilityId::AgentEmit => (
                 Some(AppCapability::AgentNotify),
-                Some(AppCapabilityKindDto::AgentNotify),
+                Some(CapabilityKind::AgentNotify),
                 "后台流程请求向 Agent 投递事件。",
             ),
             CapabilityId::NetworkRequest => {
@@ -1168,8 +1167,13 @@ mod tests {
             .await
             .expect("service"),
         );
-        let broker =
-            LocalAppsHostBroker::new(root.path().to_path_buf(), Arc::new(Sink), None, false, None);
+        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+            root.path().to_path_buf(),
+            Arc::new(Sink),
+            None,
+            false,
+            None,
+        );
         assert!(
             broker.attach_service(service.clone()).is_ok(),
             "attach service"
@@ -1411,8 +1415,13 @@ mod tests {
             .expect("first schedule");
         let first_id = first["task"]["taskId"].as_str().expect("first task id");
 
-        let restarted =
-            LocalAppsHostBroker::new(root.path().to_path_buf(), Arc::new(Sink), None, false, None);
+        let restarted = crate::mobile::local_apps_wire::broker_with_client_sink(
+            root.path().to_path_buf(),
+            Arc::new(Sink),
+            None,
+            false,
+            None,
+        );
         assert!(
             restarted.attach_service(service).is_ok(),
             "attach restarted service"

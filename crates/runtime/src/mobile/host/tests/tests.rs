@@ -9248,8 +9248,13 @@ async fn boot_backfill_adopts_an_existing_unpinned_conversation_instead_of_minti
     )
     .expect("seed orphan conversation");
 
-    let broker =
-        super::LocalAppsHostBroker::new(backfill_root.clone(), MockSink::arc(), None, false, None);
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        backfill_root.clone(),
+        MockSink::arc(),
+        None,
+        false,
+        None,
+    );
 
     super::run_app_boot_backfill_sweep(
         backfill_home.clone(),

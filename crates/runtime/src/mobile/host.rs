@@ -6740,7 +6740,14 @@ impl MobileEngineHandle {
             } => {
                 if !self
                     .local_apps_host
-                    .resolve_ui(&request_id, decision, result_json, error)
+                    .resolve_ui(
+                        &request_id,
+                        crate::mobile::local_apps_wire::authorization_decision_from_client(
+                            decision,
+                        ),
+                        result_json,
+                        error,
+                    )
                     .await
                 {
                     tracing::debug!(request_id, "unknown or completed local-app UI request");
@@ -6753,7 +6760,12 @@ impl MobileEngineHandle {
             } => {
                 if !self
                     .local_apps_host
-                    .resolve_capability(&request_id, decision)
+                    .resolve_capability(
+                        &request_id,
+                        crate::mobile::local_apps_wire::authorization_decision_from_client(
+                            decision,
+                        ),
+                    )
                     .await
                 {
                     tracing::debug!(

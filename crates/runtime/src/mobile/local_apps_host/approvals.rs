@@ -5,12 +5,9 @@ use super::LocalAppsHostBroker;
 use super::PendingNativeApproval;
 use super::UiResolution;
 use super::APPROVAL_TIMEOUT;
-use client::protocol::events::ClientEvent;
-use client::protocol::local_apps::AppAuthorizationDecisionDto;
-use client::protocol::local_apps::AppCapabilityKindDto;
-use client::protocol::local_apps::AppCapabilityRequestDto;
-use client::protocol::local_apps::AppEventDto;
-use client::protocol::local_apps::LocalAppPluginErrorCodeDto;
+use local_app_contracts::approvals::{AuthorizationDecision, CapabilityKind, CapabilityRequest};
+use local_app_contracts::events::PluginErrorCode;
+use local_app_service::host::HostEvent;
 use local_apps::load_manifest;
 use local_apps::load_permissions;
 use local_apps::save_permissions;
@@ -52,7 +49,7 @@ impl LocalAppsHostBroker {
         pending: &Mutex<HashMap<String, PendingNativeApproval>>,
         request_id: String,
         app_id: &str,
-        event: AppEventDto,
+        event: HostEvent,
     ) -> Result<bool, String> {
         self.wait_for_native_approval_with_timeout(
             pending,
@@ -73,7 +70,7 @@ impl LocalAppsHostBroker {
         pending: &Mutex<HashMap<String, PendingNativeApproval>>,
         request_id: String,
         app_id: &str,
-        event: AppEventDto,
+        event: HostEvent,
         deadline: Duration,
     ) -> Result<bool, String> {
         let (sender, receiver) = oneshot::channel();
@@ -102,7 +99,7 @@ impl LocalAppsHostBroker {
                 },
             );
         }
-        self.event_sink.emit(ClientEvent::AppEvent { event }).await;
+        self.event_sink.emit(event).await;
         match timeout(deadline, receiver).await {
             Ok(Ok(approved)) => Ok(approved),
             Ok(Err(_)) => {
@@ -115,7 +112,7 @@ impl LocalAppsHostBroker {
                 // caller only learns the workflow failed, never the client.
                 //
                 // ⚠️ KNOWN-WRONG `code`, deliberately left as-is:
-                // `LocalAppPluginErrorCodeDto` (client-protocol/src/local_apps.rs)
+                // `PluginErrorCode` (client-protocol/src/local_apps.rs)
                 // has NO cancelled/aborted/timed-out member, and `code` is not
                 // optional. Android DOES render it —
                 // `LocalAppsViewModel.localizedPluginError` maps
@@ -130,19 +127,17 @@ impl LocalAppsHostBroker {
                 // Fixing the copy is a four-file, cross-platform change this
                 // module cannot land alone: append (never insert — UniFFI encodes
                 // by declaration ordinal) an `ApprovalAborted` member at the END
-                // of `LocalAppPluginErrorCodeDto`; add its string to the five
+                // of `PluginErrorCode`; add its string to the five
                 // `clients/translations/*.json` sources and regenerate the iOS
                 // `.xcstrings` / Android `strings.xml` catalogs; add the arm to
                 // `LocalAppsViewModel.localizedPluginError`; then emit it here and
                 // in the timeout arm below.
                 self.event_sink
-                    .emit(ClientEvent::AppEvent {
-                        event: AppEventDto::LocalAppOperationFailed {
-                            app_id: Some(app_id.to_string()),
-                            code: LocalAppPluginErrorCodeDto::ProposalInvalid,
-                            message: message.clone(),
-                            request_id: Some(request_id.clone()),
-                        },
+                    .emit(HostEvent::PluginOperationFailed {
+                        app_id: Some(app_id.to_string()),
+                        code: PluginErrorCode::ProposalInvalid,
+                        message: message.clone(),
+                        request_id: Some(request_id.clone()),
                     })
                     .await;
                 Err(message)
@@ -154,13 +149,11 @@ impl LocalAppsHostBroker {
                 // above, for the timeout arm — including its KNOWN-WRONG `code`
                 // and the four-file fix that would correct it.
                 self.event_sink
-                    .emit(ClientEvent::AppEvent {
-                        event: AppEventDto::LocalAppOperationFailed {
-                            app_id: Some(app_id.to_string()),
-                            code: LocalAppPluginErrorCodeDto::ProposalInvalid,
-                            message: message.clone(),
-                            request_id: Some(request_id.clone()),
-                        },
+                    .emit(HostEvent::PluginOperationFailed {
+                        app_id: Some(app_id.to_string()),
+                        code: PluginErrorCode::ProposalInvalid,
+                        message: message.clone(),
+                        request_id: Some(request_id.clone()),
                     })
                     .await;
                 Err(message)
@@ -170,7 +163,7 @@ impl LocalAppsHostBroker {
     pub(crate) async fn resolve_capability(
         &self,
         request_id: &str,
-        decision: AppAuthorizationDecisionDto,
+        decision: AuthorizationDecision,
     ) -> bool {
         self.pending_capabilities
             .lock()
@@ -239,7 +232,7 @@ impl LocalAppsHostBroker {
             events.extend(requests.values().map(|request| request.event.clone()));
         }
         for event in events {
-            self.event_sink.emit(ClientEvent::AppEvent { event }).await;
+            self.event_sink.emit(event).await;
         }
     }
     pub(super) async fn resolve_native_approval(
@@ -256,7 +249,7 @@ impl LocalAppsHostBroker {
     pub(crate) async fn resolve_ui(
         &self,
         request_id: &str,
-        decision: AppAuthorizationDecisionDto,
+        decision: AuthorizationDecision,
         result_json: Option<String>,
         error: Option<String>,
     ) -> bool {
@@ -277,10 +270,10 @@ impl LocalAppsHostBroker {
     pub(super) async fn request_capability(
         &self,
         app_id: &str,
-        capability: AppCapabilityKindDto,
+        capability: CapabilityKind,
         domain: Option<String>,
         reason: &str,
-    ) -> Result<AppAuthorizationDecisionDto, String> {
+    ) -> Result<AuthorizationDecision, String> {
         let request_id = self.request_id("app-capability");
         let (sender, receiver) = oneshot::channel();
         self.pending_capabilities
@@ -288,17 +281,13 @@ impl LocalAppsHostBroker {
             .await
             .insert(request_id.clone(), sender);
         self.event_sink
-            .emit(ClientEvent::AppEvent {
-                event: AppEventDto::AppCapabilityRequested {
-                    request: AppCapabilityRequestDto {
-                        request_id: request_id.clone(),
-                        app_id: app_id.to_string(),
-                        capability,
-                        domain,
-                        reason: reason.to_string(),
-                    },
-                },
-            })
+            .emit(HostEvent::CapabilityRequested(CapabilityRequest {
+                request_id: request_id.clone(),
+                app_id: app_id.to_string(),
+                capability,
+                domain,
+                reason: reason.to_string(),
+            }))
             .await;
         match timeout(APPROVAL_TIMEOUT, receiver).await {
             Ok(Ok(decision)) => Ok(decision),
@@ -313,7 +302,7 @@ impl LocalAppsHostBroker {
         &self,
         app_id: &str,
         capability: AppCapability,
-        wire_capability: AppCapabilityKindDto,
+        wire_capability: CapabilityKind,
         reason: &str,
     ) -> Result<(), String> {
         let layout = self.layout(app_id)?;
@@ -376,7 +365,7 @@ impl LocalAppsHostBroker {
         &self,
         app_id: &str,
         capability: AppCapability,
-        wire_capability: AppCapabilityKindDto,
+        wire_capability: CapabilityKind,
         reason: &str,
     ) -> Result<(), BridgeFailure> {
         let layout = self.layout(app_id)?;
@@ -422,7 +411,7 @@ impl LocalAppsHostBroker {
         let decision = self
             .request_capability(
                 app_id,
-                AppCapabilityKindDto::NetworkDomain,
+                CapabilityKind::NetworkDomain,
                 Some(domain.to_string()),
                 "The local app requested first-time access to this HTTPS domain.",
             )
@@ -456,7 +445,7 @@ impl LocalAppsHostBroker {
         let decision = self
             .request_capability(
                 app_id,
-                AppCapabilityKindDto::DataMutation,
+                CapabilityKind::DataMutation,
                 None,
                 &manifest_migration_reason(preview),
             )

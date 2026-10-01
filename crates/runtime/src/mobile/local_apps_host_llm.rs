@@ -16,11 +16,11 @@
 use super::{AgentOutputStream, BridgeFailure, LocalAppsHostBroker};
 use crate::mobile::local_apps_llm::{ChatMessage, ChatPart, ChatRequest, ChatRole};
 use base64::Engine as _;
-use client::protocol::events::ClientEvent;
-use client::protocol::local_apps::{AppCapabilityKindDto, AppEventDto};
 use futures_util::StreamExt;
 use lingxi_core::host::OutputStream;
 use llm_runtime::{HistoryContentDelta, HistoryEvent};
+use local_app_contracts::approvals::CapabilityKind;
+use local_app_service::host::HostEvent;
 use local_apps::AppCapability;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -52,7 +52,7 @@ const CHAT_TIMEOUT: Duration = Duration::from_secs(120);
 struct LlmInflightGuard {
     app_id: String,
     slots: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    event_sink: std::sync::Arc<dyn client::adapter::ClientEventSink>,
+    event_sink: std::sync::Arc<dyn local_app_service::host::HostEventSink>,
     armed: bool,
 }
 
@@ -66,11 +66,9 @@ impl LlmInflightGuard {
         }
         self.free_slot();
         self.event_sink
-            .emit(ClientEvent::AppEvent {
-                event: AppEventDto::AppLlmActivityChanged {
-                    app_id: self.app_id.clone(),
-                    active: false,
-                },
+            .emit(HostEvent::LlmActivityChanged {
+                app_id: self.app_id.clone(),
+                active: false,
             })
             .await;
     }
@@ -96,11 +94,9 @@ impl Drop for LlmInflightGuard {
             let app_id = self.app_id.clone();
             handle.spawn(async move {
                 event_sink
-                    .emit(ClientEvent::AppEvent {
-                        event: AppEventDto::AppLlmActivityChanged {
-                            app_id,
-                            active: false,
-                        },
+                    .emit(HostEvent::LlmActivityChanged {
+                        app_id,
+                        active: false,
                     })
                     .await;
             });
@@ -333,11 +329,9 @@ impl LocalAppsHostBroker {
 
     async fn emit_llm_activity(&self, app_id: &str, active: bool) {
         self.event_sink
-            .emit(ClientEvent::AppEvent {
-                event: AppEventDto::AppLlmActivityChanged {
-                    app_id: app_id.to_string(),
-                    active,
-                },
+            .emit(HostEvent::LlmActivityChanged {
+                app_id: app_id.to_string(),
+                active,
             })
             .await;
     }
@@ -351,7 +345,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Llm,
-            AppCapabilityKindDto::Llm,
+            CapabilityKind::Llm,
             REASON_LLM,
         )
         .await?;
@@ -427,7 +421,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Llm,
-            AppCapabilityKindDto::Llm,
+            CapabilityKind::Llm,
             REASON_LLM,
         )
         .await?;
@@ -532,9 +526,10 @@ mod tests {
     use base64::Engine as _;
     use client::adapter::{ClientEventSink, MockSink};
     use client::protocol::events::ClientEvent;
-    use client::protocol::local_apps::{AppAuthorizationDecisionDto, AppEventDto};
+    use client::protocol::local_apps::AppEventDto;
     use futures_util::stream;
     use llm_runtime::{HistoryContentDelta, HistoryEvent, HistoryMessageDelta};
+    use local_app_contracts::approvals::AuthorizationDecision;
     use local_app_contracts::bridge::{BridgeOperation, BridgeRequest};
     use local_apps::error::AppError;
     use local_apps::test_support::FixedClock;
@@ -683,7 +678,7 @@ mod tests {
             .expect("load app service"),
         );
         let sink = MockSink::arc();
-        let broker = LocalAppsHostBroker::new(
+        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             sink.clone() as Arc<dyn ClientEventSink>,
             None,
@@ -878,7 +873,7 @@ mod tests {
                                 broker
                                     .resolve_capability(
                                         &request.request_id,
-                                        AppAuthorizationDecisionDto::Deny,
+                                        AuthorizationDecision::Deny,
                                     )
                                     .await
                             );

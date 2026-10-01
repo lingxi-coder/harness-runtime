@@ -3302,6 +3302,8 @@ dependencies = [
 name = "local-app-service"
 version = "0.12.0"
 dependencies = [
+ "async-trait",
+ "local-app-contracts",
  "local-apps",
  "serde",
  "serde_json",

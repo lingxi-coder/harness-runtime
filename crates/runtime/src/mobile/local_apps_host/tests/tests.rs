@@ -1,4 +1,5 @@
 use super::*;
+use local_app_contracts::events::PluginErrorCode;
 
 /// r1-prompt-layer-20: the backticked-tool-name scanner used to be declared
 /// INSIDE the one test that ran it, so no other model-facing text could be put
@@ -842,7 +843,7 @@ fn create_runtime_root(root: &TempDir) -> PathBuf {
 async fn await_fixed_runtime_root_waits_for_a_configured_seed_to_finish_staging() {
     let root = TempDir::new().expect("tempdir");
     let runtime_root = create_configured_digest_runtime_root(&root);
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         Arc::new(NoopClientEventSink),
         None,
@@ -871,7 +872,7 @@ async fn await_fixed_runtime_root_waits_for_a_configured_seed_to_finish_staging(
 async fn await_fixed_runtime_root_times_out_when_the_seed_never_becomes_ready() {
     let root = TempDir::new().expect("tempdir");
     let runtime_root = create_configured_digest_runtime_root(&root);
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         Arc::new(NoopClientEventSink),
         None,
@@ -892,7 +893,7 @@ async fn await_fixed_runtime_root_times_out_when_the_seed_never_becomes_ready() 
 async fn await_fixed_runtime_root_accepts_an_immutable_bundle_root_without_a_ready_marker() {
     let root = TempDir::new().expect("tempdir");
     let runtime_root = create_runtime_root(&root);
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         Arc::new(NoopClientEventSink),
         None,
@@ -921,7 +922,7 @@ async fn await_fixed_runtime_root_fails_fast_when_staging_wrote_a_failure_marker
         "runtime seed inventory validation failed before publish",
     )
     .expect("write failure marker");
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         Arc::new(NoopClientEventSink),
         None,
@@ -958,7 +959,7 @@ async fn await_fixed_runtime_root_rejects_a_corrupt_ready_marker() {
         .expect("runtime root parent")
         .join(".0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.ready");
     fs::write(&marker, "wrong-digest").expect("write corrupt ready marker");
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         Arc::new(NoopClientEventSink),
         None,
@@ -994,7 +995,7 @@ async fn create_broker_over(
 ) -> (TempDir, Arc<AppService>, Arc<LocalAppsHostBroker>) {
     let service = test_service(&root).await;
     let runtime_root = full_runtime.then(|| create_runtime_root(&root));
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         Arc::new(NoopClientEventSink),
         mobile_linux,
@@ -1061,7 +1062,7 @@ async fn host_qa_fixture_with_mobile_linux(
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
     let sink = MockSink::arc();
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         sink.clone(),
         mobile_linux,
@@ -1708,7 +1709,7 @@ async fn host_qa_roundtrip_publishes_only_after_terminal_commit_and_survives_sto
             .qa_ui_verification_summary(&fixture.app_id)
             .await
             .status,
-        LocalAppVerificationStatusDto::Unverified,
+        VerificationStatus::Unverified,
         "a passing candidate is not published proof"
     );
     let prepared = fixture
@@ -1736,7 +1737,7 @@ async fn host_qa_roundtrip_publishes_only_after_terminal_commit_and_survives_sto
             .qa_ui_verification_summary(&fixture.app_id)
             .await
             .status,
-        LocalAppVerificationStatusDto::Passed,
+        VerificationStatus::Passed,
         "stopping the same immutable build must not erase historical verification"
     );
     fixture
@@ -1820,7 +1821,7 @@ async fn rebuilding_a_verified_no_mcp_app_emits_unverified_only_after_build_comm
             .qa_ui_verification_summary(&fixture.app_id)
             .await
             .status,
-        LocalAppVerificationStatusDto::Passed,
+        VerificationStatus::Passed,
         "a failed build must preserve the previous immutable QA publication"
     );
     assert_eq!(
@@ -1955,7 +1956,7 @@ async fn qa_terminal_uses_host_canonical_fields_and_rejects_restart_before_commi
         .broker
         .qa_ui_verification_summary(&fixture.app_id)
         .await;
-    assert_eq!(summary.status, LocalAppVerificationStatusDto::Unverified);
+    assert_eq!(summary.status, VerificationStatus::Unverified);
     assert_eq!(summary.code.as_deref(), Some("ui_verification_required"));
 }
 
@@ -2279,7 +2280,7 @@ async fn real_qa_ui_roundtrip_returns_only_callable_host_evidence_ids() {
             .broker
             .resolve_ui(
                 &request_id,
-                AppAuthorizationDecisionDto::AllowOnce,
+                AuthorizationDecision::AllowOnce,
                 Some(
                     json!({
                         "lingxi_qa": {
@@ -2531,7 +2532,7 @@ async fn dropped_real_act_on_ui_future_deactivates_attribution_and_keeps_page_wr
             .broker
             .resolve_ui(
                 &request_id,
-                AppAuthorizationDecisionDto::AllowOnce,
+                AuthorizationDecision::AllowOnce,
                 Some("{}".into()),
                 None,
             )
@@ -2898,8 +2899,13 @@ async fn a_corrupt_active_mcp_catalog_fails_only_that_app_and_still_lists_the_ot
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
     let sink = MockSink::arc();
-    let broker =
-        LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        root.path().to_path_buf(),
+        sink.clone(),
+        None,
+        false,
+        None,
+    );
     assert!(broker.attach_service(service.clone()).is_ok());
     let healthy = create_app_fixture(&root, &service, "Healthy").await;
     let corrupt = create_app_fixture(&root, &service, "Corrupt").await;
@@ -3093,7 +3099,7 @@ async fn failed_native_qa_action_is_authenticated_and_persisted_without_roundtri
             .broker
             .resolve_ui(
                 &request_id,
-                AppAuthorizationDecisionDto::AllowOnce,
+                AuthorizationDecision::AllowOnce,
                 Some(
                     json!({
                         "lingxi_qa": {
@@ -3155,13 +3161,18 @@ async fn failed_native_qa_action_is_authenticated_and_persisted_without_roundtri
 async fn a_pending_native_approval_is_re_announced_verbatim_to_a_reattaching_client() {
     let root = TempDir::new().expect("tempdir");
     let sink = MockSink::arc();
-    let broker =
-        LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        root.path().to_path_buf(),
+        sink.clone(),
+        None,
+        false,
+        None,
+    );
     // The fixture event carries the request id, so "the same sheet came
     // back" is checked on the wire content, not on a count alone.
-    let event = |request_id: &str| AppEventDto::LocalAppOperationFailed {
+    let event = |request_id: &str| HostEvent::PluginOperationFailed {
         app_id: Some("app-reattach".into()),
-        code: client::protocol::local_apps::LocalAppPluginErrorCodeDto::PluginDisabled,
+        code: PluginErrorCode::PluginDisabled,
         message: "r3-failure-paths-02 fixture event; only its request_id is under test".into(),
         request_id: Some(request_id.to_string()),
     };
@@ -5578,7 +5589,7 @@ async fn unscaffolded_create_scaffolds_builds_and_promotes_from_a_staged_candida
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
     let sink = MockSink::arc();
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         sink.clone(),
         Some(runtime.clone()),
@@ -5841,7 +5852,7 @@ async fn staged_mcp_intent_survives_create_and_reaches_the_formal_contract() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
     let sink = MockSink::arc();
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         sink.clone(),
         Some(runtime.clone()),
@@ -6038,7 +6049,7 @@ async fn a_staged_declined_mcp_intent_survives_the_staging_seam() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
     let sink = MockSink::arc();
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         sink.clone(),
         Some(runtime.clone()),
@@ -6315,7 +6326,7 @@ async fn runtime_profile_dependency_status_distinguishes_seed_and_shared_cache()
     // A configured seed with the exact lock is bundled, even though its
     // dependency tree has not been copied into the shared cache.
     let runtime_root = create_bundled_seed(root.path(), &lock_digest);
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         Arc::new(NoopClientEventSink),
         None,
@@ -6482,7 +6493,7 @@ async fn scaffold_failure_after_dependency_snapshot_restores_shell_before_record
 async fn cold_start_recovers_a_partial_scaffold_before_loading_the_app() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         Arc::new(NoopClientEventSink),
         None,
@@ -6879,10 +6890,10 @@ async fn a_refused_native_create_approval_cleans_up_the_candidate_state() {
     );
 }
 
-fn dummy_native_approval_event() -> AppEventDto {
-    AppEventDto::LocalAppOperationFailed {
+fn dummy_native_approval_event() -> HostEvent {
+    HostEvent::PluginOperationFailed {
         app_id: None,
-        code: client::protocol::local_apps::LocalAppPluginErrorCodeDto::PluginDisabled,
+        code: PluginErrorCode::PluginDisabled,
         message: "r4-tests-honesty-05 fixture event; content is not under test".into(),
         request_id: None,
     }
@@ -6895,7 +6906,7 @@ fn dummy_native_approval_event() -> AppEventDto {
 #[tokio::test]
 async fn wait_for_native_approval_refuses_a_second_concurrent_wait_for_the_same_app() {
     let root = TempDir::new().expect("tempdir");
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         MockSink::arc(),
         None,
@@ -6950,7 +6961,7 @@ async fn wait_for_native_approval_refuses_a_second_concurrent_wait_for_the_same_
 #[tokio::test]
 async fn wait_for_native_approval_timeout_arm_names_the_timeout_and_clears_the_pending_entry() {
     let root = TempDir::new().expect("tempdir");
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         MockSink::arc(),
         None,
@@ -6996,8 +7007,13 @@ async fn wait_for_native_approval_timeout_arm_names_the_timeout_and_clears_the_p
 async fn wait_for_native_approval_cancelled_and_timed_out_arms_emit_local_app_operation_failed() {
     let root = TempDir::new().expect("tempdir");
     let sink = MockSink::arc();
-    let broker =
-        LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        root.path().to_path_buf(),
+        sink.clone(),
+        None,
+        false,
+        None,
+    );
     let pending: Mutex<HashMap<String, PendingNativeApproval>> = Mutex::new(HashMap::new());
 
     // --- cancelled arm: drop the sender out from under the wait without
@@ -7406,7 +7422,7 @@ async fn dependency_add_uses_dedicated_native_confirmation_before_receipt() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
     let sink = MockSink::arc();
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         sink.clone(),
         Some(runtime.clone()),
@@ -7508,7 +7524,7 @@ async fn dependency_confirmation_does_not_wait_on_unrelated_global_build_lock() 
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
     let sink = MockSink::arc();
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         sink.clone(),
         Some(runtime),
@@ -7580,7 +7596,7 @@ async fn dependency_add_denial_does_not_issue_receipt() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
     let sink = MockSink::arc();
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         sink.clone(),
         Some(runtime),
@@ -8483,7 +8499,7 @@ async fn dependency_update_cold_start_recovers_an_in_progress_journal() {
 
     // The broker constructor runs recovery before AppService::load, so the
     // service observes the same exact old dependency record as disk.
-    let restarted = LocalAppsHostBroker::new(
+    let restarted = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         Arc::new(NoopClientEventSink),
         Some(runtime),
@@ -8608,7 +8624,7 @@ async fn dependency_update_cold_start_cleans_a_committed_journal_without_rollbac
     drop(broker);
     drop(service);
 
-    let restarted = LocalAppsHostBroker::new(
+    let restarted = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         Arc::new(NoopClientEventSink),
         Some(runtime),
@@ -10471,7 +10487,7 @@ async fn dependency_install_preserves_current_toolchain_and_cache_identity() {
         let root = TempDir::new().unwrap();
         let service = test_service(&root).await;
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        let broker = LocalAppsHostBroker::new(
+        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             MockSink::arc(),
             Some(runtime.clone()),
@@ -10557,7 +10573,7 @@ async fn dependency_install_preserves_current_toolchain_and_cache_identity() {
 async fn dependency_staging_preserves_the_pinned_widget_importer() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         MockSink::arc(),
         Some(MockMobileLinuxRuntime::new(Duration::ZERO)),
@@ -11103,7 +11119,7 @@ fn normalize_query_rejects_cursor_and_invalid_page_bounds() {
 fn normalize_ui_target_accepts_string_and_structured_object() {
     assert_eq!(
         normalize_ui_target(Some(&json!("submit-button"))).unwrap(),
-        Some(AppUiTargetDto {
+        Some(UiTarget {
             element_id: Some("submit-button".into()),
             role: None,
             name: None,
@@ -11115,7 +11131,7 @@ fn normalize_ui_target_accepts_string_and_structured_object() {
             "name": "Save"
         })))
         .unwrap(),
-        Some(AppUiTargetDto {
+        Some(UiTarget {
             element_id: None,
             role: Some("button".into()),
             name: Some("Save".into()),
@@ -12120,7 +12136,7 @@ fn host_environment(
 async fn the_host_stamps_the_iphone_device_context_the_agent_cannot_name() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         MockSink::arc(),
         None,
@@ -12158,7 +12174,7 @@ async fn the_host_stamps_the_iphone_device_context_the_agent_cannot_name() {
 async fn the_host_stamps_the_android_tablet_device_context() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         MockSink::arc(),
         None,
@@ -12189,7 +12205,7 @@ async fn the_host_stamps_the_android_tablet_device_context() {
 async fn an_unclassified_host_records_no_device_context() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         MockSink::arc(),
         None,
@@ -12219,7 +12235,7 @@ async fn an_unclassified_host_records_no_device_context() {
 async fn an_agent_supplied_device_context_never_overrides_the_host() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         MockSink::arc(),
         None,
@@ -12262,7 +12278,7 @@ async fn an_agent_supplied_device_context_never_overrides_the_host() {
 async fn update_manifest_rejects_a_caller_supplied_surface() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         MockSink::arc(),
         None,
@@ -12298,8 +12314,13 @@ async fn an_undeclared_capability_is_refused_without_prompting() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
     let sink = MockSink::arc();
-    let broker =
-        LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        root.path().to_path_buf(),
+        sink.clone(),
+        None,
+        false,
+        None,
+    );
     assert!(broker.attach_service(service.clone()).is_ok());
     let app_id = create_app_fixture(&root, &service, "Undeclared").await;
 
@@ -12308,7 +12329,7 @@ async fn an_undeclared_capability_is_refused_without_prompting() {
         broker.authorize_declared_capability(
             &app_id,
             AppCapability::Camera,
-            AppCapabilityKindDto::Camera,
+            CapabilityKind::Camera,
             "test reason",
         ),
     )
@@ -12327,8 +12348,13 @@ async fn a_declared_capability_with_a_persisted_grant_passes_silently() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
     let sink = MockSink::arc();
-    let broker =
-        LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        root.path().to_path_buf(),
+        sink.clone(),
+        None,
+        false,
+        None,
+    );
     assert!(broker.attach_service(service.clone()).is_ok());
     let app_id = create_app_fixture(&root, &service, "Granted").await;
     declare_capability(&root, &app_id, AppCapability::Microphone);
@@ -12341,7 +12367,7 @@ async fn a_declared_capability_with_a_persisted_grant_passes_silently() {
         .authorize_declared_capability(
             &app_id,
             AppCapability::Microphone,
-            AppCapabilityKindDto::Microphone,
+            CapabilityKind::Microphone,
             "test reason",
         )
         .await
@@ -12357,8 +12383,13 @@ async fn a_declared_capability_denial_carries_the_permission_denied_code() {
     let root = TempDir::new().expect("tempdir");
     let service = test_service(&root).await;
     let sink = MockSink::arc();
-    let broker =
-        LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        root.path().to_path_buf(),
+        sink.clone(),
+        None,
+        false,
+        None,
+    );
     assert!(broker.attach_service(service.clone()).is_ok());
     let app_id = create_app_fixture(&root, &service, "Denied").await;
     declare_capability(&root, &app_id, AppCapability::Camera);
@@ -12378,7 +12409,7 @@ async fn a_declared_capability_denial_carries_the_permission_denied_code() {
                             broker
                                 .resolve_capability(
                                     &request.request_id,
-                                    AppAuthorizationDecisionDto::Deny,
+                                    AuthorizationDecision::Deny,
                                 )
                                 .await
                         );
@@ -12395,7 +12426,7 @@ async fn a_declared_capability_denial_carries_the_permission_denied_code() {
         broker.authorize_declared_capability(
             &app_id,
             AppCapability::Camera,
-            AppCapabilityKindDto::Camera,
+            CapabilityKind::Camera,
             "test reason",
         ),
     )
@@ -12745,7 +12776,7 @@ async fn pinned_shell() -> PinnedShell {
         platform_posix_minimal::PosixFileSystem::new(root.path().to_path_buf()),
     );
     let service = test_service(&root).await;
-    let broker = LocalAppsHostBroker::new(
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
         root.path().to_path_buf(),
         Arc::new(NoopClientEventSink),
         Some(MockMobileLinuxRuntime::new(Duration::ZERO)),

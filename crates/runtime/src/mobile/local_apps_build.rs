@@ -4540,7 +4540,7 @@ mod tests {
         fs::create_dir_all(served_index.parent().expect("dist dir")).expect("dist dir");
         fs::write(&served_index, "<html>live</html>").expect("served index");
 
-        let broker = LocalAppsHostBroker::new(
+        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::MockSink::arc(),
             None,
@@ -4608,7 +4608,7 @@ mod tests {
         )
         .expect("workspace vite");
 
-        let broker = LocalAppsHostBroker::new(
+        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::MockSink::arc(),
             None,
@@ -4689,7 +4689,7 @@ mod tests {
         let tampered = br#"{"name":"tampered","dependencies":{"left-pad":"9.9.9"}}"#.to_vec();
         fs::write(workspace.join("package.json"), &tampered).expect("tamper package.json");
 
-        let broker = LocalAppsHostBroker::new(
+        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::MockSink::arc(),
             None,
@@ -4754,7 +4754,7 @@ mod tests {
         )
         .expect("workspace vite");
 
-        let broker = LocalAppsHostBroker::new(
+        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::MockSink::arc(),
             None,
@@ -4809,7 +4809,7 @@ mod tests {
             .expect("old output");
 
             let runtime = RecordingIsolatedRuntime::new();
-            let broker = LocalAppsHostBroker::new(
+            let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
                 root.path().to_path_buf(),
                 client::adapter::MockSink::arc(),
                 Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
@@ -4914,7 +4914,7 @@ mod tests {
         );
 
         let runtime = RecordingIsolatedRuntime::new();
-        let broker = LocalAppsHostBroker::new(
+        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::MockSink::arc(),
             Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
@@ -4999,7 +4999,7 @@ mod tests {
                 "test runtime never executes node",
             ),
         );
-        let broker = LocalAppsHostBroker::new(
+        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::MockSink::arc(),
             Some(runtime.clone()),

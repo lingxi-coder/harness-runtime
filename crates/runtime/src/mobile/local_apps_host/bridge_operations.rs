@@ -9,13 +9,11 @@ use super::LOCAL_APP_BRIDGE_LLM_BYTES;
 use super::MAX_NETWORK_RESPONSE_BYTES;
 use super::UI_TIMEOUT;
 use crate::mobile::local_apps_mcp::LocalAppsMcpHost;
-use client::protocol::events::ClientEvent;
-use client::protocol::local_apps::AppAuthorizationDecisionDto;
-use client::protocol::local_apps::AppEventDto;
-use client::protocol::local_apps::AppUiRequestDto;
+use local_app_contracts::approvals::{AuthorizationDecision, UiRequest};
 use local_app_contracts::bridge::BridgeOperation;
 use local_app_contracts::bridge::BridgeRequest;
 use local_app_contracts::bridge::BridgeResponse;
+use local_app_service::host::HostEvent;
 use local_apps::load_manifest;
 use local_apps::load_permissions;
 use serde_json::json;
@@ -28,7 +26,7 @@ use tokio::time::timeout;
 use tokio::time::Duration;
 
 impl LocalAppsHostBroker {
-    pub(super) async fn request_ui(&self, request: AppUiRequestDto) -> Result<Value, String> {
+    pub(super) async fn request_ui(&self, request: UiRequest) -> Result<Value, String> {
         let request_id = request.request_id.clone();
         let is_qa_request = request.request_id.starts_with("qa-ui-");
         let (sender, receiver) = oneshot::channel();
@@ -36,11 +34,7 @@ impl LocalAppsHostBroker {
             .lock()
             .await
             .insert(request_id.clone(), sender);
-        self.event_sink
-            .emit(ClientEvent::AppEvent {
-                event: AppEventDto::AppUiRequest { request },
-            })
-            .await;
+        self.event_sink.emit(HostEvent::UiRequest(request)).await;
         let resolution = match timeout(UI_TIMEOUT, receiver).await {
             Ok(Ok(resolution)) => resolution,
             Ok(Err(_)) => return Err("WebView action was cancelled".into()),
@@ -49,7 +43,7 @@ impl LocalAppsHostBroker {
                 return Err("WebView action timed out".into());
             }
         };
-        if matches!(resolution.decision, AppAuthorizationDecisionDto::Deny) {
+        if matches!(resolution.decision, AuthorizationDecision::Deny) {
             return Err("user denied the WebView action".into());
         }
         if let Some(error) = resolution.error {
@@ -109,11 +103,7 @@ impl LocalAppsHostBroker {
     /// Deliver the answer to a bridge request to the client that holds the page.
     pub(crate) async fn emit_bridge_response(&self, response: BridgeResponse) {
         self.event_sink
-            .emit(ClientEvent::AppEvent {
-                event: AppEventDto::AppBridgeResponse {
-                    response: crate::mobile::local_apps_wire::bridge_response_to_dto(response),
-                },
-            })
+            .emit(HostEvent::BridgeResponse(response))
             .await;
     }
     pub(super) async fn execute_bridge_inner(

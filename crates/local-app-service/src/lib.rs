@@ -22,4 +22,5 @@
 #![allow(missing_docs)]
 
 pub mod dependency_integrity;
+pub mod host;
 pub mod runtime_profiles;

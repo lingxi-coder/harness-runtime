@@ -6,7 +6,7 @@
 
 use super::{BridgeFailure, LocalAppsHostBroker};
 use base64::Engine as _;
-use client::protocol::local_apps::AppCapabilityKindDto;
+use local_app_contracts::approvals::CapabilityKind;
 use local_apps::AppCapability;
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
@@ -181,7 +181,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::FilesRead,
-            AppCapabilityKindDto::FilesRead,
+            CapabilityKind::FilesRead,
             REASON_FILES_READ,
         )
         .await?;
@@ -216,7 +216,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::FilesWrite,
-            AppCapabilityKindDto::FilesWrite,
+            CapabilityKind::FilesWrite,
             REASON_FILES_WRITE,
         )
         .await?;

@@ -5670,7 +5670,7 @@ mod run_id_tests {
         .await;
         let listener = Arc::new(FakeListener::default());
         let sink = terminal_test_sink(root.path(), listener.clone(), registry.clone(), &task_id);
-        let host = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
+        let host = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::ListenerSink::arc(listener.clone()),
             None,
@@ -5723,7 +5723,7 @@ mod run_id_tests {
         .await;
         let listener = Arc::new(FakeListener::default());
         let sink = terminal_test_sink(root.path(), listener.clone(), registry.clone(), &task_id);
-        let host = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
+        let host = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::ListenerSink::arc(listener.clone()),
             None,
@@ -6124,7 +6124,7 @@ mod run_id_tests {
         scaffold_local_app(root.path(), app_id, local_apps::AppRuntimeProfile::ReactDom);
         let registry = scope_test_registry();
         let launcher = scope_test_launcher(root.path(), registry.clone());
-        let host = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
+        let host = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::ListenerSink::arc(Arc::new(FakeListener::default())),
             None,

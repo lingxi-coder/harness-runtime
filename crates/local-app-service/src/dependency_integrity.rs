@@ -23,13 +23,9 @@ pub const DEPENDENCY_SNAPSHOT_INVENTORY_SCHEMA_VERSION: u8 = 1;
 
 pub const MAX_DEPENDENCY_SNAPSHOT_INVENTORY_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DependencyChangeKind {
-    Add,
-    Update,
-    Remove,
-}
+/// The kind of one dependency change. The contracts own it because the host's
+/// review sheet shows it; the service uses the same type rather than a copy.
+pub use local_app_contracts::approvals::DependencyChangeKind;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1115,11 +1111,7 @@ pub fn validate_dependency_entry(path: &Path, canonical_root: &Path) -> Result<(
     Ok(())
 }
 
-pub fn dependency_attestation(
-    lock_digest: &str,
-    tree_digest: &str,
-    toolchain_key: &str,
-) -> String {
+pub fn dependency_attestation(lock_digest: &str, tree_digest: &str, toolchain_key: &str) -> String {
     format!("{DEPENDENCY_SNAPSHOT_VERSION}\n{lock_digest}\n{toolchain_key}\n{tree_digest}\n")
 }
 
@@ -1248,10 +1240,7 @@ pub fn make_dependency_files_read_only(root: &Path) -> io::Result<()> {
 /// Resolution is strict: a shim whose target does not exist is rejected rather
 /// than copied forward as a dangling entry that fails later at `vite` spawn
 /// time with an unrelated message.
-pub fn dependency_symlink_target(
-    path: &Path,
-    canonical_root: &Path,
-) -> Result<PathBuf, String> {
+pub fn dependency_symlink_target(path: &Path, canonical_root: &Path) -> Result<PathBuf, String> {
     let resolved = std::fs::canonicalize(path).map_err(|error| {
         format!(
             "dependency tree symlink does not resolve: {}: {error}",

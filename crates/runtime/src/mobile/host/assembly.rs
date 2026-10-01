@@ -3020,7 +3020,7 @@ pub fn build_mobile_engine_inner(
             // same unavailable state and never mutate data.
             let host = LocalAppsHostBroker::new_with_physical_memory(
                 mobile_apps_data_root(&firer_cfg),
-                event_sink.clone(),
+                crate::mobile::local_apps_wire::ClientSinkAdapter::new(event_sink.clone()),
                 inner.mobile_linux.clone(),
                 firer_cfg.local_apps_full_runtime,
                 firer_cfg.local_apps_runtime_root.clone(),

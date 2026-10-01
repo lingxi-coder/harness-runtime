@@ -13,7 +13,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod approvals;
 pub mod bridge;
+pub mod events;
 
 pub mod ids {
     //! Id grammars for local apps and the Host-issued handles.

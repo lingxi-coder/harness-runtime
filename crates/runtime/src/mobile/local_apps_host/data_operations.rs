@@ -1,7 +1,7 @@
 use super::authoring;
 use super::required_string;
 use super::LocalAppsHostBroker;
-use client::protocol::local_apps::AppCapabilityKindDto;
+use local_app_contracts::approvals::CapabilityKind;
 use local_apps::load_manifest;
 use local_apps::AppCapability;
 use local_apps::AppDataStore;
@@ -269,7 +269,7 @@ impl LocalAppsHostBroker {
             self.authorize_capability(
                 &app_id,
                 AppCapability::DataMutation,
-                AppCapabilityKindDto::DataMutation,
+                CapabilityKind::DataMutation,
                 "The agent requested permission to modify this app's persisted data.",
             )
             .await?;

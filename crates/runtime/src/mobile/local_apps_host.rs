@@ -8,16 +8,14 @@ use crate::mobile::host::LocalAppBackgroundRunDto;
 use crate::mobile::local_apps_mcp::LocalAppsMcpHost;
 use crate::mobile::plan_approval::CreateApprovalAuthority;
 use async_trait::async_trait;
-use client::adapter::ClientEventSink;
-use client::protocol::events::ClientEvent;
-use client::protocol::local_apps::{
-    AppAuthorizationDecisionDto, AppCapabilityKindDto, AppDependencyChangeConfirmationRequestDto,
-    AppDependencyChangeDto, AppDependencyChangeKindDto, AppEventDto, AppRuntimeProfileDto,
-    AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto,
-    LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppVerificationStatusDto,
-    LocalAppVerificationSummaryDto,
-};
 use futures_util::StreamExt;
+use local_app_contracts::approvals::{
+    AuthorizationDecision, CapabilityKind, DependencyChangeConfirmationRequest,
+    DependencyChangeReview, GateStatus, McpProposalApprovalRequest, UiActionKind, UiRequest,
+    UiTarget, VerificationStatus,
+};
+use local_app_service::host::HostEvent;
+use local_app_service::host::HostEventSink;
 use local_apps::{
     load_manifest, load_mcp_settings, load_permissions, mcp_catalog_tool_names, save_mcp_settings,
     AppCapability, AppDependencyState, AppLayout, AppMcpSettings, AppRuntimeProfile,
@@ -131,7 +129,7 @@ const LOCAL_APP_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 
 
 #[derive(Debug)]
 struct UiResolution {
-    decision: AppAuthorizationDecisionDto,
+    decision: AuthorizationDecision,
     result_json: Option<String>,
     error: Option<String>,
 }
@@ -150,7 +148,7 @@ struct PendingNativeApproval {
     /// engine blocked until it timed out and failed the whole workflow. Keep
     /// the request so a reattaching client can be handed it again, unchanged
     /// and with the same `request_id` its answer must carry.
-    event: AppEventDto,
+    event: HostEvent,
 }
 
 #[derive(Clone, Debug)]
@@ -1196,7 +1194,7 @@ struct LocalAppsRuntimeConfiguration {
 /// completed, while command/capability resolution can be wired immediately.
 pub(crate) struct LocalAppsHostBroker {
     root: PathBuf,
-    event_sink: Arc<dyn ClientEventSink>,
+    event_sink: Arc<dyn HostEventSink>,
     runtime_configuration: RwLock<LocalAppsRuntimeConfiguration>,
     service: OnceLock<Arc<AppService>>,
     mcp_registry: OnceLock<std::sync::Weak<mcp::McpRegistry>>,
@@ -1281,7 +1279,7 @@ pub(crate) struct LocalAppsHostBroker {
     /// spawned onto the profile worker and outlive the call that started
     /// them. Weak so a watcher can never be what keeps the broker alive.
     self_ref: OnceLock<std::sync::Weak<LocalAppsHostBroker>>,
-    pending_capabilities: Mutex<HashMap<String, oneshot::Sender<AppAuthorizationDecisionDto>>>,
+    pending_capabilities: Mutex<HashMap<String, oneshot::Sender<AuthorizationDecision>>>,
     pending_dependency_change_confirmations: Mutex<HashMap<String, oneshot::Sender<bool>>>,
     pending_create_confirmations: Mutex<HashMap<String, PendingNativeApproval>>,
     pending_mcp_proposal_approvals: Mutex<HashMap<String, PendingNativeApproval>>,
@@ -1383,7 +1381,7 @@ impl LocalAppsHostBroker {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(
         root: PathBuf,
-        event_sink: Arc<dyn ClientEventSink>,
+        event_sink: Arc<dyn HostEventSink>,
         mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
         _full_runtime: bool,
         runtime_root: Option<PathBuf>,
@@ -1393,7 +1391,7 @@ impl LocalAppsHostBroker {
 
     pub(crate) fn new_with_physical_memory(
         root: PathBuf,
-        event_sink: Arc<dyn ClientEventSink>,
+        event_sink: Arc<dyn HostEventSink>,
         mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
         _full_runtime: bool,
         runtime_root: Option<PathBuf>,
@@ -1789,22 +1787,22 @@ impl LocalAppsHostBroker {
     /// `LocalAppApprovalSheets.swift`'s `localizedGateLabel` /
     /// `localizedGateDetail`, and an unknown future id falls back to the
     /// `label`/`detail` sent from here.
-    fn pending_verification_gates(proposed_tools: usize) -> Vec<LocalAppGateStatusDto> {
+    fn pending_verification_gates(proposed_tools: usize) -> Vec<GateStatus> {
         let mut gates = Vec::new();
         if proposed_tools > 0 {
-            gates.push(LocalAppGateStatusDto {
+            gates.push(GateStatus {
                 gate_id: "mcp_qa".into(),
                 label: "MCP schema, Flow, call and isolation QA".into(),
-                status: LocalAppVerificationStatusDto::Pending,
+                status: VerificationStatus::Pending,
                 available: true,
                 detail: None,
             });
         }
 
-        gates.push(LocalAppGateStatusDto {
+        gates.push(GateStatus {
             gate_id: "ui_runner".into(),
             label: "UI verification runner".into(),
-            status: LocalAppVerificationStatusDto::Unavailable,
+            status: VerificationStatus::Unavailable,
             available: false,
             detail: Some("UI evidence is unavailable on this host.".into()),
         });
@@ -2086,21 +2084,19 @@ impl LocalAppsHostBroker {
             Vec::new()
         };
         let request_id = self.request_id("app-mcp-proposal-approval");
-        let event = AppEventDto::McpProposalApprovalRequested {
-            request: LocalAppMcpProposalApprovalRequestDto {
-                request_id: request_id.clone(),
-                app_id: app_id.to_string(),
-                workflow_run_id: workflow_run_id.to_string(),
-                summary: candidate.validated.proposal.summary.clone(),
-                proposal_sha256: candidate.validated.proposal_sha256.clone(),
-                approval_contract_sha256: candidate.approval_contract_sha256.clone(),
-                tool_surface_sha256: candidate.validated.tool_surface_sha256.clone(),
-                tool_diffs: mcp_tool_diffs(current, proposed),
-                required_flow_changes: candidate.validated.proposal.required_flow_changes.clone(),
-                excluded_capabilities: candidate.validated.proposal.excluded_capabilities.clone(),
-                pending_gates: Self::pending_verification_gates(proposed_tool_count),
-            },
-        };
+        let event = HostEvent::McpProposalApprovalRequested(McpProposalApprovalRequest {
+            request_id: request_id.clone(),
+            app_id: app_id.to_string(),
+            workflow_run_id: workflow_run_id.to_string(),
+            summary: candidate.validated.proposal.summary.clone(),
+            proposal_sha256: candidate.validated.proposal_sha256.clone(),
+            approval_contract_sha256: candidate.approval_contract_sha256.clone(),
+            tool_surface_sha256: candidate.validated.tool_surface_sha256.clone(),
+            tool_diffs: mcp_tool_diffs(current, proposed),
+            required_flow_changes: candidate.validated.proposal.required_flow_changes.clone(),
+            excluded_capabilities: candidate.validated.proposal.excluded_capabilities.clone(),
+            pending_gates: Self::pending_verification_gates(proposed_tool_count),
+        });
         self.wait_for_native_approval(
             &self.pending_mcp_proposal_approvals,
             request_id,
@@ -2306,7 +2302,7 @@ impl LocalAppsHostBroker {
         let decision = self
             .request_capability(
                 &app_id,
-                AppCapabilityKindDto::RestoreCheckpoint,
+                CapabilityKind::RestoreCheckpoint,
                 None,
                 &restore_reason,
             )
@@ -2407,9 +2403,9 @@ impl LocalAppsHostBroker {
     /// that one never came into being.
     pub(crate) async fn emit_create_failure(&self, error: &local_apps::AppError) {
         self.event_sink
-            .emit(ClientEvent::AppOperationFailed {
+            .emit(HostEvent::AppOperationFailed {
                 app_id: None,
-                code: crate::mobile::local_apps_bridge::lower_error_code(error.code()),
+                code: error.code(),
                 message: error.to_string(),
                 // Correctly `None`, not a stub: `request_id` is the
                 // correlation key a client puts on its own `CreateApp`, and
@@ -3976,7 +3972,7 @@ impl LocalAppsHostBroker {
 
 /// Build the opaque `value` payload for a capture request.
 ///
-/// The rect rides `AppUiRequestDto.value` — an `Option<String>` the wire
+/// The rect rides `UiRequest.value` — an `Option<String>` the wire
 /// already carries — so a region crop costs no DTO change. Shape and
 /// finiteness are checked here; CLAMPING to the viewport happens on the
 /// client, which is the only side that knows the real viewport.
@@ -5297,8 +5293,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             // cache work before the user's approval.
             let confirmation_changes = changes
                 .iter()
-                .map(|change| AppDependencyChangeDto {
-                    kind: dependency_change_kind_dto(&change.kind),
+                .map(|change| DependencyChangeReview {
+                    kind: change.kind,
                     package: change.package.clone(),
                     version: change.version.clone(),
                     cache_status: dependency_change_cache_status(&change.kind),
@@ -5321,23 +5317,21 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 request_id: request_id.clone(),
             };
             self.event_sink
-                .emit(ClientEvent::AppEvent {
-                    event: AppEventDto::AppDependencyChangeConfirmationRequested {
-                        request: AppDependencyChangeConfirmationRequestDto {
-                            request_id: request_id.clone(),
-                            app_id: app_id.clone(),
-                            // Stable codes keep native clients localized while
-                            // still making the policy explicit on the wire.
-                            reason: "pre_resolution_no_network".into(),
-                            changes: confirmation_changes,
-                            license_risk: "unknown_until_resolution".into(),
-                            sbom_risk: "unknown_until_resolution".into(),
-                            lifecycle_scripts_blocked: true,
-                            native_addons_blocked: true,
-                            rollback_policy: "rollback_on_validation_failure".into(),
-                        },
+                .emit(HostEvent::DependencyChangeConfirmationRequested(
+                    DependencyChangeConfirmationRequest {
+                        request_id: request_id.clone(),
+                        app_id: app_id.clone(),
+                        // Stable codes keep native clients localized while
+                        // still making the policy explicit on the wire.
+                        reason: "pre_resolution_no_network".into(),
+                        changes: confirmation_changes,
+                        license_risk: "unknown_until_resolution".into(),
+                        sbom_risk: "unknown_until_resolution".into(),
+                        lifecycle_scripts_blocked: true,
+                        native_addons_blocked: true,
+                        rollback_policy: "rollback_on_validation_failure".into(),
                     },
-                })
+                ))
                 .await;
             let approval_wait_span = tracing::debug_span!(
                 "local_app_dependency_native_confirmation_wait",
@@ -5947,10 +5941,10 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             self.request_id("app-ui")
         };
         let result = self
-            .request_ui(AppUiRequestDto {
+            .request_ui(UiRequest {
                 request_id: ui_request_id,
                 app_id,
-                action: AppUiActionKindDto::CaptureView,
+                action: UiActionKind::CaptureView,
                 target: None,
                 value: capture_value,
             })
@@ -5990,14 +5984,14 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             self.request_id("app-ui")
         };
         let result = self
-            .request_ui(AppUiRequestDto {
+            .request_ui(UiRequest {
                 request_id: ui_request_id,
                 app_id,
-                action: AppUiActionKindDto::Inspect,
+                action: UiActionKind::Inspect,
                 target: input
                     .get("selector")
                     .and_then(Value::as_str)
-                    .map(|selector| AppUiTargetDto {
+                    .map(|selector| UiTarget {
                         element_id: Some(selector.to_string()),
                         role: None,
                         name: None,
@@ -6032,21 +6026,21 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         self.authorize_capability(
             &app_id,
             AppCapability::UiControl,
-            AppCapabilityKindDto::UiControl,
+            CapabilityKind::UiControl,
             "The agent requested permission to control this app's visible interface.",
         )
         .await?;
         let action = match required_string(&input, "action")? {
-            "click" => AppUiActionKindDto::Click,
-            "fill" => AppUiActionKindDto::Fill,
-            "select" => AppUiActionKindDto::Select,
-            "toggle" => AppUiActionKindDto::Toggle,
-            "scroll" => AppUiActionKindDto::Scroll,
-            "navigate" => AppUiActionKindDto::Navigate,
-            "back" => AppUiActionKindDto::Back,
-            "reload" => AppUiActionKindDto::Reload,
-            "pointer" => AppUiActionKindDto::Pointer,
-            "key" => AppUiActionKindDto::Key,
+            "click" => UiActionKind::Click,
+            "fill" => UiActionKind::Fill,
+            "select" => UiActionKind::Select,
+            "toggle" => UiActionKind::Toggle,
+            "scroll" => UiActionKind::Scroll,
+            "navigate" => UiActionKind::Navigate,
+            "back" => UiActionKind::Back,
+            "reload" => UiActionKind::Reload,
+            "pointer" => UiActionKind::Pointer,
+            "key" => UiActionKind::Key,
             _ => return Err("unsupported structured UI action".into()),
         };
         let target = normalize_ui_target(input.get("target"))?;
@@ -6072,7 +6066,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
             self.request_id("app-ui")
         };
         let result = self
-            .request_ui(AppUiRequestDto {
+            .request_ui(UiRequest {
                 request_id: ui_request_id,
                 app_id: app_id.clone(),
                 action,
@@ -6165,7 +6159,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         self.authorize_capability(
             &app_id,
             AppCapability::BackgroundSchedule,
-            AppCapabilityKindDto::BackgroundSchedule,
+            CapabilityKind::BackgroundSchedule,
             "应用请求在系统后台按计划运行一个流程。",
         )
         .await?;
@@ -6526,46 +6520,28 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn raise_decision(decision: AppAuthorizationDecisionDto) -> PermissionDecision {
+fn raise_decision(decision: AuthorizationDecision) -> PermissionDecision {
     match decision {
-        AppAuthorizationDecisionDto::Deny => PermissionDecision::Deny,
-        AppAuthorizationDecisionDto::AllowOnce => PermissionDecision::AllowOnce,
-        AppAuthorizationDecisionDto::AllowSession => PermissionDecision::AllowSession,
-        AppAuthorizationDecisionDto::AllowAlways => PermissionDecision::AlwaysAllow,
-        _ => PermissionDecision::Deny,
+        AuthorizationDecision::Deny => PermissionDecision::Deny,
+        AuthorizationDecision::AllowOnce => PermissionDecision::AllowOnce,
+        AuthorizationDecision::AllowSession => PermissionDecision::AllowSession,
+        AuthorizationDecision::AllowAlways => PermissionDecision::AlwaysAllow,
     }
 }
 
-fn lower_runtime_profile_family(profile: AppRuntimeProfile) -> AppRuntimeProfileDto {
-    match profile {
-        AppRuntimeProfile::ReactDom => AppRuntimeProfileDto::ReactDom,
-        AppRuntimeProfile::Canvas2d => AppRuntimeProfileDto::Canvas2d,
-        AppRuntimeProfile::Three3d => AppRuntimeProfileDto::Three3d,
-        AppRuntimeProfile::Phaser2d => AppRuntimeProfileDto::Phaser2d,
-        AppRuntimeProfile::Babylon3d => AppRuntimeProfileDto::Babylon3d,
-    }
-}
-
-fn lower_surface(surface: local_apps::AppSurface) -> AppSurfaceDto {
-    match surface {
-        local_apps::AppSurface::Dom => AppSurfaceDto::Dom,
-        local_apps::AppSurface::Canvas => AppSurfaceDto::Canvas,
-    }
-}
-
-fn normalize_ui_target(target: Option<&Value>) -> Result<Option<AppUiTargetDto>, String> {
+fn normalize_ui_target(target: Option<&Value>) -> Result<Option<UiTarget>, String> {
     let Some(target) = target else {
         return Ok(None);
     };
     match target {
         Value::Null => Ok(None),
-        Value::String(target) => Ok(Some(AppUiTargetDto {
+        Value::String(target) => Ok(Some(UiTarget {
             element_id: Some(target.to_string()),
             role: None,
             name: None,
         })),
         Value::Object(object) => {
-            let target = AppUiTargetDto {
+            let target = UiTarget {
                 element_id: object
                     .get("element_id")
                     .or_else(|| object.get("elementId"))
@@ -6696,16 +6672,6 @@ use dependency_integrity::DependencyChange;
 use dependency_integrity::DependencyChangeKind;
 use local_app_service::dependency_integrity;
 
-/// The wire name of a dependency change kind. The service owns the kind; the
-/// client protocol owns the DTO, so the mapping lives on this side of the seam.
-fn dependency_change_kind_dto(kind: &DependencyChangeKind) -> AppDependencyChangeKindDto {
-    match kind {
-        DependencyChangeKind::Add => AppDependencyChangeKindDto::Add,
-        DependencyChangeKind::Update => AppDependencyChangeKindDto::Update,
-        DependencyChangeKind::Remove => AppDependencyChangeKindDto::Remove,
-    }
-}
-
 use dependency_recovery::DependencyUpdateRecoveryStatus;
 use mcp_publication::mcp_tool_diffs;
 use mcp_publication::mcp_tool_surfaces_from_candidate;
@@ -6778,7 +6744,12 @@ use static_server::STATIC_ACCEPT_RETRY;
 #[cfg(test)]
 use crate::mobile::local_app_runtime_profiles::RuntimeToolchain;
 #[cfg(test)]
-use client::protocol::local_apps::ManagedLocalAppMcpStatusDto;
+use client::protocol::events::ClientEvent;
+#[cfg(test)]
+use client::protocol::local_apps::{
+    AppCapabilityKindDto, AppEventDto, AppWorkflowStateDto, LocalAppVerificationStatusDto,
+    ManagedLocalAppMcpStatusDto,
+};
 #[cfg(test)]
 use dependency_integrity::clone_or_copy_tree;
 #[cfg(test)]

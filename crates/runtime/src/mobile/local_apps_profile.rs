@@ -216,7 +216,7 @@ impl ProfileApps {
         }
         let host = LocalAppsHostBroker::new_with_physical_memory(
             root.clone(),
-            client_events.clone(),
+            crate::mobile::local_apps_wire::ClientSinkAdapter::new(client_events.clone()),
             mobile_linux.clone(),
             full_runtime,
             runtime_root,

@@ -11,7 +11,6 @@
 
 use super::{BridgeFailure, LocalAppsHostBroker};
 use base64::Engine as _;
-use client::protocol::local_apps::AppCapabilityKindDto;
 use lingxi_core::host::audio::{
     AudioError, AudioErrorKind, AudioInitiator, AudioOperation, AudioOperationContext,
     AudioOperationId, AudioOperationKind, AudioOperationSuccess, AudioOwner, AudioRecordingHandle,
@@ -23,6 +22,7 @@ use lingxi_core::host::{
     HapticStyle, LocationError, NotificationError, NotificationRequest, ShareError, SharePayload,
     ShareResult, VoiceRecording,
 };
+use local_app_contracts::approvals::CapabilityKind;
 use local_apps::{load_permissions, AppCapability};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -68,7 +68,7 @@ const CONTACTS_QUERY_MAX_CHARS: usize = 200;
 const CONTACTS_MAX_LIMIT: u32 = 50;
 
 // First-use prompt reasons, one per capability (reach the sheet verbatim
-// through `AppCapabilityRequestDto.reason`).
+// through `CapabilityRequest.reason`).
 const REASON_CAMERA: &str = "应用请求使用相机拍摄一张照片。";
 const REASON_PHOTO_LIBRARY: &str = "应用请求从相册选择一张图片。";
 const REASON_MICROPHONE: &str = "应用请求使用麦克风录音。";
@@ -1074,7 +1074,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Camera,
-            AppCapabilityKindDto::Camera,
+            CapabilityKind::Camera,
             REASON_CAMERA,
         )
         .await?;
@@ -1121,7 +1121,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::PhotoLibrary,
-            AppCapabilityKindDto::PhotoLibrary,
+            CapabilityKind::PhotoLibrary,
             REASON_PHOTO_LIBRARY,
         )
         .await?;
@@ -1155,7 +1155,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Microphone,
-            AppCapabilityKindDto::Microphone,
+            CapabilityKind::Microphone,
             REASON_MICROPHONE,
         )
         .await?;
@@ -1844,7 +1844,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Microphone,
-            AppCapabilityKindDto::Microphone,
+            CapabilityKind::Microphone,
             REASON_TRANSCRIBE,
         )
         .await?;
@@ -1917,7 +1917,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Location,
-            AppCapabilityKindDto::Location,
+            CapabilityKind::Location,
             REASON_LOCATION,
         )
         .await?;
@@ -1945,7 +1945,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Notifications,
-            AppCapabilityKindDto::Notifications,
+            CapabilityKind::Notifications,
             REASON_NOTIFICATIONS,
         )
         .await?;
@@ -2011,7 +2011,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Clipboard,
-            AppCapabilityKindDto::Clipboard,
+            CapabilityKind::Clipboard,
             REASON_CLIPBOARD,
         )
         .await?;
@@ -2032,7 +2032,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Clipboard,
-            AppCapabilityKindDto::Clipboard,
+            CapabilityKind::Clipboard,
             REASON_CLIPBOARD,
         )
         .await?;
@@ -2064,7 +2064,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Share,
-            AppCapabilityKindDto::Share,
+            CapabilityKind::Share,
             REASON_SHARE,
         )
         .await?;
@@ -2151,7 +2151,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::TextToSpeech,
-            AppCapabilityKindDto::TextToSpeech,
+            CapabilityKind::TextToSpeech,
             REASON_TTS,
         )
         .await?;
@@ -2280,7 +2280,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Haptics,
-            AppCapabilityKindDto::Haptics,
+            CapabilityKind::Haptics,
             REASON_HAPTICS,
         )
         .await?;
@@ -2301,7 +2301,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::DeepLink,
-            AppCapabilityKindDto::DeepLink,
+            CapabilityKind::DeepLink,
             REASON_DEEP_LINK,
         )
         .await?;
@@ -2325,7 +2325,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Calendar,
-            AppCapabilityKindDto::Calendar,
+            CapabilityKind::Calendar,
             REASON_CALENDAR,
         )
         .await?;
@@ -2350,7 +2350,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Contacts,
-            AppCapabilityKindDto::Contacts,
+            CapabilityKind::Contacts,
             REASON_CONTACTS,
         )
         .await?;
@@ -2374,7 +2374,7 @@ impl LocalAppsHostBroker {
         self.authorize_declared_capability(
             app_id,
             AppCapability::Media,
-            AppCapabilityKindDto::Media,
+            CapabilityKind::Media,
             REASON_MEDIA,
         )
         .await?;
@@ -2412,7 +2412,7 @@ mod tests {
     use base64::Engine as _;
     use client::adapter::{ClientEventSink, MockSink};
     use client::protocol::events::ClientEvent;
-    use client::protocol::local_apps::{AppAuthorizationDecisionDto, AppEventDto};
+    use client::protocol::local_apps::AppEventDto;
     use lingxi_core::host::audio::{
         AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioOperation, AudioOperationContext,
         AudioOperationId, AudioOperationKind, AudioOperationReadiness, AudioOperationSuccess,
@@ -2425,6 +2425,7 @@ mod tests {
         NotificationError, NotificationRequest, NotificationService, ShareError, SharePayload,
         ShareResult, SharingService, SttTranscript, TtsAudio, VoiceRecording,
     };
+    use local_app_contracts::approvals::AuthorizationDecision;
     use local_app_contracts::bridge::{BridgeOperation, BridgeRequest};
     use local_apps::test_support::FixedClock;
     use local_apps::{
@@ -2807,7 +2808,7 @@ mod tests {
             .expect("load app service"),
         );
         let sink = MockSink::arc();
-        let broker = LocalAppsHostBroker::new(
+        let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             sink.clone() as Arc<dyn ClientEventSink>,
             None,
@@ -3296,7 +3297,7 @@ mod tests {
                                 broker
                                     .resolve_capability(
                                         &request.request_id,
-                                        AppAuthorizationDecisionDto::AllowOnce,
+                                        AuthorizationDecision::AllowOnce,
                                     )
                                     .await
                             );
@@ -4468,10 +4469,7 @@ mod tests {
 
             assert!(
                 h.broker
-                    .resolve_capability(
-                        &capability_request_id,
-                        AppAuthorizationDecisionDto::AllowOnce,
-                    )
+                    .resolve_capability(&capability_request_id, AuthorizationDecision::AllowOnce,)
                     .await
             );
             timeout(Duration::from_secs(2), pending)
