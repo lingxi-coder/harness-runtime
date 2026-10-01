@@ -1641,11 +1641,11 @@ impl LocalAppsHostBroker {
         let mut body = serde_json::to_vec_pretty(candidate)
             .map_err(|error| format!("serialize MCP candidate: {error}"))?;
         body.push(b'\n');
-        lingxi_core::host::rooted_fs::atomic_write(
+        rooted_fs::atomic_write(
             &self.root,
             &path,
             &body,
-            lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
+            rooted_fs::AtomicWriteOptions::default(),
         )
         .map_err(|error| local_apps::AppError::from_fs("write MCP candidate", &error).to_string())
     }
@@ -1658,10 +1658,9 @@ impl LocalAppsHostBroker {
         let path =
             Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
         let body =
-            lingxi_core::host::rooted_fs::read_to_string_limited(&self.root, &path, 512 * 1024)
-                .map_err(|error| {
-                    local_apps::AppError::from_fs("read MCP candidate", &error).to_string()
-                })?;
+            rooted_fs::read_to_string_limited(&self.root, &path, 512 * 1024).map_err(|error| {
+                local_apps::AppError::from_fs("read MCP candidate", &error).to_string()
+            })?;
         serde_json::from_str(&body).map_err(|error| format!("parse MCP candidate: {error}"))
     }
 
@@ -1674,8 +1673,8 @@ impl LocalAppsHostBroker {
         local_apps::delete_candidate_journal(layout).map_err(|error| error.to_string())?;
         let relative =
             Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
-        match lingxi_core::host::rooted_fs::remove_file(&self.root, &relative) {
-            Ok(()) | Err(lingxi_core::host::FsError::NotFound(_)) => {}
+        match rooted_fs::remove_file(&self.root, &relative) {
+            Ok(()) | Err(rooted_fs::FsError::NotFound(_)) => {}
             Err(error) => {
                 return Err(local_apps::AppError::from_fs(
                     "delete create-only MCP candidate",
@@ -1724,9 +1723,9 @@ impl LocalAppsHostBroker {
         let rel = layout
             .workspace_rel()
             .join(".lingxi/mcp-flow-contexts.json");
-        let body = lingxi_core::host::rooted_fs::read_to_string_limited(&self.root, &rel, 512 * 1024)
+        let body = rooted_fs::read_to_string_limited(&self.root, &rel, 512 * 1024)
             .map_err(|error| match error {
-                lingxi_core::host::FsError::NotFound(_) => {
+                rooted_fs::FsError::NotFound(_) => {
                     "mcp_flow_contexts_missing: Host could not resolve any trusted MCP flow contexts for this app".to_string()
                 }
                 other => local_apps::AppError::from_fs("read MCP flow contexts", &other).to_string(),
@@ -1835,9 +1834,8 @@ impl LocalAppsHostBroker {
             .join(app_id)
             .join(workflow_run_id)
             .join("validated-selection.json");
-        let body =
-            lingxi_core::host::rooted_fs::read_to_string_limited(&self.root, &relative, 256 * 1024)
-                .map_err(|error| format!("validated_selection_missing: {error}"))?;
+        let body = rooted_fs::read_to_string_limited(&self.root, &relative, 256 * 1024)
+            .map_err(|error| format!("validated_selection_missing: {error}"))?;
         let value: Value = serde_json::from_str(&body)
             .map_err(|error| format!("validated_selection_invalid: {error}"))?;
         let handle = value
@@ -2822,8 +2820,8 @@ impl LocalAppsHostBroker {
         create_seed: Option<CreateScaffoldSeed>,
     ) -> Result<
         (
-            lingxi_core::host::rooted_fs::RootedFileLock,
-            lingxi_core::host::rooted_fs::RootedFileLock,
+            rooted_fs::RootedFileLock,
+            rooted_fs::RootedFileLock,
             local_apps::storage::ScaffoldRecoveryHandle,
         ),
         String,
@@ -2867,8 +2865,8 @@ impl LocalAppsHostBroker {
             move ||
                 -> Result<
                     (
-                        lingxi_core::host::rooted_fs::RootedFileLock,
-                        lingxi_core::host::rooted_fs::RootedFileLock,
+                        rooted_fs::RootedFileLock,
+                        rooted_fs::RootedFileLock,
                         local_apps::storage::ScaffoldRecoveryHandle,
                     ),
                     String,
@@ -3424,10 +3422,10 @@ impl LocalAppsHostBroker {
         &self,
         app_id: &str,
         tool_input: Value,
-        definition: &lingxi_core::host::McpToolDefinitionDto,
+        definition: &mcp_wire::McpToolDefinitionDto,
         binding: &local_apps::AppMcpFlowBinding,
         context: &local_apps::AppMcpFlowContext,
-        catalog_ceiling: lingxi_core::host::McpPermissionCeiling,
+        catalog_ceiling: mcp_wire::McpPermissionCeiling,
         mode: BoundMcpFlowMode,
     ) -> Result<BoundMcpExecution, String> {
         let input_bytes = serde_json::to_vec(&tool_input)
@@ -3464,13 +3462,9 @@ impl LocalAppsHostBroker {
                     .into(),
             );
         }
-        if matches!(
-            derived_ceiling,
-            lingxi_core::host::McpPermissionCeiling::Deny
-        ) || matches!(
-            catalog_ceiling,
-            lingxi_core::host::McpPermissionCeiling::Deny
-        ) {
+        if matches!(derived_ceiling, mcp_wire::McpPermissionCeiling::Deny)
+            || matches!(catalog_ceiling, mcp_wire::McpPermissionCeiling::Deny)
+        {
             return Err("permission_ceiling: Host denied this MCP Flow".into());
         }
 
@@ -3710,7 +3704,7 @@ impl LocalAppsHostBroker {
                 "unknown_tool: Local App tool is not in the active catalog".to_string()
             })?;
         let definition_value = entry.get("definition").unwrap_or(entry);
-        let definition: lingxi_core::host::McpToolDefinitionDto =
+        let definition: mcp_wire::McpToolDefinitionDto =
             serde_json::from_value(definition_value.clone())
                 .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
         let binding_value = entry.get("flow").cloned().ok_or_else(|| {
@@ -3757,7 +3751,7 @@ impl LocalAppsHostBroker {
         let catalog_ceiling = entry
             .get("ceiling")
             .and_then(Value::as_str)
-            .and_then(lingxi_core::host::McpPermissionCeiling::from_policy_str)
+            .and_then(mcp_wire::McpPermissionCeiling::from_policy_str)
             .ok_or_else(|| "permission_ceiling: active tool ceiling is invalid".to_string())?;
         Ok(self
             .execute_bound_mcp_flow(

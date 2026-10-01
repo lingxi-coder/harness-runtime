@@ -100,6 +100,8 @@ mobile = [
     "workflow",
     "dep:provider-config",
     "dep:local-apps",
+    "dep:mcp-wire",
+    "dep:rooted-fs",
     "dep:jsonrpc",
     "dep:tool-mcp",
     "dep:futures-util",
@@ -196,6 +198,7 @@ local-apps = { path = "../local-apps", optional = true }
 lsp = { path = "../lsp", optional = true }
 lsp-types = { version = "0.95", optional = true }
 mcp = { path = "../mcp", optional = true }
+mcp-wire = { path = "../mcp-wire", optional = true }
 memory = { path = "../memory", optional = true }
 migrations = { path = "../migrations", optional = true }
 llm-runtime = { path = "../llm-runtime" }
@@ -210,6 +213,7 @@ platform-posix-minimal = { path = "../platforms/posix-minimal", optional = true 
 plugin = { path = "../plugin", optional = true }
 provider-config = { path = "../provider-config", optional = true }
 reqwest = { version = "=0.12.28", default-features = false, optional = true }
+rooted-fs = { path = "../rooted-fs", optional = true }
 sandbox = { path = "../sandbox", optional = true }
 sandbox-runtime = { path = "../sandbox-runtime", optional = true }
 secret = { path = "../secret", optional = true }

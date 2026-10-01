@@ -3460,8 +3460,7 @@ async fn execute_mcp_flow_runs_the_host_reloaded_typed_binding() {
     )
     .expect("write flow contexts");
 
-    let mut definition =
-        lingxi_core::host::McpToolDefinitionDto::new("runtime_status", input_schema);
+    let mut definition = mcp_wire::McpToolDefinitionDto::new("runtime_status", input_schema);
     definition.output_schema = Some(output_schema);
     let binding = json!({
         "flowId": "runtime-status-flow",
@@ -4405,8 +4404,7 @@ fn persist_initial_mcp_candidate_fixture(
         "additionalProperties": false,
     });
     let output_schema = runtime_record_output_schema();
-    let mut definition =
-        lingxi_core::host::McpToolDefinitionDto::new("runtime_status", input_schema);
+    let mut definition = mcp_wire::McpToolDefinitionDto::new("runtime_status", input_schema);
     definition.title = Some("Runtime status".into());
     definition.description = Some("Read the current runtime status from the staged flow.".into());
     definition.output_schema = Some(output_schema);
@@ -4428,7 +4426,7 @@ fn persist_initial_mcp_candidate_fixture(
         tools: vec![local_apps::HostValidatedMcpTool {
             definition: definition.clone(),
             flow,
-            ceiling: lingxi_core::host::McpPermissionCeiling::Allow,
+            ceiling: mcp_wire::McpPermissionCeiling::Allow,
         }],
         proposal_sha256: local_apps::approval_contract_sha256(
             serde_json::to_value(&proposal).expect("serialize proposal"),

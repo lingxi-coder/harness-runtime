@@ -46,7 +46,7 @@ pub(super) fn lower_managed_mcp_status(status: AppMcpStatus) -> ManagedLocalAppM
 }
 
 pub(super) fn tool_meta_resource_uri(
-    definition: &lingxi_core::host::McpToolDefinitionDto,
+    definition: &mcp_wire::McpToolDefinitionDto,
 ) -> Option<String> {
     let meta = definition.meta.as_ref()?;
     meta.get("ui")
@@ -95,12 +95,8 @@ pub(super) fn validate_managed_mcp_widget_file(
         .join(local_apps::manifest::MCP_DIR)
         .join(LOCAL_APP_WIDGET_DIR)
         .join(format!("{resource_sha256}.html"));
-    let body = lingxi_core::host::rooted_fs::read_to_string_limited(
-        layout.root(),
-        &relative,
-        4 * 1024 * 1024,
-    )
-    .map_err(|error| format!("widget_invalid: {}: {error}", relative.display()))?;
+    let body = rooted_fs::read_to_string_limited(layout.root(), &relative, 4 * 1024 * 1024)
+        .map_err(|error| format!("widget_invalid: {}: {error}", relative.display()))?;
     let actual = format!("{:x}", Sha256::digest(body.as_bytes()));
     if actual != resource_sha256 {
         return Err("widget_invalid: Local App MCP widget digest mismatch".into());
@@ -174,7 +170,7 @@ pub(super) fn managed_mcp_widget_resource(
         .and_then(Value::as_array)
         .ok_or_else(|| "catalog_invalid: active catalog tools are missing".to_string())?;
     for entry in entries {
-        let definition: lingxi_core::host::McpToolDefinitionDto =
+        let definition: mcp_wire::McpToolDefinitionDto =
             serde_json::from_value(entry.get("definition").unwrap_or(entry).clone())
                 .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
         let Some(uri) = tool_meta_resource_uri(&definition) else {
@@ -209,9 +205,9 @@ pub(super) fn managed_mcp_widget_resource(
 }
 
 pub(super) fn mcp_tool_surface(
-    definition: lingxi_core::host::McpToolDefinitionDto,
+    definition: mcp_wire::McpToolDefinitionDto,
     flow: Value,
-    ceiling: lingxi_core::host::McpPermissionCeiling,
+    ceiling: mcp_wire::McpPermissionCeiling,
 ) -> Result<LocalAppMcpToolSurfaceDto, String> {
     Ok(LocalAppMcpToolSurfaceDto {
         name: definition.name,
@@ -225,9 +221,9 @@ pub(super) fn mcp_tool_surface(
         visible_meta_json: optional_json_string(definition.meta.as_ref())?,
         semantic_flow_json: serde_json::to_string(&flow).map_err(|error| error.to_string())?,
         permission_ceiling: match ceiling {
-            lingxi_core::host::McpPermissionCeiling::Allow => "allow",
-            lingxi_core::host::McpPermissionCeiling::Ask => "ask",
-            lingxi_core::host::McpPermissionCeiling::Deny => "deny",
+            mcp_wire::McpPermissionCeiling::Allow => "allow",
+            mcp_wire::McpPermissionCeiling::Ask => "ask",
+            mcp_wire::McpPermissionCeiling::Deny => "deny",
         }
         .into(),
     })
@@ -242,7 +238,7 @@ pub(super) fn mcp_tool_surfaces_from_catalog(
         .ok_or_else(|| "catalog_invalid: active catalog tools are missing".to_string())?;
     let mut tools = Vec::with_capacity(entries.len());
     for entry in entries {
-        let definition: lingxi_core::host::McpToolDefinitionDto =
+        let definition: mcp_wire::McpToolDefinitionDto =
             serde_json::from_value(entry.get("definition").unwrap_or(entry).clone())
                 .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
         let flow = entry
@@ -252,7 +248,7 @@ pub(super) fn mcp_tool_surfaces_from_catalog(
         let ceiling = entry
             .get("ceiling")
             .and_then(Value::as_str)
-            .and_then(lingxi_core::host::McpPermissionCeiling::from_policy_str)
+            .and_then(mcp_wire::McpPermissionCeiling::from_policy_str)
             .ok_or_else(|| "catalog_invalid: active tool ceiling is invalid".to_string())?;
         tools.push(mcp_tool_surface(definition, flow, ceiling)?);
     }

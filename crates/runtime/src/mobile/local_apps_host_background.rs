@@ -22,7 +22,7 @@ impl LocalAppsHostBroker {
     pub(crate) async fn acquire_background_process_lock(
         &self,
         app_id: &str,
-    ) -> Result<lingxi_core::host::rooted_fs::RootedFileLock, String> {
+    ) -> Result<rooted_fs::RootedFileLock, String> {
         let root = self.root.clone();
         let app_id = app_id.to_string();
         tokio::task::spawn_blocking(move || {
