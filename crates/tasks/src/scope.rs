@@ -53,7 +53,7 @@
 //!    made that choice; provenance remains the Host integration's obligation.
 //! 2. **`app_id` is well formed.** Every constructor is fallible and rejects
 //!    an `app_id` that does not match `^[a-z0-9][a-z0-9-]{0,53}$` -- the same
-//!    grammar `local_apps::ids::is_valid_app_id` enforces before an id is
+//!    grammar `local_app_contracts::ids::is_valid_app_id` enforces before an id is
 //!    ever used in a path. `tasks` deliberately does NOT depend on
 //!    `local-apps` for this (see `MIRRORED GRAMMAR` below), so the check is a
 //!    local copy of a 6-line predicate, not a shared type.
@@ -123,22 +123,20 @@
 //!
 //! # MIRRORED GRAMMAR
 //!
-//! `local_apps::ids::is_valid_app_id` is the original. `tasks` does not take
-//! a PRODUCTION dependency on `local-apps`: both crates classify as `engine`
-//! so `scripts/checks/check_deps.py` would permit the edge, but `local-apps` pulls
-//! bundled SQLite, vendored libgit2 and two tree-sitter grammars into
-//! `tasks`, and `tasks` has five dependents (including `cron` and
-//! `coordinator`, which build none of that today) for what is a six-line
-//! predicate. The copy is pinned by the test
+//! `local_app_contracts::ids::is_valid_app_id` is the original. It used to
+//! live in `local-apps`, which pulls bundled SQLite and vendored libgit2, so
+//! `tasks` (with five dependents, including `cron` and `coordinator`, which
+//! build none of that) copied a six-line predicate instead of depending on
+//! it. The grammar now lives in the dependency-free `local-app-contracts`, so
+//! a direct call would be free; the copy stays only so that moving the
+//! original is a pure dependency swap. It is pinned by the test
 //! `app_id_grammar_matches_the_local_apps_corpus` below, whose corpus is
-//! the one from `local_apps::ids`'s own tests.
+//! the one from the original's own tests.
 //!
-//! A DEV-dependency is a different tradeoff: `check_deps.py` excludes
-//! dev-dependencies from its edge check, so it costs the five dependents
-//! nothing, and it lets `app_id_grammar_agrees_with_local_apps_ids` call the
-//! real `local_apps::ids::is_valid_app_id` directly instead of trusting that
-//! the copied corpus above was transcribed correctly -- so `tasks/Cargo.toml`
-//! carries that dev-dependency and both tests run.
+//! A DEV-dependency lets `app_id_grammar_agrees_with_local_apps_ids` call the
+//! real `local_app_contracts::ids::is_valid_app_id` directly instead of
+//! trusting that the copied corpus above was transcribed correctly -- so
+//! `tasks/Cargo.toml` carries that dev-dependency and both tests run.
 //!
 //! # Scope of this module
 //!
@@ -164,12 +162,12 @@ pub enum LocalAppWorkflowPurpose {
 }
 
 /// Longest accepted app id -- the `{0,53}` tail plus the leading character,
-/// matching `local_apps::ids::APP_ID_MAX_LEN`.
+/// matching `local_app_contracts::ids::APP_ID_MAX_LEN`.
 const APP_ID_MAX_LEN: usize = 54;
 
 /// True iff `id` matches `^[a-z0-9][a-z0-9-]{0,53}$`.
 ///
-/// A local mirror of `local_apps::ids::is_valid_app_id`; see the module docs'
+/// A local mirror of `local_app_contracts::ids::is_valid_app_id`; see the module docs'
 /// `MIRRORED GRAMMAR` section for why it is a copy and what pins it.
 fn is_well_formed_app_id(id: &str) -> bool {
     let bytes = id.as_bytes();
@@ -477,7 +475,7 @@ mod tests {
     }
 
     /// Real cross-crate agreement, as a DEV-dependency (see module docs'
-    /// `MIRRORED GRAMMAR`): calls the ACTUAL `local_apps::ids::is_valid_app_id`
+    /// `MIRRORED GRAMMAR`): calls the ACTUAL `local_app_contracts::ids::is_valid_app_id`
     /// side by side with this module's mirrored `is_well_formed_app_id`
     /// across one shared corpus, so a future edit to either grammar that
     /// silently drifts from the other fails HERE, not by two independently
@@ -504,7 +502,7 @@ mod tests {
         for id in valid {
             assert_eq!(
                 is_well_formed_app_id(id),
-                local_apps::ids::is_valid_app_id(id),
+                local_app_contracts::ids::is_valid_app_id(id),
                 "grammars disagree on {id:?} (expected both to accept)"
             );
             assert!(is_well_formed_app_id(id), "expected valid: {id}");
@@ -512,7 +510,7 @@ mod tests {
         for id in invalid {
             assert_eq!(
                 is_well_formed_app_id(id),
-                local_apps::ids::is_valid_app_id(id),
+                local_app_contracts::ids::is_valid_app_id(id),
                 "grammars disagree on {id:?} (expected both to reject)"
             );
             assert!(!is_well_formed_app_id(id), "expected invalid: {id}");

@@ -32,14 +32,12 @@ llm-runtime = { path = "../llm-runtime" }
 tempfile = "3.13"
 tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
 # DEV-only: enables `scope::tests::app_id_grammar_agrees_with_local_apps_ids`,
-# a real cross-crate agreement test against `local_apps::ids::is_valid_app_id`
-# (the grammar `scope.rs` otherwise mirrors from a copied corpus -- see that
-# module's `MIRRORED GRAMMAR` docs). NOT a production dependency: `tasks` has
-# five dependents (including `cron`/`coordinator`, which pull none of
-# `local-apps`'s bundled SQLite/libgit2 weight today), and
-# `check_deps.py` excludes dev-dependencies from its edge check, so this adds
-# nothing to their build.
-local-apps = { path = "../local-apps" }
+# a real cross-crate agreement test against
+# `local_app_contracts::ids::is_valid_app_id` (the grammar `scope.rs` otherwise
+# mirrors from a copied corpus -- see that module's `MIRRORED GRAMMAR` docs).
+# The crate has no dependencies, so unlike the service it used to name here it
+# adds nothing to the test build.
+local-app-contracts = { path = "../local-app-contracts" }
 
 [lints]
 workspace = true

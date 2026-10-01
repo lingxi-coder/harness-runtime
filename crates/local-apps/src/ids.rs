@@ -5,21 +5,18 @@
 //! store crate so every entry path (engine command, future FFI) produces the
 //! SAME on-disk format. App ids must match `^[a-z0-9][a-z0-9-]{0,53}$` and are
 //! validated before ever being used in a path.
+//!
+//! The grammar itself lives in `local-app-contracts`, which has no
+//! dependencies, so clients can check an id without compiling the service;
+//! this module re-exports it under its old path and adds what needs the
+//! service: minting, and validators that answer with an [`AppError`].
 
 use crate::error::AppError;
-
-/// Maximum app id length (regex `{0,53}` tail plus the leading character).
-pub const APP_ID_MAX_LEN: usize = 54;
-
-/// Host-issued authoring contract handle shape exposed by the Local App
-/// schemas. The random suffix is generated as lowercase hex, which provides
-/// 128 bits of entropy while remaining inside the public alphanumeric shape.
-pub const AUTHORING_HANDLE_PATTERN: &str = r"^contract_[A-Za-z0-9]{32}$";
-/// Host-issued QA handle shape exposed by the Local App schemas.
-pub const QA_HANDLE_PATTERN: &str = r"^qa_[A-Za-z0-9]{32}$";
-const AUTHORING_HANDLE_PREFIX: &str = "contract_";
-const QA_HANDLE_PREFIX: &str = "qa_";
-const HANDLE_SUFFIX_LEN: usize = 32;
+pub use local_app_contracts::ids::{
+    is_valid_app_id, is_valid_authoring_handle, is_valid_qa_handle, APP_ID_MAX_LEN,
+    AUTHORING_HANDLE_PATTERN, QA_HANDLE_PATTERN,
+};
+use local_app_contracts::ids::{AUTHORING_HANDLE_PREFIX, HANDLE_SUFFIX_LEN, QA_HANDLE_PREFIX};
 
 fn random_hex(len: usize) -> String {
     use rand::Rng;
@@ -63,26 +60,6 @@ pub fn generate_qa_handle() -> String {
     format!("{QA_HANDLE_PREFIX}{}", random_hex(HANDLE_SUFFIX_LEN))
 }
 
-fn is_valid_host_handle(value: &str, prefix: &str) -> bool {
-    value.len() == prefix.len() + HANDLE_SUFFIX_LEN
-        && value.starts_with(prefix)
-        && value[prefix.len()..]
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric())
-}
-
-/// True iff `value` has the Host-issued authoring handle shape.
-#[must_use]
-pub fn is_valid_authoring_handle(value: &str) -> bool {
-    is_valid_host_handle(value, AUTHORING_HANDLE_PREFIX)
-}
-
-/// True iff `value` has the Host-issued QA handle shape.
-#[must_use]
-pub fn is_valid_qa_handle(value: &str) -> bool {
-    is_valid_host_handle(value, QA_HANDLE_PREFIX)
-}
-
 /// Validate a Host-issued authoring contract handle.
 pub fn validate_authoring_handle(value: &str) -> Result<(), AppError> {
     if is_valid_authoring_handle(value) {
@@ -103,20 +80,6 @@ pub fn validate_qa_handle(value: &str) -> Result<(), AppError> {
             "invalid QA handle {value:?}: must match {QA_HANDLE_PATTERN}"
         )))
     }
-}
-
-/// True iff `id` matches `^[a-z0-9][a-z0-9-]{0,53}$`.
-#[must_use]
-pub fn is_valid_app_id(id: &str) -> bool {
-    let bytes = id.as_bytes();
-    if bytes.is_empty() || bytes.len() > APP_ID_MAX_LEN {
-        return false;
-    }
-    let first_ok = bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit();
-    first_ok
-        && bytes[1..]
-            .iter()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 
 /// Validate `id` against the app-id grammar, rejecting anything that could
@@ -173,29 +136,6 @@ mod tests {
         assert_ne!(qa, generate_qa_handle());
         assert!(validate_authoring_handle(&authoring).is_ok());
         assert!(validate_qa_handle(&qa).is_ok());
-    }
-
-    #[test]
-    fn host_handle_validators_reject_counters_and_wrong_prefixes() {
-        for value in [
-            "contract_1",
-            "contract_0000000000000000000000000000000",
-            "authoring_00000000000000000000000000000000",
-            "qa_1",
-            "qa_0000000000000000000000000000000",
-            "contract_0000000000000000000000000000000/",
-        ] {
-            assert!(!is_valid_authoring_handle(value));
-            assert!(!is_valid_qa_handle(value));
-        }
-    }
-
-    #[test]
-    fn accepts_valid_ids() {
-        let max_len = "a".repeat(54);
-        for id in ["a", "0", "abc-123", "9-", max_len.as_str()] {
-            assert!(is_valid_app_id(id), "expected valid: {id}");
-        }
     }
 
     #[test]
