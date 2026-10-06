@@ -1,0 +1,2 @@
+# Hits that stay in a product-neutral crate, one per line: <path>\t<needle>\t<reason>
+# (see check_product_neutral.py). A line that matches nothing fails the gate.
