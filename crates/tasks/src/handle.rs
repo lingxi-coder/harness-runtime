@@ -362,7 +362,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             creator_teammate_name: None,
             creator_team_name: None,
             creator_agent_id: None,
-            // A placeholder carries no Local App authority: `create` only
+            // A placeholder carries no managed-app authority: `create` only
             // allocates a spool file and a state slot, and the Host mints a
             // scope on the real `spawn` path.
             scope: None,

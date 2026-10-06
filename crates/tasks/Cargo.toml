@@ -31,14 +31,6 @@ test-harness = { path = "../test-harness" }
 llm-runtime = { path = "../llm-runtime" }
 tempfile = "3.13"
 tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
-# DEV-only: enables `scope::tests::app_id_grammar_agrees_with_local_apps_ids`,
-# a real cross-crate agreement test against
-# `local_app_contracts::ids::is_valid_app_id` (the grammar `scope.rs` otherwise
-# mirrors from a copied corpus -- see that module's `MIRRORED GRAMMAR` docs).
-# The crate has no dependencies, so unlike the service it used to name here it
-# adds nothing to the test build.
-local-app-contracts = { workspace = true }
-local-app-plugin = { workspace = true }
 
 [lints]
 workspace = true

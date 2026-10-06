@@ -28,10 +28,9 @@ API_CRATES = {"tool-api", "skill-api", "command-api"}
 LOCAL_APP_PRIMITIVES = {"device-api", "local-app-contracts", "mcp-wire", "rooted-fs"}
 LOCAL_APP_CRATES = LOCAL_APP_PRIMITIVES | {"local-app-plugin", "local-app-service", "local-apps"}
 LOCAL_APP_CONSUMERS = {
-    "core": LOCAL_APP_PRIMITIVES,  # re-exports the primitives; names nothing above them
+    "core": LOCAL_APP_PRIMITIVES - {"local-app-contracts"},  # re-exports the shared device/MCP/fs primitives only
     "platform-android": {"local-app-contracts"},  # the Android build profile's guest paths
     "mcp": {"mcp-wire"},
-    "tasks": {"local-app-contracts", "local-app-plugin"},  # (dev) id-grammar mirror, plugin agent roster
     "agent": {"local-app-plugin"},  # (dev) the role schemas
     "workflow": {"local-app-plugin"},  # (dev) the plugin workflow scripts
     "harness-runtime": LOCAL_APP_CRATES,  # the composition root: adapters, build script, bundle

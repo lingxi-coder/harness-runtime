@@ -87,7 +87,7 @@ pub struct TaskStateBase {
 /// # `Serialize` but deliberately NOT `Deserialize`
 ///
 /// This enum owns [`LocalWorkflowTaskState`], whose `scope` field is the
-/// Local App delete/lease authority and is `#[serde(skip)]`. A `Deserialize`
+/// managed-app delete/lease authority and is `#[serde(skip)]`. A `Deserialize`
 /// impl on this enum would therefore hand every future read-back path a row
 /// whose `scope` is silently `None` -- no compile error, no test failure, and
 /// a delete guard that quietly stops guarding. Dropping the derive turns that
@@ -424,7 +424,7 @@ pub struct LocalWorkflowTaskState {
     /// Terminal result/failure/usage payload for workflow notifications.
     #[serde(default)]
     pub outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
-    /// Typed Local App workflow authority for this run (design §18 Phase -1
+    /// Typed managed-app workflow authority for this run (design §18 Phase -1
     /// step 8 / §8.1) -- which app this task may touch, and why. Read by the
     /// workspace-lease and App-delete guards INSTEAD of `workflow_id`/`args`;
     /// see [`crate::scope`]'s module docs for the whole design.
@@ -436,7 +436,7 @@ pub struct LocalWorkflowTaskState {
     /// it from `workflow_id` or `args`.
     ///
     /// `None` when no scope was minted for this task -- every workflow that
-    /// is not a Local App workflow, and any Local App launch the Host could
+    /// is not a managed-app workflow, and any managed-app launch the Host could
     /// not fully validate. Both guards treat `None` as "no authority", not as
     /// "assume the worst": a `None` row never takes the workspace lease and
     /// never blocks an App's delete. The alternative -- granting authority to
@@ -449,7 +449,7 @@ pub struct LocalWorkflowTaskState {
     /// and `a_spawned_workflows_scope_is_what_blocks_its_apps_delete` in
     /// `registry_test.rs`.
     ///
-    /// `#[serde(skip)]`, not `#[serde(default)]`: [`crate::scope::LocalAppWorkflowTaskScope`]
+    /// `#[serde(skip)]`, not `#[serde(default)]`: [`crate::scope::ManagedWorkflowScope`]
     /// deliberately implements `Serialize` and NOT `Deserialize` (see its
     /// module docs' `serde surface` section) -- so this field cannot be
     /// read back from persisted bytes at all today, by construction, not by
@@ -479,7 +479,7 @@ pub struct LocalWorkflowTaskState {
     /// (this module, below) pins that absence so re-adding the derive goes
     /// red naming this field and the guard it protects.
     #[serde(skip)]
-    pub scope: Option<crate::scope::LocalAppWorkflowTaskScope>,
+    pub scope: Option<crate::scope::ManagedWorkflowScope>,
 }
 
 /// State specific to an MCP monitor task.
@@ -629,8 +629,8 @@ pub struct LocalFusionTaskState {
 /// `scope` is `#[serde(skip)]`. `#[serde(skip)]` only requires `Default` on
 /// the field's type -- which `Option<_>` always has -- so a `Deserialize` impl
 /// on [`TaskState`] would compile happily and hand every read-back row
-/// `scope: None`. No compile error, no failing test, and the Local App delete
-/// guard (`crate::registry::TaskRegistry::find_nonterminal_local_app_workflows`)
+/// `scope: None`. No compile error, no failing test, and the managed-app delete
+/// guard (`crate::registry::TaskRegistry::find_nonterminal_managed_workflows`)
 /// silently stops guarding: exactly the gap
 /// `crate::registry::TaskRegistry::register_adopted_workflow_with_scope`
 /// closes at the restart-adoption seam, reopened by one derive.
@@ -716,7 +716,7 @@ mod taskstate_scope_readback_tripwire {
              `scope` field is #[serde(skip)]: a derive is one word, it compiles \
              clean, and every row it reads back gets `scope: None` -- silently \
              reverting the delete guard \
-             (registry::TaskRegistry::find_nonterminal_local_app_workflows) to \
+             (registry::TaskRegistry::find_nonterminal_managed_workflows) to \
              the pre-scope hole that \
              register_adopted_workflow_with_scope closes. Before adding a \
              read-back path, re-mint `scope` AT that seam from state the Host \
@@ -766,7 +766,7 @@ mod taskstate_scope_readback_tripwire {
             transcript_dir: None,
             current_step: 0,
             outcome: Default::default(),
-            scope: crate::scope::LocalAppWorkflowTaskScope::for_build("some-app").ok(),
+            scope: crate::scope::ManagedWorkflowScope::for_build("some-app").ok(),
         });
         let json = serde_json::to_string(&state).expect("a task row still serializes");
         assert!(

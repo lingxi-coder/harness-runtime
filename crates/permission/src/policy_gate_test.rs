@@ -383,9 +383,8 @@ mod tests {
     #[tokio::test]
     async fn a_per_target_allow_rule_grants_only_that_target() {
         crate::defaults_per_tool::install_test_extension();
-        let policy = local_settings_policy(
-            r#"{ "permissions": { "allow": ["ExtMutate(app-a)"] } }"#,
-        );
+        let policy =
+            local_settings_policy(r#"{ "permissions": { "allow": ["ExtMutate(app-a)"] } }"#);
         let inner = RecordingInner::new(PermissionDecision::Deny {
             reason: "prompted".into(),
         });

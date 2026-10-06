@@ -4576,7 +4576,7 @@ impl MobileEngineHandle {
         let active_workflows = self
             .inner
             .task_registry
-            .find_nonterminal_local_app_workflows(&app_id)
+            .find_nonterminal_managed_workflows(&app_id)
             .await;
         let active_lease = self
             .inner

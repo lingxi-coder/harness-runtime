@@ -33,6 +33,11 @@ pub trait WorkspaceProfile: Send + Sync + std::fmt::Debug {
     /// it must name the same id.
     fn root_matches_id(&self, root: &Path, id: &str) -> bool;
 
+    /// Where the workspace of `id` lives under the host's data root. This is
+    /// derived from a validated id, never taken from the session's own cwd, so
+    /// a workflow cannot borrow another workspace.
+    fn workspace_root(&self, data_root: &Path, id: &str) -> PathBuf;
+
     /// Whether `root` is exactly the canonical workspace of `id`. This is the
     /// production gate for starting a lease.
     fn is_exact_root(&self, root: &Path, id: &str) -> bool;
@@ -151,6 +156,12 @@ impl WorkspacePermissionLeaseRegistry {
             token,
             registry: Arc::clone(self),
         }
+    }
+
+    /// The profile's workspace root for `workspace_id` under `data_root`.
+    #[must_use]
+    pub fn workspace_root_for(&self, data_root: &Path, workspace_id: &str) -> PathBuf {
+        self.profile.workspace_root(data_root, workspace_id)
     }
 
     pub fn active(&self) -> Vec<WorkspaceLeaseInfo> {
@@ -657,6 +668,9 @@ mod tests {
         fn root_matches_id(&self, root: &Path, id: &str) -> bool {
             self.workspace_id(root).is_none_or(|own| own == id)
         }
+        fn workspace_root(&self, data_root: &Path, id: &str) -> PathBuf {
+            data_root.join("spaces").join(format!("ws-{id}"))
+        }
         fn is_exact_root(&self, root: &Path, id: &str) -> bool {
             self.workspace_id(root).as_deref() == Some(id)
         }
@@ -699,9 +713,8 @@ mod tests {
         let registry = registry();
         let _lease = registry.begin_unchecked("a", root.clone());
         let fs = roots(&root);
-        let write = |path: &str| {
-            registry.allows("Write", &serde_json::json!({"file_path": path}), &fs)
-        };
+        let write =
+            |path: &str| registry.allows("Write", &serde_json::json!({"file_path": path}), &fs);
         assert!(write("src/main.txt"));
         assert!(!write("../secret"));
         assert!(!write("host.lock"));
@@ -764,9 +777,8 @@ mod tests {
         let registry = registry();
         let _lease = registry.begin_unchecked("a", root.clone());
         let fs = roots(&root);
-        let shell = |command: &str| {
-            registry.allows("Bash", &serde_json::json!({"command": command}), &fs)
-        };
+        let shell =
+            |command: &str| registry.allows("Bash", &serde_json::json!({"command": command}), &fs);
         assert!(shell("cat src/main.txt"));
         assert!(shell("cd . && grep -rn foo src/"));
         for command in [
@@ -796,10 +808,39 @@ mod tests {
         let allows = |tool: &str, input: serde_json::Value| {
             registry.allows_for_token(Some(lease.token()), tool, &input, &fs)
         };
-        assert!(allows("Write", serde_json::json!({"file_path":"/guest/a/src/x.txt"})));
-        assert!(!allows("Write", serde_json::json!({"file_path":"/guest/b/src/x.txt"})));
-        assert!(allows("Bash", serde_json::json!({"command":"cat /guest/a/src/x.txt"})));
-        assert!(!allows("Bash", serde_json::json!({"command":"echo ok > /guest/a/src/x.txt"})));
+        assert!(allows(
+            "Write",
+            serde_json::json!({"file_path":"/guest/a/src/x.txt"})
+        ));
+        assert!(!allows(
+            "Write",
+            serde_json::json!({"file_path":"/guest/b/src/x.txt"})
+        ));
+        assert!(allows(
+            "Bash",
+            serde_json::json!({"command":"cat /guest/a/src/x.txt"})
+        ));
+        assert!(!allows(
+            "Bash",
+            serde_json::json!({"command":"echo ok > /guest/a/src/x.txt"})
+        ));
+    }
+
+    #[test]
+    fn the_workspace_root_is_derived_from_the_id_under_the_data_root() {
+        let registry = registry();
+        let data = Path::new("/profile");
+        assert_eq!(
+            registry.workspace_root_for(data, "a"),
+            PathBuf::from("/profile/spaces/ws-a")
+        );
+        assert_ne!(
+            registry.workspace_root_for(data, "a"),
+            registry.workspace_root_for(data, "b")
+        );
+        // A derived root is the profile's own canonical shape.
+        let derived = registry.workspace_root_for(data, "a");
+        assert!(TestProfile.is_exact_root(&derived, "a"));
     }
 
     #[test]
@@ -841,7 +882,10 @@ mod tests {
             registry.allows_for_token(Some(lease.token()), "TestOp", &input, &fs)
         };
         assert!(allows(serde_json::json!({"id": "a"})));
-        assert!(!allows(serde_json::json!({"id": "b"})), "a sibling is out of scope");
+        assert!(
+            !allows(serde_json::json!({"id": "b"})),
+            "a sibling is out of scope"
+        );
         assert!(!allows(serde_json::json!({})));
     }
 
@@ -920,15 +964,23 @@ mod tests {
         let denies = |tool: &str, input: serde_json::Value| {
             registry.denies_host_owned_for_workspace(tool, &input, &fs)
         };
-        assert!(denies("Edit", serde_json::json!({"file_path":"/guest/a/.host/state.json"})));
+        assert!(denies(
+            "Edit",
+            serde_json::json!({"file_path":"/guest/a/.host/state.json"})
+        ));
         assert!(denies("Bash", serde_json::json!({"command":"npm install"})));
         assert!(!denies("Bash", serde_json::json!({"command":"cat src/x"})));
-        let escapes = |tool: &str, input: serde_json::Value| {
-            registry.escapes_workspace(tool, &input, &fs)
-        };
+        let escapes =
+            |tool: &str, input: serde_json::Value| registry.escapes_workspace(tool, &input, &fs);
         assert!(!escapes("Bash", serde_json::json!({"command":"cat src/x"})));
-        assert!(escapes("Bash", serde_json::json!({"command":"cat /etc/passwd"})));
-        assert!(escapes("Bash", serde_json::json!({"command":"cd /tmp && cat src/x"})));
+        assert!(escapes(
+            "Bash",
+            serde_json::json!({"command":"cat /etc/passwd"})
+        ));
+        assert!(escapes(
+            "Bash",
+            serde_json::json!({"command":"cd /tmp && cat src/x"})
+        ));
         // A root the profile does not recognise is not a managed workspace.
         let plain = dir.path().join("plain");
         std::fs::create_dir_all(&plain).unwrap();
@@ -957,7 +1009,11 @@ mod tests {
         let registry = registry();
         let _lease = registry.begin_unchecked("a", root.clone());
         let fs = roots(&root);
-        assert!(!registry.allows("Write", &serde_json::json!({"file_path":"link/new.txt"}), &fs));
+        assert!(!registry.allows(
+            "Write",
+            &serde_json::json!({"file_path":"link/new.txt"}),
+            &fs
+        ));
         // The same hole without a lease: the static boundary names it too.
         assert!(registry.escapes_workspace(
             "Edit",

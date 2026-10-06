@@ -7,7 +7,7 @@
 //! may authorize for its own app.
 
 use permission::{WorkspacePermissionLeaseRegistry, WorkspaceProfile};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 /// The Local App workspace profile.
@@ -29,6 +29,11 @@ impl WorkspaceProfile for LocalAppWorkspaceProfile {
 
     fn root_matches_id(&self, root: &Path, id: &str) -> bool {
         workspace_root_matches_app_id(root, id)
+    }
+
+    // AppService's persisted invariant is exactly `apps/<id>/workspace`.
+    fn workspace_root(&self, data_root: &Path, id: &str) -> PathBuf {
+        data_root.join("apps").join(id).join("workspace")
     }
 
     fn is_exact_root(&self, root: &Path, id: &str) -> bool {
@@ -424,6 +429,52 @@ mod tests {
                 "side-effecting or path-indirect find must not be lease-authorized: {command}"
             );
         }
+    }
+
+    /// The id grammar exists twice on purpose: the service's contracts crate owns it and `tasks` keeps a
+    /// copy so its dependents do not pull the service in. This is the one place that sees both, so it runs
+    /// one corpus through the original and through the scope constructors (which use the copy).
+    #[test]
+    fn the_task_scope_accepts_exactly_the_ids_the_service_accepts() {
+        let max_len = "a".repeat(54);
+        let too_long = "a".repeat(55);
+        let corpus = [
+            "a", "0", "abc-123", "9-", max_len.as_str(), "", "-leading-dash", "Upper", "under_score",
+            "spa ce", "..", "../evil", "a/b", "a\\b", "a.b", "über", too_long.as_str(),
+        ];
+        let mut accepted = 0;
+        for id in corpus {
+            let expected = local_app_contracts::ids::is_valid_app_id(id);
+            for made in [
+                tasks::scope::ManagedWorkflowScope::for_build(id),
+                tasks::scope::ManagedWorkflowScope::for_use_test(id),
+                tasks::scope::ManagedWorkflowScope::for_mcp_authoring(id),
+            ] {
+                assert_eq!(made.is_ok(), expected, "the grammars disagree on {id:?}");
+            }
+            accepted += usize::from(expected);
+        }
+        assert_eq!(accepted, 5, "vacuity: the corpus must contain both valid and invalid ids");
+    }
+
+    /// The lease root is derived from the requested app, so a workflow cannot borrow the session cwd or
+    /// another app's workspace.
+    #[test]
+    fn the_lease_root_is_derived_from_the_requested_app() {
+        let registry = registry();
+        let data_root = PathBuf::from("/profile");
+        assert_eq!(
+            registry.workspace_root_for(&data_root, "app-a"),
+            PathBuf::from("/profile/apps/app-a/workspace")
+        );
+        assert_eq!(
+            registry.workspace_root_for(&data_root, "app-b"),
+            PathBuf::from("/profile/apps/app-b/workspace")
+        );
+        assert_ne!(
+            registry.workspace_root_for(&data_root, "app-a"),
+            registry.workspace_root_for(&data_root, "app-b")
+        );
     }
 
     #[test]

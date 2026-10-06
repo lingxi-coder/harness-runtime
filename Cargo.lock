@@ -6469,8 +6469,6 @@ dependencies = [
  "futures",
  "hooks",
  "llm-runtime",
- "local-app-contracts",
- "local-app-plugin",
  "mcp",
  "mobile-linux-api",
  "permission",

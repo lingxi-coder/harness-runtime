@@ -242,7 +242,11 @@ pub fn tool_default_names() -> Vec<&'static str> {
         .get_or_init(init_defaults)
         .keys()
         .copied()
-        .chain(extension().into_iter().flat_map(|ext| ext.rows.keys().copied()))
+        .chain(
+            extension()
+                .into_iter()
+                .flat_map(|ext| ext.rows.keys().copied()),
+        )
         .collect();
     names.sort_unstable();
     names
@@ -429,10 +433,26 @@ mod tests {
                 .filter(|(name, value)| (**name == "Workflow") == divergence && **value == want)
                 .count()
         };
-        assert_eq!(count(false, PromptDefault::DenyByDefault), 14, "oracle deny");
-        assert_eq!(count(false, PromptDefault::AllowByDefault), 32, "oracle allow");
-        assert_eq!(count(true, PromptDefault::AllowByDefault), 1, "divergence allow");
-        assert_eq!(count(true, PromptDefault::DenyByDefault), 0, "divergence deny");
+        assert_eq!(
+            count(false, PromptDefault::DenyByDefault),
+            14,
+            "oracle deny"
+        );
+        assert_eq!(
+            count(false, PromptDefault::AllowByDefault),
+            32,
+            "oracle allow"
+        );
+        assert_eq!(
+            count(true, PromptDefault::AllowByDefault),
+            1,
+            "divergence allow"
+        );
+        assert_eq!(
+            count(true, PromptDefault::DenyByDefault),
+            0,
+            "divergence deny"
+        );
     }
 
     /// An installed extension adds rows and divergence status, nothing else.
@@ -441,7 +461,10 @@ mod tests {
         install_test_extension();
         assert_eq!(tool_default("ExtList"), PromptDefault::AllowByDefault);
         assert_eq!(tool_default("ExtMutate"), PromptDefault::DenyByDefault);
-        assert_eq!(tool_default_row("ExtBuild"), Some(PromptDefault::AllowByDefault));
+        assert_eq!(
+            tool_default_row("ExtBuild"),
+            Some(PromptDefault::AllowByDefault)
+        );
         assert_eq!(tool_default_row("ExtNope"), None);
         assert!(is_divergence_tool("ExtList"));
         assert!(!is_divergence_tool("ExtNope"));
@@ -455,8 +478,14 @@ mod tests {
             extension_rule_content("ExtMutate", &serde_json::json!({"id": "x"})).as_deref(),
             Some("x")
         );
-        assert_eq!(extension_rule_content("Read", &serde_json::json!({"id": "x"})), None);
-        assert_eq!(extension_rule_content("ExtMutate", &serde_json::json!({})), None);
+        assert_eq!(
+            extension_rule_content("Read", &serde_json::json!({"id": "x"})),
+            None
+        );
+        assert_eq!(
+            extension_rule_content("ExtMutate", &serde_json::json!({})),
+            None
+        );
     }
 }
 

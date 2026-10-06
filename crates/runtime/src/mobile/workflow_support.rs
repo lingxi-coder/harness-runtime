@@ -810,8 +810,8 @@ impl MobileWorkflowStatusSink {
         let scope = workflow.scope.as_ref()?;
         if !matches!(
             scope.purpose(),
-            tasks::scope::LocalAppWorkflowPurpose::Build
-                | tasks::scope::LocalAppWorkflowPurpose::UseTest
+            tasks::scope::ManagedWorkflowPurpose::Build
+                | tasks::scope::ManagedWorkflowPurpose::UseTest
         ) {
             return None;
         }
@@ -1083,8 +1083,8 @@ impl MobileWorkflowStatusSink {
         let purpose = scope.purpose();
         if !matches!(
             purpose,
-            tasks::scope::LocalAppWorkflowPurpose::Build
-                | tasks::scope::LocalAppWorkflowPurpose::UseTest
+            tasks::scope::ManagedWorkflowPurpose::Build
+                | tasks::scope::ManagedWorkflowPurpose::UseTest
         ) {
             return (outcome, status, None);
         }
@@ -1099,7 +1099,7 @@ impl MobileWorkflowStatusSink {
                 registry,
                 &workflow.base.output_file,
                 outcome,
-                "local_app_completion_unverified: verified workflow has no run id".into(),
+                "completion_unverified: verified workflow has no run id".into(),
             )
             .await;
             return (outcome, status, None);
@@ -1109,7 +1109,7 @@ impl MobileWorkflowStatusSink {
                 registry,
                 &workflow.base.output_file,
                 outcome,
-                "local_app_completion_unverified: verified workflow returned no result".into(),
+                "completion_unverified: verified workflow returned no result".into(),
             )
             .await;
             return (outcome, status, None);
@@ -1119,7 +1119,7 @@ impl MobileWorkflowStatusSink {
                 registry,
                 &workflow.base.output_file,
                 outcome,
-                "local_app_completion_unverified: workflow result is not JSON".into(),
+                "completion_unverified: workflow result is not JSON".into(),
             )
             .await;
             return (outcome, status, None);
@@ -1129,7 +1129,7 @@ impl MobileWorkflowStatusSink {
                 registry,
                 &workflow.base.output_file,
                 outcome,
-                "local_app_completion_unverified: workflow result is not an object".into(),
+                "completion_unverified: workflow result is not an object".into(),
             )
             .await;
             return (outcome, status, None);
@@ -1145,7 +1145,7 @@ impl MobileWorkflowStatusSink {
                 registry,
                 &workflow.base.output_file,
                 outcome,
-                "local_app_completion_unverified: verified workflow result has no boolean ok:true"
+                "completion_unverified: verified workflow result has no boolean ok:true"
                     .into(),
             )
             .await;
@@ -1172,7 +1172,7 @@ impl MobileWorkflowStatusSink {
                     registry,
                     &workflow.base.output_file,
                     outcome,
-                    format!("local_app_completion_unverified: {error}"),
+                    format!("completion_unverified: {error}"),
                 )
                 .await;
                 return (outcome, status, None);
@@ -1188,7 +1188,7 @@ impl MobileWorkflowStatusSink {
                     registry,
                     &workflow.base.output_file,
                     outcome,
-                    format!("local_app_completion_unverified: {error}"),
+                    format!("completion_unverified: {error}"),
                 )
                 .await;
                 return (outcome, status, None);
@@ -1202,7 +1202,7 @@ impl MobileWorkflowStatusSink {
                     &workflow.base.output_file,
                     outcome,
                     format!(
-                        "local_app_completion_unverified: cannot serialize checked result: {error}"
+                        "completion_unverified: cannot serialize checked result: {error}"
                     ),
                 )
                 .await;
@@ -1295,8 +1295,8 @@ impl tasks::handlers::TaskStatusSink for MobileWorkflowStatusSink {
                 let is_local_app_build_or_use_test = workflow.scope.as_ref().is_some_and(|scope| {
                     matches!(
                         scope.purpose(),
-                        tasks::scope::LocalAppWorkflowPurpose::Build
-                            | tasks::scope::LocalAppWorkflowPurpose::UseTest
+                        tasks::scope::ManagedWorkflowPurpose::Build
+                            | tasks::scope::ManagedWorkflowPurpose::UseTest
                     )
                 });
                 if is_local_app_build_or_use_test {
@@ -1311,7 +1311,7 @@ impl tasks::handlers::TaskStatusSink for MobileWorkflowStatusSink {
                     let actual = match prepared {
                         Some(prepared) if candidate_status == tasks::TaskStatus::Completed => {
                             registry
-                                .commit_local_app_workflow_terminal(task_id, candidate, move || {
+                                .commit_managed_workflow_terminal(task_id, candidate, move || {
                                     let PreparedMobileQaCommit { host, publication } = prepared;
                                     async move {
                                         host.commit_prepared_workflow_qa_publication(&publication)
@@ -1637,7 +1637,7 @@ fn is_verified_plugin_workflow(
         .is_some_and(|resolved| resolved == script)
 }
 
-/// Does this launch earn `LocalAppWorkflowTaskScope::for_mcp_authoring`?
+/// Does this launch earn `ManagedWorkflowScope::for_mcp_authoring`?
 ///
 /// Exactly two provenances, mirroring the build path's pair:
 ///   * a BY-NAME launch of the MCP-authoring plugin workflow whose script
@@ -2011,7 +2011,7 @@ fn apply_materialized_local_app_collections_with_provenance(
 
 /// Rewrite the launch args, and -- when this launch really is one of this
 /// Host's own Local App build workflows against an app this Host resolved --
-/// mint the [`tasks::scope::LocalAppWorkflowTaskScope`] that authorizes it.
+/// mint the [`tasks::scope::ManagedWorkflowScope`] that authorizes it.
 ///
 /// `Ok(None)` is the answer for every launch that is not a Local App build:
 /// the function returns before the app lookup, and an unscoped task row is
@@ -2024,7 +2024,7 @@ fn apply_materialized_local_app_collections_with_identity(
     trusted_local_app_resume: bool,
     expected_workflow_id: Option<&str>,
     verified_plugin_workflow: bool,
-) -> Result<Option<tasks::scope::LocalAppWorkflowTaskScope>, tool_workflow::WorkflowLaunchError> {
+) -> Result<Option<tasks::scope::ManagedWorkflowScope>, tool_workflow::WorkflowLaunchError> {
     if let Some(expected_workflow_id) = expected_workflow_id {
         if expected_workflow_id != crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID
         {
@@ -2188,7 +2188,7 @@ fn apply_materialized_local_app_collections_with_identity(
     // bundled bytes are running. Naming another app there does not hand the
     // forger that app's authority; it hands them a build of that app, which is
     // the same thing the tool would have done anyway.
-    let scope = tasks::scope::LocalAppWorkflowTaskScope::for_build(&app_id).map_err(|error| {
+    let scope = tasks::scope::ManagedWorkflowScope::for_build(&app_id).map_err(|error| {
         tool_workflow::WorkflowLaunchError(format!(
             "cannot authorize local-app build workflow: {error}"
         ))
@@ -2343,7 +2343,7 @@ fn resolve_adopted_local_app_build_scope(
     script_sha256: Option<&str>,
     script_is_verbatim_builtin: Option<bool>,
     args_json: Option<&str>,
-) -> Option<tasks::scope::LocalAppWorkflowTaskScope> {
+) -> Option<tasks::scope::ManagedWorkflowScope> {
     if workflow_id != crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID {
         return None;
     }
@@ -2371,7 +2371,7 @@ fn resolve_adopted_local_app_build_scope(
     plugin_binding
         .enforce(app_id, binding.family, workflow_id)
         .ok()?;
-    tasks::scope::LocalAppWorkflowTaskScope::for_build(app_id).ok()
+    tasks::scope::ManagedWorkflowScope::for_build(app_id).ok()
 }
 
 /// Re-mint the Host scope for a restart-recovered verified Local App
@@ -2386,7 +2386,7 @@ fn resolve_adopted_local_app_scope(
     script_sha256: Option<&str>,
     script_is_verbatim_builtin: Option<bool>,
     args_json: Option<&str>,
-) -> Option<tasks::scope::LocalAppWorkflowTaskScope> {
+) -> Option<tasks::scope::ManagedWorkflowScope> {
     if workflow_id == crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID {
         return resolve_adopted_local_app_build_scope(
             app_data_root,
@@ -2429,7 +2429,7 @@ fn resolve_adopted_local_app_scope(
     local_app_service::app_build::active_authoring_contract(&layout)
         .ok()
         .flatten()?;
-    tasks::scope::LocalAppWorkflowTaskScope::for_use_test(app_id).ok()
+    tasks::scope::ManagedWorkflowScope::for_use_test(app_id).ok()
 }
 
 #[async_trait::async_trait]
@@ -2590,7 +2590,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             .and_then(|resolution| resolution.workflow_id.as_deref());
         // `trusted_local_app_resume` is BUILD-specific: it feeds
         // `is_mobile_local_app_builtin`, which grants the build path's
-        // args rewrite and `LocalAppWorkflowTaskScope::for_build`. A use-test
+        // args rewrite and `ManagedWorkflowScope::for_build`. A use-test
         // or MCP-authoring resume must NOT flip it on -- that would hand the
         // build workflow's authority to a different script.
         let trusted_local_app_resume = matches!(
@@ -2681,7 +2681,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 .and_then(Value::as_str)
             {
                 local_app_scope = Some(if is_use_test_launch {
-                    tasks::scope::LocalAppWorkflowTaskScope::for_use_test(app_id).map_err(
+                    tasks::scope::ManagedWorkflowScope::for_use_test(app_id).map_err(
                         |error| {
                             tool_workflow::WorkflowLaunchError(format!(
                                 "cannot authorize local-app use-test workflow: {error}"
@@ -2689,7 +2689,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                         },
                     )?
                 } else {
-                    tasks::scope::LocalAppWorkflowTaskScope::for_mcp_authoring(app_id).map_err(
+                    tasks::scope::ManagedWorkflowScope::for_mcp_authoring(app_id).map_err(
                         |error| {
                             tool_workflow::WorkflowLaunchError(format!(
                                 "cannot authorize local-app MCP authoring workflow: {error}"
@@ -3442,7 +3442,7 @@ mod plugin_args_tests {
     }
 
     /// Pins BOTH halves of `is_mcp_authoring_launch`, the sole production
-    /// grant of `LocalAppWorkflowTaskScope::for_mcp_authoring`. The second
+    /// grant of `ManagedWorkflowScope::for_mcp_authoring`. The second
     /// case is the narrowing that previously shipped unpinned: before it, a
     /// by-name launch of a project workflow that had simply taken the name
     /// `lingxi-local-app:local-app-mcp-authoring` in the saved-workflow
@@ -5474,7 +5474,7 @@ mod run_id_tests {
 
     async fn register_terminal_test_workflow(
         registry: &Arc<tasks::registry::TaskRegistry>,
-        scope: Option<tasks::scope::LocalAppWorkflowTaskScope>,
+        scope: Option<tasks::scope::ManagedWorkflowScope>,
         args: serde_json::Value,
     ) -> String {
         let task_id = registry
@@ -5591,7 +5591,7 @@ mod run_id_tests {
         let registry = scope_test_registry();
         let task_id = register_terminal_test_workflow(
             &registry,
-            Some(tasks::scope::LocalAppWorkflowTaskScope::for_build("qa-app").expect("scope")),
+            Some(tasks::scope::ManagedWorkflowScope::for_build("qa-app").expect("scope")),
             serde_json::json!({"app_id":"qa-app","quality_level":"balanced"}),
         )
         .await;
@@ -5660,7 +5660,7 @@ mod run_id_tests {
         let registry = scope_test_registry();
         let task_id = register_terminal_test_workflow(
             &registry,
-            Some(tasks::scope::LocalAppWorkflowTaskScope::for_use_test(app_id).expect("scope")),
+            Some(tasks::scope::ManagedWorkflowScope::for_use_test(app_id).expect("scope")),
             serde_json::json!({"app_id":app_id,"quality_level":"balanced"}),
         )
         .await;
@@ -5713,7 +5713,7 @@ mod run_id_tests {
         let registry = scope_test_registry();
         let task_id = register_terminal_test_workflow(
             &registry,
-            Some(tasks::scope::LocalAppWorkflowTaskScope::for_use_test("qa-app").expect("scope")),
+            Some(tasks::scope::ManagedWorkflowScope::for_use_test("qa-app").expect("scope")),
             serde_json::json!({"app_id":"qa-app","quality_level":"thorough"}),
         )
         .await;
@@ -5746,7 +5746,7 @@ mod run_id_tests {
         assert_eq!(actual.base.status, tasks::TaskStatus::Failed);
         assert!(actual.outcome.result.is_none());
         assert!(actual.outcome.error.as_deref().is_some_and(|error| {
-            error.contains("local_app_completion_unverified")
+            error.contains("completion_unverified")
                 && !error.contains("terminal spool replacement failed")
         }));
         let spool = registry
@@ -5766,7 +5766,7 @@ mod run_id_tests {
         assert!(events[0]
             .1
             .as_deref()
-            .is_some_and(|error| { error.contains("local_app_completion_unverified") }));
+            .is_some_and(|error| { error.contains("completion_unverified") }));
     }
 
     #[tokio::test]
@@ -5777,7 +5777,7 @@ mod run_id_tests {
         let registry = scope_test_registry();
         let task_id = register_terminal_test_workflow(
             &registry,
-            Some(tasks::scope::LocalAppWorkflowTaskScope::for_build("qa-app").expect("scope")),
+            Some(tasks::scope::ManagedWorkflowScope::for_build("qa-app").expect("scope")),
             serde_json::json!({"app_id":"qa-app"}),
         )
         .await;
@@ -5826,7 +5826,7 @@ mod run_id_tests {
         let registry = scope_test_registry();
         let task_id = register_terminal_test_workflow(
             &registry,
-            Some(tasks::scope::LocalAppWorkflowTaskScope::for_build("qa-app").expect("scope")),
+            Some(tasks::scope::ManagedWorkflowScope::for_build("qa-app").expect("scope")),
             serde_json::json!({"app_id":"qa-app"}),
         )
         .await;
@@ -5952,9 +5952,9 @@ mod run_id_tests {
 
     /// THE REGRESSION. A genuine, in-flight Local App build must block its
     /// app's delete, end to end: the Host resolves the app and mints a
-    /// `LocalAppWorkflowTaskScope` at the launch seam, the launcher puts it on
+    /// `ManagedWorkflowScope` at the launch seam, the launcher puts it on
     /// `TaskSpawnInput::LocalWorkflow`, `state_for_spawn` copies it onto the
-    /// task row, and `find_nonterminal_local_app_workflows` finds the row.
+    /// task row, and `find_nonterminal_managed_workflows` finds the row.
     ///
     /// Every link is production code; only the task HANDLER is a stub, and it
     /// is a stub in the direction that cannot help the assertion (it neither
@@ -5998,13 +5998,13 @@ mod run_id_tests {
             };
 
             assert_eq!(
-                registry.find_nonterminal_local_app_workflows(app_id).await,
+                registry.find_nonterminal_managed_workflows(app_id).await,
                 vec![launched.task_id.clone()],
                 "a genuine in-flight build must block its own app's delete"
             );
             assert!(
                 registry
-                    .find_nonterminal_local_app_workflows("some-other-app")
+                    .find_nonterminal_managed_workflows("some-other-app")
                     .await
                     .is_empty(),
                 "and must block ONLY its own app's delete"
@@ -6083,11 +6083,11 @@ mod run_id_tests {
         assert_eq!(scope.app_id(), app_id);
         assert_eq!(
             scope.purpose(),
-            tasks::scope::LocalAppWorkflowPurpose::UseTest
+            tasks::scope::ManagedWorkflowPurpose::UseTest
         );
         assert!(!scope.requires_workspace_lease());
         assert_eq!(
-            registry.find_nonterminal_local_app_workflows(app_id).await,
+            registry.find_nonterminal_managed_workflows(app_id).await,
             vec![launched.task_id.clone()]
         );
 
@@ -6172,7 +6172,7 @@ mod run_id_tests {
         };
         assert_eq!(genuine_state.base.status, tasks::TaskStatus::Failed);
         assert!(genuine_state.outcome.error.as_deref().is_some_and(|error| {
-            error.contains("local_app_completion_unverified")
+            error.contains("completion_unverified")
                 && !error.contains("terminal spool replacement failed")
         }));
 
@@ -6934,7 +6934,7 @@ mod run_id_tests {
 
         assert!(
             registry
-                .find_nonterminal_local_app_workflows("victim12")
+                .find_nonterminal_managed_workflows("victim12")
                 .await
                 .is_empty(),
             "a forged custom workflow must not block the victim app's delete, \
@@ -7091,14 +7091,14 @@ mod run_id_tests {
             "an adopted row must be non-terminal (Paused)"
         );
         assert_eq!(
-            registry.find_nonterminal_local_app_workflows(app_id).await,
+            registry.find_nonterminal_managed_workflows(app_id).await,
             vec!["wgenuine1".to_string()],
             "a genuine in-flight build recovered by adoption must still \
              block its own app's delete"
         );
         assert!(
             registry
-                .find_nonterminal_local_app_workflows("some-other-app")
+                .find_nonterminal_managed_workflows("some-other-app")
                 .await
                 .is_empty(),
             "and must block ONLY its own app's delete"
@@ -7143,10 +7143,10 @@ mod run_id_tests {
         assert_eq!(scope.app_id(), app_id);
         assert_eq!(
             scope.purpose(),
-            tasks::scope::LocalAppWorkflowPurpose::UseTest
+            tasks::scope::ManagedWorkflowPurpose::UseTest
         );
         assert_eq!(
-            registry.find_nonterminal_local_app_workflows(app_id).await,
+            registry.find_nonterminal_managed_workflows(app_id).await,
             vec!["wuadopt01".to_string()]
         );
 
@@ -7183,7 +7183,7 @@ mod run_id_tests {
         };
         assert!(forged_state.scope.is_none());
         assert!(forged_registry
-            .find_nonterminal_local_app_workflows(app_id)
+            .find_nonterminal_managed_workflows(app_id)
             .await
             .is_empty());
     }
@@ -7244,7 +7244,7 @@ mod run_id_tests {
         );
         assert!(
             registry
-                .find_nonterminal_local_app_workflows(victim_app_id)
+                .find_nonterminal_managed_workflows(victim_app_id)
                 .await
                 .is_empty(),
             "a forged workflow_id/args.app_id pair must never block another \
