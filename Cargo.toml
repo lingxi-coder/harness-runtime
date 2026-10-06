@@ -35,9 +35,6 @@ members = [
     "crates/memory",
     "crates/migrations",
     "crates/jsonrpc",
-    "crates/mcp-wire",
-    "crates/rooted-fs",
-    "crates/device-api",
     "crates/mcp",
     "crates/llm-runtime",
     "crates/http-client",
@@ -57,10 +54,6 @@ members = [
     "crates/msgqueue",
     "crates/session",
     "crates/cron",
-    "crates/local-app-contracts",
-    "crates/local-apps",
-    "crates/local-app-service",
-    "crates/local-app-plugin",
     "crates/sandbox",
     "crates/sandbox-runtime",
     "crates/apply-seccomp",
@@ -115,9 +108,6 @@ default-members = [
     "crates/memory",
     "crates/migrations",
     "crates/jsonrpc",
-    "crates/mcp-wire",
-    "crates/rooted-fs",
-    "crates/device-api",
     "crates/mcp",
     "crates/llm-runtime",
     "crates/provider-config",
@@ -136,10 +126,6 @@ default-members = [
     "crates/msgqueue",
     "crates/session",
     "crates/cron",
-    "crates/local-app-contracts",
-    "crates/local-apps",
-    "crates/local-app-service",
-    "crates/local-app-plugin",
     "crates/sandbox",
     "crates/sandbox-runtime",
     "crates/lsp",
@@ -175,16 +161,15 @@ platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git
 # `branding.workspace = true` regardless of its own depth.
 branding = { path = "crates/branding" }
 
-# The Local App project's crates. They are about to leave for a repository of their own; everything outside them names
-# them through this table, so that move is a change to these lines and to nothing else. Paths are workspace-root-relative,
-# as for `branding`.
-device-api = { path = "crates/device-api" }
-local-app-contracts = { path = "crates/local-app-contracts" }
-local-app-plugin = { path = "crates/local-app-plugin" }
-local-app-service = { path = "crates/local-app-service" }
-local-apps = { path = "crates/local-apps" }
-mcp-wire = { path = "crates/mcp-wire" }
-rooted-fs = { path = "crates/rooted-fs" }
+# The Local App project's crates, in a repository of their own. One revision for every crate of it, here and in the
+# product.
+device-api = { git = "https://github.com/lingxi-coder/local-app", rev = "d26b4f767066975f26ce82b0a086d999172c0090" }
+local-app-contracts = { git = "https://github.com/lingxi-coder/local-app", rev = "d26b4f767066975f26ce82b0a086d999172c0090" }
+local-app-plugin = { git = "https://github.com/lingxi-coder/local-app", rev = "d26b4f767066975f26ce82b0a086d999172c0090" }
+local-app-service = { git = "https://github.com/lingxi-coder/local-app", rev = "d26b4f767066975f26ce82b0a086d999172c0090" }
+local-apps = { git = "https://github.com/lingxi-coder/local-app", rev = "d26b4f767066975f26ce82b0a086d999172c0090" }
+mcp-wire = { git = "https://github.com/lingxi-coder/local-app", rev = "d26b4f767066975f26ce82b0a086d999172c0090" }
+rooted-fs = { git = "https://github.com/lingxi-coder/local-app", rev = "d26b4f767066975f26ce82b0a086d999172c0090" }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps `serde_json::Map` keys in insertion order across
 # Value round-trips. Required for claude-code wire-byte fidelity: outbound

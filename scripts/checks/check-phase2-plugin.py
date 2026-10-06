@@ -176,26 +176,9 @@ def check_manifest_and_skills() -> tuple[dict, list[dict]]:
             f"missing={sorted(EXPECTED_SKILLS - skill_dirs)}, extra={sorted(skill_dirs - EXPECTED_SKILLS)}"
         )
 
-    if not MIRRORED_SKILLS <= EXPECTED_SKILLS:
-        fail(
-            "root skill mirror roster names skills the Plugin does not ship: "
-            f"{sorted(MIRRORED_SKILLS - EXPECTED_SKILLS)}"
-        )
-    root_skills = REPO / "skills"
+    # The top-level skills/ mirror is gone: the plugin owns the only copy.
     for name in sorted(MIRRORED_SKILLS):
-        source = root_skills / name
         destination = skill_root / name
-        if not source.is_dir():
-            fail(f"root Local App skill source missing: {source}")
-        source_files = {path.relative_to(source) for path in source.rglob("*") if path.is_file()}
-        destination_files = {path.relative_to(destination) for path in destination.rglob("*") if path.is_file()}
-        if source_files != destination_files:
-            fail(f"skill migration file set differs for {name}: source/destination are not equal")
-        for relative in source_files:
-            source_file = source / relative
-            destination_file = destination / relative
-            if source_file.read_bytes() != destination_file.read_bytes():
-                fail(f"skill migration bytes differ: {source_file} vs {destination_file}")
         if not (destination / "SKILL.md").is_file() or not (destination / "agents" / "openai.yaml").is_file():
             fail(f"{name} must include SKILL.md and inert agents/openai.yaml metadata")
 

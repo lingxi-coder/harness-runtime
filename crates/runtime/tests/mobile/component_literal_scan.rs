@@ -201,7 +201,7 @@ const PLUGIN_NAMESPACE: &str = "lingxi-local-app";
 /// testing hand-off prose in `broker.rs` names the `frontend-qa` /
 /// `local-app-test` plugin skills, which is the only way the model can reach
 /// the app's use-test path (testing is never host-initiated).
-const ALLOWLIST_BASELINE_COUNT: usize = 13;
+const ALLOWLIST_BASELINE_COUNT: usize = 8;
 
 /// Scan roots, relative to the workspace root. Deny-by-default directory
 /// enumeration: every source file under each of these is scanned unless it is
@@ -217,12 +217,6 @@ const SCAN_ROOTS: &[&str] = &[
     // left the scan surface entirely — the exact asymmetry the SKIPPED_EXTENSIONS
     // note below describes, and the STALE entries were the only thing that said so.
     "workflow/src",
-    // The Local App orchestration (the broker, the build pipeline, the in-process
-    // MCP server) moved from `runtime/src/mobile` into its own crate. It writes
-    // the prose the model reads about skills and workflows, so it is exactly the
-    // code this gate exists for; leaving the root out would have taken it off the
-    // scan surface silently.
-    "local-app-service/src",
 ];
 
 /// File extensions that are NOT scanned — a DENY-list, deliberately, so that

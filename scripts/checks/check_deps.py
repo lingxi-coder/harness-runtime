@@ -20,39 +20,11 @@ LEAVES = {"app", "example"}
 # concrete `tool-shell` would defeat the whole composition-root design.
 API_CRATES = {"tool-api", "skill-api", "command-api"}
 
-# Primitive crates both the engine (`core` re-exports them) and the Local App
-# service name directly. They are the bottom of the graph: a workspace
-# dependency here would drag the engine into whatever else depends on them,
-# which is exactly what they exist to prevent.
-SHARED_PRIMITIVES = {"device-api", "local-app-contracts", "mcp-wire", "rooted-fs"}
-
-# The Local App crates are being extracted into their own repository, so their
-# production graphs may reach the workspace only through the shared primitives
-# and the layer beneath them. Anything else (core, client, mcp, tasks,
-# permission, ...) would have to come along or be cut again at the move.
-# `local-apps` is the core and sits directly on the primitives;
-# `local-app-service` is the orchestration on top of it.
-STANDALONE_SERVICES = {
-    "local-apps": SHARED_PRIMITIVES,
-    "local-app-service": SHARED_PRIMITIVES | {"local-apps"},
-}
-
-# Native libraries a standalone service may only reach through a feature.
-# libgit2 links C code and one dependency graph may link it once, so the
-# service core cannot demand it: the final binary chooses where git2 comes
-# from, or supplies a checkpoint backend of its own.
-FEATURE_GATED_DEPENDENCIES = {"local-apps": {"git2"}}
-
-# A crate built on one that gates a native library behind a feature must not
-# switch that feature on through default features: the consumer's choice (see
-# FEATURE_GATED_DEPENDENCIES) would be unreachable. It forwards the feature.
-DEFAULT_FEATURES_OFF = {"local-app-service": {"local-apps"}}
-
 # Who may name the Local App project's crates, by NAME. Rules written for workspace members cannot see an edge onto a
 # crate that lives in another repository; this table does not care where a crate lives. A crate may name one only if it
 # is listed here, which keeps the engine's use of the project to the shared primitives it re-exports and to the one
-# composition root that assembles it. While the project's crates are still members of this workspace they are not subject
-# to the table (their own directions are the member rules above).
+# composition root that assembles it. The project's own graph (primitives at the bottom, no engine) is checked in its
+# repository.
 LOCAL_APP_PRIMITIVES = {"device-api", "local-app-contracts", "mcp-wire", "rooted-fs"}
 LOCAL_APP_CRATES = LOCAL_APP_PRIMITIVES | {"local-app-plugin", "local-app-service", "local-apps"}
 LOCAL_APP_CONSUMERS = {
@@ -141,18 +113,7 @@ def main():
             if d == "harness-runtime" and c not in LEAVES:
                 violations.append("%s depends on the Harness composition root" % n)
                 continue
-            if n in SHARED_PRIMITIVES:
-                violations.append(
-                    "%s depends on %s — shared primitives have no workspace dependencies" % (n, d)
-                )
-                continue
-            if n in STANDALONE_SERVICES and d not in STANDALONE_SERVICES[n]:
-                violations.append(
-                    "%s depends on %s — a standalone service may reach the workspace only through %s"
-                    % (n, d, ", ".join(sorted(STANDALONE_SERVICES[n])))
-                )
-                continue
-            if n == "core" and d not in {"branding", "jsonrpc"} | SHARED_PRIMITIVES:
+            if n == "core" and d not in {"branding", "jsonrpc"}:
                 violations.append(
                     "core depends on %s — shared contracts must stay below domain and telemetry crates" % d
                 )
@@ -188,32 +149,8 @@ def main():
                     "%s (%s) depends on %s (%s) — forbidden by §8.1" % (n, c, d, dc)
                 )
 
-    for n, gated in sorted(FEATURE_GATED_DEPENDENCIES.items()):
-        if n not in pkgs:
-            continue
-        for dep in pkgs[n]["dependencies"]:
-            if dep["name"] in gated and dep.get("kind") != "dev" and not dep.get("optional", False):
-                violations.append(
-                    "%s depends on %s unconditionally — it must stay behind its feature"
-                    % (n, dep["name"])
-                )
-
-    for n, off in sorted(DEFAULT_FEATURES_OFF.items()):
-        if n not in pkgs:
-            continue
-        for dep in pkgs[n]["dependencies"]:
-            if (
-                dep["name"] in off
-                and dep.get("kind") != "dev"
-                and dep.get("uses_default_features", True)
-            ):
-                violations.append(
-                    "%s depends on %s with its default features — a consumer could not turn them off"
-                    % (n, dep["name"])
-                )
-
     for n in sorted(pkgs):
-        if n in EXEMPT or n in LOCAL_APP_CRATES:
+        if n in EXEMPT:
             continue
         allowed = LOCAL_APP_CONSUMERS.get(n, set())
         for dep in pkgs[n]["dependencies"]:

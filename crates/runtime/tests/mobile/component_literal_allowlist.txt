@@ -95,13 +95,10 @@
 # `skill_loader.rs::resolve_agent_skill_name` serves agent-frontmatter
 # preloading, NOT the tool). Host prose naming the bare form would send the
 # model to `Unknown skill: create-local-app`.
-local-app-service/src/broker.rs:lingxi-local-app:create-local-app:2
 #
 # The on-demand testing hand-off prose names the two plugin test SKILLS so the
 # model can invoke them: testing is never host-initiated, so the only way to
 # reach the app's on-device use-test path is by name.
-local-app-service/src/broker.rs:frontend-qa:1
-local-app-service/src/broker.rs:local-app-test:1
 
 # host.rs — the ONE place the three plugin-owned entry routers are kept visible
 # in a global/project conversation. Every other `lingxi-local-app:` skill is
@@ -142,7 +139,6 @@ runtime/src/mobile/local_app_plugin_binding.rs:lingxi-local-app:local-app-use-te
 # reason the gate cannot live at transport level (the local-apps MCP server is
 # connected unconditionally with `disabled: false, always_load: true`). Naming
 # the component the gate protects is the point of the comment; 2 -> 3.
-local-app-service/src/mcp_server.rs:lingxi-local-app:create-local-app:3
 
 # local-app-service/src/app_build.rs (was runtime/src/mobile/local_apps_build.rs) — the same WP8 exception, on the one refusal an agent
 # meets when it tries to build an app that is still an empty shell. It used to
@@ -152,7 +148,6 @@ local-app-service/src/mcp_server.rs:lingxi-local-app:create-local-app:3
 # the two entries above: the bare `create-local-app` does not resolve, so the
 # copy has to carry the qualified form or it sends the reader to
 # `Unknown skill: create-local-app`.
-local-app-service/src/app_build.rs:lingxi-local-app:create-local-app:1
 
 # --- tasks/src -------------------------------------------------------------
 

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Canvas 2D Local App"
-  short_description: "Build deterministic Canvas 2D local apps"
-  default_prompt: "Use $canvas-2d-local-app to implement this LingXi local app as a Canvas 2D scene with native-feeling overlays and deterministic loop rules."

@@ -1535,12 +1535,11 @@ dependencies = [
 [[package]]
 name = "device-api"
 version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
 dependencies = [
  "async-trait",
  "serde",
- "serde_json",
  "thiserror 2.0.18",
- "tokio",
  "uuid",
 ]
 
@@ -3307,18 +3306,20 @@ dependencies = [
 [[package]]
 name = "local-app-contracts"
 version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
 dependencies = [
  "serde",
- "serde_json",
 ]
 
 [[package]]
 name = "local-app-plugin"
 version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
 
 [[package]]
 name = "local-app-service"
 version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3326,7 +3327,6 @@ dependencies = [
  "futures-core",
  "futures-util",
  "local-app-contracts",
- "local-app-plugin",
  "local-apps",
  "mcp-wire",
  "reqwest",
@@ -3334,7 +3334,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
@@ -3345,6 +3344,7 @@ dependencies = [
 [[package]]
 name = "local-apps"
 version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
 dependencies = [
  "async-trait",
  "git2",
@@ -3356,7 +3356,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3535,6 +3534,7 @@ dependencies = [
 [[package]]
 name = "mcp-wire"
 version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -5589,11 +5589,11 @@ dependencies = [
 [[package]]
 name = "rooted-fs"
 version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
 dependencies = [
  "fs2",
  "rustix 0.38.44",
  "serde",
- "tempfile",
  "thiserror 2.0.18",
  "uuid",
 ]
