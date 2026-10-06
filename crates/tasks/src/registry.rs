@@ -2589,7 +2589,7 @@ impl TaskRegistry {
     ///
     /// Reads each task's typed [`crate::scope::ManagedWorkflowScope`]
     /// (design §18 Phase -1 step 8 / §8.1) instead of matching `workflow_id`
-    /// against this crate's (since-deleted) `LOCAL_APP_BUILD_WORKFLOWS` array
+    /// against this crate's (since-deleted) list of build-workflow names
     /// and then parsing `app_id` out of caller-supplied `args` JSON. That
     /// used to be a genuine forgery
     /// vector: a custom workflow could declare a `workflow_id` naming one of

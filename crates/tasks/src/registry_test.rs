@@ -5110,7 +5110,7 @@ async fn find_nonterminal_managed_workflows_ignores_workflow_id() {
 /// forges the victim's app id into its (caller-supplied) `args` must get
 /// NOTHING -- not the workspace lease, not the App delete guard's
 /// protection. Before this migration, `find_nonterminal_managed_workflows`
-/// matched on `workflow_id` membership in `LOCAL_APP_BUILD_WORKFLOWS` PLUS a
+/// matched on `workflow_id` membership in the (since-deleted) build-workflow name list PLUS a
 /// JSON-parsed `args.app_id` -- both caller-supplied -- so this EXACT shape
 /// used to block the victim's delete. `requires_workspace_lease` matched the
 /// same `workflow_id` alone. Both guards now read `scope`, which nothing but

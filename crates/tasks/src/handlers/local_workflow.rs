@@ -513,7 +513,7 @@ const HANDLER_NAME: &str = "local_workflow";
 ///
 /// Reads the task's typed [`crate::scope::ManagedWorkflowScope`]
 /// (design §18 Phase -1 step 8 / §8.1) instead of matching `workflow_id`
-/// against this crate's (since-deleted) `LOCAL_APP_BUILD_WORKFLOWS` array: a
+/// against this crate's (since-deleted) list of build-workflow names: a
 /// `workflow_id` is a string the *caller* supplies when launching a
 /// workflow, so a custom workflow that happens to reuse a real build
 /// workflow's name used to collect the exact same lease. `None` -- no scope
