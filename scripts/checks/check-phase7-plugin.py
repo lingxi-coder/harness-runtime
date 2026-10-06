@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from local_app_checkout import local_app_root  # noqa: E402
 LOCAL_APP = local_app_root(REPO)
 REGISTRY = REPO / "crates" / "mcp" / "src" / "registry.rs"
-REGISTRY_LOCAL_APPS = REPO / "crates" / "mcp" / "src" / "registry" / "local_apps.rs"
+REGISTRY_MANAGED = REPO / "crates" / "mcp" / "src" / "registry" / "managed.rs"
 # `ConversationExport` (the scoped identity and its registry-key grammar) lives in
 # `mcp-wire` so the in-process transport can be written without the engine.
 CONVERSATION_EXPORT = LOCAL_APP / "crates" / "mcp-wire" / "src" / "export.rs"
@@ -53,11 +53,11 @@ def main() -> None:
         fail("task contract must contain P7.0 through P7.3 in order")
 
     registry_root = REGISTRY.read_text(encoding="utf-8")
-    require(registry_root, "mod local_apps;", "McpRegistry module wiring")
+    require(registry_root, "mod managed;", "McpRegistry module wiring")
     registry = (
         registry_root
         + "\n"
-        + REGISTRY_LOCAL_APPS.read_text(encoding="utf-8")
+        + REGISTRY_MANAGED.read_text(encoding="utf-8")
         + "\n"
         + CONVERSATION_EXPORT.read_text(encoding="utf-8")
     )
@@ -65,15 +65,15 @@ def main() -> None:
         "pub struct ConversationExport",
         "local_apps:conversation-export:",
         "mcp__{}__{}",
-        "pub struct ManagedLocalAppServer",
+        "pub struct ManagedServer",
         "physical_transport_count",
-        "register_managed_local_app",
+        "register_managed_server",
         "actual_surface_changed",
-        "pub struct LocalAppExposure",
-        "LOCAL_APP_MAX_EXPOSED: usize = 8",
-        "LOCAL_APP_MAX_IN_FLIGHT_PER_APP: usize = 4",
+        "pub struct ServerExposure",
+        "MAX_EXPOSED_SERVERS: usize = 8",
+        "MAX_IN_FLIGHT_PER_SERVER: usize = 4",
         "exposure_capacity_reached",
-        "pub async fn begin_local_app_call",
+        "pub async fn begin_server_call",
     ]:
         require(registry, needle, "McpRegistry Phase 7 seam")
     if not re.search(r"format!\(\"local_app_\{\}\", self\.app_id\)", registry):

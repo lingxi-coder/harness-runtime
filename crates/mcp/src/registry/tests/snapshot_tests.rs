@@ -331,51 +331,59 @@ async fn snapshot_sorts_by_name() {
     assert_eq!(snap[1].name, "memory");
 }
 
-#[test]
-fn conversation_export_identity_preserves_hyphens_and_split_boundaries() {
-    let scope = ConversationExport::new("abc--1", "0".repeat(64)).unwrap();
-    assert_eq!(scope.server_name(), "local_app_abc--1");
-    assert_eq!(scope.server_info_name(), "lingxi-local-app");
-    assert_eq!(
-        scope.registry_key(),
-        "local_apps:conversation-export:abc--1"
-    );
-    assert_eq!(
-        scope.tool_full_name("read_value").unwrap(),
-        "mcp__local_app_abc--1__read_value"
-    );
-    assert!(ConversationExport::new("abc_1", "0".repeat(64)).is_err());
-    assert!(scope.tool_full_name("bad__name").is_err());
-}
-
-#[test]
-fn conversation_export_uses_schema_v3_app_id_boundaries() {
-    let id_54 = format!("a{}", "b".repeat(53));
-    let id_55 = format!("a{}", "b".repeat(54));
-    assert!(ConversationExport::new(id_54, "0".repeat(64)).is_ok());
-    assert!(ConversationExport::new(id_55, "0".repeat(64)).is_err());
-    assert!(ConversationExport::new("A123", "0".repeat(64)).is_err());
-    assert!(ConversationExport::new("-leading", "0".repeat(64)).is_err());
+/// A registry that holds managed-server ids to a plain grammar of its own. The identity wire format
+/// (`ConversationExport`) is pinned where it is defined, in `mcp-wire`.
+fn managed_registry() -> McpRegistry {
+    fn id(value: &str) -> bool {
+        !value.is_empty() && value.len() <= 54
+    }
+    fn tool(value: &str) -> bool {
+        !value.is_empty() && value.len() <= 64
+    }
+    let registry = McpRegistry::new(Arc::new(StubTransport));
+    registry.configure_managed_servers(crate::registry::ManagedServerPolicy {
+        is_valid_id: id,
+        is_valid_tool_name: tool,
+    });
+    registry
 }
 
 #[tokio::test]
-async fn managed_local_apps_share_one_physical_hub_and_notify_changed_catalog_partitions() {
+async fn an_unconfigured_registry_refuses_managed_servers() {
     let registry = McpRegistry::new(Arc::new(StubTransport));
+    let scope = ConversationExport::new("app-0", "0".repeat(64)).unwrap();
+    // Registering needs no policy: the scope is already validated by its own constructor.
+    registry
+        .register_managed_server(scope, "1".repeat(64), true)
+        .await
+        .unwrap();
+    let error = registry.unregister_managed_server("app-0").await.unwrap_err();
+    assert!(error.to_string().contains("not configured"), "{error}");
+    assert!(registry
+        .expose_managed_server("conversation-1", "app-0", false)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn managed_servers_share_one_physical_hub_and_notify_changed_catalog_partitions() {
+    let registry = managed_registry();
     let mut events = registry.subscribe_catalog_changes();
     for index in 0..100 {
         let scope = ConversationExport::new(format!("app-{index}"), "0".repeat(64)).unwrap();
+        let expected_name = scope.server_name();
         registry
-            .register_managed_local_app(scope, "1".repeat(64), true)
+            .register_managed_server(scope, "1".repeat(64), true)
             .await
             .unwrap();
         let change = events.recv().await.unwrap();
-        assert_eq!(change.server_name, format!("local_app_app-{index}"));
+        assert_eq!(change.server_name, expected_name);
     }
-    assert_eq!(registry.managed_local_app_count().await, 100);
+    assert_eq!(registry.managed_server_count().await, 100);
     assert_eq!(registry.physical_transport_count(), 1);
     let scope = ConversationExport::new("app-0", "0".repeat(64)).unwrap();
     registry
-        .register_managed_local_app(scope, "2".repeat(64), false)
+        .register_managed_server(scope, "2".repeat(64), false)
         .await
         .unwrap();
     assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Resources);
@@ -383,43 +391,43 @@ async fn managed_local_apps_share_one_physical_hub_and_notify_changed_catalog_pa
     // the committed surface digest is unchanged.
     let same_surface = ConversationExport::new("app-0", "0".repeat(64)).unwrap();
     let refreshed = registry
-        .register_managed_local_app(same_surface, "3".repeat(64), true)
+        .register_managed_server(same_surface, "3".repeat(64), true)
         .await
         .unwrap();
     assert_eq!(refreshed.surface_generation, 1);
     assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Resources);
     let changed_surface = ConversationExport::new("app-0", "f".repeat(64)).unwrap();
     let changed = registry
-        .register_managed_local_app(changed_surface, "4".repeat(64), false)
+        .register_managed_server(changed_surface, "4".repeat(64), false)
         .await
         .unwrap();
     assert_eq!(changed.surface_generation, 2);
     let tools = events.recv().await.unwrap();
-    assert_eq!(tools.server_name, "local_app_app-0");
+    assert_eq!(tools.server_name, ConversationExport::new("app-0", "0".repeat(64)).unwrap().server_name());
     assert_eq!(tools.kind, McpCatalogKind::Tools);
     assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Resources);
     assert!(registry
-        .unregister_managed_local_app("app-0")
+        .unregister_managed_server("app-0")
         .await
         .unwrap());
 }
 
 #[tokio::test]
-async fn managed_local_app_catalog_refresh_notifies_resources_only() {
-    let registry = McpRegistry::new(Arc::new(StubTransport));
+async fn managed_server_catalog_refresh_notifies_resources_only() {
+    let registry = managed_registry();
     let mut events = registry.subscribe_catalog_changes();
     let scope = ConversationExport::new("app-0", "0".repeat(64)).unwrap();
     registry
-        .register_managed_local_app(scope.clone(), "1".repeat(64), false)
+        .register_managed_server(scope.clone(), "1".repeat(64), false)
         .await
         .unwrap();
     assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Tools);
     registry
-        .register_managed_local_app(scope, "2".repeat(64), false)
+        .register_managed_server(scope, "2".repeat(64), false)
         .await
         .unwrap();
     let event = events.recv().await.unwrap();
-    assert_eq!(event.server_name, "local_app_app-0");
+    assert_eq!(event.server_name, ConversationExport::new("app-0", "0".repeat(64)).unwrap().server_name());
     assert_eq!(event.kind, McpCatalogKind::Resources);
     assert!(
         tokio::time::timeout(Duration::from_millis(10), events.recv())
@@ -429,35 +437,35 @@ async fn managed_local_app_catalog_refresh_notifies_resources_only() {
 }
 
 #[tokio::test]
-async fn local_app_exposure_is_bounded_lru_and_pin_aware() {
-    let registry = McpRegistry::new(Arc::new(StubTransport));
+async fn server_exposure_is_bounded_lru_and_pin_aware() {
+    let registry = managed_registry();
     for index in 0..10 {
         let scope = ConversationExport::new(format!("app-{index}"), "0".repeat(64)).unwrap();
         registry
-            .register_managed_local_app(scope, "1".repeat(64), false)
+            .register_managed_server(scope, "1".repeat(64), false)
             .await
             .unwrap();
     }
 
     assert!(registry
-        .local_app_exposures("conversation")
+        .server_exposures("conversation")
         .await
         .is_empty());
     for index in 0..8 {
         registry
-            .expose_managed_local_app("conversation", &format!("app-{index}"), false)
+            .expose_managed_server("conversation", &format!("app-{index}"), false)
             .await
             .unwrap();
     }
-    assert_eq!(registry.local_app_exposures("conversation").await.len(), 8);
+    assert_eq!(registry.server_exposures("conversation").await.len(), 8);
 
     // app-0 is the oldest unpinned entry and is the only one evicted.
     registry
-        .expose_managed_local_app("conversation", "app-8", false)
+        .expose_managed_server("conversation", "app-8", false)
         .await
         .unwrap();
     let ids: Vec<String> = registry
-        .local_app_exposures("conversation")
+        .server_exposures("conversation")
         .await
         .into_iter()
         .map(|entry| entry.app_id)
@@ -468,15 +476,15 @@ async fn local_app_exposure_is_bounded_lru_and_pin_aware() {
     // Pinning is explicit. The next eviction skips app-1 even though it
     // is older than the unpinned entries.
     registry
-        .pin_local_app_exposure("conversation", "app-1", true)
+        .pin_server_exposure("conversation", "app-1", true)
         .await
         .unwrap();
     registry
-        .expose_managed_local_app("conversation", "app-9", false)
+        .expose_managed_server("conversation", "app-9", false)
         .await
         .unwrap();
     let ids: Vec<String> = registry
-        .local_app_exposures("conversation")
+        .server_exposures("conversation")
         .await
         .into_iter()
         .map(|entry| entry.app_id)
@@ -486,23 +494,23 @@ async fn local_app_exposure_is_bounded_lru_and_pin_aware() {
 }
 
 #[tokio::test]
-async fn local_app_exposure_rejects_ninth_when_all_are_pinned_and_tracks_calls() {
-    let registry = McpRegistry::new(Arc::new(StubTransport));
+async fn server_exposure_rejects_ninth_when_all_are_pinned_and_tracks_calls() {
+    let registry = managed_registry();
     for index in 0..9 {
         let scope = ConversationExport::new(format!("pin-{index}"), "0".repeat(64)).unwrap();
         registry
-            .register_managed_local_app(scope, "1".repeat(64), false)
+            .register_managed_server(scope, "1".repeat(64), false)
             .await
             .unwrap();
     }
     for index in 0..8 {
         registry
-            .expose_managed_local_app("conversation", &format!("pin-{index}"), true)
+            .expose_managed_server("conversation", &format!("pin-{index}"), true)
             .await
             .unwrap();
     }
     let err = registry
-        .expose_managed_local_app("conversation", "pin-8", false)
+        .expose_managed_server("conversation", "pin-8", false)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("exposure_capacity_reached"));
@@ -510,21 +518,21 @@ async fn local_app_exposure_rejects_ninth_when_all_are_pinned_and_tracks_calls()
 
     for _ in 0..4 {
         registry
-            .begin_local_app_call("conversation", "pin-0")
+            .begin_server_call("conversation", "pin-0")
             .await
             .unwrap();
     }
     let err = registry
-        .begin_local_app_call("conversation", "pin-0")
+        .begin_server_call("conversation", "pin-0")
         .await
         .unwrap_err();
     assert!(err.to_string().contains("rate_limited"));
     for _ in 0..5 {
-        registry.end_local_app_call("conversation", "pin-0").await;
+        registry.end_server_call("conversation", "pin-0").await;
     }
     assert_eq!(
         registry
-            .local_app_exposures("conversation")
+            .server_exposures("conversation")
             .await
             .iter()
             .find(|entry| entry.app_id == "pin-0")
@@ -535,30 +543,30 @@ async fn local_app_exposure_rejects_ninth_when_all_are_pinned_and_tracks_calls()
 }
 
 #[tokio::test]
-async fn local_app_exposure_never_evicts_an_inflight_entry() {
-    let registry = McpRegistry::new(Arc::new(StubTransport));
+async fn server_exposure_never_evicts_an_inflight_entry() {
+    let registry = managed_registry();
     for index in 0..9 {
         let scope = ConversationExport::new(format!("busy-{index}"), "0".repeat(64)).unwrap();
         registry
-            .register_managed_local_app(scope, "1".repeat(64), false)
+            .register_managed_server(scope, "1".repeat(64), false)
             .await
             .unwrap();
     }
     for index in 0..8 {
         registry
-            .expose_managed_local_app("conversation", &format!("busy-{index}"), false)
+            .expose_managed_server("conversation", &format!("busy-{index}"), false)
             .await
             .unwrap();
     }
     registry
-        .begin_local_app_call("conversation", "busy-0")
+        .begin_server_call("conversation", "busy-0")
         .await
         .unwrap();
     registry
-        .expose_managed_local_app("conversation", "busy-8", false)
+        .expose_managed_server("conversation", "busy-8", false)
         .await
         .unwrap();
-    let exposed = registry.local_app_exposures("conversation").await;
+    let exposed = registry.server_exposures("conversation").await;
     assert!(exposed.iter().any(|entry| entry.app_id == "busy-0"));
     assert!(exposed.iter().any(|entry| entry.app_id == "busy-8"));
     assert_eq!(
@@ -569,37 +577,37 @@ async fn local_app_exposure_never_evicts_an_inflight_entry() {
             .in_flight,
         1
     );
-    registry.end_local_app_call("conversation", "busy-0").await;
+    registry.end_server_call("conversation", "busy-0").await;
 }
 
 #[tokio::test]
-async fn deleting_managed_local_app_removes_all_conversation_exposure() {
-    let registry = McpRegistry::new(Arc::new(StubTransport));
+async fn deleting_managed_server_removes_all_conversation_exposure() {
+    let registry = managed_registry();
     let scope = ConversationExport::new("delete-me", "0".repeat(64)).unwrap();
     registry
-        .register_managed_local_app(scope, "1".repeat(64), false)
+        .register_managed_server(scope, "1".repeat(64), false)
         .await
         .unwrap();
     registry
-        .expose_managed_local_app("conversation", "delete-me", true)
+        .expose_managed_server("conversation", "delete-me", true)
         .await
         .unwrap();
     assert!(registry
-        .unregister_managed_local_app("delete-me")
+        .unregister_managed_server("delete-me")
         .await
         .unwrap());
     assert!(registry
-        .local_app_exposures("conversation")
+        .server_exposures("conversation")
         .await
         .is_empty());
 }
 
 #[tokio::test]
-async fn disabling_managed_local_app_clears_exposure_and_emits_changes() {
-    let registry = McpRegistry::new(Arc::new(StubTransport));
+async fn disabling_managed_server_clears_exposure_and_emits_changes() {
+    let registry = managed_registry();
     let mut events = registry.subscribe_catalog_changes();
     registry
-        .register_managed_local_app(
+        .register_managed_server(
             ConversationExport::new("toggle-me", "0".repeat(64)).unwrap(),
             "1".repeat(64),
             false,
@@ -608,16 +616,16 @@ async fn disabling_managed_local_app_clears_exposure_and_emits_changes() {
         .unwrap();
     let _ = events.recv().await.unwrap();
     registry
-        .expose_managed_local_app("conversation", "toggle-me", true)
+        .expose_managed_server("conversation", "toggle-me", true)
         .await
         .unwrap();
     let runtime = registry
-        .set_managed_local_app_runtime(
+        .set_managed_server_runtime(
             "toggle-me",
             false,
             Some(vec!["read_value".into()]),
-            Some(ManagedLocalAppResource {
-                uri: "ui://local-app/toggle-me/0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/mcp-app.html".into(),
+            Some(ManagedServerResource {
+                uri: "ui://widgets/toggle-me/0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/mcp-app.html".into(),
                 name: "Toggle".into(),
                 description: None,
                 mime_type: Some("text/html;profile=mcp-app".into()),
@@ -628,24 +636,24 @@ async fn disabling_managed_local_app_clears_exposure_and_emits_changes() {
         .unwrap();
     assert!(!runtime.enabled);
     assert!(registry
-        .local_app_exposures("conversation")
+        .server_exposures("conversation")
         .await
         .is_empty());
     assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Tools);
     assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Resources);
     let err = registry
-        .expose_managed_local_app("conversation", "toggle-me", false)
+        .expose_managed_server("conversation", "toggle-me", false)
         .await
         .unwrap_err();
     assert!(matches!(err, McpError::ToolNotFound(_)));
 }
 
 #[tokio::test]
-async fn expose_managed_local_app_reports_the_evicted_entry() {
-    let registry = McpRegistry::new(Arc::new(StubTransport));
+async fn expose_managed_server_reports_the_evicted_entry() {
+    let registry = managed_registry();
     for index in 0..9 {
         registry
-            .register_managed_local_app(
+            .register_managed_server(
                 ConversationExport::new(format!("diff-{index}"), "0".repeat(64)).unwrap(),
                 "1".repeat(64),
                 false,
@@ -655,12 +663,12 @@ async fn expose_managed_local_app_reports_the_evicted_entry() {
     }
     for index in 0..8 {
         registry
-            .expose_managed_local_app("conversation", &format!("diff-{index}"), false)
+            .expose_managed_server("conversation", &format!("diff-{index}"), false)
             .await
             .unwrap();
     }
     let update = registry
-        .expose_managed_local_app_with_diff("conversation", "diff-8", false)
+        .expose_managed_server_with_diff("conversation", "diff-8", false)
         .await
         .unwrap();
     assert_eq!(update.exposure.app_id, "diff-8");
@@ -668,11 +676,11 @@ async fn expose_managed_local_app_reports_the_evicted_entry() {
 }
 
 #[tokio::test]
-async fn managed_local_apps_snapshot_is_sorted() {
-    let registry = McpRegistry::new(Arc::new(StubTransport));
+async fn managed_servers_snapshot_is_sorted() {
+    let registry = managed_registry();
     for app_id in ["b-app", "a-app"] {
         registry
-            .register_managed_local_app(
+            .register_managed_server(
                 ConversationExport::new(app_id, "0".repeat(64)).unwrap(),
                 "1".repeat(64),
                 false,
@@ -680,7 +688,7 @@ async fn managed_local_apps_snapshot_is_sorted() {
             .await
             .unwrap();
     }
-    let apps = registry.managed_local_apps().await;
+    let apps = registry.managed_servers().await;
     assert_eq!(
         apps.iter()
             .map(|server| server.scope.app_id.as_str())

@@ -102,6 +102,7 @@ mobile = [
     "dep:local-apps",
     "dep:local-app-contracts",
     "dep:local-app-plugin",
+    "dep:mcp-wire",
     "dep:local-app-service",
     "dep:rooted-fs",
     "dep:jsonrpc",
@@ -201,6 +202,7 @@ local-apps = { workspace = true, optional = true }
 lsp = { path = "../lsp", optional = true }
 lsp-types = { version = "0.95", optional = true }
 mcp = { path = "../mcp", optional = true }
+mcp-wire = { workspace = true, optional = true }
 memory = { path = "../memory", optional = true }
 migrations = { path = "../migrations", optional = true }
 llm-runtime = { path = "../llm-runtime" }

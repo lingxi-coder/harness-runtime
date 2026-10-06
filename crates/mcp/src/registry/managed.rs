@@ -1,15 +1,25 @@
 use super::{
-    is_local_app_id, is_local_app_tool_name, is_sha256, ConversationExport, LocalAppExposure,
-    LocalAppExposureUpdate, ManagedLocalAppResource, ManagedLocalAppRuntime, ManagedLocalAppServer,
-    McpCatalogChanged, McpCatalogKind, McpRegistry, LOCAL_APP_MAX_EXPOSED,
-    LOCAL_APP_MAX_IN_FLIGHT_PER_APP, LOCAL_APP_MAX_IN_FLIGHT_PER_CONVERSATION,
+    is_sha256, ConversationExport, ServerExposure,
+    ManagedServerPolicy, ServerExposureUpdate, ManagedServerResource, ManagedServerRuntime, ManagedServer,
+    McpCatalogChanged, McpCatalogKind, McpRegistry, MAX_EXPOSED_SERVERS,
+    MAX_IN_FLIGHT_PER_SERVER, MAX_IN_FLIGHT_PER_CONVERSATION,
 };
 use crate::connection::McpConnectionState;
 use lingxi_core::host::McpError;
 use lingxi_core::types::McpConnectionId;
 
 impl McpRegistry {
-    pub(super) async fn managed_local_app_connection_id(
+    /// Install how this registry validates managed-server ids and tool names. The first call wins; the
+    /// grammar belongs to whoever publishes the servers, not to this crate.
+    pub fn configure_managed_servers(&self, policy: ManagedServerPolicy) {
+        let _ = self.managed_policy.set(policy);
+    }
+    fn managed_policy(&self) -> Result<&ManagedServerPolicy, McpError> {
+        self.managed_policy
+            .get()
+            .ok_or_else(|| McpError::Internal("managed servers are not configured".into()))
+    }
+    pub(super) async fn managed_server_connection_id(
         &self,
         server_name: &str,
     ) -> McpConnectionId {
@@ -21,17 +31,17 @@ impl McpRegistry {
             _ => McpConnectionId::new(),
         }
     }
-    pub(super) fn managed_local_app_runtime_changed(
-        previous: &ManagedLocalAppRuntime,
-        current: &ManagedLocalAppRuntime,
+    pub(super) fn managed_server_runtime_changed(
+        previous: &ManagedServerRuntime,
+        current: &ManagedServerRuntime,
     ) -> (bool, bool) {
         (
             previous.enabled != current.enabled || previous.enabled_tools != current.enabled_tools,
             previous.enabled != current.enabled || previous.resource != current.resource,
         )
     }
-    pub(super) async fn remove_local_app_exposures(&self, app_id: &str) -> bool {
-        let mut conversations = self.local_app_exposures.write().await;
+    pub(super) async fn remove_server_exposures(&self, app_id: &str) -> bool {
+        let mut conversations = self.server_exposures.write().await;
         let mut removed = false;
         for state in conversations.values_mut() {
             if state.entries.remove(app_id).is_some() {
@@ -41,22 +51,22 @@ impl McpRegistry {
         }
         removed
     }
-    /// Register or refresh one published Local App logical server. Only a
+    /// Register or refresh one published managed logical server. Only a
     /// changed tool surface advances the logical generation and emits the
     /// shared tools/list_changed notification; build/execution-only changes
     /// update the catalog pointer without invalidating connections.
-    pub async fn register_managed_local_app(
+    pub async fn register_managed_server(
         &self,
         scope: ConversationExport,
         catalog_sha256: String,
         _surface_changed: bool,
-    ) -> Result<ManagedLocalAppServer, McpError> {
+    ) -> Result<ManagedServer, McpError> {
         if !is_sha256(&catalog_sha256) {
             return Err(McpError::Internal(
-                "invalid Local App catalog identity".into(),
+                "invalid managed server catalog identity".into(),
             ));
         }
-        let mut apps = self.managed_local_apps.write().await;
+        let mut apps = self.managed_servers.write().await;
         // The catalog commit is the authority for whether the exposed tool
         // surface changed. Do not trust a caller-supplied boolean: a stale or
         // forged hint must not produce duplicate listChanged notifications,
@@ -72,21 +82,21 @@ impl McpRegistry {
             .as_ref()
             .map(|server| server.surface_generation + u64::from(actual_surface_changed))
             .unwrap_or(1);
-        let server = ManagedLocalAppServer {
+        let server = ManagedServer {
             scope: scope.clone(),
             catalog_sha256,
             surface_generation: generation,
         };
         apps.insert(scope.app_id.clone(), server.clone());
         drop(apps);
-        self.managed_local_app_runtime
+        self.managed_server_runtime
             .write()
             .await
             .entry(scope.app_id.clone())
-            .or_insert_with(ManagedLocalAppRuntime::default);
+            .or_insert_with(ManagedServerRuntime::default);
         if actual_surface_changed {
             let connection_id = self
-                .managed_local_app_connection_id(&scope.server_name())
+                .managed_server_connection_id(&scope.server_name())
                 .await;
             let _ = self.catalog_changes.send(McpCatalogChanged {
                 server_name: scope.server_name(),
@@ -98,7 +108,7 @@ impl McpRegistry {
         }
         if previous.is_some() && actual_catalog_changed {
             let connection_id = self
-                .managed_local_app_connection_id(&scope.server_name())
+                .managed_server_connection_id(&scope.server_name())
                 .await;
             let _ = self.catalog_changes.send(McpCatalogChanged {
                 server_name: scope.server_name(),
@@ -110,28 +120,29 @@ impl McpRegistry {
         }
         Ok(server)
     }
-    /// Remove a published Local App logical server after Host has stopped new
+    /// Remove a published managed logical server after Host has stopped new
     /// calls. The notification tells consumers to evict its exposed tools.
-    pub async fn unregister_managed_local_app(&self, app_id: &str) -> Result<bool, McpError> {
-        if !is_local_app_id(app_id) {
-            return Err(McpError::Internal("invalid Local App identity".into()));
+    pub async fn unregister_managed_server(&self, app_id: &str) -> Result<bool, McpError> {
+        if !self.managed_policy()?.is_valid_id(app_id) {
+            return Err(McpError::Internal("invalid managed server identity".into()));
         }
-        let removed = self.managed_local_apps.write().await.remove(app_id);
-        if removed.is_some() {
-            self.managed_local_app_runtime.write().await.remove(app_id);
+        let removed = self.managed_servers.write().await.remove(app_id);
+        if let Some(server) = &removed {
+            let server_name = server.scope.server_name();
+            self.managed_server_runtime.write().await.remove(app_id);
             // A deleted app can no longer be selected or called. Remove its
             // logical exposure from every conversation in the same commit
             // boundary; no stale FQN survives deletion.
-            self.remove_local_app_exposures(app_id).await;
+            self.remove_server_exposures(app_id).await;
             let _ = self.catalog_changes.send(McpCatalogChanged {
-                server_name: format!("local_app_{app_id}"),
+                server_name: server_name.clone(),
                 connection_id: McpConnectionId::new(),
                 retired_connection_id: None,
                 kind: McpCatalogKind::Tools,
                 telemetry_cause: None,
             });
             let _ = self.catalog_changes.send(McpCatalogChanged {
-                server_name: format!("local_app_{app_id}"),
+                server_name: server_name.clone(),
                 connection_id: McpConnectionId::new(),
                 retired_connection_id: None,
                 kind: McpCatalogKind::Resources,
@@ -142,13 +153,13 @@ impl McpRegistry {
     }
     /// Lightweight logical-server count; all entries continue to use this
     /// registry's one physical transport substrate.
-    pub async fn managed_local_app_count(&self) -> usize {
-        self.managed_local_apps.read().await.len()
+    pub async fn managed_server_count(&self) -> usize {
+        self.managed_servers.read().await.len()
     }
-    /// Snapshot every published Local App logical server.
-    pub async fn managed_local_apps(&self) -> Vec<ManagedLocalAppServer> {
-        let mut apps: Vec<ManagedLocalAppServer> = self
-            .managed_local_apps
+    /// Snapshot every published managed logical server.
+    pub async fn managed_servers(&self) -> Vec<ManagedServer> {
+        let mut apps: Vec<ManagedServer> = self
+            .managed_servers
             .read()
             .await
             .values()
@@ -162,40 +173,41 @@ impl McpRegistry {
     pub fn physical_transport_count(&self) -> usize {
         1
     }
-    pub async fn managed_local_app(&self, app_id: &str) -> Option<ManagedLocalAppServer> {
-        self.managed_local_apps.read().await.get(app_id).cloned()
+    pub async fn managed_server(&self, app_id: &str) -> Option<ManagedServer> {
+        self.managed_servers.read().await.get(app_id).cloned()
     }
-    /// Snapshot the Host-owned runtime overlay for one managed Local App.
-    pub async fn managed_local_app_runtime(&self, app_id: &str) -> Option<ManagedLocalAppRuntime> {
-        self.managed_local_app_runtime
+    /// Snapshot the Host-owned runtime overlay for one managed server.
+    pub async fn managed_server_runtime(&self, app_id: &str) -> Option<ManagedServerRuntime> {
+        self.managed_server_runtime
             .read()
             .await
             .get(app_id)
             .cloned()
     }
-    /// Update the Host-owned runtime overlay for one managed Local App.
+    /// Update the Host-owned runtime overlay for one managed server.
     ///
     /// This is the intended seam for service enable/disable, per-tool
     /// allowlists, and per-app widget resource publication without changing
     /// the immutable published catalog record.
-    pub async fn set_managed_local_app_runtime(
+    pub async fn set_managed_server_runtime(
         &self,
         app_id: &str,
         enabled: bool,
         enabled_tools: Option<Vec<String>>,
-        resource: Option<ManagedLocalAppResource>,
-    ) -> Result<ManagedLocalAppRuntime, McpError> {
-        if !is_local_app_id(app_id) {
-            return Err(McpError::Internal("invalid Local App identity".into()));
+        resource: Option<ManagedServerResource>,
+    ) -> Result<ManagedServerRuntime, McpError> {
+        let policy = *self.managed_policy()?;
+        if !policy.is_valid_id(app_id) {
+            return Err(McpError::Internal("invalid managed server identity".into()));
         }
-        let Some(server) = self.managed_local_app(app_id).await else {
+        let Some(server) = self.managed_server(app_id).await else {
             return Err(McpError::ToolNotFound(app_id.into()));
         };
         let enabled_tools = enabled_tools
             .map(|tools| {
                 let mut normalized = Vec::with_capacity(tools.len());
                 for tool in tools {
-                    if !is_local_app_tool_name(&tool) {
+                    if !policy.is_valid_tool_name(&tool) {
                         return Err(McpError::ToolNotFound(tool));
                     }
                     let _ = server.scope.tool_full_name(&tool)?;
@@ -210,15 +222,15 @@ impl McpRegistry {
         if let Some(resource) = resource.as_ref() {
             if resource.uri.trim().is_empty() || resource.name.trim().is_empty() {
                 return Err(McpError::Internal(
-                    "managed Local App resource metadata is incomplete".into(),
+                    "managed server resource metadata is incomplete".into(),
                 ));
             }
         }
-        let mut runtimes = self.managed_local_app_runtime.write().await;
+        let mut runtimes = self.managed_server_runtime.write().await;
         let previous = runtimes.get(app_id).cloned().unwrap_or_default();
         let resource_generation_changed =
             previous.resource != resource || previous.enabled != enabled;
-        let runtime = ManagedLocalAppRuntime {
+        let runtime = ManagedServerRuntime {
             enabled,
             enabled_tools,
             resource,
@@ -226,14 +238,14 @@ impl McpRegistry {
                 + u64::from(resource_generation_changed),
         };
         let (tools_changed, resources_changed) =
-            Self::managed_local_app_runtime_changed(&previous, &runtime);
+            Self::managed_server_runtime_changed(&previous, &runtime);
         runtimes.insert(app_id.to_string(), runtime.clone());
         drop(runtimes);
         if !enabled {
-            self.remove_local_app_exposures(app_id).await;
+            self.remove_server_exposures(app_id).await;
         }
         let connection_id = self
-            .managed_local_app_connection_id(&server.scope.server_name())
+            .managed_server_connection_id(&server.scope.server_name())
             .await;
         if tools_changed {
             let _ = self.catalog_changes.send(McpCatalogChanged {
@@ -255,34 +267,34 @@ impl McpRegistry {
         }
         Ok(runtime)
     }
-    /// Expose a published Local App in one conversation. Exposure is lazy and
+    /// Expose a published managed server in one conversation. Exposure is lazy and
     /// bounded: at most eight logical apps are retained, with unpinned,
     /// idle least-recently-used entries evicted first. A pinned entry is the
     /// only hard pin; merely listing or calling an app keeps it recent but
     /// does not make it ineligible for eviction.
-    pub async fn expose_managed_local_app_with_diff(
+    pub async fn expose_managed_server_with_diff(
         &self,
         conversation_id: &str,
         app_id: &str,
         pin: bool,
-    ) -> Result<LocalAppExposureUpdate, McpError> {
-        if conversation_id.is_empty() || !is_local_app_id(app_id) {
+    ) -> Result<ServerExposureUpdate, McpError> {
+        if conversation_id.is_empty() || !self.managed_policy()?.is_valid_id(app_id) {
             return Err(McpError::Internal(
-                "invalid Local App exposure scope".into(),
+                "invalid managed server exposure scope".into(),
             ));
         }
-        if self.managed_local_app(app_id).await.is_none() {
+        if self.managed_server(app_id).await.is_none() {
             return Err(McpError::ToolNotFound(app_id.into()));
         }
         if self
-            .managed_local_app_runtime(app_id)
+            .managed_server_runtime(app_id)
             .await
             .is_some_and(|runtime| !runtime.enabled)
         {
             return Err(McpError::ToolNotFound(app_id.into()));
         }
 
-        let mut conversations = self.local_app_exposures.write().await;
+        let mut conversations = self.server_exposures.write().await;
         let state = conversations
             .entry(conversation_id.to_string())
             .or_default();
@@ -294,14 +306,14 @@ impl McpRegistry {
                 entry.pinned = true;
                 entry.exposure_generation = state.next_generation;
             }
-            return Ok(LocalAppExposureUpdate {
+            return Ok(ServerExposureUpdate {
                 exposure: entry.clone(),
                 evicted_app_id: None,
             });
         }
 
         let mut evicted_app_id = None;
-        if state.entries.len() >= LOCAL_APP_MAX_EXPOSED {
+        if state.entries.len() >= MAX_EXPOSED_SERVERS {
             let evict = state
                 .entries
                 .iter()
@@ -326,7 +338,7 @@ impl McpRegistry {
         }
 
         state.next_generation = state.next_generation.saturating_add(1);
-        let entry = LocalAppExposure {
+        let entry = ServerExposure {
             app_id: app_id.to_string(),
             pinned: pin,
             in_flight: 0,
@@ -334,34 +346,34 @@ impl McpRegistry {
             exposure_generation: state.next_generation,
         };
         state.entries.insert(app_id.to_string(), entry.clone());
-        Ok(LocalAppExposureUpdate {
+        Ok(ServerExposureUpdate {
             exposure: entry,
             evicted_app_id,
         })
     }
-    pub async fn expose_managed_local_app(
+    pub async fn expose_managed_server(
         &self,
         conversation_id: &str,
         app_id: &str,
         pin: bool,
-    ) -> Result<LocalAppExposure, McpError> {
+    ) -> Result<ServerExposure, McpError> {
         Ok(self
-            .expose_managed_local_app_with_diff(conversation_id, app_id, pin)
+            .expose_managed_server_with_diff(conversation_id, app_id, pin)
             .await?
             .exposure)
     }
     /// Mark an already exposed app as recently used without hard-pinning it.
-    pub async fn touch_local_app_exposure(
+    pub async fn touch_server_exposure(
         &self,
         conversation_id: &str,
         app_id: &str,
-    ) -> Result<LocalAppExposure, McpError> {
-        if conversation_id.is_empty() || !is_local_app_id(app_id) {
+    ) -> Result<ServerExposure, McpError> {
+        if conversation_id.is_empty() || !self.managed_policy()?.is_valid_id(app_id) {
             return Err(McpError::Internal(
-                "invalid Local App exposure scope".into(),
+                "invalid managed server exposure scope".into(),
             ));
         }
-        let mut conversations = self.local_app_exposures.write().await;
+        let mut conversations = self.server_exposures.write().await;
         let state = conversations
             .get_mut(conversation_id)
             .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
@@ -376,18 +388,18 @@ impl McpRegistry {
     /// Change the hard-pin bit for one exposed app. Pin state is explicit and
     /// therefore advances the exposure generation independently of catalog or
     /// authoring revisions.
-    pub async fn pin_local_app_exposure(
+    pub async fn pin_server_exposure(
         &self,
         conversation_id: &str,
         app_id: &str,
         pinned: bool,
-    ) -> Result<LocalAppExposure, McpError> {
-        if conversation_id.is_empty() || !is_local_app_id(app_id) {
+    ) -> Result<ServerExposure, McpError> {
+        if conversation_id.is_empty() || !self.managed_policy()?.is_valid_id(app_id) {
             return Err(McpError::Internal(
-                "invalid Local App exposure scope".into(),
+                "invalid managed server exposure scope".into(),
             ));
         }
-        let mut conversations = self.local_app_exposures.write().await;
+        let mut conversations = self.server_exposures.write().await;
         let state = conversations
             .get_mut(conversation_id)
             .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
@@ -408,18 +420,18 @@ impl McpRegistry {
     }
     /// Begin one call through an exposed app. The registry rejects calls
     /// instead of queueing them without bound; callers must release the lease
-    /// with [`Self::end_local_app_call`] on completion/cancellation.
-    pub async fn begin_local_app_call(
+    /// with [`Self::end_server_call`] on completion/cancellation.
+    pub async fn begin_server_call(
         &self,
         conversation_id: &str,
         app_id: &str,
-    ) -> Result<LocalAppExposure, McpError> {
-        if conversation_id.is_empty() || !is_local_app_id(app_id) {
+    ) -> Result<ServerExposure, McpError> {
+        if conversation_id.is_empty() || !self.managed_policy()?.is_valid_id(app_id) {
             return Err(McpError::Internal(
-                "invalid Local App exposure scope".into(),
+                "invalid managed server exposure scope".into(),
             ));
         }
-        let mut conversations = self.local_app_exposures.write().await;
+        let mut conversations = self.server_exposures.write().await;
         let state = conversations
             .get_mut(conversation_id)
             .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
@@ -428,8 +440,8 @@ impl McpRegistry {
             .entries
             .get_mut(app_id)
             .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
-        if entry.in_flight >= LOCAL_APP_MAX_IN_FLIGHT_PER_APP
-            || total_in_flight >= LOCAL_APP_MAX_IN_FLIGHT_PER_CONVERSATION
+        if entry.in_flight >= MAX_IN_FLIGHT_PER_SERVER
+            || total_in_flight >= MAX_IN_FLIGHT_PER_CONVERSATION
         {
             return Err(McpError::Internal(
                 "rate_limited: retry after 1000ms".into(),
@@ -442,8 +454,8 @@ impl McpRegistry {
     }
     /// Release a call lease. Releasing an unknown lease is intentionally
     /// idempotent so timeout/cancel cleanup cannot turn into a second error.
-    pub async fn end_local_app_call(&self, conversation_id: &str, app_id: &str) {
-        let mut conversations = self.local_app_exposures.write().await;
+    pub async fn end_server_call(&self, conversation_id: &str, app_id: &str) {
+        let mut conversations = self.server_exposures.write().await;
         if let Some(state) = conversations.get_mut(conversation_id) {
             if let Some(entry) = state.entries.get_mut(app_id) {
                 entry.in_flight = entry.in_flight.saturating_sub(1);
@@ -452,12 +464,12 @@ impl McpRegistry {
     }
     /// Snapshot the logical exposure metadata for one conversation in recency
     /// order. Tool DTOs are intentionally not part of this API.
-    pub async fn local_app_exposures(&self, conversation_id: &str) -> Vec<LocalAppExposure> {
-        let conversations = self.local_app_exposures.read().await;
+    pub async fn server_exposures(&self, conversation_id: &str) -> Vec<ServerExposure> {
+        let conversations = self.server_exposures.read().await;
         let Some(state) = conversations.get(conversation_id) else {
             return Vec::new();
         };
-        let mut entries: Vec<LocalAppExposure> = state.entries.values().cloned().collect();
+        let mut entries: Vec<ServerExposure> = state.entries.values().cloned().collect();
         entries.sort_by_key(|entry| std::cmp::Reverse(entry.last_used));
         entries
     }

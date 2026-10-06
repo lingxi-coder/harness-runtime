@@ -206,9 +206,17 @@ impl RegistryPublisher {
     }
 
     fn registry(&self) -> Result<Arc<mcp::McpRegistry>, String> {
-        self.registry
+        let registry = self
+            .registry
             .upgrade()
-            .ok_or_else(|| "the MCP registry is gone".to_string())
+            .ok_or_else(|| "the MCP registry is gone".to_string())?;
+        // The registry does not know what the managed servers are; the grammar of their ids and tool
+        // names is the Local App service's. Every path to the registry goes through here.
+        registry.configure_managed_servers(mcp::ManagedServerPolicy {
+            is_valid_id: mcp_wire::export::is_local_app_id,
+            is_valid_tool_name: mcp_wire::export::is_local_app_tool_name,
+        });
+        Ok(registry)
     }
 
     /// The logical server configuration that connects one conversation to one
@@ -251,17 +259,17 @@ impl McpPublisher for RegistryPublisher {
     async fn publish(&self, app: &ManagedApp, runtime: ManagedRuntime) -> Result<(), String> {
         let registry = self.registry()?;
         registry
-            .register_managed_local_app(scope_of(app)?, app.catalog_sha256.clone(), false)
+            .register_managed_server(scope_of(app)?, app.catalog_sha256.clone(), false)
             .await
             .map_err(|error| error.to_string())?;
         registry
-            .set_managed_local_app_runtime(
+            .set_managed_server_runtime(
                 &app.app_id,
                 runtime.enabled,
                 Some(runtime.enabled_tools),
                 runtime
                     .widget
-                    .map(|widget| mcp::registry::ManagedLocalAppResource {
+                    .map(|widget| mcp::registry::ManagedServerResource {
                         uri: widget.uri,
                         name: widget.name,
                         description: widget.description,
@@ -276,7 +284,7 @@ impl McpPublisher for RegistryPublisher {
 
     async fn unregister(&self, app_id: &str) -> Result<(), String> {
         self.registry()?
-            .unregister_managed_local_app(app_id)
+            .unregister_managed_server(app_id)
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -291,7 +299,7 @@ impl McpPublisher for RegistryPublisher {
 
     async fn disconnect_all(&self) -> Result<(), String> {
         let registry = self.registry()?;
-        for managed in registry.managed_local_apps().await {
+        for managed in registry.managed_servers().await {
             registry
                 .disconnect(&managed.scope.server_name())
                 .await
@@ -309,7 +317,7 @@ impl McpPublisher for RegistryPublisher {
         let registry = self.registry()?;
         let scope = scope_of(app)?;
         let update = registry
-            .expose_managed_local_app_with_diff(conversation_id, &app.app_id, pin)
+            .expose_managed_server_with_diff(conversation_id, &app.app_id, pin)
             .await
             .map_err(|error| error.to_string())?;
         if let Some(evicted_app_id) = update.evicted_app_id {
@@ -357,7 +365,7 @@ impl McpPublisher for RegistryPublisher {
     async fn unpin(&self, conversation_id: &str, app_id: &str) -> Result<(), String> {
         match self
             .registry()?
-            .pin_local_app_exposure(conversation_id, app_id, false)
+            .pin_server_exposure(conversation_id, app_id, false)
             .await
         {
             Ok(_) | Err(lingxi_core::host::McpError::ToolNotFound(_)) => Ok(()),
@@ -369,10 +377,10 @@ impl McpPublisher for RegistryPublisher {
         let Ok(registry) = self.registry() else {
             return Published::default();
         };
-        let runtime = registry.managed_local_app_runtime(app_id).await;
+        let runtime = registry.managed_server_runtime(app_id).await;
         Published {
             server_name: registry
-                .managed_local_app(app_id)
+                .managed_server(app_id)
                 .await
                 .map(|managed| managed.scope.server_name()),
             enabled: runtime.as_ref().map(|runtime| runtime.enabled),
@@ -393,7 +401,7 @@ impl McpPublisher for RegistryPublisher {
 
     async fn begin_call(&self, conversation_id: &str, app_id: &str) -> Result<(), String> {
         self.registry()?
-            .begin_local_app_call(conversation_id, app_id)
+            .begin_server_call(conversation_id, app_id)
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -401,7 +409,7 @@ impl McpPublisher for RegistryPublisher {
 
     async fn end_call(&self, conversation_id: &str, app_id: &str) {
         if let Ok(registry) = self.registry() {
-            registry.end_local_app_call(conversation_id, app_id).await;
+            registry.end_server_call(conversation_id, app_id).await;
         }
     }
 
@@ -410,7 +418,7 @@ impl McpPublisher for RegistryPublisher {
             return Vec::new();
         };
         registry
-            .local_app_exposures(conversation_id)
+            .server_exposures(conversation_id)
             .await
             .into_iter()
             .map(|entry| Exposure {
@@ -960,7 +968,7 @@ mod tests {
             .await
             .is_err());
         registry
-            .expose_managed_local_app("conversation-1", "abc12345", false)
+            .expose_managed_server("conversation-1", "abc12345", false)
             .await
             .expect("expose");
         publisher
@@ -989,7 +997,7 @@ mod tests {
             .await
             .expect("publish");
         registry
-            .expose_managed_local_app("conversation-1", "abc12345", true)
+            .expose_managed_server("conversation-1", "abc12345", true)
             .await
             .expect("expose");
 
