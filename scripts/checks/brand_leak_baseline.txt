@@ -595,8 +595,6 @@ G1	crates/tools/worktree/src/worktree.rs	LingXi
 G1	crates/tools/worktree/src/worktree.rs	\.claude(?![A-Za-z0-9_.\-])
 G1	crates/tools/worktree/src/worktree.rs	\.lingxi
 G1	crates/workflow/src/description.rs	LINGXI
-G1	scripts/checks/check-phase2-plugin.py	LingXi
-G1	scripts/checks/check-phase2-plugin.py	\.lingxi
 G1	scripts/checks/lap_gate.py	LINGXI
 G1	scripts/checks/prompt_drift_scan.py	CLAUDE\.md
 G1	scripts/checks/prompt_drift_scan.py	LINGXI
@@ -995,7 +993,6 @@ G3	crates/tools/workflow/src/lib.rs	.lingxi
 G3	crates/tools/workflow/src/workflow_input_schema.json	.lingxi
 G3	crates/tools/worktree/src/worktree.rs	.lingxi
 G3	crates/tools/worktree/src/worktree.rs	LINGXI.md
-G3	scripts/checks/check-phase2-plugin.py	.lingxi-plugin
 G3	scripts/checks/prompt_drift_scan.py	.lingxi
 G3	scripts/checks/prompt_drift_scan.py	LINGXI.md
 G3	scripts/local-apps/verify-local-app-supply-chain.py	.lingxi
