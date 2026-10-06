@@ -1,2 +1,10 @@
 # Hits that stay in a product-neutral crate, one per line: <path>\t<needle>\t<reason>
 # (see check_product_neutral.py). A line that matches nothing fails the gate.
+crates/platforms/android/Cargo.toml	local-app	the Android build profile's guest paths come from the product's contracts crate; the profile is the product's adapter, kept in the platform crate that carries the Android runtime (S0 moved it out of core)
+crates/platforms/android/src/mobile_linux.rs	local_app	same: the guest-path constants and the test that pins them
+crates/platforms/android/src/mobile_linux.rs	local-app	same: the pinned guest path literal
+crates/tools/workflow/src/lib.rs	local-app	the shipped Workflow tool description carries one product clause (the create hand-off) and this test pins it; making the clause injectable changes the prompt-parity register, a separate follow-up
+crates/tools/workflow/src/lib.rs	local_app	same test, by function name
+crates/workflow/src/workflow_description_divergences.json	local-app	the register entry that adds that clause to the description
+crates/workflow/src/workflow_description_divergences.json	local_apps	same entry's reason text
+crates/test-harness/src/parity/fixtures/accepted_divergences.json	local-app	the parity harness's record of the same accepted divergence

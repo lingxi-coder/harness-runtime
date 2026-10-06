@@ -43,7 +43,7 @@ class ProductNeutral(unittest.TestCase):
                     self.assertIn(f"crates/{crate}/src/a.rs names the Local App product at 2(", result.stderr)
 
     def test_ordinary_words_that_start_the_same_way_are_not_hits(self):
-        result = self.run_gate({"crates/mcp/src/a.rs": "fn policy_loads_migrated_local_approval() {}\nlocal_application\n"})
+        result = self.run_gate({"crates/mcp/src/a.rs": "fn policy_loads_migrated_local_approval() {}\nlocal_application\nlet d = env(\"LOCALAPPDATA\"); // %LocalAppData%\n"})
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_manifests_and_json_are_scanned_too(self):

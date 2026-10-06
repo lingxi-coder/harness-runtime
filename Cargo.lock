@@ -42,7 +42,6 @@ dependencies = [
  "futures",
  "hooks",
  "llm-runtime",
- "local-app-plugin",
  "mcp",
  "memory",
  "migrations",
@@ -2407,6 +2406,7 @@ dependencies = [
  "agent",
  "async-trait",
  "base64 0.22.1",
+ "boon",
  "branding",
  "bridge",
  "client",
@@ -8597,7 +8597,6 @@ name = "workflow"
 version = "0.12.0"
 dependencies = [
  "core",
- "local-app-plugin",
  "once_cell",
  "rquickjs",
  "serde",

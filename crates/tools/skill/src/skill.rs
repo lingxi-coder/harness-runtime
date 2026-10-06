@@ -747,7 +747,7 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
 /// Trim `skill` and strip one invocation prefix (`/` or `$`).
 ///
 /// The canonical `Skill` tool contract passes the bare name, but the mobile
-/// local-app coordinator describes specialist skills using the `$name`
+/// app coordinator describes specialist skills using the `$name`
 /// shorthand. Normalize that shorthand at the tool boundary so the model's
 /// invocation syntax cannot turn an otherwise registered skill into an
 /// `Unknown skill` lookup.

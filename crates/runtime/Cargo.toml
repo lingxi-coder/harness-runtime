@@ -277,6 +277,8 @@ platform-android = { path = "../platforms/android", optional = true }
 
 [dev-dependencies]
 permission = { path = "../permission", features = ["test-support"] }
+# the role-schema tests compile the plugin's JSON schemas the way the agent runner does
+boon = "0.6"
 llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 toml = "0.8"
 async-trait = { workspace = true }
@@ -340,6 +342,16 @@ required-features = ["mobile"]
 [[test]]
 name = "local_app_image_read"
 path = "tests/mobile/local_app_image_read.rs"
+required-features = ["mobile"]
+
+[[test]]
+name = "local_app_role_schemas"
+path = "tests/mobile/local_app_role_schemas.rs"
+required-features = ["mobile"]
+
+[[test]]
+name = "plugin_workflow_scripts"
+path = "tests/mobile/plugin_workflow_scripts.rs"
 required-features = ["mobile"]
 
 [[test]]

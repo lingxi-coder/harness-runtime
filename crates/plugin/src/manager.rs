@@ -1769,8 +1769,8 @@ mod plugin_skill_reference_tests {
         let source =
             "Use $frontend-design, $device and $ARGUMENTS. Keep $other and $plugin:device.";
         assert_eq!(
-            scope_plugin_skill_references(source, "lingxi-local-app", &names),
-            "Use $lingxi-local-app:frontend-design, $lingxi-local-app:device and \
+            scope_plugin_skill_references(source, "acme-plugin", &names),
+            "Use $acme-plugin:frontend-design, $acme-plugin:device and \
              $ARGUMENTS. Keep $other and $plugin:device."
         );
     }

@@ -52,18 +52,17 @@ class DependencyRules(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(f"{engine} depends on rooted-fs — only", result.stderr)
 
-    def test_tasks_names_no_crate_of_the_local_app_project(self):
-        # tasks, permission and core are product-neutral now: what they need from the product is injected.
-        for crate in ("local-app-contracts", "local-app-plugin", "mcp-wire", "rooted-fs"):
-            with self.subTest(crate=crate):
-                result = self.run_gate({"tasks": "crates/tasks"}, {"tasks": [crate]})
-                self.assertEqual(result.returncode, 1)
-                self.assertIn(f"tasks depends on {crate} — only", result.stderr)
+    def test_tasks_agent_and_workflow_name_no_crate_of_the_local_app_project(self):
+        # tasks, agent, workflow, permission and core are product-neutral now: what they need from the product is injected.
+        for engine in ("tasks", "agent", "workflow"):
+            for crate in ("local-app-contracts", "local-app-plugin", "mcp-wire", "rooted-fs"):
+                with self.subTest(engine=engine, crate=crate):
+                    result = self.run_gate({engine: f"crates/{engine}"}, {engine: [crate]})
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn(f"{engine} depends on {crate} — only", result.stderr)
 
     def test_the_consumers_the_table_lists_are_let_through(self):
-        for consumer, crate in (("mcp", "mcp-wire"), ("agent", "local-app-plugin"),
-                                ("workflow", "local-app-plugin"),
-                                ("platform-android", "local-app-contracts")):
+        for consumer, crate in (("mcp", "mcp-wire"), ("platform-android", "local-app-contracts")):
             with self.subTest(consumer=consumer, crate=crate):
                 result = self.run_gate({consumer: f"crates/{consumer}"}, {consumer: [crate]})
                 self.assertEqual(result.returncode, 0, result.stderr)

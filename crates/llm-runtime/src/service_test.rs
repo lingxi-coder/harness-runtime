@@ -1834,7 +1834,7 @@ mod tests {
     /// This is what makes `messages_create_side_query`'s `Option<u32>` worth
     /// having. A caller with no real reason to pick a number used to be forced
     /// to invent a ceiling, and an invented ceiling is sized against the ANSWER
-    /// while the provider bills THINKING to the same number. The local-app
+    /// while the provider bills THINKING to the same number. The app
     /// questionnaire stage picked 4096, and on `deepseek-v4-pro` a 3123-token
     /// reasoning pass hit `finish_reason: length` at 4098, cutting the tool call
     /// mid-JSON.
@@ -1869,7 +1869,7 @@ mod tests {
         );
         assert!(
             model_default > 4096,
-            "this model must have headroom above the figure the local-app stages \
+            "this model must have headroom above the figure the app stages \
              used to invent, or the test cannot tell the two apart"
         );
         assert_eq!(

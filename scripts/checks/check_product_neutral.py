@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Product-neutral crates must not name the Local App product (driver: scripts/checks/check-product-neutral.sh).
+"""Engine crates must not name the Local App product (driver: scripts/checks/check-product-neutral.sh).
 
-`core`, `mcp`, `tasks` and `permission` are engine crates: what they need from a product (the layout of its
-workspaces, the rows of its tool table, the grammar of its server ids) is injected by the composition root, so a
-Local App identifier in one of them is a coupling that the extraction removed and must not come back.
+Every crate under `crates/` is product-neutral except the two that are the product's adapters: `runtime` (the
+composition root, which installs the product into the engine) and `client` (the wire protocol the apps speak). What
+an engine crate needs from the product (the layout of its workspaces, the rows of its tool table, the grammar of
+its server ids) is injected by the composition root, so a Local App identifier in one of them is a coupling that
+the extraction removed and must not come back.
 
 A hit is `LocalApp…`, `local_app…`, `local-app…`, `local app…` or `LOCAL_APP…` in a tracked source, manifest, JSON or
-text file under one of these crates. The one way to keep a hit is a line in `product_neutral_keep.txt`:
+text file under such a crate (`LocalAppData`, the Windows directory, is not one). The one way to keep a hit is a line
+in `product_neutral_keep.txt`:
 
     <path>\t<needle>\t<reason>
 
@@ -18,11 +21,13 @@ import re
 import subprocess
 import sys
 
-CRATES = ("core", "mcp", "tasks", "permission")
+# The crates that are the product's own adapters; everything else under crates/ is scanned.
+ADAPTERS = ("crates/runtime/", "crates/client/")
 EXTENSIONS = (".rs", ".toml", ".json", ".md", ".txt")
 # `local_approval`, `local_application` and friends are ordinary words; the app family is `app`/`apps` followed by a
 # non-letter (or the end).
-PATTERN = re.compile(r"LocalApp|local[-_ ]apps?(?![a-z])", re.IGNORECASE)
+# `LOCALAPPDATA`/`LocalAppData` is the Windows per-user directory, not the product.
+PATTERN = re.compile(r"LocalApp(?!Data)|local[-_ ]apps?(?![a-z])", re.IGNORECASE)
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -47,12 +52,15 @@ def load_keep(path):
     return keep
 
 
+def in_scope(rel):
+    return rel.startswith("crates/") and rel.endswith(EXTENSIONS) and not rel.startswith(ADAPTERS)
+
+
 def scan(root, files, keep):
     used = set()
     hits = []
     for rel in files:
-        parts = rel.split("/")
-        if len(parts) < 3 or parts[0] != "crates" or parts[1] not in CRATES or not rel.endswith(EXTENSIONS):
+        if not in_scope(rel):
             continue
         try:
             with open(os.path.join(root, rel), encoding="utf-8") as f:
@@ -75,10 +83,9 @@ def main(argv):
     keep_path = os.path.join(HERE, "product_neutral_keep.txt") if len(argv) <= 2 else argv[2]
     keep = load_keep(keep_path)
     files = tracked_files(root)
-    scanned = [f for f in files if f.split("/")[1:2] and f.split("/")[1] in CRATES and f.endswith(EXTENSIONS)]
+    scanned = [f for f in files if in_scope(f)]
     if not scanned:
-        sys.stderr.write("[deny] product-neutral: scanned 0 files under %s — the scan is broken, not the repo\n"
-                         % ", ".join("crates/" + c for c in CRATES))
+        sys.stderr.write("[deny] product-neutral: scanned 0 files under crates/ — the scan is broken, not the repo\n")
         return 1
     hits, used = scan(root, files, keep)
     stale = [k for i, k in enumerate(keep) if i not in used]
@@ -94,8 +101,8 @@ def main(argv):
         for path, needle, _ in stale:
             sys.stderr.write("  - keep entry for %s (%s) matches nothing — remove it\n" % (path, needle))
         return 1
-    print("check-product-neutral: OK — %d files under %s, no Local App identifiers (%d kept)"
-          % (len(scanned), ", ".join("crates/" + c for c in CRATES), len(keep)))
+    print("check-product-neutral: OK — %d files under crates/ outside %s, no Local App identifiers (%d kept)"
+          % (len(scanned), ", ".join(ADAPTERS), len(keep)))
     return 0
 
 

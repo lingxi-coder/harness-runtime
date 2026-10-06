@@ -22,7 +22,7 @@
 //! 语法解析器。
 #![allow(clippy::needless_raw_string_hashes)]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,

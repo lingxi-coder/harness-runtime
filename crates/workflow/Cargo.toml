@@ -40,8 +40,5 @@ tree-sitter-javascript = "0.23"
 [target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
 rquickjs = { version = "=0.14.0", features = ["bindgen"] }
 
-[dev-dependencies]
-local-app-plugin = { workspace = true }
-
 [lints]
 workspace = true
