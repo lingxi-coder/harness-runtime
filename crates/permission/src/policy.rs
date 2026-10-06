@@ -3214,21 +3214,12 @@ fn tool_content_key(tool_name: &str, input: &serde_json::Value) -> Option<String
                 .unwrap_or("general-purpose");
             Some(agent_type.to_string())
         }
-        // MOBILE DIVERGENCE: the first-party local-app host operations key on
-        // their `app_id`, so `LocalAppBuild(app-a)` grants ONE app instead of
-        // every app on the device. Without this the only expressible grant is
-        // the tool-wide one — the exact limitation that moving these off
-        // `mcp__local_apps__*` was meant to remove.
-        //
-        // Absent `app_id` yields `None`, i.e. a CONTENT rule never matches a
-        // call that names no app. A tool-wide rule still matches either way.
-        name if name.starts_with("LocalApp") => Some(
-            input
-                .get("app_id")
-                .and_then(serde_json::Value::as_str)?
-                .to_string(),
-        ),
-        _ => None,
+        // A product's own host-owned tools say what their rules are keyed on
+        // (`defaults_per_tool::ToolDefaultExtension::rule_content`), so a rule can
+        // grant ONE target instead of every target on the device. Absent content
+        // yields `None`: a CONTENT rule never matches a call that names none. A
+        // tool-wide rule still matches either way.
+        _ => crate::defaults_per_tool::extension_rule_content(tool_name, input),
     }
 }
 

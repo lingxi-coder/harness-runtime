@@ -36,6 +36,9 @@ pub mod mobile;
 /// The Local App workspace profile for the permission crate's leases; both compositions install it.
 #[cfg(any(feature = "mobile", feature = "desktop"))]
 pub(crate) mod local_app_workspace_profile;
+/// The Local App rows for the permission crate's per-tool table.
+#[cfg(any(feature = "mobile", feature = "desktop"))]
+pub(crate) mod local_app_tool_policy;
 
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();

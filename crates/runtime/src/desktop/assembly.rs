@@ -1544,6 +1544,7 @@ pub async fn build_with_credential_stack(
     // arms below (the full union when enforcing; `--add-dir` only otherwise), so
     // it is always initialized before its later reads.
     let boot_additional_working_dirs: Vec<std::path::PathBuf>;
+    crate::local_app_tool_policy::install();
     let workspace_leases = crate::local_app_workspace_profile::LocalAppWorkspaceProfile::registry();
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
         // Read the persistable rule tiers in ASCENDING priority — user →

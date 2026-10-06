@@ -2083,17 +2083,16 @@ fn read_only_default_auto_allows(
         return false;
     }
     // LINGXI DIVERGENCE, narrowly scoped to the rows that have no oracle
-    // counterpart (`defaults_per_tool::is_divergence_tool`: the `LocalApp*`
-    // family plus `Workflow`).
+    // counterpart (`defaults_per_tool::is_divergence_tool`: `Workflow` plus
+    // whatever rows a product installed).
     //
     // `AllowByDefault` short-circuits the Plan-mode backstop, so a mutating
     // tool that is auto-allowed for convenience would RUN while the user
-    // believes they are only planning — `LocalAppBuild` starts a 30-minute
-    // build, `LocalAppRuntime {action:"open"}` puts an app on screen, and
-    // `Workflow` fans out a whole crew of side-effecting agents
-    // (`WorkflowTool::is_read_only` answers `false`). `PLAN_SAFE_TOOLS` is the
-    // existing statement of what may run in Plan mode, and none of these are
-    // in it.
+    // believes they are only planning — a product's long build, an app put on
+    // screen, and `Workflow` fans out a whole crew of side-effecting agents
+    // (`WorkflowTool::is_read_only` answers `false`). `PLAN_SAFE_TOOLS` (plus
+    // the product's own plan-safe list) is the existing statement of what may
+    // run in Plan mode, and none of these are in it.
     //
     // Deliberately NOT applied to the oracle tools: several of them are
     // `AllowByDefault` without being plan-safe, and changing that would be a
@@ -2440,7 +2439,7 @@ impl PermissionGate for PolicyPermissionGate {
     ) -> Result<PermissionOutcome, PermissionAbort> {
         // PER-CALL PERMISSION LAYERS — `gn(toolUseContext)` (binary @287028951).
         // This is the fold's PRIMARY call site: every subagent / teammate /
-        // local-app tool dispatch reaches the gate here, so a spawn's
+        // host-owned tool dispatch reaches the gate here, so a spawn's
         // `permission_mode` (its clamped spawn mode), `avoid_prompts`,
         // `allowed_tools` / `disallowed_tools`, `working_directory` and
         // `bash_command_clamp` layers all take effect on THIS call without

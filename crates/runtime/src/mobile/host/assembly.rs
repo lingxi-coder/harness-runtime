@@ -865,6 +865,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         restricted: false,
     };
     let mut requested_permission_mode;
+    crate::local_app_tool_policy::install();
     let workspace_leases = crate::local_app_workspace_profile::LocalAppWorkspaceProfile::registry();
     // ONE derivation of the (host, guest) workspace pairing. `model_cwd` below
     // is rebuilt from THIS binding rather than re-scanning the mount table —

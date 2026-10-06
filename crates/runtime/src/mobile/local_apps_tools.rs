@@ -998,6 +998,7 @@ mod tests {
     /// create-flow prompt storm returns.
     #[test]
     fn every_tool_has_a_permission_default_row() {
+        crate::local_app_tool_policy::install();
         for &(name, _, _) in LOCAL_APP_TOOLS {
             // `permission::tool_default` collapses "no row" and "a row that
             // says Deny" to the same DenyByDefault value, so asserting
@@ -1060,6 +1061,7 @@ mod tests {
     /// for this test.
     #[test]
     fn every_local_app_permission_row_names_a_real_tool() {
+        crate::local_app_tool_policy::install();
         let declared: std::collections::BTreeSet<&str> =
             LOCAL_APP_TOOLS.iter().map(|&(name, _, _)| name).collect();
         let rows: Vec<&str> = permission::tool_default_names()
