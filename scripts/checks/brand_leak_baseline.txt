@@ -435,6 +435,8 @@ G1	crates/runtime/src/desktop/tests/managed_otel_env_tests.rs	LINGXI
 G1	crates/runtime/src/desktop/tests/tests.rs	LINGXI
 G1	crates/runtime/src/desktop/tests/tests.rs	LingXi
 G1	crates/runtime/src/desktop/tests/tests.rs	\.lingxi
+G1	crates/runtime/src/local_app_workspace_profile.rs	LINGXI
+G1	crates/runtime/src/local_app_workspace_profile.rs	\.lingxi
 G1	crates/runtime/src/mobile/host/assembly.rs	LINGXI
 G1	crates/runtime/src/mobile/host/automation.rs	\.lingxi
 G1	crates/runtime/src/mobile/host/restoration.rs	LINGXI
@@ -914,6 +916,9 @@ G3	crates/runtime/src/desktop/tests/bash_edit_diff_wiring_tests.rs	.lingxi
 G3	crates/runtime/src/desktop/tests/tests.rs	.lingxi
 G3	crates/runtime/src/desktop/tests/tests.rs	.lingxi-plugin
 G3	crates/runtime/src/desktop/tests/tests.rs	LINGXI.md
+G3	crates/runtime/src/local_app_workspace_profile.rs	.lingxi
+G3	crates/runtime/src/local_app_workspace_profile.rs	.lingxi-*
+G3	crates/runtime/src/local_app_workspace_profile.rs	LINGXI.md
 G3	crates/runtime/src/mobile/host/automation.rs	.lingxi
 G3	crates/runtime/src/mobile/host/restoration.rs	LINGXI.md
 G3	crates/runtime/src/mobile/host/tests/cron_automation_tests.rs	.lingxi
