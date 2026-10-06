@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 // The error, guard and append vocabulary the rooted primitives share with this
-// trait lives in `rooted-fs`, so the Local App service can use those primitives
+// trait lives in `rooted-fs`, so an out-of-tree service can use those primitives
 // without depending on this crate; re-exported so every existing path resolves.
 pub use rooted_fs::{FileAppendError, FileAppendStage, FlockGuard, FsError};
 

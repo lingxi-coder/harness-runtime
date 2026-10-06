@@ -17,7 +17,6 @@ branding.workspace = true
 mobile-linux-api.workspace = true
 device-api = { workspace = true }
 jsonrpc = { path = "../jsonrpc" }
-local-app-contracts = { workspace = true }
 mcp-wire = { workspace = true }
 rooted-fs = { workspace = true }
 secrecy = { version = "0.10", features = ["serde"] }

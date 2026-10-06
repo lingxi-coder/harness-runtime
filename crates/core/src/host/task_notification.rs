@@ -113,8 +113,8 @@ fn escape_xml(s: &str) -> String {
 
 /// r1-workflow-runtime-05: `host_context.selector_capability` /
 /// `host_context.invocation_capability` are host-minted authority tokens the
-/// `local-app-build`/`update`/`verify` workflow launch enriches `spec.args`
-/// with AFTER `sanitize_namespaced_local_app_args` strips the caller-supplied
+/// host-managed app workflow launch (build/update/verify) enriches `spec.args`
+/// with AFTER the launcher's namespaced-args sanitizer strips the caller-supplied
 /// copies (`runtime/src/mobile/workflow_support.rs`); they are read back
 /// only by the workflow script's own `context.selector_capability` /
 /// `context.invocation_capability`, never by the model. `n.workflow_args` is
@@ -1563,10 +1563,10 @@ mod tests {
         assert!(!block.contains("<result>"));
     }
 
-    /// r1-workflow-runtime-05: the `local-app-build`/`update`/`verify`
-    /// launch enriches `spec.args` with `host_context.selector_capability` /
+    /// r1-workflow-runtime-05: the host-managed app workflow
+    /// launch (build/update/verify) enriches `spec.args` with `host_context.selector_capability` /
     /// `host_context.invocation_capability` AFTER the caller-supplied copies
-    /// are stripped (`sanitize_namespaced_local_app_args`); those minted
+    /// are stripped (the launcher's namespaced-args sanitizer); those minted
     /// tokens must never echo back into the model's conversation through the
     /// `<recovery>` resume command, even though everything else in the args
     /// object (including sibling `host_context` keys) must survive verbatim

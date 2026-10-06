@@ -99,7 +99,7 @@ pub mod agent_processes;
 pub mod agent_view;
 pub mod android_ui;
 // The device facilities (camera, location, audio, ...) are traits and plain data in
-// `device-api`, which the Local App service names too; the old module paths stay.
+// `device-api`, which out-of-tree services name too; the old module paths stay.
 pub use device_api::{
     audio, calendar, camera, clipboard, contacts, deep_link, device_status, haptics, location,
     notification, share, stt, tts, voice,
@@ -126,10 +126,9 @@ pub mod http;
 pub mod ide;
 mod live_session_words;
 pub mod live_sessions;
-pub mod local_app_paths;
 pub mod lsp;
 pub mod mailbox;
-// MCP's wire DTOs and the `McpTransport` interface live in `mcp-wire` so the Local App
+// MCP's wire DTOs and the `McpTransport` interface live in `mcp-wire` so an out-of-tree
 // service can implement a transport without the engine; the old path stays.
 pub use mcp_wire::transport as mcp;
 pub mod mobile_runtime_environment;

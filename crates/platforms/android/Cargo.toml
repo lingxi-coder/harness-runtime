@@ -17,6 +17,7 @@ license.workspace = true
 [dependencies]
 mobile-linux-api.workspace = true
 core = { path = "../../core" }
+local-app-contracts.workspace = true
 platform-posix-minimal = { path = "../posix-minimal" }
 platform-common = { path = "../common" }
 mobile-linux-android.workspace = true
