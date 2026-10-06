@@ -3720,7 +3720,7 @@ impl Task for LocalWorkflowHandler {
             let root = local_app_workspace_root(&data_root, &app_id);
             Some(
                 registry
-                    .begin_local_app(app_id, root)
+                    .begin_bound(app_id, root)
                     .map_err(TaskError::Internal)?,
             )
         } else {

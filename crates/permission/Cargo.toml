@@ -38,6 +38,9 @@ tree-sitter-bash = { version = "=0.25.1", optional = true }
 # AST-precision layer over bash safety (claude-code's tree-sitter path). OFF by
 # default; enabled by engine-desktop. Feature off => byte-identical legacy path.
 bash-ast = ["dep:tree-sitter", "dep:tree-sitter-bash"]
+# Unscoped lease helpers (`begin_unchecked`, `allows`, `denies_host_owned`) for tests of
+# whatever supplies a `WorkspaceProfile`. Never enabled in a shipped build.
+test-support = []
 
 [dev-dependencies]
 # M8-P7-final: the tool_name_parity_test reads TOOL_NAME constants directly from

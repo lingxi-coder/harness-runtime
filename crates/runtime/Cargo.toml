@@ -276,6 +276,7 @@ platform-ios = { path = "../platforms/ios", optional = true }
 platform-android = { path = "../platforms/android", optional = true }
 
 [dev-dependencies]
+permission = { path = "../permission", features = ["test-support"] }
 llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 toml = "0.8"
 async-trait = { workspace = true }

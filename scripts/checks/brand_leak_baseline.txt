@@ -366,8 +366,6 @@ G1	crates/permission/src/powershell_containment_test.rs	\.lingxi
 G1	crates/permission/src/powershell_parse.rs	LINGXI
 G1	crates/permission/src/read_deny_globs.rs	\.lingxi
 G1	crates/permission/src/sed_validation.rs	\.lingxi
-G1	crates/permission/src/workspace_lease.rs	LINGXI
-G1	crates/permission/src/workspace_lease.rs	\.lingxi
 G1	crates/permission/tests/auto_mode_classifier_scope.rs	LingXi
 G1	crates/permission/tests/auto_mode_classifier_scope.rs	\.lingxi
 G1	crates/permission/tests/loop_permission_parity.rs	\.lingxi
@@ -884,9 +882,6 @@ G3	crates/permission/src/policy_test.rs	.lingxi
 G3	crates/permission/src/powershell_containment_test.rs	.lingxi
 G3	crates/permission/src/read_deny_globs.rs	.lingxi
 G3	crates/permission/src/sed_validation.rs	.lingxi
-G3	crates/permission/src/workspace_lease.rs	.lingxi
-G3	crates/permission/src/workspace_lease.rs	.lingxi-*
-G3	crates/permission/src/workspace_lease.rs	LINGXI.md
 G3	crates/permission/tests/auto_mode_classifier_scope.rs	.lingxi
 G3	crates/permission/tests/loop_permission_parity.rs	.lingxi
 G3	crates/permission/tests/powershell_wiring.rs	.lingxi

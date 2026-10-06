@@ -1129,9 +1129,9 @@ mod tests {
         let app_id = "app-lease-probe";
         let workspace = root.path().join("apps").join(app_id).join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
-        let registry = permission::WorkspacePermissionLeaseRegistry::new();
+        let registry = crate::local_app_workspace_profile::LocalAppWorkspaceProfile::registry();
         let lease = registry
-            .begin_local_app(app_id, &workspace)
+            .begin_bound(app_id, &workspace)
             .expect("canonical local-app layout must grant a lease");
         let token = Some(lease.token());
         // The `LocalApp*` branch of `allows_for_lease` returns before

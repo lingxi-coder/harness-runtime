@@ -19,7 +19,6 @@ use crate::result::{
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource};
 use crate::shell_command;
 use crate::working_dirs::AdditionalWorkingDirs;
-use crate::workspace_lease;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -188,7 +187,7 @@ pub struct PermissionPolicy {
     /// Set at engine boot from any enabling settings tier via
     /// [`crate::classify_all_shell_from_settings_json`].
     pub classify_all_shell: bool,
-    /// Ephemeral local-app workflow leases.  This is deliberately orthogonal
+    /// Ephemeral managed-workspace leases.  This is deliberately orthogonal
     /// to the session-wide mode and is checked only after explicit deny/ask
     /// rules and shell safety guards have run.
     pub workspace_leases: Option<Arc<crate::WorkspacePermissionLeaseRegistry>>,
@@ -1545,7 +1544,7 @@ impl PermissionPolicy {
                 }
             }
         }
-        // The local-app source boundary is a hard deny for leased workflows.
+        // The managed-workspace source boundary is a hard deny for leased workflows.
         // Place this before shell exact-allow and the generic allow/mode
         // branches so a broad `Edit(./**)` or `Bash(...)` rule cannot turn the
         // generated workspace metadata into agent-writable state. Explicit
@@ -1555,19 +1554,15 @@ impl PermissionPolicy {
                 return deny_workspace_host_owned(tool_name);
             }
         }
-        // The generated local-app settings file contains a broad
+        // The generated workspace settings file contains a broad
         // `Edit(./**)` allow for source files. Keep host-owned metadata and
         // symlink escapes protected even after the temporary build lease has
         // expired, and before any generic allow rule can short-circuit.
-        if let Some(roots) = self.roots.as_ref() {
-            if workspace_lease::WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
-                tool_name, input, roots,
-            ) {
+        if let (Some(leases), Some(roots)) = (&self.workspace_leases, &self.roots) {
+            if leases.denies_host_owned_for_workspace(tool_name, input, roots) {
                 return deny_workspace_host_owned(tool_name);
             }
-            if workspace_lease::WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
-                tool_name, input, roots,
-            ) {
+            if leases.escapes_workspace(tool_name, input, roots) {
                 return deny_workspace_outside(tool_name);
             }
         }
@@ -1630,7 +1625,7 @@ impl PermissionPolicy {
         ) {
             return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
         }
-        // Local-app build workflows receive a temporary, canonical-root lease.
+        // Managed build workflows receive a temporary, canonical-root lease.
         // Explicit deny/ask rules and shell safety/containment guards have
         // already run above, so this cannot weaken policy rules or approve an
         // unsafe shell command.
@@ -3704,10 +3699,10 @@ fn ask_for_restricted_protected_mutation(
 fn deny_workspace_host_owned(tool_name: &str) -> PermissionResult {
     PermissionResult::Deny {
         reason: PermissionDecisionReason::Other {
-            reason: format!("{tool_name} is outside the local-app source editing boundary"),
+            reason: format!("{tool_name} is outside the managed-workspace source editing boundary"),
         },
         explanation: Some(
-            "Local-app writes must use structured file tools; host-managed build files and non-inspection shell commands are protected."
+            "Managed-workspace writes must use structured file tools; host-managed build files and non-inspection shell commands are protected."
                 .to_string(),
         ),
         metadata: PermissionMetadata::default(),
@@ -3717,10 +3712,10 @@ fn deny_workspace_host_owned(tool_name: &str) -> PermissionResult {
 fn deny_workspace_outside(tool_name: &str) -> PermissionResult {
     PermissionResult::Deny {
         reason: PermissionDecisionReason::Other {
-            reason: format!("{tool_name} path escapes the local-app workspace"),
+            reason: format!("{tool_name} path escapes the managed workspace"),
         },
         explanation: Some(
-            "Local-app workspace operations cannot follow paths outside the canonical workspace."
+            "Managed-workspace operations cannot follow paths outside the canonical workspace."
                 .to_string(),
         ),
         metadata: PermissionMetadata::default(),

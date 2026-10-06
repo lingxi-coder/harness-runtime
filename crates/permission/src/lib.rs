@@ -193,8 +193,8 @@ pub use working_dirs::{
     network_working_directory_message, AdditionalWorkingDirs, WorkingDirectory,
 };
 pub use workspace_lease::{
-    local_app_id_for_root, WorkspaceLeaseInfo, WorkspacePermissionLease,
-    WorkspacePermissionLeaseRegistry,
+    WorkspaceLeaseInfo, WorkspacePermissionLease, WorkspacePermissionLeaseRegistry,
+    WorkspaceProfile,
 };
 
 pub use model_path::{FileSystemPathTranslator, ModelPathOutcome, ModelPathTranslator};

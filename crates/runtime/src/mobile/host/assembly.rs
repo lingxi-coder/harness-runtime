@@ -865,7 +865,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         restricted: false,
     };
     let mut requested_permission_mode;
-    let workspace_leases = permission::WorkspacePermissionLeaseRegistry::new();
+    let workspace_leases = crate::local_app_workspace_profile::LocalAppWorkspaceProfile::registry();
     // ONE derivation of the (host, guest) workspace pairing. `model_cwd` below
     // is rebuilt from THIS binding rather than re-scanning the mount table —
     // two derivations of one root is exactly how the guest/host split forked
@@ -904,8 +904,8 @@ pub(super) async fn build_mobile_inner_with_ask(
             // three tests go false, and a NESTED pair takes the disjoint arm —
             // re-rooting the permission root upward (the case the comment below
             // says must be refused) and turning
-            // `is_local_app_workspace_root(&roots.cwd)` false, which disables
-            // `denies_host_owned_for_workspace` and `escapes_local_app_workspace`
+            // the profile no longer recognising `roots.cwd`, which disables
+            // `denies_host_owned_for_workspace` and `escapes_workspace`
             // outright.
             // Canonical forms are used ONLY to decide. BOTH returned values are
             // raw, and that is load-bearing: `translate_model_path` resolves a
@@ -923,8 +923,8 @@ pub(super) async fn build_mobile_inner_with_ask(
             // Which root the rules resolve against.
             //
             // A WIDER root is not "more deny coverage": both local-app write
-            // guards are all-or-nothing on `is_local_app_workspace_root(
-            // &roots.cwd)`, and that is false for any directory that is not
+            // guards are all-or-nothing on the profile recognising
+            // `roots.cwd`, and that is false for any directory that is not
             // itself `.../apps/<id>/workspace`. Widening turns them OFF.
             if cwd_canon == host_canon {
                 // Identical — `.project` / `.localApp`, where cwd already IS
@@ -1979,9 +1979,9 @@ pub(super) async fn build_mobile_inner_with_ask(
     // `shared_command_registry` fails that test instead of silently emptying
     // the model's skill listing on device.
     // One Host-bounded scope decision drives both Local App model surfaces.
-    // `permission::local_app_id_for_root` intentionally also understands
-    // guest/legacy spellings for isolated runtimes, but using that broader
-    // detector directly at this main-session composition root would let an
+    // the lease profile's root detection (`LocalAppWorkspaceProfile`) intentionally
+    // also understands guest/legacy spellings for isolated runtimes, but using
+    // that broader detector directly at this main-session composition root would let an
     // ordinary project whose path merely ends in `apps/<id>/workspace` inherit
     // the full app authoring surface.
     let local_app_scope_id = mobile_local_app_scope_id(&cwd, &mobile_apps_data_root(&cfg));

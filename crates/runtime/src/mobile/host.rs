@@ -4583,7 +4583,7 @@ impl MobileEngineHandle {
             .workspace_leases
             .active()
             .into_iter()
-            .any(|lease| lease.app_id == app_id);
+            .any(|lease| lease.workspace_id == app_id);
         if active_lease || !active_workflows.is_empty() {
             self.emit_app_failure(
                 Some(app_id.clone()),
