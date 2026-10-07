@@ -170,7 +170,7 @@ serde = { version = "1", features = ["derive"] }
 # the order claude-code emits (e.g. `capabilities` declared as
 # `{"roots":{},"elicitation":{}}`, not the alphabetized
 # `{"elicitation":{},"roots":{}}`).
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 # `indexmap` gives an insertion-order-preserving map. Used for MCP transport
 # `headers` so the `getServerKey` config hash byte-matches claude-code, whose
 # `JSON.stringify({type,url,headers})` serializes header keys in the config's
@@ -353,7 +353,7 @@ split-debuginfo = "unpacked"
 # Develop the shared SDK in its own Git submodule. Downstream workspaces keep
 # using the immutable Git dependency above because root patches do not propagate.
 [patch."https://github.com/lingxi-coder/llm-client"]
-lingxi-llm-client = { path = "deps/llm-client" }
+lingxi-llm-client = { path = "../llm-client" }
 
 [profile.release]
 lto = "thin"

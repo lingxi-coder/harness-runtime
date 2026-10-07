@@ -77,6 +77,10 @@ async fn cold_resume_consumes_physical_retry_removal_without_breaking_chain() {
         .join(project_dir_name(&cwd))
         .join(format!("{sid}.jsonl"));
     let writer = session::jsonl::writer::JsonlWriter::new(path.clone(), fs.clone());
+    writer
+        .bootstrap_session_message_identity_snapshot(&path)
+        .await
+        .unwrap();
     let parent = writer
         .remove_retry_attempt(&discarded.to_string())
         .await
@@ -1575,6 +1579,11 @@ mod deferred_tool_resume_tests {
         let transcript_path = subdir.join(format!("{sid}.jsonl"));
         tokio::fs::write(&transcript_path, body).await.unwrap();
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(root.path().to_path_buf()));
+        // This fixture imports a Native transcript before the resumed host mutates it.
+        session::jsonl::writer::JsonlWriter::new(transcript_path.clone(), fs.clone())
+            .bootstrap_session_message_identity_snapshot(&transcript_path)
+            .await
+            .unwrap();
         (lingxi_home, cwd, sid, fs)
     }
 

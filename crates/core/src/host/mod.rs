@@ -381,3 +381,10 @@ pub mod refusal_notice;
 
 /// One refusal hop, decided identically for both turn loops.
 pub mod refusal_driver;
+pub mod tool_execution;
+
+pub use tool_execution::{
+    DurableToolOutput, NativeContinuationBinding, NativeReceiptRecord, NativeReceiptStage,
+    ToolExecutionIdentity, ToolExecutionJournal, ToolExecutionOutcome, ToolExecutionRecord,
+    ToolExecutionStage, ToolJournalAck, ToolJournalError, ToolJournalRecovery,
+};

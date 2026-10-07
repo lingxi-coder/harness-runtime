@@ -380,8 +380,7 @@ pub(crate) struct PromptRuntime {
     /// set (attachments.ts:1524-1530) — kept in memory here (like
     /// [`Self::sent_skill_names`]) rather than rebuilt from prior deltas. When no
     /// new type appears, [`Self::agent_listing_reminder_message`] returns `None`.
-    /// Only consulted when the gate (`LINGXI_AGENT_LIST_IN_MESSAGES`) is ON;
-    /// inert (never read) in the default OFF build.
+    /// Updated when the current Agent catalog reminder is rendered.
     pub(crate) sent_agent_names: Mutex<std::collections::HashSet<String>>,
     /// P0.1: the memory-selector prefetcher, fired at turn start to score +
     /// rank the available memdir set CONCURRENTLY with the main API call (1:1
@@ -764,6 +763,26 @@ impl CompactionRuntime {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.turn_start_output_baseline
             .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Carry the full prior context usage into the padded countdown before an
+    /// automatic compact, PTL recovery or clear. The oracle ledger belongs to
+    /// the root session object, which survives hot resume and clear; it is not
+    /// reset with the API counters, and does not use the compact token estimate.
+    pub(crate) fn roll_over_total_tokens_context(&self) {
+        use crate::prompt::total_tokens::{resolve_mode, TotalTokensMode};
+        if resolve_mode(None) != TotalTokensMode::PaddedCountdown {
+            return;
+        }
+        let used = i64::try_from(
+            self.total_tokens_reminder_usage
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .unwrap_or(i64::MAX);
+        self.total_tokens_ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .roll_over_context("main", used);
     }
 }
 
@@ -1516,4 +1535,19 @@ mod session_switch_supervisor_tests {
         assert!(errors.is_empty());
         assert!(supervisor.claim().is_err(), "shutdown closes admission");
     }
+}
+
+#[derive(Default)]
+pub(crate) struct ModPromptAttachmentCache {
+    pub(crate) generation: u64,
+    /// Claude Code keys attachment answers by attachment UUID. The outgoing
+    /// message ID is the stable identity for this runtime's retry snapshots.
+    pub(crate) answers: std::collections::HashMap<
+        MessageId,
+        (
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+            (u64, u64),
+            Option<Vec<u16>>,
+        ),
+    >,
 }

@@ -98,8 +98,24 @@ pub(crate) async fn prepare(
     mode: sdk::RequestMode,
 ) -> Result<(sdk::RequestDraft, ProviderRequest), LlmError> {
     // This exact connection was already selected by the application's policy.
-    // Credentials are applied by the host after its final body/header policies.
-    profile.auth = wire::AuthStrategy::Bearer;
+    // Keep the route auth strategy for provider body policy, while credentials
+    // are still applied by the host after its final body/header policies.
+    let body_auth_strategy = selected_auth;
+    profile.auth = if profile.protocol == wire::ProtocolFamily::GeminiInteractions {
+        selected_auth
+    } else {
+        wire::AuthStrategy::Bearer
+    };
+    let anthropic_request_kind = if matches!(
+        mode,
+        sdk::RequestMode::Complete | sdk::RequestMode::Stream
+    ) && profile.protocol == wire::ProtocolFamily::AnthropicMessages
+        && request.execution.query_source.as_deref() == Some("hook_prompt")
+    {
+        lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::HookPrompt
+    } else {
+        request.execution.anthropic_request_kind
+    };
     let transport: Arc<dyn sdk::Transport> = transport.unwrap_or_else(|| {
         static PREPARATION: std::sync::OnceLock<Arc<dyn sdk::Transport>> =
             std::sync::OnceLock::new();

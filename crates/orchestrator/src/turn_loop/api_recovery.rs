@@ -203,59 +203,48 @@ pub(crate) async fn call_api_with_ptl_recovery(
         })?;
     }
     let mut output_observation = orch.capture_main_output().await?;
-    let first = if let Some(params) = hint_params {
-        // The controller is live: take the hint-carrying seam. `params.body` is
-        // `None` when the estimated savings are under the floor — the oracle
-        // still sends the beta in that case and omits only the body.
-        orch.api
-            .messages_create_with_context_hint(
-                model,
-                profile,
-                system,
-                history_snapshot,
-                tools.clone(),
-                params.body,
-            )
-            .await
-    } else if let Some(max_tokens) = max_tokens_override {
-        // REC.A1 escalated single-shot (TS `query.ts:1199-1221`): re-issue with
-        // the override `max_tokens` (8k→64k). The escalation is orthogonal to the
-        // Opus-fallback gate, so it takes the plain `_with_opts` seam regardless
-        // of `fallback_model`. The no-override branches below are byte-identical
-        // to before, so the locked turn-loop fixtures (which never arm an
-        // override) are unaffected.
-        orch.api
-            .messages_create_with_opts(
-                model,
-                profile,
-                system,
-                history_snapshot,
-                tools.clone(),
-                max_tokens,
-            )
-            .await
-    } else if orch.config.fallback_model.is_some() {
-        orch.api
-            .messages_create_with_fallback(
-                model,
-                profile,
-                system,
-                history_snapshot,
-                tools.clone(),
-                orch.config.fallback_model.as_deref(),
-                orch.config.is_subscriber,
-                orch.config.is_enterprise,
-            )
-            .await
-    } else {
-        orch.api
-            .messages_create(model, profile, system, history_snapshot, tools.clone())
-            .await
-    };
-    // NOTE: `ApiError::FallbackTriggered` interception is REMOVED — `LlmError`
-    // has no `FallbackTriggered` variant. The model-fallback logic moves into
-    // `ProviderApiAdapter` in Task 6 (the adapter handles the 529 switch
-    // internally and falls back silently without emitting a separate warning).
+    crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+        &mut history_snapshot,
+        &mut turn_reminders,
+        guarded_async_hook_reminders,
+    );
+    let hint_params = hint_controller
+        .as_mut()
+        .and_then(|controller| controller.build_request_params(&history_snapshot));
+    let mut request = llm_runtime::MessagesCreateRequest::new(
+        model,
+        profile,
+        system.cloned(),
+        history_snapshot,
+        tools.clone(),
+    );
+    request.opts.skip_global_cache_for_system_prompt = skip_global_cache_for_system_prompt;
+    request.opts.query_source =
+        Some(crate::config::sanitize_query_source(&orch.config.query_source).to_string());
+    apply_main_request_options(
+        &mut request,
+        max_tokens_override,
+        hint_params,
+        orch.config.fallback_model.as_deref(),
+    );
+    crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+        &mut request.messages,
+        &mut turn_reminders,
+        guarded_async_hook_reminders,
+    );
+    request.opts.request_dispatch_admission =
+        crate::prompt::async_hook_response::request_dispatch_admission(
+            &request.messages,
+            guarded_async_hook_reminders,
+        );
+    let request_history = request.messages.clone();
+    let first = orch
+        .model_runtime
+        .prompt_cache_capture
+        .scope(
+            crate::native_computer::call_model(orch, request),
+        )
+        .await;
 
     // Map `LlmError::ContextOverflow` to the PTL recovery path.
     // The `token_gap` field carries the actual-minus-limit count parsed from the
@@ -330,8 +319,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         })?;
                     }
                     return match orch
-                        .api
-                        .messages_create(model, profile, system, retry, tools.clone())
+                        .model_runtime
+                        .prompt_cache_capture
+                        .scope(
+                            crate::native_computer::call_model(orch, request),
+                        )
                         .await
                     {
                         Ok(resp) => {
@@ -383,11 +375,49 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         ))
                     })?;
                 }
-                match orch
-                    .api
-                    .messages_create(model, profile, system, retry, tools.clone())
-                    .await
-                {
+                crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                    &mut retry,
+                    &mut turn_reminders,
+                    guarded_async_hook_reminders,
+                );
+                let retry_hint_params = hint_controller
+                    .as_mut()
+                    .and_then(|controller| controller.build_request_params(&retry));
+                let mut request = llm_runtime::MessagesCreateRequest::new(
+                    model,
+                    profile,
+                    system.cloned(),
+                    retry,
+                    tools.clone(),
+                );
+                request.opts.query_source = Some(
+                    crate::config::sanitize_query_source(&orch.config.query_source).to_string(),
+                );
+                apply_main_request_options(
+                    &mut request,
+                    max_tokens_override,
+                    retry_hint_params,
+                    orch.config.fallback_model.as_deref(),
+                );
+                crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                    &mut request.messages,
+                    &mut turn_reminders,
+                    guarded_async_hook_reminders,
+                );
+                request.opts.request_dispatch_admission =
+                    crate::prompt::async_hook_response::request_dispatch_admission(
+                        &request.messages,
+                        guarded_async_hook_reminders,
+                    );
+                let request_history = request.messages.clone();
+                let retry_result = orch
+                    .model_runtime
+                    .prompt_cache_capture
+                    .scope(
+                        crate::native_computer::call_model(orch, request),
+                    )
+                    .await;
+                match retry_result {
                     Ok(resp) => {
                         if let Some(observation) = &mut output_observation {
                             observation.observe(&resp.usage);
@@ -548,8 +578,11 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     })?;
                 }
                 match orch
-                    .api
-                    .messages_create(model, profile, system, history, tools)
+                    .model_runtime
+                    .prompt_cache_capture
+                    .scope(
+                        crate::native_computer::call_model(orch, request),
+                    )
                     .await
                 {
                     Ok(resp) => {

@@ -182,3 +182,9 @@ pub use history::{
     CacheControl, CacheEdit, CacheScope, ContentBlock, Message, ResponseFormat, SystemBlock,
     ToolChoice, ToolDeclaration,
 };
+pub mod computer;
+pub use computer::{ComputerNativeDeclaration, ComputerRequestProjection, scope_computer_request};
+pub use auth::provider::{
+    AnthropicAuthSnapshot, CopilotExchangeCredentialProvider, Credential, CredentialProvider,
+    CredentialScope, CredentialSource, EnvCredentialProvider, StaticCredentialProvider,
+};

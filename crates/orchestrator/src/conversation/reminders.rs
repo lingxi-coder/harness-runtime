@@ -2023,6 +2023,176 @@ message with multiple tool uses so they run concurrently."
         let body = delta.render_reminder()?;
         Some(ConversationMessage::user_meta(MessageId::new(), body))
     }
+
+    pub(crate) async fn mod_prompt_attachment_with_detail(
+        &self,
+        kind: &str,
+        mut message: ConversationMessage,
+        origin: serde_json::Value,
+        detail: Option<serde_json::Value>,
+    ) -> Option<ConversationMessage> {
+        let Some(host) = (if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            registry.read().await.mod_host()
+        } else {
+            None
+        })
+        .filter(|host| host.has_event("prompt.attachment")) else {
+            return Some(message);
+        };
+        let message_id = message.id();
+        let ConversationMessage::User { content, .. } = &mut message else {
+            return Some(message);
+        };
+        use lingxi_core::types::utf16_json::{Utf16JsonProjection, Utf16JsonString};
+        use lingxi_core::types::ContentBlock;
+        let (units, citations, was_utf16) = match content.as_slice() {
+            [ContentBlock::Text { text, citations }] => (
+                text.encode_utf16().collect::<Vec<_>>(),
+                citations.clone(),
+                false,
+            ),
+            [ContentBlock::TextJsUtf16 {
+                utf16_code_units,
+                citations,
+                ..
+            }] => (utf16_code_units.clone(), citations.clone(), true),
+            _ => return Some(message),
+        };
+        let prefix = "<system-reminder>\n".encode_utf16().collect::<Vec<_>>();
+        let suffix = "\n</system-reminder>".encode_utf16().collect::<Vec<_>>();
+        let inner = units
+            .strip_prefix(prefix.as_slice())
+            .and_then(|body| body.strip_suffix(suffix.as_slice()));
+        let wrapped = inner.is_some();
+        let body_units = inner.unwrap_or(&units).to_vec();
+        let body = String::from_utf16_lossy(&body_units);
+        // Native JHo omits attachments whose unframed rendered text is blank.
+        if body.trim().is_empty() {
+            return Some(message);
+        }
+        let mut input = Utf16JsonProjection::plain(
+            serde_json::json!({"type":kind,"text":body,"origin":origin}),
+        );
+        if body.encode_utf16().ne(body_units.iter().copied()) {
+            input.strings.push(Utf16JsonString {
+                pointer: "/text".into(),
+                code_units: body_units.clone(),
+            });
+        }
+        if let Some(detail) = detail {
+            input.value["detail"] = detail;
+        }
+        let identity = host.registration_identity();
+        let (generation, cached) = {
+            let cache = self.prompt_runtime.mod_prompt_attachments.lock().await;
+            let cached = cache
+                .answers
+                .get(&message_id)
+                .and_then(|(source, catalog, answer)| {
+                    (source == &input && catalog == &identity).then_some(answer.clone())
+                });
+            (cache.generation, cached)
+        };
+        let answer = if let Some(cached) = cached {
+            cached
+        } else {
+            let pinned_kind = kind.to_owned();
+            let pinned_origin = origin.clone();
+            let log_output = self.output.clone();
+            let toast_output = self.output.clone();
+            let status_output = self.output.clone();
+            let result = host
+                .dispatch_with_utf16_at_context_scope(
+                    "prompt.attachment",
+                    input.clone(),
+                    &self.current_cwd(),
+                    Some(self),
+                    hooks::mods::ModUtf16DispatchScope::default(),
+                    lingxi_core::host::task_registry::FieldPresence::Missing,
+                    move |forwarded| {
+                        let pinned_kind = pinned_kind.clone();
+                        let pinned_origin = pinned_origin.clone();
+                        async move {
+                            if forwarded
+                                .value
+                                .get("type")
+                                .and_then(serde_json::Value::as_str)
+                                != Some(pinned_kind.as_str())
+                                || forwarded.value.get("origin") != Some(&pinned_origin)
+                                || forwarded.value.get("agentId").is_some()
+                            {
+                                return Err(hooks::mods::ModError::Hook(
+                                    "prompt.attachment type and origin are pinned".into(),
+                                ));
+                            }
+                            let text = forwarded.string_units("/text").ok_or_else(|| {
+                                hooks::mods::ModError::Hook("prompt.attachment needs text".into())
+                            })?;
+                            let display = String::from_utf16_lossy(&text);
+                            let mut result =
+                                Utf16JsonProjection::plain(serde_json::json!({"text":display}));
+                            if display.encode_utf16().ne(text.iter().copied()) {
+                                result.strings.push(Utf16JsonString {
+                                    pointer: "/text".into(),
+                                    code_units: text,
+                                });
+                            }
+                            Ok(result)
+                        }
+                    },
+                    move |plugin, text| {
+                        let output = log_output.clone();
+                        async move { output.emit_mod_log(&plugin, &text).await }
+                    },
+                    move |plugin, text, timeout_ms| {
+                        let output = toast_output.clone();
+                        async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                    },
+                    move |plugin, text| {
+                        let output = status_output.clone();
+                        async move { output.emit_mod_status(&plugin, text.as_deref()).await }
+                    },
+                )
+                .await;
+            let answer = match result {
+                Ok(result) if result.result.get("text") == Some(&serde_json::Value::Null) => None,
+                Ok(result) => hooks::mods::ModUtf16ValueProjection {
+                    value: result.result,
+                    strings: result.result_utf16_strings,
+                    keys: result.result_utf16_keys,
+                }
+                .into_core_projection()
+                .ok()
+                .and_then(|projection| projection.string_units("/text")),
+                Err(error) => {
+                    tracing::warn!(attachment = kind, %error, "prompt.attachment Mod failed");
+                    Some(body_units)
+                }
+            };
+            let mut cache = self.prompt_runtime.mod_prompt_attachments.lock().await;
+            if cache.generation == generation {
+                cache
+                    .answers
+                    .insert(message_id, (input, identity, answer.clone()));
+            }
+            answer
+        };
+        let answer = answer?;
+        let answer = if wrapped {
+            [prefix, answer, suffix].concat()
+        } else {
+            answer
+        };
+        content[0] = match String::from_utf16(&answer) {
+            Ok(text) if !was_utf16 => ContentBlock::Text { text, citations },
+            _ => ContentBlock::TextJsUtf16 {
+                text: String::from_utf16_lossy(&answer),
+                utf16_code_units: answer,
+                citations,
+            },
+        };
+        Some(message)
+    }
 }
 
 #[cfg(test)]

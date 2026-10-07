@@ -42,7 +42,6 @@
 #![allow(dead_code)]
 
 use async_trait::async_trait;
-use lingxi_core::host::computer_control::ComputerError;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -123,10 +122,11 @@ pub struct ComputerTool {
     state: std::sync::Arc<Mutex<SessionState>>,
     access_resolver: std::sync::Arc<dyn ComputerAccessResolver>,
     /// Resolved once at construction (not re-read per call) — the directory
-    /// [`Self::enforce_computer_lock`] locks in. Overridable in tests via
+    /// the atomic desktop lease locks in. Overridable in tests via
     /// [`Self::with_lock_home`] so they never touch the real
     /// `$HOME/.lingxi` (or a concurrently-running real session's lock).
     lock_home: std::path::PathBuf,
+    runtime: std::sync::Arc<Mutex<ExecutionState>>,
 }
 
 impl ComputerTool {
@@ -152,6 +152,7 @@ impl ComputerTool {
             state: std::sync::Arc::new(Mutex::new(SessionState::default())),
             access_resolver,
             lock_home: lock::lingxi_config_home_dir(),
+            runtime: std::sync::Arc::new(Mutex::new(ExecutionState::default())),
         }
     }
 
@@ -177,6 +178,9 @@ impl ComputerTool {
 /// into `screenshot`/`zoom` internally); kept for callers that just want
 /// dimensions without a capture.
 const ACTIONS: &[&str] = &[
+    "mouse_click",
+    "key_down",
+    "key_up",
     "screenshot",
     "display_size",
     "cursor_position",
@@ -260,10 +264,17 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             // Ceiling matches `validate::duration_secs`'s enforced bound —
             // advertised in the schema so the model isn't told a wider range
             // than what actually gets accepted.
-            "duration": { "type": "number", "minimum": 0, "maximum": 60 },
+            "duration": { "type": "number", "minimum": 0, "maximum": 300 },
             // Text for `type` / key name for `key`/`hold_key` / clipboard write.
             "text": { "type": "string" },
             // Repeat count for `key` (positive integer, max 100).
+            "keys": { "type": "array", "items": {"type":"string"}, "minItems":1, "maxItems":32 },
+            "modifiers": { "type":"array", "items":{"type":"string"}, "maxItems":32 },
+            "button": {"type":"string", "enum":["left","right","middle","back","forward"]},
+            "path": {"type":"array", "items":{"type":"array", "items":{"type":"integer","minimum":0}, "minItems":2,"maxItems":2}, "minItems":2,"maxItems":1000},
+            "pixel_delta": {"type":"array", "items":{"type":"integer","minimum":-100000,"maximum":100000}, "minItems":2,"maxItems":2},
+            "use_current_cursor": {"type":"boolean"},
+            "press_enter": {"type":"boolean"},
             "repeat": { "type": "integer", "minimum": 1, "maximum": 100 },
             // Bundle id or display name for `open_application`.
             "bundle_id": { "type": "string" },
@@ -310,15 +321,14 @@ fn result_summary(action: &str) -> Option<&'static str> {
     Some(match action {
         "screenshot" | "zoom" => "Captured",
         "request_access" => "Access updated",
-        "left_click" | "right_click" | "middle_click" | "double_click" | "triple_click" => {
-            "Clicked"
-        }
+        "mouse_click" | "left_click" | "right_click" | "middle_click" | "double_click"
+        | "triple_click" => "Clicked",
         "type" => "Typed",
-        "key" | "left_mouse_down" => "Pressed",
+        "key" | "key_down" | "left_mouse_down" => "Pressed",
         "hold_key" => "Held",
         "scroll" => "Scrolled",
         "left_click_drag" => "Dragged",
-        "left_mouse_up" => "Released",
+        "left_mouse_up" | "key_up" => "Released",
         "open_application" => "Opened",
         "mouse_move" => "Moved",
         "write_clipboard" => "Written",
@@ -458,9 +468,9 @@ fn scroll_delta(input: &Value) -> Result<(i32, i32), ToolError> {
         });
     }
     #[allow(clippy::cast_possible_truncation)] // scroll delta never exceeds i32
-    let dx = input.get("dx").and_then(Value::as_i64).unwrap_or(0) as i32;
+    let dx = signed_delta(input, "dx")?;
     #[allow(clippy::cast_possible_truncation)] // scroll delta never exceeds i32
-    let dy = input.get("dy").and_then(Value::as_i64).unwrap_or(0) as i32;
+    let dy = signed_delta(input, "dy")?;
     Ok((dx, dy))
 }
 
@@ -543,7 +553,9 @@ impl Tool for ComputerTool {
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         match input.get("action").and_then(Value::as_str) {
-            Some(a) if ACTIONS.contains(&a) => Ok(()),
+            Some(a) if ACTIONS.contains(&a) => self
+                .validate_final_input(a, input)
+                .map_err(|e| ValidationError(e.to_string())),
             Some(a) => Err(ValidationError(format!("unknown action: {a}"))),
             None => Err(ValidationError("`action` is required".into())),
         }
@@ -558,22 +570,149 @@ impl Tool for ComputerTool {
         let action = input
             .get("action")
             .and_then(Value::as_str)
-            .unwrap_or("screenshot")
+            .ok_or_else(|| ToolError::InvalidInput("`action` is required".into()))?
             .to_string();
 
-        self.enforce_computer_lock(&action)?;
-
-        // Session-scoped meta actions never touch the ComputerControl seam.
-        match action.as_str() {
-            "request_access" => return self.handle_request_access(&input).await,
-            "list_granted_applications" => return Ok(self.handle_list_granted()),
-            "switch_display" => return self.handle_switch_display(&input).await,
-            "computer_batch" => return self.handle_batch(&input, &ctx, &progress_tx).await,
-            _ => {}
+        if let Err(error) = self.check_cancel(&ctx) {
+            self.invalidate_frame(&ctx).await;
+            self.release_owned_inputs(&ctx).await?;
+            return Err(error);
         }
+        self.validate_final_input(&action, &input)?;
+        let dirty = {
+            let runtime = self
+                .runtime
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+            runtime.backend_inputs_dirty
+                || runtime.backend_mouse_dirty
+                || runtime.observation_invalidation_pending
+        };
+        if dirty {
+            self.release_owned_inputs(&ctx).await?;
+        }
+        let _lease = self.acquire_call(&action, &ctx).await?;
+        if action != "screenshot" {
+            let owner = Self::owner(&ctx).await;
+            self.runtime
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                .pending_observations
+                .remove(&owner);
+        }
+        self.check_cancel(&ctx)?;
 
-        let data = self.execute_one(&action, &input).await?;
-        Ok(finish(data, &action))
+        let result = match action.as_str() {
+            "request_access" => self.handle_request_access(&input, &ctx).await,
+            "list_granted_applications" => Ok(self.handle_list_granted()),
+            "switch_display" => {
+                self.invalidate_frame(&ctx).await;
+                self.handle_switch_display(&input).await
+            }
+            "computer_batch" => self.handle_batch(&input, &ctx, &progress_tx).await,
+            _ => self
+                .execute_one(&action, &input, &ctx)
+                .await
+                .map(|data| finish(data, &action)),
+        };
+        if result.is_err()
+            || ctx
+                .cancel
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+        {
+            self.invalidate_frame(&ctx).await;
+            self.release_owned_inputs(&ctx).await?;
+        }
+        if action != "computer_batch" {
+            self.check_cancel(&ctx)?;
+        }
+        result
+    }
+    fn map_result_text(&self, result: &Value) -> Option<String> {
+        tool_api::tool_result_media::computer_batch_model_text(result)
+    }
+    fn native_computer_capabilities(
+        &self,
+    ) -> Option<lingxi_llm_client::protocol::computer::ComputerCapabilities> {
+        self.native_capabilities()
+    }
+    fn lower_computer_operation(
+        &self,
+        operation: &lingxi_llm_client::protocol::computer::ComputerOperation,
+        frame: &lingxi_llm_client::protocol::computer::ComputerFrame,
+    ) -> Result<Value, ToolError> {
+        self.lower_native(operation, frame)
+    }
+    async fn native_computer_frame(
+        &self,
+        ctx: &ToolUseContext,
+    ) -> Result<Option<lingxi_llm_client::protocol::computer::ComputerFrame>, ToolError> {
+        self.ready_frame(ctx).await
+    }
+    async fn invalidate_computer_observation(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        self.invalidate_frame(ctx).await;
+        Ok(())
+    }
+    async fn computer_model_output(
+        &self,
+        ctx: &ToolUseContext,
+        content: &str,
+        blocks: Option<&[Value]>,
+    ) -> Result<(), ToolError> {
+        self.apply_model_observation(ctx, content, blocks).await
+    }
+    async fn begin_computer_sequence(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        let _call = self.acquire_call("screenshot", ctx).await?;
+        let generation = self.desktop_generation()?;
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+        runtime.sequence_generation = Some(generation);
+        runtime.sequence = true;
+        Ok(())
+    }
+    async fn end_computer_sequence(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        let owner = Self::owner(ctx).await;
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+        if runtime.owner.as_ref() == Some(&owner) {
+            runtime.sequence = false;
+            runtime.sequence_generation = None;
+            if runtime.sequence_dirty {
+                runtime.frames.remove(&owner);
+                runtime.pending_observations.remove(&owner);
+                runtime
+                    .snapshots
+                    .retain(|_, snapshot| snapshot.owner != owner);
+            }
+            runtime.sequence_dirty = false;
+            let current = runtime
+                .frames
+                .values()
+                .map(|frame| frame.frame.geometry_version.clone())
+                .collect::<std::collections::HashSet<_>>();
+            runtime
+                .snapshots
+                .retain(|version, _| current.contains(version));
+            if runtime.held_keys.is_empty()
+                && !runtime.held_mouse
+                && !runtime.active
+                && !runtime.backend_inputs_dirty
+                && !runtime.backend_mouse_dirty
+                && !runtime.observation_invalidation_pending
+            {
+                runtime.lease = None;
+                runtime.owner = None;
+            }
+        }
+        Ok(())
+    }
+    async fn cleanup_computer_inputs(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        self.release_owned_inputs(ctx).await
     }
 }
 
@@ -608,7 +747,11 @@ impl ComputerTool {
             .map_or_else(|| name.to_string(), |a| a.bundle_id.clone())
     }
 
-    async fn handle_request_access(&self, input: &Value) -> Result<ToolCallResult, ToolError> {
+    async fn handle_request_access(
+        &self,
+        input: &Value,
+        ctx: &ToolUseContext,
+    ) -> Result<ToolCallResult, ToolError> {
         let raw_apps: Vec<String> = input
             .get("apps")
             .and_then(Value::as_array)
@@ -666,12 +809,27 @@ impl ComputerTool {
         // Pause here for the user's real decision — the resolver is either a
         // live `TuiBridgeResolver` (real interactive dialog) or the hermetic
         // `DenyAllResolver` (no UI wired: fails closed, grants nothing).
-        let response = self.access_resolver.resolve(request).await;
+        self.check_cancel(ctx)?;
+        let response = if let Some(cancel) = &ctx.cancel {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(ToolError::Aborted),
+                response = self.access_resolver.resolve(request) => response,
+            }
+        } else {
+            self.access_resolver.resolve(request).await
+        };
+        // Resolver completion cannot commit a grant after cancellation.
+        self.check_cancel(ctx)?;
+        if response.granted_apps.is_empty() {
+            self.invalidate_frame(ctx).await;
+        }
 
         let mut state = self
             .state
             .lock()
             .map_err(|_| ToolError::Internal("computer-use session state poisoned".into()))?;
+        self.check_cancel(ctx)?;
         for name in &response.granted_apps {
             state.grant_app(name.clone(), tier);
         }
@@ -824,9 +982,11 @@ impl ComputerTool {
             }
             let sub_input = Value::Object(obj.clone());
             let _ = (ctx, progress_tx); // batch sub-actions don't emit per-item progress yet
-            match self.execute_one(sub_action, &sub_input).await {
+            match self.execute_one(sub_action, &sub_input, ctx).await {
                 Ok(data) => results.push(json!({ "action": sub_action, "result": data })),
                 Err(e) => {
+                    self.invalidate_frame(ctx).await;
+                    self.release_owned_inputs(ctx).await?;
                     return Ok(finish(
                         json!({
                             "stepsCompleted": results.len(),
@@ -844,32 +1004,6 @@ impl ComputerTool {
         ))
     }
 
-    /// Enforce the cross-session computer lock (parity with the binary's
-    /// `cu_lock_held` gate). Exempts the two purely session-local
-    /// bookkeeping actions (`request_access`, `list_granted_applications`) —
-    /// neither touches the shared physical machine, so two sessions doing
-    /// their OWN permission bookkeeping concurrently is harmless. Every
-    /// other action (including `switch_display` and `computer_batch`, which
-    /// dispatch outside [`Self::execute_one`]) claims — or re-claims — the
-    /// lock for this process, or fails with [`LOCK_HELD_AT_CALL`] when a
-    /// different live process already holds it.
-    fn enforce_computer_lock(&self, action: &str) -> Result<(), ToolError> {
-        if matches!(action, "request_access" | "list_granted_applications") {
-            return Ok(());
-        }
-        #[allow(clippy::cast_possible_wrap)] // real PIDs never approach i32::MAX
-        let my_pid = std::process::id() as i32;
-        match lock::check(&self.lock_home, my_pid) {
-            lock::Holder::Other { .. } => {
-                Err(ToolError::PermissionDenied(LOCK_HELD_AT_CALL.to_string()))
-            }
-            lock::Holder::Free | lock::Holder::Ourselves => {
-                lock::claim(&self.lock_home, my_pid);
-                Ok(())
-            }
-        }
-    }
-
     /// Enforce the frontmost-app tier gate for actions that touch the screen.
     /// Read-only/meta actions, and anything called with NO live backend at
     /// all, are waved through — there's nothing to compare against, matching
@@ -880,7 +1014,8 @@ impl ComputerTool {
     /// "can't tell what's frontmost" is not the same as "nothing to check".
     async fn enforce_tier(&self, action: &str) -> Result<(), ToolError> {
         let required = match action {
-            "right_click" | "middle_click" | "type" | "key" | "hold_key" => Some(AppTier::Full),
+            "right_click" | "middle_click" | "mouse_click" | "type" | "key" | "hold_key"
+            | "key_down" | "key_up" => Some(AppTier::Full),
             "mouse_move" | "left_click" | "double_click" | "triple_click" | "scroll"
             | "left_click_drag" | "left_mouse_down" | "left_mouse_up" | "cursor_position" => {
                 Some(AppTier::Click)
@@ -946,190 +1081,100 @@ impl ComputerTool {
     // splitting it up would just scatter the dispatch table across more
     // indirection without shrinking it.
     #[allow(clippy::too_many_lines)]
-    async fn execute_one(&self, action: &str, input: &Value) -> Result<Value, ToolError> {
+    async fn execute_one(
+        &self,
+        action: &str,
+        input: &Value,
+        ctx: &ToolUseContext,
+    ) -> Result<Value, ToolError> {
         // `wait` carries no host capability — it only pauses. Handled before
         // the seam check so it succeeds even when no ComputerControl is
         // wired, and before the tier gate since it never touches an app.
+        self.check_cancel(ctx)?;
         if action == "wait" {
-            return validate::wait_duration(input)
-                .map(|secs| json!({ "ok": true, "waited_seconds": secs }));
+            let secs = validate::wait_duration(input)?;
+            self.wait_cancellable(secs, ctx).await?;
+            return Ok(json!({ "ok":true,"waited_seconds":secs }));
         }
 
-        self.enforce_tier(action).await?;
+        let modifiers = extensions::keys(input, "modifiers")?;
+        let has_held_keys = !self
+            .runtime
+            .lock()
+            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+            .held_keys
+            .is_empty();
+        let tier_action = if action == "mouse_click"
+            && input.get("button").and_then(Value::as_str) == Some("left")
+            && !has_held_keys
+        {
+            "left_click"
+        } else {
+            action
+        };
+        self.enforce_tier(
+            if !modifiers.is_empty()
+                || has_held_keys
+                    && matches!(
+                        action,
+                        "mouse_move"
+                            | "left_click"
+                            | "double_click"
+                            | "triple_click"
+                            | "scroll"
+                            | "left_click_drag"
+                            | "left_mouse_down"
+                            | "left_mouse_up"
+                    )
+            {
+                "key"
+            } else {
+                tier_action
+            },
+        )
+        .await?;
 
         let cc = self.ctx.computer_control.as_ref().ok_or_else(|| {
             ToolError::Internal("computer-control not available on this platform".into())
         })?;
 
-        match action {
-            "screenshot" => {
-                let s = cc.screenshot().await.map_err(|e| map_err(&e))?;
-                // Best-effort: a backend that can't enumerate displays (or
-                // reports just one) simply gets no note — never fail the
-                // screenshot itself over this.
-                let note = match cc.list_displays().await {
-                    Ok(displays) => multi_display_note(&displays),
-                    Err(_) => None,
-                };
-                image_action_result(s, note.as_deref())
-            }
-            "display_size" => {
-                let (w, h) = cc.display_size().await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "width": w, "height": h }))
-            }
-            "mouse_move" => {
-                let (x, y) = validate::require_coord(input, "coordinate")?;
-                cc.mouse_move(x, y).await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "ok": true }))
-            }
-            "left_click" => {
-                let (x, y) = validate::require_coord(input, "coordinate")?;
-                cc.left_click(x, y).await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "ok": true }))
-            }
-            "right_click" => {
-                let (x, y) = validate::require_coord(input, "coordinate")?;
-                cc.right_click(x, y).await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "ok": true }))
-            }
-            "middle_click" => {
-                let (x, y) = validate::require_coord(input, "coordinate")?;
-                cc.middle_click(x, y).await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "ok": true }))
-            }
-            "double_click" => {
-                let (x, y) = validate::require_coord(input, "coordinate")?;
-                cc.double_click(x, y).await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "ok": true }))
-            }
-            "triple_click" => {
-                let (x, y) = validate::require_coord(input, "coordinate")?;
-                cc.triple_click(x, y).await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "ok": true }))
-            }
-            "left_click_drag" => {
-                let to = validate::require_coord(input, "coordinate")?;
-                let from = coord(input, "start_coordinate");
-                cc.drag(from, to).await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "ok": true }))
-            }
-            "left_mouse_down" => {
-                {
-                    let state = self.state.lock().map_err(|_| {
-                        ToolError::Internal("computer-use session state poisoned".into())
-                    })?;
-                    if state.mouse_button_held {
-                        return Err(ToolError::InvalidInput(
-                            "mouse button already held, call left_mouse_up first".into(),
-                        ));
-                    }
-                }
-                // Only mark "held" once the press actually succeeds — flagging
-                // it beforehand would permanently wedge every future
-                // left_mouse_down behind a false "already held" error if
-                // mouse_down() itself fails (nothing left_mouse_up could ever
-                // clear, since nothing is really held).
-                cc.mouse_down().await.map_err(|e| map_err(&e))?;
-                if let Ok(mut state) = self.state.lock() {
-                    state.mouse_button_held = true;
-                }
-                Ok(json!({ "ok": true }))
-            }
-            "left_mouse_up" => {
-                // Mirror left_mouse_down: only clear "held" once the release
-                // actually succeeds. Clearing it unconditionally first would,
-                // on a mouse_up() failure, falsely tell the next
-                // left_mouse_down the button is free — same bug class as the
-                // one already fixed above, just on the release side.
-                cc.mouse_up().await.map_err(|e| map_err(&e))?;
-                if let Ok(mut state) = self.state.lock() {
-                    state.mouse_button_held = false;
-                }
-                Ok(json!({ "ok": true }))
-            }
-            "cursor_position" => {
-                let (x, y) = cc.cursor_position().await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "x": x, "y": y }))
-            }
-            "type" => {
-                let text = validate::require_text(input)?;
-                cc.type_text(text).await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "ok": true }))
-            }
-            "key" => {
-                let key = validate::require_text(input)?;
-                let repeat = validate::key_repeat(input)?;
-                self.enforce_system_shortcut_grant(&key)?;
-                for _ in 0..repeat {
-                    cc.key(key.clone()).await.map_err(|e| map_err(&e))?;
-                }
-                Ok(json!({ "ok": true, "repeat": repeat }))
-            }
-            "hold_key" => {
-                let key = validate::require_text(input)?;
-                let secs = validate::hold_duration(input)?;
-                self.enforce_system_shortcut_grant(&key)?;
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let ms = (secs * 1000.0) as u64;
-                cc.hold_key(key, ms).await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "ok": true }))
-            }
-            "scroll" => {
-                let (x, y) = validate::require_coord(input, "coordinate")?;
-                let (dx, dy) = scroll_delta(input)?;
-                cc.scroll(x, y, dx, dy).await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "ok": true }))
-            }
-            "zoom" => {
-                let (x0, y0, x1, y1) = validate::require_region(input)?;
-                let s = cc
-                    .zoom(x0, y0, x1 - x0, y1 - y0)
-                    .await
-                    .map_err(|e| map_err(&e))?;
-                image_action_result(s, None)
-            }
-            "read_clipboard" => {
-                self.require_grant_flag(GrantFlags::clipboard_read_enabled, "clipboardRead")?;
-                let text = cc.read_clipboard().await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "text": text }))
-            }
-            "write_clipboard" => {
-                self.require_grant_flag(GrantFlags::clipboard_write_enabled, "clipboardWrite")?;
-                let text = validate::require_text(input)?;
-                cc.write_clipboard(text).await.map_err(|e| map_err(&e))?;
-                Ok(json!({ "ok": true }))
-            }
-            "open_application" => {
-                let name = input
-                    .get("bundle_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| ToolError::InvalidInput("bundle_id is required".into()))?
-                    .to_string();
-                // Gate against the allowlist BEFORE launching anything — this
-                // action had no permission check at all, letting the model
-                // open arbitrary apps regardless of what request_access had
-                // actually granted (bypassing the whole per-app model this
-                // tool otherwise enforces). Any granted tier suffices (the
-                // real system doesn't tier-gate opening, only interacting).
-                let resolved = self.resolve_app_identifier(&name).await;
-                let is_granted = self
-                    .state
-                    .lock()
-                    .map_err(|_| ToolError::Internal("computer-use session state poisoned".into()))?
-                    .tier_for(&resolved)
-                    .is_some();
-                if !is_granted {
-                    return Err(ToolError::PermissionDenied(format!(
-                        "\"{name}\" is not granted for this session. Call request_access first."
-                    )));
-                }
-                cc.open_application(resolved)
-                    .await
-                    .map_err(|e| map_err(&e))?;
-                Ok(json!({ "ok": true, "opened": name }))
-            }
-            other => Err(ToolError::InvalidInput(format!("unknown action: {other}"))),
+        if !modifiers.is_empty() {
+            cc.validate_keys(&modifiers)
+                .await
+                .map_err(|e| map_err(&e))?;
         }
+        self.validate_host_parameters(action, input).await?;
+        self.enforce_cumulative_shortcuts(&modifiers)?;
+        self.validate_geometry(input, ctx).await?;
+        if changes_desktop(action) {
+            self.mark_input_changed(ctx).await?;
+        }
+        let added = self.press_keys(&modifiers).await?;
+        let compound_click = matches!(
+            action,
+            "mouse_click"
+                | "left_click"
+                | "right_click"
+                | "middle_click"
+                | "double_click"
+                | "triple_click"
+        );
+        if compound_click {
+            self.runtime
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                .backend_mouse_dirty = true;
+        }
+        let result = self.execute_backend(action, input, ctx).await;
+        if compound_click && result.is_ok() {
+            self.runtime
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                .backend_mouse_dirty = false;
+        }
+        let release = self.release_keys(&added).await;
+        let result = result.and_then(|value| release.map(|()| value));
+        result
     }
 
     fn require_grant_flag(
@@ -1177,6 +1222,804 @@ impl ComputerTool {
             )))
         }
     }
+
+    /// Enforce the cross-session computer lock (parity with the binary's
+    /// `cu_lock_held` gate). Exempts the two purely session-local
+    /// bookkeeping actions (`request_access`, `list_granted_applications`) —
+    /// neither touches the shared physical machine, so two sessions doing
+    /// their OWN permission bookkeeping concurrently is harmless. Every
+    /// other action (including `switch_display` and `computer_batch`, which
+    /// dispatch outside [`Self::execute_one`]) claims — or re-claims — the
+    /// lock for this process, or fails with [`LOCK_HELD_AT_CALL`] when a
+    /// different live process already holds it.
+    async fn owner(ctx: &ToolUseContext) -> String {
+        let session = if let Some(id) = &ctx.origin_session_id {
+            id.to_string()
+        } else if let Some(session) = &ctx.session {
+            session.lock().await.session_id.to_string()
+        } else {
+            "legacy".into()
+        };
+        format!(
+            "{}:{}",
+            session,
+            ctx.agent_id
+                .as_ref()
+                .map_or_else(|| "main".into(), ToString::to_string)
+        )
+    }
+    async fn acquire_call(
+        &self,
+        action: &str,
+        ctx: &ToolUseContext,
+    ) -> Result<Option<CallLease<'_>>, ToolError> {
+        if matches!(action, "request_access" | "list_granted_applications") {
+            return Ok(None);
+        }
+        let owner = Self::owner(ctx).await;
+        let lock_scope = self
+            .ctx
+            .computer_control
+            .as_ref()
+            .and_then(|backend| backend.desktop_lock_scope())
+            .unwrap_or_else(|| self.lock_home.clone());
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+        if runtime.active || runtime.owner.as_ref().is_some_and(|o| o != &owner) {
+            return Err(ToolError::PermissionDenied(LOCK_HELD_AT_CALL.into()));
+        }
+        if matches!(
+            lock::check(&lock_scope, std::process::id() as i32),
+            lock::Holder::Other { .. }
+        ) {
+            return Err(ToolError::PermissionDenied(LOCK_HELD_AT_CALL.into()));
+        }
+        if runtime.lease.is_none() {
+            runtime.lease = Some(lock::DesktopLease::acquire(&lock_scope).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    ToolError::PermissionDenied(LOCK_HELD_AT_CALL.into())
+                } else {
+                    ToolError::Internal(format!("computer desktop lock unavailable: {e}"))
+                }
+            })?);
+        }
+        runtime.owner = Some(owner);
+        runtime.active = true;
+        Ok(Some(CallLease { tool: self }))
+    }
+    fn check_cancel(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        if ctx
+            .cancel
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+        {
+            Err(ToolError::Aborted)
+        } else {
+            Ok(())
+        }
+    }
+    async fn wait_cancellable(&self, seconds: f64, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        self.check_cancel(ctx)?;
+        let sleep = tokio::time::sleep(std::time::Duration::from_secs_f64(seconds));
+        if let Some(cancel) = &ctx.cancel {
+            tokio::select! { biased; ()=cancel.cancelled()=>Err(ToolError::Aborted), ()=sleep=>Ok(()) }
+        } else {
+            sleep.await;
+            Ok(())
+        }
+    }
+    fn validate_final_input(&self, action: &str, input: &Value) -> Result<(), ToolError> {
+        if !ACTIONS.contains(&action) {
+            return Err(ToolError::InvalidInput(format!("unknown action: {action}")));
+        }
+        extensions::validate(action, input)?;
+        if action == "computer_batch" {
+            let items = input
+                .get("actions")
+                .and_then(Value::as_array)
+                .filter(|a| !a.is_empty())
+                .ok_or_else(|| {
+                    ToolError::InvalidInput("actions must be a non-empty array".into())
+                })?;
+            if items.len() > 1000 {
+                return Err(ToolError::InvalidInput(
+                    "actions exceeds maximum of 1000".into(),
+                ));
+            }
+            for (i, item) in items.iter().enumerate() {
+                let sub = item.get("action").and_then(Value::as_str).ok_or_else(|| {
+                    ToolError::InvalidInput(format!("actions[{i}].action must be a string"))
+                })?;
+                if !allowed_in_batch(sub) {
+                    return Err(ToolError::InvalidInput(format!(
+                        "actions[{i}].action=\"{sub}\" is not allowed in a batch"
+                    )));
+                }
+                self.validate_final_input(sub, item)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn validate_host_parameters(&self, action: &str, input: &Value) -> Result<(), ToolError> {
+        let cc = self
+            .ctx
+            .computer_control
+            .as_ref()
+            .ok_or_else(|| ToolError::Internal("computer unavailable".into()))?;
+        // Text backends may emit Tab as a physical key while retaining held
+        // modifiers. Validate the entire text before publishing any prefix.
+        if action == "type" && validate::require_text(input)?.contains('\t') {
+            self.enforce_cumulative_shortcuts(&["tab".into()])?;
+        }
+        if matches!(action, "key" | "hold_key" | "key_down" | "key_up") {
+            let keys = if matches!(action, "key" | "hold_key") {
+                extensions::keys(input, "keys")?
+            } else {
+                vec![validate::require_text(input)?]
+            };
+            // Current backends validate the full key set before posting events.
+            // Older partial backends keep their own original key parser.
+            if cc.capabilities().held_keys
+                || input.get("keys").is_some()
+                || matches!(action, "key_down" | "key_up")
+            {
+                cc.validate_keys(&keys).await.map_err(|e| map_err(&e))?;
+            }
+        }
+        if action == "mouse_click"
+            && matches!(input["button"].as_str(), Some("back" | "forward"))
+            && !cc.capabilities().side_buttons
+        {
+            return Err(ToolError::InvalidInput(
+                "backend does not support side buttons".into(),
+            ));
+        }
+        if input.get("pixel_delta").is_some() && !cc.capabilities().pixel_scroll {
+            return Err(ToolError::InvalidInput(
+                "backend does not support pixel scrolling".into(),
+            ));
+        }
+        let presses_left = matches!(
+            action,
+            "left_click_drag" | "left_mouse_down" | "left_click" | "double_click" | "triple_click"
+        ) || (action == "mouse_click" && input["button"] == "left");
+        if presses_left
+            && self
+                .runtime
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                .held_mouse
+        {
+            return Err(ToolError::InvalidInput(
+                "mouse button already held, call left_mouse_up first".into(),
+            ));
+        }
+        if matches!(
+            action,
+            "mouse_move"
+                | "mouse_click"
+                | "left_click"
+                | "right_click"
+                | "middle_click"
+                | "double_click"
+                | "triple_click"
+                | "left_click_drag"
+                | "left_mouse_down"
+                | "left_mouse_up"
+                | "scroll"
+                | "zoom"
+        ) {
+            let (width, height) = match cc.display_size().await {
+                Ok(size) => size,
+                Err(ComputerError::Unsupported(_)) => return Ok(()),
+                Err(e) => return Err(map_err(&e)),
+            };
+            let mut points = Vec::new();
+            for key in ["coordinate", "start_coordinate"] {
+                if let Some(p) = coord(input, key) {
+                    points.push(p);
+                }
+            }
+            if let Some(path) = extensions::path(input)? {
+                points.extend(path);
+            }
+            if points.iter().any(|(x, y)| *x >= width || *y >= height) {
+                return Err(ToolError::InvalidInput(
+                    "coordinate outside selected display".into(),
+                ));
+            }
+            if action == "zoom" {
+                let (_, _, x1, y1) = validate::require_region(input)?;
+                if x1 > width || y1 > height {
+                    return Err(ToolError::InvalidInput(
+                        "region outside selected display".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn target_coordinate(&self, input: &Value) -> Result<(u32, u32), ToolError> {
+        if input.get("use_current_cursor").and_then(Value::as_bool) == Some(true) {
+            self.ctx
+                .computer_control
+                .as_ref()
+                .ok_or_else(|| ToolError::Internal("computer unavailable".into()))?
+                .cursor_position()
+                .await
+                .map_err(|e| map_err(&e))
+        } else {
+            validate::require_coord(input, "coordinate")
+        }
+    }
+    async fn execute_backend(
+        &self,
+        action: &str,
+        input: &Value,
+        ctx: &ToolUseContext,
+    ) -> Result<Value, ToolError> {
+        let cc = self
+            .ctx
+            .computer_control
+            .as_ref()
+            .ok_or_else(|| ToolError::Internal("computer unavailable".into()))?;
+        if input.get("use_current_cursor").and_then(Value::as_bool) == Some(true) {
+            match action {
+                "mouse_click" | "left_click" | "right_click" | "middle_click" | "double_click"
+                | "triple_click" => {
+                    let (button, count) = match action {
+                        "right_click" => ("right", 1),
+                        "middle_click" => ("middle", 1),
+                        "double_click" => ("left", 2),
+                        "triple_click" => ("left", 3),
+                        "mouse_click" => (
+                            input["button"]
+                                .as_str()
+                                .ok_or_else(|| ToolError::InvalidInput("button required".into()))?,
+                            1,
+                        ),
+                        _ => ("left", 1),
+                    };
+                    cc.click_current(button, count)
+                        .await
+                        .map_err(|e| map_err(&e))?;
+                    return Ok(json!({"ok":true}));
+                }
+                "scroll" => {
+                    let pixels = extensions::pixel_delta(input)?;
+                    let (dx, dy) = pixels.unwrap_or(scroll_delta(input)?);
+                    cc.scroll_current(dx, dy, pixels.is_some())
+                        .await
+                        .map_err(|e| map_err(&e))?;
+                    return Ok(json!({"ok":true}));
+                }
+                _ => {}
+            }
+        }
+        match action {
+            "screenshot" => {
+                let s = cc.screenshot().await.map_err(|e| map_err(&e))?;
+                // Best-effort: a backend that can't enumerate displays (or
+                // reports just one) simply gets no note — never fail the
+                // screenshot itself over this.
+                let note = match cc.list_displays().await {
+                    Ok(displays) => multi_display_note(&displays),
+                    Err(_) => None,
+                };
+                let mut data = image_action_result(s, note.as_deref())?;
+                self.record_frame(&mut data, ctx).await?;
+                Ok(data)
+            }
+            "display_size" => {
+                let (w, h) = cc.display_size().await.map_err(|e| map_err(&e))?;
+                Ok(json!({ "width": w, "height": h }))
+            }
+            "mouse_move" => {
+                let (x, y) = validate::require_coord(input, "coordinate")?;
+                cc.mouse_move(x, y).await.map_err(|e| map_err(&e))?;
+                Ok(json!({ "ok": true }))
+            }
+            "left_click" => {
+                let (x, y) = self.target_coordinate(input).await?;
+                cc.left_click(x, y).await.map_err(|e| map_err(&e))?;
+                Ok(json!({ "ok": true }))
+            }
+            "right_click" => {
+                let (x, y) = self.target_coordinate(input).await?;
+                cc.right_click(x, y).await.map_err(|e| map_err(&e))?;
+                Ok(json!({ "ok": true }))
+            }
+            "middle_click" => {
+                let (x, y) = self.target_coordinate(input).await?;
+                cc.middle_click(x, y).await.map_err(|e| map_err(&e))?;
+                Ok(json!({ "ok": true }))
+            }
+            "double_click" => {
+                let (x, y) = self.target_coordinate(input).await?;
+                cc.double_click(x, y).await.map_err(|e| map_err(&e))?;
+                Ok(json!({ "ok": true }))
+            }
+            "triple_click" => {
+                let (x, y) = self.target_coordinate(input).await?;
+                cc.triple_click(x, y).await.map_err(|e| map_err(&e))?;
+                Ok(json!({ "ok": true }))
+            }
+            "mouse_click" => {
+                let (x, y) = self.target_coordinate(input).await?;
+                let button = input["button"]
+                    .as_str()
+                    .ok_or_else(|| ToolError::InvalidInput("button required".into()))?;
+                cc.mouse_click(x, y, button)
+                    .await
+                    .map_err(|e| map_err(&e))?;
+                Ok(json!({"ok":true}))
+            }
+            "left_click_drag" => {
+                if let Some(path) = extensions::path(input)? {
+                    let (x, y) = path[0];
+                    cc.mouse_move(x, y).await.map_err(|e| map_err(&e))?;
+                    cc.mouse_down().await.map_err(|e| map_err(&e))?;
+                    self.runtime
+                        .lock()
+                        .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                        .held_mouse = true;
+                    let mut result = Ok(());
+                    for (x, y) in path.into_iter().skip(1) {
+                        result = self.check_cancel(ctx);
+                        if result.is_err() {
+                            break;
+                        }
+                        result = cc.mouse_move(x, y).await.map_err(|e| map_err(&e));
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                    let released = cc.mouse_up().await.map_err(|e| map_err(&e));
+                    if released.is_ok() {
+                        self.runtime
+                            .lock()
+                            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                            .held_mouse = false;
+                    }
+                    result.and(released)?;
+                } else {
+                    let to = validate::require_coord(input, "coordinate")?;
+                    let from = coord(input, "start_coordinate");
+                    if let Some((x, y)) = from {
+                        cc.mouse_move(x, y).await.map_err(|e| map_err(&e))?;
+                    }
+                    cc.mouse_down().await.map_err(|e| map_err(&e))?;
+                    self.runtime
+                        .lock()
+                        .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                        .held_mouse = true;
+                    let moved = cc.mouse_move(to.0, to.1).await.map_err(|e| map_err(&e));
+                    let released = cc.mouse_up().await.map_err(|e| map_err(&e));
+                    if released.is_ok() {
+                        self.runtime
+                            .lock()
+                            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                            .held_mouse = false;
+                    }
+                    moved.and(released)?;
+                }
+                Ok(json!({"ok":true}))
+            }
+            "left_mouse_down" => {
+                {
+                    let state = self.state.lock().map_err(|_| {
+                        ToolError::Internal("computer-use session state poisoned".into())
+                    })?;
+                    if state.mouse_button_held {
+                        return Err(ToolError::InvalidInput(
+                            "mouse button already held, call left_mouse_up first".into(),
+                        ));
+                    }
+                }
+                // Only mark "held" once the press actually succeeds — flagging
+                // it beforehand would permanently wedge every future
+                // left_mouse_down behind a false "already held" error if
+                // mouse_down() itself fails (nothing left_mouse_up could ever
+                // clear, since nothing is really held).
+                if let Some((x, y)) = coord(input, "coordinate") {
+                    cc.mouse_move(x, y).await.map_err(|e| map_err(&e))?;
+                }
+                cc.mouse_down().await.map_err(|e| map_err(&e))?;
+                self.runtime
+                    .lock()
+                    .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                    .held_mouse = true;
+                if let Ok(mut state) = self.state.lock() {
+                    state.mouse_button_held = true;
+                }
+                Ok(json!({ "ok": true }))
+            }
+            "left_mouse_up" => {
+                // Mirror left_mouse_down: only clear "held" once the release
+                // actually succeeds. Clearing it unconditionally first would,
+                // on a mouse_up() failure, falsely tell the next
+                // left_mouse_down the button is free — same bug class as the
+                // one already fixed above, just on the release side.
+                if let Some((x, y)) = coord(input, "coordinate") {
+                    cc.mouse_move(x, y).await.map_err(|e| map_err(&e))?;
+                }
+                cc.mouse_up().await.map_err(|e| map_err(&e))?;
+                self.runtime
+                    .lock()
+                    .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                    .held_mouse = false;
+                if let Ok(mut state) = self.state.lock() {
+                    state.mouse_button_held = false;
+                }
+                Ok(json!({ "ok": true }))
+            }
+            "cursor_position" => {
+                let (x, y) = cc.cursor_position().await.map_err(|e| map_err(&e))?;
+                Ok(json!({ "x": x, "y": y }))
+            }
+            "type" => {
+                let text = validate::require_text(input)?;
+                let tracked = cc.capabilities().held_keys;
+                if tracked {
+                    self.runtime
+                        .lock()
+                        .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                        .backend_inputs_dirty = true;
+                }
+                let typed = cc.type_text(text).await;
+                if tracked && typed.is_ok() {
+                    self.runtime
+                        .lock()
+                        .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                        .backend_inputs_dirty = false;
+                }
+                typed.map_err(|e| map_err(&e))?;
+                if input.get("press_enter").and_then(Value::as_bool) == Some(true) {
+                    self.check_cancel(ctx)?;
+                    self.runtime
+                        .lock()
+                        .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                        .backend_inputs_dirty = true;
+                    let result = cc.key("Return".into()).await;
+                    if result.is_ok() {
+                        self.runtime
+                            .lock()
+                            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                            .backend_inputs_dirty = false;
+                    }
+                    result.map_err(|e| map_err(&e))?;
+                }
+                Ok(json!({ "ok": true }))
+            }
+            "key" => {
+                let keys = extensions::keys(input, "keys")?;
+                self.enforce_cumulative_shortcuts(&keys)?;
+                let repeat = validate::key_repeat(input)?;
+                if input.get("keys").is_some() {
+                    cc.validate_keys(&keys).await.map_err(|e| map_err(&e))?;
+                }
+                for _ in 0..repeat {
+                    self.check_cancel(ctx)?;
+                    self.runtime
+                        .lock()
+                        .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                        .backend_inputs_dirty = true;
+                    let result = if input.get("keys").is_some() {
+                        cc.key_chord(keys.clone()).await
+                    } else {
+                        cc.key(validate::require_text(input)?).await
+                    };
+                    if result.is_ok() {
+                        self.runtime
+                            .lock()
+                            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                            .backend_inputs_dirty = false;
+                    }
+                    result.map_err(|e| map_err(&e))?;
+                }
+                Ok(json!({"ok":true,"repeat":repeat}))
+            }
+            "key_down" => {
+                let key = validate::require_text(input)?;
+                cc.validate_keys(std::slice::from_ref(&key))
+                    .await
+                    .map_err(|e| map_err(&e))?;
+                self.enforce_cumulative_shortcuts(std::slice::from_ref(&key))?;
+                self.press_keys(&[key]).await?;
+                Ok(json!({"ok":true}))
+            }
+            "key_up" => {
+                let key = canonical_key(&validate::require_text(input)?);
+                if !self
+                    .runtime
+                    .lock()
+                    .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                    .held_keys
+                    .contains(&key)
+                {
+                    return Err(ToolError::InvalidInput(
+                        "key is not held by this agent".into(),
+                    ));
+                }
+                self.release_keys(&[key]).await?;
+                Ok(json!({"ok":true}))
+            }
+            "hold_key" => {
+                let keys = extensions::keys(input, "keys")?;
+                let secs = validate::hold_duration(input)?;
+                self.enforce_cumulative_shortcuts(&keys)?;
+                cc.validate_keys(&keys).await.map_err(|e| map_err(&e))?;
+                let added = self.press_keys(&keys).await?;
+                let result = self.wait_cancellable(secs, ctx).await;
+                let released = self.release_keys(&added).await;
+                result.and(released)?;
+                Ok(json!({"ok":true}))
+            }
+            "scroll" => {
+                let (x, y) = self.target_coordinate(input).await?;
+                if let Some((dx, dy)) = extensions::pixel_delta(input)? {
+                    cc.scroll_pixels(x, y, dx, dy)
+                        .await
+                        .map_err(|e| map_err(&e))?;
+                } else {
+                    let (dx, dy) = scroll_delta(input)?;
+                    cc.scroll(x, y, dx, dy).await.map_err(|e| map_err(&e))?;
+                }
+                Ok(json!({ "ok": true }))
+            }
+            "zoom" => {
+                let (x0, y0, x1, y1) = validate::require_region(input)?;
+                let s = cc
+                    .zoom(x0, y0, x1 - x0, y1 - y0)
+                    .await
+                    .map_err(|e| map_err(&e))?;
+                self.invalidate_frame(ctx).await;
+                let mut data = image_action_result(s, None)?;
+                data["capture_region"] = json!([x0, y0, x1, y1]);
+                Ok(data)
+            }
+            "read_clipboard" => {
+                self.require_grant_flag(GrantFlags::clipboard_read_enabled, "clipboardRead")?;
+                let text = cc.read_clipboard().await.map_err(|e| map_err(&e))?;
+                Ok(json!({ "text": text }))
+            }
+            "write_clipboard" => {
+                self.require_grant_flag(GrantFlags::clipboard_write_enabled, "clipboardWrite")?;
+                let text = validate::require_text(input)?;
+                cc.write_clipboard(text).await.map_err(|e| map_err(&e))?;
+                Ok(json!({ "ok": true }))
+            }
+            "open_application" => {
+                let name = input
+                    .get("bundle_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ToolError::InvalidInput("bundle_id is required".into()))?
+                    .to_string();
+                // Gate against the allowlist BEFORE launching anything — this
+                // action had no permission check at all, letting the model
+                // open arbitrary apps regardless of what request_access had
+                // actually granted (bypassing the whole per-app model this
+                // tool otherwise enforces). Any granted tier suffices (the
+                // real system doesn't tier-gate opening, only interacting).
+                let resolved = self.resolve_app_identifier(&name).await;
+                let is_granted = self
+                    .state
+                    .lock()
+                    .map_err(|_| ToolError::Internal("computer-use session state poisoned".into()))?
+                    .tier_for(&resolved)
+                    .is_some();
+                if !is_granted {
+                    return Err(ToolError::PermissionDenied(format!(
+                        "\"{name}\" is not granted for this session. Call request_access first."
+                    )));
+                }
+                cc.open_application(resolved)
+                    .await
+                    .map_err(|e| map_err(&e))?;
+                Ok(json!({ "ok": true, "opened": name }))
+            }
+            other => Err(ToolError::InvalidInput(format!("unknown action: {other}"))),
+        }
+    }
+
+    async fn press_keys(&self, keys: &[String]) -> Result<Vec<String>, ToolError> {
+        let mut added = Vec::new();
+        let Some(cc) = &self.ctx.computer_control else {
+            return Ok(added);
+        };
+        for key in keys {
+            let key = canonical_key(key);
+            let already = self
+                .runtime
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                .held_keys
+                .contains(&key);
+            if already {
+                continue;
+            }
+            if let Err(error) = cc.key_down(key.clone()).await {
+                let _ = self.release_keys(&added).await;
+                return Err(map_err(&error));
+            }
+            self.runtime
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                .held_keys
+                .insert(key.clone());
+            added.push(key);
+        }
+        Ok(added)
+    }
+    async fn release_keys(&self, keys: &[String]) -> Result<(), ToolError> {
+        let Some(cc) = &self.ctx.computer_control else {
+            return Ok(());
+        };
+        let mut error = None;
+        for key in keys.iter().rev() {
+            match cc.key_up(key.clone()).await {
+                Ok(()) => {
+                    self.runtime
+                        .lock()
+                        .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                        .held_keys
+                        .remove(key);
+                }
+                Err(e) => {
+                    error = Some(map_err(&e));
+                }
+            }
+        }
+        error.map_or(Ok(()), Err)
+    }
+    async fn release_owned_inputs(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        let owner = Self::owner(ctx).await;
+        let (keys, mouse, backend_dirty, mouse_dirty, invalidation_pending) = {
+            let runtime = self
+                .runtime
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+            if runtime.owner.as_ref() != Some(&owner) {
+                return Ok(());
+            }
+            (
+                runtime.held_keys.iter().cloned().collect::<Vec<_>>(),
+                runtime.held_mouse,
+                runtime.backend_inputs_dirty,
+                runtime.backend_mouse_dirty,
+                runtime.observation_invalidation_pending,
+            )
+        };
+        let observation_result =
+            if !keys.is_empty() || mouse || backend_dirty || mouse_dirty || invalidation_pending {
+                let result = self.mark_input_changed(ctx).await;
+                // Cleanup terminates the frozen observation too. Releases can
+                // activate a control or finish a drop after the last screenshot.
+                self.invalidate_frame(ctx).await;
+                result
+            } else {
+                Ok(())
+            };
+        let keys_result = self.release_keys(&keys).await;
+        let backend_result = if backend_dirty {
+            let result = self
+                .ctx
+                .computer_control
+                .as_ref()
+                .ok_or_else(|| ToolError::Internal("computer unavailable".into()))?
+                .release_held_keys()
+                .await
+                .map_err(|e| map_err(&e));
+            if result.is_ok() {
+                let mut runtime = self
+                    .runtime
+                    .lock()
+                    .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+                runtime.backend_inputs_dirty = false;
+                runtime.held_keys.clear();
+            }
+            result
+        } else {
+            Ok(())
+        };
+        let mouse_result = if mouse {
+            let result = self
+                .ctx
+                .computer_control
+                .as_ref()
+                .ok_or_else(|| ToolError::Internal("computer unavailable".into()))?
+                .mouse_up()
+                .await
+                .map_err(|e| map_err(&e));
+            if result.is_ok() {
+                self.runtime
+                    .lock()
+                    .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                    .held_mouse = false;
+                if let Ok(mut state) = self.state.lock() {
+                    state.mouse_button_held = false;
+                }
+            }
+            result
+        } else {
+            Ok(())
+        };
+        let backend_mouse_result = if mouse_dirty {
+            let result = self
+                .ctx
+                .computer_control
+                .as_ref()
+                .ok_or_else(|| ToolError::Internal("computer unavailable".into()))?
+                .release_held_buttons()
+                .await
+                .map_err(|e| map_err(&e));
+            if result.is_ok() {
+                self.runtime
+                    .lock()
+                    .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                    .backend_mouse_dirty = false;
+            }
+            result
+        } else {
+            Ok(())
+        };
+        {
+            let mut runtime = self
+                .runtime
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+            // Keep version-store retry separate from keyboard cleanup: a
+            // mouse-only backend need not support releasing held keys.
+            runtime.observation_invalidation_pending = observation_result.is_err();
+            if !runtime.active
+                && !runtime.sequence
+                && runtime.held_keys.is_empty()
+                && !runtime.held_mouse
+                && !runtime.backend_inputs_dirty
+                && !runtime.backend_mouse_dirty
+                && !runtime.observation_invalidation_pending
+            {
+                runtime.lease = None;
+                runtime.owner = None;
+            }
+        }
+        observation_result
+            .and(keys_result)
+            .and(backend_result)
+            .and(mouse_result)
+            .and(backend_mouse_result)
+    }
+    fn enforce_cumulative_shortcuts(&self, keys: &[String]) -> Result<(), ToolError> {
+        let mut held = self
+            .runtime
+            .lock()
+            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+            .held_keys
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        held.extend(keys.iter().map(|k| canonical_key(k)));
+        // Check each main key against the complete held modifier set, including
+        // a modifier added after its main key was held in an earlier call.
+        let modifiers = held
+            .iter()
+            .filter(|k| matches!(k.as_str(), "cmd" | "ctrl" | "alt" | "shift"))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in held
+            .iter()
+            .filter(|k| !matches!(k.as_str(), "cmd" | "ctrl" | "alt" | "shift"))
+        {
+            let mut chord = modifiers.clone();
+            chord.push(key.clone());
+            self.enforce_system_shortcut_grant(&chord.join("+"))?;
+        }
+        Ok(())
+    }
 }
 
 /// Attach the user-facing one-line summary (parity with `RESULT_SUMMARY`) to the
@@ -1195,12 +2038,12 @@ fn finish(mut data: Value, action: &str) -> ToolCallResult {
     // only: width/height/byte-count). `model_content` here is deliberately a
     // short placeholder plus any resize/multi-display note, matching
     // `tool-file`'s Read-on-image path exactly.
-    let model_content = (data.get("type").and_then(Value::as_str) == Some("image")).then(|| {
-        match data.get("note").and_then(Value::as_str) {
+    let model_content = (data.get("type").and_then(Value::as_str) == Some("image"))
+        .then(|| match data.get("note").and_then(Value::as_str) {
             Some(note) => format!("[Image content provided in tool result.] {note}"),
             None => "[Image content provided in tool result.]".to_string(),
-        }
-    });
+        })
+        .or_else(|| tool_api::tool_result_media::computer_batch_model_text(&data));
     ToolCallResult {
         data,
         model_content,
@@ -2211,6 +3054,86 @@ mod integration_tests {
         // We took it over — it's now recorded as OUR pid, not the dead one.
         #[allow(clippy::cast_possible_wrap)]
         let my_pid = std::process::id() as i32;
-        assert_eq!(lock::check(&home, my_pid), lock::Holder::Ourselves);
+        let _ = my_pid;
+        assert!(lock::DesktopLease::acquire(&home).is_ok());
     }
+}
+use lingxi_core::host::computer_control::{canonical_computer_key as canonical_key, ComputerError};
+#[cfg(test)]
+mod execution_tests;
+mod extensions;
+mod native;
+
+#[derive(Default)]
+struct ExecutionState {
+    owner: Option<String>,
+    active: bool,
+    sequence: bool,
+    sequence_generation: Option<u64>,
+    sequence_dirty: bool,
+    lease: Option<lock::DesktopLease>,
+    held_keys: std::collections::BTreeSet<String>,
+    held_mouse: bool,
+    backend_inputs_dirty: bool,
+    backend_mouse_dirty: bool,
+    observation_invalidation_pending: bool,
+    frames: std::collections::HashMap<String, native::ObservedFrame>,
+    snapshots: std::collections::HashMap<String, native::ObservedFrame>,
+    capture_generation: u64,
+    pending_observations: std::collections::HashMap<String, Option<String>>,
+}
+struct CallLease<'a> {
+    tool: &'a ComputerTool,
+}
+impl Drop for CallLease<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.tool.runtime.lock() {
+            state.active = false;
+            if !state.sequence
+                && state.held_keys.is_empty()
+                && !state.held_mouse
+                && !state.backend_inputs_dirty
+                && !state.backend_mouse_dirty
+                && !state.observation_invalidation_pending
+            {
+                state.lease = None;
+                state.owner = None;
+            }
+        }
+    }
+}
+
+fn signed_delta(input: &Value, key: &str) -> Result<i32, ToolError> {
+    input.get(key).map_or(Ok(0), |v| {
+        v.as_i64()
+            .and_then(|n| i32::try_from(n).ok())
+            .filter(|n| n.unsigned_abs() <= 100_000)
+            .ok_or_else(|| {
+                ToolError::InvalidInput(format!("{key} must be an integer within 100000"))
+            })
+    })
+}
+
+fn changes_desktop(action: &str) -> bool {
+    matches!(
+        action,
+        "mouse_move"
+            | "mouse_click"
+            | "left_click"
+            | "right_click"
+            | "middle_click"
+            | "double_click"
+            | "triple_click"
+            | "left_click_drag"
+            | "left_mouse_down"
+            | "left_mouse_up"
+            | "type"
+            | "key"
+            | "key_down"
+            | "key_up"
+            | "hold_key"
+            | "scroll"
+            | "write_clipboard"
+            | "open_application"
+    )
 }

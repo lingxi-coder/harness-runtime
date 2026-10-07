@@ -13,9 +13,6 @@ mod tcc;
 
 use async_trait::async_trait;
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
-use lingxi_core::host::computer_control::{
-    AppInfo, ComputerControl, ComputerError, DisplayInfo, Screenshot,
-};
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
 use objc2_foundation::NSString;
 
@@ -63,34 +60,10 @@ fn monitor_error(e: &xcap::XCapError) -> ComputerError {
     ComputerError::Other(format!("display error: {e}"))
 }
 
-/// Screen-pixel coordinate → enigo's signed API. Real displays never
-/// approach `i32::MAX` pixels wide, so the wrap this cast could theoretically
-/// produce never happens in practice.
-#[allow(clippy::cast_possible_wrap)]
-fn px(v: u32) -> i32 {
-    v as i32
-}
-
-/// enigo's signed cursor location → our unsigned coordinate space. Clamped to
-/// 0 first, so this never actually loses a sign — the cursor is always
-/// on-screen (non-negative) when this is called.
-#[allow(clippy::cast_sign_loss)]
-fn unpx(v: i32) -> u32 {
-    v.max(0) as u32
-}
-
-/// Real macOS automation backend.
-///
-/// Holds only the `select_display` pin (`Mutex<Option<u32>>` — cheap,
-/// `Send + Sync`). Everything else is constructed fresh per call: `Enigo`
-/// wraps a raw `CGEventSource` handle that is neither `Send` nor `Sync`, so
-/// it can't live as a field on a type shared behind `Arc<dyn
-/// ComputerControl>` (the trait requires `Send + Sync`). Each call
-/// constructs, uses, and drops its own `Enigo` entirely within one
-/// synchronous closure — never held across an `.await` — so the type never
-/// needs to cross a thread boundary.
 pub struct MacosComputerControl {
     selected_display: std::sync::Mutex<Option<u32>>,
+    input_worker: std::sync::mpsc::Sender<InputJob>,
+    owned_mouse: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl Default for MacosComputerControl {
@@ -104,8 +77,28 @@ impl MacosComputerControl {
     /// actual action runs.
     #[must_use]
     pub fn new() -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel::<InputJob>();
+        let owned_mouse = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let worker_mouse = owned_mouse.clone();
+        std::thread::Builder::new()
+            .name("computer-input".into())
+            .spawn(move || {
+                let mut enigo = None;
+                while let Ok(job) = receiver.recv() {
+                    job(&mut enigo);
+                }
+                if let Some(backend) = enigo.as_mut() {
+                    let _ = release_buttons_with(&worker_mouse, |button| {
+                        send_button(backend, button, Direction::Release)
+                    });
+                }
+                // Enigo releases any remaining owned keys on its owning thread.
+            })
+            .expect("computer input worker thread");
         Self {
             selected_display: std::sync::Mutex::new(None),
+            input_worker: sender,
+            owned_mouse,
         }
     }
 
@@ -115,6 +108,42 @@ impl MacosComputerControl {
             .selected_display
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn with_enigo<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Enigo) -> enigo::InputResult<T> + Send + 'static,
+    ) -> Result<T, ComputerError> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        self.input_worker
+            .send(Box::new(move |backend| {
+                let result = (|| {
+                    if backend.is_none() {
+                        *backend = Some(Enigo::new(&Settings::default()).map_err(|e| {
+                            ComputerError::Other(format!("enigo init failed: {e}"))
+                        })?);
+                    }
+                    f(backend.as_mut().expect("initialized"))
+                        .map_err(|e| ComputerError::Other(format!("input error: {e}")))
+                })();
+                let _ = sender.send(result);
+            }))
+            .map_err(|_| ComputerError::Other("computer input worker stopped".into()))?;
+        receiver
+            .recv()
+            .map_err(|_| ComputerError::Other("computer input worker stopped".into()))?
+    }
+
+    /// Press `chord.modifiers` in order, click `chord.main`, release
+    /// modifiers in reverse — matches `withModifiers`/`key()` semantics.
+    ///
+    /// Tracks which modifiers actually landed (`pressed`) so a mid-press
+    /// failure still releases everything that WAS pressed, not just the ones
+    /// before the failure point — otherwise a transient press error on e.g.
+    /// the 2nd of 3 modifiers would leave the 1st stuck held on the real
+    /// keyboard forever.
+    fn press_chord(enigo: &mut Enigo, chord: &keymap::Chord) -> enigo::InputResult<()> {
+        let held = enigo.held().0;
+        Self::press_chord_with(&held, chord, |key, direction| enigo.key(key, direction))
     }
 
     /// The pinned display's origin `(x, y)` in the global desktop coordinate
@@ -127,57 +156,41 @@ impl MacosComputerControl {
     /// whichever display `screenshot`/`zoom` are currently capturing —
     /// without this a click computed from a secondary display's screenshot
     /// would land on the primary display instead.
-    fn target_origin(&self) -> Result<(i32, i32), ComputerError> {
-        let Some(id) = self.pinned_display() else {
-            return Ok((0, 0));
-        };
-        let monitor = xcap::Monitor::all()
-            .map_err(|e| ComputerError::Other(format!("listing displays failed: {e}")))?
-            .into_iter()
-            .find(|m| m.id().ok() == Some(id))
-            .ok_or_else(|| ComputerError::Other(format!("display {id} is no longer connected")))?;
-        Ok((
-            monitor.x().map_err(|e| monitor_error(&e))?,
-            monitor.y().map_err(|e| monitor_error(&e))?,
-        ))
+    fn geometry(&self) -> Result<ComputerFrameGeometry, ComputerError> {
+        let monitor = target_monitor(self.pinned_display())?;
+        monitor_geometry(&monitor)
+    }
+    fn target_point(&self, x: u32, y: u32) -> Result<(i32, i32), ComputerError> {
+        let geometry = self.geometry()?;
+        pixel_to_global(&geometry, x, y)
     }
 
-    // `&self` is unused (Enigo is constructed fresh per call, see the struct
-    // doc), but kept for a consistent `self.with_enigo(...)` call-site shape
-    // alongside every other method here.
-    #[allow(clippy::unused_self)]
-    fn with_enigo<T>(
-        &self,
-        f: impl FnOnce(&mut Enigo) -> enigo::InputResult<T>,
-    ) -> Result<T, ComputerError> {
-        let mut enigo = Enigo::new(&Settings::default())
-            .map_err(|e| ComputerError::Other(format!("enigo init failed: {e}")))?;
-        f(&mut enigo).map_err(|e| ComputerError::Other(format!("input error: {e}")))
-    }
-
-    /// Press `chord.modifiers` in order, click `chord.main`, release
-    /// modifiers in reverse — matches `withModifiers`/`key()` semantics.
-    ///
-    /// Tracks which modifiers actually landed (`pressed`) so a mid-press
-    /// failure still releases everything that WAS pressed, not just the ones
-    /// before the failure point — otherwise a transient press error on e.g.
-    /// the 2nd of 3 modifiers would leave the 1st stuck held on the real
-    /// keyboard forever.
-    fn press_chord(enigo: &mut Enigo, chord: &keymap::Chord) -> enigo::InputResult<()> {
+    fn press_chord_with(
+        held: &[enigo::Key],
+        chord: &keymap::Chord,
+        mut send: impl FnMut(enigo::Key, Direction) -> enigo::InputResult<()>,
+    ) -> enigo::InputResult<()> {
         let mut pressed = Vec::with_capacity(chord.modifiers.len());
         let press_result = (|| {
             for m in &chord.modifiers {
-                enigo.key(*m, Direction::Press)?;
-                pressed.push(*m);
+                if !held.contains(m) {
+                    send(*m, Direction::Press)?;
+                    pressed.push(*m);
+                }
             }
-            enigo.key(chord.main, Direction::Click)
+            send(chord.main, Direction::Press)?;
+            if !held.contains(&chord.main) {
+                pressed.push(chord.main);
+            }
+            Ok(())
         })();
+        let mut release_result = Ok(());
         for m in pressed.iter().rev() {
-            // Best-effort release — a release failure must not mask the
-            // original error, matching `releasePressed`'s swallow-on-throw.
-            let _ = enigo.key(*m, Direction::Release);
+            if let Err(error) = send(*m, Direction::Release) {
+                release_result = Err(error);
+            }
         }
-        press_result
+        press_result.and(release_result)
     }
 }
 
@@ -213,57 +226,54 @@ impl ComputerControl for MacosComputerControl {
     }
 
     async fn display_size(&self) -> Result<(u32, u32), ComputerError> {
-        let monitor = target_monitor(self.pinned_display())?;
-        Ok((
-            monitor.width().map_err(|e| monitor_error(&e))?,
-            monitor.height().map_err(|e| monitor_error(&e))?,
-        ))
+        let geometry = self.geometry()?;
+        Ok((geometry.pixel_width, geometry.pixel_height))
     }
 
     async fn mouse_move(&self, x: u32, y: u32) -> Result<(), ComputerError> {
-        let (ox, oy) = self.target_origin()?;
-        self.with_enigo(|e| e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs))
+        let (gx, gy) = self.target_point(x, y)?;
+        self.with_enigo(move |e| e.move_mouse(gx, gy, Coordinate::Abs))
     }
 
     async fn left_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
-        let (ox, oy) = self.target_origin()?;
-        self.with_enigo(|e| {
-            e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs)?;
-            e.button(Button::Left, Direction::Click)
-        })
+        self.mouse_click(x, y, "left").await
     }
-
     async fn right_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
-        let (ox, oy) = self.target_origin()?;
-        self.with_enigo(|e| {
-            e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs)?;
-            e.button(Button::Right, Direction::Click)
-        })
+        self.mouse_click(x, y, "right").await
     }
-
     async fn double_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
-        let (ox, oy) = self.target_origin()?;
-        self.with_enigo(|e| {
-            e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs)?;
-            e.button(Button::Left, Direction::Click)?;
-            e.button(Button::Left, Direction::Click)
+        let (x, y) = self.target_point(x, y)?;
+        let owned = self.owned_mouse.clone();
+        self.with_enigo(move |e| {
+            e.move_mouse(x, y, Coordinate::Abs)?;
+            click_button_with(&owned, 0, 2, |direction| send_button(e, 0, direction))
         })
     }
-
     async fn type_text(&self, text: String) -> Result<(), ComputerError> {
-        self.with_enigo(|e| e.text(&text))
+        self.with_enigo(move |e| {
+            type_text_with(&text, |input| match input {
+                TextInput::Text(text) => e.text(text),
+                TextInput::Tab => Self::press_chord(
+                    e,
+                    &keymap::Chord {
+                        main: enigo::Key::Tab,
+                        modifiers: vec![],
+                    },
+                ),
+            })
+        })
     }
 
     async fn key(&self, key: String) -> Result<(), ComputerError> {
         let chord = keymap::parse_chord(&key)
             .ok_or_else(|| ComputerError::Other(format!("unrecognized key name: {key}")))?;
-        self.with_enigo(|e| Self::press_chord(e, &chord))
+        self.with_enigo(move |e| Self::press_chord(e, &chord))
     }
 
     async fn scroll(&self, x: u32, y: u32, dx: i32, dy: i32) -> Result<(), ComputerError> {
-        let (ox, oy) = self.target_origin()?;
-        self.with_enigo(|e| {
-            e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs)?;
+        let (gx, gy) = self.target_point(x, y)?;
+        self.with_enigo(move |e| {
+            e.move_mouse(gx, gy, Coordinate::Abs)?;
             if dy != 0 {
                 e.scroll(dy, Axis::Vertical)?;
             }
@@ -275,108 +285,97 @@ impl ComputerControl for MacosComputerControl {
     }
 
     async fn middle_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
-        let (ox, oy) = self.target_origin()?;
-        self.with_enigo(|e| {
-            e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs)?;
-            e.button(Button::Middle, Direction::Click)
-        })
+        self.mouse_click(x, y, "middle").await
     }
-
     async fn triple_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
-        let (ox, oy) = self.target_origin()?;
-        self.with_enigo(|e| {
-            e.move_mouse(px(x) + ox, px(y) + oy, Coordinate::Abs)?;
-            e.button(Button::Left, Direction::Click)?;
-            e.button(Button::Left, Direction::Click)?;
-            e.button(Button::Left, Direction::Click)
+        let (x, y) = self.target_point(x, y)?;
+        let owned = self.owned_mouse.clone();
+        self.with_enigo(move |e| {
+            e.move_mouse(x, y, Coordinate::Abs)?;
+            click_button_with(&owned, 0, 3, |direction| send_button(e, 0, direction))
         })
     }
 
     async fn drag(&self, from: Option<(u32, u32)>, to: (u32, u32)) -> Result<(), ComputerError> {
-        let (ox, oy) = self.target_origin()?;
-        self.with_enigo(|e| {
-            if let Some((fx, fy)) = from {
-                e.move_mouse(px(fx) + ox, px(fy) + oy, Coordinate::Abs)?;
+        let from = from.map(|(x, y)| self.target_point(x, y)).transpose()?;
+        let (tx, ty) = self.target_point(to.0, to.1)?;
+        let owned = self.owned_mouse.clone();
+        self.with_enigo(move |e| {
+            if let Some((x, y)) = from {
+                e.move_mouse(x, y, Coordinate::Abs)?;
             }
             e.button(Button::Left, Direction::Press)?;
-            let result = e.move_mouse(px(to.0) + ox, px(to.1) + oy, Coordinate::Abs);
-            // Always release, even if the move failed — otherwise the button
-            // stays stuck-down (matches executor.ts's drag `finally`).
+            owned.fetch_or(1, std::sync::atomic::Ordering::AcqRel);
+            let moved = e.move_mouse(tx, ty, Coordinate::Abs);
             let release = e.button(Button::Left, Direction::Release);
-            result.and(release)
+            if release.is_ok() {
+                owned.fetch_and(!1, std::sync::atomic::Ordering::AcqRel);
+            }
+            moved.and(release)
         })
     }
 
     async fn mouse_down(&self) -> Result<(), ComputerError> {
-        self.with_enigo(|e| e.button(Button::Left, Direction::Press))
+        self.with_enigo(move |e| e.button(Button::Left, Direction::Press))?;
+        self.owned_mouse
+            .fetch_or(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
     }
 
     async fn mouse_up(&self) -> Result<(), ComputerError> {
-        self.with_enigo(|e| e.button(Button::Left, Direction::Release))
+        self.with_enigo(move |e| e.button(Button::Left, Direction::Release))?;
+        self.owned_mouse
+            .fetch_and(!1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
     }
 
     async fn cursor_position(&self) -> Result<(u32, u32), ComputerError> {
-        let (ox, oy) = self.target_origin()?;
-        self.with_enigo(|e| e.location())
-            .map(|(x, y)| (unpx(x - ox), unpx(y - oy)))
+        let geometry = self.geometry()?;
+        let (x, y) = self.with_enigo(move |e| e.location())?;
+        let x = (f64::from(x) - geometry.origin_x) * geometry.scale;
+        let y = (f64::from(y) - geometry.origin_y) * geometry.scale;
+        if x < 0.0
+            || y < 0.0
+            || x >= f64::from(geometry.pixel_width)
+            || y >= f64::from(geometry.pixel_height)
+        {
+            return Err(ComputerError::Other(
+                "cursor is outside the selected display; switch display to query its position"
+                    .into(),
+            ));
+        }
+        Ok((x.round() as u32, y.round() as u32))
     }
 
     async fn hold_key(&self, key: String, duration_ms: u64) -> Result<(), ComputerError> {
         let chord = keymap::parse_chord(&key)
-            .ok_or_else(|| ComputerError::Other(format!("unrecognized key name: {key}")))?;
-        let mut all = chord.modifiers.clone();
-        all.push(chord.main);
-        // Press, tracking what actually landed — a mid-press failure (e.g. the
-        // 2nd of 3 keys) must still release the ones that DID press, not skip
-        // straight to returning the error and leaving them stuck held.
-        let press_result = self.with_enigo(|e| {
-            let mut pressed = Vec::with_capacity(all.len());
-            let result = (|| {
-                for k in &all {
-                    e.key(*k, Direction::Press)?;
-                    pressed.push(*k);
+            .ok_or_else(|| ComputerError::Other(format!("unrecognized key: {key}")))?;
+        let mut keys = chord.modifiers;
+        keys.push(chord.main);
+        let press = keys.clone();
+        self.with_enigo(move |e| {
+            let mut pressed = Vec::new();
+            for key in press {
+                if let Err(error) = e.key(key, Direction::Press) {
+                    for key in pressed.into_iter().rev() {
+                        let _ = e.key(key, Direction::Release);
+                    }
+                    return Err(error);
                 }
-                Ok(())
-            })();
-            if result.is_err() {
-                for k in pressed.iter().rev() {
-                    let _ = e.key(*k, Direction::Release);
-                }
+                pressed.push(key);
             }
-            result
-        });
-        press_result?;
+            Ok(())
+        })?;
         tokio::time::sleep(std::time::Duration::from_millis(duration_ms)).await;
-        // The release MUST run even if constructing a fresh `Enigo` for it
-        // transiently fails: `with_enigo` bails via `?` on
-        // `Enigo::new()`'s own error BEFORE ever calling the closure that
-        // does the releasing — a single failed construction here would skip
-        // the release loop entirely and leave every key in `all` physically
-        // held with no second chance (unlike the press-phase failure above,
-        // which at least runs its own compensating release inside the SAME
-        // `with_enigo` call). Retry construction a few times with a short
-        // backoff — a construction failure moments after the press phase
-        // just succeeded is far more likely to be transient than a real,
-        // sustained permission loss.
-        let mut last_err = None;
-        for attempt in 0..3u32 {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            match self.with_enigo(|e| {
-                for k in all.iter().rev() {
-                    let _ = e.key(*k, Direction::Release);
+        self.with_enigo(move |e| {
+            let mut error = None;
+            for key in keys.into_iter().rev() {
+                if let Err(e) = e.key(key, Direction::Release) {
+                    error = Some(e);
                 }
-                Ok(())
-            }) {
-                Ok(()) => return Ok(()),
-                Err(e) => last_err = Some(e),
             }
-        }
-        Err(ComputerError::Other(format!(
-            "hold_key release failed after 3 attempts — key(s) may still be physically held: {}",
-            last_err.expect("loop always runs at least once")
-        )))
+            error.map_or(Ok(()), Err)
+        })
     }
 
     async fn zoom(&self, x: u32, y: u32, w: u32, h: u32) -> Result<Screenshot, ComputerError> {
@@ -478,11 +477,12 @@ impl ComputerControl for MacosComputerControl {
         let monitors = xcap::Monitor::all().map_err(|e| monitor_error(&e))?;
         let mut out = Vec::with_capacity(monitors.len());
         for m in &monitors {
+            let geometry = monitor_geometry(m)?;
             out.push(DisplayInfo {
-                id: m.id().map_err(|e| monitor_error(&e))?,
+                id: geometry.display_id,
                 name: m.name().unwrap_or_else(|_| "Unknown Display".into()),
-                width: m.width().map_err(|e| monitor_error(&e))?,
-                height: m.height().map_err(|e| monitor_error(&e))?,
+                width: geometry.pixel_width,
+                height: geometry.pixel_height,
                 is_primary: m.is_primary().unwrap_or(false),
             });
         }
@@ -525,5 +525,512 @@ impl ComputerControl for MacosComputerControl {
 
     async fn check_os_permissions(&self) -> Option<(bool, bool)> {
         Some(tcc::check_os_permissions())
+    }
+    fn desktop_lock_scope(&self) -> Option<std::path::PathBuf> {
+        // Effective UID identifies the current user's macOS desktop. The
+        // literal OS temporary root deliberately ignores HOME, TMPDIR and
+        // the application's configurable data directory.
+        unsafe extern "C" {
+            fn geteuid() -> u32;
+        }
+        let uid = unsafe { geteuid() };
+        Some(std::path::PathBuf::from(format!(
+            "/private/tmp/lingxi-computer-desktop-{uid}"
+        )))
+    }
+    fn capabilities(&self) -> ComputerBackendCapabilities {
+        ComputerBackendCapabilities {
+            held_keys: true,
+            pixel_scroll: true,
+            side_buttons: true,
+            frame_geometry: true,
+        }
+    }
+    async fn frame_geometry(&self) -> Result<Option<ComputerFrameGeometry>, ComputerError> {
+        self.geometry().map(Some)
+    }
+    async fn validate_keys(&self, keys: &[String]) -> Result<(), ComputerError> {
+        for key in keys {
+            if keymap::parse_key_name(key).is_none() {
+                return Err(ComputerError::Other(format!(
+                    "unrecognized key name: {key}"
+                )));
+            }
+        }
+        Ok(())
+    }
+    async fn key_down(&self, key: String) -> Result<(), ComputerError> {
+        let key = keymap::parse_key_name(&key)
+            .ok_or_else(|| ComputerError::Other(format!("unrecognized key name: {key}")))?;
+        self.with_enigo(move |e| e.key(key, Direction::Press))
+    }
+    async fn key_up(&self, key: String) -> Result<(), ComputerError> {
+        let key = keymap::parse_key_name(&key)
+            .ok_or_else(|| ComputerError::Other(format!("unrecognized key name: {key}")))?;
+        self.with_enigo(move |e| e.key(key, Direction::Release))
+    }
+    async fn key_chord(&self, keys: Vec<String>) -> Result<(), ComputerError> {
+        let parsed = keys
+            .iter()
+            .map(|key| {
+                keymap::parse_key_name(key)
+                    .ok_or_else(|| ComputerError::Other(format!("unrecognized key name: {key}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let Some((main, modifiers)) = parsed.split_last() else {
+            return Err(ComputerError::Other("empty key chord".into()));
+        };
+        let chord = keymap::Chord {
+            main: *main,
+            modifiers: modifiers.to_vec(),
+        };
+        self.with_enigo(move |e| Self::press_chord(e, &chord))
+    }
+    async fn release_held_keys(&self) -> Result<(), ComputerError> {
+        self.with_enigo(|enigo| {
+            let (keys, raw_keys) = enigo.held();
+            let mut result = Ok(());
+            for key in keys {
+                if let Err(error) = enigo.key(key, Direction::Release) {
+                    result = Err(error);
+                }
+            }
+            for key in raw_keys {
+                if let Err(error) = enigo.raw(key, Direction::Release) {
+                    result = Err(error);
+                }
+            }
+            result
+        })
+    }
+    async fn mouse_click(&self, x: u32, y: u32, button: &str) -> Result<(), ComputerError> {
+        let button = mouse_button_id(button)?;
+        let (x, y) = self.target_point(x, y)?;
+        let owned = self.owned_mouse.clone();
+        self.with_enigo(move |e| {
+            e.move_mouse(x, y, Coordinate::Abs)?;
+            click_button_with(&owned, button, 1, |direction| {
+                send_button(e, button, direction)
+            })
+        })
+    }
+    async fn click_current(&self, button: &str, count: u32) -> Result<(), ComputerError> {
+        let button = mouse_button_id(button)?;
+        if count == 0 || count > 3 || (button >= 3 && count != 1) {
+            return Err(ComputerError::Unsupported("mouse click count".into()));
+        }
+        let owned = self.owned_mouse.clone();
+        self.with_enigo(move |e| {
+            click_button_with(&owned, button, count, |direction| {
+                send_button(e, button, direction)
+            })
+        })
+    }
+    async fn release_held_buttons(&self) -> Result<(), ComputerError> {
+        let owned = self.owned_mouse.clone();
+        self.with_enigo(move |e| {
+            release_buttons_with(&owned, |button| send_button(e, button, Direction::Release))
+        })
+    }
+    async fn scroll_current(&self, dx: i32, dy: i32, pixels: bool) -> Result<(), ComputerError> {
+        if pixels {
+            return post_pixel_scroll(dx, dy);
+        }
+        self.with_enigo(move |e| {
+            if dy != 0 {
+                e.scroll(dy, Axis::Vertical)?;
+            }
+            if dx != 0 {
+                e.scroll(dx, Axis::Horizontal)?;
+            }
+            Ok(())
+        })
+    }
+    async fn scroll_pixels(&self, x: u32, y: u32, dx: i32, dy: i32) -> Result<(), ComputerError> {
+        let (x, y) = self.target_point(x, y)?;
+        self.with_enigo(move |e| e.move_mouse(x, y, Coordinate::Abs))?;
+        post_pixel_scroll(dx, dy)
+    }
+}
+use lingxi_core::host::computer_control::{
+    AppInfo, ComputerBackendCapabilities, ComputerControl, ComputerError, ComputerFrameGeometry,
+    DisplayInfo, Screenshot,
+};
+
+fn monitor_geometry(monitor: &xcap::Monitor) -> Result<ComputerFrameGeometry, ComputerError> {
+    let display_id = monitor.id().map_err(|e| monitor_error(&e))?;
+    let scale = f64::from(monitor.scale_factor().map_err(|e| monitor_error(&e))?);
+    let origin_x = f64::from(monitor.x().map_err(|e| monitor_error(&e))?);
+    let origin_y = f64::from(monitor.y().map_err(|e| monitor_error(&e))?);
+    // xcap's macOS monitor bounds are global OS points, while this host
+    // contract exposes capture pixels for both display listings and frames.
+    let pixel_width =
+        (f64::from(monitor.width().map_err(|e| monitor_error(&e))?) * scale).round() as u32;
+    let pixel_height =
+        (f64::from(monitor.height().map_err(|e| monitor_error(&e))?) * scale).round() as u32;
+    Ok(ComputerFrameGeometry {
+        display_id,
+        pixel_width,
+        pixel_height,
+        origin_x,
+        origin_y,
+        scale,
+        version: format!(
+            "macos-v1:{display_id}:{pixel_width}:{pixel_height}:{origin_x}:{origin_y}:{scale}"
+        ),
+    })
+}
+
+/// Real macOS automation backend.
+///
+/// Native input handles live on one dedicated worker thread. This preserves
+/// modifier flags and pressed inputs across asynchronous calls while keeping
+/// the non-Send Enigo handle on its owning thread.
+type InputJob = Box<dyn FnOnce(&mut Option<Enigo>) + Send>;
+
+fn event_source() -> Result<core_graphics::event_source::CGEventSource, ComputerError> {
+    core_graphics::event_source::CGEventSource::new(
+        core_graphics::event_source::CGEventSourceStateID::HIDSystemState,
+    )
+    .map_err(|()| ComputerError::Other("CGEventSource creation failed".into()))
+}
+
+enum TextInput<'a> {
+    Text(&'a str),
+    Tab,
+}
+
+/// Keep Enigo's 20-scalar text chunks and leading-control workaround, but
+/// route its physical Tab clicks through tracked Press/Release operations.
+fn type_text_with<E>(
+    text: &str,
+    mut send: impl FnMut(TextInput<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut starts = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .step_by(20)
+        .peekable();
+    while let Some(start) = starts.next() {
+        let end = starts.peek().copied().unwrap_or(text.len());
+        let mut chunk = &text[start..end];
+        loop {
+            if let Some(rest) = chunk.strip_prefix('\t') {
+                send(TextInput::Tab)?;
+                chunk = rest;
+            } else if let Some(rest) = chunk.strip_prefix('\r') {
+                send(TextInput::Text("\u{200B}\r"))?;
+                chunk = rest;
+            } else if let Some(rest) = chunk.strip_prefix('\n') {
+                send(TextInput::Text("\u{200B}\n"))?;
+                chunk = rest;
+            } else {
+                break;
+            }
+        }
+        if !chunk.is_empty() {
+            send(TextInput::Text(chunk))?;
+        }
+    }
+    Ok(())
+}
+fn mouse_button_id(button: &str) -> Result<u8, ComputerError> {
+    match button {
+        "left" => Ok(0),
+        "right" => Ok(1),
+        "middle" => Ok(2),
+        "back" => Ok(3),
+        "forward" => Ok(4),
+        _ => Err(ComputerError::Unsupported(format!("mouse button {button}"))),
+    }
+}
+fn click_button_with<E>(
+    owned: &std::sync::atomic::AtomicU8,
+    button: u8,
+    count: u32,
+    mut send: impl FnMut(Direction) -> Result<(), E>,
+) -> Result<(), E> {
+    for _ in 0..count {
+        send(Direction::Press)?;
+        owned.fetch_or(1 << button, std::sync::atomic::Ordering::AcqRel);
+        send(Direction::Release)?;
+        owned.fetch_and(!(1 << button), std::sync::atomic::Ordering::AcqRel);
+    }
+    Ok(())
+}
+fn release_buttons_with<E>(
+    owned: &std::sync::atomic::AtomicU8,
+    mut send: impl FnMut(u8) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut error = None;
+    for button in 0..5 {
+        if owned.load(std::sync::atomic::Ordering::Acquire) & (1 << button) != 0 {
+            match send(button) {
+                Ok(()) => {
+                    owned.fetch_and(!(1 << button), std::sync::atomic::Ordering::AcqRel);
+                }
+                Err(e) => {
+                    error = Some(e);
+                }
+            }
+        }
+    }
+    error.map_or(Ok(()), Err)
+}
+fn send_button(enigo: &mut Enigo, button: u8, direction: Direction) -> enigo::InputResult<()> {
+    match button {
+        0 => enigo.button(Button::Left, direction),
+        1 => enigo.button(Button::Right, direction),
+        2 => enigo.button(Button::Middle, direction),
+        _ => {
+            let (x, y) = enigo.location()?;
+            post_side_button_event(x, y, i64::from(button), direction)
+                .map_err(|_| enigo::InputError::Simulate("side button event creation failed"))
+        }
+    }
+}
+fn post_side_button_event(
+    x: i32,
+    y: i32,
+    button: i64,
+    direction: Direction,
+) -> Result<(), ComputerError> {
+    use core_graphics::{
+        event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField},
+        geometry::CGPoint,
+    };
+    let source = event_source()?;
+    let event_type = match direction {
+        Direction::Press => CGEventType::OtherMouseDown,
+        Direction::Release => CGEventType::OtherMouseUp,
+        Direction::Click => return Err(ComputerError::Other("untracked side button click".into())),
+    };
+    let event = CGEvent::new_mouse_event(
+        source.clone(),
+        event_type,
+        CGPoint::new(f64::from(x), f64::from(y)),
+        CGMouseButton::Center,
+    )
+    .map_err(|()| ComputerError::Other("mouse event creation failed".into()))?;
+    event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, button);
+    event.set_flags(
+        CGEvent::new(source)
+            .map_err(|()| ComputerError::Other("event flags unavailable".into()))?
+            .get_flags(),
+    );
+    event.post(CGEventTapLocation::HID);
+    Ok(())
+}
+fn post_pixel_scroll(dx: i32, dy: i32) -> Result<(), ComputerError> {
+    use core_graphics::event::{CGEvent, CGEventTapLocation, ScrollEventUnit};
+    let source = event_source()?;
+    let flags = CGEvent::new(source.clone())
+        .map_err(|()| ComputerError::Other("event flags unavailable".into()))?
+        .get_flags();
+    let event = CGEvent::new_scroll_event(source, ScrollEventUnit::PIXEL, 2, -dy, -dx, 0)
+        .map_err(|()| ComputerError::Other("pixel scroll event creation failed".into()))?;
+    event.set_flags(flags);
+    event.post(CGEventTapLocation::HID);
+    Ok(())
+}
+
+fn pixel_to_global(
+    geometry: &ComputerFrameGeometry,
+    x: u32,
+    y: u32,
+) -> Result<(i32, i32), ComputerError> {
+    if x >= geometry.pixel_width
+        || y >= geometry.pixel_height
+        || !geometry.scale.is_finite()
+        || geometry.scale <= 0.0
+    {
+        return Err(ComputerError::Other(
+            "coordinate outside selected display".into(),
+        ));
+    }
+    // Enigo accepts integer OS points. Keep every capture pixel within its
+    // logical point cell; rounding can cross the display's far edge.
+    Ok((
+        (geometry.origin_x + f64::from(x) / geometry.scale).floor() as i32,
+        (geometry.origin_y + f64::from(y) / geometry.scale).floor() as i32,
+    ))
+}
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+    #[test]
+    fn typed_leading_tabs_are_tracked_and_stop_text_after_a_release_failure() {
+        let mut held = Vec::new();
+        let mut events = Vec::new();
+        let result = type_text_with("\r\n\ttext", |input| match input {
+            TextInput::Text(text) => {
+                events.push(text.to_string());
+                Ok(())
+            }
+            TextInput::Tab => MacosComputerControl::press_chord_with(
+                &[],
+                &keymap::Chord {
+                    main: enigo::Key::Tab,
+                    modifiers: vec![],
+                },
+                |key, direction| {
+                    assert_ne!(direction, Direction::Click);
+                    events.push(format!("{key:?}:{direction:?}"));
+                    if direction == Direction::Press {
+                        held.push(key);
+                        Ok(())
+                    } else {
+                        Err(enigo::InputError::Simulate("release failed"))
+                    }
+                },
+            ),
+        });
+        assert!(result.is_err());
+        assert_eq!(held, [enigo::Key::Tab]);
+        assert_eq!(
+            events,
+            ["\u{200B}\r", "\u{200B}\n", "Tab:Press", "Tab:Release"]
+        );
+    }
+    #[test]
+    fn typed_chunks_keep_unicode_boundaries_and_embedded_tabs() {
+        let prefix = "界".repeat(20);
+        let text = format!("{prefix}\t\n\ta\tb");
+        let mut events = Vec::new();
+        type_text_with(&text, |input| {
+            events.push(match input {
+                TextInput::Text(text) => format!("text:{text}"),
+                TextInput::Tab => "tab".into(),
+            });
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert_eq!(
+            events,
+            [
+                format!("text:{prefix}"),
+                "tab".into(),
+                "text:\u{200B}\n".into(),
+                "tab".into(),
+                "text:a\tb".into()
+            ]
+        );
+    }
+    #[test]
+    fn every_click_button_retains_failed_release_and_retries_cleanup() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        for button in 0..5 {
+            let held = AtomicU8::new(0);
+            let mut directions = Vec::new();
+            let result = click_button_with(&held, button, 1, |direction| {
+                directions.push(direction);
+                if direction == Direction::Release {
+                    Err("release failed")
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_err());
+            assert_eq!(directions, [Direction::Press, Direction::Release]);
+            assert_eq!(held.load(Ordering::Acquire), 1 << button);
+            assert!(release_buttons_with(&held, |_| Err("still failing")).is_err());
+            assert_eq!(held.load(Ordering::Acquire), 1 << button);
+            release_buttons_with(&held, |released| {
+                assert_eq!(released, button);
+                Ok::<_, &str>(())
+            })
+            .unwrap();
+            assert_eq!(held.load(Ordering::Acquire), 0);
+        }
+    }
+    #[test]
+    fn chord_release_failure_is_reported_and_other_modifiers_are_still_released() {
+        let chord = keymap::Chord {
+            main: enigo::Key::Unicode('a'),
+            modifiers: vec![enigo::Key::Meta, enigo::Key::Shift],
+        };
+        for failed in [enigo::Key::Shift, chord.main] {
+            let mut releases = Vec::new();
+            let result = MacosComputerControl::press_chord_with(&[], &chord, |key, direction| {
+                assert_ne!(
+                    direction,
+                    Direction::Click,
+                    "compound input must track each successful press"
+                );
+                if direction == Direction::Release {
+                    releases.push(key);
+                    if key == failed {
+                        return Err(enigo::InputError::InvalidInput("release failed".into()));
+                    }
+                }
+                Ok(())
+            });
+            assert!(result.is_err());
+            assert_eq!(
+                releases,
+                vec![chord.main, enigo::Key::Shift, enigo::Key::Meta]
+            );
+        }
+    }
+    #[test]
+    fn capture_pixels_stay_inside_the_selected_display_point_bounds() {
+        for (origin_x, origin_y, scale, width, height) in [
+            (0.0, 0.0, 2.0, 2880, 1800),
+            (1440.0, 900.0, 2.0, 2880, 1800),
+            (-1440.0, -900.0, 2.0, 2880, 1800),
+            (0.0, 0.0, 1.5, 6, 6),
+        ] {
+            let geometry = ComputerFrameGeometry {
+                display_id: 2,
+                pixel_width: width,
+                pixel_height: height,
+                origin_x,
+                origin_y,
+                scale,
+                version: "edge-fixture".into(),
+            };
+            for (x, y) in [
+                (0, 0),
+                (width - 1, 0),
+                (0, height - 1),
+                (width - 1, height - 1),
+                (1, 1),
+            ] {
+                let (global_x, global_y) = pixel_to_global(&geometry, x, y).unwrap();
+                assert!(
+                    f64::from(global_x) >= origin_x
+                        && f64::from(global_x) < origin_x + f64::from(width) / scale
+                        && f64::from(global_y) >= origin_y
+                        && f64::from(global_y) < origin_y + f64::from(height) / scale,
+                    "pixel ({x},{y}) escaped display bounds: ({global_x},{global_y}), origin=({origin_x},{origin_y}), scale={scale}"
+                );
+                assert_eq!(
+                    (global_x, global_y),
+                    (
+                        (origin_x + f64::from(x) / scale).floor() as i32,
+                        (origin_y + f64::from(y) / scale).floor() as i32
+                    ),
+                    "all pixels in a logical point cell must target that cell"
+                );
+            }
+            assert!(pixel_to_global(&geometry, width, 0).is_err());
+            assert!(pixel_to_global(&geometry, 0, height).is_err());
+        }
+    }
+
+    #[test]
+    fn retina_secondary_pixels_become_global_points() {
+        let geometry = ComputerFrameGeometry {
+            display_id: 2,
+            pixel_width: 2880,
+            pixel_height: 1800,
+            origin_x: -1440.0,
+            origin_y: 120.0,
+            scale: 2.0,
+            version: "v1".into(),
+        };
+        assert_eq!(pixel_to_global(&geometry, 200, 400).unwrap(), (-1340, 320));
+        assert_eq!(pixel_to_global(&geometry, 0, 0).unwrap(), (-1440, 120));
+        assert!(pixel_to_global(&geometry, 2880, 1).is_err());
     }
 }

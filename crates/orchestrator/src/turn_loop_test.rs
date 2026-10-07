@@ -1876,6 +1876,82 @@ mod read_file_state_tests {
             vec![cwd.join("a.rs"), cwd.join("c.rs"), cwd.join("b.rs")]
         );
     }
+    use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, ToolUseId};
+
+    #[tokio::test]
+    async fn mod_prompt_attachment_retains_utf16_through_rewrite_and_cache_identity() {
+        use lingxi_core::types::{ContentBlock, ConversationMessage};
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("register.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+              let calls = 0;
+              on('prompt.attachment', { type: 'hook_additional_context' }, ($, e) => {
+                return { text: String(++calls) + e.text + String.fromCharCode(0xdc00) };
+              });
+            }"#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("utf16-context", dir.path(), &module, json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let orch = orch_with_tools(PathBuf::from("/tmp"), vec![])
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        let id = lingxi_core::types::MessageId::new();
+        let prefix = "<system-reminder>\n".encode_utf16().collect::<Vec<_>>();
+        let suffix = "\n</system-reminder>".encode_utf16().collect::<Vec<_>>();
+        for (source, count) in [(0xd800, b'1'), (0xd800, b'1'), (0xd801, b'2')] {
+            let units = [
+                prefix.clone(),
+                vec![u16::from(b'A'), source],
+                suffix.clone(),
+            ]
+            .concat();
+            let message = ConversationMessage::User {
+                id,
+                content: vec![ContentBlock::TextJsUtf16 {
+                    text: String::from_utf16_lossy(&units),
+                    utf16_code_units: units,
+                    citations: None,
+                }],
+                is_meta: true,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+            };
+            let rendered = orch
+                .mod_prompt_attachment(
+                    "hook_additional_context",
+                    message,
+                    json!({"kind":"plugin","event":"tool.call"}),
+                )
+                .await
+                .unwrap();
+            let ConversationMessage::User { content, .. } = rendered else {
+                panic!("attachment must remain a user message");
+            };
+            let ContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            } = &content[0]
+            else {
+                panic!("attachment must retain its exact UTF-16 representation");
+            };
+            assert_eq!(
+                utf16_code_units,
+                &[
+                    prefix.clone(),
+                    vec![u16::from(count), u16::from(b'A'), source, 0xdc00],
+                    suffix.clone()
+                ]
+                .concat(),
+                "rewrites preserve code units; equal display text cannot alias cache identities"
+            );
+        }
+    }
 }
 // ============================================================================
 // A1: max_output_tokens recovery (multi-turn nudge + escalation/exhaustion).
@@ -3472,6 +3548,30 @@ mod pre_tool_hook_tests {
                 reason: "denied-by-rule".into(),
             }
         }
+        async fn resolve_after_hook_allow_mod_core(
+            &self,
+            _tool: &str,
+            _input: &serde_json::Value,
+            _ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+        ) -> Result<
+            lingxi_core::host::permission_gate::HookAllowModCoreEvaluation,
+            lingxi_core::host::permission_gate::PermissionAbort,
+        > {
+            Ok(
+                lingxi_core::host::permission_gate::HookAllowModCoreEvaluation {
+                    resolution: PermissionResolution::Deny {
+                        reason: "denied-by-rule".into(),
+                        source: PermissionDecisionSource::Rule,
+                        rule_source: Some("session".into()),
+                        decision_reason_type: Some("rule".into()),
+                        decision_reason: Some("denied-by-rule".into()),
+                        behavior_ask: false,
+                        content_blocks: Vec::new(),
+                    },
+                    evaluation: None,
+                },
+            )
+        }
     }
 
     /// Permission gate that returns a DISTINGUISHABLE denial from each entry
@@ -4558,13 +4658,13 @@ mod pre_tool_hook_tests {
         let (msg, tagged_tu) = &injected[0];
         assert_eq!(*tagged_tu, tool_use_id, "tagged with the dispatching tool");
         match msg {
-            ConversationMessage::User { content, .. } => match content.first() {
-                Some(ContentBlock::Text { text }) => assert_eq!(
-                    text,
-                    "<system-reminder>\nPreToolUse:Echo hook additional context: INJECTED-CTX\n</system-reminder>"
-                ),
-                other => panic!("expected leading Text block, got {other:?}"),
-            },
+            ConversationMessage::User { content, .. } => {
+                assert_eq!(content.len(), 1);
+                assert_eq!(
+                    content[0].visible_text(),
+                    Some("<system-reminder>\nPreToolUse:Echo hook additional context: INJECTED-CTX\n</system-reminder>")
+                );
+            }
             other => panic!("expected injected User message, got {other:?}"),
         }
     }
@@ -4826,7 +4926,7 @@ mod pre_tool_hook_tests {
         let bus = Arc::new(telemetry::AnalyticsBus::new());
         let sink = Arc::new(telemetry::InMemorySink::new());
         bus.attach_sink(sink.clone()).await;
-        let orch = orch_with_mcp_end_turn(api.clone(), output, bus, false);
+        let orch = orch_with_mcp_end_turn(api.clone(), output.clone(), bus, false);
 
         match execute_one_turn(&orch, None).await.expect("turn step") {
             TurnStepOutcome::Ended {
@@ -4847,6 +4947,27 @@ mod pre_tool_hook_tests {
             api.captured_msgs().await.len(),
             1,
             "no follow-up model call"
+        );
+        let result_frames = output
+            .snapshot()
+            .await
+            .into_iter()
+            .filter(|event| {
+                matches!(event, lingxi_core::host::OutputEvent::ToolResult { id, tool, .. }
+                    if id == &tu && tool == "McpEndTurn")
+            })
+            .count();
+        assert_eq!(
+            result_frames, 1,
+            "the accepted tool result emits one client frame"
+        );
+        assert!(
+            orch.transcript
+                .pending_tool_result_turn_end
+                .lock()
+                .await
+                .is_empty(),
+            "the accepted end-turn request must be consumed once"
         );
         let history = orch.session().lock().await.history.clone();
         assert_eq!(
@@ -6084,6 +6205,62 @@ mod pre_tool_hook_tests {
             1,
             "classifier deny MUST fire the PermissionDenied hook"
         );
+    }
+
+    #[tokio::test]
+    async fn revoked_ordinary_dispatch_cannot_publish_mcp_metadata_or_result_frames() {
+        let output = Arc::new(MockOutputStream::new());
+        let orch = orch_with_mcp_end_turn(
+            Arc::new(MockApiClient::new(vec![])),
+            output.clone(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            false,
+        );
+        let id = ToolUseId::new();
+        let assistant_id = MessageId::new();
+        let generation = lingxi_core::host::CancellationToken::new();
+        let fence = crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
+            generation.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+        );
+        let mut dispatched = crate::native_computer::dispatch_tools(
+            &orch,
+            &[(id.clone(), "McpEndTurn".into(), json!({}), None)],
+            assistant_id,
+            crate::turn_loop::ToolUseDispatchFacts {
+                query_history: vec![],
+                assistant_message: ConversationMessage::Assistant {
+                    id: assistant_id,
+                    content: vec![ContentBlock::ToolUse {
+                        id: id.clone(),
+                        name: "McpEndTurn".into(),
+                        input: json!({}),
+                        provider_id: None,
+                    }],
+                    stop_reason: Some("tool_use".into()),
+                },
+                same_turn_tool_uses: vec![],
+            },
+            fence.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(!dispatched.publications.is_empty());
+        generation.cancel();
+        assert!(!dispatched.publish_results(&orch, &fence).await);
+        assert!(orch.transcript.tool_use_results.lock().await.is_empty());
+        assert!(orch.transcript.tool_use_mcp_meta.lock().await.is_empty());
+        assert!(orch
+            .transcript
+            .pending_tool_result_turn_end
+            .lock()
+            .await
+            .is_empty());
+        assert!(output
+            .snapshot()
+            .await
+            .iter()
+            .all(|event| !matches!(event, lingxi_core::host::OutputEvent::ToolResult { .. })));
     }
 }
 /// Pre-cancellation guard in `dispatch_tool_uses_tracked`:

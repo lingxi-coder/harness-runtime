@@ -15,7 +15,7 @@ use crate::{
     ProviderProfile, SigningConfig,
 };
 
-const SUPPORTED_PROVIDER_TYPES: &str = "openai, openai-responses, anthropic, gemini, azure-openai, bedrock-claude, vertex-claude, vertex-gemini, foundry-claude";
+const SUPPORTED_PROVIDER_TYPES: &str = "openai, openai-responses, anthropic, gemini, gemini-interactions, azure-openai, bedrock-claude, vertex-claude, vertex-gemini, foundry-claude";
 
 /// Provider kinds accepted in `settings.providers`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +28,8 @@ pub enum ProviderKind {
     Anthropic,
     /// Gemini first-party generateContent wire.
     Gemini,
+    /// Gemini first-party stored Interactions wire.
+    GeminiInteractions,
     /// Azure OpenAI deployments wire.
     AzureOpenAi,
     /// Anthropic Claude on AWS Bedrock.
@@ -47,6 +49,7 @@ impl ProviderKind {
             "openai-responses" => Some(Self::OpenAiResponses),
             "anthropic" => Some(Self::Anthropic),
             "gemini" => Some(Self::Gemini),
+            "gemini-interactions" => Some(Self::GeminiInteractions),
             "azure-openai" => Some(Self::AzureOpenAi),
             "bedrock-claude" => Some(Self::BedrockClaude),
             "vertex-claude" => Some(Self::VertexClaude),
@@ -62,6 +65,7 @@ impl ProviderKind {
             Self::OpenAiResponses => ProtocolFamily::OpenAiResponses,
             Self::Anthropic => ProtocolFamily::AnthropicMessages,
             Self::Gemini => ProtocolFamily::GeminiGenerateContent,
+            Self::GeminiInteractions => ProtocolFamily::GeminiInteractions,
             Self::AzureOpenAi => ProtocolFamily::AzureOpenAi,
             Self::BedrockClaude => ProtocolFamily::BedrockClaude,
             Self::VertexClaude => ProtocolFamily::VertexClaude,
@@ -80,7 +84,7 @@ impl ProviderKind {
             // `auth = Bearer` explicitly. See `foundry_claude` codec docs and
             // the `(ApiKey, FoundryClaude)` auth arm in `client.rs`.
             Self::FoundryClaude => AuthStrategy::ApiKey,
-            Self::OpenAi | Self::OpenAiResponses | Self::Anthropic | Self::Gemini => {
+            Self::OpenAi | Self::OpenAiResponses | Self::Anthropic | Self::Gemini | Self::GeminiInteractions => {
                 AuthStrategy::ApiKey
             }
         }
@@ -92,7 +96,7 @@ impl ProviderKind {
                 name: profile_name.to_string(),
             },
             Self::Anthropic => ProviderId::AnthropicFirstParty,
-            Self::Gemini => ProviderId::Gemini,
+            Self::Gemini | Self::GeminiInteractions => ProviderId::Gemini,
             Self::AzureOpenAi => ProviderId::AzureOpenAI,
             Self::BedrockClaude => ProviderId::BedrockClaude,
             Self::VertexClaude => ProviderId::VertexClaude,

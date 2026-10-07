@@ -18,7 +18,12 @@ pub fn require_coord(input: &Value, key: &str) -> Result<(u32, u32), ToolError> 
             let y = input.get("y").and_then(Value::as_u64);
             if let (Some(x), Some(y)) = (x, y) {
                 #[allow(clippy::cast_possible_truncation)]
-                return Ok((x as u32, y as u32));
+                return Ok((
+                    u32::try_from(x)
+                        .map_err(|_| ToolError::InvalidInput("coordinate exceeds u32".into()))?,
+                    u32::try_from(y)
+                        .map_err(|_| ToolError::InvalidInput("coordinate exceeds u32".into()))?,
+                ));
             }
         }
         return Err(ToolError::InvalidInput(format!("{key} is required")));
@@ -38,8 +43,10 @@ pub fn require_coord(input: &Value, key: &str) -> Result<(u32, u32), ToolError> 
             "{key} must be a tuple of non-negative numbers"
         )));
     };
-    #[allow(clippy::cast_possible_truncation)] // coordinate space never exceeds u32
-    Ok((x as u32, y as u32))
+    Ok((
+        u32::try_from(x).map_err(|_| ToolError::InvalidInput("coordinate exceeds u32".into()))?,
+        u32::try_from(y).map_err(|_| ToolError::InvalidInput("coordinate exceeds u32".into()))?,
+    ))
 }
 
 /// `text is required` (`bad_args`) / `text must be a string` (`bad_args`).
@@ -151,13 +158,13 @@ fn duration_secs(input: &Value, max_secs: f64) -> Result<f64, ToolError> {
 
 /// `wait`'s duration validation.
 pub fn wait_duration(input: &Value) -> Result<f64, ToolError> {
-    duration_secs(input, 60.0)
+    duration_secs(input, 300.0)
 }
 
 /// `hold_key`'s duration validation (same rules, kept as a distinct entry
 /// point in case the two ceilings ever diverge).
 pub fn hold_duration(input: &Value) -> Result<f64, ToolError> {
-    duration_secs(input, 60.0)
+    duration_secs(input, 300.0)
 }
 
 /// `scroll_direction must be 'up', 'down', 'left', or 'right'` (`bad_args`).
@@ -234,11 +241,7 @@ fn canonicalize_chord(chord: &str) -> Option<(Vec<&'static str>, String)> {
         .filter(|p| !p.is_empty())
         .collect();
     let last = parts.pop()?;
-    let main = match last.to_ascii_lowercase().as_str() {
-        "esc" => "escape".to_string(),
-        "enter" => "return".to_string(),
-        other => other.to_string(),
-    };
+    let main = lingxi_core::host::computer_control::canonical_computer_key(last);
     let mut mods: Vec<&'static str> = parts.iter().filter_map(|p| canonical_modifier(p)).collect();
     mods.sort_unstable();
     mods.dedup();

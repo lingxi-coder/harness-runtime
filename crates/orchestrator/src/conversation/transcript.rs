@@ -414,7 +414,7 @@ impl ConversationOrchestrator {
     /// or several tool_results cannot attribute one message-level kind, so it
     /// gets none. Taking (rather than reading) keeps a denial from stamping a
     /// second line if the same result were ever persisted twice.
-    async fn take_tool_denial_kind(&self, msg: &ConversationMessage) -> Option<String> {
+    pub(crate) async fn take_tool_denial_kind(&self, msg: &ConversationMessage) -> Option<String> {
         let only = Self::sole_tool_result_id(msg)?;
         self.transcript.tool_denial_kinds.lock().await.remove(&only)
     }
@@ -540,13 +540,13 @@ impl ConversationOrchestrator {
     }
 
     /// Take the recorded `toolUseResult` under the same single-block guard.
-    async fn take_tool_use_result(&self, msg: &ConversationMessage) -> Option<serde_json::Value> {
+    pub(crate) async fn take_tool_use_result(&self, msg: &ConversationMessage) -> Option<serde_json::Value> {
         let only = Self::sole_tool_result_id(msg)?;
         self.transcript.tool_use_results.lock().await.remove(&only)
     }
 
     /// Take the recorded `mcpMeta` under the same single-block guard.
-    async fn take_tool_use_mcp_meta(&self, msg: &ConversationMessage) -> Option<serde_json::Value> {
+    pub(crate) async fn take_tool_use_mcp_meta(&self, msg: &ConversationMessage) -> Option<serde_json::Value> {
         let only = Self::sole_tool_result_id(msg)?;
         self.transcript.tool_use_mcp_meta.lock().await.remove(&only)
     }
@@ -2022,11 +2022,229 @@ impl ConversationOrchestrator {
     /// Update the out-of-band assistant timestamp without changing message wire
     /// shape. Every production assistant commit passes through one of the JSONL
     /// persistence seams, including writer-less runtimes.
-    async fn note_assistant_commit(&self, msg: &ConversationMessage) {
+    pub(crate) async fn note_assistant_commit(&self, msg: &ConversationMessage) {
         if matches!(msg, ConversationMessage::Assistant { .. }) {
             self.session.lock().await.message_timing.last_assistant_at =
                 Some(std::time::SystemTime::now());
         }
+    }
+
+    /// Dispatch the main-session row before JSONL serialization and reflect
+    /// accepted content changes into the already-appended in-memory history.
+    pub(crate) async fn mod_session_append_row(
+        &self,
+        message: &ConversationMessage,
+        row_uuid: Option<&str>,
+        update_history: bool,
+        publication_fence: Option<Arc<dyn HookPublicationGuard>>,
+    ) -> ConversationMessage {
+        let original = message.clone();
+        if publication_fence.as_ref().is_some_and(|fence| {
+            !hooks::attachment::HookPublicationGuard::is_current(fence.as_ref())
+        }) {
+            return original;
+        }
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return original;
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            return original;
+        };
+        if !host.has_event("session.append") {
+            return original;
+        }
+
+        let uuid = row_uuid
+            .map(str::to_owned)
+            .unwrap_or_else(|| original.id().as_uuid().to_string());
+        let (door, origin) = self.mod_append_door_origin(&original).await;
+        let input_utf16_strings = mod_append_content_utf16_sidecars(&original, "/message");
+        let input = serde_json::json!({
+            "message":mod_append_message(&original),
+            "door":door,
+            "origin":origin,
+            "uuid":uuid.clone(),
+        });
+        let core_input = input.clone();
+        let core_uuid = uuid.clone();
+        let core_original = original.clone();
+        let applied = Arc::new(std::sync::Mutex::new(
+            None::<(ConversationMessage, serde_json::Value)>,
+        ));
+        let applied_by_core = applied.clone();
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let cwd = self.current_cwd();
+        let guarded_session = if let Some(fence) = publication_fence.clone() {
+            let Some(session) = crate::turn_loop::generation_bound_mod_session_context(self, fence)
+            else {
+                return original;
+            };
+            Some(session)
+        } else {
+            None
+        };
+        let session: &dyn hooks::mods::ModSessionContext =
+            guarded_session.as_deref().map_or(self, |session| session);
+        let log_fence = publication_fence.clone();
+        let toast_fence = publication_fence.clone();
+        let status_fence = publication_fence.clone();
+        let dispatched = host
+            .dispatch_with_utf16_at_context(
+                "session.append",
+                hooks::mods::ModUtf16ValueProjection {
+                    value: input,
+                    strings: input_utf16_strings,
+                    keys: Vec::new(),
+                },
+                &cwd,
+                Some(session),
+                None,
+                None,
+                None,
+                lingxi_core::host::task_registry::FieldPresence::Missing,
+                move |forwarded_projection| {
+                    let core_input = core_input.clone();
+                    let core_uuid = core_uuid.clone();
+                    let core_original = core_original.clone();
+                    let applied = applied_by_core.clone();
+                    let forwarded = forwarded_projection.value;
+                    let input_utf16_strings = forwarded_projection.strings;
+                    async move {
+                        for key in ["door", "origin", "uuid", "agentId"] {
+                            if forwarded
+                                .get(key)
+                                .is_some_and(|value| core_input.get(key) != Some(value))
+                            {
+                                return Err(hooks::mods::ModError::Hook(format!(
+                                    "session.append {key} is pinned"
+                                )));
+                            }
+                        }
+                        let Some(incoming) = forwarded.get("message") else {
+                            return Err(hooks::mods::ModError::Hook(
+                                "session.append needs message.content".into(),
+                            ));
+                        };
+                        let original_projection = mod_append_message(&core_original);
+                        for key in ["type", "name", "role", "isMeta"] {
+                            if incoming
+                                .get(key)
+                                .is_some_and(|value| original_projection.get(key) != Some(value))
+                            {
+                                return Err(hooks::mods::ModError::Hook(format!(
+                                    "session.append message.{key} is pinned"
+                                )));
+                            }
+                        }
+                        let rewritten = rewrite_mod_append_message(
+                            &core_original,
+                            incoming,
+                            &input_utf16_strings,
+                        )
+                        .map_err(hooks::mods::ModError::Hook)?;
+                        let projected = mod_append_message(&rewritten);
+                        let result_utf16_strings =
+                            mod_append_content_utf16_sidecars(&rewritten, "/message");
+                        *applied
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some((rewritten, projected.clone()));
+                        Ok(hooks::mods::ModUtf16ValueProjection {
+                            value: serde_json::json!({"message":projected,"uuid":core_uuid}),
+                            strings: result_utf16_strings,
+                            keys: Vec::new(),
+                        })
+                    }
+                },
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    let fence = log_fence.clone();
+                    async move {
+                        if let Some(fence) = fence {
+                            fence
+                                .publish_if_current(Box::pin(output.emit_mod_log(&plugin, &text)))
+                                .await;
+                        } else {
+                            output.emit_mod_log(&plugin, &text).await;
+                        }
+                    }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    let fence = toast_fence.clone();
+                    async move {
+                        if let Some(fence) = fence {
+                            fence
+                                .publish_if_current(Box::pin(
+                                    output.emit_mod_toast(&plugin, &text, timeout_ms),
+                                ))
+                                .await;
+                        } else {
+                            output.emit_mod_toast(&plugin, &text, timeout_ms).await;
+                        }
+                    }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    let fence = status_fence.clone();
+                    async move {
+                        if let Some(fence) = fence {
+                            fence
+                                .publish_if_current(Box::pin(
+                                    output.emit_mod_status(&plugin, text.as_deref()),
+                                ))
+                                .await;
+                        } else {
+                            output.emit_mod_status(&plugin, text.as_deref()).await;
+                        }
+                    }
+                },
+            )
+            .await;
+        if publication_fence.as_ref().is_some_and(|fence| {
+            !hooks::attachment::HookPublicationGuard::is_current(fence.as_ref())
+        }) {
+            return original;
+        }
+        let rewritten = match dispatched {
+            Ok(outcome) => {
+                let result = outcome.result;
+                let result_utf16_strings = outcome.result_utf16_strings;
+                let accepted = applied
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                match accepted {
+                    Some((rewritten, _projected))
+                        if result["uuid"] == uuid
+                            && mod_append_projection_matches(
+                                &rewritten,
+                                &result["message"],
+                                &result_utf16_strings,
+                            ) =>
+                    {
+                        rewritten
+                    }
+                    _ => original.clone(),
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%uuid, %error, "session.append Mod dispatch failed; preserving original row");
+                original.clone()
+            }
+        };
+
+        if update_history && rewritten != original {
+            let replace = self.replace_session_history_row(original.id(), rewritten.clone());
+            if let Some(fence) = publication_fence.as_ref() {
+                fence.commit_if_current(Box::pin(replace)).await;
+            } else {
+                replace.await;
+            }
+        }
+        rewritten
     }
 }
 
@@ -2082,4 +2300,314 @@ fn scheduled_fire_prompt_matches_oracle_sanitization_and_utf16_limit() {
             case["expected"].as_str().unwrap()
         );
     }
+}
+#[cfg(test)]
+#[tokio::test]
+async fn mod_utf16_text_is_exact_live_raw_and_after_cold_resume() {
+    use hooks::mods::ModHost;
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, SessionId};
+    use llm_runtime::services::sdk::{self, WireCodec};
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+
+    let root = tempfile::tempdir().expect("temporary session root");
+    let cwd = root.path().to_string_lossy().into_owned();
+    let session_id = SessionId::new();
+    let transcript_path =
+        session::jsonl::session_path(root.path(), &cwd, &session_id.as_uuid().to_string());
+    let state_root = root.path().join("durable-state");
+    std::fs::create_dir_all(&state_root).expect("create durable state root");
+    let durable = Arc::new(
+        session::jsonl::DurableTranscriptWriter::open(&state_root)
+            .expect("open durable transcript writer"),
+    );
+    let writer = Arc::new(
+        session::jsonl::JsonlWriter::new(
+            transcript_path.clone(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(
+                root.path().to_path_buf(),
+            )),
+        )
+        .with_durable_lock(durable),
+    );
+    writer
+        .activate_session_target(
+            session_id,
+            transcript_path.clone(),
+            root.path().to_path_buf(),
+        )
+        .expect("bind durable transcript target");
+
+    let accepted_units = "accepted Mod text "
+        .encode_utf16()
+        .chain([0xd800, 0x03a9, 0xdc00])
+        .collect::<Vec<_>>();
+    let accepted_text = String::from_utf16_lossy(&accepted_units);
+    let replacement_text = String::from_utf16_lossy(
+        &accepted_units
+            .iter()
+            .map(|unit| match unit {
+                0xd800 | 0xdc00 => 0xfffd,
+                unit => *unit,
+            })
+            .collect::<Vec<_>>(),
+    );
+    let source_units = "source Mod text "
+        .encode_utf16()
+        .chain([0xd800, 0x03a9, 0xdc00])
+        .collect::<Vec<_>>();
+    let source_text = String::from_utf16_lossy(&source_units);
+
+    let module_path = root.path().join("utf16-session-append.js");
+    std::fs::write(
+        &module_path,
+        r#"
+const units = text => Array.from({length:text.length}, (_, index) => text.charCodeAt(index));
+export function register(on) {
+  on('session.append', async ($, event, next) => {
+    if (event.message.type !== 'assistant') return next(event);
+    const before = event.message.content.filter(block => block.type === 'text').map(block => ({text:block.text.toWellFormed(), units:units(block.text)}));
+    const content = event.message.content.map(block => block.type === 'text'
+      ? {...block, text:'accepted Mod text ' + String.fromCharCode(0xd800) + 'Ω' + String.fromCharCode(0xdc00), citations:null}
+      : block);
+    const forwarded = {...event, message:{...event.message, content}};
+    const result = await next(forwarded);
+    const resultUnits = result.message.content.filter(block => block.type === 'text').map(block => ({text:block.text.toWellFormed(), units:units(block.text)}));
+    await $.fs.write('append-units.json', JSON.stringify({before, forwarded:units(content[0].text), result:resultUnits, citations:result.message.content[0].citations}));
+    return result;
+  });
+  on('turn.complete', async ($, event, next) => {
+    // Direct session API calls: this module registers no `session.messages`
+    // middleware, so both forms cross the nested worker API result boundary.
+    const summary = await $.session.messages();
+    const api = await $.session.messages({as:'api'});
+    const summaryRow = summary.find(row => row.role === 'assistant' && row.text.startsWith('accepted Mod text '));
+    const apiBlock = api.flatMap(row => row.content ?? []).find(block => block.type === 'text' && block.text.startsWith('accepted Mod text '));
+    const observe = row => row && ({text:row.text.toWellFormed(), units:units(row.text)});
+    const observeBlock = block => block && ({text:block.text.toWellFormed(), units:units(block.text), citations:block.citations});
+    const suffix = event.answer === 'cold-resume' ? 'resume' : 'live';
+    await $.fs.write('session-views-' + suffix + '.json', JSON.stringify({summary:observe(summaryRow), api:observeBlock(apiBlock)}));
+    return next(event);
+  });
+}
+"#,
+    )
+    .expect("write UTF-16 Mod fixture");
+    let host = ModHost::start(None).await.expect("start Mod host");
+    host.load("utf16-session-append", root.path(), &module_path, json!({}))
+        .await
+        .expect("load UTF-16 session.append Mod");
+    let mut hook_registry = hooks::HookRegistry::new();
+    hook_registry.set_mod_host(host.clone());
+    let orchestrator = ConversationOrchestrator::new(
+        crate::OrchestratorConfig::default(),
+        Arc::new(crate::test_support::MockApiClient::new(vec![])),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        crate::test_support::noop_hook_executor(),
+        Arc::new(crate::test_support::NoOpPermissionGate),
+        Arc::new(crate::test_support::MockOutputStream::new()),
+        Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+        root.path().to_path_buf(),
+    )
+    .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hook_registry)))
+    .with_jsonl_writer(writer)
+    .with_session_id(session_id)
+    .with_config_home(root.path().to_path_buf());
+
+    let prompt =
+        ConversationMessage::user(MessageId::new(), "live UTF-16 session projection".into());
+    orchestrator
+        .session
+        .lock()
+        .await
+        .history
+        .push(prompt.clone());
+    orchestrator.persist_message_to_jsonl(&prompt).await;
+    let assistant = ConversationMessage::Assistant {
+        id: MessageId::new(),
+        content: vec![ContentBlock::TextJsUtf16 {
+            text: source_text.clone(),
+            utf16_code_units: source_units.clone(),
+            citations: Some(Some(json!([{"type":"source","label":"before"}]))),
+        }],
+        stop_reason: Some("end_turn".into()),
+    };
+    orchestrator
+        .session
+        .lock()
+        .await
+        .history
+        .push(assistant.clone());
+    let accepted = orchestrator
+        .persist_assistant_merged(&assistant, None, None, None)
+        .await;
+    assert!(matches!(
+        &accepted,
+        ConversationMessage::Assistant { content, .. }
+            if matches!(content.as_slice(), [ContentBlock::TextJsUtf16 {
+                text, utf16_code_units, citations: Some(None),
+            }] if text == &accepted_text && utf16_code_units == &accepted_units)
+    ));
+    let append_views: Value = serde_json::from_str(
+        &std::fs::read_to_string(root.path().join("append-units.json"))
+            .expect("read session.append observations"),
+    )
+    .expect("parse session.append observations");
+    assert_eq!(append_views["before"][0]["units"], json!(&source_units));
+    assert_eq!(append_views["forwarded"], json!(&accepted_units));
+    assert_eq!(append_views["result"][0]["units"], json!(&accepted_units));
+    assert_eq!(append_views["citations"], Value::Null);
+
+    let fire_turn_complete = |answer: &'static str| {
+        let host = host.clone();
+        let orchestrator = &orchestrator;
+        async move {
+            host.dispatch_with_ui_meta_at_session(
+                "turn.complete",
+                json!({"answer":answer,"turnId":"utf16-live-test","durationMs":0,"isAborted":false,"reason":"answer"}),
+                orchestrator,
+                |event| async move { Ok(json!({"text":event["answer"]})) },
+                |_, _| async {},
+                |_, _, _| async {},
+                |_, _| async {},
+            )
+            .await
+            .expect("dispatch session.messages through a real Mod hook")
+        }
+    };
+    fire_turn_complete("live").await;
+    let live_views: Value = serde_json::from_str(
+        &std::fs::read_to_string(root.path().join("session-views-live.json"))
+            .expect("read live session.messages observation"),
+    )
+    .expect("parse live session.messages observation");
+    assert_eq!(live_views["summary"]["units"], json!(&accepted_units));
+    assert_eq!(live_views["api"]["units"], json!(&accepted_units));
+    assert_eq!(live_views["api"]["citations"], Value::Null);
+
+    let live_history = orchestrator.session.lock().await.history.clone();
+    let llm_messages =
+        llm_runtime::convert::to_llm_messages(live_history).expect("convert exact live history");
+    let (request, live_overrides) = llm_runtime::convert::history_input(
+        "claude-sonnet-4-5",
+        &llm_messages,
+        &[],
+        &[],
+        sdk::protocol::ProtocolFamily::AnthropicMessages,
+    )
+    .expect("project exact live history");
+    assert!(
+        live_overrides
+            .values()
+            .any(|units| units == &accepted_units)
+    );
+    let profile: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
+        "provider_id":"anthropic", "profile_name":"test", "base_url":"https://api.anthropic.com",
+        "protocol":"anthropic_messages", "auth":"none", "models":[]
+    }))
+    .expect("build public Anthropic codec profile");
+    let encoded = sdk::AnthropicMessagesCodec
+        .encode_request(
+            sdk::EncodeRequest::new(&request),
+            &sdk::CodecContext::new(&profile, &request.model, sdk::RequestMode::Complete),
+        )
+        .expect("public SDK encodes the safe Anthropic body");
+    let encoded_json: Value =
+        serde_json::from_slice(&encoded.body).expect("parse safe public SDK request projection");
+    let live_wire = String::from_utf8(
+        sdk::exact_json::serialize(
+            &encoded_json,
+            &live_overrides,
+            sdk::exact_json::JsonEncoding::JavaScript,
+        )
+        .expect("public SDK serializes host UTF-16 sidecars"),
+    )
+    .expect("exact public SDK body remains UTF-8 JSON");
+    assert!(
+        live_wire.contains(r#""text":"accepted Mod text \ud800Ω\udc00""#),
+        "{live_wire}"
+    );
+    assert!(live_wire.contains(r#""citations":null"#), "{live_wire}");
+
+    let raw_jsonl =
+        std::fs::read_to_string(&transcript_path).expect("read durable transcript bytes");
+    assert!(raw_jsonl.contains(r#"\ud800Ω\udc00"#), "{raw_jsonl}");
+    assert!(!raw_jsonl.contains("utf16_code_units"), "{raw_jsonl}");
+    assert!(
+        !raw_jsonl.contains("__lingxiModUtf16StringsV1"),
+        "{raw_jsonl}"
+    );
+    let loaded = session::jsonl::load_session(
+        root.path(),
+        &cwd,
+        session_id.as_uuid(),
+        Arc::new(platform_posix::fs::PosixFileSystem::new(
+            root.path().to_path_buf(),
+        )),
+    )
+    .await
+    .expect("load durable UTF-16 transcript");
+    let assistant_row = loaded.last().expect("loaded assistant row");
+    assert_eq!(
+        session::jsonl::exact_json::message_utf16_overrides(assistant_row)["/message/content/0/text"],
+        accepted_units
+    );
+    let resumed = crate::resume::state_from_messages(session_id.as_uuid(), &loaded);
+    let ConversationMessage::Assistant { content, .. } = &resumed.history[1] else {
+        panic!("resumed accepted row stays assistant history");
+    };
+    assert!(matches!(
+        content.as_slice(),
+        [ContentBlock::TextJsUtf16 { text, utf16_code_units, citations: Some(None) }]
+            if text == &replacement_text && utf16_code_units == &accepted_units
+    ));
+    orchestrator.session.lock().await.history = resumed.history;
+    fire_turn_complete("cold-resume").await;
+    let resumed_views: Value = serde_json::from_str(
+        &std::fs::read_to_string(root.path().join("session-views-resume.json"))
+            .expect("read resumed session.messages observation"),
+    )
+    .expect("parse resumed session.messages observation");
+    assert_eq!(resumed_views["summary"]["units"], json!(&accepted_units));
+    assert_eq!(resumed_views["api"]["units"], json!(&accepted_units));
+
+    let resumed_llm =
+        llm_runtime::convert::to_llm_messages(orchestrator.session.lock().await.history.clone())
+            .expect("convert cold-resumed history");
+    let (resumed_request, resumed_overrides) = llm_runtime::convert::history_input(
+        "claude-sonnet-4-5",
+        &resumed_llm,
+        &[],
+        &[],
+        sdk::protocol::ProtocolFamily::AnthropicMessages,
+    )
+    .expect("project cold-resumed history");
+    assert!(resumed_overrides
+        .values()
+        .any(|units| units == &accepted_units));
+    let resumed_encoded = sdk::AnthropicMessagesCodec
+        .encode_request(
+            sdk::EncodeRequest::new(&resumed_request),
+            &sdk::CodecContext::new(&profile, &resumed_request.model, sdk::RequestMode::Complete),
+        )
+        .expect("public SDK encodes the cold-resume projection");
+    let resumed_json: Value = serde_json::from_slice(&resumed_encoded.body)
+        .expect("parse safe public SDK cold-resume projection");
+    let resumed_wire = String::from_utf8(
+        sdk::exact_json::serialize(
+            &resumed_json,
+            &resumed_overrides,
+            sdk::exact_json::JsonEncoding::JavaScript,
+        )
+        .expect("public SDK serializes cold-resumed UTF-16 sidecars"),
+    )
+    .expect("resumed public SDK body is UTF-8 JSON");
+    assert!(
+        resumed_wire.contains(r#""text":"accepted Mod text \ud800Ω\udc00""#),
+        "{resumed_wire}"
+    );
+    assert!(
+        resumed_wire.contains(r#""citations":null"#),
+        "{resumed_wire}"
+    );
 }

@@ -21,7 +21,7 @@ pub struct Chord {
 /// character and becomes `Key::Unicode`.
 #[must_use]
 pub fn parse_key_name(name: &str) -> Option<Key> {
-    let lower = name.to_ascii_lowercase();
+    let lower = lingxi_core::host::computer_control::canonical_computer_key(name);
     let named = match lower.as_str() {
         "return" | "enter" => Key::Return,
         "escape" | "esc" => Key::Escape,

@@ -24,7 +24,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 #[cfg(test)]
 use std::sync::Condvar;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Notify};
 
 const COST_QUEUE_CAPACITY: usize = 64;
 
@@ -34,6 +33,7 @@ use attempts::AttemptProjection;
 
 #[derive(Debug, Clone, Default)]
 struct CoordinatorProjection {
+    tools: ToolProjection,
     latest: Option<(CostState, u64)>,
     fusion_terminals: std::collections::HashMap<String, DurableFusionTerminalRecord>,
     fusion_outbox: std::collections::HashMap<String, DurableFusionOutboxRecord>,
@@ -53,6 +53,7 @@ struct CachedCostResult {
 }
 
 struct HydratedCostLedger {
+    tools: ToolProjection,
     attempts: AttemptProjection,
     hydration: CostHydration,
     durable_results: std::collections::HashMap<CostMutationId, CachedCostResult>,
@@ -65,6 +66,8 @@ struct HydratedCostLedger {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionProjectionSnapshot {
+    tool_executions: Vec<ToolExecutionRecord>,
+    native_receipts: Vec<NativeReceiptRecord>,
     /// Independent cost projection; its revision is not the journal revision.
     cost: CostStateVector,
     /// Durable terminal records folded from the mixed journal.
@@ -75,6 +78,8 @@ struct SessionProjectionSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionEvent {
+    ToolExecution(ToolExecutionRecord),
+    NativeReceipt(NativeReceiptRecord),
     AttemptIntent(AttemptIntent),
     AttemptReceipt(AttemptReceipt, CostStateVector),
     /// New mixed-journal cost mutation.
@@ -87,6 +92,8 @@ enum SessionEvent {
 
 fn encode_session_event(event: &SessionEvent) -> Result<serde_json::Value, CostPersistError> {
     let (tag, payload) = match event {
+        SessionEvent::ToolExecution(record) => ("ToolExecution", serde_json::to_value(record)),
+        SessionEvent::NativeReceipt(record) => ("NativeReceipt", serde_json::to_value(record)),
         SessionEvent::AttemptIntent(intent) => ("AttemptIntent", serde_json::to_value(intent)),
         SessionEvent::AttemptReceipt(receipt, state) => {
             ("AttemptReceipt", serde_json::to_value((receipt, state)))
@@ -106,6 +113,8 @@ fn encode_session_event(event: &SessionEvent) -> Result<serde_json::Value, CostP
 fn encode_projection_snapshot(snapshot: &SessionProjectionSnapshot) -> serde_json::Value {
     serde_json::json!({
         "cost": snapshot.cost,
+        "tool_executions": snapshot.tool_executions,
+        "native_receipts": snapshot.native_receipts,
         "fusion_terminals": snapshot.fusion_terminals,
         "fusion_outbox": snapshot.fusion_outbox,
     })
@@ -129,12 +138,22 @@ fn decode_projection_snapshot(
     let outbox = fields.remove("fusion_outbox").ok_or_else(|| {
         CostPersistError::Storage("session snapshot has no Fusion outbox projection".into())
     })?;
+    let tools = fields.remove("tool_executions").ok_or_else(|| {
+        CostPersistError::Storage("session snapshot has no tool execution projection".into())
+    })?;
+    let receipts = fields.remove("native_receipts").ok_or_else(|| {
+        CostPersistError::Storage("session snapshot has no native receipt projection".into())
+    })?;
     if !fields.is_empty() {
         return Err(CostPersistError::Storage(
             "session snapshot contains unknown fields".into(),
         ));
     }
     Ok(SessionProjectionSnapshot {
+        tool_executions: serde_json::from_value(tools)
+            .map_err(|e| CostPersistError::Storage(e.to_string()))?,
+        native_receipts: serde_json::from_value(receipts)
+            .map_err(|e| CostPersistError::Storage(e.to_string()))?,
         cost: serde_json::from_value(cost)
             .map_err(|error| CostPersistError::Storage(error.to_string()))?,
         fusion_terminals: serde_json::from_value(terminals)
@@ -145,6 +164,10 @@ fn decode_projection_snapshot(
 }
 
 enum SessionMutation {
+    ToolJournal {
+        event: SessionEvent,
+        ack: tokio::sync::oneshot::Sender<Result<ToolJournalAck, ToolJournalError>>,
+    },
     Attempt(AttemptPersistRequest),
     Cost(CostPersistRequest),
     FusionTerminal {
@@ -1193,6 +1216,18 @@ impl SessionStateCoordinator {
                         }
                         let _ = ack.send(result);
                     }
+                    SessionMutation::ToolJournal { event, ack } => {
+                        let worker = state.clone();
+                        let result =
+                            tokio::task::spawn_blocking(move || worker.persist_tool_event(event))
+                                .await
+                                .map_err(|e| ToolJournalError(e.to_string()))
+                                .and_then(|r| r);
+                        if let Err(error) = &result {
+                            state.durability_gate.freeze(error.to_string());
+                        }
+                        let _ = ack.send(result);
+                    }
                     SessionMutation::Barrier { ack } => {
                         // Reaching this arm proves every earlier accepted FIFO
                         // mutation finished its blocking append and projection
@@ -1886,6 +1921,8 @@ impl CoordinatorState {
             |(state, _)| state.clone(),
         );
         SessionProjectionSnapshot {
+            tool_executions: projection.tools.executions.values().cloned().collect(),
+            native_receipts: projection.tools.receipts.values().cloned().collect(),
             cost: CostStateVector::from(&cost),
             fusion_terminals: projection.fusion_terminals.values().cloned().collect(),
             fusion_outbox: projection.fusion_outbox.values().cloned().collect(),
@@ -1967,24 +2004,13 @@ impl CoordinatorState {
         let hydrated = match hydrate_from_journal(&self.journal, self.session_id) {
             Ok(hydrated) => hydrated,
             Err(error) if rebuildable_ledger_damage(&error) => {
-                // The transcript is a separate file and is untouched, so the
-                // conversation resumes. What is lost is this session's
-                // recorded spend and any queued Fusion delivery, which is why
-                // the damaged bytes are preserved rather than deleted.
-                let report = self
-                    .journal
-                    .quarantine(&error.to_string())
-                    .map_err(|failure| {
-                        CostPersistError::Storage(format!(
-                            "cost ledger is damaged ({error}) and could not be set aside: {failure}"
-                        ))
-                    })?;
-                tracing::warn!(
-                    reason = %report.reason,
-                    moved = ?report.moved,
-                    "cost ledger was damaged; the session resumes with a fresh one"
-                );
-                hydrate_from_journal(&self.journal, self.session_id)?
+                // This ledger now contains authoritative side-effect facts.
+                // A damaged or missing record cannot prove that it was cost-only;
+                // replacing it could authorize the same desktop input twice.
+                // Preserve the WAL/snapshot and require explicit recovery.
+                return Err(CostPersistError::Storage(format!(
+                    "durable session ledger recovery is blocked because tool execution outcomes may be unknown: {error}"
+                )));
             }
             Err(error) => return Err(error),
         };
@@ -2024,12 +2050,14 @@ impl CoordinatorState {
             projection.fusion_terminals = hydrated.fusion_terminals;
             projection.fusion_outbox = hydrated.fusion_outbox;
             projection.fusion_acks = hydrated.fusion_acks;
+            projection.tools = hydrated.tools;
         }
         drop(results);
         // Only startup recovery can manufacture Unknown, never a provider
         // response. Persist every unresolved intent before this session is live.
         if recover {
             self.recover_attempts()?;
+            self.recover_tool_events()?;
         }
         let attempt_outputs = self
             .attempts
@@ -2147,6 +2175,7 @@ fn hydrate_from_journal(
     let mut fusion_outbox = std::collections::HashMap::new();
     let mut fusion_acks = std::collections::HashMap::new();
     let mut attempts = AttemptProjection::new(session_id);
+    let mut tools = ToolProjection::default();
     let mut fold_error = None;
     let replay = journal
         .replay_durable_with(|entry| {
@@ -2163,6 +2192,7 @@ fn hydrate_from_journal(
                     &mut fusion_outbox,
                     &mut fusion_acks,
                     &mut attempts,
+                    &mut tools,
                 ) {
                     fold_error = Some(error);
                 }
@@ -2175,6 +2205,7 @@ fn hydrate_from_journal(
     if !replay.journal_present {
         return match journal.read_snapshot::<serde_json::Value>() {
             Ok(None) => Ok(HydratedCostLedger {
+                tools,
                 attempts,
                 hydration: CostHydration {
                     state: CostState {
@@ -2199,6 +2230,8 @@ fn hydrate_from_journal(
     // prefix-mismatched derivative snapshot is rebuilt without weakening the
     // successful replay result.
     let snapshot = SessionProjectionSnapshot {
+        tool_executions: tools.executions.values().cloned().collect(),
+        native_receipts: tools.receipts.values().cloned().collect(),
         cost: CostStateVector::from(&latest),
         fusion_terminals: fusion_terminals.values().cloned().collect(),
         fusion_outbox: fusion_outbox.values().cloned().collect(),
@@ -2212,6 +2245,7 @@ fn hydrate_from_journal(
         }
     };
     Ok(HydratedCostLedger {
+        tools,
         attempts,
         hydration: CostHydration {
             state: latest,
@@ -2239,6 +2273,12 @@ fn decode_session_event(value: serde_json::Value) -> Result<SessionEvent, CostPe
     }
     let (tag, payload) = envelope.into_iter().next().expect("one tag was validated");
     match tag.as_str() {
+        "ToolExecution" => serde_json::from_value(payload)
+            .map(SessionEvent::ToolExecution)
+            .map_err(|e| CostPersistError::Storage(e.to_string())),
+        "NativeReceipt" => serde_json::from_value(payload)
+            .map(SessionEvent::NativeReceipt)
+            .map_err(|e| CostPersistError::Storage(e.to_string())),
         "AttemptIntent" => serde_json::from_value(payload)
             .map(SessionEvent::AttemptIntent)
             .map_err(|error| CostPersistError::Storage(error.to_string())),
@@ -2270,10 +2310,14 @@ fn fold_session_entry(
     fusion_outbox: &mut std::collections::HashMap<String, DurableFusionOutboxRecord>,
     fusion_acks: &mut std::collections::HashMap<String, CostPersistAck>,
     attempts: &mut AttemptProjection,
+    tools: &mut ToolProjection,
 ) -> Result<(), CostPersistError> {
     let event = decode_session_event(entry.event.clone())
         .map_err(|error| CostPersistError::Storage(error.to_string()))?;
     match event {
+        event @ (SessionEvent::ToolExecution(_) | SessionEvent::NativeReceipt(_)) => tools
+            .fold(&event, session_id, &entry.event_id)
+            .map_err(|e| CostPersistError::Storage(e.0)),
         event @ (SessionEvent::AttemptIntent(_) | SessionEvent::AttemptReceipt(_, _)) => {
             attempts.replay(event, &entry.event_id, entry.journal_revision, latest)?;
             *last_cost_revision = latest.cost_revision;
@@ -2642,65 +2686,6 @@ mod tests {
         ));
     }
 
-    /// P0-7: the cost ledger is derivative. One damaged byte in it must not
-    /// make the conversation unresumable -- the transcript is a separate file
-    /// and is untouched. The damaged ledger is set aside, not deleted, and the
-    /// session starts a fresh one.
-    #[test]
-    fn corrupt_ledger_is_quarantined_and_the_session_still_hydrates() {
-        let (directory, coordinator, session_id) = coordinator();
-        let mutation_id = CostMutationId::new("cost-1");
-        coordinator
-            .journal()
-            .append_once(
-                mutation_id.as_str(),
-                &encode_session_event(&SessionEvent::Cost(CostMutationRecord {
-                    cost_revision: 1,
-                    mutation_id: mutation_id.clone(),
-                    source: CostMutationSource::ModelResponse,
-                    state: CostStateVector::from(&state(session_id, 1, 99)),
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-        let wal = coordinator.journal().root().join("ledger.v1.jsonl");
-        let original = std::fs::read(&wal).unwrap();
-        // An interior corrupt record: the reader must keep refusing to parse
-        // this, so recovery cannot come from loosening the reader.
-        let mut damaged = b"{not json\n".to_vec();
-        damaged.extend_from_slice(&original);
-        std::fs::write(&wal, &damaged).unwrap();
-
-        let hydrated = coordinator
-            .hydrate_blocking()
-            .expect("a damaged ledger must not block the session");
-        assert_eq!(
-            hydrated.state.total_nano_usd, 0,
-            "the fresh ledger starts from zero"
-        );
-
-        let quarantined: Vec<_> =
-            std::fs::read_dir(coordinator.journal().root().join("quarantine"))
-                .expect("a quarantine directory exists")
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .collect();
-        let ledger = quarantined
-            .iter()
-            .find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("ledger.v1."))
-            })
-            .expect("the damaged ledger was set aside");
-        assert_eq!(
-            std::fs::read(ledger).unwrap(),
-            damaged,
-            "the original bytes are preserved for inspection"
-        );
-        drop(directory);
-    }
-
     /// A write that never reached the file is survivable: the journal only
     /// advances its revision after the write, its fsync and its fingerprint
     /// check all pass, so nothing was left behind and the session continues.
@@ -2796,21 +2781,6 @@ mod tests {
             !coordinator.journal().root().join("quarantine").exists(),
             "a frozen gate must not move the ledger aside"
         );
-    }
-
-    #[test]
-    fn snapshot_without_authoritative_wal_is_quarantined_not_trusted() {
-        let (_directory, coordinator, session_id) = coordinator();
-        coordinator
-            .journal()
-            .write_snapshot(1, &CostStateVector::from(&state(session_id, 1, 99)))
-            .unwrap();
-
-        // A snapshot is derivative of the WAL. Alone it has no authority, so
-        // it is set aside; the totals it claimed are never adopted.
-        let hydrated = coordinator.hydrate_blocking().unwrap();
-        assert_eq!(hydrated.state.total_nano_usd, 0);
-        assert!(coordinator.journal().root().join("quarantine").exists());
     }
 
     /// The projection snapshot has exactly one production reader: hydration
@@ -3946,4 +3916,53 @@ mod tests {
         drop(coordinator);
         writer.await.unwrap();
     }
+
+    /// A damaged mixed ledger cannot prove that no side effect was started.
+    #[test]
+    fn corrupt_ledger_is_preserved_and_blocks_automatic_rebuild() {
+        let (_directory, coordinator, session_id) = coordinator();
+        let mutation_id = CostMutationId::new("cost-1");
+        coordinator
+            .journal()
+            .append_once(
+                mutation_id.as_str(),
+                &encode_session_event(&SessionEvent::Cost(CostMutationRecord {
+                    cost_revision: 1,
+                    mutation_id: mutation_id.clone(),
+                    source: CostMutationSource::ModelResponse,
+                    state: CostStateVector::from(&state(session_id, 1, 99)),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let wal = coordinator.journal().root().join("ledger.v1.jsonl");
+        let original = std::fs::read(&wal).unwrap();
+        let mut damaged = b"{not json\n".to_vec();
+        damaged.extend_from_slice(&original);
+        std::fs::write(&wal, &damaged).unwrap();
+        assert!(matches!(coordinator.hydrate_blocking(),
+            Err(CostPersistError::Storage(message)) if message.contains("tool execution outcomes may be unknown")));
+        assert_eq!(std::fs::read(&wal).unwrap(), damaged);
+        assert!(!coordinator.journal().root().join("quarantine").exists());
+    }
+
+    #[test]
+    fn snapshot_without_authoritative_wal_blocks_automatic_rebuild() {
+        let (_directory, coordinator, session_id) = coordinator();
+        coordinator
+            .journal()
+            .write_snapshot(1, &CostStateVector::from(&state(session_id, 1, 99)))
+            .unwrap();
+
+        // Missing WAL records could contain Started; retain evidence and fail closed.
+        assert!(coordinator.hydrate_blocking().is_err());
+        assert!(!coordinator.journal().root().join("quarantine").exists());
+    }
 }
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, watch};
+mod tool_execution;
+use lingxi_core::host::{
+    DurableToolOutput, NativeReceiptRecord, NativeReceiptStage, ToolExecutionJournal,
+    ToolExecutionRecord, ToolExecutionStage, ToolJournalAck, ToolJournalError, ToolJournalRecovery,
+};
+use tool_execution::ToolProjection;

@@ -152,4 +152,92 @@ mod tests {
         assert!(ephemeral_summary(&serde_json::json!({ "summary": "one frame" })).is_none());
         assert!(ephemeral_summary(&serde_json::json!({ "_lingxi_ephemeral": true })).is_none());
     }
+
+    #[test]
+    fn computer_batch_images_remain_ordered_and_do_not_project_for_unrelated_tools() {
+        let data = serde_json::json!({"stepsCompleted":3,"stepFailed":{"action":"key","error":"denied"},"results":[
+            {"action":"screenshot","result":{"type":"image","file":{"base64":"first","type":"image/png"},"computer_frame":{"width":2}}},
+            {"action":"left_click","result":{"ok":true}},
+            {"action":"zoom","result":{"type":"image","file":{"base64":"second","type":"image/png"},"capture_region":[0,0,1,1]}}
+        ]});
+        let text = computer_batch_model_text(&data).unwrap();
+        assert!(!text.contains("base64"));
+        let metadata: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(metadata["stepFailed"], data["stepFailed"]);
+        assert_eq!(
+            metadata["results"][0]["result"]["computer_frame"],
+            data["results"][0]["result"]["computer_frame"]
+        );
+        let blocks = media_content_blocks_for_tool("computer", &data, &text).unwrap();
+        assert_eq!(blocks[0]["text"], text);
+        assert_eq!(blocks[1]["text"], "[Step 1: screenshot]");
+        assert_eq!(blocks[2]["source"]["data"], "first");
+        assert_eq!(blocks[3]["text"], "[Step 3: zoom]");
+        assert_eq!(blocks[4]["source"]["data"], "second");
+        assert!(media_content_blocks_for_tool("Read", &data, &text).is_none());
+        assert!(
+            media_content_blocks_for_tool("mcp__computer-use__capture", &data, &text).is_none()
+        );
+        assert!(computer_batch_model_text(&serde_json::json!({"stepsCompleted":1,"results":[{"action":"left_click","result":{"ok":true}}]})).is_none());
+    }
+}
+
+/// Tool-aware media projection shared by the main and child loops.
+#[must_use]
+pub fn media_content_blocks_for_tool(
+    name: &str,
+    data: &Value,
+    model_text: &str,
+) -> Option<Vec<Value>> {
+    match name {
+        "Bash" => bash_image_content_blocks(data).or_else(|| media_content_blocks(data)),
+        "Read" => {
+            read_media_content_blocks(data, model_text).or_else(|| media_content_blocks(data))
+        }
+        "computer" => {
+            computer_batch_content_blocks(data, model_text).or_else(|| media_content_blocks(data))
+        }
+        _ => media_content_blocks(data),
+    }
+}
+
+fn computer_batch_images(data: &Value) -> Option<Vec<(usize, Vec<Value>)>> {
+    data.get("stepsCompleted")?.as_u64()?;
+    let images: Vec<_> = data
+        .get("results")?
+        .as_array()?
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| matches!(item["action"].as_str(), Some("screenshot" | "zoom")))
+        .filter_map(|(index, item)| {
+            image_content_blocks(&item["result"]).map(|blocks| (index, blocks))
+        })
+        .collect();
+    (!images.is_empty()).then_some(images)
+}
+
+/// Keep Computer's batch wrapper and geometry visible without spelling out
+/// image bytes in the accompanying text. The raw result still reaches hooks.
+#[must_use]
+pub fn computer_batch_model_text(data: &Value) -> Option<String> {
+    let images = computer_batch_images(data)?;
+    let mut metadata = data.clone();
+    for (index, _) in images {
+        metadata["results"][index]["result"]["file"]
+            .as_object_mut()?
+            .remove("base64");
+    }
+    Some(crate::native_schema::js_json(&metadata, false))
+}
+
+fn computer_batch_content_blocks(data: &Value, model_text: &str) -> Option<Vec<Value>> {
+    let images = computer_batch_images(data)?;
+    let mut blocks = vec![serde_json::json!({"type":"text","text":model_text})];
+    for (index, image) in images {
+        blocks.push(serde_json::json!({"type":"text","text":format!(
+            "[Step {}: {}]", index + 1, data["results"][index]["action"].as_str()?
+        )}));
+        blocks.extend(image);
+    }
+    Some(blocks)
 }

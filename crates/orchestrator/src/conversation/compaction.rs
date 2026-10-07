@@ -1365,7 +1365,40 @@ impl ConversationOrchestrator {
         // full-replacement path (short conversation / snip-micro-only /
         // under-threshold), keeping the post-compact history byte-identical to
         // before this finding.
-        let preserved_tail = result.messages_to_preserve;
+        let preserved_tail = match crate::native_computer::preserve_pending_compaction_tail(
+            self,
+            &result.messages_to_preserve,
+        )
+        .await
+        {
+            Ok(tail) => tail,
+            Err(error) => {
+                tracing::warn!(%error, "compaction cannot preserve an unfinished native round");
+                self.output
+                    .emit_compaction_finished(Some(&error.to_string()))
+                    .await;
+                return None;
+            }
+        };
+        let kept_context_types = self
+            .context_attachment_history(&preserved_tail)
+            .into_iter()
+            .filter_map(|attachment| {
+                let kind = attachment.get("type")?.as_str()?;
+                if !matches!(
+                    kind,
+                    "instructions" | "session_context" | "context_sections" | "date"
+                ) || (kind == "instructions"
+                    && attachment
+                        .get("changed")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true))
+                {
+                    return None;
+                }
+                Some(kind.to_owned())
+            })
+            .collect::<HashSet<_>>();
         let tail_ids = preserved_tail
             .iter()
             .map(|message| message.id().to_string())

@@ -421,11 +421,20 @@ impl ConversationOrchestrator {
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.len()
         );
-        let result = telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
-            self.scope_api_session(!self.prompt_is_interactive(), self.try_run_turn(prompt))
+        let result = crate::server_fallback::scope_query_and_flush(
+            self,
+            telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
+                self.scope_api_session(
+                    !self.prompt_is_interactive(),
+                    crate::turn_loop::boxed_turn_future(|| self.try_run_turn(prompt)),
+                )
                 .await
-        })
+            }),
+        )
         .await;
+        let cleanup = crate::native_computer::cleanup(self).await;
+        let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+        self.fire_mod_turn_complete(false, result.is_err()).await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         let result = result.map_err(|e| self.enrich_api_error(e));
         // ConversationOutcome is #[non_exhaustive] so future variants will
@@ -897,6 +906,45 @@ impl ConversationOrchestrator {
             // Empty for every non-`model:` tool → strict no-op.
             crate::turn_loop::apply_model_context_modifiers(self, all_modifiers).await;
         }
+        self.flush_stream_event_journal(settlement, &mut pumped.assistant_rows)
+            .await;
+        // Readiness follows the accepted model output, including Mods edits to
+        // screenshots. Discarded generations must not confirm observations.
+        if settlement
+            .publication_guard
+            .as_ref()
+            .is_none_or(|guard| guard.is_current())
+        {
+            for (message, _) in &settlement.query_rows {
+                if let ConversationMessage::User { content, .. } = message {
+                    if let Err(error) =
+                        crate::native_computer::final_model_result(self, content).await
+                    {
+                        self.set_tool_frame_buffering(false).await;
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        self.append_stream_query_rows_to_history(settlement).await;
+        // Tool context modifiers represent query-local Harness changes. They
+        // are applied after the final drain, never by the per-event Tn poll.
+        if let Err(error) = exec.finish_context_layers().await {
+            self.set_tool_frame_buffering(false).await;
+            return Err(error);
+        }
+        let context_modifiers = std::mem::take(&mut settlement.context_modifiers);
+        let apply_context_modifiers =
+            crate::turn_loop::apply_model_context_modifiers(self, context_modifiers);
+        if let Some(guard) = settlement.publication_guard.as_ref() {
+            guard
+                .commit_if_current(Box::pin(apply_context_modifiers))
+                .await;
+        } else {
+            apply_context_modifiers.await;
+        }
+        prevent_continuation |= settlement.prevent_continuation;
+        post_tool_batch_calls.extend(std::mem::take(&mut settlement.post_tool_batch_calls));
         // Drive finished: stop holding frames.
         self.set_tool_frame_buffering(false).await;
         // Concurrent safe tools can finish out of order. PostToolBatch is
@@ -1359,18 +1407,35 @@ impl ConversationOrchestrator {
         in_human_turn: bool,
         queued_inputs: Option<Vec<QueuedPromptInput>>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        StreamingTurnDriver {
-            orch: self,
-            prompt,
-            images,
-            user_cancel,
-            message_id,
-            transient_rewake,
-            in_human_turn,
-            queued_inputs,
-        }
-        .run()
-        .await
+        let completion_cancel = user_cancel.clone();
+        let result = crate::server_fallback::scope_query_and_flush(
+            self,
+            Box::pin(
+                StreamingTurnDriver {
+                    orch: self,
+                    prompt,
+                    images,
+                    user_cancel,
+                    message_id,
+                    transient_rewake,
+                    in_human_turn,
+                    queued_inputs,
+                    row_token,
+                }
+                .run(),
+            ),
+        )
+        .await;
+        let cleanup = crate::native_computer::cleanup(self).await;
+        let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+        self.fire_mod_turn_complete(
+            completion_cancel
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled),
+            result.is_err(),
+        )
+        .await;
+        result
     }
 
     // Race cancellation only before execution starts. Dropping a running turn
@@ -1399,30 +1464,46 @@ impl ConversationOrchestrator {
     ///
     /// Telemetry: emits `CONVERSATION_STARTED` at entry; delegates to the
     /// same turn-loop body as `run_turn` (via `try_run_turn_cancelable`).
-    pub async fn run_turn_with_cancel(
-        &self,
-        prompt: &str,
+    pub fn run_turn_with_cancel<'a>(
+        &'a self,
+        prompt: &'a str,
         cancel: CancellationToken,
-    ) -> Result<TurnOutcome, OrchestratorError> {
-        let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
-            return Ok(TurnOutcome::Cancelled);
-        };
-        let _activity_guard = self.main_loop_activity(true);
-        tracing::info!(
-            event = orch_events::CONVERSATION_STARTED,
-            prompt_len = prompt.len()
-        );
-        let result =
-            telemetry::otel::with_turn_span("lingxi.orchestrator.turn.cancelable", async {
-                self.scope_api_session(
-                    !self.prompt_is_interactive(),
-                    self.try_run_turn_cancelable(prompt, cancel),
-                )
-                .await
-            })
+    ) -> futures::future::BoxFuture<'a, Result<TurnOutcome, OrchestratorError>> {
+        Box::pin(async move {
+            let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+                return Ok(TurnOutcome::Cancelled);
+            };
+            let _activity_guard = self.main_loop_activity(true);
+            tracing::info!(
+                event = orch_events::CONVERSATION_STARTED,
+                prompt_len = prompt.len()
+            );
+            let result = crate::server_fallback::scope_query_and_flush(
+                self,
+                telemetry::otel::with_turn_span("lingxi.orchestrator.turn.cancelable", async {
+                    self.scope_api_session(
+                        !self.prompt_is_interactive(),
+                        crate::turn_loop::boxed_turn_future(|| {
+                            self.try_run_turn_cancelable(prompt, cancel.clone())
+                        }),
+                    )
+                    .await
+                }),
+            )
             .await;
-        self.emit_terminal_rate_limit_if_changed(&result).await;
-        result.map_err(|e| self.enrich_api_error(e))
+            let cleanup = crate::native_computer::cleanup(self).await;
+            let result = result.and_then(|outcome| cleanup.map(|()| outcome));
+            self.fire_mod_turn_complete(
+                cancel.is_cancelled()
+                    || result
+                        .as_ref()
+                        .is_ok_and(|outcome| matches!(outcome, TurnOutcome::Cancelled)),
+                result.is_err(),
+            )
+            .await;
+            self.emit_terminal_rate_limit_if_changed(&result).await;
+            result.map_err(|e| self.enrich_api_error(e))
+        })
     }
 
     /// Internal implementation of the REPL turn loop with cancellation.
@@ -1466,7 +1547,7 @@ impl ConversationOrchestrator {
         //
         // #2 (main-loop parity): the cancelable driver is recovery- AND
         // budget-aware, identical to the non-cancelable [`Self::run_turn`]
-        // batched loop, except each API round-trip is raced against `cancel`.
+        // batched loop, with cancellation passed into each turn step.
         // The legacy no-recovery shim ([`execute_one_turn`]) is no longer used
         // here: a `max_tokens` stop_reason now drives the A1 multi-turn recovery
         // nudge (and exhaustion-ends) exactly as the main batched path does,
@@ -1515,29 +1596,38 @@ impl ConversationOrchestrator {
                 }
             }
 
-            // Race the recovery-aware API turn-step against the cancellation
-            // token. The `_tracked` variant returns this step's output-token
-            // count for the A3 budget accumulation, mirroring `run_turn`.
-            let (step, output_tokens) = tokio::select! {
-                r = execute_one_turn_with_recovery_tracked(
+            if !state.mod_turn_started {
+                self.fire_mod_turn_start(prompt, &state.mod_turn_id).await;
+                state.mod_turn_started = true;
+            }
+            // The turn core cancels preparation/network waits and threads the
+            // token into dispatch. Await tool cleanup and result persistence
+            // before reporting cancellation to the caller.
+            let result = crate::native_computer::scope_turn_cancel(
+                cancel.clone(),
+                execute_one_turn_with_recovery_tracked(
                     self,
                     system_prompt.as_deref(),
                     Some(&mut state.recovery),
-                ) => r?,
-                () = cancel.cancelled() => {
-                    // claude-code `query.ts:1046-1050`: inject the non-tool-use
-                    // interrupt message when the cancel fires mid-API-call
-                    // (model was in-flight, no tool_use blocks produced yet).
-                    // NOW-ABORT disambiguation: skip the message for a
-                    // `Now`-command abort (default behavior unchanged).
-                    if self.cancel_reason_now()
+                    Some((&state.mod_turn_id, state.turn_count.saturating_sub(1))),
+                ),
+            )
+            .await;
+            if cancel.is_cancelled() {
+                // claude-code `query.ts:1046-1050`: inject the non-tool-use
+                // interrupt message when the cancel fires mid-API-call
+                // (model was in-flight, no tool_use blocks produced yet).
+                // NOW-ABORT disambiguation: skip the message for a
+                // `Now`-command abort (default behavior unchanged).
+                if result.is_err()
+                    && self.cancel_reason_now()
                         != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
-                    {
-                        self.inject_user_message(INTERRUPT_MESSAGE).await;
-                    }
-                    return Ok(TurnOutcome::Cancelled);
+                {
+                    self.inject_user_message(INTERRUPT_MESSAGE).await;
                 }
-            };
+                return Ok(TurnOutcome::Cancelled);
+            }
+            let (step, output_tokens) = result?;
             match self
                 .run_batched_round(&mut state, step, output_tokens)
                 .await
@@ -1883,6 +1973,17 @@ impl ConversationOrchestrator {
             .iter()
             .map(|p| crate::image_input::load_image_source(p))
             .collect()
+    }
+
+    /// Inject hook-authored text while preserving isolated UTF-16 code units
+    /// through history, JSONL, and the later provider request.
+    pub(crate) async fn inject_user_text_exact(&self, text: &hooks::ExactHookText, is_meta: bool) {
+        let msg = text.to_conversation_message(MessageId::new(), is_meta);
+        {
+            let mut session = self.session.lock().await;
+            session.history.push(msg.clone());
+        }
+        self.persist_message_to_jsonl(&msg).await;
     }
 }
 
